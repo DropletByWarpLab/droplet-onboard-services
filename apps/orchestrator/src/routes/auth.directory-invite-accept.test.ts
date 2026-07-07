@@ -455,3 +455,82 @@ describe("Fix B — invite-accept upsert refreshes email on the UPDATE path (re-
     expect(row.email).not.toBe("stale@old.test");
   });
 });
+
+// WARP-1051 — session-role mapping must not diverge by account-creation
+// path. /auth/login uses the raw User.role, and the refresh path re-derives
+// from the DB row (WARP-116), so the old accept-time admin→owner promotion
+// gave an invited admin an "owner" session that silently downgraded to
+// "admin" at the first token rotation — and let an admin-minted admin
+// invite yield an owner session, defeating the ROLE_RANK_EXCEEDED guard.
+// The invite's canonical role is now the session role on every path.
+describe("WARP-1051 — invite-accept session role matches the canonical invite role", () => {
+  it("an admin invite mints an 'admin' session (not 'owner') and role survives re-login", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Morpheus",
+      email: "morpheus@warp.test",
+      role: "admin",
+    });
+
+    const publicApp = buildApp(prisma, null);
+    const accept = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    // Response body and the minted access JWT agree: admin, not owner.
+    expect(accept.body.user.role).toBe("admin");
+    expect(sessionJwt(accept).role).toBe("admin");
+    // The DB row carries the canonical role too.
+    const row = prisma._users.find(
+      (u: any) => readUserEmail(u.email) === "morpheus@warp.test",
+    );
+    expect(row.role).toBe("admin");
+
+    // Convergence: a normal /auth/login for the same account yields the
+    // SAME session role the accept path minted.
+    (nc.ncLoginWithCredentials as any).mockResolvedValue({
+      token: "nc-app-password",
+      loginName: "morpheus",
+    });
+    const login = await request(publicApp)
+      .post("/api/auth/login")
+      .send({ email: "morpheus@warp.test", password: INVITE_PASSWORD });
+    expect(login.status).toBe(200);
+    expect(sessionJwt(login).role).toBe("admin");
+  });
+
+  it("an owner invite still mints an 'owner' session (passthrough unchanged)", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Trinity",
+      email: "trinity@warp.test",
+      role: "owner",
+    });
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    expect(accept.body.user.role).toBe("owner");
+    expect(sessionJwt(accept).role).toBe("owner");
+  });
+
+  it("a guest invite still mints a 'guest' session", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Mouse",
+      email: "mouse@warp.test",
+      role: "guest",
+    });
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    expect(accept.body.user.role).toBe("guest");
+    expect(sessionJwt(accept).role).toBe("guest");
+  });
+});
