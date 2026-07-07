@@ -250,9 +250,9 @@ test_frigate_env_scan_catches_unresolved_substitution() {
   # shellcheck disable=SC2064
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$cfg_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: passes on the unmutated tree (the live config uses only
-  #    FRIGATE_MQTT_USER + FRIGATE_MQTT_PASSWORD, both seeded by
-  #    secrets.sh).
+  # 1. Sanity: passes on the unmutated tree (since WARP-235 the live config
+  #    has NO {VAR} substitutions — MQTT auth is the client cert, with static
+  #    tls_* paths — so the baseline hits the no-substitution PASS branch).
   if ! _assert_check_passes "$REPO_ROOT_REAL" frigate-env-scan; then
     printf "    baseline frigate-env-scan failed against unmodified real repo\n" >&2
     return 1

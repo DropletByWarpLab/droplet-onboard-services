@@ -32,7 +32,9 @@ FAIL=0
 pass() { printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; PASS=$((PASS + 1)); }
 fail() { printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"; FAIL=$((FAIL + 1)); }
 
-SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
+# MQTT_PASSWORD retired by WARP-235 — MQTT identity is the per-service client
+# certificate CN (see docker/mosquitto.acl + docs/security/internal-mtls.md).
+SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
 
 # =============================================================================
 # Test 1: Compose file contains NO :? patterns (always parseable)
@@ -483,6 +485,25 @@ if grep -q 'REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR' "$COM
   pass "every Redis client dials its own ACL identity over rediss:// (WARP-234)"
 else
   fail "a Redis client lost its per-service rediss:// identity (WARP-234)"
+fi
+
+# =============================================================================
+# Test 19: WARP-235 — no compose service may mount the data/secrets ROOT
+# =============================================================================
+# Since WARP-236, data/secrets holds the internal CA PRIVATE key
+# (internal-ca/ca.key) and every service's TLS bundle (service-tls/<svc>/).
+# A container that bind-mounts the ROOT can read the CA key and mint
+# arbitrary service identities, defeating per-service mTLS + the MQTT
+# per-CN ACLs. Only scoped mounts are allowed:
+#   - ../data/secrets/service-tls/<svc>:...   (a service's OWN bundle)
+#   - ../data/secrets/<single-file-key>:...   (e.g. audit.key, email.key)
+# The match targets the exact bare-root bind (../data/secrets:/...), so the
+# scoped patterns above never trip it.
+
+if grep -qE '\.\./data/secrets:' "$COMPOSE_FILE"; then
+  fail "docker-compose.yml: a service mounts the data/secrets ROOT (exposes internal-ca/ca.key — use a scoped service-tls/<svc> or single-key mount)"
+else
+  pass "docker-compose.yml: no service mounts the data/secrets root (CA key stays unmountable)"
 fi
 
 # =============================================================================

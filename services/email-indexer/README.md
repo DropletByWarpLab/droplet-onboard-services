@@ -52,8 +52,8 @@ orchestrator, and drains the outbound SMTP queue.
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Ingest + status callbacks. |
 | `ORCHESTRATOR_SERVICE_TOKEN` | (required at runtime) | Service-principal bearer. |
 | `EMAIL_KEY_PATH` | `/data/secrets/email.key` | Fernet key path (mode 0600). |
-| `MQTT_HOST` / `MQTT_PORT` | `mosquitto` / `1883` | MQTT broker. |
-| `MQTT_USERNAME` / `MQTT_PASSWORD` | unset | Broker auth. |
+| `MQTT_HOST` / `MQTT_PORT` | `broker` / `8883` | MQTT broker (mTLS listener). |
+| `MQTT_TLS` | `1` | Present the service TLS bundle (identity = cert CN, WARP-235). `0` = plaintext dev broker. |
 | `OUTBOUND_POLL_SECONDS` | `10` | SMTP poller cadence. |
 | `ACCOUNT_REFRESH_SECONDS` | `300` | Account re-discovery cadence. |
 | `DROPLET_FIPS_REQUIRED` | `true` | WARP-229 boot self-test. |

@@ -85,7 +85,6 @@ Each device gets its own random credentials — no two devices share secrets:
 | `DEVICE_SECRET` | ai-gateway | Fernet encryption key for BYOK API keys |
 | `POSTGRES_PASSWORD` | db, orchestrator, nextcloud | PostgreSQL authentication |
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway | Redis authentication |
-| `MQTT_PASSWORD` | broker, orchestrator, file-indexer | MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
 
 Secrets are stored in `.env` (chmod 600) at the repo root.
@@ -112,7 +111,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 | NVR recordings | `nvrdata` volume |
 | Device secrets | `.env` — all 5 generated passwords/keys |
 | TLS certificates | `docker/certs/` — self-signed cert + key |
-| MQTT credentials | `docker/mosquitto_passwd_dir/` + `docker/mosquitto.conf` |
+| MQTT broker TLS bundle | `data/secrets/service-tls/broker/` (per-CN client identities — WARP-235) |
 | Setup logs | `.data/` — logs and lock files |
 
 Source code, git history, Docker images, and system packages are preserved.

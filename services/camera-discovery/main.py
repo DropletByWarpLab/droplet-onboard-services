@@ -199,21 +199,32 @@ rejected_macs: set[str] = set()
 mqtt_client: mqtt.Client | None = None
 
 
-def _parse_mqtt_url(url: str) -> tuple[str, int, str | None, str | None]:
-    """Parse mqtt://user:pass@host:port into components."""
+def _parse_mqtt_url(url: str) -> tuple[str, int, str | None, str | None, bool]:
+    """Parse mqtt(s)://user:pass@host:port into components.
+
+    WARP-235: a mqtts:// scheme means the broker's mTLS listener — the port
+    default flips to 8883 and the caller presents this service's client cert
+    (identity = cert CN) instead of a username/password.
+    """
     from urllib.parse import urlparse
     parsed = urlparse(url)
+    use_tls = parsed.scheme == "mqtts"
     host = parsed.hostname or "localhost"
-    port = parsed.port or 1883
+    port = parsed.port or (8883 if use_tls else 1883)
     user = parsed.username
     password = parsed.password
-    return host, port, user, password
+    return host, port, user, password, use_tls
 
 
 def _connect_mqtt() -> mqtt.Client:
-    host, port, user, password = _parse_mqtt_url(MQTT_BROKER)
+    host, port, user, password, use_tls = _parse_mqtt_url(MQTT_BROKER)
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="droplet-camera-discovery")
-    if user:
+    if use_tls:
+        # WARP-235: identity is the client cert CN; no username/password.
+        from _shared.internal_tls import paho_configure
+
+        paho_configure(client)
+    elif user:
         client.username_pw_set(user, password)
     client.connect(host, port, keepalive=60)
     client.loop_start()

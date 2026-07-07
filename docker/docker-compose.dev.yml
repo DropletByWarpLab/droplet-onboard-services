@@ -79,8 +79,9 @@ services:
     image: eclipse-mosquitto:2
     container_name: droplet-dev-broker
     restart: unless-stopped
-    # Anonymous allowed for dev — production uses the password file
-    # at /mosquitto/config/mosquitto.passwd.
+    # Anonymous allowed for dev — production runs the WARP-235 mTLS-only
+    # listener (client identity = cert CN, per-CN ACLs; see
+    # docs/security/internal-mtls.md).
     command:
       - "sh"
       - "-c"

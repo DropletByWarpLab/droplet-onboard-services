@@ -41,7 +41,6 @@ LOG_FILE="$TMP_ROOT/.data/setup.log"
 export LOG_FILE
 # shellcheck source=../scripts/lib/logging.sh
 source "$REPO_ROOT_REAL/scripts/lib/logging.sh"
-_generate_mosquitto_passwd() { return 0; }
 _write_mosquitto_conf()       { return 0; }
 _generate_tls_cert()          { return 0; }
 # shellcheck source=../scripts/lib/secrets.sh

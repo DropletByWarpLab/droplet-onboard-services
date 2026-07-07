@@ -79,7 +79,7 @@ What gets deleted:
   - The Docker build cache (always reclaimed — largest rebuildable consumer)
   - Generated secrets (.env)
   - TLS certificates
-  - MQTT credentials
+  - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
 
 What is preserved:
@@ -720,10 +720,11 @@ if [ -d "$REPO_ROOT/data/secrets" ]; then
   log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
 
-# MQTT password file
+# Legacy MQTT password file (pre-WARP-235 installs; the passwd mechanism is
+# retired — MQTT identity is the client cert CN, wiped above with data/secrets)
 if [ -d "$REPO_ROOT/docker/mosquitto_passwd_dir" ]; then
   rm -rf "$REPO_ROOT/docker/mosquitto_passwd_dir"
-  log_success "Removed docker/mosquitto_passwd_dir/ (MQTT credentials)"
+  log_success "Removed docker/mosquitto_passwd_dir/ (legacy MQTT credentials)"
 fi
 
 # Generated mosquitto.conf (not git-tracked; may be a directory if Docker

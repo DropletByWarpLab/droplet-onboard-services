@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import paho.mqtt.client as mqtt
 
+from _shared.internal_tls import paho_configure
 from config import MQTT_BROKER
 
 logger = logging.getLogger(__name__)
@@ -70,13 +71,17 @@ def _on_connect(client, _userdata, _flags, _reason_code, _properties=None) -> No
 def connect() -> None:
     global _client
     parsed = urlparse(MQTT_BROKER)
+    use_tls = parsed.scheme == "mqtts"
     host = parsed.hostname or "localhost"
-    port = parsed.port or 1883
+    port = parsed.port or (8883 if use_tls else 1883)
     username = parsed.username
     password = parsed.password
 
     _client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if username:
+    if use_tls:
+        # WARP-235: identity is the client cert CN; no username/password.
+        paho_configure(_client)
+    elif username:
         _client.username_pw_set(username, password)
     _client.on_message = _on_message
     # Re-subscribe on every (re)connect — paho drops subscriptions across a
@@ -84,7 +89,7 @@ def connect() -> None:
     _client.on_connect = _on_connect
     _client.connect(host, port, keepalive=60)
     _client.loop_start()
-    logger.info("Connected to MQTT broker at %s:%d", host, port)
+    logger.info("Connected to MQTT broker at %s:%d (tls=%s)", host, port, use_tls)
 
 
 def publish(topic: str, payload: dict) -> None:

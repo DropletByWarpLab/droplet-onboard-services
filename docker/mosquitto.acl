@@ -1,0 +1,25 @@
+# WARP-235 — per-service topic ACLs. Usernames ARE certificate CNs
+# (use_identity_as_username true); there are no password accounts.
+# Deny-by-default: any topic not granted here is rejected for that CN.
+
+user orchestrator
+topic readwrite droplet/#
+topic read frigate/#
+topic read email/#
+
+user file-indexer
+topic write droplet/index/+/indexed
+topic write droplet/index/+/deleted
+topic write droplet/files/+/brain/indexed
+topic write droplet/context-stats/invalidate
+topic read droplet/files/brain/uploaded
+topic read droplet/transcription/run-one
+
+user email-indexer
+topic write email/+/new
+
+user camera-discovery
+topic write droplet/cameras/discovered
+
+user frigate
+topic readwrite frigate/#

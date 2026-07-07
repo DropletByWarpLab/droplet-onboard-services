@@ -271,14 +271,16 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "                       SERVICE_TOKEN_VOICE if missing"
   else
     log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
-    log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
+    log_info "                  NEXTCLOUD_ADMIN_PASSWORD,"
     log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
     log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN,"
     log_info "                  SERVICE_TOKEN_VOICE"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
   fi
-  log_info "  Would materialize artifacts (idempotent): MQTT password file,"
-  log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
+  log_info "  Would materialize artifacts (idempotent): mosquitto.conf +"
+  log_info "                  mosquitto.acl (WARP-235 mTLS broker, per-CN topic grants),"
+  log_info "                  TLS cert, docker/secrets/openwrt_password,"
+  log_info "                  data/secrets/audit.key + data/secrets/email.key"
   log_info "                  WARP-236: internal CA (data/secrets/internal-ca) +"
   log_info "                  per-service TLS bundles (data/secrets/service-tls/<svc>)"
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
