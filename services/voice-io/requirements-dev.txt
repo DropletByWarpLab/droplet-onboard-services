@@ -3,4 +3,4 @@
 # `requirements-dev.txt` adds the test suite's harness on top.
 -r requirements.txt
 pytest==8.3.3
-pytest-asyncio==0.24.0
+pytest-asyncio==1.4.0
