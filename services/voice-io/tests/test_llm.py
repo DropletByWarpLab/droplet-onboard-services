@@ -325,8 +325,27 @@ class TestMockLLM:
 # build_llm_from_env
 # ────────────────────────────────────────────────────────────────────
 
+@pytest.fixture
+def stub_geo(monkeypatch):
+    """Pin voice.geo.get_geo to the no-lookup fallback (WARP-1053).
+
+    build_llm_from_env() resolves location via a LIVE ipapi.co lookup
+    whenever DROPLET_LOCATION + TZ aren't both set — on a networked
+    runner that returns the runner's real city (e.g. "Des Moines,
+    Iowa, United States" on GitHub CI) and flakes any assertion on
+    `_location`. Geo resolution itself is pinned hermetically in
+    test_geo.py; these tests only care about the passthrough.
+    """
+    from voice import geo
+
+    monkeypatch.setattr(
+        geo, "get_geo",
+        lambda: geo.GeoLocation(description=None, timezone="UTC", source="fallback"),
+    )
+
+
 class TestBuildLLMFromEnv:
-    def test_default_uses_orchestrator_compose_dns(self, monkeypatch):
+    def test_default_uses_orchestrator_compose_dns(self, monkeypatch, stub_geo):
         for k in ("LLM_URL", "LLM_MODEL", "ORCHESTRATOR_TOKEN"):
             monkeypatch.delenv(k, raising=False)
         llm = build_llm_from_env()
@@ -340,19 +359,19 @@ class TestBuildLLMFromEnv:
         # echo mode so manual dev triggering shows something
         assert llm.reply("hi") == "You said: hi"
 
-    def test_custom_url_propagates(self, monkeypatch):
+    def test_custom_url_propagates(self, monkeypatch, stub_geo):
         monkeypatch.setenv("LLM_URL", "http://other-host:1234")
         llm = build_llm_from_env()
         assert isinstance(llm, OrchestratorLLM)
         assert llm._base_url == "http://other-host:1234"
 
-    def test_model_env_propagates(self, monkeypatch):
+    def test_model_env_propagates(self, monkeypatch, stub_geo):
         monkeypatch.delenv("LLM_URL", raising=False)
         monkeypatch.setenv("LLM_MODEL", "tinyllama:latest")
         llm = build_llm_from_env()
         assert llm._model == "tinyllama:latest"
 
-    def test_orchestrator_token_propagates_to_authorization(self, monkeypatch):
+    def test_orchestrator_token_propagates_to_authorization(self, monkeypatch, stub_geo):
         # Reuse the existing service-to-service auth secret.
         monkeypatch.delenv("LLM_URL", raising=False)
         monkeypatch.setenv("ORCHESTRATOR_TOKEN", "shared-secret")
@@ -369,7 +388,7 @@ class TestBuildLLMFromEnv:
         assert llm._location == "Greenwich, CT, USA"
         assert llm._timezone == "America/New_York"
 
-    def test_missing_location_env_is_none_not_empty_string(self, monkeypatch):
+    def test_missing_location_env_is_none_not_empty_string(self, monkeypatch, stub_geo):
         # A None location skips the "located in" line in the prompt
         # entirely. An empty string ("") would render as
         # "The Droplet is located in ." which is worse than silent.
@@ -377,6 +396,7 @@ class TestBuildLLMFromEnv:
         monkeypatch.delenv("DROPLET_LOCATION", raising=False)
         llm = build_llm_from_env()
         assert llm._location is None
+        assert llm._timezone == "UTC"
 
 
 # ────────────────────────────────────────────────────────────────────
