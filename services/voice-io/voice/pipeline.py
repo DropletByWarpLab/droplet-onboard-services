@@ -549,12 +549,24 @@ class WakePipeline:
     # ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Spawn the worker. Idempotent."""
+        """Spawn the supervising worker. Idempotent.
+
+        WARP-1092: we no longer bail when ``input_device_index`` is None. A
+        boot/reflash race can start voice-io before the ReSpeaker XVF3800's
+        ALSA nodes settle, so ``resolve_devices()`` finds no mic and we're
+        constructed with a None index. The old early-return parked us in
+        ``no_mic`` FOREVER — the self-heal machinery (re-resolve + reopen)
+        lives inside ``_loop``, which never ran, so a mic that appeared a
+        few seconds later was never picked up until a container restart.
+
+        Now we always spawn ``_loop``: with no input device it raises
+        ``_DeviceError("no input device resolved")`` on the first session,
+        parks in ``no_mic``, and keeps re-resolving (capped backoff) until a
+        mic appears — then opens it. "No mic at boot" is just the disconnect
+        case with a zero-length connected prefix, which the supervising loop
+        already handles (``_run_capture_session`` guards a None index).
+        """
         if self._thread is not None and self._thread.is_alive():
-            return
-        if self._input_device_index is None:
-            self._set_state("no_mic")
-            logger.info("WakePipeline: no input device — not starting worker")
             return
         # Probe STT + TTS + LLM reachability synchronously now so the
         # first /voice/status read after start() has accurate flags. A

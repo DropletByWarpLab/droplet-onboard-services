@@ -1489,11 +1489,31 @@ services:
     build:
       context: ..
       dockerfile: services/voice-io/Dockerfile
-    # /dev/snd is the ALSA device tree; mounting it gives the container
-    # access to whatever the host kernel sees. No need to enumerate
-    # specific devices — sounddevice picks them up via PortAudio.
-    devices:
-      - "/dev/snd:/dev/snd"
+    # /dev/snd is the ALSA device tree. WARP-1092: mount it as a LIVE bind
+    # (not a static `devices:` snapshot) and grant the whole ALSA char
+    # class via a device-cgroup rule, so a ReSpeaker XVF3800 that settles a
+    # few seconds AFTER this container starts — the boot/reflash container-
+    # storm race — becomes visible AND usable WITHOUT a container restart.
+    # A `devices:` entry only mknods the minors present at create time and
+    # cgroup-permits exactly those, so a late-enumerating card is stranded
+    # (container sees no cards, /health flatlines) until a human restarts
+    # voice-io. The bind is a live view of the host dir (late nodes appear)
+    # and the wildcard cgroup rule permits them; voice-io's wake loop
+    # re-resolves + opens the card when it shows up (pipeline.py).
+    volumes:
+      - /dev/snd:/dev/snd
+    # ALSA sound-class char major is 116; the wildcard minor covers ANY
+    # card, including one that enumerates after container-create (which the
+    # old per-minor `devices:` rule could not). read / write / mknod.
+    device_cgroup_rules:
+      - "c 116:* rmw"
+    # Pairs with the device-cgroup grant above, matching the oled-display
+    # scoped-device pattern: the cgroup rule is the real access control;
+    # this just stops a setuid binary inside the container from escalating
+    # beyond its launch cap-bag. voice-io (a Python FastAPI service) needs
+    # no privilege elevation, so this is free belt-and-braces.
+    security_opt:
+      - no-new-privileges:true
     # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
