@@ -2618,6 +2618,16 @@ model Workspace {
   industry      String?
   size          String?
   logoPath      String?
+  /// Module-toggles feature — BOUNDED module-preset selector. Distinct from the
+  /// free-form `industry` hint above: module enablement keys off THIS enum so the
+  /// preset a customer picks maps to a deterministic module set (CLAUDE.md
+  /// no-guessing / explicit-enum rule — a free-form string can't back a reliable
+  /// preset map). The setup wizard MAY derive it from `industry`. Null until a
+  /// preset is applied, in which case the registry's per-module `defaultEnabled`
+  /// applies. See docs/superpowers/specs/2026-07-07-module-toggles-design.md.
+  businessType      BusinessType?
+  businessTypeSetBy String?
+  businessTypeSetAt DateTime?
   /// PR #380 — EXPLICIT completion flag for the org step. The wizard / state
   /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
@@ -2629,6 +2639,58 @@ model Workspace {
   setAt         DateTime      @default(now())
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+}
+
+/// Module-toggles feature — the bounded set of vertical presets. Each maps (in
+/// code, src/modules/module-registry.ts BUSINESS_TYPE_PRESETS) to a default set
+/// of enabled modules. `custom` = no preset (leave current toggles as-is).
+/// Adding a value here is a schema change — keep the set stable and update the
+/// preset map + the design spec together.
+enum BusinessType {
+  home
+  professional_office
+  retail
+  clinic
+  hospitality
+  custom
+}
+
+/// Module-toggles feature — the canonical id of every user-facing capability
+/// module. The catalog (label, category, route prefixes, tool domains,
+/// availability signal, defaults) lives in code (src/modules/module-registry.ts,
+/// the one-registry discipline mirroring packages/tools-core); THIS enum is the
+/// shared id vocabulary between the registry, the ModuleSetting rows, and the
+/// dashboard. Admin-only surfaces (activity, rag-eval) stay on the existing
+/// GET /api/admin/capabilities probe and are intentionally NOT here.
+enum ModuleId {
+  chat
+  knowledge
+  files
+  docs
+  email
+  calendar
+  projects
+  voice
+  cameras
+  smart_home
+  network
+  managed_switch
+}
+
+/// Module-toggles feature — per-install runtime enablement of a module. ONE row
+/// per module, keyed by the ModuleId enum. `enabled` is an EXPLICIT boolean,
+/// never derived from absence (CLAUDE.md no-guessing rule; same discipline as
+/// UserInvite.role / BrainMemoryItemStatus / Workspace.orgConfigured). A MISSING
+/// row means "the operator hasn't decided" → the registry's versioned
+/// `defaultEnabled` applies; it is NOT an inferred runtime state. Applying a
+/// business type materializes a row for every non-core module, so post-onboard
+/// the table is fully explicit. Effective = available (deploy-time, from config)
+/// AND enabled (this row). See the design spec for the two-axis model.
+model ModuleSetting {
+  moduleId ModuleId @id
+  enabled  Boolean
+  setBy    String?
+  setAt    DateTime @default(now()) @updatedAt
 }
 
 /// PR #372 — first-run setup is RESUMABLE and EXPLICIT.

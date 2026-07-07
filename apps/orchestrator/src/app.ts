@@ -63,6 +63,9 @@ import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
+import { createModulesRouter } from "./routes/modules.routes.js";
+import { createModuleGate } from "./middleware/module-gate.js";
+import { MODULES } from "./modules/module-registry.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -221,6 +224,22 @@ export function createApp(
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
+
+  // Module toggles (runtime enablement, per business type). Data-driven from the
+  // registry: 404 a DISABLED module's `/api/*` routes before they reach the
+  // module's router (a disabled module reads as absent, not forbidden). Core
+  // modules (chat) are never gated. Registered here — after auth, before the
+  // module routers below — so the gate precedes what it guards. The `/api/modules`
+  // + `/api/business-types` control-plane mounts alongside.
+  // Spec: docs/superpowers/specs/2026-07-07-module-toggles-design.md.
+  const moduleGate = createModuleGate(prisma, config);
+  for (const def of MODULES) {
+    if (def.core) continue;
+    for (const prefix of def.routePrefixes) {
+      app.use(prefix, moduleGate.requireModuleEnabled(def.id));
+    }
+  }
+  app.use("/api", createModulesRouter(prisma, config, moduleGate));
 
   // PR #377 — passkey REGISTRATION. You enrol a passkey for the signed-in
   // user, so register/options + register/verify require an authenticated
