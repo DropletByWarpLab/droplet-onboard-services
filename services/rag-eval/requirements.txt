@@ -3,7 +3,7 @@
 # Bump these in lockstep with that file (CI guards via a tiny diff check).
 
 # RAGAS + LangChain wrapper (judge-LLM scoring)
-ragas==0.2.13
+ragas==0.4.3
 langchain-openai>=0.2.0
 openai>=1.0
 datasets>=3.0.0
