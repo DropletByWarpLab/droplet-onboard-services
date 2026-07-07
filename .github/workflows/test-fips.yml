@@ -134,7 +134,7 @@ jobs:
 
       - name: Detect FIPS-option-path changes
         if: github.event_name != 'workflow_dispatch'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         id: gate
         with:
           # push events diff against the previous main commit by default.
