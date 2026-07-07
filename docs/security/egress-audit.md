@@ -140,7 +140,15 @@ crashes; a present, valid file loads and classifies.
 
 Matching semantics (unchanged in spirit, applied to the nested shape):
 
-- `service` — exact match (no wildcard service in v1).
+- `service` — exact match against the flow's **attributed** service (the
+  compose service name, or `host` for host-netns egress). Two registry entries
+  use human-readable owner labels that differ from what the attributor emits, so
+  they are canonicalized before matching: `openwrt-router` → `openwrt` (bridge
+  container `droplet-openwrt`) and `cloudflared` → `host` (`network_mode: host`).
+  No wildcard service in v1. A runtime-phase egress row whose `service` the
+  attributor can never emit is dead weight (a permanent false anomaly), so a
+  test cross-checks the registry's runtime services against `docker-compose.yml`
+  to trip on that drift.
 - `destination.hosts` / `destination.cidrs` — an IP/CIDR token ⇒ `dst_ip ∈
   network`; a `*.suffix` token ⇒ any DNS-observed name for `dst_ip` ends with
   `.suffix` (the leading dot enforces the label boundary, so `evilopenai.com`
@@ -184,8 +192,10 @@ suppress repeat warnings until recovery; a missing `SERVICE_TOKEN_EGRESS_AUDIT`
 1. **Host-netns services attribute as `host` (aggregate).** Services running
    `network_mode: host` (routing, matter-controller, switch, camera-discovery,
    oled-display, cloudflared) egress from the host's IPs → labelled `host`.
-   Notably **cloudflared's tunnel egress shows as `host`.** Per-process split is
-   a follow-up ticket.
+   Notably **cloudflared's tunnel egress shows as `host`.** The allowlist matcher
+   reconciles this — the `service: cloudflared` registry row is canonicalized to
+   `host` so the tunnel still matches instead of flagging (see Matching
+   semantics). Per-process split is a follow-up ticket.
 2. **QNAME visibility is host-aggregate.** Bridge containers resolve via
    Docker's embedded DNS (`127.0.0.11`); dockerd forwards upstream from the host
    netns, so per-container QNAME attribution is structurally impossible without

@@ -69,6 +69,29 @@ _PROTOCOL_TRANSPORTS: dict[str, frozenset[str]] = {
 # to. dynamic (config-driven) and reference (non-egress hostnames) are ignored.
 _MATCHABLE_KINDS = ("egress",)
 
+# WARP-268/269 — service-name reconciliation. The registry (owned by WARP-269)
+# labels egress rows with human-readable owners, but the runtime Attributor
+# (attribution.py) emits a different vocabulary for two of them:
+#   * network_mode:host services aggregate to "host" in v1  → "cloudflared"
+#   * a bridge container reduces to its droplet-stripped name → the container
+#     "droplet-openwrt" resolves to "openwrt", not "openwrt-router".
+# match() filters candidate rules by the attributor's string, so without this
+# a box's own tunnel + router DNS/NTP egress never matches its rule and surfaces
+# as a steady false anomaly. Canonicalize the registry label to the attributor
+# vocabulary at parse time; the human label is preserved on AllowRule.service
+# for operator-facing `policy` / `key` output. The set is kept explicit (not
+# derived from compose) so a new host-mode / renamed service is a conscious
+# edit here — the TestRealAllowlist cross-check guards against silent drift.
+_SERVICE_ALIASES: dict[str, str] = {
+    "openwrt-router": "openwrt",   # bridge container droplet-openwrt
+    "cloudflared": "host",         # network_mode:host → attributes to "host"
+}
+
+
+def _canonical_service(service: str) -> str:
+    """Map a registry `service:` label to the Attributor.resolve() vocabulary."""
+    return _SERVICE_ALIASES.get(service, service)
+
 
 class AllowlistError(Exception):
     pass
@@ -77,13 +100,15 @@ class AllowlistError(Exception):
 @dataclass(frozen=True)
 class AllowRule:
     entry_id: str
-    service: str
+    service: str                        # registry label (operator-facing)
+    match_service: str                  # service in Attributor.resolve() vocab
     hostnames: tuple[str, ...]          # bare hostnames + "*.suffix" wildcards
     networks: tuple[str, ...]           # IP/CIDR literals (from hosts + cidrs)
     ports: tuple[int, ...]              # empty == any port
     any_port: bool
     transports: frozenset[str]          # empty == any transport
     protocol_label: str
+    phase: str                          # runtime | build | ci (absent == runtime)
     purpose: str
     ticket: str
 
@@ -179,16 +204,25 @@ def _parse_entry(entry: object) -> Optional[AllowRule]:
 
     protocol_label = str(dest.get("protocol", "")).strip().lower()
     transports = _PROTOCOL_TRANSPORTS.get(protocol_label, frozenset())
+    # phase is advisory provenance (runtime | build | ci); absent == runtime.
+    # It does NOT gate runtime matching — a build-labeled destination the box
+    # legitimately reaches at runtime (e.g. openwrt opkg → downloads.openwrt.org,
+    # WARP-826) must still match, not flag. It scopes the TestRealAllowlist
+    # attributor-producibility cross-check to the rows the collector can see.
+    phase = str(entry.get("phase", "runtime")).strip().lower()
 
+    service = str(entry["service"])
     return AllowRule(
         entry_id=str(entry["id"]),
-        service=str(entry["service"]),
+        service=service,
+        match_service=_canonical_service(service),
         hostnames=tuple(hostnames),
         networks=tuple(networks),
         ports=ports,
         any_port=any_port,
         transports=transports,
         protocol_label=protocol_label,
+        phase=phase,
         purpose=str(entry.get("purpose", "")),
         ticket=str(entry.get("ticket", "")),
     )
@@ -259,7 +293,9 @@ def match(
 ) -> Optional[AllowRule]:
     protocol = protocol.lower()
     for rule in allowlist.rules:
-        if rule.service != service:
+        # Compare against the attributor-vocabulary name, not the registry
+        # label — see _SERVICE_ALIASES (WARP-268/269).
+        if rule.match_service != service:
             continue
         # Protocol is advisory: filter only when the rule's transport set is
         # known (non-empty) and excludes the observed flow's transport.

@@ -182,8 +182,12 @@ class TestRealAllowlist:
 
     def test_known_allowlisted_ip_resolver_classifies_as_allowed(self):
         al = load_allowlist(REAL_ALLOWLIST.read_text())
-        # openwrt-router -> 1.1.1.1:53 is an IP/CIDR egress row (no DNS needed).
-        rule = match(al, service="openwrt-router", dst_ip="1.1.1.1", port=53,
+        # The collector attributes the router's flows to "openwrt" (bridge
+        # container droplet-openwrt) — NOT the registry label "openwrt-router".
+        # Feed the string Attributor.resolve() actually emits so this guards the
+        # WARP-268 service-name reconciliation end-to-end (1.1.1.1:53 is an
+        # IP/CIDR egress row, no DNS observation needed).
+        rule = match(al, service="openwrt", dst_ip="1.1.1.1", port=53,
                      protocol="udp", dst_names=frozenset())
         assert rule is not None
         assert rule.entry_id == "public-dns-resolvers"
@@ -194,3 +198,51 @@ class TestRealAllowlist:
                      port=443, protocol="tcp",
                      dst_names=frozenset({"telemetry.evil.example"}))
         assert rule is None  # -> collector emits an unlisted_destination anomaly
+
+    def test_host_attributed_cloudflared_tunnel_matches(self):
+        al = load_allowlist(REAL_ALLOWLIST.read_text())
+        # cloudflared runs network_mode:host, so the attributor emits "host",
+        # NOT the registry label "cloudflared". The alias must let the box's own
+        # outbound tunnel match instead of surfacing as a false anomaly.
+        rule = match(al, service="host", dst_ip="198.41.192.7", port=7844,
+                     protocol="udp",
+                     dst_names=frozenset({"tunnel.argotunnel.com"}))
+        assert rule is not None
+        assert rule.entry_id == "cloudflare-tunnel-edge"
+
+    def test_every_runtime_egress_service_is_attributor_producible(self):
+        """WARP-268 drift guard. match() filters candidate rules by the string
+        Attributor.resolve() emits, so every runtime-phase egress row's
+        canonicalized service must be a value the attributor can actually
+        produce — otherwise the row is dead and its destination flags as a false
+        anomaly on every box. The producible set is derived from
+        docker-compose.yml, so a renamed service or a newly host-mode container
+        trips this test instead of silently shipping false anomalies. This fails
+        before the _SERVICE_ALIASES fix (openwrt-router / cloudflared are not
+        attributor outputs).
+        """
+        import yaml
+        from attribution import service_from_container_name
+
+        compose = yaml.safe_load(
+            (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        producible = {"host"}
+        for name, cfg in (compose.get("services") or {}).items():
+            cfg = cfg or {}
+            if cfg.get("network_mode") == "host":
+                producible.add("host")
+            else:
+                cname = cfg.get("container_name") or f"droplet-{name}"
+                producible.add(service_from_container_name(cname))
+
+        al = load_allowlist(REAL_ALLOWLIST.read_text())
+        dead = [
+            (r.entry_id, r.service, r.match_service)
+            for r in al.rules
+            if r.phase == "runtime" and r.match_service not in producible
+        ]
+        assert not dead, (
+            "runtime egress rows whose service no Attributor.resolve() output "
+            f"can match (registry/compose drift): {dead}"
+        )
