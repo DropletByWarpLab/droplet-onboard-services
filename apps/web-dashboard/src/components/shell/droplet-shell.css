@@ -115,6 +115,13 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 
 .droplet-shell .card { background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: 16px; padding: 18px; position: relative;
   transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease), transform 200ms var(--ease); }
+/* `.droplet-shell .card` (0,2,0) out-specifies Tailwind's position utilities
+   (0,1,0), so `card fixed` (ContextMenu), `card absolute` (SearchBar results)
+   and `card sticky` (files detail column, cameras save bar) silently rendered
+   `position: relative`. Restore utility semantics at (0,3,0). */
+.droplet-shell .card.fixed { position: fixed; }
+.droplet-shell .card.absolute { position: absolute; }
+.droplet-shell .card.sticky { position: sticky; }
 .droplet-shell .card.hover { cursor: pointer; }
 .droplet-shell .card.hover:hover { border-color: color-mix(in srgb, var(--brand) 36%, var(--card-bd)); transform: translateY(-2px); box-shadow: var(--lift); }
 .droplet-shell .card-h { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }
