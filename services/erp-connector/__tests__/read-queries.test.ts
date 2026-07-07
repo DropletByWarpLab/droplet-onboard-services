@@ -15,6 +15,7 @@ import {
   READ_QUERIES,
   getReadQuery,
   buildReadStatement,
+  scheduleDayBounds,
   UnknownReadQueryError,
 } from "../src/read-queries.js";
 import { buildSchemaMap, SchemaResolutionError, type IntrospectedTable } from "../src/schema-map.js";
@@ -95,6 +96,24 @@ describe("read-query registry", () => {
     // Prefix match: the `%` is appended in Node, the value still binds as `?`.
     expect(params).toEqual(["smith%"]);
     expect(sql).not.toContain("smith");
+  });
+
+  it("find_patient escapes LIKE metacharacters so '%'/'_' can't wildcard-scan", () => {
+    const { sql, params } = buildReadStatement(map, "find_patient", { query: "%_x" });
+    expect(sql).toContain("ESCAPE");
+    // %, _ and \ escaped with a backslash; the trailing % (prefix match) stays literal.
+    expect(params).toEqual(["\\%\\_x%"]);
+    // A bare "%" no longer binds as a match-everything wildcard.
+    const wild = buildReadStatement(map, "find_patient", { query: "%" });
+    expect(wild.params).toEqual(["\\%%"]);
+  });
+
+  it("scheduleDayBounds expands a YYYY-MM-DD into half-open UTC bounds", () => {
+    expect(scheduleDayBounds("2026-07-07")).toEqual({
+      from: "2026-07-07T00:00:00.000Z",
+      to: "2026-07-08T00:00:00.000Z",
+    });
+    expect(() => scheduleDayBounds("not-a-date")).toThrow(RangeError);
   });
 
   it("rejects an unknown query name (LLM can only name registered queries)", () => {

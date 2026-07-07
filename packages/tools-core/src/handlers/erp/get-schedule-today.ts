@@ -15,7 +15,10 @@ const inputSchema = {
 
 async function handler(_args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
   // WARP-1094: DB-independent slice — no DB access; the live read path lands
-  // in WARP-1095+ once the connector's copy-DB-gated phase ships.
+  // in WARP-1095+ once the connector's copy-DB-gated phase ships. When wired,
+  // the `date` arg expands to the query's half-open [from, to) window via the
+  // connector's scheduleDayBounds() (read-queries.ts) — the single, tested
+  // date→window translation, so the tool and query contracts can't disagree.
   return erpNotConnected();
 }
 

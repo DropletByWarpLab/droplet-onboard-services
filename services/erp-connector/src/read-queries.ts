@@ -14,6 +14,37 @@
  */
 import { resolveTable, resolveColumn, type SchemaMap } from "./schema-map.js";
 
+/**
+ * Escape SQL `LIKE` metacharacters (`%`, `_`, and the escape char itself) in a
+ * user-supplied search term so it can only match a literal prefix — never a
+ * wildcard. Without this, a `find_patient` query of "%" would match every
+ * patient row (a PHI minimum-necessary violation, brief §14). The value still
+ * binds as `?`; this closes the wildcard-scoping hole, not an injection one.
+ * Pairs with `... LIKE ? ESCAPE '\'`.
+ */
+export function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Translate the `erp_get_schedule_today` tool's `date` (YYYY-MM-DD) input into
+ * the half-open `[from, to)` bounds the `get_schedule_today` query binds — the
+ * single, tested seam between the tool's contract and the query's, so the two
+ * halves can't silently disagree when the live path is wired (WARP-1095+).
+ * Returns UTC day bounds; local-timezone day boundaries are a WARP-1095
+ * refinement (brief §8.2). Throws on a malformed date rather than silently
+ * producing an empty window.
+ */
+export function scheduleDayBounds(date: string): { from: string; to: string } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new RangeError(`invalid schedule date "${date}" — expected YYYY-MM-DD`);
+  }
+  const from = `${date}T00:00:00.000Z`;
+  const next = new Date(from);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return { from, to: next.toISOString() };
+}
+
 /** Thrown when a caller names a read query that is not registered. */
 export class UnknownReadQueryError extends Error {
   readonly code = "UNKNOWN_READ_QUERY";
@@ -76,10 +107,13 @@ const findPatient: ReadQuery = {
     const sql =
       `SELECT ${patientId}, ${firstName}, ${lastName} ` +
       `FROM ${patient} ` +
-      `WHERE ${lastName} LIKE ? ` +
+      `WHERE ${lastName} LIKE ? ESCAPE '\\' ` +
       `ORDER BY ${lastName}, ${firstName}`;
-    // Prefix match — the `%` is appended in Node, the value still binds as `?`.
-    return { sql, params: [`${String(params.query)}%`] };
+    // Prefix match. LIKE metacharacters in the term are escaped so a "%"/"_"
+    // can't turn a name search into a full-table scan (PHI over-fetch); the
+    // trailing `%` (the prefix wildcard) is appended after escaping and the
+    // value still binds as `?` (never concatenated).
+    return { sql, params: [`${escapeLike(String(params.query))}%`] };
   },
 };
 
