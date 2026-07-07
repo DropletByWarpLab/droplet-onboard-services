@@ -102,6 +102,17 @@
 @media (max-width: 1080px) { .droplet-shell .grid.c4 { grid-template-columns: repeat(2, 1fr); } .droplet-shell .grid.c3 { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 720px) { .droplet-shell .grid.c2, .droplet-shell .grid.c3, .droplet-shell .grid.c4 { grid-template-columns: 1fr; } .droplet-shell .span2 { grid-column: auto; } }
 
+/* Native <select> popup options inside the shell — same belt-and-braces as
+   globals.css's WARP-946 `.dp-input option` pin, for indigo-converted selects
+   that no longer carry `dp-input` (users modals, ShareDialog, …). The theme
+   root's `color-scheme` handles most engines; pin the option surface + label
+   to shell tokens for the ones that ignore it on the option list. */
+.droplet-shell select option,
+.droplet-shell select optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
 .droplet-shell .card { background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: 16px; padding: 18px; position: relative;
   transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease), transform 200ms var(--ease); }
 .droplet-shell .card.hover { cursor: pointer; }
