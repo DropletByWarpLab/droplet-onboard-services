@@ -81,7 +81,7 @@
     "ts-proto": "^2.11.7",
     "tsx": "^4.11.0",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0",
+    "vitest": "^4.1.10",
     "yauzl": "^3.3.0"
   },
   "prisma": {
