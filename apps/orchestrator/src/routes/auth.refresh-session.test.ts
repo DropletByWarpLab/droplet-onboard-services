@@ -122,6 +122,10 @@ function createPrismaMock() {
         if (where.email === aliceRow.email || where.id === aliceRow.id) return aliceRow;
         return null;
       }),
+      // WARP-233 pre-backfill fallback probe (plaintext row, no blind index).
+      findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        where.email === aliceRow.email ? aliceRow : null,
+      ),
       update: vi.fn(async () => aliceRow),
     },
     totpCredential: { findUnique: vi.fn(async () => null) },

@@ -18,6 +18,7 @@
  * delete — Okta owns the lifecycle and may re-activate the same person later.
  */
 import type { PrismaClient, User } from "@prisma/client";
+import { findUserByEmail, emailWriteData } from "./user-directory.service.js";
 import { effectiveRoleForGroupNames, roleForScimGroupName, ROLE_PRIVILEGE } from "./scim-role-mapping.service.js";
 import type { DirectoryRole } from "./scim-role-mapping.service.js";
 import type { ParsedScimUser } from "./scim-resource.js";
@@ -55,7 +56,8 @@ export async function provisionUser(
 ): Promise<ProvisionUserResult> {
   const targetStatus = parsed.active ? "ACTIVE" : "DEACTIVATED";
 
-  const existing = await prisma.user.findUnique({ where: { email: parsed.email } });
+  // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
+  const existing = await findUserByEmail(prisma, parsed.email);
   if (existing) {
     const user = await prisma.user.update({
       where: { id: existing.id },
@@ -75,7 +77,7 @@ export async function provisionUser(
     data: {
       username: usernameSeedFromEmail(parsed.email),
       displayName: parsed.displayName,
-      email: parsed.email,
+      ...emailWriteData(parsed.email),
       role: "family", // least privilege; provisionGroup raises it
       isLocal: true,
       directoryStatus: targetStatus,
@@ -127,7 +129,8 @@ export async function findUserById(prisma: PrismaClient, id: string): Promise<Us
 }
 
 export async function findUserByUserName(prisma: PrismaClient, email: string): Promise<User | null> {
-  return prisma.user.findUnique({ where: { email } });
+  // WARP-233: SCIM userName IS the email — resolve through the blind index.
+  return findUserByEmail(prisma, email);
 }
 
 export interface ProvisionGroupInput {

@@ -190,6 +190,9 @@ function createPrismaMock(seed: UserRow[]) {
     }),
     findFirst: vi.fn(async () => null),
   };
+  self.user.findFirst = vi.fn(async ({ where }: { where: any }) =>
+    users.find((u) => u.email === where.email) ?? null,
+  );
   self.totpCredential = { findUnique: vi.fn(async () => null) };
   self.recoveryCode = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
   self._users = users;

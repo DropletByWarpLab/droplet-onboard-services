@@ -180,6 +180,11 @@ function createPrismaMock(
       if (where.id !== undefined) return users.find((u) => u.id === where.id) ?? null;
       return null;
     }),
+    // WARP-233 pre-backfill fallback probe from findUserByEmail: plaintext
+    // equality on rows without a blind index.
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      users.find((u: any) => u.email === where.email) ?? null,
+    ),
   };
   self.totpCredential = {
     findUnique: vi.fn(async ({ where }: { where: any }) =>

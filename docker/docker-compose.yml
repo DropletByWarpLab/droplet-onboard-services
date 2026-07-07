@@ -258,7 +258,7 @@ services:
       # WITHOUT a rebuild (Node needs all three vars together — its bundled
       # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
       #
-      # ┌─ P1011 orchestrator↔Postgres TLS clash — DECISION FOR ROMAIN ────────┐
+      # ┌─ P1011 orchestrator↔Postgres TLS clash — decision (A), RECONCILED ───┐
       # │ Under the FIPS openssl config the FIPS cipher set rejects the        │
       # │ non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's      │
       # │ libpq then fails to open ANY connection with P1011: "library has no  │
@@ -268,18 +268,18 @@ services:
       # │ handshake; the FIPS boundary auditors care about (edge TLS,          │
       # │ data-at-rest, signatures) is unaffected.                             │
       # │                                                                      │
-      # │ *** UNRESOLVED CROSS-CLUSTER TENSION ***                             │
-      # │ WARP-233 is enforcing Postgres TLS 1.3 + SCRAM and pins             │
-      # │ DATABASE_URL ...?sslmode=REQUIRE (the exact opposite). This PR       │
-      # │ deliberately does NOT edit the DATABASE_URL line (WARP-233 owns it)  │
-      # │ and does NOT force sslmode=disable — decision (A) needs Romain's     │
-      # │ sign-off AND reconciliation with WARP-233 at review. Until then the  │
-      # │ orchestrator keeps the system openssl config (below) so it always    │
-      # │ reaches Postgres; its "boots FIPS-enforcing" AC is descoped (see     │
-      # │ the skip in tests/integration/fips-stack.test.sh, WARP-317).         │
-      # │ To apply (A) once ratified — reversible, FIPS-path-scoped: append    │
-      # │ `?sslmode=disable` to the orchestrator/mcp-server DATABASE_URL ONLY  │
-      # │ when DROPLET_FIPS_MODE=1 (or drop server-side FIPS ciphers, opt B).  │
+      # │ WARP-233 ships that reconciliation, scoped to the ONE knob: on a     │
+      # │ default (non-FIPS) box the DB hop is TLS 1.3 + SCRAM only            │
+      # │ (hostssl-only pg_hba.conf, every DATABASE_URL pins                   │
+      # │ sslmode=require). `setup.sh --fips` (apply_fips_mode) flips the      │
+      # │ posture atomically: .env DATABASE_URL sslmode → disable,             │
+      # │ PG_SSLMODE=disable (file-indexer's inline URL), PG_HBA=              │
+      # │ pg_hba.fips.conf (plaintext tolerated ONLY from the private bridge   │
+      # │ ranges, still SCRAM). `--no-fips` restores TLS-only. The WARP-233    │
+      # │ app-layer PHI/PII column encryption applies in BOTH postures.        │
+      # │ Decision (A) itself still carries Romain's sign-off at review of     │
+      # │ the WARP-233 PR (option B — server-side FIPS ciphers — remains       │
+      # │ open; flipping back is config-only).                                 │
       # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - OPENSSL_MODULES=${OPENSSL_MODULES:-}
@@ -584,6 +584,19 @@ services:
       # Static Nextcloud config — passwords come from .env via env_file
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
+      # WARP-233: the db's pg_hba.conf is TLS-only (hostssl + reject plaintext),
+      # so Nextcloud must speak TLS to Postgres or it can never reach
+      # 'installed'. Nextcloud connects via PHP's PDO_pgsql/libpq, which honours
+      # libpq's PGSSLMODE env var for EVERY connection — the entrypoint's
+      # auto-install (occ maintenance:install, before the post-installation
+      # hook runs) AND all ongoing config.php connections. PG_SSLMODE is the same
+      # shared knob the DATABASE_URL producers key on (default `require`, flipped
+      # to `disable` under `setup.sh --fips` where the FIPS pg_hba tolerates
+      # plaintext from the private bridge), so this stays in lockstep with the
+      # orchestrator/file-indexer posture. `require` (encrypt, don't verify CA)
+      # matches those services; the internal CA is NOT mounted into this
+      # container so verify-full is not available here.
+      - PGSSLMODE=${PG_SSLMODE:-require}
       # WARP-234: the entrypoint-written redis.config.php (from REDIS_HOST)
       # still points at plaintext :6379; the zz-redis-tls.config.php mount
       # below overrides the whole `redis` config key with the TLS listener +
@@ -686,9 +699,30 @@ services:
     # pre-installed. The 20260412000000_add_file_content_index migration
     # needs `CREATE EXTENSION vector`, which plain postgres:16-alpine lacks.
     image: pgvector/pgvector:pg16
+    # WARP-233: TLS 1.3 + SCRAM enforced via server flags (equivalent to
+    # postgresql.conf edits; the stock image config stays untouched). The
+    # bash -c wrapper stages the key with postgres-uid ownership BEFORE
+    # exec'ing the stock entrypoint — its argv[1] is `postgres`, so
+    # first-boot initdb still runs. pg_hba.conf has NO plaintext host lines.
+    # The server cert is the WARP-236 internal-CA `db` bundle
+    # (data/secrets/service-tls/db, issued by scripts/lib/internal-ca.sh) —
+    # one trust root for mesh mTLS AND infra TLS, not a second CA.
+    #
+    # PG_HBA (default pg_hba.conf) is DERIVED from DROPLET_FIPS_MODE by
+    # setup.sh's apply_fips_mode — never hand-edit. FIPS-on selects
+    # pg_hba.fips.conf, which tolerates plaintext+SCRAM from the private
+    # container bridge because Prisma/libpq under the FIPS provider cannot
+    # do TLS at all (P1011; decision A — see the orchestrator env comment).
+    command:
+      - bash
+      - -c
+      - install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
+      - ../data/secrets/service-tls/db:/certs-src:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/pg_hba.fips.conf:/etc/postgresql/pg_hba.fips.conf:ro
     env_file:
       - path: ../.env
         required: false
@@ -889,19 +923,18 @@ services:
       - path: ../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet
+      # WARP-233: sslmode pinned; PG_SSLMODE (default require) is DERIVED from
+      # DROPLET_FIPS_MODE by setup.sh's apply_fips_mode — FIPS-on flips it to
+      # `disable` because this container's Prisma/libpq connection hits the
+      # P1011 clash (decision A, see the orchestrator comment). Never hand-edit.
+      - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet?sslmode=${PG_SSLMODE:-require}
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
-      # false default → byte-identical to today. NOTE: like the orchestrator,
-      # this container opens a Prisma/libpq connection to `db`, so the P1011
-      # Postgres-TLS-under-FIPS clash (decision A, see the orchestrator comment)
-      # applies to it too — its FIPS enforcement is subject to the same
-      # unresolved WARP-233 reconciliation. The DATABASE_URL line above is left
-      # exactly as-is (WARP-233 owns it).
+      # false default → byte-identical to today.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:
@@ -1141,7 +1174,7 @@ services:
       # Compose service names are `db` and `broker` (NOT `postgres` /
       # `mosquitto`). Match the rest of the file's interpolations
       # otherwise the indexer can't open its Prisma connection.
-      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@db:5432/droplet}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@db:5432/droplet?sslmode=require}
       - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
       # SERVICE_TOKEN_EMAIL is generated by scripts/lib/secrets.sh into
       # .env on first install. The email-indexer reads it as

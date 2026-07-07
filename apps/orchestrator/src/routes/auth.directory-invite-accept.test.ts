@@ -33,6 +33,7 @@
  * flow. argon2's own correctness is unit-tested in password.service.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 import cookieParser from "cookie-parser";
@@ -163,6 +164,9 @@ function createPrismaMock() {
       return row;
     }),
     findUnique: vi.fn(async ({ where }: any) => {
+      // WARP-233: the accepted row carries the blind index — login resolves it.
+      if (where?.emailLookupHash !== undefined)
+        return users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null;
       if (where?.email !== undefined)
         return users.find((u) => u.email === where.email) ?? null;
       if (where?.nextcloudUsername !== undefined)
@@ -326,7 +330,7 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
       .send({ password: INVITE_PASSWORD });
     expect(res.status).toBe(200);
 
-    const row = prisma._users.find((u: any) => u.email === "alice@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "alice@warp.test");
     expect(row).toBeDefined();
     // The directory is the auth source of truth — accept must persist the
     // argon2id hash (same as /auth/setup), not leave it null.
@@ -446,7 +450,7 @@ describe("Fix B — invite-accept upsert refreshes email on the UPDATE path (re-
     // now carry the invite's fresh email, not the stale one.
     const row = prisma._users.find((u: any) => u.nextcloudUsername === "fresh");
     expect(row).toBeDefined();
-    expect(row.email).toBe("fresh@warp.test");
+    expect(readUserEmail(row.email)).toBe("fresh@warp.test");
     // Verify that the old stale email is gone.
     expect(row.email).not.toBe("stale@old.test");
   });

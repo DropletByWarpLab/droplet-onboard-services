@@ -35,6 +35,7 @@ import {
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { readUserEmail } from "../services/user-directory.service.js";
 import {
   ncMintEditorSession,
   docServerHealthy,
@@ -1789,7 +1790,8 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           .map((u) => ({
             shareWith: u.nextcloudUsername as string,
             displayName: u.displayName,
-            email: u.email ?? null,
+            // WARP-233: decrypt the at-rest dcv1 blob for display.
+            email: readUserEmail(u.email),
           }));
 
         res.json({ recipients });

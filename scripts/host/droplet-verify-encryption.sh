@@ -250,6 +250,14 @@ probe_transit_pg_plaintext_rejected() {
   local id="$1"
   local out="$VFY_EVID/$id/psql-disable.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  # WARP-233 ⇄ WARP-318: a FIPS-mode box deliberately serves pg_hba.fips.conf,
+  # which tolerates plaintext+SCRAM on the private container bridge (the P1011
+  # Prisma/libpq clash, decision A). Plaintext acceptance there is the
+  # configured posture, not a regression — record the exception, don't FAIL.
+  if [ "$(vfy_env DROPLET_FIPS_MODE)" = "1" ]; then
+    vfy_record "$id" SKIP "fips-mode-plaintext-exception (WARP-318 P1011 decision A — pg_hba.fips.conf)"
+    return
+  fi
   # Password passed inline in the conninfo (not via `-e PGPASSWORD`) so the
   # exec argv keeps `db psql` adjacent and the value never lands in the process
   # list of the host (it is inside the container's argv only).
@@ -259,8 +267,11 @@ probe_transit_pg_plaintext_rejected() {
     > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
+  # "pg_hba.conf rejects connection" = WARP-233's explicit terminal reject
+  # line matching (the shipped shape); "no pg_hba.conf entry" = the no-match
+  # wording kept for configs without a terminal reject.
   v="$(vfy_eval_expect_reject "$rc" "$out" \
-       'no pg_hba.conf entry.*(SSL off|no encryption)|server does not support SSL')"
+       '(no pg_hba.conf entry|pg_hba.conf rejects connection).*(SSL off|no encryption)|server does not support SSL')"
   vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/psql-disable.txt"
 }
 
