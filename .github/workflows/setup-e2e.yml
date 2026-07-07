@@ -43,7 +43,7 @@ jobs:
     # build on a disk-constrained runner while still bounding a hung build.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ubuntu-latest has ~14GB free. `docker compose --profile full build`
       # (invoked by setup.sh in the build phase) fills that before BuildKit

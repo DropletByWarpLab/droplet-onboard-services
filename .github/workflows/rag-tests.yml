@@ -40,7 +40,7 @@ jobs:
       API_URL: http://localhost:3000
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ubuntu-latest has ~14GB free. The Compose stack (file-indexer
       # alone pulls ~3GB of Tesseract + Pillow + pypdf + pgvector

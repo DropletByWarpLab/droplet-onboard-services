@@ -68,7 +68,7 @@ jobs:
     # a wide ceiling for a sub-minute suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run lint script's own unit tests
         run: ./tests/test-fips-script/run.sh
@@ -106,7 +106,7 @@ jobs:
     # Compiles the OpenSSL FIPS module in a throwaway build (minutes cold).
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Deliberate-sabotage proof (removing fips.so breaks the gate)
         run: bash tests/fips-sabotage.test.sh
 
@@ -130,7 +130,7 @@ jobs:
       packages: read # pull the GHCR BuildKit layer cache (buildcache:<image>)
       pull-requests: read # dorny/paths-filter lists PR files via the API
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Detect FIPS-option-path changes
         if: github.event_name != 'workflow_dispatch'

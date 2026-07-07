@@ -63,7 +63,7 @@ jobs:
           - web-dashboard
           - matter-controller
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Reused from docker-build.yml: strip preinstalled toolchains we don't
       # use so the ~14GB runner keeps headroom for npm ci + workspace builds.
@@ -200,7 +200,7 @@ jobs:
       run:
         working-directory: services/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system deps
         if: matrix.sysdeps != ''

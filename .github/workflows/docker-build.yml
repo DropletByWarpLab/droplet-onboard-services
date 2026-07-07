@@ -111,7 +111,7 @@ jobs:
     outputs:
       images: ${{ steps.plan.outputs.images }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Validate compose YAML before eating any build cost. Ignore the
       # "variable not set" warnings from unbaked secrets — those are only
@@ -281,7 +281,7 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.detect.outputs.images) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # WARP-243: the Trivy image scan needs the built image loaded into the
       # docker daemon plus a full uncompressed export during layer analysis —

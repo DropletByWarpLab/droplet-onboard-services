@@ -34,7 +34,7 @@ jobs:
       run:
         working-directory: services/device-identity-svc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # WARP-230: tpm2-pytss pip-install builds against tss2-esapi C
       # headers from libtss2-dev. Without these apt packages the build
