@@ -1,0 +1,194 @@
+# =============================================================================
+# .trivyignore — WARP-243 image-vuln baseline (fixable HIGH/CRITICAL only).
+#
+# WHY THIS EXISTS (the "no flake-blocking" contract, cluster-E spec):
+# docker-build.yml scans every built image with Trivy and BLOCKS on any fixable
+# HIGH/CRITICAL. On a *rolling* Trivy DB that gate is non-deterministic: the
+# same image + same code goes red the day the DB publishes a CVE for an
+# already-installed package (Debian point-release lag on libcap2/libgnutls30,
+# new npm/pip/Go advisories for pinned deps, new CVEs in bundled release
+# binaries like cosign). That churn is PRE-EXISTING findings, which must never
+# block a PR. Determinism comes from two mechanisms:
+#
+#   1. The Trivy DB is PINNED by digest in .github/trivy-db-version, so a given
+#      commit always scans the same snapshot — no silent day-to-day drift.
+#   2. This file lists EVERY fixable HIGH/CRITICAL present at that snapshot.
+#      The trivy-action's `trivyignores` makes the gate fail ONLY on a fixable
+#      finding NOT listed here — i.e. one a PR introduces, or one a deliberate
+#      DB-pin bump newly surfaces. `ignore-unfixed` drops un-patchable base
+#      CVEs on top. A new fixable HIGH/CRITICAL therefore still fails the build
+#      (proof: tests/probe/trivy-newcve.md).
+#
+# HOW IT WAS GENERATED: every CI image was built + scanned against the pinned
+# DB (sha256:a8a1af880ecae3a9e4fe74c0351c921b33bc083ed439ff25c9aaac0aa5d6945a)
+# with `trivy image --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln`;
+# entries are the union of fixable IDs (both build arches — some findings live
+# in arch-specific prebuilt Go binaries), grouped by package with fix version.
+# The first CI run is authoritative for the amd64 image set; reconcile any
+# additional amd64-only IDs it surfaces into this file. Regenerate the same way
+# after any DB-pin bump.
+#
+# BURN-DOWN (decision D3): real fixable vulns in base images + third-party
+# deps/binaries — retire entries as Dependabot upgrades land (npm/pip/Go
+# modules), as the Debian base picks up point-releases (libcap2/libgnutls30/
+# libssl3), and as bundled Go release binaries are rebuilt (stdlib, x/crypto,
+# grpc, otel, sigstore in cosign/syft). Owner: Romain.
+#
+# Snapshot: 2026-07-05.  Total: 89 entries.
+# =============================================================================
+
+# stdlib: 17 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.21.9, 1.22.2. Burn-down: WARP-243-D3.
+CVE-2023-45288
+CVE-2024-24790
+CVE-2024-34156
+CVE-2025-61726
+CVE-2025-61729
+CVE-2025-68121
+CVE-2026-25679
+CVE-2026-27145
+CVE-2026-32280
+CVE-2026-32281
+CVE-2026-32283
+CVE-2026-33811
+CVE-2026-33814
+CVE-2026-39820
+CVE-2026-39836
+CVE-2026-42499
+CVE-2026-42504
+
+# golang.org/x/crypto: 9 fixable HIGH/CRITICAL [orchestrator]; fix→ 0.52.0. Burn-down: WARP-243-D3.
+CVE-2026-39827
+CVE-2026-39828
+CVE-2026-39829
+CVE-2026-39830
+CVE-2026-39832
+CVE-2026-39835
+CVE-2026-42508
+CVE-2026-46595
+CVE-2026-46597
+
+# protobufjs: 6 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 8.0.1, 7.5.5. Burn-down: WARP-243-D3.
+CVE-2026-41242
+CVE-2026-44289
+CVE-2026-44290
+CVE-2026-44291
+CVE-2026-44293
+CVE-2026-48712
+
+# tar: 6 fixable HIGH/CRITICAL [orchestrator]; fix→ 7.5.3. Burn-down: WARP-243-D3.
+CVE-2026-23745
+CVE-2026-23950
+CVE-2026-24842
+CVE-2026-26960
+CVE-2026-29786
+CVE-2026-31802
+
+# libgnutls30: 5 fixable HIGH/CRITICAL [orchestrator]; fix→ 3.7.9-2+deb12u7. Burn-down: WARP-243-D3.
+CVE-2026-33845
+CVE-2026-33846
+CVE-2026-3833
+CVE-2026-42009
+CVE-2026-42010
+
+# ci-observed (amd64 base/gobinary): 4 fixable HIGH/CRITICAL [amd64-only]. Burn-down: WARP-243-D3.
+CVE-2025-45691
+CVE-2026-23949
+CVE-2026-24049
+CVE-2026-4372
+
+# golang.org/x/net: 4 fixable HIGH/CRITICAL [orchestrator]; fix→ 0.55.0. Burn-down: WARP-243-D3.
+CVE-2026-25681
+CVE-2026-27136
+CVE-2026-39821
+CVE-2026-42502
+
+# minimatch: 3 fixable HIGH/CRITICAL [orchestrator]; fix→ 10.2.1, 9.0.6, 8.0.5, 7.4.7, 6.2.1, 5.1.7, 4.2.4, 3.1.3. Burn-down: WARP-243-D3.
+CVE-2026-26996
+CVE-2026-27903
+CVE-2026-27904
+
+# starlette: 3 fixable HIGH/CRITICAL [camera-discovery,email-indexer,routing,switch]; fix→ 0.49.1. Burn-down: WARP-243-D3.
+CVE-2025-62727
+CVE-2026-48818
+CVE-2026-54283
+
+# @grpc/grpc-js: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 1.9.16, 1.10.12, 1.11.4, 1.12.7, 1.13.5, 1.14.4. Burn-down: WARP-243-D3.
+CVE-2026-48068
+CVE-2026-48069
+
+# fast-uri: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 3.1.1. Burn-down: WARP-243-D3.
+CVE-2026-6321
+CVE-2026-6322
+
+# go.opentelemetry.io/otel/sdk: 2 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.40.0. Burn-down: WARP-243-D3.
+CVE-2026-24051
+CVE-2026-39883
+
+# next: 2 fixable HIGH/CRITICAL [web-dashboard]; fix→ 15.5.16, 16.2.5. Burn-down: WARP-243-D3.
+CVE-2026-44573
+CVE-2026-44578
+
+# nodemailer: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 7.0.11. Burn-down: WARP-243-D3.
+CVE-2025-14874
+GHSA-p6gq-j5cr-w38f
+
+# cross-spawn: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 7.0.5, 6.0.6. Burn-down: WARP-243-D3.
+CVE-2024-21538
+
+# cryptography: 1 fixable HIGH/CRITICAL [camera-discovery,email-indexer,routing]; fix→ 46.0.5. Burn-down: WARP-243-D3.
+CVE-2026-26007
+
+# form-data: 1 fixable HIGH/CRITICAL [matter-controller,mcp-server,orchestrator]; fix→ 2.5.6, 3.0.5, 4.0.6. Burn-down: WARP-243-D3.
+CVE-2026-12143
+
+# github.com/docker/cli: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 29.2.0. Burn-down: WARP-243-D3.
+CVE-2025-15558
+
+# github.com/go-jose/go-jose/v4: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.4. Burn-down: WARP-243-D3.
+CVE-2026-34986
+
+# github.com/sigstore/fulcio: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.8.6. Burn-down: WARP-243-D3.
+CVE-2026-49478
+
+# github.com/sigstore/rekor: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.5.2. Burn-down: WARP-243-D3.
+CVE-2026-48702
+
+# glob: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 11.1.0, 10.5.0. Burn-down: WARP-243-D3.
+CVE-2025-64756
+
+# go.opentelemetry.io/otel: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.41.0. Burn-down: WARP-243-D3.
+CVE-2026-29181
+
+# google.golang.org/grpc: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.79.3. Burn-down: WARP-243-D3.
+CVE-2026-33186
+
+# hono: 1 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 4.12.25. Burn-down: WARP-243-D3.
+CVE-2026-54290
+
+# libcap2: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1:2.66-4+deb12u3. Burn-down: WARP-243-D3.
+CVE-2026-4878
+
+# multer: 1 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 2.2.0, 3.0.0-alpha.2. Burn-down: WARP-243-D3.
+CVE-2026-5079
+
+# sigstore: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.1. Burn-down: WARP-243-D3.
+CVE-2026-48815
+
+# vite: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 8.0.16, 7.3.5, 6.4.3. Burn-down: WARP-243-D3.
+CVE-2026-53571
+
+# vitest: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.0, 3.2.6. Burn-down: WARP-243-D3.
+CVE-2026-47429
+
+# ws: 1 fixable HIGH/CRITICAL [matter-controller,mcp-server,orchestrator]; fix→ 5.2.5, 6.2.4, 7.5.11, 8.21.0. Burn-down: WARP-243-D3.
+CVE-2026-48779
+
+# --- drift reconciliation (2026-07-05 pinned-DB rescan of the current build) ---
+# cryptography: subgroup attack (camera-discovery,email-indexer,routing); fix→ 48.0.1. WARP-243-D3.
+GHSA-537c-gmf6-5ccf
+# libssl3/openssl: PKCS7_verify UAF (web-dashboard base); fix→ 3.0.20-1~deb12u2. WARP-243-D3.
+CVE-2026-45447
+# next: 3 advisories (web-dashboard); fix→ 15.5.16+. WARP-243-D3.
+GHSA-8h8q-6873-q5fj
+GHSA-h25m-26qc-wcjf
+GHSA-q4gf-8mx6-v5v3

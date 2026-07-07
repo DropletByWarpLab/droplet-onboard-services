@@ -1,0 +1,27 @@
+# hadolint configuration — WARP-243.
+#
+# Baseline audit (2026-07-04, commit 1ee9e858): 37 findings across the 20
+# Dockerfiles, all of them the three rules ignored below, zero errors.
+# Everything else — including every error-severity rule (DL3004 sudo,
+# DL3002 last-user-root, DL3020 ADD-for-fetch, etc.) — blocks the PR at
+# failure-threshold: warning.
+#
+# Ignored (with reasons — revisit when burning down):
+#   DL3008  Pin apt package versions. 21 pre-existing hits. Debian point
+#           releases GC old package versions from the mirrors, so exact
+#           `pkg=ver` pins break builds unpredictably; the images already
+#           pin their BASE image digests via publish-release and rebuild
+#           weekly, which bounds drift. Trivy (this same PR) gates the
+#           resulting CVEs, which is the risk DL3008 proxies for.
+#   DL3059  Consecutive RUN instructions (info-level style advice). 12
+#           pre-existing hits; layer-count optimization is deliberate in
+#           several files (FIPS stage cache-sharing comments).
+#   DL4006  Missing `SHELL -o pipefail` before piped RUN. 4 pre-existing
+#           hits. Fixing requires per-image shell audits (dash has no
+#           pipefail; one image is alpine/busybox) — tracked as follow-up,
+#           not worth blocking unrelated PRs on.
+failure-threshold: warning
+ignored:
+  - DL3008
+  - DL3059
+  - DL4006

@@ -13,9 +13,15 @@ name: docker-build
 #   build           — matrix, one image per runner. Layer cache lives at
 #                     ghcr.io/<repo>/buildcache:<image>; PRs read it, pushes
 #                     to main rebuild every image and refresh it (post-merge,
-#                     so their wall-clock blocks nobody). One image per
-#                     runner also fits in the stock ~14 GB disk, so the old
-#                     "free disk space" step is gone.
+#                     so their wall-clock blocks nobody). Each built image is
+#                     Trivy-scanned (WARP-243): HIGH/CRITICAL vulns with a fix
+#                     available fail the job unless triaged in .trivyignore.
+#                     The Trivy lane needs the image loaded into the daemon
+#                     (`load: true`) AND exported once more by Trivy's layer
+#                     analysis — three uncompressed copies of the biggest
+#                     images blow the stock ~14 GB disk, so the "free disk
+#                     space" step (dropped in #815 when one bare build fit)
+#                     is back.
 #   docker-build-ok — stable fan-in check name for branch protection.
 #
 # WARP-316 — arch scope of the build-time FIPS gate: this workflow builds
@@ -50,6 +56,9 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # WARP-243: the Trivy baseline changes the scan verdict for every
+      # image - a .trivyignore-only PR must rebuild + rescan to be validated.
+      - ".trivyignore"
       # Build inputs the old trigger list missed — each is COPY'd into at
       # least one image (see the per-image filters in the detect job):
       - "package.json"
@@ -74,6 +83,9 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # WARP-243: the Trivy baseline changes the scan verdict for every
+      # image - a .trivyignore-only PR must rebuild + rescan to be validated.
+      - ".trivyignore"
       - "package.json"
       - "package-lock.json"
       - "packages/**"
@@ -169,6 +181,7 @@ jobs:
               - "docker/openssl-fips.cnf"
               - ".dockerignore"
               - ".github/workflows/docker-build.yml"
+              - ".trivyignore" # Trivy baseline applies to every image
             # WARP-1021: the FIPS-capable nginx edge. Everything it COPYs
             # beyond docker/nginx/** (docker/fips/**, docker/openssl-fips.cnf)
             # lives in `global` above, which rebuilds ALL images anyway.
@@ -270,6 +283,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WARP-243: the Trivy image scan needs the built image loaded into the
+      # docker daemon plus a full uncompressed export during layer analysis —
+      # on top of the BuildKit cache that's ~3 copies of the image, which
+      # overflows the stock ~14 GB runner disk for the biggest images
+      # ("no space left on device" in Trivy's docker-export). Strip the
+      # preinstalled toolchains we don't use to reclaim ~25 GB (same step
+      # setup-e2e.yml uses; docker-build had it too before #815).
+      - name: Free disk space (Trivy needs headroom for image export)
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
       # Derive build context + Dockerfile from the compose file itself so
       # the matrix never drifts from what `docker compose build` would do.
       # `config` normalizes context to an absolute path; dockerfile stays
@@ -313,8 +351,55 @@ jobs:
           file: ${{ steps.meta.outputs.file }}
           pull: true
           push: false
+          load: true
+          tags: droplet-ci/${{ matrix.image }}:scan
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
+
+      # WARP-243: image vulnerability gate — DETERMINISTIC by construction.
+      #
+      # Blocking on "any fixable HIGH/CRITICAL" against a *rolling* Trivy DB
+      # is non-deterministic over time: the same image + same code goes red
+      # the day the DB adds a CVE for an already-installed package (Debian
+      # point-release lag on libcap2/libgnutls30, new npm/Go-module advisories
+      # for pinned deps). That is the exact "flake-block on pre-existing
+      # findings" the cluster-E spec forbids. Two mechanisms make this gate
+      # reproducible AND still catch genuinely NEW fixable vulns:
+      #
+      #   1. PINNED vuln DB (TRIVY_DB_REPOSITORY at a dated OCI tag). A given
+      #      commit always scans against the same DB snapshot, so "green on
+      #      Monday" stays green on Friday with no code change. Bumping the
+      #      pin is a deliberate, reviewable PR (`.github/trivy-db-version`),
+      #      turning silent drift into an intentional event.
+      #   2. .trivyignore BASELINE — the complete set of fixable HIGH/CRITICAL
+      #      findings present at the pinned-DB snapshot, each with a burn-down
+      #      note. A fixable vuln NOT in the baseline (i.e. one this PR
+      #      introduces, or one the DB bump newly surfaces) still fails the
+      #      build. ignore-unfixed drops un-patchable base CVEs on top.
+      #
+      # scanners: vuln only — secrets are gitleaks' domain, misconfig is
+      # hadolint's (no double-reporting). Probe: tests/probe/trivy-newcve.md
+      # documents adding an un-baselined fixable HIGH and watching this fail.
+      - name: Read pinned Trivy DB digest
+        id: trivydb
+        run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan ${{ matrix.image }} (block new HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Pin the vuln DB by immutable digest so the scan is reproducible
+          # run-to-run — the sole knob is .github/trivy-db-version. (The Java
+          # DB is unused here: no JVM images, scanners:vuln only. Left at the
+          # rolling tag; it never contributes findings to these images.)
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
+          TRIVY_SKIP_VERSION_CHECK: "true"
+        with:
+          image-ref: droplet-ci/${{ matrix.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          scanners: vuln
+          trivyignores: .trivyignore
 
   # Single stable check name for branch protection, whatever the matrix did.
   docker-build-ok:

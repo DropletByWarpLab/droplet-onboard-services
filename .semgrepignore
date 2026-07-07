@@ -1,0 +1,26 @@
+# Semgrep scope — WARP-243. Paths excluded from SAST:
+#   tests/fixtures never ship;
+#   .github/ workflows are gated by their own review (unpinned-action-tag
+#     cleanup tracked as a follow-up, 67 baseline hits);
+#   Dockerfiles are hadolint's domain (semgrep missing-user ×15 tracked in
+#     the container-hardening follow-up);
+#   docker/nginx.conf h2c findings tracked in the same follow-up.
+.github/
+docker/nginx.conf
+**/Dockerfile
+**/Dockerfile.*
+node_modules/
+.next/
+docs/
+*.md
+tests/
+**/tests/
+**/__tests__/
+**/__fixtures__/
+**/__mocks__/
+**/testing/
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.spec.ts
+**/conftest.py

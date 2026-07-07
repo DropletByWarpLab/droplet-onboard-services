@@ -1,0 +1,9 @@
+# osv-scanner triage — WARP-269-adjacent hygiene for the WARP-243 nightly.
+# Empty on day one BY DESIGN: the nightly is informational-red until the
+# Dependabot burn-down clears the ~85-entry baseline (audited 2026-07-04).
+# Add [[IgnoredVulns]] entries ONLY for triaged non-applicable findings,
+# with reason + ticket, e.g.:
+#
+# [[IgnoredVulns]]
+# id = "CVE-2026-47429"
+# reason = "vitest is a dev-only dependency; never ships in images (WARP-xxx)"
