@@ -128,9 +128,17 @@ check "Nextcloud database" \
     psql -U "${POSTGRES_USER:-droplet}" -d nextcloud -c "SELECT 1" -t || true
 
 # --- Redis ---
+# WARP-234: the cache runs TLS-only (redis-server --port 0 --tls-port 6380),
+# so the plaintext 6379 ping false-fails on a healthy listener. Ping over TLS
+# against 6380 using the internal-CA `cache` bundle the container stages to
+# /tmp/redis.{key,crt} + /tmp/redis-ca.crt (see docker/docker-compose.yml
+# cache service). REDIS_PASSWORD is the ping-only `default` ACL user, which
+# carries +ping, so a bare `ping` is sufficient.
 check "Redis" \
   _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T cache \
-    redis-cli -a "${REDIS_PASSWORD:-redis-dev-password}" --no-auth-warning ping || true
+    redis-cli -p 6380 --tls \
+      --cert /tmp/redis.crt --key /tmp/redis.key --cacert /tmp/redis-ca.crt \
+      -a "${REDIS_PASSWORD:-redis-dev-password}" --no-auth-warning ping || true
 
 # --- MQTT broker ---
 check_warn "MQTT broker" \

@@ -457,6 +457,35 @@ else
 fi
 
 # =============================================================================
+# Test 18: WARP-234 — cache must stay TLS-only with per-service ACLs
+# =============================================================================
+# (Test 17 is the WARP-233 db guard, on the warp-233-postgres-tls-scram
+# branch.) No silent regression to a plaintext/shared-password Redis. All
+# static:
+#   1. plaintext listener disabled (--port 0) and TLS listener on 6380,
+#   2. the ACL file is served (--aclfile) and --requirepass is retired,
+#   3. every first-party client dials its own ACL identity over rediss://,
+#   4. Nextcloud's TLS config override is mounted.
+
+if grep -q -- "--port 0" "$COMPOSE_FILE" &&
+   grep -q -- "--tls-port 6380" "$COMPOSE_FILE" &&
+   grep -q -- "--aclfile /etc/redis/users.acl" "$COMPOSE_FILE" &&
+   ! grep -q -- "--requirepass" "$COMPOSE_FILE"; then
+  pass "cache serves TLS-only on 6380 with the generated ACL file (WARP-234)"
+else
+  fail "cache TLS/ACL launch flags regressed (WARP-234)"
+fi
+
+if grep -q 'REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_URL=rediss://mcp-server:${REDIS_PASSWORD_MCP' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_URL=rediss://ai-gateway:${REDIS_PASSWORD_AI_GATEWAY' "$COMPOSE_FILE" &&
+   grep -q 'zz-redis-tls.config.php' "$COMPOSE_FILE"; then
+  pass "every Redis client dials its own ACL identity over rediss:// (WARP-234)"
+else
+  fail "a Redis client lost its per-service rediss:// identity (WARP-234)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
