@@ -177,6 +177,9 @@ prepare_and_build() {
   log_info "Building application containers..."
   local build_services=(
     # default profile
+    # WARP-1021: the nginx edge gateway is now a local build (Bookworm +
+    # dormant validated FIPS provider), no longer a pulled nginx:alpine.
+    gateway
     orchestrator
     web-dashboard
     ai-gateway

@@ -88,6 +88,30 @@ OpenSSL FIPS provider's **CTR_DRBG (AES-256-CTR)**, seeded from the Linux kernel
 | SSH protocol 2 (OpenSSH 9.x) | allowed | Operator login (off-device) |
 | WireGuard | allowed via documented exception | Per-tunnel keys are X25519 (see `fips-exceptions.md` → `wireguard-x25519`); session keys post-handshake are ChaCha20-Poly1305, which is also outside the FIPS provider's current activation set. The risk is accepted on the basis that WireGuard's PSK + handshake transcript means the tunnel's effective security is bounded by the FIPS-approved session establishment, and that WireGuard's role is at the WAN edge only — not protecting in-cluster traffic. |
 
+## Edge TLS (nginx gateway) — WARP-1021
+
+The public `:443` terminator is the `gateway` service (`docker/nginx/Dockerfile`):
+Debian **Bookworm** nginx linking the **system OpenSSL 3**, with the same
+dormant validated provider (`fips.so`, CMVP #4282) baked at build time as the
+five service images. The offered cipher suites are keyed on the single
+`DROPLET_FIPS_MODE` knob by `/docker-entrypoint.d/00-fips-profile.sh`:
+
+| `DROPLET_FIPS_MODE` | Profile | TLS 1.3 suites | TLS 1.2 suites |
+|---|---|---|---|
+| `0` (default) | `cipher-profile.default.conf` | OpenSSL defaults (incl. ChaCha20-Poly1305) | `HIGH:!aNULL:!MD5` — byte-identical to the pre-WARP-1021 nginx:alpine posture |
+| `1` | `cipher-profile.fips.conf` | `TLS_AES_256_GCM_SHA384`, `TLS_AES_128_GCM_SHA256` only (ChaCha dropped) | `ECDHE-{ECDSA,RSA}-AES{128,256}-GCM-SHA{256,384}` only (no CBC, no ChaCha, no SHA-1) |
+
+The FIPS profile **restricts** the negotiable set — it adds no strength. With
+`DROPLET_FIPS_MODE=1` the entrypoint also points nginx's OpenSSL at
+`/etc/ssl/openssl-fips.cnf`, so the handshake crypto itself runs on the
+validated provider, not just an approved-suite allowlist.
+
+**Out of scope:** the `cache` service (`redis:7-alpine`) stays on Alpine — it
+terminates no TLS today (plaintext on the private compose bridge, protected by
+`requirepass`; the WARP-234 Redis-TLS work owns that hop) and performs no
+customer-facing crypto, so it carries no FIPS provider. Revisit if Redis TLS
+lands before a validated Alpine path exists.
+
 ---
 
 ## Forbidden algorithms
@@ -124,3 +148,4 @@ Dead or non-resolving reason-ids fail the lint. Every entry in `fips-exceptions.
 |---|---|---|
 | 2026-05-10 | Initial page published as part of WARP-229. | (TBD) |
 | 2026-07-02 | WARP-967: validated `fips.so` (OpenSSL FIPS provider 3.0.9, CMVP #4282) now source-built into every shipped service image with a build-time KAT self-test; provider section updated (was described as the distro 3.0.13 build). | (TBD) |
+| 2026-07-05 | WARP-1021: edge TLS moved off `nginx:alpine` to a Bookworm nginx image carrying the same dormant validated provider; `DROPLET_FIPS_MODE`-keyed cipher profiles documented (new "Edge TLS" section); redis:7-alpine explicitly noted out of scope. | (TBD) |

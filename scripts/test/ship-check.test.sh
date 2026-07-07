@@ -980,7 +980,7 @@ STUB
 test_tls_invariants_catches_deregister_regression() {
   local needed=(
     "scripts/lib/secrets.sh"
-    "docker/nginx.conf"
+    "docker/nginx/nginx.conf"
     "scripts/factory-reset.sh"
     "scripts/lib/logging.sh"
   )
@@ -998,10 +998,10 @@ test_tls_invariants_catches_deregister_regression() {
   trap "rm -rf '$synth'" RETURN
 
   mkdir -p "$synth/.git"
-  mkdir -p "$synth/scripts/lib" "$synth/docker"
+  mkdir -p "$synth/scripts/lib" "$synth/docker/nginx"
   cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
   cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"   "$synth/scripts/lib/logging.sh"
-  cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
+  cp "$REPO_ROOT_REAL/docker/nginx/nginx.conf"  "$synth/docker/nginx/nginx.conf"
   cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
 
   # 1. Faithful copy → check PASSES.

@@ -114,7 +114,7 @@ lands.
 | `transit.mqtt.plaintext-closed` (T-06) | FAIL | `docker/mosquitto.conf` = `listener 1883` + password file; transport is plaintext |
 | `transit.mqtt.mtls-required` (T-07) | SKIP | no 8883 listener until WARP-235 |
 | `transit.mesh.plain-http-refused` (T-08) | FAIL | orchestrator/ai-gateway/mcp-server speak plain HTTP (WARP-236 open) |
-| `transit.edge.tls-policy` (T-09) | PASS | `docker/nginx.conf` — TLSv1.2/1.3 only, HIGH ciphers |
+| `transit.edge.tls-policy` (T-09) | PASS | `docker/nginx/nginx.conf` — TLSv1.2/1.3 only, HIGH ciphers |
 | `transit.pcap.canary` (T-10) | FAIL | canary visible on the wire in pg/redis/MQTT hops |
 
 ## Filing blockers

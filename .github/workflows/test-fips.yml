@@ -29,6 +29,7 @@ on:
       - "docs/security/fips-allowed-algorithms.md"
       - "tests/fips-sabotage.test.sh"
       - "tests/fips-sabotage-logic.test.sh"
+      - "tests/nginx-fips.test.sh"
       - ".github/workflows/test-fips.yml"
   push:
     branches: [main]
@@ -42,6 +43,7 @@ on:
       - "docs/security/fips-allowed-algorithms.md"
       - "tests/fips-sabotage.test.sh"
       - "tests/fips-sabotage-logic.test.sh"
+      - "tests/nginx-fips.test.sh"
       - ".github/workflows/test-fips.yml"
   workflow_dispatch:
 
@@ -69,6 +71,13 @@ jobs:
 
       - name: Run FIPS static lint (PR-blocking)
         run: ./scripts/test-fips.sh
+
+      - name: Validate the FIPS-capable nginx gateway artifacts (WARP-1021)
+        # Docker-free: cipher-profile posture, entrypoint profile selection,
+        # compose + CI wiring. The image's own build-time self-test (provider
+        # KATs + nginx -t on both profiles) runs in docker-build.yml's
+        # gateway matrix leg.
+        run: bash tests/nginx-fips.test.sh
 
       - name: Validate the sabotage-proof harness (Docker-free logic checks)
         # WARP-316: asserts tests/fips-sabotage.test.sh encodes a real sabotage

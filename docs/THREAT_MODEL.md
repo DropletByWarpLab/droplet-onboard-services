@@ -73,7 +73,7 @@
 
 ## 3. TB1 — WAN edge
 
-Inbound surface is nginx :443 only (`docker/nginx.conf`; ADR-009).
+Inbound surface is nginx :443 only (`docker/nginx/nginx.conf`; ADR-009).
 Remote access is outbound-only (`relay` compose profile cloudflared →
 per-box VNET, ADR-025A — proposed, sign-offs pending on WARP-1000).
 
