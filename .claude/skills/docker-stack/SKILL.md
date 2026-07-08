@@ -60,6 +60,40 @@ Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`.
   `full` also enables email-indexer.
 - `eval` enables the RAG evaluation harness, `ops` the operator console.
 
+## Running the stack locally on macOS (override file)
+
+The tracked `docker/docker-compose.yml` targets the Linux prototype —
+real TPM (`/dev/tpm0`), USB automount, host paths. On macOS, Docker
+Desktop errors on the TPM device mount instead of skipping it, so the
+stack needs an **untracked** `docker/docker-compose.override.yml`:
+
+- `devices: !reset []` for `device-identity-svc` (no `/dev/tpm0`);
+  `.env` must pin `DROPLET_TPM_BACKEND=mock`.
+- Remap host-path binds to named volumes: `/var/lib/droplet/tpm`,
+  `/var/run/droplet` (shared with the orchestrator), and Nextcloud's
+  `/mnt/droplet` USB-automount bind.
+- Optional: enable the claim gate for local testing
+  (`DROPLET_CLAIM_GATE_ENABLED=1` + a pinned claim code in the
+  orchestrator's `environment:` — keep the code value out of tracked
+  files).
+
+Start with **both** files (plain `npm run dev:docker` passes only the
+main file and fails on the TPM device):
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.override.yml --env-file .env up -d
+```
+
+(or run compose from `docker/`, where the override auto-loads).
+
+Also required locally: `data/secrets/audit.key` — 32 raw bytes, mode
+600 (WARP-456 audit signing; generated per
+`scripts/lib/secrets.sh:sync_audit_signing_key`). Without it the
+orchestrator crash-loops at boot. **Never delete or commit it** —
+HMAC audit-chain continuity depends on it. Both the override and the
+key are deliberately untracked; local fixes go in the override, never
+in tracked files.
+
 ## Updating `.env` on a running stack
 
 `docker restart <container>` does **not** re-read the env_file. Containers
@@ -72,6 +106,10 @@ for the per-service RAM budget and tuning guidance.
 ```bash
 docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate <service>
 ```
+
+(On macOS include the override too — `-f docker/docker-compose.yml -f
+docker/docker-compose.override.yml` — or the recreate strips the local
+TPM/volume adaptations. See the macOS section above.)
 
 This caught us once on `FRIGATE_CAMERA_*_PASSWORD` — `.env` had the right
 value but Frigate's container still had the stale one. `scripts/test-security.sh`

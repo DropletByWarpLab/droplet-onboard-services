@@ -57,6 +57,19 @@ Skip style / formatting / naming — covered by QA nits and Manager's Nits secti
 Do not re-litigate concerns already acknowledged in the PR body unless you have a concrete new argument.
 ```
 
+## Concrete-claim verification (required)
+
+Any finding that asserts a concrete resolvable fact — "X is
+undefined", "import cannot resolve", "file/function does not exist",
+"type error", "dead reference" — must be verified against the PR
+**head SHA** before it appears in your returned verdict: follow the
+procedure in `.claude/agents/pr-claim-verifier.md` (dispatch that
+agent if you can spawn subagents; otherwise run its gh-api procedure
+yourself). The local clone is routinely checked out to an unrelated
+branch — a clone grep is not evidence (PR #828: three agents reported
+a symbol undefined that existed at head). Report unverifiable claims
+as open questions; never let one justify REQUEST_CHANGES.
+
 ## Output
 
 Return **one structured review artifact to the controller** — do NOT run `gh pr review` / `gh pr comment`. Internal reviews never post to GitHub. If the verdict is `APPROVE_WITH_COMMENTS` or `REQUEST_CHANGES`, the controller loops the findings back through `droplet-dev` to be fixed locally and pushed to the branch, so what the human reviewer sees is a clean, final PR. No line-level nitpicks unless they're load-bearing.
