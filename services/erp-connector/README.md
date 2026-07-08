@@ -98,9 +98,9 @@ contract, so the bridge language is invisible to it.
 ## Test
 
 ```bash
-# From the repo root:
-npm run -w @droplet/erp-connector build
-cd services/erp-connector && npx vitest run --pool=forks --no-file-parallelism
+# From the repo root (matches the package's own scripts):
+npm run -w @droplet/erp-connector build   # tsc
+npm run -w @droplet/erp-connector test    # vitest run — 58/58
 ```
 
 All tests are pure unit tests. There are **no mock-database integration
