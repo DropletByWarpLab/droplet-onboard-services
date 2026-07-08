@@ -1,43 +1,41 @@
 /**
  * WARP-1118 — request-size estimator + degradation trigger (§10).
  *
- * THE Phase-0 gate. The box runs Ollama's default 4096-token `num_ctx`
- * (configurable via `LLM_NUM_CTX`), and WARP-854 recorded that the owner-role
- * tool list ALONE has already overflowed it — WARP-854 only *detects* the
- * resulting empty completion; this service *prevents* the overflow.
- *
- * Static per-block char caps (identity 4000, persona 1200, business 1500,
- * memory-facts 2000) are necessary but NOT sufficient: chars ≠ tokens, and
- * the tool schemas / pins / attachments / history live in no block. So we
- * size the WHOLE assembled request in tokens and, when it would overflow the
- * effective window, degrade DETERMINISTICALLY (§10 degradation ranks):
+ * THE Phase-0 gate. Static per-block char caps (identity 4000, persona 1200,
+ * business 1500, memory-facts 2000; see prompt-budget.consts.ts) are
+ * necessary but NOT sufficient: chars ≠ tokens, and the serialized `tools[]`
+ * schemas / pins / attachments / history live in no block. So we size the
+ * WHOLE assembled request in tokens and, when it would overflow the effective
+ * window, degrade DETERMINISTICALLY (§10 degradation ranks):
  *   1. drop the business block (Phase 2)
  *   2. drop the persona block
  *   3. hand off to the existing history/attachment trimming
  * Each drop emits a structured warning. Identity, tool guidance, and the
  * interview conductor block are never dropped.
  *
+ * WINDOW (corrected 2026-07-08): the bundled single-box Ollama already runs
+ * `OLLAMA_CONTEXT_LENGTH=16384` (docker-compose.yml, the WARP-854 fix — the
+ * owner-role tool schemas alone overflow Ollama's own 4096 default, which
+ * surfaced as instant empty chat answers). The orchestrator reads that same
+ * value (config.OLLAMA_CONTEXT_LENGTH) and passes it in as `contextWindow`.
+ * At 16384 nothing normally drops — this degradation path is defense-in-depth
+ * for a future wider tool list / long-history turn, not a routine occurrence.
+ *
  * The estimator is intentionally conservative and provider-agnostic: a
  * ~4-chars-per-token heuristic (matching the codebase's "12k chars ≈ 3k
  * tokens" note in routes/llm.ts) rounding UP, so we under-fill rather than
  * over-fill the real window.
  */
+import { OUTPUT_RESERVE } from "./prompt-budget.consts.js";
 
-/** Ollama's default context window — the box's real default (§10). The
- *  effective LLM_NUM_CTX is read from config in the route layer and passed
- *  in; this constant is the fallback + the value the estimator's own tests
- *  pin against. */
-export const DEFAULT_NUM_CTX = 4096;
-
-/** Reserve held back from the window for the model's OUTPUT (§10). The
- *  threshold the request must fit under is `numCtx - OUTPUT_TOKEN_RESERVE`. */
-export const OUTPUT_TOKEN_RESERVE = 1024;
-
-/** CI-tested ceiling on the worst-case sum of all FIXED system-prompt chars
- *  (identity + persona + tool guidance + a representative serialized tools[]
- *  payload; §10). Not a runtime gate — the estimator is — but a canary so a
- *  future block-copy edit that would blow the budget fails in CI. */
-export const BASE_PROMPT_MAX_CHARS = 10000;
+/**
+ * The shipping single-box context window (tokens). Mirrors the
+ * `OLLAMA_CONTEXT_LENGTH` default in docker-compose.yml + config.ts, and is
+ * the value the estimator's own tests pin against. Production passes
+ * config.OLLAMA_CONTEXT_LENGTH explicitly; this is the fallback + the
+ * documented default.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 16384;
 
 /** Chars per token for the estimate heuristic. */
 const CHARS_PER_TOKEN = 4;
@@ -48,13 +46,14 @@ const CHARS_PER_TOKEN = 4;
  * them here — the estimator stays a pure function with no Prisma / no I/O.
  */
 export interface RequestSizeParts {
-  /** Identity core — never dropped. */
+  /** Identity core (+ tool guidance, folded in by the route) — never dropped. */
   identityBlock: string;
   /** Persona style block — dropped 2nd. */
   personaBlock: string;
   /** Role-filtered business block — dropped 1st (Phase 2; "" until then). */
   businessBlock: string;
-  /** Tool-guidance bullets in the base prompt — never dropped. */
+  /** Tool-guidance bullets, when the route passes them separately — never
+   *  dropped. (The route currently folds these into identityBlock.) */
   toolGuidance: string;
   /** Durable memory-facts block — trimmed by its own budget, not dropped. */
   memoryFactsBlock: string;
@@ -93,8 +92,11 @@ export function estimateRequestTokens(parts: RequestSizeParts): number {
 export type DroppedBlock = "business" | "persona";
 
 export interface DegradeOptions {
-  /** Effective context window (config.LLM_NUM_CTX in production). */
-  numCtx: number;
+  /**
+   * Effective context window in tokens (config.OLLAMA_CONTEXT_LENGTH in
+   * production). The request must fit under `contextWindow − OUTPUT_RESERVE`.
+   */
+  contextWindow: number;
   /**
    * Structured warn sink. One call per drop; the payload names the block
    * and carries the estimate/threshold for observability. Defaults to a
@@ -125,7 +127,7 @@ export interface DegradeResult {
 }
 
 /**
- * Deterministically shrink the request to fit `numCtx - OUTPUT_TOKEN_RESERVE`.
+ * Deterministically shrink the request to fit `contextWindow − OUTPUT_RESERVE`.
  *
  * Drops the business block first, re-estimates, drops the persona block only
  * if still over, re-estimates, and finally flags `historyTrimNeeded` if even
@@ -137,7 +139,7 @@ export function degradeToFit(
   opts: DegradeOptions,
 ): DegradeResult {
   const warn = opts.warn ?? (() => {});
-  const thresholdTokens = Math.max(0, opts.numCtx - OUTPUT_TOKEN_RESERVE);
+  const thresholdTokens = Math.max(0, opts.contextWindow - OUTPUT_RESERVE);
 
   let personaBlock = parts.personaBlock;
   let businessBlock = parts.businessBlock;

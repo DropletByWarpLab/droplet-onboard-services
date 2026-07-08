@@ -55,14 +55,16 @@ const envSchema = z.object({
   DROPLET_TLS_KEY: z.string().default("/data/service-tls/key.pem"),
   DROPLET_TLS_CA: z.string().default("/data/service-tls/ca.pem"),
   AI_GATEWAY_URL: z.string().default("http://localhost:8000"),
-  // WARP-1118 (§10) — the local model's effective context window in tokens.
-  // Defaults to 4096 to MATCH the box's real default (Ollama's `num_ctx`);
-  // the point of the request-size estimator (context-budget.service.ts) is to
-  // PREVENT the WARP-854 overflow at this default, not merely detect it. The
-  // on-hardware measurement + a possible raise to 8192 is a separately gated
-  // step (§10a) needing physical-box confirmation. This is NOT a model swap
-  // and does NOT touch the One-Model Rule — it configures the window only.
-  LLM_NUM_CTX: z.coerce.number().int().positive().default(4096),
+  // WARP-1118 (§10) — the local model's effective context window in tokens,
+  // read by the orchestrator's request-size estimator (context-budget.service.ts)
+  // to PREVENT (not merely detect) the WARP-854 overflow. Mirrors the bundled
+  // Ollama's own `OLLAMA_CONTEXT_LENGTH`: the compose file already sets both to
+  // 16384 (the WARP-854 fix — Ollama's baked-in 4096 default is overflowed by
+  // the owner-role tool schemas alone, which surfaced as instant empty chat
+  // answers). Keep this equal to the deployed Ollama window so the estimator
+  // doesn't degrade blocks the model could actually carry. This configures the
+  // window only — it is NOT a model swap and does not touch the One-Model Rule.
+  OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),

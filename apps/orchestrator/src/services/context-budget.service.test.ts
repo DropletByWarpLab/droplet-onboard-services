@@ -2,24 +2,50 @@
  * WARP-1118 — request-size estimator + degradation trigger (§10, the
  * Phase-0 overflow gate).
  *
- * The box runs Ollama's default 4096-token num_ctx and the owner-role tool
- * list alone has already overflowed it (WARP-854). This estimator sizes the
- * WHOLE assembled request — system blocks + serialized tools[] + pins +
- * attachments + history — against the effective window (num_ctx minus an
- * output reserve) and, when it would overflow, DROPS blocks deterministically:
- *   business block first (Phase 2), then persona block, then the existing
- * history/attachment trimming. Each drop logs a structured warn.
+ * The estimator sizes the WHOLE assembled request — system blocks +
+ * serialized tools[] + pins + attachments + history — against the effective
+ * window (config.OLLAMA_CONTEXT_LENGTH minus OUTPUT_RESERVE) and, when it
+ * would overflow, DROPS blocks deterministically: business first (Phase 2),
+ * then persona, then the existing history/attachment trimming. Each drop
+ * logs a structured warn.
+ *
+ * WINDOW (corrected 2026-07-08): the shipping box runs 16384, wide enough
+ * that a normal request never drops — these tests prove both the
+ * nothing-drops-at-16384 happy path AND the forced-overflow degradation.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   estimateTokensFromChars,
   estimateRequestTokens,
   degradeToFit,
-  OUTPUT_TOKEN_RESERVE,
-  BASE_PROMPT_MAX_CHARS,
-  DEFAULT_NUM_CTX,
+  DEFAULT_CONTEXT_WINDOW,
   type RequestSizeParts,
 } from "./context-budget.service.js";
+import { OUTPUT_RESERVE } from "./prompt-budget.consts.js";
+
+/** A representative serialized tools[] payload — the shape ai-gateway sends
+ *  the model. Big enough to be non-trivial in the estimate, small enough to
+ *  fit the 16384 window alongside the fixed blocks. */
+const REPRESENTATIVE_TOOLS_JSON = JSON.stringify(
+  Array.from({ length: 12 }, (_, i) => ({
+    type: "function",
+    function: {
+      name: `tool_${i}`,
+      description:
+        "A representative tool with a moderately long natural-language " +
+        "description so the serialized schema resembles the real registry.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          query: { type: "string", description: "the input query text" },
+          limit: { type: "number", description: "max results to return" },
+        },
+        required: ["query"],
+      },
+    },
+  })),
+);
 
 function parts(overrides: Partial<RequestSizeParts> = {}): RequestSizeParts {
   return {
@@ -63,15 +89,44 @@ describe("estimateRequestTokens", () => {
   });
 });
 
-describe("degradeToFit", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
+describe("degradeToFit — shipping 16384 window (nothing drops)", () => {
+  it("keeps the persona (and would-be business) block at the real window", () => {
+    const warn = vi.fn();
+    // A realistic turn: identity + persona + business at their caps, memory
+    // facts, a representative tools[] payload, and a chunk of history — all
+    // well under 16384.
+    const p = parts({
+      identityBlock: "i".repeat(4000),
+      personaBlock: "p".repeat(1200),
+      businessBlock: "b".repeat(1500),
+      memoryFactsBlock: "m".repeat(2000),
+      toolSchemasJson: REPRESENTATIVE_TOOLS_JSON,
+      historyText: "h".repeat(8000),
+    });
+    const result = degradeToFit(p, {
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      warn,
+    });
+    expect(result.dropped).toEqual([]);
+    expect(result.personaBlock).toBe("p".repeat(1200));
+    expect(result.businessBlock).toBe("b".repeat(1500));
+    expect(result.historyTrimNeeded).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    // Sanity: the whole request really is under the effective window.
+    expect(result.estimatedTokens).toBeLessThan(
+      DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE,
+    );
   });
+});
 
+describe("degradeToFit — forced overflow", () => {
   it("keeps every block when the request already fits", () => {
     const warn = vi.fn();
     const p = parts({ personaBlock: "p", businessBlock: "b" });
-    const result = degradeToFit(p, { numCtx: DEFAULT_NUM_CTX, warn });
+    const result = degradeToFit(p, {
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      warn,
+    });
     expect(result.personaBlock).toBe("p");
     expect(result.businessBlock).toBe("b");
     expect(result.dropped).toEqual([]);
@@ -80,21 +135,19 @@ describe("degradeToFit", () => {
 
   it("drops the business block FIRST when over the threshold", () => {
     const warn = vi.fn();
-    // Force overflow with a tiny window so only one drop is needed.
-    const big = "x".repeat(2000); // ~500 tokens each
+    // A tiny window forces a drop with a representative tools[] + persona +
+    // business present.
     const p = parts({
-      identityBlock: big,
-      personaBlock: big,
-      businessBlock: big,
+      identityBlock: "i".repeat(2000),
+      personaBlock: "p".repeat(2000),
+      businessBlock: "b".repeat(2000),
+      toolSchemasJson: REPRESENTATIVE_TOOLS_JSON,
     });
-    const result = degradeToFit(p, { numCtx: 512, warn });
-    expect(result.businessBlock).toBe("");
-    // persona still present after only-one-drop-needed... but the window is
-    // tiny, so persona goes too. Assert ORDER via the dropped log instead.
+    const result = degradeToFit(p, { contextWindow: 512, warn });
     expect(result.dropped[0]).toBe("business");
+    expect(result.businessBlock).toBe("");
     expect(warn).toHaveBeenCalled();
-    const firstWarn = warn.mock.calls[0][0];
-    expect(firstWarn).toMatchObject({ block: "business" });
+    expect(warn.mock.calls[0][0]).toMatchObject({ block: "business" });
   });
 
   it("drops persona SECOND (only after business) and logs both in order", () => {
@@ -104,34 +157,35 @@ describe("degradeToFit", () => {
       identityBlock: big,
       personaBlock: big,
       businessBlock: big,
+      toolSchemasJson: REPRESENTATIVE_TOOLS_JSON,
     });
-    const result = degradeToFit(p, { numCtx: 512, warn });
+    const result = degradeToFit(p, { contextWindow: 512, warn });
     expect(result.dropped).toEqual(["business", "persona"]);
     expect(result.personaBlock).toBe("");
-    // Structured warn on each drop, in order.
+    // Structured warn on each drop, in order, each carrying the estimate +
+    // threshold for observability.
     expect(warn.mock.calls.map((c) => c[0].block)).toEqual([
       "business",
       "persona",
     ]);
-    // Each warn carries the estimate + threshold for observability.
+    const expectedThreshold = Math.max(0, 512 - OUTPUT_RESERVE);
     for (const call of warn.mock.calls) {
       expect(call[0]).toHaveProperty("estimatedTokens");
-      expect(call[0]).toHaveProperty("thresholdTokens");
+      expect(call[0].thresholdTokens).toBe(expectedThreshold);
     }
   });
 
   it("does NOT drop persona when dropping business alone brings it under", () => {
     const warn = vi.fn();
-    // Window sized so identity+persona fit but +business overflows.
     // identity=400c(~100t), persona=400c(~100t), business=4000c(~1000t).
     const p = parts({
       identityBlock: "i".repeat(400),
       personaBlock: "p".repeat(400),
       businessBlock: "b".repeat(4000),
     });
-    // effective = numCtx - reserve. Choose numCtx so threshold ~= 300 tokens.
+    // threshold ≈ 300 tokens: identity+persona (~200t) fit, +business overflows.
     const result = degradeToFit(p, {
-      numCtx: OUTPUT_TOKEN_RESERVE + 300,
+      contextWindow: OUTPUT_RESERVE + 300,
       warn,
     });
     expect(result.dropped).toEqual(["business"]);
@@ -147,15 +201,9 @@ describe("degradeToFit", () => {
       toolSchemasJson: big,
       historyText: big,
     });
-    const result = degradeToFit(p, { numCtx: 512, warn });
-    // Nothing left to drop from the persona/business layer, so the caller
-    // is told to fall through to the existing history/attachment trimming.
+    const result = degradeToFit(p, { contextWindow: 512, warn });
+    // Nothing left to drop from the persona/business layer, so the caller is
+    // told to fall through to the existing history/attachment trimming.
     expect(result.historyTrimNeeded).toBe(true);
-  });
-});
-
-describe("BASE_PROMPT_MAX_CHARS worst-case ceiling", () => {
-  it("is 10000", () => {
-    expect(BASE_PROMPT_MAX_CHARS).toBe(10000);
   });
 });

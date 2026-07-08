@@ -19,6 +19,7 @@ import {
   PERSONA_PRESETS,
   type PersonaPresetName,
 } from "./persona-presets.js";
+import { PERSONA_PROMPT_MAX_CHARS } from "./prompt-budget.consts.js";
 
 export type PersonaVerbosityName = "concise" | "balanced" | "detailed";
 
@@ -39,12 +40,17 @@ export const PERSONA_SINGLETON_ID = "singleton";
 
 /**
  * Hard ceiling on the composed persona block (§10 budget table — dropped
- * 2nd under overflow). Enforced here as a final slice so no combination of
- * preset + traits + customInstructions can exceed it, in addition to the
- * per-field caps (preset ≤400 in persona-presets.ts, customInstructions
- * ≤1200 at the DB + zod layers).
+ * 2nd under overflow). Re-exported from the shared budget consts so the
+ * estimator and this composer share one source of truth.
+ *
+ * NOTE the two 1200s are distinct ceilings that happen to coincide:
+ * `customInstructions` carries its OWN 1200-char cap (DB @db.VarChar(1200) +
+ * the route's zod), and the COMPOSED block is also capped at 1200 here. The
+ * priority order (prefix → preset → verbosity → address form →
+ * customInstructions) guarantees the preset + traits always survive the
+ * final slice; only the customInstructions tail is ever trimmed.
  */
-export const PERSONA_PROMPT_MAX_CHARS = 1200;
+export { PERSONA_PROMPT_MAX_CHARS };
 
 /** Leading line: personality is style-only and never overrides identity.
  *  Load-bearing — the composer asserts the block starts with it, and it is
