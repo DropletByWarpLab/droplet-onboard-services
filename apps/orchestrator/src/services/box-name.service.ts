@@ -30,8 +30,9 @@ import {
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
-  CLAIM_RESULT_RENAME_UNSUPPORTED,
+  CLAIM_RESULT_ALREADY_NAMED,
   type ClaimBoxNameResult,
+  type ReleaseResult,
 } from "./tls-issuance.service.js";
 
 /** The `.env` key the chosen box name is persisted under (host `.env`,
@@ -154,12 +155,13 @@ export interface SetBoxNameResult {
   /** TRUE when HQ said the name is taken by ANOTHER device. The wizard shows
    *  the conflict + any `suggestions`. */
   taken: boolean;
-  /** WARP-984 — TRUE when HQ said THIS box already holds a (different) name and
-   *  rename isn't supported yet; distinct from `taken` so the wizard can say
-   *  "factory reset releases it" instead of the false "that name is taken". */
-  renameUnsupported: boolean;
-  /** WARP-984 — the name this box already holds at HQ (when the worker sent
-   *  `current_name` on the rename-unsupported 409). */
+  /** WARP-1109 — TRUE when HQ said THIS box already holds a DIFFERENT name;
+   *  distinct from `taken` so the wizard shows the current address + a Rename
+   *  affordance instead of the false "that name is taken". */
+  alreadyNamed: boolean;
+  /** WARP-1109 — the name this box already holds at HQ (when HQ sent
+   *  `current_name` / it was recovered from the message on the already-named
+   *  409). */
   currentName?: string;
   /** Alternate names HQ offered on a taken name (empty otherwise). */
   suggestions: string[];
@@ -200,24 +202,160 @@ export async function setBoxName(
   // 2. Device-auth claim with the RAW owner-entered name (HQ slugs it). Never
   //    throws — branch on the typed outcome.
   const claim = await deps.claim(raw);
+  return summarizeClaim(v.slug, claim);
+}
+
+/** Shared shaping of a raw claim outcome into a `SetBoxNameResult`. Used by both
+ *  `setBoxName` (first-claim) and `renameBoxName` (post-release claim). */
+function summarizeClaim(
+  localSlug: string,
+  claim: ClaimBoxNameResult,
+): SetBoxNameResult {
   const taken = claim.outcome === CLAIM_RESULT_NAME_TAKEN;
-  const renameUnsupported = claim.outcome === CLAIM_RESULT_RENAME_UNSUPPORTED;
+  const alreadyNamed = claim.outcome === CLAIM_RESULT_ALREADY_NAMED;
   return {
     // Prefer HQ's canonical slug/fqdn when it confirmed the claim; otherwise
     // fall back to the locally-derived slug so the wizard can still show the
     // chosen name (issuance will re-claim it later).
-    slug: claim.outcome === CLAIM_RESULT_CLAIMED && claim.slug ? claim.slug : v.slug,
+    slug: claim.outcome === CLAIM_RESULT_CLAIMED && claim.slug ? claim.slug : localSlug,
     fqdn:
       claim.outcome === CLAIM_RESULT_CLAIMED && claim.fqdn
         ? claim.fqdn
-        : boxNameToFqdn(v.slug),
+        : boxNameToFqdn(localSlug),
     authoritative: claim.authoritative,
     taken,
-    renameUnsupported,
-    ...(renameUnsupported && claim.currentName
+    alreadyNamed,
+    ...(alreadyNamed && claim.currentName
       ? { currentName: claim.currentName }
       : {}),
     suggestions: claim.suggestions ?? [],
     claim,
   };
+}
+
+// ---------------------------------------------------------------------------
+// WARP-1109 — renameBoxName: change a box's secured address in place.
+// ---------------------------------------------------------------------------
+
+/** A minimal logger shape (matches the pino child loggers the route composes).
+ *  Optional on the deps so unit tests can omit it. */
+export interface BoxNameLogger {
+  info(obj: unknown, msg?: string): void;
+  warn(obj: unknown, msg?: string): void;
+  error(obj: unknown, msg?: string): void;
+}
+
+const NOOP_LOGGER: BoxNameLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
+
+/** Frees the CURRENT name at HQ (device-authed release). In production this is
+ *  `tls-issuance.releaseFromHq` bound to the box identity; injected so the
+ *  service unit-tests with a fake. NEVER throws (returns a sentinel). */
+export type BoxNameReleaser = () => Promise<ReleaseResult>;
+
+/** Triggers a cert re-issue under the (new) FQDN — in production a
+ *  `tlsIssuance.runOnce()` tick. Best-effort: may throw; the caller swallows it
+ *  (the daily cron retries). Injected so tests spy on it. */
+export type TlsReissuer = () => Promise<void>;
+
+export interface RenameBoxNameDeps extends SetBoxNameDeps {
+  release: BoxNameReleaser;
+  reissue: TlsReissuer;
+  logger?: BoxNameLogger;
+}
+
+export interface RenameBoxNameResult extends SetBoxNameResult {
+  /** TRUE when the rename completed — the new name was persisted and a claim was
+   *  attempted (authoritative OR fallback). FALSE only when the NEW name is taken
+   *  by another box (a 409 the wizard surfaces so the owner can pick another). */
+  ok: boolean;
+  /** TRUE when a cert re-issue tick was triggered (and did not throw) under the
+   *  new/opaque FQDN. FALSE when the new name was taken (nothing to re-issue) or
+   *  the re-issue tick threw (non-fatal — the daily cron retries). */
+  reissued: boolean;
+}
+
+/**
+ * WARP-1109 — rename a box's secured address in place (the fix for "every name
+ * reads as taken once the box already holds one"). The flow, all NON-FATAL past
+ * the validation gate so the box is never stranded:
+ *
+ *   1. Validate the NEW name — invalid throws `BoxNameInvalidError` BEFORE any
+ *      HQ mutation (never release the current name for a name we can't accept).
+ *   2. RELEASE the current name at HQ (device-authed PoP). A FAILED/SKIPPED
+ *      release does NOT abort — HQ reaps stale names server-side, so we proceed
+ *      to the claim (logged loudly).
+ *   3. PERSIST the new slug (DROPLET_BOX_NAME host .env write-back) + device-auth
+ *      CLAIM the new name so HQ makes `<new>.droplet-us.com` authoritative.
+ *   4. Trigger a cert RE-ISSUE under the new FQDN.
+ *
+ * Fallback contract: if the CLAIM fails AFTER a successful release (the classic
+ * release-then-claim rollback window), the box is not left name-less — it still
+ * re-issues (falling back to opaque/bootstrap issuance) and the persisted new
+ * name is re-claimed on the next issuance tick. A 409 on the NEW name (taken by
+ * another box) surfaces `taken:true` with suggestions and does NOT re-issue.
+ */
+export async function renameBoxName(
+  raw: string,
+  deps: RenameBoxNameDeps,
+): Promise<RenameBoxNameResult> {
+  const logger = deps.logger ?? NOOP_LOGGER;
+
+  // 1. Validate the NEW name first — never release the current name for a name
+  //    we can't even accept.
+  const v = validateBoxName(raw);
+  if (!v.ok) {
+    throw new BoxNameInvalidError(v.reason ?? "empty", v.slug);
+  }
+
+  // 2. Release the CURRENT name at HQ. Non-fatal: a failed/skipped release
+  //    doesn't abort (HQ reaps stale names) — we log and proceed to the claim.
+  const releaseResult = await deps.release();
+  if (releaseResult !== "ok") {
+    logger.warn(
+      { newName: v.slug, releaseResult },
+      "box-rename: HQ release of the current name did not confirm (ok) — proceeding with the claim; HQ reaps stale names server-side",
+    );
+  }
+
+  // 3. Persist + claim the NEW name (best-effort persist, then device-auth PoP).
+  await deps.persist(v.slug);
+  const claim = await deps.claim(raw);
+  const summary = summarizeClaim(v.slug, claim);
+
+  // A NEW name taken by ANOTHER box: nothing to re-issue under it. Surface the
+  // conflict; the box's cert-state is unaffected (the old name was released, so
+  // the next tick re-issues opaque/bootstrap — the wizard shows the truth).
+  if (summary.taken) {
+    return { ...summary, ok: false, reissued: false };
+  }
+
+  // The classic rollback window: release succeeded but the claim did NOT confirm
+  // authoritatively. The box must not be stranded — log loudly; it still
+  // re-issues (opaque/bootstrap) and re-claims the persisted name next tick.
+  if (!summary.authoritative) {
+    logger.warn(
+      { newName: v.slug, outcome: claim.outcome },
+      "box-rename: current name released but the new claim did not confirm (non-authoritative) — falling back to opaque/bootstrap issuance; the new name re-claims on the next issuance tick",
+    );
+  }
+
+  // 4. Trigger a re-issue under the new/opaque FQDN. Best-effort — a thrown tick
+  //    is non-fatal (the daily cron retries); the rename result still reflects
+  //    the successful claim.
+  let reissued = false;
+  try {
+    await deps.reissue();
+    reissued = true;
+  } catch (err) {
+    logger.warn(
+      { err, newName: v.slug },
+      "box-rename: re-issue tick failed (non-fatal) — the daily renewal cron re-issues under the new FQDN",
+    );
+  }
+
+  return { ...summary, ok: true, reissued };
 }

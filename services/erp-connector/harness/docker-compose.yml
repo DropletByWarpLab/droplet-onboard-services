@@ -1,0 +1,35 @@
+# =============================================================================
+# WARP-1106 — Dry-setup harness: mock Eaglesoft "PattersonPM" database
+# =============================================================================
+#
+# Runnable-NOW, shape-faithful mock (PostgreSQL). Stands up a synthetic
+# PattersonPM (dba-owned schema, droplet_ro/droplet_rw least-privilege roles,
+# the exact tables/columns the erp-connector targets) so you can walk the whole
+# dry setup with zero SAP dependency.
+#
+#   docker compose -f services/erp-connector/harness/docker-compose.yml up -d
+#   # then run the smoke test (see README.md).
+#
+# The SQL-Anywhere-protocol-faithful variant (real dbsrv17 + PattersonPM.db)
+# lives in ./sqlanywhere/ and needs the SAP Developer Edition binaries.
+name: eaglesoft-mock
+
+services:
+  mock-eaglesoft:
+    image: postgres:16-alpine
+    container_name: eaglesoft-mock-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pattersonpm            # mock DB (SQL Anywhere DBN is "PattersonPM")
+    ports:
+      - "2638:5432"                       # host 2638 (Eaglesoft's port) -> pg 5432
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro   # 01-schema, 02-seed, 03-provision (alpha order)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pattersonpm"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data          # throwaway: fresh seed on every `up`

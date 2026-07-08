@@ -32,13 +32,15 @@ export interface StatusChipProps {
   onTranscribeNow?: (itemId: string) => void;
 }
 
-const PILL_BASE =
-  "inline-flex items-center rounded-full px-2 py-0.5 type-caption-1 border";
+// WARP-1079 — the indigo shell's ported `.badge` language (droplet-shell.css):
+// muted for parked states, info (brand) for active work, warn (amber) for
+// failures. The chip renders inside ShellPage's `.droplet-shell` scope
+// (knowledge page), so the descendant-scoped badge classes resolve.
 const STATUS_CLASSES: Record<string, string> = {
-  queued: `${PILL_BASE} bg-surface-secondary border-separator text-label-secondary`,
-  indexing: `${PILL_BASE} bg-accent/10 border-accent/40 text-accent`,
-  failed: `${PILL_BASE} bg-system-orange/10 border-system-orange/50 text-system-orange`,
-  unknown: `${PILL_BASE} bg-surface-secondary border-separator text-label-tertiary`,
+  queued: "badge muted",
+  indexing: "badge info",
+  failed: "badge warn",
+  unknown: "badge muted",
 };
 
 export function StatusChip({
@@ -85,16 +87,23 @@ export function StatusChip({
           <button
             type="button"
             aria-label="More actions"
-            className="inline-flex h-5 w-5 items-center justify-center rounded-full text-label-tertiary hover:bg-label-quaternary/40 hover:text-label-primary transition-colors"
+            className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--text-muted)] hover:bg-[var(--inset)] hover:text-[var(--text)] transition-colors"
             onClick={() => setMenuOpen((o) => !o)}
           >
             <MoreHorizontal size={14} />
           </button>
           {menuOpen && (
-            <div className="absolute right-0 top-6 z-10 min-w-[8rem] rounded-md border border-separator bg-surface-primary py-1 shadow-md">
+            <div
+              className="absolute right-0 top-6 z-10 min-w-[8rem] py-1 shadow-md"
+              style={{
+                background: "var(--card-bg)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left type-caption-1 text-label-primary hover:bg-surface-secondary"
+                className="block w-full px-3 py-1.5 text-left type-caption-1 text-[var(--text)] hover:bg-[var(--inset)]"
                 onClick={() => {
                   setMenuOpen(false);
                   onTranscribeNow?.(itemId);
