@@ -42,7 +42,7 @@ local tsc is the only gate.
 |---|---|---|
 | apps/orchestrator | `npm run test:orchestrator` | 1 env failure: `mcp-client.service.test.ts` (spawns stdio subprocess; green in CI) |
 | apps/web-dashboard | `npm run test:dashboard` | — |
-| services/ai-gateway | `cd services/ai-gateway && .venv/bin/python3 -m pytest --deselect tests/test_rate_limit.py::TestRateLimitEndpoint::test_chat_endpoint_has_rate_limit_headers` | deselected test hangs (real network call after full suite) — pre-existing |
+| services/ai-gateway | `cd services/ai-gateway && .venv/bin/python3 -m pytest` | if `test_chat_endpoint_has_rate_limit_headers` hangs, the branch predates the #770 fix — deselect it and rebase |
 | services/routing | `cd services/routing && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
 | services/voice-io | `cd services/voice-io && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
 | services/mcp-server | `cd services/mcp-server && npx vitest run` | 1 env failure: `stdio-roundtrip.test.ts` (green in CI) |
@@ -64,10 +64,21 @@ services/ai-gateway/.venv/bin/python3 -m pip install --only-binary=:all: APSched
 `git stash` → rerun the suite → note the failure set → `git stash pop`
 → rerun. Only failures absent from the baseline run are yours.
 
-Known pre-existing reds in **CI on main** (check before blaming your
-PR): the ai-gateway-tests job cancelled at ~15 min (the rate-limit hang
-test above), routing-tests 3 failures (`test_upnp.py` ×2,
-`test_system_firmware.py::…connection_drop…`).
+Known pre-existing reds in **CI on main** (as of 2026-07-08 — verify
+with the `ci-triage` agent before trusting this list; the previous
+ai-gateway hang and routing reds were fixed by #770/#768):
+
+- web-dashboard: `add-matter.ble-notice.test.tsx` (WARP-851 pre-flight
+  copy assertion) — intermittent flake on main; re-run before chasing.
+- publish-release: fails deterministically at "Sign release manifest"
+  (`COSIGN_PRIVATE_KEY` repo secret unset — needs the key ceremony in
+  `scripts/README.md`, not a code fix).
+- osv-nightly: never been green (standing dependency-vuln debt plus
+  intermittent OSV resolver errors).
+
+A red not on this list: check whether main's latest run of the same
+workflow fails the same way (the `ci-triage` agent does exactly this),
+then stash/replay locally.
 
 ## 5. Diff hygiene
 
