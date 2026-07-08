@@ -23,16 +23,21 @@ import {
   checkBoxName,
   persistBoxName,
   setBoxName,
+  renameBoxName,
   BoxNameInvalidError,
   BOX_NAME_ENV_KEY,
 } from "./box-name.service.js";
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
-  CLAIM_RESULT_RENAME_UNSUPPORTED,
+  CLAIM_RESULT_ALREADY_NAMED,
   CLAIM_RESULT_NOT_REGISTERED,
   CLAIM_RESULT_FAILED,
+  RELEASE_RESULT_OK,
+  RELEASE_RESULT_SKIPPED,
+  RELEASE_RESULT_FAILED,
   type ClaimBoxNameResult,
+  type ReleaseResult,
 } from "./tls-issuance.service.js";
 
 describe("box-name.service — checkBoxName", () => {
@@ -194,10 +199,10 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
     expect(result.suggestions).toEqual(["studio-2", "studio-hq"]);
   });
 
-  it("threads a rename-unsupported claim through as renameUnsupported:true with currentName (WARP-984)", async () => {
+  it("threads an already-named claim through as alreadyNamed:true with currentName (WARP-1093)", async () => {
     const persist = vi.fn(async (_name: string) => {});
     const claim = claiming({
-      outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+      outcome: CLAIM_RESULT_ALREADY_NAMED,
       authoritative: true,
       currentName: "scruceru",
       slug: undefined,
@@ -207,18 +212,18 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
 
     // Persistence still happened (best-effort local write), but HQ says this
     // box already holds a DIFFERENT name — distinct from taken, so the wizard
-    // can say "factory reset releases it" instead of the false "taken".
+    // can offer the rename flow instead of the false "taken".
     expect(persist).toHaveBeenCalledTimes(1);
     expect(result.taken).toBe(false);
-    expect(result.renameUnsupported).toBe(true);
+    expect(result.alreadyNamed).toBe(true);
     expect(result.currentName).toBe("scruceru");
     expect(result.authoritative).toBe(true);
   });
 
-  it("reports renameUnsupported:false on every other claim outcome", async () => {
+  it("reports alreadyNamed:false on every other claim outcome", async () => {
     const persist = vi.fn(async (_name: string) => {});
     const result = await setBoxName("studio", { persist, claim: claiming({}) });
-    expect(result.renameUnsupported).toBe(false);
+    expect(result.alreadyNamed).toBe(false);
     expect(result.currentName).toBeUndefined();
   });
 
@@ -263,6 +268,193 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
     const err = await setBoxName("My Box!", { persist, claim }).catch((e) => e);
 
     expect(err).toBeInstanceOf(BoxNameInvalidError);
+    expect(persist).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-1093 — renameBoxName: RELEASE the old name at HQ, THEN claim the new one
+// and trigger a re-issue under the new FQDN. Non-fatal on a post-release claim
+// failure (the box falls back to opaque/bootstrap + re-claims on the next tick).
+// ---------------------------------------------------------------------------
+
+describe("box-name.service — renameBoxName (WARP-1093)", () => {
+  function claiming(over: Partial<ClaimBoxNameResult>): (
+    raw: string,
+  ) => Promise<ClaimBoxNameResult> {
+    return vi.fn(async () => ({
+      outcome: CLAIM_RESULT_CLAIMED,
+      authoritative: true,
+      slug: "renamed",
+      fqdn: "renamed.droplet-us.com",
+      ...over,
+    }));
+  }
+
+  function makeDeps(over: {
+    persist?: (name: string) => Promise<void>;
+    release?: () => Promise<ReleaseResult>;
+    claim?: (raw: string) => Promise<ClaimBoxNameResult>;
+    reissue?: () => Promise<void>;
+  } = {}): {
+    persist: (name: string) => Promise<void>;
+    release: () => Promise<ReleaseResult>;
+    claim: (raw: string) => Promise<ClaimBoxNameResult>;
+    reissue: () => Promise<void>;
+  } {
+    return {
+      persist: over.persist ?? vi.fn(async (_name: string) => {}),
+      release: over.release ?? vi.fn(async () => RELEASE_RESULT_OK),
+      claim: over.claim ?? claiming({}),
+      reissue: over.reissue ?? vi.fn(async () => {}),
+    };
+  }
+
+  it("releases the current name FIRST, then persists + claims the new one, then re-issues", async () => {
+    const order: string[] = [];
+    const release = vi.fn(async () => {
+      order.push("release");
+      return RELEASE_RESULT_OK;
+    });
+    const persist = vi.fn(async (_n: string) => {
+      order.push("persist");
+    });
+    const claim = vi.fn(async () => {
+      order.push("claim");
+      return {
+        outcome: CLAIM_RESULT_CLAIMED,
+        authoritative: true,
+        slug: "renamed",
+        fqdn: "renamed.droplet-us.com",
+      } as ClaimBoxNameResult;
+    });
+    const reissue = vi.fn(async () => {
+      order.push("reissue");
+    });
+
+    const result = await renameBoxName("Renamed", {
+      persist,
+      release,
+      claim,
+      reissue,
+    });
+
+    // RELEASE must precede the CLAIM (HQ frees the old name before we take a new
+    // one) and the re-issue runs last, under the new FQDN.
+    expect(order).toEqual(["release", "persist", "claim", "reissue"]);
+    // The claim is driven with the RAW owner-entered name (HQ slugs it).
+    expect(claim).toHaveBeenCalledWith("Renamed");
+    // The new slug is persisted to DROPLET_BOX_NAME.
+    expect(persist).toHaveBeenCalledWith("renamed");
+    expect(result.ok).toBe(true);
+    expect(result.slug).toBe("renamed");
+    expect(result.fqdn).toBe("renamed.droplet-us.com");
+    expect(result.authoritative).toBe(true);
+    expect(result.taken).toBe(false);
+    expect(result.reissued).toBe(true);
+  });
+
+  it("surfaces a 409 name-taken on the NEW name as taken:true (with suggestions)", async () => {
+    const claim = claiming({
+      outcome: CLAIM_RESULT_NAME_TAKEN,
+      authoritative: true,
+      suggestions: ["renamed-2"],
+      slug: undefined,
+      fqdn: undefined,
+    });
+    const reissue = vi.fn(async () => {});
+    const result = await renameBoxName("renamed", makeDeps({ claim, reissue }));
+
+    expect(result.taken).toBe(true);
+    expect(result.suggestions).toEqual(["renamed-2"]);
+    expect(result.authoritative).toBe(true);
+    // A taken new name means no successful re-issue under it.
+    expect(result.reissued).toBe(false);
+    expect(reissue).not.toHaveBeenCalled();
+  });
+
+  it("release-succeeded / claim-FAILED is NON-FATAL: reports fallback, still re-issues (opaque/bootstrap re-claims next tick)", async () => {
+    // The classic rollback path: HQ freed the old name, but the new claim failed
+    // transiently. The box must NOT be stranded — it re-issues (falls back to
+    // opaque/bootstrap) and the persisted new name is re-claimed on the next tick.
+    const release = vi.fn(async () => RELEASE_RESULT_OK);
+    const claim = claiming({
+      outcome: CLAIM_RESULT_FAILED,
+      authoritative: false,
+      slug: undefined,
+      fqdn: undefined,
+    });
+    const reissue = vi.fn(async () => {});
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const result = await renameBoxName("renamed", {
+      ...makeDeps({ release, claim, reissue }),
+      logger,
+    });
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(result.authoritative).toBe(false);
+    expect(result.taken).toBe(false);
+    // Fallback is loud: a warning is logged.
+    expect(logger.warn).toHaveBeenCalled();
+    // The box still re-issues so it keeps serving a cert (opaque/bootstrap).
+    expect(reissue).toHaveBeenCalledTimes(1);
+    expect(result.reissued).toBe(true);
+  });
+
+  it("proceeds with the claim even when the release FAILED (HQ reaps the stale name server-side)", async () => {
+    const release = vi.fn(async () => RELEASE_RESULT_FAILED);
+    const claim = claiming({});
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const result = await renameBoxName("renamed", {
+      ...makeDeps({ release, claim }),
+      logger,
+    });
+
+    // A failed release does not abort the rename — HQ reaps stale names; the
+    // claim still runs and can succeed.
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("treats a SKIPPED release (device not provisioned) as fine and continues", async () => {
+    const release = vi.fn(async () => RELEASE_RESULT_SKIPPED);
+    const claim = claiming({});
+    const result = await renameBoxName("renamed", makeDeps({ release, claim }));
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a re-issue failure is non-fatal — the rename result still reflects the successful claim", async () => {
+    const reissue = vi.fn(async () => {
+      throw new Error("reissue tick threw");
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const result = await renameBoxName("renamed", {
+      ...makeDeps({ reissue }),
+      logger,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.authoritative).toBe(true);
+    // The claim succeeded; the re-issue is best-effort (the 04:00 cron retries).
+    expect(result.reissued).toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("rejects an invalid NEW name with BoxNameInvalidError BEFORE releasing anything", async () => {
+    const release = vi.fn(async () => RELEASE_RESULT_OK);
+    const persist = vi.fn(async (_n: string) => {});
+    const claim = claiming({});
+    const err = await renameBoxName("My Box!", {
+      ...makeDeps({ release, persist, claim }),
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(BoxNameInvalidError);
+    // Never release the CURRENT name for a new name we can't even accept.
+    expect(release).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
     expect(claim).not.toHaveBeenCalled();
   });

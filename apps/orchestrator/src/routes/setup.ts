@@ -69,13 +69,17 @@ import {
 import {
   checkBoxName,
   setBoxName,
+  renameBoxName,
   BoxNameInvalidError,
   type BoxNameClaimer,
+  type BoxNameReleaser,
 } from "../services/box-name.service.js";
 import {
   createBridgeBoxNamePersister,
   createBoxNameClaimer,
+  createBoxNameReleaser,
 } from "../services/tls-issuance.adapters.js";
+import { reissueTlsNow } from "../services/tls-reissue.singleton.js";
 import {
   boxNameReasonMessage,
   boxNameToFqdn,
@@ -319,6 +323,15 @@ export function createSetupRouter(
      *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
      *  fake so no HQ / sidecar is touched. */
     claimBoxName?: BoxNameClaimer;
+    /** WARP-1093 — device-auth name RELEASER for the rename flow. Frees the box's
+     *  current name at HQ before the new claim. Defaults to the production
+     *  `createBoxNameReleaser()`; route tests inject a fake. */
+    releaseBoxName?: BoxNameReleaser;
+    /** WARP-1093 — trigger an immediate cert re-issue under the new FQDN after a
+     *  rename. Defaults to the process-wide issuance hook (`reissueTlsNow`, a
+     *  no-op until boot registers the composed issuance service); route tests
+     *  inject a spy so no issuance runtime is touched. */
+    reissueTls?: () => Promise<void>;
     /** WARP-1039 — boot-env fallback for GET /setup/box-name. Defaults to the
      *  `config` snapshot's DROPLET_BOX_NAME (covers a container restart
      *  mid-wizard, where the re-read host .env is the only place the name
@@ -334,6 +347,8 @@ export function createSetupRouter(
   const persistBoxNameToHost =
     deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
   const claimBoxNameToHq = deps?.claimBoxName ?? createBoxNameClaimer();
+  const releaseBoxNameFromHq = deps?.releaseBoxName ?? createBoxNameReleaser();
+  const reissueTls = deps?.reissueTls ?? reissueTlsNow;
   const getEnvBoxName = deps?.getEnvBoxName ?? (() => config.DROPLET_BOX_NAME);
   const warmModel = deps?.warmDefaultModel ?? warmDefaultModel;
 
@@ -810,8 +825,9 @@ export function createSetupRouter(
   //   valid + claimed → 200 { ok, slug, fqdn, authoritative:true, taken:false }
   //   valid + fallback→ 200 { ok, slug, fqdn, authoritative:false, taken:false }
   //   valid + taken   → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
-  //   valid + this box already holds a different name (WARP-984)
-  //                   → 409 { code:"BOX_NAME_RENAME_UNSUPPORTED", currentName? }
+  //   valid + this box already holds a different name (WARP-1093)
+  //                   → 409 { code:"BOX_NAME_ALREADY_NAMED", currentName? }
+  //                     (the wizard offers Rename → POST /setup/box-name/rename)
   //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
   //
   // GATED exactly like the org POST + the appliance:"ready" PATCH: a write is
@@ -850,20 +866,21 @@ export function createSetupRouter(
         claim: claimBoxNameToHq,
       });
 
-      // WARP-984 — HQ says THIS box already holds a (different) name and rename
-      // isn't supported yet. Distinct 409 so the wizard can say "factory reset
-      // releases it" instead of the misleading "that name is taken".
-      if (result.renameUnsupported) {
+      // WARP-1093 — HQ says THIS box already holds a (different) name. Distinct
+      // 409 so the wizard shows the current address + a Rename affordance
+      // (POST /setup/box-name/rename) instead of the misleading "that name is
+      // taken". `currentName` lets the wizard name the address it already holds.
+      if (result.alreadyNamed) {
         res.status(409).json({
           ok: false,
-          code: "BOX_NAME_RENAME_UNSUPPORTED",
+          code: "BOX_NAME_ALREADY_NAMED",
           slug: result.slug,
           fqdn: result.fqdn,
           taken: false,
           authoritative: result.authoritative,
           ...(result.currentName ? { currentName: result.currentName } : {}),
           error:
-            "This box already holds a secure address — a factory reset releases it.",
+            "This box already holds a secure address — use Rename to change it.",
         });
         return;
       }
@@ -923,6 +940,114 @@ export function createSetupRouter(
         return;
       }
       logger.error({ err }, "Failed to persist box name");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/box-name/rename { name } ───────────────────
+  //
+  // WARP-1093 — CHANGE the box's secured address in place. This is the flow the
+  // wizard's Rename affordance drives once a box already holds a name (the fix
+  // for "every name reads as taken once the box holds one"): it RELEASES the
+  // current name at HQ (device-auth PoP — the same signed release factory-reset
+  // uses), THEN claims the NEW name and triggers a cert re-issue under the new
+  // FQDN. All non-fatal past validation — a post-release claim failure falls back
+  // to opaque/bootstrap issuance (the new name re-claims on the next tick), and a
+  // re-issue-tick failure is retried by the daily renewal cron.
+  //
+  //   valid + claimed → 200 { ok:true, slug, fqdn, authoritative:true }
+  //   valid + fallback→ 200 { ok:true, slug, fqdn, authoritative:false }
+  //   new name taken  → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
+  //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
+  //
+  // GATED exactly like POST /setup/box-name: allowed with a valid session cookie
+  // OR when the appliance is not yet `ready` (first-run). A rename is only ever
+  // reached AFTER a name exists, so in practice the box is claimed and the
+  // authenticated owner drives it — but the same first-run allowance keeps the
+  // wizard flow uniform.
+  router.post("/setup/box-name/rename", async (req: Request, res, next) => {
+    try {
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if (!session) {
+        const { appliance } = await getSetupState(prisma);
+        if (appliance === "ready") {
+          res.status(401).json({
+            error: "Renaming the box requires an authenticated session.",
+            code: "BOX_NAME_AUTH_REQUIRED",
+          });
+          return;
+        }
+      }
+
+      const parsed = boxNameSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A box name is required.",
+          code: "BOX_NAME_REQUIRED",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const result = await renameBoxName(parsed.data.name, {
+        persist: persistBoxNameToHost,
+        claim: claimBoxNameToHq,
+        release: releaseBoxNameFromHq,
+        reissue: reissueTls,
+        logger,
+      });
+
+      // The NEW name is taken by ANOTHER box. 409 with suggestions so the wizard
+      // shows the real conflict — the old name was already released, so the box
+      // re-issues opaque/bootstrap on the next tick until a free name is chosen.
+      if (result.taken) {
+        res.status(409).json({
+          ok: false,
+          code: "BOX_NAME_TAKEN",
+          slug: result.slug,
+          fqdn: result.fqdn,
+          taken: true,
+          authoritative: result.authoritative,
+          suggestions: result.suggestions,
+          error: "That name is already taken — pick another.",
+        });
+        return;
+      }
+
+      // Persist the accepted slug on the ApplianceSetup singleton so
+      // GET /setup/box-name reads the new name back without a container restart
+      // (mirrors the POST). NON-FATAL: the name is already durable on the host.
+      try {
+        await prisma.applianceSetup.upsert({
+          where: { id: "singleton" },
+          create: { id: "singleton", boxName: result.slug },
+          update: { boxName: result.slug },
+        });
+      } catch (dbErr) {
+        logger.warn(
+          { err: dbErr },
+          "Renamed box name persisted to the host .env but the ApplianceSetup write-back failed",
+        );
+      }
+
+      res.json({
+        ok: true,
+        slug: result.slug,
+        fqdn: result.fqdn,
+        authoritative: result.authoritative,
+        taken: false,
+      });
+    } catch (err) {
+      if (err instanceof BoxNameInvalidError) {
+        res.status(400).json({
+          error: boxNameReasonMessage(err.reason),
+          code: err.code,
+          reason: err.reason,
+        });
+        return;
+      }
+      logger.error({ err }, "Failed to rename box name");
       next(err);
     }
   });

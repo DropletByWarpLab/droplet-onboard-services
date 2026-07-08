@@ -45,6 +45,7 @@ import {
 import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
   createPrismaTlsCertStore,
@@ -786,6 +787,11 @@ async function main() {
     },
     { lockKey: "droplet:tls-renewal" },
   );
+  // WARP-1093 — register the composed issuance service's runOnce so the rename
+  // endpoint (POST /api/setup/box-name/rename) can trigger an immediate re-issue
+  // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
+  // the setup route reads it via reissueTlsNow() (a no-op until this runs).
+  initTlsReissueHook(() => tlsIssuance.runOnce());
   // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
   // reflash gets its publicly-trusted cert within seconds instead of waiting up
   // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
