@@ -1,9 +1,10 @@
 /**
  * Static connector catalog for the Integrations hub (WARP-1101). Eaglesoft is
  * provider #1; the rest are framework placeholders so the hub reads as
- * "systems you can connect", not a one-off. Live connection *status* is merged
- * in from the backend (GET /api/integrations) by useIntegrations — this file
- * is only the descriptive metadata, which is safe to know client-side.
+ * "systems you can connect", not a one-off. Copy + order match the Claude
+ * Design handoff (Eaglesoft · Dentrix · QuickBooks · Open Dental). Live
+ * connection *status* is merged in from the backend (GET /api/integrations) by
+ * useIntegrations — this file is only the descriptive metadata.
  */
 
 import type { ConnectorMeta } from "./erp-types";
@@ -22,15 +23,7 @@ export const CONNECTORS: ConnectorMeta[] = [
     name: "Dentrix",
     category: "Practice management",
     description:
-      "Connect your Dentrix database to bring its schedule and patients into Droplet.",
-    availability: "coming-soon",
-  },
-  {
-    id: "opendental",
-    name: "Open Dental",
-    category: "Practice management",
-    description:
-      "Link your Open Dental database for schedule, patients, and production.",
+      "Schedule, patients, and ledgers from Dentrix — read on your own network.",
     availability: "coming-soon",
   },
   {
@@ -38,7 +31,15 @@ export const CONNECTORS: ConnectorMeta[] = [
     name: "QuickBooks",
     category: "Accounting",
     description:
-      "Bring your books into Droplet to see production and receivables together.",
+      "Production, receivables, and deposits from your books — no export, no upload.",
+    availability: "coming-soon",
+  },
+  {
+    id: "opendental",
+    name: "Open Dental",
+    category: "Practice management",
+    description:
+      "Read the schedule and patient records straight from your Open Dental database.",
     availability: "coming-soon",
   },
 ];

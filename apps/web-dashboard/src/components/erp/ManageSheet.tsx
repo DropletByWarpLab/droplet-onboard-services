@@ -38,6 +38,11 @@ export function ManageSheet({
         <h2 id={headingId} className="type-title-3 text-label-primary">Manage Eaglesoft</h2>
 
         <div className="mt-4 dp-group">
+          <button type="button" className="dp-row w-full text-left" onClick={onSyncNow}>
+            <span className="flex items-center gap-2 type-subheadline text-label-primary">
+              <PlugZap size={15} className="text-label-tertiary" /> Re-test connection
+            </span>
+          </button>
           <div className="dp-row">
             <span className="flex items-center gap-2 type-subheadline text-label-primary">
               {writesOn ? <PlugZap size={15} className="text-system-orange" /> : <Lock size={15} className="text-label-tertiary" />}

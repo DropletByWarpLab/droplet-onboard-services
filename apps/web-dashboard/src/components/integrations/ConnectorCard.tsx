@@ -80,7 +80,9 @@ export function ConnectorCard({
         {meta.description}
       </p>
 
-      {comingSoon ? null : isConnected ? (
+      {comingSoon ? (
+        <span className="type-caption-1 text-label-tertiary">Available in a future update</span>
+      ) : isConnected ? (
         <button type="button" className="btn" onClick={onOpen}>
           Open
         </button>

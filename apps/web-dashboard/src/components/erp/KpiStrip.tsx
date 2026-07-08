@@ -2,9 +2,10 @@
 
 /**
  * The practice at a glance (design brief §4.2) — four read-only KPI tiles.
- * Values are facts pulled from Eaglesoft: mono, never editable. When there's
- * no snapshot yet (not connected / loading) each shows an em-dash placeholder
- * rather than a fake zero.
+ * Values are facts pulled from Eaglesoft: mono, never editable. Schedule +
+ * recall carry a unit ("appointments" / "patients") per the design handoff.
+ * When there's no snapshot yet (not connected / loading) each shows an em-dash
+ * placeholder rather than a fake zero.
  */
 
 import { CalendarDays, DollarSign, Activity, UserRound } from "lucide-react";
@@ -21,10 +22,11 @@ export function KpiStrip({ kpis }: { kpis?: ErpKpis }) {
         icon={<CalendarDays size={13} />}
         label="Today's schedule"
         value={kpis ? kpis.appointmentsToday : DASH}
+        unit={kpis ? "appointments" : undefined}
         note={
           kpis?.openChairsPm != null
             ? `${kpis.openChairsPm} open chairs this afternoon.`
-            : "appointments on the books."
+            : "on the books today."
         }
       />
       <Kpi
@@ -43,6 +45,7 @@ export function KpiStrip({ kpis }: { kpis?: ErpKpis }) {
         icon={<UserRound size={13} />}
         label="Recall due"
         value={kpis ? kpis.recallDue : DASH}
+        unit={kpis ? "patients" : undefined}
         note="overdue for recare this month."
       />
     </div>
