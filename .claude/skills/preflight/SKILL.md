@@ -41,7 +41,7 @@ local tsc is the only gate.
 | Touched | Command (from repo root) | Known local baseline (don't chase) |
 |---|---|---|
 | apps/orchestrator | `npm run test:orchestrator` | 1 env failure: `mcp-client.service.test.ts` (spawns stdio subprocess; green in CI) |
-| apps/web-dashboard | `npm run test:dashboard` | — |
+| apps/web-dashboard | `npm run test:dashboard` | ~26 env failures in 9 files locally (`localStorage` undefined, auth re-probe classes; all green in CI) — compare via stash/replay; single-file runs are reliable |
 | services/ai-gateway | `cd services/ai-gateway && .venv/bin/python3 -m pytest` | if `test_chat_endpoint_has_rate_limit_headers` hangs, the branch predates the #770 fix — deselect it and rebase |
 | services/routing | `cd services/routing && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
 | services/voice-io | `cd services/voice-io && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
