@@ -111,6 +111,15 @@ import pmListWorkItems from "./handlers/pm/list-work-items.js";
 import pmGetWorkItem from "./handlers/pm/get-work-item.js";
 import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
 
+// ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
+// independent slice: handlers return ERP_NOT_CONNECTED; the live read/write
+// paths ship in WARP-1095+. Read tools are Read-tier; the appointment
+// scheduler is Write-tier (requiresWrite + requiresConfirmation, brief §11.6).
+import erpGetScheduleToday from "./handlers/erp/get-schedule-today.js";
+import erpFindPatient from "./handlers/erp/find-patient.js";
+import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
+import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -210,6 +219,11 @@ const allTools: Tool[] = [
   pmListWorkItems,
   pmGetWorkItem,
   pmSearchWorkItems,
+  // WARP-1094: ERP-connector (Eaglesoft) — 3 Read-tier + 1 Write-tier
+  erpGetScheduleToday,
+  erpFindPatient,
+  erpGetArSummary,
+  erpScheduleAppointment,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

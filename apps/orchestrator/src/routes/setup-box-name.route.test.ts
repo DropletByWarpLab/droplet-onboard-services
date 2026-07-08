@@ -31,8 +31,10 @@ import { createSetupRouter } from "./setup.js";
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
-  CLAIM_RESULT_RENAME_UNSUPPORTED,
+  CLAIM_RESULT_ALREADY_NAMED,
   CLAIM_RESULT_NOT_REGISTERED,
+  CLAIM_RESULT_FAILED,
+  RELEASE_RESULT_OK,
   type ClaimBoxNameResult,
 } from "../services/tls-issuance.service.js";
 
@@ -98,6 +100,18 @@ function buildApp(
     claimed.push(raw);
     return claimResult;
   });
+  // WARP-1109 — rename collaborators. The release frees the CURRENT name at HQ;
+  // the reissue triggers a cert re-issue under the NEW fqdn. Both injected so no
+  // HQ / issuance runtime is touched.
+  const released: number[] = [];
+  const releaseBoxName = vi.fn(async () => {
+    released.push(Date.now());
+    return RELEASE_RESULT_OK;
+  });
+  const reissued: number[] = [];
+  const reissueTls = vi.fn(async () => {
+    reissued.push(Date.now());
+  });
   const app = express();
   app.use(cookieParser());
   app.use(express.json());
@@ -106,12 +120,24 @@ function buildApp(
     createSetupRouter(prisma as never, {
       persistBoxNameToHost,
       claimBoxName,
+      releaseBoxName,
+      reissueTls,
       // WARP-1039 — boot-env fallback for GET /setup/box-name, injected so the
       // tests never touch the real config snapshot.
       getEnvBoxName: () => envBoxName,
     }),
   );
-  return { app, persisted, persistBoxNameToHost, claimed, claimBoxName };
+  return {
+    app,
+    persisted,
+    persistBoxNameToHost,
+    claimed,
+    claimBoxName,
+    released,
+    releaseBoxName,
+    reissued,
+    reissueTls,
+  };
 }
 
 describe("GET /api/setup/box-name/check (WARP-979)", () => {
@@ -244,11 +270,11 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
   });
 
-  it("409s with BOX_NAME_RENAME_UNSUPPORTED when THIS box already holds a name (WARP-984)", async () => {
+  it("409s with BOX_NAME_ALREADY_NAMED when THIS box already holds a name (WARP-1109)", async () => {
     const { app, persistBoxNameToHost } = buildApp(
       prisma,
       makeClaimResult({
-        outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+        outcome: CLAIM_RESULT_ALREADY_NAMED,
         authoritative: true,
         currentName: "scruceru",
         slug: undefined,
@@ -261,9 +287,9 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
 
     expect(res.status).toBe(409);
     expect(res.body.ok).toBe(false);
-    expect(res.body.code).toBe("BOX_NAME_RENAME_UNSUPPORTED");
-    // Distinct from a taken name — the wizard can say "this box already holds a
-    // name — factory reset releases it" instead of the false "taken".
+    expect(res.body.code).toBe("BOX_NAME_ALREADY_NAMED");
+    // Distinct from a taken name — the wizard shows the current address + a
+    // Rename affordance instead of the false "taken".
     expect(res.body.taken).toBe(false);
     expect(res.body.currentName).toBe("scruceru");
     expect(res.body.authoritative).toBe(true);
@@ -272,11 +298,11 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
   });
 
-  it("omits currentName on the rename-unsupported 409 when HQ did not send it", async () => {
+  it("omits currentName on the already-named 409 when HQ did not send it", async () => {
     const { app } = buildApp(
       prisma,
       makeClaimResult({
-        outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+        outcome: CLAIM_RESULT_ALREADY_NAMED,
         authoritative: true,
         slug: undefined,
         fqdn: undefined,
@@ -287,7 +313,7 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
       .send({ name: "studio" });
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe("BOX_NAME_RENAME_UNSUPPORTED");
+    expect(res.body.code).toBe("BOX_NAME_ALREADY_NAMED");
     expect(res.body.currentName).toBeUndefined();
   });
 
@@ -428,6 +454,148 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(res.body.slug).toBe("renamed");
     expect(res.body.authoritative).toBe(true);
     expect(persisted).toEqual(["renamed"]);
+  });
+});
+
+describe("POST /api/setup/box-name/rename (WARP-1109)", () => {
+  let prisma: ReturnType<typeof createPrismaMock>;
+  beforeEach(() => {
+    prisma = createPrismaMock();
+  });
+
+  it("releases the current name, claims the new one, re-issues, and 200s authoritative", async () => {
+    const { app, released, releaseBoxName, claimed, claimBoxName, reissueTls, persisted } =
+      buildApp(
+        prisma,
+        makeClaimResult({ slug: "renamed", fqdn: "renamed.droplet-us.com" }),
+      );
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .send({ name: "Renamed" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.slug).toBe("renamed");
+    expect(res.body.fqdn).toBe("renamed.droplet-us.com");
+    expect(res.body.authoritative).toBe(true);
+    // The old name was released, the new one claimed (RAW), a re-issue fired.
+    expect(releaseBoxName).toHaveBeenCalledTimes(1);
+    expect(claimBoxName).toHaveBeenCalledTimes(1);
+    expect(claimed).toEqual(["Renamed"]);
+    expect(persisted).toEqual(["renamed"]);
+    expect(reissueTls).toHaveBeenCalledTimes(1);
+    expect(released.length).toBe(1);
+
+    // The DB singleton is updated so GET /setup/box-name reads the new name.
+    const read = await request(app)
+      .get("/api/setup/box-name")
+      .set("Cookie", "droplet_session=valid-session");
+    expect(read.body.name).toBe("renamed");
+  });
+
+  it("409s with BOX_NAME_TAKEN when the NEW name is taken by another box (still released the old one)", async () => {
+    const { app, releaseBoxName, reissueTls } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_NAME_TAKEN,
+        authoritative: true,
+        suggestions: ["renamed-2"],
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .send({ name: "renamed" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("BOX_NAME_TAKEN");
+    expect(res.body.taken).toBe(true);
+    expect(res.body.suggestions).toEqual(["renamed-2"]);
+    expect(releaseBoxName).toHaveBeenCalledTimes(1);
+    // No successful re-issue under a taken name.
+    expect(reissueTls).not.toHaveBeenCalled();
+  });
+
+  it("200 authoritative:false when the post-release claim fails (fallback, still re-issues)", async () => {
+    const { app, releaseBoxName, reissueTls } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_FAILED,
+        authoritative: false,
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .send({ name: "renamed" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.authoritative).toBe(false);
+    expect(releaseBoxName).toHaveBeenCalledTimes(1);
+    // The box falls back to opaque/bootstrap so it keeps serving a cert.
+    expect(reissueTls).toHaveBeenCalledTimes(1);
+  });
+
+  it("400s an invalid new name with BOX_NAME_INVALID and does NOT release the current name", async () => {
+    const { app, releaseBoxName, reissueTls } = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .send({ name: "My Box!" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("BOX_NAME_INVALID");
+    expect(releaseBoxName).not.toHaveBeenCalled();
+    expect(reissueTls).not.toHaveBeenCalled();
+  });
+
+  it("400s a missing name with BOX_NAME_REQUIRED", async () => {
+    const { app } = buildApp(prisma);
+    const res = await request(app).post("/api/setup/box-name/rename").send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("BOX_NAME_REQUIRED");
+  });
+
+  it("rejects an unauthenticated rename once the appliance is `ready` (401, no release)", async () => {
+    prisma._seedSetup({
+      id: "singleton",
+      state: "ready",
+      setupStep: "done",
+      userTourCompleted: true,
+      boxName: "studio",
+    });
+    const { app, releaseBoxName } = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .send({ name: "evil" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("BOX_NAME_AUTH_REQUIRED");
+    expect(releaseBoxName).not.toHaveBeenCalled();
+  });
+
+  it("allows an AUTHENTICATED owner to rename on a claimed appliance", async () => {
+    prisma._seedSetup({
+      id: "singleton",
+      state: "ready",
+      setupStep: "done",
+      userTourCompleted: true,
+      boxName: "studio",
+    });
+    const { app, releaseBoxName } = buildApp(
+      prisma,
+      makeClaimResult({ slug: "renamed", fqdn: "renamed.droplet-us.com" }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name/rename")
+      .set("Cookie", "droplet_session=valid-session")
+      .send({ name: "renamed" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.slug).toBe("renamed");
+    expect(releaseBoxName).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -241,18 +241,21 @@ describe("setup VPN step (WARP-174)", () => {
     });
 
     // Onboarding-Flow redesign — the precheck jumps back to the dedicated
-    // Address step (not the old combined Internet step). WARP-979 reworked its
-    // title to the Secured / name-your-box step, "Name your secure address".
-    expect(
-      screen.getByText(/name your secure address/i),
-    ).toBeInTheDocument();
-    // WARP-1039 — the step rehydrates the name the customer already saved,
-    // with the current-address hint, instead of an empty input.
+    // Address step (not the old combined Internet step). WARP-1109 — because a
+    // name is already saved, the step shows the "your box is named X" state (its
+    // fqdn + padlock) instead of the empty fresh-pick input; the address is
+    // NEVER rendered as an empty/blank picker once the box already holds a name.
     await waitFor(() =>
-      expect(screen.getByLabelText(/box name/i)).toHaveValue("studio"),
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
     );
+    expect(screen.getByText("studio.droplet-us.com")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/box name/i)).not.toBeInTheDocument();
+    // Keep-this-address advances; Rename is offered for a change.
     expect(
-      screen.getByText(/this is your current address/i),
+      screen.getByRole("button", { name: /keep this address/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /rename this address/i }),
     ).toBeInTheDocument();
   });
 
