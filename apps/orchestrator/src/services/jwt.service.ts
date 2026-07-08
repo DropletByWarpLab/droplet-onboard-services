@@ -67,8 +67,9 @@ export function roleFromGroups(groups: string[]): Role {
  * Privilege ladder for the household role taxonomy (ADR-004 §3). Higher
  * number = more authority. Used to stop a lower-ranked operator from
  * minting an invite that assigns a role outranking their own — the
- * privilege-escalation vector on the invite-creation routes (an
- * owner/admin invite is granted an `owner` session role on accept).
+ * privilege-escalation vector on the invite-creation routes (since
+ * WARP-1051 the accept path grants the invite's canonical role as the
+ * session role, so the cap is what keeps an admin from minting owners).
  *
  * Mirrors the ascending ladder in `scim-role-mapping.service.ts`
  * (`ROLE_PRIVILEGE`, the SCIM directory branch) — keep the two in sync
