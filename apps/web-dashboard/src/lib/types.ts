@@ -562,6 +562,16 @@ export interface BoxNameCurrentResult {
   name: string | null;
   fqdn: string | null;
 }
+
+/**
+ * WARP-1109 — response from POST /api/setup/box-name/rename. Same shape as
+ * BoxNameSetResult: the rename RELEASES the current name at HQ then claims the
+ * new one, so `authoritative` is true only when HQ device-auth-confirmed the new
+ * name (false = the new name was persisted but issuance fell back to
+ * opaque/bootstrap and re-claims on the next tick). A 409 name-taken on the NEW
+ * name surfaces as a thrown error carrying `code: "BOX_NAME_TAKEN"` + suggestions.
+ */
+export type BoxNameRenameResult = BoxNameSetResult;
 // --- Auth types ---
 
 export interface AuthUser {

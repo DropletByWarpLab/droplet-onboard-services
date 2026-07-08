@@ -16,6 +16,18 @@ import { HELP_PATH } from "@/lib/routing";
 // only route under that prefix.
 const PUBLIC_PATHS = ["/setup", "/login", "/invite"];
 
+// WARP-1079 — AuthGate renders ABOVE every page scope (`.droplet-shell`,
+// `.droplet-home`, the auth pages), so its full-screen loading / probe-error
+// states can't resolve the shell's CSS variables. The literal hexes below are
+// the indigo ramp from `components/shell/indigo-tokens.css`, kept in lockstep
+// by hand (light / dark): bg #f5f6fb / #0f1117, text #1b1e2b / #e4e4e7,
+// text-muted #6b7180 / #8a8a94, brand #6366f1 / #818cf8.
+const GATE_BG = "bg-[#f5f6fb] dark:bg-[#0f1117]";
+const GATE_TEXT = "text-[#1b1e2b] dark:text-[#e4e4e7]";
+const GATE_TEXT_MUTED = "text-[#6b7180] dark:text-[#8a8a94]";
+const GATE_BRAND_TEXT = "text-[#6366f1] dark:text-[#818cf8]";
+const GATE_BRAND_BG = "bg-[#6366f1] dark:bg-[#818cf8]";
+
 export function AuthGate({ children }: { children: ReactNode }) {
   // PR #372 — route off the explicit `/setup/state` machine. The appliance
   // lifecycle ("unclaimed" | "ready") replaces the boolean `setupRequired`
@@ -194,12 +206,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // (or its data) to an unauthenticated viewer.
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-surface-primary flex items-center justify-center">
+      <div className={`min-h-screen ${GATE_BG} flex items-center justify-center`}>
         <div className="text-center">
           <div className="flex items-center justify-center mx-auto mb-3 animate-pulse">
-            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
+            <DropletMark size={32} className={GATE_BRAND_TEXT} aria-label="Droplet" />
           </div>
-          <p className="type-subheadline text-label-tertiary">Loading...</p>
+          <p className={`type-subheadline ${GATE_TEXT_MUTED}`}>Loading...</p>
         </div>
       </div>
     );
@@ -217,7 +229,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     // than immediately flashing an error + manual Retry. Once the auto-retries
     // are exhausted we fall back to the explicit error + Retry affordance.
     return (
-      <div className="min-h-screen bg-surface-primary flex items-center justify-center">
+      <div className={`min-h-screen ${GATE_BG} flex items-center justify-center`}>
         <div
           role="status"
           aria-live="polite"
@@ -231,24 +243,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
             {/* Decorative — the role="status" region + headline carry the
                 spoken status, so the mark stays out of the a11y tree (it sits
                 next to "…your Droplet" / the error copy). */}
-            <DropletMark size={32} className="text-accent" />
+            <DropletMark size={32} className={GATE_BRAND_TEXT} />
           </div>
           {setupAutoRetrying ? (
             <>
-              <p className="type-headline text-label-primary mb-2">
+              <p className={`type-headline ${GATE_TEXT} mb-2`}>
                 Reconnecting to your Droplet…
               </p>
-              <p className="type-subheadline text-label-tertiary mb-4">
+              <p className={`type-subheadline ${GATE_TEXT_MUTED} mb-4`}>
                 Your Droplet is starting up. This can take a few seconds on the
                 first boot.
               </p>
             </>
           ) : (
             <>
-              <p className="type-headline text-label-primary mb-2">
+              <p className={`type-headline ${GATE_TEXT} mb-2`}>
                 Can&apos;t reach your appliance
               </p>
-              <p className="type-subheadline text-label-tertiary mb-4">
+              <p className={`type-subheadline ${GATE_TEXT_MUTED} mb-4`}>
                 {setupProbeError}
               </p>
               <button
@@ -256,7 +268,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 onClick={() => {
                   void retrySetupProbe();
                 }}
-                className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+                className={`rounded-full ${GATE_BRAND_BG} px-5 py-2 text-white type-subheadline`}
               >
                 Retry
               </button>

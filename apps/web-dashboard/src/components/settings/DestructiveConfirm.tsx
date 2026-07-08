@@ -151,18 +151,19 @@ export function DestructiveConfirm({
       <div className="p-5 space-y-4">
         <div className="flex items-start gap-3">
           <span
-            className="flex-none mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-system-red/10 text-system-red"
+            className="flex-none mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-[rgba(239,68,68,0.1)] text-[#ef4444]"
             aria-hidden="true"
           >
             <AlertTriangle size={18} />
           </span>
           <div className="min-w-0">
-            <h2 id={headingId} className="type-headline text-label-primary">
+            <h2 id={headingId} className="type-headline" style={{ color: "var(--text)" }}>
               {title}
             </h2>
             <p
               id={descId}
-              className="type-subheadline text-label-secondary mt-1.5"
+              className="type-subheadline mt-1.5"
+              style={{ color: "var(--text-muted)" }}
             >
               {consequence}
             </p>
@@ -170,7 +171,10 @@ export function DestructiveConfirm({
         </div>
 
         {/* Exactly what's at stake — separated, monospace, hard to misread. */}
-        <p className="type-caption-1 text-label-tertiary font-mono break-all rounded-md bg-surface-secondary px-3 py-2">
+        <p
+          className="type-caption-1 font-mono break-all rounded-[var(--radius-input)] px-3 py-2"
+          style={{ background: "var(--inset)", color: "var(--text-muted)" }}
+        >
           {affectedSummary}
         </p>
 
@@ -181,10 +185,13 @@ export function DestructiveConfirm({
         <div className="space-y-1.5">
           <label
             htmlFor={inputId}
-            className="block type-footnote text-label-secondary"
+            className="block type-footnote"
+            style={{ color: "var(--text-muted)" }}
           >
             Type{" "}
-            <span className="font-mono text-label-primary">{confirmPhrase}</span>{" "}
+            <span className="font-mono" style={{ color: "var(--text)" }}>
+              {confirmPhrase}
+            </span>{" "}
             to confirm
           </label>
           <input
@@ -198,7 +205,13 @@ export function DestructiveConfirm({
             autoCorrect="off"
             spellCheck={false}
             aria-invalid={failed || undefined}
-            className="dp-input font-mono"
+            className="w-full px-3 py-2.5 font-mono outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-60"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             placeholder={confirmPhrase}
           />
         </div>
@@ -206,11 +219,12 @@ export function DestructiveConfirm({
         {failed && (
           <div
             role="alert"
-            className="flex items-start gap-2 type-footnote text-label-primary bg-system-red/10 rounded-sm px-3 py-2"
+            className="flex items-start gap-2 type-footnote bg-[rgba(239,68,68,0.1)] rounded-[var(--radius-input)] px-3 py-2"
+            style={{ color: "var(--text)" }}
           >
             <AlertTriangle
               size={14}
-              className="mt-0.5 flex-shrink-0 text-system-red"
+              className="mt-0.5 flex-shrink-0 text-[#ef4444]"
               aria-hidden="true"
             />
             <span>
@@ -222,7 +236,8 @@ export function DestructiveConfirm({
 
         {pending && (
           <p
-            className="flex items-center gap-2 type-footnote text-label-secondary"
+            className="flex items-center gap-2 type-footnote"
+            style={{ color: "var(--text-muted)" }}
             aria-live="polite"
           >
             <Loader2 size={14} className="animate-spin flex-none" aria-hidden="true" />
@@ -236,7 +251,7 @@ export function DestructiveConfirm({
             type="button"
             onClick={onCancel}
             disabled={pending}
-            className="type-subheadline text-accent hover:text-accent-hover px-4 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-h-[44px]"
+            className="btn ghost min-h-[44px]"
           >
             {cancelLabel}
           </button>
@@ -245,7 +260,7 @@ export function DestructiveConfirm({
             onClick={() => void handleConfirm()}
             disabled={!matches || pending}
             aria-busy={pending || undefined}
-            className="type-subheadline px-4 rounded-md bg-system-red text-white hover:bg-system-red/90 disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[44px]"
+            className="type-subheadline px-4 rounded-[var(--radius-input)] bg-[#ef4444] text-white hover:bg-[#dc2626] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[44px]"
           >
             {pending ? (
               <>
