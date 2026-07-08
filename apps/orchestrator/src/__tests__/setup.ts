@@ -5,6 +5,15 @@
 
 import { vi } from "vitest";
 
+// --- WARP-233: column-crypto test key ---
+// The email blind index + dcv1 column encryption derive keys from
+// DEVICE_SECRET_KEY at call time (auth login, SCIM provisioning, SSO linking
+// all hash the email before touching prisma). Install a deterministic key via
+// the module's own test seam — NOT process.env, which would silently satisfy
+// encryption.test.ts's "no key configured" path through config.ts.
+import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.js";
+__setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
+
 // --- Mock ioredis ---
 // Disable caching in tests to avoid stale data between test cases
 vi.mock("ioredis", () => {
@@ -86,6 +95,9 @@ vi.mock("@prisma/client", () => {
     // fresh auth-disabled dev session.
     user: {
       findUnique: vi.fn().mockResolvedValue(null),
+      // WARP-233: findUserByEmail probes findUnique (blind index) then
+      // findFirst (pre-backfill plaintext fallback) — same "no row" default.
+      findFirst: vi.fn().mockResolvedValue(null),
     },
   };
   return {

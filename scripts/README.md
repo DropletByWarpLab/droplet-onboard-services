@@ -40,7 +40,6 @@ Each device gets its own random secrets — no two devices share credentials:
 | `DEVICE_SECRET` | ai-gateway | Fernet encryption key for BYOK API keys |
 | `POSTGRES_PASSWORD` | db, orchestrator, nextcloud, file-indexer | PostgreSQL authentication |
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway, nextcloud | Redis authentication |
-| `MQTT_PASSWORD` | broker, orchestrator, file-indexer | Mosquitto MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
 | `DROPLET_MATTER_SERVICE_TOKEN` | orchestrator, matter-controller | X-Droplet-Auth bearer for the Matter host-network sidecar (WARP-850) |
 
@@ -107,7 +106,7 @@ interrupted (power loss, SSH drop, ctrl-C) — WARP-595.
 | **1. Preflight** | Read-only checks; re-run has no side effects |
 | **2. Docker** | No-op when Docker ≥ 25 is present; group membership checked, not re-added |
 | **3. Drivers / Bluetooth** | apt installs skip when present; kernel modules re-loaded (idempotent); guarded files only written when absent |
-| **4. Secrets** | `.env` is **preserved** — never regenerated without `--regenerate-env`. `migrate_env` appends only *missing* keys (never rewrites a value); artifacts (mosquitto passwd/conf, Docker secret files, audit key) are re-materialized deterministically from `.env`; the TLS cert is kept unless invalid (a public-CA leaf is *never* clobbered — ADR-023) |
+| **4. Secrets** | `.env` is **preserved** — never regenerated without `--regenerate-env`. `migrate_env` appends only *missing* keys (never rewrites a value); artifacts (mosquitto conf/ACL, Docker secret files, audit key, internal-CA service bundles) are re-materialized deterministically; the TLS cert is kept unless invalid (a public-CA leaf is *never* clobbered — ADR-023) |
 | **5. Build** | `docker compose down` then rebuild — this is where new code lands |
 | **6. Start** | `up -d` recreates changed containers; Nextcloud DB creation is existence-guarded; the Nextcloud provisioning hook and workspace-settings seeder are insert-or-skip |
 | **7. Verify / DNS** | Read-only checks + idempotent registrations |
@@ -153,7 +152,7 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   Recover by restoring the automatic `.env.bak.*`, or factory-reset if the
   data is disposable. Use `--sync-secrets` (not `--regenerate-env`) after
   hand-editing `.env`. Hand edits must also keep the six core keys
-  (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MQTT_PASSWORD`,
+  (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`,
   `NEXTCLOUD_ADMIN_PASSWORD`, `DEVICE_SECRET`, `DEVICE_SECRET_KEY`)
   non-empty and the file's trailing newline intact — otherwise the next
   re-run classifies the file as torn and restores/regenerates it (the
@@ -297,7 +296,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 - Docker volumes: database, uploaded files, Nextcloud data, AI keys, Matter fabric state
 - The Docker **build cache** — reclaimed on **every** reset. It's the largest rebuildable disk consumer (`docker compose down --rmi all` leaves it behind; it has grown past 57 GB on a long-lived box, enough to fill the OS NVMe) and is never user data. This is why the next `setup.sh` after a reset is a cold (slower) rebuild — an intentional trade so the OS drive doesn't silently fill over time.
 - Device secrets (`.env`)
-- TLS certificates and MQTT credentials
+- TLS certificates and internal-CA service bundles (incl. broker mTLS identities)
 - Setup logs
 
 ### Options

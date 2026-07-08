@@ -250,6 +250,14 @@ probe_transit_pg_plaintext_rejected() {
   local id="$1"
   local out="$VFY_EVID/$id/psql-disable.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  # WARP-233 ⇄ WARP-318: a FIPS-mode box deliberately serves pg_hba.fips.conf,
+  # which tolerates plaintext+SCRAM on the private container bridge (the P1011
+  # Prisma/libpq clash, decision A). Plaintext acceptance there is the
+  # configured posture, not a regression — record the exception, don't FAIL.
+  if [ "$(vfy_env DROPLET_FIPS_MODE)" = "1" ]; then
+    vfy_record "$id" SKIP "fips-mode-plaintext-exception (WARP-318 P1011 decision A — pg_hba.fips.conf)"
+    return
+  fi
   # Password passed inline in the conninfo (not via `-e PGPASSWORD`) so the
   # exec argv keeps `db psql` adjacent and the value never lands in the process
   # list of the host (it is inside the container's argv only).
@@ -259,8 +267,11 @@ probe_transit_pg_plaintext_rejected() {
     > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
+  # "pg_hba.conf rejects connection" = WARP-233's explicit terminal reject
+  # line matching (the shipped shape); "no pg_hba.conf entry" = the no-match
+  # wording kept for configs without a terminal reject.
   v="$(vfy_eval_expect_reject "$rc" "$out" \
-       'no pg_hba.conf entry.*(SSL off|no encryption)|server does not support SSL')"
+       '(no pg_hba.conf entry|pg_hba.conf rejects connection).*(SSL off|no encryption)|server does not support SSL')"
   vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/psql-disable.txt"
 }
 
@@ -311,12 +322,19 @@ probe_transit_redis_tls() {
   local out="$VFY_EVID/$id/redis-tls.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
-  vfy_compose exec -T cache redis-cli -h cache --tls -p "$VFY_REDIS_TLS_PORT" \
+  # WARP-234: the cache serves a compose-internal-CA leaf (WARP-236 trust
+  # root) that no public root signs — redis-cli must be pointed at the CA
+  # the launch wrapper stages inside the container. REDIS_PASSWORD is the
+  # ping-only `default` ACL user, which is exactly what PING needs.
+  vfy_compose exec -T cache redis-cli -h cache --tls \
+    --cacert /tmp/redis-ca.crt -p "$VFY_REDIS_TLS_PORT" \
     -a "$pw" --no-auth-warning PING > "$out" 2>&1 || true
   if grep -qx 'PONG' "$out" 2>/dev/null; then
     vfy_record "$id" PASS "tls-ping-ok (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   else
-    vfy_record "$id" SKIP "tls-port-not-listening (WARP-234 not landed)" "evidence/$id/redis-tls.txt"
+    # WARP-234 landed the TLS listener — a non-PONG is a regression now,
+    # not a not-yet-shipped feature.
+    vfy_record "$id" FAIL "tls-ping-failed (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   fi
 }
 
@@ -324,8 +342,12 @@ probe_transit_mqtt_plaintext_closed() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  # WARP-235 retired MQTT_PASSWORD from .env — fall back to a placeholder so
+  # the probe still ATTEMPTS the plaintext connection (the check is "no 1883
+  # listener", not "wrong credentials"); pre-235 installs still use the real
+  # value so a lingering password listener is caught either way.
   pw="$(vfy_env MQTT_PASSWORD)"
-  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "${pw:-warp235-retired}" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
@@ -340,7 +362,8 @@ probe_transit_mqtt_mtls_required() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/certs/ca.crt}"
+  # WARP-235 mounts the broker bundle at /mosquitto/config/tls (ca.pem).
+  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/config/tls/ca.pem}"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?

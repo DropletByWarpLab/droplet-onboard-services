@@ -31,18 +31,31 @@ _gen_fernet_key() {
 _upsert_env_kv() {
   local key="$1" val="$2"
   local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
-  local stage="${env_file}.upsert.$$"
-  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  # WARP-232 (finding 2): once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Staging beside the symlink and `mv`-ing
+  # over it would REPLACE the link with a plain file on the unencrypted root —
+  # moving DEVICE_SECRET_KEY back outside the LUKS boundary AND breaking the
+  # compose `../.env` env_file for the docker-group user. Resolve the link and
+  # write THROUGH it (stage next to the real target, rename onto the target),
+  # so the symlink and the encrypted destination both survive.
+  local target="$env_file"
+  if [ -L "$env_file" ]; then
+    target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$target" ] || target="$env_file"
+  fi
+  local stage="${target}.upsert.$$"
+  rm -f "${target}".upsert.* 2>/dev/null || true
   # Normalize a missing trailing newline first — appending to a file whose last
   # line was cut mid-write would glue the new key onto it (mirrors the guards in
-  # generate_env / migrate_env / configure_single_box_env).
-  if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
-    printf '\n' >> "$env_file"
+  # generate_env / migrate_env / configure_single_box_env). Read/write the
+  # target (via the symlink) so this works whether or not $env_file is a link.
+  if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
+    printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$env_file" 2>/dev/null || true; \
+  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
-  mv "$stage" "$env_file"
+  mv "$stage" "$target"
 }
 
 # WARP-318: translate the single DROPLET_FIPS_MODE customer knob into the
@@ -59,6 +72,19 @@ _upsert_env_kv() {
 # OpenSSL and additionally needs OPENSSL_MODULES (system ossl-modules dir) +
 # NODE_OPTIONS=--openssl-shared-config. All are written here; the OFF path
 # clears them.
+#
+# WARP-233 ⇄ WARP-318 reconciliation (P1011, decision A — pending Romain's
+# ratification): under the FIPS openssl config Prisma/libpq cannot open ANY
+# TLS connection to `db` ("library has no ciphers"), so FIPS-on scopes the
+# intra-compose DB hop to plaintext+SCRAM on the private container bridge:
+#   PG_SSLMODE=disable          → file-indexer's inline DATABASE_URL param
+#   PG_HBA=pg_hba.fips.conf     → db serves docker/postgres/pg_hba.fips.conf
+#                                 (hostssl first; RFC1918+loopback host lines
+#                                 still SCRAM-authed; terminal reject intact)
+#   DATABASE_URL sslmode        → rewritten in-place (orchestrator/mcp-server/
+#                                 email-indexer consume .env's DATABASE_URL)
+# FIPS-off restores the WARP-233 default posture (TLS 1.3-only, sslmode=
+# require). Both directions are idempotent and driven by this ONE knob.
 apply_fips_mode() {
   local mode="${1:-}"
   local ossl_modules
@@ -73,6 +99,9 @@ apply_fips_mode() {
       _upsert_env_kv DROPLET_FIPS_REQUIRED  true
       _upsert_env_kv OPENSSL_MODULES        "$ossl_modules"
       _upsert_env_kv NODE_OPTIONS           --openssl-shared-config
+      _upsert_env_kv PG_SSLMODE             disable
+      _upsert_env_kv PG_HBA                 pg_hba.fips.conf
+      _rewrite_database_url_sslmode         disable
       ;;
     off)
       _upsert_env_kv DROPLET_FIPS_MODE      0
@@ -80,12 +109,33 @@ apply_fips_mode() {
       _upsert_env_kv DROPLET_FIPS_REQUIRED  false
       _upsert_env_kv OPENSSL_MODULES        ""
       _upsert_env_kv NODE_OPTIONS           ""
+      _upsert_env_kv PG_SSLMODE             require
+      _upsert_env_kv PG_HBA                 pg_hba.conf
+      _rewrite_database_url_sslmode         require
       ;;
     *)
       log_error "apply_fips_mode: expected 'on' or 'off', got '${mode:-<none>}'"
       return 1
       ;;
   esac
+}
+
+# WARP-233/318: flip the sslmode param of the .env DATABASE_URL in place.
+# Only rewrites an EXISTING sslmode=<value> param — a param-less URL is
+# migrate_env's job (it backfills ?sslmode=require), and custom operator
+# params are never restructured. Same staged-rename atomicity as
+# _upsert_env_kv.
+_rewrite_database_url_sslmode() {
+  local target="$1"
+  local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
+  local stage="${env_file}.upsert.$$"
+  [ -f "$env_file" ] || return 0
+  grep -qE '^DATABASE_URL=.*sslmode=' "$env_file" || return 0
+  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  ( umask 077; sed -E "s|^(DATABASE_URL=.*[?\&]sslmode=)[A-Za-z-]+|\1${target}|" \
+      "$env_file" > "$stage" )
+  chmod 600 "$stage"
+  mv "$stage" "$env_file"
 }
 
 # WARP-595: core keys that EVERY .env our heredoc has ever written contains
@@ -96,10 +146,15 @@ apply_fips_mode() {
 # excludes later additions (JWT_SECRET, OPENWRT_PASSWORD, SERVICE_TOKEN_*…):
 # a healthy pre-WARP-834 install legitimately lacks those until migrate_env
 # backfills them, and flagging it torn would rotate a live box's secrets.
+#
+# WARP-235 removed MQTT_PASSWORD from the heredoc (MQTT identity is the client
+# cert CN now), so it can no longer serve as a torn-file marker — a fresh .env
+# legitimately lacks it. Truncation detection is unaffected: the heredoc is
+# prefix-preserving, so any cut that would have lost MQTT_PASSWORD also loses
+# NEXTCLOUD_ADMIN_PASSWORD and the DEVICE_SECRET* keys below it.
 _ENV_CORE_KEYS=(
   POSTGRES_PASSWORD
   REDIS_PASSWORD
-  MQTT_PASSWORD
   NEXTCLOUD_ADMIN_PASSWORD
   DEVICE_SECRET
   DEVICE_SECRET_KEY
@@ -199,7 +254,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -207,7 +262,12 @@ generate_env() {
   local onlyoffice_jwt_secret
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
-  mqtt_password=$(_gen_password 24)
+  # WARP-234: per-service Redis ACL identities (least privilege; the shared
+  # REDIS_PASSWORD becomes the ping-only `default` user for health probes).
+  local redis_orchestrator_password redis_ai_gateway_password redis_mcp_password
+  redis_orchestrator_password=$(_gen_password 24)
+  redis_ai_gateway_password=$(_gen_password 24)
+  redis_mcp_password=$(_gen_password 24)
   nc_password=$(_gen_password 24)
   # WARP-834: per-device OpenWrt rpcd/root password. _gen_password keeps it
   # alphanumeric ([A-Za-z0-9]) so it's safe for `passwd`, the docker secret
@@ -322,8 +382,19 @@ generate_env() {
   # mistake for a complete one — .env is either the previous complete file or
   # the new complete file, never a prefix. The temp file is created empty and
   # chmod'd 600 BEFORE any secret is written into it.
-  local env_tmp="$env_file.tmp.$$"
-  rm -f "$env_file".tmp.* 2>/dev/null || true
+  #
+  # WARP-232 (finding 2): on a --regenerate-env re-run AFTER secrets have been
+  # relocated onto the encrypted /data, $env_file is a SYMLINK. Stage beside and
+  # rename onto the link's REAL target so the regenerated secrets stay inside the
+  # LUKS boundary and the symlink survives — never replace the link with a plain
+  # file on the unencrypted root.
+  local env_write_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_write_target" ] || env_write_target="$env_file"
+  fi
+  local env_tmp="$env_write_target.tmp.$$"
+  rm -f "$env_write_target".tmp.* 2>/dev/null || true
   : > "$env_tmp"
   chmod 600 "$env_tmp"
   cat >> "$env_tmp" << EOF
@@ -334,20 +405,24 @@ generate_env() {
 POSTGRES_USER=droplet
 POSTGRES_PASSWORD=$pg_password
 POSTGRES_DB=droplet
-DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet
+DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet?sslmode=require
 
 # --- Redis ---
+# WARP-234: REDIS_PASSWORD is the ping-only `default` ACL user (health
+# probes / the WARP-966 harness). Real clients authenticate as their own
+# ACL user via the per-service rediss:// URLs in docker-compose.yml.
 REDIS_PASSWORD=$redis_password
-REDIS_URL=redis://:${redis_password}@cache:6379
-# Nextcloud expects this name for the Redis password
+REDIS_URL=rediss://:${redis_password}@cache:6380
+REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
+REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
+REDIS_PASSWORD_MCP=$redis_mcp_password
+# Nextcloud expects this name for the Redis password (ACL user `nextcloud`)
 REDIS_HOST_PASSWORD=$redis_password
 
-# --- MQTT ---
-MQTT_USER=droplet
-MQTT_PASSWORD=$mqtt_password
-MQTT_BROKER=mqtt://droplet:${mqtt_password}@broker:1883
-# Host-mode services (camera-discovery) connect via localhost
-MQTT_BROKER_LOCAL=mqtt://droplet:${mqtt_password}@localhost:1883
+# --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
+MQTT_BROKER=mqtts://broker:8883
+# Host-network services (camera-discovery) connect via the loopback publish
+MQTT_BROKER_LOCAL=mqtts://localhost:8883
 
 # --- Nextcloud ---
 NEXTCLOUD_ADMIN_USER=admin
@@ -483,10 +558,6 @@ AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 # authMiddleware sets req.user = _service:egress-audit.
 SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 
-# --- Frigate NVR ---
-FRIGATE_MQTT_USER=droplet
-FRIGATE_MQTT_PASSWORD=$mqtt_password
-
 # --- Application ---
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
@@ -554,13 +625,12 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
 EOF
 
-  mv "$env_tmp" "$env_file"
+  mv "$env_tmp" "$env_write_target"
   chmod 600 "$env_file"
 
   log_success "Generated unique secrets:"
   log_info "  POSTGRES_PASSWORD : ${pg_password:0:4}****"
   log_info "  REDIS_PASSWORD    : ${redis_password:0:4}****"
-  log_info "  MQTT_PASSWORD     : ${mqtt_password:0:4}****"
   log_info "  NEXTCLOUD_ADMIN   : ${nc_password:0:4}****"
   log_info "  DEVICE_SECRET     : ${device_secret:0:8}****"
   log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
@@ -731,6 +801,19 @@ migrate_env() {
   _migrate_ensure_key DROPLET_TPM_BACKEND "$di_backend_default"
   _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
 
+  # WARP-234: per-service Redis ACL identities for pre-existing installs.
+  _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
+  _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
+  _migrate_ensure_key REDIS_PASSWORD_MCP "$(_gen_password 24)"
+  # Upgrade the exact legacy plaintext REDIS_URL shape to the TLS listener.
+  # Only the default-user URL is rewritten (operators with custom URLs keep
+  # theirs); real clients get per-service URLs from docker-compose.yml.
+  if grep -qE '^REDIS_URL=redis://:[^@]*@cache:6379$' "$stage"; then
+    sed -i.bak -E 's|^REDIS_URL=redis://(:[^@]*@cache):6379$|REDIS_URL=rediss://\1:6380|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: REDIS_URL now points at the TLS listener (WARP-234)"
+  fi
+
   # WARP-318: backfill the single FIPS knob (default OFF) so a pre-318 .env
   # gains it on the next setup re-run. Only the knob is migrated — the derived
   # activation vars (OPENSSL_CONF / DROPLET_FIPS_REQUIRED / OPENSSL_MODULES /
@@ -739,7 +822,40 @@ migrate_env() {
   # without the flag a no-op on FIPS (never a silent enable/disable).
   _migrate_ensure_key DROPLET_FIPS_MODE 0
 
-  if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ]; then
+  # WARP-235: move existing installs from the shared-password plaintext broker
+  # to the mTLS endpoint (single listener :8883; identity = client cert CN).
+  # Rewrite-in-place rather than append: compose interpolates these URLs
+  # directly, so a stale mqtt:// value would dial a listener that no longer
+  # exists. Stale MQTT_PASSWORD / MQTT_USER / FRIGATE_MQTT_* keys are left in
+  # the file — harmless, nothing reads them anymore.
+  local mqtt_migrated=false
+  if grep -qE '^MQTT_BROKER(_LOCAL)?=mqtt://' "$stage" 2>/dev/null; then
+    if [ "$backed_up" = "false" ]; then
+      # shellcheck disable=SC2155  # Same rationale as above: `date +%s` cannot meaningfully fail.
+      local backup="$env_file.bak.$(date +%s)"
+      cp "$env_file" "$backup"
+      log_info "Backed up existing .env to $backup before migration"
+      backed_up=true
+    fi
+    # BSD/GNU-portable: stage a rewritten copy and rename over the stage file.
+    sed -e 's|^MQTT_BROKER=mqtt://.*$|MQTT_BROKER=mqtts://broker:8883|' \
+        -e 's|^MQTT_BROKER_LOCAL=mqtt://.*$|MQTT_BROKER_LOCAL=mqtts://localhost:8883|' \
+        "$stage" > "$stage.mqtt"
+    chmod 600 "$stage.mqtt"
+    mv "$stage.mqtt" "$stage"
+    mqtt_migrated=true
+  fi
+
+  # WARP-233: upgrade an existing DATABASE_URL to sslmode=require (idempotent —
+  # only rewrites the exact legacy no-param shape; operators with custom params
+  # keep their value). Runs inside the staged-file+mv atomic write.
+  if grep -qE '^DATABASE_URL=postgresql://[^?]*$' "$stage"; then
+    sed -i.bak -E 's|^(DATABASE_URL=postgresql://[^?]*)$|\1?sslmode=require|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: DATABASE_URL now pins sslmode=require (WARP-233)"
+  fi
+
+  if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
     mv "$stage" "$env_file"
   else
     rm -f "$stage"
@@ -747,10 +863,13 @@ migrate_env() {
   if [ "$appended_count" -gt 0 ]; then
     log_success "Migrated .env: appended$appended_keys"
   fi
+  if [ "$mqtt_migrated" = "true" ]; then
+    log_success "Migrated .env MQTT_BROKER(_LOCAL) to mqtts:// (WARP-235 — shared password retired)"
+  fi
 }
 
 # Materialize all setup-time artifact files that Docker Compose bind-mounts
-# (Docker secret file, MQTT password file + conf, TLS cert). Each underlying
+# (Docker secret file, mosquitto conf + ACL, TLS cert). Each underlying
 # generator is individually idempotent, so this is safe to run on every
 # setup invocation.
 #
@@ -759,9 +878,9 @@ migrate_env() {
 materialize_artifacts() {
   log_info "Materializing setup artifacts (idempotent)..."
 
-  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / SWITCH_PASSWORD / MQTT_USER
-  # are in scope for the helpers below. Reachable via setup.sh --sync-secrets
-  # where nothing else has loaded .env yet.
+  # Source .env so OPENWRT_PASSWORD / SWITCH_PASSWORD are in scope for the
+  # helpers below. Reachable via setup.sh --sync-secrets where nothing else
+  # has loaded .env yet.
   if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -769,8 +888,9 @@ materialize_artifacts() {
     set +a
   fi
 
-  _generate_mosquitto_passwd "${MQTT_PASSWORD:-}"
   _write_mosquitto_conf
+  _generate_redis_acl
+  _write_mosquitto_acl
   # WARP-236 — mint the internal CA and issue a per-service TLS bundle for
   # every first-party identity. Idempotent (renews only within 30d of expiry).
   # DROPLET_BRIDGE_GATEWAY_IP is exported by single-box.sh for the single-box
@@ -781,6 +901,7 @@ materialize_artifacts() {
   sync_openwrt_password_secret
   sync_switch_password_secret
   sync_audit_signing_key
+  sync_email_fernet_key
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.
@@ -807,6 +928,12 @@ sync_audit_signing_key() {
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"
 
+  # WARP-235 decision-4: compose bind-mounts this key as a single FILE. A bare
+  # `docker compose up` run before any setup.sh leaves a Docker-created
+  # DIRECTORY at the mount source, which would then block the tmp+mv write
+  # below forever — clear it so setup self-heals.
+  [ -d "$key_file" ] && rm -rf "$key_file"
+
   if [ -f "$key_file" ] && [ -s "$key_file" ]; then
     # Already provisioned — preserve the existing chain. `-s` (size > 0)
     # is the guard against a half-written file from a previous crashed
@@ -824,6 +951,45 @@ sync_audit_signing_key() {
   chmod 600 "$tmp"
   mv "$tmp" "$key_file"
   log_success "Generated audit signing key at $key_file (chmod 600)"
+}
+
+# WARP-465 / WARP-235 decision-4 — generate data/secrets/email.key on first
+# setup. The email-indexer's creds.py decrypts EmailAccount.passwordEnc with
+# this per-device Fernet key (EMAIL_KEY_PATH, mode 0600) and exits non-zero
+# when it's missing. creds.py has ALWAYS documented the key as
+# "generated once by setup.sh", but no generator existed until now — and the
+# WARP-235 mount-narrowing makes it load-bearing: compose bind-mounts the key
+# as a single FILE, so the source must exist before `docker compose up` or
+# Docker manufactures a directory in its place.
+#
+# Idempotent: an existing key is preserved on every re-run — rotating it would
+# orphan every already-encrypted EmailAccount row. A fresh key is only minted
+# when no file exists (no accounts can predate the key: without it the
+# service never booted).
+sync_email_fernet_key() {
+  local secret_dir="$REPO_ROOT/data/secrets"
+  local key_file="$secret_dir/email.key"
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  # Same single-file bind-mount self-heal as sync_audit_signing_key: a bare
+  # compose-up before setup leaves a Docker-created directory here.
+  [ -d "$key_file" ] && rm -rf "$key_file"
+
+  if [ -f "$key_file" ] && [ -s "$key_file" ]; then
+    log_success "Email Fernet key already present at $key_file — skipping"
+    return 0
+  fi
+
+  # Fernet key = url-safe base64 of 32 random bytes (44 chars incl. padding).
+  # Stage + rename so a crashed run never leaves a truncated key the
+  # email-indexer would then fail to parse.
+  local tmp="$key_file.tmp"
+  openssl rand -base64 32 | tr '+/' '-_' > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$key_file"
+  log_success "Generated email Fernet key at $key_file (chmod 600)"
 }
 
 # Write $OPENWRT_PASSWORD (from env or .env) into docker/secrets/openwrt_password
@@ -913,63 +1079,82 @@ sync_switch_password_secret() {
   log_success "Wrote $secret_file (chmod 600)"
 }
 
-_generate_mosquitto_passwd() {
-  local mqtt_password="$1"
-  local mqtt_user="${MQTT_USER:-droplet}"
-  local passwd_dir="$REPO_ROOT/docker/mosquitto_passwd_dir"
-  local passwd_file="$passwd_dir/mosquitto_passwd"
+# WARP-234 — materialize the per-service Redis ACL file the `cache` service
+# serves via --aclfile. Passwords land as sha256 hashes (never plaintext), so
+# the file is 0644-safe (redis runs as uid 999 in redis:7-alpine; same
+# rationale as the hashed mosquitto passwd). Idempotent: content is fully
+# derived from the .env passwords, staged + rename(2)d into place.
+#
+# ACL map (from ACTUAL usage, not aspiration):
+#   default       — +ping only. Health probes + the WARP-966 harness
+#                   authenticate with the legacy REDIS_PASSWORD; no data.
+#   orchestrator  — get/set/del/expire/smembers/srem/scan/eval across its
+#                   many prefixes (sessions, ratelimit:login:*, SWR cache) →
+#                   ~* but -@dangerous (KEYS/FLUSH*/CONFIG/... stay denied);
+#                   +info for the ioredis ready check.
+#   ai-gateway    — chat sessions (session:*, sessions:index) + rate-limit
+#                   Lua (ratelimit:*) → exactly those patterns, +@scripting.
+#   mcp-server    — rerank result cache → ~rerank:* with +get +setex only.
+#   nextcloud     — php memcache/locking (instanceid-derived prefixes) → ~*,
+#                   +keys carve-out (phpredis clear()), -@dangerous.
+_generate_redis_acl() {
+  local acl_dir="$REPO_ROOT/data/secrets/redis"
+  local acl_file="$acl_dir/users.acl"
 
-  log_info "Generating MQTT password file..."
-
-  # Ensure the target directory exists (this is what docker-compose.yml mounts).
-  # The parent directory is owned by the current user, so we can unlink any
-  # stale file inside it without sudo even if the file itself is root-owned.
-  mkdir -p "$passwd_dir"
-  rm -f "$passwd_file" 2>/dev/null || true
-
-  # Write directly to the final mount location. Pass --user so the container
-  # runs as the host user and the generated file is already correctly owned —
-  # no follow-up `sudo chown` needed. This is required for unattended factory
-  # reset on the device, where nothing should prompt for a sudo password.
-  if run_docker run --rm \
-    --user "$(id -u):$(id -g)" \
-    -v "$passwd_dir:/tmp/mqtt" \
-    eclipse-mosquitto:2 \
-    sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
-    # 0644 — the runtime mosquitto container runs as uid 1883, not the host
-    # user (1000) that generated the file, so 0600 made the file unreadable
-    # and mosquitto crash-looped with "Unable to open pwfile". The bytes on
-    # disk are a bcrypt hash, not the plaintext; .env holds the plaintext
-    # at 0600 already.
-    chmod 644 "$passwd_file"
-    log_success "MQTT password file generated"
-  else
-    # Fallback: create a plaintext file (no Docker needed).
-    # IMPORTANT: the bytes here are the PLAINTEXT password, not a bcrypt
-    # hash. The 0644 justification on the success branch above applies
-    # only to hashed output; leaving a plaintext MQTT credential
-    # world-readable on the host would be a real regression. Keep this
-    # file at 0600 and try to hand ownership to the mosquitto UID (1883)
-    # so the runtime container can still read it. If chown fails (no
-    # sudo, not root, non-POSIX fs) we warn loudly — the operator needs
-    # to rerun once Docker is available so the hashed path takes over.
-    log_warn "Could not generate hashed MQTT password — using plaintext fallback"
-    printf "%s:%s\n" "$mqtt_user" "$mqtt_password" > "$passwd_file"
-    chmod 600 "$passwd_file"
-    if [ "$(id -u)" = "0" ]; then
-      chown 1883:1883 "$passwd_file" 2>/dev/null || true
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-      sudo chown 1883:1883 "$passwd_file" 2>/dev/null || true
-    else
-      log_warn "plaintext passwd_file left owned by $(id -un); mosquitto (uid 1883) may not be able to read it — install Docker and rerun to generate the hashed version"
-    fi
+  if [ -z "${REDIS_PASSWORD:-}" ]; then
+    log_warn "REDIS_PASSWORD not set — skipping Redis ACL generation (rerun setup once .env exists)"
+    return 0
+  fi
+  # Pre-WARP-234 .env (fresh generate_env always sets these; migrate_env
+  # backfills on upgrade). Nextcloud reuses REDIS_HOST_PASSWORD.
+  local orch_pw="${REDIS_PASSWORD_ORCHESTRATOR:-}"
+  local aigw_pw="${REDIS_PASSWORD_AI_GATEWAY:-}"
+  local mcp_pw="${REDIS_PASSWORD_MCP:-}"
+  local nc_pw="${REDIS_HOST_PASSWORD:-$REDIS_PASSWORD}"
+  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ]; then
+    log_warn "Per-service Redis passwords missing from .env — skipping ACL generation (run setup.sh to migrate .env first)"
+    return 0
   fi
 
-  # Clean up stale intermediate file from old code path. The parent directory
-  # (docker/) is user-owned, so plain rm can unlink even a root-owned file.
-  rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || true
+  _redis_sha() { printf '%s' "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
+
+  mkdir -p "$acl_dir"
+  chmod 700 "$REPO_ROOT/data/secrets" "$acl_dir" 2>/dev/null || true
+  local stage="$acl_file.tmp.$$"
+  rm -f "$acl_file".tmp.* 2>/dev/null || true
+  # NOTE: redis --aclfile REJECTS comment lines ("should start with user
+  # keyword") — the file must contain user lines ONLY. Provenance lives here:
+  # generated by _generate_redis_acl (WARP-234); regenerated on every setup
+  # run from .env; DO NOT hand-edit.
+  cat > "$stage" <<EOF
+user default on #$(_redis_sha "$REDIS_PASSWORD") resetchannels -@all +ping
+user orchestrator on #$(_redis_sha "$orch_pw") ~* resetchannels -@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous +info +client|setinfo
+user ai-gateway on #$(_redis_sha "$aigw_pw") ~session:* ~sessions:index ~ratelimit:* resetchannels -@all +@connection +@read +@write +@keyspace +@scripting -@dangerous +client|setinfo
+user mcp-server on #$(_redis_sha "$mcp_pw") ~rerank:* resetchannels -@all +@connection +get +setex +info +client|setinfo
+user nextcloud on #$(_redis_sha "$nc_pw") ~* resetchannels -@all +@connection +@read +@write +@keyspace +@string +@scripting -@dangerous +keys +client|setinfo
+EOF
+  chmod 644 "$stage"
+  if [ -f "$acl_file" ] && cmp -s "$stage" "$acl_file"; then
+    rm -f "$stage"
+    return 0
+  fi
+  mv "$stage" "$acl_file"
+  log_success "Redis ACL file generated at $acl_file (5 users, hashed)"
 }
 
+# WARP-235: the shared-password machinery (the passwd-file generator + its
+# compose mount) is retired. The broker runs a single mTLS
+# listener on :8883; client identity is the certificate CN issued by the
+# WARP-236 internal CA (internal_ca_issue broker/orchestrator/file-indexer/…),
+# and per-CN topic grants live in docker/mosquitto.acl. Both files below are
+# TRACKED IN GIT and regenerated byte-identically here so an on-box
+# `--sync-secrets` run never dirties the checkout (the parity is pinned by
+# tests/mosquitto-conf.test.sh).
+#
+# WARP-185 lineage: the runtime mosquitto uid is 1883, so the broker's TLS
+# private key gets the same readability treatment the old passwd file needed —
+# internal_ca_issue (scripts/lib/internal-ca.sh) chowns key.pem to 1883 or
+# falls back to 0644 inside the 0700 data/secrets tree.
 _write_mosquitto_conf() {
   local conf_file="$REPO_ROOT/docker/mosquitto.conf"
 
@@ -979,13 +1164,60 @@ _write_mosquitto_conf() {
   rm -rf "$conf_file" 2>/dev/null || true
 
   cat > "$conf_file" << 'MQTTCONF'
-listener 1883
-password_file /mosquitto/config/passwd_dir/mosquitto_passwd
+listener 8883
+cafile /mosquitto/config/tls/ca.pem
+certfile /mosquitto/config/tls/cert.pem
+keyfile /mosquitto/config/tls/key.pem
+require_certificate true
+use_identity_as_username true
+acl_file /mosquitto/config/droplet.acl
 allow_anonymous false
 persistence false
 MQTTCONF
 
-  log_success "Mosquitto configured with authentication"
+  log_success "Mosquitto configured for mTLS (client identity = cert CN)"
+}
+
+# WARP-235: per-CN topic ACLs. The heredoc MUST stay byte-identical to the
+# tracked docker/mosquitto.acl (tests/mosquitto-conf.test.sh enforces parity).
+# Adding a new MQTT client: add its CN to INTERNAL_CA_SERVICES
+# (scripts/lib/internal-ca.sh), grant its topics HERE and in
+# docker/mosquitto.acl, mount its bundle in docker-compose.yml, then run
+# `./scripts/setup.sh --sync-secrets` — see docs/security/internal-mtls.md.
+_write_mosquitto_acl() {
+  local acl_file="$REPO_ROOT/docker/mosquitto.acl"
+
+  rm -rf "$acl_file" 2>/dev/null || true
+
+  cat > "$acl_file" << 'MQTTACL'
+# WARP-235 — per-service topic ACLs. Usernames ARE certificate CNs
+# (use_identity_as_username true); there are no password accounts.
+# Deny-by-default: any topic not granted here is rejected for that CN.
+
+user orchestrator
+topic readwrite droplet/#
+topic read frigate/#
+topic read email/#
+
+user file-indexer
+topic write droplet/index/+/indexed
+topic write droplet/index/+/deleted
+topic write droplet/files/+/brain/indexed
+topic write droplet/context-stats/invalidate
+topic read droplet/files/brain/uploaded
+topic read droplet/transcription/run-one
+
+user email-indexer
+topic write email/+/new
+
+user camera-discovery
+topic write droplet/cameras/discovered
+
+user frigate
+topic readwrite frigate/#
+MQTTACL
+
+  log_success "Mosquitto per-CN topic ACLs written"
 }
 
 # DNS names every Droplet TLS cert must cover. These are the friendly host-

@@ -9,6 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import type https from "node:https";
+import type { IClientOptions } from "mqtt";
 // Import fetch from undici alongside Agent so the client cert dispatcher is
 // always version-matched to the fetch it feeds. The appliance runs Node 20
 // (undici 6 is the bundled fetch engine there), but pairing undici's own fetch
@@ -71,6 +72,16 @@ export function internalBaseUrl(url: string): string {
     return "https://" + url.slice("http://".length);
   }
   return url;
+}
+
+/** WARP-235: MQTT TLS is keyed off the URL scheme so the broker migration
+ *  works even when HTTP-plane mTLS (DROPLET_INTERNAL_TLS) is off. On mqtts://
+ *  the client presents this service's bundle (identity = cert CN) and pins
+ *  trust to the internal CA; on mqtt:// (dev broker) it stays plaintext. */
+export function mqttConnectOptions(brokerUrl: string): IClientOptions {
+  if (!brokerUrl.startsWith("mqtts://")) return {};
+  const m = loadInternalTls();
+  return { cert: m.cert, key: m.key, ca: m.ca, rejectUnauthorized: true };
 }
 
 export function resetInternalTlsForTests(): void {

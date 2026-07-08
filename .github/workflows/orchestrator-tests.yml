@@ -42,7 +42,7 @@ jobs:
     # Docker — 15 min is a generous ceiling for the suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -119,7 +119,7 @@ jobs:
       DATABASE_URL: postgresql://droplet_test:droplet_test_pw@localhost:5432/droplet_test?schema=public
       RUN_PG_INTEGRATION: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

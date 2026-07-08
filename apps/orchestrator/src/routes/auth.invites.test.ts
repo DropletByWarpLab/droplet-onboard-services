@@ -12,6 +12,7 @@
  *     Nextcloud, and assert it's invoked with the right groups[].
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 import cookieParser from "cookie-parser";
@@ -359,7 +360,8 @@ describe("POST /api/auth/invites — create", () => {
       .post("/api/auth/invites")
       .send({ email: "  Alice@Example.COM  " });
     expect(res.status).toBe(200);
-    expect(prisma.rows[0].email).toBe("alice@example.com");
+    // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
+    expect(readUserEmail(prisma.rows[0].email)).toBe("alice@example.com");
     // Username is derived from the normalized email local-part.
     expect(prisma.rows[0].username).toBe("alice");
   });
@@ -760,6 +762,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
       "alice@example.com",
     );
     // The normalized email is also written to the local row (the login key).
-    expect(prisma.userRows[0].email).toBe("alice@example.com");
+    // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
+    expect(readUserEmail(prisma.userRows[0].email)).toBe("alice@example.com");
   });
 });

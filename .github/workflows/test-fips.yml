@@ -29,6 +29,9 @@ on:
       - "docs/security/fips-allowed-algorithms.md"
       - "tests/fips-sabotage.test.sh"
       - "tests/fips-sabotage-logic.test.sh"
+      - "tests/nginx-fips.test.sh"
+      - "tests/fips-stack-logic.test.sh"
+      - "tests/integration/fips-stack.test.sh"
       - ".github/workflows/test-fips.yml"
   push:
     branches: [main]
@@ -42,6 +45,9 @@ on:
       - "docs/security/fips-allowed-algorithms.md"
       - "tests/fips-sabotage.test.sh"
       - "tests/fips-sabotage-logic.test.sh"
+      - "tests/nginx-fips.test.sh"
+      - "tests/fips-stack-logic.test.sh"
+      - "tests/integration/fips-stack.test.sh"
       - ".github/workflows/test-fips.yml"
   workflow_dispatch:
 
@@ -62,7 +68,7 @@ jobs:
     # a wide ceiling for a sub-minute suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run lint script's own unit tests
         run: ./tests/test-fips-script/run.sh
@@ -70,11 +76,25 @@ jobs:
       - name: Run FIPS static lint (PR-blocking)
         run: ./scripts/test-fips.sh
 
+      - name: Validate the FIPS-capable nginx gateway artifacts (WARP-1021)
+        # Docker-free: cipher-profile posture, entrypoint profile selection,
+        # compose + CI wiring. The image's own build-time self-test (provider
+        # KATs + nginx -t on both profiles) runs in docker-build.yml's
+        # gateway matrix leg.
+        run: bash tests/nginx-fips.test.sh
+
       - name: Validate the sabotage-proof harness (Docker-free logic checks)
         # WARP-316: asserts tests/fips-sabotage.test.sh encodes a real sabotage
         # (build → install → rm fips.so → assert provider gone) and skips
         # cleanly without Docker. The Docker build itself runs in fips-sabotage.
         run: bash tests/fips-sabotage-logic.test.sh
+
+      - name: Validate the FIPS stack harness (Docker-free logic checks)
+        # WARP-317: asserts tests/integration/fips-stack.test.sh encodes the
+        # real activation flow + assertions, that the compose file pins the
+        # FIPS boot gate OFF for non-provider images, and that the operator
+        # docs exist. The stack boot itself runs in the fips-stack job.
+        run: bash tests/fips-stack-logic.test.sh
 
   # WARP-316 deliberate-sabotage proof: builds one throwaway image, installs the
   # validated provider for real, deletes fips.so, and asserts the FIPS provider
@@ -86,6 +106,92 @@ jobs:
     # Compiles the OpenSSL FIPS module in a throwaway build (minutes cold).
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Deliberate-sabotage proof (removing fips.so breaks the gate)
         run: bash tests/fips-sabotage.test.sh
+
+  # WARP-317 full-stack FIPS ACTIVATION smoke test: boots the real compose
+  # stack with DROPLET_FIPS_MODE=1 (via the real setup.sh --fips path) and
+  # asserts the whole appliance runs on the validated provider — per-service
+  # fips_self_test lines, FIPS-restricted edge TLS (WARP-1021), live API
+  # endpoints, in-container MD5 refusal, and no crash-loops on the images
+  # that don't ship the provider. Heavy (builds the app images), so it is
+  # additionally gated on the FIPS *option paths* below — this workflow's
+  # trigger list is broad (apps/**, services/**, …) and ordinary app PRs
+  # must not pay a stack boot. Like fips-sabotage, it does not gate merges
+  # by itself. Docker-free logic checks for the harness run in fips-lint.
+  fips-stack:
+    runs-on: ubuntu-latest
+    # Full image-set build (GHCR layer cache warm ≈ 15-25 min; ai-gateway is
+    # the long pole) + stack boot + probes. 60 min bounds a cold build.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read # pull the GHCR BuildKit layer cache (buildcache:<image>)
+      pull-requests: read # dorny/paths-filter lists PR files via the API
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect FIPS-option-path changes
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@v4
+        id: gate
+        with:
+          # push events diff against the previous main commit by default.
+          filters: |
+            fips:
+              - "scripts/setup.sh"
+              - "scripts/lib/secrets.sh"
+              - "scripts/lib/compose.sh"
+              - "docker/docker-compose.yml"
+              - "docker/docker-compose.test.override.yml"
+              - "docker/fips/**"
+              - "docker/openssl-fips.cnf"
+              - "docker/nginx/**"
+              - "services/_shared/fips_selftest.py"
+              - "packages/fips-selftest/**"
+              - "tests/integration/fips-stack.test.sh"
+              - ".github/workflows/test-fips.yml"
+
+      # ubuntu-latest has ~14GB free; the full compose image set does not fit
+      # cold. Same reclaim as setup-e2e.yml / rag-tests.yml.
+      - name: Free disk space
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # Read-only: import the BuildKit layer cache docker-build.yml refreshes
+      # on every push to main. Best-effort — a cold cache only slows the run.
+      - name: Log in to GHCR (layer cache, read-only)
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Full-stack FIPS activation smoke test
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
+        env:
+          # compose merges this overlay so `up` builds import the GHCR cache
+          # (cache_from only; unset on devices) — same hook as setup-e2e.yml.
+          DROPLET_COMPOSE_BUILD_EXTRA_FILE: ${{ github.workspace }}/docker/docker-compose.build-cache.yml
+        run: bash tests/integration/fips-stack.test.sh

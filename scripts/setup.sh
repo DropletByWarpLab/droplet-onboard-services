@@ -136,6 +136,8 @@ source "$SCRIPT_DIR/lib/local-dns.sh"
 source "$SCRIPT_DIR/lib/single-box.sh"
 # shellcheck source=lib/backup.sh
 source "$SCRIPT_DIR/lib/backup.sh"
+# shellcheck source=lib/luks.sh
+source "$SCRIPT_DIR/lib/luks.sh"
 
 # --- Single-box mode resolution ---
 # Either the user forced it via --single-box/--no-single-box, or we auto-detect.
@@ -269,14 +271,16 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "                       SERVICE_TOKEN_VOICE if missing"
   else
     log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
-    log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
+    log_info "                  NEXTCLOUD_ADMIN_PASSWORD,"
     log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
     log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN,"
     log_info "                  SERVICE_TOKEN_VOICE"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
   fi
-  log_info "  Would materialize artifacts (idempotent): MQTT password file,"
-  log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
+  log_info "  Would materialize artifacts (idempotent): mosquitto.conf +"
+  log_info "                  mosquitto.acl (WARP-235 mTLS broker, per-CN topic grants),"
+  log_info "                  TLS cert, docker/secrets/openwrt_password,"
+  log_info "                  data/secrets/audit.key + data/secrets/email.key"
   log_info "                  WARP-236: internal CA (data/secrets/internal-ca) +"
   log_info "                  per-service TLS bundles (data/secrets/service-tls/<svc>)"
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
@@ -374,6 +378,14 @@ main() {
   log_step 1 $total_steps "Preflight checks"
   preflight_check
 
+  # --- Phase 1.5: Encrypted data partition (WARP-232) ---
+  # Provision the LUKS2/Argon2id data LV + TPM-sealed unlock BEFORE Docker, so
+  # a fresh appliance's docker daemon.json data-root lands on the encrypted
+  # /data before any image exists. Idempotent; refuses loudly without a TPM
+  # (data stays plain), skipped silently on non-Linux. See scripts/lib/luks.sh.
+  install_luks_data_partition \
+    || log_warn "LUKS data-partition provisioning had issues (continuing)"
+
   # --- Phase 2: Docker ---
   log_step 2 $total_steps "Docker"
   if [ "$SKIP_DOCKER" = "true" ]; then
@@ -418,6 +430,13 @@ main() {
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
   materialize_artifacts
+  # WARP-232: once /data is a real encrypted mount, relocate the crypto-
+  # sensitive secrets (.env carries DEVICE_SECRET_KEY → restic password;
+  # data/secrets carries the audit key) onto it and symlink them back, so
+  # "disk removed + mounted elsewhere yields no readable data" holds for the
+  # derivation inputs too. No-op unless /data is the LUKS mapper. Idempotent.
+  relocate_secrets_to_data \
+    || log_warn "secrets relocation onto /data had issues (continuing)"
   # Single-box mode: append single-box .env knobs so the `single-box`
   # compose profile activates and the patched services find the right
   # values. Idempotent — re-appends the same block; docker-compose

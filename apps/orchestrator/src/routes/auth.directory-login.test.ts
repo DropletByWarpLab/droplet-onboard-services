@@ -149,6 +149,14 @@ function createPrismaMock(seed: UserRow[] = []) {
   const self: any = {};
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      // WARP-233: the login lookup probes the blind index first. Seeded rows
+      // model the pre-backfill shape (plaintext email, no emailLookupHash),
+      // so the probe misses and findUserByEmail falls back to findFirst.
+      if (where.emailLookupHash !== undefined) {
+        return (
+          users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null
+        );
+      }
       if (where.email !== undefined) {
         return users.find((u) => u.email === where.email) ?? null;
       }
@@ -163,6 +171,15 @@ function createPrismaMock(seed: UserRow[] = []) {
       }
       return null;
     }),
+    // WARP-233 pre-backfill fallback: plaintext equality on rows whose
+    // emailLookupHash is NULL.
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      users.find(
+        (u: any) =>
+          u.email === where.email &&
+          (where.emailLookupHash === undefined || (u.emailLookupHash ?? null) === where.emailLookupHash),
+      ) ?? null,
+    ),
   };
   // PR #375 — the login route checks for an enabled TOTP factor after the
   // password verify. These directory-login fixtures have no TOTP enrolled,
@@ -383,8 +400,8 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
     expect(res.status).toBe(200);
     // The lookup value handed to Prisma must be trim+lowercased so it
     // matches the normalized stored row.
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { email: "foo@x.com" },
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: { email: "foo@x.com", emailLookupHash: null },
     });
     expect(verifyPassword).toHaveBeenCalledWith(normalized.passwordHash, "correct-horse");
     const decoded = decode(res);
@@ -409,8 +426,8 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
       .send({ username: "FOO2@X.COM", password: "correct-horse" });
 
     expect(res.status).toBe(200);
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { email: "foo2@x.com" },
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: { email: "foo2@x.com", emailLookupHash: null },
     });
   });
 
@@ -440,8 +457,8 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
 
     expect(res.status).toBe(200);
     // The lookup must have gone through the email branch of findUnique.
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { email: "owner@warp.test" },
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: { email: "owner@warp.test", emailLookupHash: null },
     });
     expect(verifyPassword).toHaveBeenCalledWith(owner.passwordHash, "Owner-secret123");
     expect(res.body.user.id).toBe("u-login");

@@ -30,6 +30,7 @@ import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { dispatchDetectionEvent } from "./push-dispatch.service.js";
 import { processCameraEvent } from "./camera-event-gate.js";
 import { config } from "../config.js";
+import { mqttConnectOptions } from "../lib/internal-tls.js";
 import type {
   CameraInfo,
   DetectionEvent,
@@ -71,9 +72,12 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
 
   // Connect to MQTT for Frigate events and camera discovery
   try {
+    // WARP-235: mqtts:// brokers require this service's client cert
+    // (identity = CN "orchestrator"); dev mqtt:// URLs add no TLS options.
     _mqttClient = mqtt.connect(config.MQTT_BROKER, {
       clientId: "orchestrator-cameras",
       clean: true,
+      ...mqttConnectOptions(config.MQTT_BROKER),
     });
 
     _mqttClient.on("connect", () => {

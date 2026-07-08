@@ -45,6 +45,7 @@ import {
   type Role,
 } from "../services/jwt.service.js";
 import { createSession } from "../services/session.service.js";
+import { findUserByEmail, emailWriteData } from "../services/user-directory.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
@@ -214,7 +215,8 @@ async function ensureLinkedUser(
   }
 
   // 2a. Link to an existing local user with this email.
-  const byEmail = await prisma.user.findUnique({ where: { email } });
+  // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
+  const byEmail = await findUserByEmail(prisma, email);
   if (byEmail) {
     // Same deactivation gate as the by-sub branch: never re-activate a
     // disabled directory row by silently minting a fresh SSO link to it.
@@ -239,7 +241,7 @@ async function ensureLinkedUser(
     data: {
       username: usernameSeedFromEmail(email),
       displayName,
-      email,
+      ...emailWriteData(email),
       role: "family",
       isLocal: true,
       // No passwordHash — this account authenticates via SSO only. The

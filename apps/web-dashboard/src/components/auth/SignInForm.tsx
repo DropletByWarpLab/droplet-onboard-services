@@ -98,13 +98,14 @@ export type SignInFormProps = {
    *  page's `?next=`). Omitted → the orchestrator defaults to "/". */
   returnTo?: string;
   /**
-   * Start the passwordless passkey ceremony. Wired by the login page once the
-   * WebAuthn backend shipped (PR #377). When omitted, the passkey affordance
-   * falls back to the disabled "Soon" placeholder.
+   * Handle a click on the passkey affordance. Wired by the login page once the
+   * WebAuthn backend shipped (PR #377); as of WARP-1054 it NAVIGATES to the
+   * dedicated `/login/passkey` approval page (which runs the ceremony) rather
+   * than running it inline — so the click is instant and there's no busy state
+   * to render here. When omitted, the affordance falls back to the disabled
+   * "Soon" placeholder.
    */
   onPasskey?: () => void;
-  /** True while the passkey ceremony is in flight (drives the busy label). */
-  passkeyBusy?: boolean;
   /**
    * PR #375 — two-factor challenge. When true the form swaps the
    * email/password/SSO block for the code-entry panel: the password was already
@@ -140,7 +141,6 @@ export function SignInForm({
   ssoProviders = [],
   returnTo,
   onPasskey,
-  passkeyBusy = false,
   mfaRequired = false,
   mfaMode = "totp",
   totpCode = "",
@@ -432,11 +432,10 @@ export function SignInForm({
         <button
           type="button"
           onClick={onPasskey}
-          disabled={passkeyBusy}
-          className="dp-btn-secondary w-full justify-center gap-2.5 disabled:opacity-70"
+          className="dp-btn-secondary w-full justify-center gap-2.5"
         >
           <KeyRound size={14} aria-hidden="true" />
-          {passkeyBusy ? "Waiting for passkey…" : "Sign in with a passkey"}
+          Sign in with a passkey
         </button>
       ) : null}
     </div>

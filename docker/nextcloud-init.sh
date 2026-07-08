@@ -99,7 +99,7 @@ echo "[droplet] WARP-883: shared space provisioning complete"
 #
 # URLs:
 #   DocumentServerUrl         — browser-facing engine path, fronted by the
-#                               gateway at /docs/ (see docker/nginx.conf).
+#                               gateway at /docs/ (see docker/nginx/nginx.conf).
 #   DocumentServerInternalUrl — compose-network address the connector reaches
 #                               the engine on directly (no gateway hop).
 #   StorageUrl                — how the engine calls BACK into Nextcloud.

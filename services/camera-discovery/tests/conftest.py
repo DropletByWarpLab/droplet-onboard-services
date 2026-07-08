@@ -20,3 +20,10 @@ os.environ.setdefault("CAMERA_SUBNET", "192.168.100.0/24")
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVICE_DIR))
+
+# WARP-235/236 — main.py's mqtts:// path imports `_shared.internal_tls`.
+# In-container the helper is COPY'd to /app/_shared; in the repo it lives at
+# services/_shared, so add services/ to the path (voice-io precedent).
+_SERVICES_DIR = _SERVICE_DIR.parent
+if str(_SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVICES_DIR))

@@ -1,0 +1,20 @@
+# Pinned Trivy vulnerability-DB snapshot (WARP-243).
+#
+# docker-build.yml's Trivy image gate scans against THIS exact DB digest so a
+# given commit's scan verdict is reproducible — it cannot flip to red on DB
+# drift alone (Debian point-release lag, newly-published npm/Go advisories for
+# already-pinned deps). Bumping the pin is a deliberate PR: it re-surfaces the
+# real fixable-vuln set, which must then be reconciled with .trivyignore in the
+# SAME PR (any newly-fixable HIGH/CRITICAL is either patched via the dep bump
+# or triaged with a burn-down note). That makes DB refresh a reviewable event
+# instead of a random CI failure.
+#
+# Resolve the current digest for a bump:
+#   TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:aquasecurity/trivy-db:pull&service=ghcr.io" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+#     https://ghcr.io/v2/aquasecurity/trivy-db/manifests/2 \
+#     | awk -tolower'/docker-content-digest/{print $2}'
+#
+# Snapshot pinned: 2026-07-05 (schema v2).
+sha256:a8a1af880ecae3a9e4fe74c0351c921b33bc083ed439ff25c9aaac0aa5d6945a

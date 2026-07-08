@@ -17,10 +17,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const startRegistration = vi.fn();
 const startAuthentication = vi.fn();
 const browserSupportsWebAuthn = vi.fn();
+const webAuthnCancelCeremony = vi.fn();
 vi.mock("@simplewebauthn/browser", () => ({
   startRegistration: (...a: unknown[]) => startRegistration(...a),
   startAuthentication: (...a: unknown[]) => startAuthentication(...a),
   browserSupportsWebAuthn: (...a: unknown[]) => browserSupportsWebAuthn(...a),
+  WebAuthnAbortService: {
+    cancelCeremony: (...a: unknown[]) => webAuthnCancelCeremony(...a),
+  },
 }));
 
 // authFetch — assert it's used (credentials: same-origin attaches the cookie).
@@ -29,7 +33,15 @@ vi.mock("./auth", () => ({
   authFetch: (...a: unknown[]) => authFetch(...a),
 }));
 
-import { registerPasskey, signInWithPasskey, isPasskeySupported } from "./webauthn";
+import {
+  registerPasskey,
+  signInWithPasskey,
+  isPasskeySupported,
+  getPasskeyAuthenticationOptions,
+  runPasskeyAuthenticationCeremony,
+  verifyPasskeyAuthentication,
+  cancelPasskeyCeremony,
+} from "./webauthn";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return {
@@ -114,5 +126,50 @@ describe("isPasskeySupported", () => {
     expect(isPasskeySupported()).toBe(true);
     browserSupportsWebAuthn.mockReturnValue(false);
     expect(isPasskeySupported()).toBe(false);
+  });
+});
+
+// WARP-1054 — the constituent steps the approval page drives individually.
+describe("passkey authentication steps (WARP-1054)", () => {
+  it("getPasskeyAuthenticationOptions POSTs the options endpoint and returns the raw options", async () => {
+    const options = { challenge: "c", timeout: 60_000, rpId: "droplet.local" };
+    authFetch.mockResolvedValueOnce(jsonResponse(options));
+
+    await expect(getPasskeyAuthenticationOptions()).resolves.toEqual(options);
+    expect(authFetch).toHaveBeenCalledWith(
+      "/api/auth/webauthn/authenticate/options",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("runPasskeyAuthenticationCeremony drives startAuthentication with the options", async () => {
+    const options = { challenge: "c" };
+    startAuthentication.mockResolvedValueOnce({ id: "cred", response: {} });
+
+    await expect(
+      runPasskeyAuthenticationCeremony(options as never),
+    ).resolves.toEqual({ id: "cred", response: {} });
+    expect(startAuthentication).toHaveBeenCalledWith({ optionsJSON: options });
+  });
+
+  it("verifyPasskeyAuthentication POSTs the assertion and returns the user", async () => {
+    const user = { id: "u-1", username: "stefan", displayName: "Stefan", role: "owner" as const };
+    authFetch.mockResolvedValueOnce(jsonResponse({ user }));
+    const assertion = { id: "cred", response: {} };
+
+    await expect(verifyPasskeyAuthentication(assertion as never)).resolves.toEqual(user);
+    const [url, init] = authFetch.mock.calls[0]!;
+    expect(url).toBe("/api/auth/webauthn/authenticate/verify");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ response: assertion });
+  });
+
+  it("verifyPasskeyAuthentication throws on a non-2xx verify (server rejection)", async () => {
+    authFetch.mockResolvedValueOnce(jsonResponse({ error: "Invalid credentials" }, false, 401));
+    await expect(verifyPasskeyAuthentication({ id: "x" } as never)).rejects.toThrow();
+  });
+
+  it("cancelPasskeyCeremony delegates to WebAuthnAbortService.cancelCeremony", () => {
+    cancelPasskeyCeremony();
+    expect(webAuthnCancelCeremony).toHaveBeenCalledTimes(1);
   });
 });

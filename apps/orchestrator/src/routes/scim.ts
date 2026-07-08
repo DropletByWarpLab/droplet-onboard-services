@@ -17,6 +17,7 @@
  * by a shared catch into the SCIM Error envelope (application/scim+json).
  */
 import { Router, type Request, type Response } from "express";
+import { readUserEmail } from "../services/user-directory.service.js";
 
 import { scimAuthMiddleware } from "../middleware/scim-auth.js";
 import {
@@ -59,7 +60,9 @@ function asScimSource(u: {
     id: u.id,
     username: u.username,
     displayName: u.displayName,
-    email: u.email,
+    // WARP-233: SCIM resources surface the plaintext (userName/emails[]) —
+    // decrypt the at-rest dcv1 blob; pre-backfill plaintext passes through.
+    email: readUserEmail(u.email),
     role: u.role,
     directoryStatus: u.directoryStatus === "DEACTIVATED" ? "DEACTIVATED" : "ACTIVE",
     createdAt: u.createdAt,

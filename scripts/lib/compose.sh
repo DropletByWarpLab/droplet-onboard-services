@@ -12,7 +12,8 @@ COMPOSE_ENV_FILE="$REPO_ROOT/.env"
 REQUIRED_ENV_VARS=(
   POSTGRES_PASSWORD
   REDIS_PASSWORD
-  MQTT_PASSWORD
+  # MQTT_PASSWORD retired by WARP-235 — MQTT identity is the per-service
+  # client certificate CN (WARP-236 internal CA), not a shared secret.
   NEXTCLOUD_ADMIN_PASSWORD
   DEVICE_SECRET
   DEVICE_SECRET_KEY
@@ -107,9 +108,6 @@ prepare_and_build() {
   # --- Ensure init scripts are executable ---
   chmod +x "$REPO_ROOT/docker/init-nextcloud-db.sh" 2>/dev/null || true
 
-  # --- Ensure mosquitto passwd dir exists for compose mount ---
-  mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
-
   # --- Make `.env` discoverable to bare `docker compose -f docker/…` calls ---
   # Compose resolves `.env` relative to the compose file's directory, not the
   # repo root. Without this symlink, invocations that don't pass
@@ -177,6 +175,9 @@ prepare_and_build() {
   log_info "Building application containers..."
   local build_services=(
     # default profile
+    # WARP-1021: the nginx edge gateway is now a local build (Bookworm +
+    # dormant validated FIPS provider), no longer a pulled nginx:alpine.
+    gateway
     orchestrator
     web-dashboard
     ai-gateway
@@ -402,9 +403,6 @@ start_stack() {
     . "$REPO_ROOT/.env"
     set +a
   fi
-
-  # --- Ensure mosquitto password directory exists for compose mount ---
-  mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
 
   # --- Start infrastructure first ---
   run_with_spinner "Starting database, cache, and broker" \

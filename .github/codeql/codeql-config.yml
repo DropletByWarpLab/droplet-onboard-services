@@ -1,0 +1,13 @@
+# CodeQL advanced-setup config — WARP-243.
+name: droplet-codeql
+paths-ignore:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/__tests__/**"
+  - "**/__fixtures__/**"
+  - "**/__mocks__/**"
+  - "**/tests/**"
+  - "**/testing/**"
+  - "**/node_modules/**"
+  - "**/.next/**"
+  - "docs/**"

@@ -40,6 +40,23 @@ describe("internal-tls", () => {
     expect(mod.internalBaseUrl("http://ai-gateway:8000")).toBe("http://ai-gateway:8000");
   });
 
+  it("returns TLS material for mqtts:// URLs and {} for mqtt:// (WARP-235)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "itls-mqtt-"));
+    const p = makePems(dir);
+    const mod = await freshModule({
+      DROPLET_INTERNAL_TLS: "0", // deliberately off — the URL scheme is the gate
+      DROPLET_TLS_CERT: p.cert,
+      DROPLET_TLS_KEY: p.key,
+      DROPLET_TLS_CA: p.ca,
+    });
+    expect(mod.mqttConnectOptions("mqtt://localhost:1883")).toEqual({});
+    const opts = mod.mqttConnectOptions("mqtts://broker:8883");
+    expect(opts.rejectUnauthorized).toBe(true);
+    expect(Buffer.isBuffer(opts.cert)).toBe(true);
+    expect(Buffer.isBuffer(opts.key)).toBe(true);
+    expect(Buffer.isBuffer(opts.ca)).toBe(true);
+  });
+
   it("loads material, builds server options and rewrites schemes when enabled", async () => {
     const dir = mkdtempSync(join(tmpdir(), "itls-"));
     const p = makePems(dir);

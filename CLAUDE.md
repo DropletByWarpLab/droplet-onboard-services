@@ -200,6 +200,14 @@ Full per-variable reference (defaults, ports, resource limits):
   OnlyOffice CE (AGPLv3) is what we build/test; an OnlyOffice
   OEM/commercial license is required before GA (WARP-882). Full row set:
   `docs/ENVIRONMENT.md`.
+- `DROPLET_FIPS_MODE` is the SINGLE FIPS 140-3 knob (per-customer,
+  default OFF; flipped only via `setup.sh --fips` / `--no-fips`, which
+  derives `OPENSSL_CONF` / `DROPLET_FIPS_REQUIRED` / `OPENSSL_MODULES` /
+  `NODE_OPTIONS` — never hand-edit those). Only the six provider-carrying
+  images (orchestrator, web-dashboard, mcp-server, ai-gateway,
+  file-indexer, gateway) enforce; the others are pinned out in compose.
+  Operator/auditor guide incl. verification commands and the "library
+  has no ciphers" failure mode: [`docs/fips.md`](docs/fips.md).
 
 ## GTM alignment
 

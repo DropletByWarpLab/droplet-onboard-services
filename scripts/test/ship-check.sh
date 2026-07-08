@@ -1203,7 +1203,7 @@ run_check_tls_invariants() {
   #      curl, this FAILs.
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
-  local nginx_conf="$REPO_ROOT/docker/nginx.conf"
+  local nginx_conf="$REPO_ROOT/docker/nginx/nginx.conf"
   local factory_reset="$REPO_ROOT/scripts/factory-reset.sh"
   local failures=0
 
@@ -1231,7 +1231,7 @@ run_check_tls_invariants() {
       failures=$((failures + 1))
     fi
   else
-    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx.conf not found\n" "$label"
+    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx/nginx.conf not found\n" "$label"
     failures=$((failures + 1))
   fi
 
@@ -1531,12 +1531,11 @@ case "$1" in
   info)
     exit 0
     ;;
-  # `_generate_mosquitto_passwd` (scripts/lib/secrets.sh) does a
-  # `docker run --rm eclipse-mosquitto:2 ...` to bcrypt-hash the MQTT
-  # password. exit 1 forces the plaintext fallback branch, which is
-  # the pre-Docker code path and the right thing for a no-real-daemon
-  # smoke test (the success branch would crash on "file not written"
-  # because the shim doesn't actually produce the output file).
+  # Any `docker run` in the smoke path must fail cleanly so callers take
+  # their no-daemon fallback branches. (Historically this forced
+  # _generate_mosquitto_passwd's plaintext fallback; that generator was
+  # retired by WARP-235 — MQTT identity is the client cert CN now — but the
+  # fail-closed shim behavior stays right for any future docker-run caller.)
   run)
     exit 1
     ;;

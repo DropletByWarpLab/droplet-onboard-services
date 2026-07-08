@@ -29,6 +29,7 @@
  *   - never logs tokens/codes/secrets (no token in response body)
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -112,16 +113,24 @@ function createPrismaMock(users: UserRow[] = [], identities: IdentityRow[] = [])
   let seq = self._users.length;
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      // WARP-233: account linking resolves users through the blind index.
+      if (where.emailLookupHash !== undefined)
+        return self._users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null;
       if (where.email !== undefined) return self._users.find((u: UserRow) => u.email === where.email) ?? null;
       if (where.id !== undefined) return self._users.find((u: UserRow) => u.id === where.id) ?? null;
       return null;
     }),
+    // WARP-233 pre-backfill fallback probe (plaintext rows, no blind index).
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      self._users.find((u: any) => u.email === where.email && u.emailLookupHash == null) ?? null,
+    ),
     create: vi.fn(async ({ data }: { data: any }) => {
-      const row: UserRow = {
+      const row: UserRow & { emailLookupHash?: string | null } = {
         id: data.id ?? `u-new-${++seq}`,
         username: data.username,
         displayName: data.displayName,
         email: data.email ?? null,
+        emailLookupHash: data.emailLookupHash ?? null,
         nextcloudUsername: data.nextcloudUsername ?? null,
         passwordHash: data.passwordHash ?? null,
         role: data.role ?? "family",
@@ -457,7 +466,8 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     expect(res.status).toBe(302);
     expect(prisma.user.create).toHaveBeenCalledTimes(1);
     const created = prisma.user.create.mock.calls[0]![0].data;
-    expect(created.email).toBe("newhire@warp.test");
+    // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
+    expect(readUserEmail(created.email)).toBe("newhire@warp.test");
     expect(created.role).toBe("family"); // least privilege
     expect(created.passwordHash ?? null).toBeNull(); // SSO-only, can't password-login
     expect(created.isLocal).toBe(true);
@@ -480,7 +490,11 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
     expect(res.status).toBe(302);
     // Resolved by sub → no email lookup, no new identity, no new user.
-    expect(prisma.user.findUnique).not.toHaveBeenCalledWith({ where: { email: "whatever@x.com" } });
+    // WARP-233: neither the blind-index probe nor the plaintext fallback ran.
+    expect(prisma.user.findUnique).not.toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ emailLookupHash: expect.anything() }) }),
+    );
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
     expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
     expect(prisma.user.create).not.toHaveBeenCalled();
     const session = sessionFromRes(res);
@@ -630,7 +644,11 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
     expect(res.status).toBe(302);
     // The lookup value must be normalized so it matches the stored row.
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { email: "stefan@warp.test" } });
+    // WARP-233: the email lookup runs through findUserByEmail — the seeded
+    // plaintext row resolves via the fallback probe.
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: { email: "stefan@warp.test", emailLookupHash: null },
+    });
     expect(prisma.user.create).not.toHaveBeenCalled();
     const session = sessionFromRes(res);
     expect(session?.sub).toBe("u-uuid-stefan-7777");

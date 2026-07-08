@@ -40,8 +40,13 @@ describe("ADR-013 schema: argon2id directory", () => {
     expect(userBlock()).toMatch(/passwordHash\s+String\?/);
   });
 
-  it("User.email is declared @unique (stable login key)", () => {
-    expect(userBlock()).toMatch(/email\s+String\?\s+@unique/);
+  it("User email uniqueness lives on the blind index (WARP-233: email is ciphertext at rest)", () => {
+    // ADR-013 made email the stable login key via @unique. WARP-233 encrypts
+    // email at rest (GCM ciphertext is non-deterministic, so it cannot carry
+    // uniqueness) and moves BOTH the equality lookup and the uniqueness
+    // guarantee to emailLookupHash. email itself must stay WITHOUT @unique.
+    expect(userBlock()).toMatch(/emailLookupHash\s+String\?\s+@unique/);
+    expect(userBlock()).not.toMatch(/email\s+String\?\s+@unique/);
   });
 
   it("preserves the local User.id UUID as the canonical key (WARP-485)", () => {

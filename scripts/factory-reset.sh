@@ -79,7 +79,7 @@ What gets deleted:
   - The Docker build cache (always reclaimed — largest rebuildable consumer)
   - Generated secrets (.env)
   - TLS certificates
-  - MQTT credentials
+  - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
 
 What is preserved:
@@ -450,6 +450,15 @@ log_divider
 
 log_step 2 4 "Removing Docker volumes"
 
+# WARP-234: a bind-mounted *.config.php inside a named volume (nextcloud
+# redis-TLS config) leaves a STALE bind-mount after `down -v` that Docker
+# does not clean up, so `docker volume rm droplet_nextcloud-data` fails
+# with "device or resource busy" and the reset aborts. Lazy-umount any
+# lingering submounts under our droplet_ volumes before the removal loop.
+for _stale in $(awk '$2 ~ /\/var\/lib\/docker\/volumes\/droplet_.*\/_data\// {print $2}' /proc/mounts 2>/dev/null); do
+  sudo umount -l "$_stale" 2>/dev/null || true
+done
+
 # Project prefixes whose volumes we OWN and may remove. PRIMARY_PROJECT is the
 # live name derived from the compose `name:` in Phase 1; droplet-pi-platform is
 # the retired pre-WARP-605 name whose volumes still linger on long-lived boxes.
@@ -711,10 +720,11 @@ if [ -d "$REPO_ROOT/data/secrets" ]; then
   log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
 
-# MQTT password file
+# Legacy MQTT password file (pre-WARP-235 installs; the passwd mechanism is
+# retired — MQTT identity is the client cert CN, wiped above with data/secrets)
 if [ -d "$REPO_ROOT/docker/mosquitto_passwd_dir" ]; then
   rm -rf "$REPO_ROOT/docker/mosquitto_passwd_dir"
-  log_success "Removed docker/mosquitto_passwd_dir/ (MQTT credentials)"
+  log_success "Removed docker/mosquitto_passwd_dir/ (legacy MQTT credentials)"
 fi
 
 # Generated mosquitto.conf (not git-tracked; may be a directory if Docker

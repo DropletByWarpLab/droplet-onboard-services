@@ -39,7 +39,7 @@ jobs:
     # Everything is local stubs + tmpdirs; a hung test must fail fast.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck the supervisor
         # warning severity to match ship-check's bar; no global excludes —
         # waivers live inline per scripts/test/ship-check.sh convention.

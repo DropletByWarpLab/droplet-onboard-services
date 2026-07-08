@@ -11,10 +11,12 @@ import {
   startRegistration,
   startAuthentication,
   browserSupportsWebAuthn,
+  WebAuthnAbortService,
 } from "@simplewebauthn/browser";
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
+  AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
 import { authFetch } from "./auth";
 import type { AuthUser } from "./auth";
@@ -59,19 +61,67 @@ export async function registerPasskey(): Promise<void> {
 }
 
 /**
- * Sign in with a passkey (passwordless). Fetches assertion options, runs the
- * authentication ceremony, and posts the assertion back. On success the server
- * has set the session cookie; we return the user profile so the caller can
- * hydrate the auth context exactly like a password login.
+ * The passwordless sign-in ceremony, split into its three constituent steps so
+ * the dedicated `/login/passkey` approval page (WARP-1054) can drive a state
+ * machine around them — showing "getting ready" during the options round-trip,
+ * "approve this sign-in" while the browser sheet is up, and "almost there"
+ * during verification. `signInWithPasskey()` below composes them for any caller
+ * that just wants the whole thing in one await (and for the existing wiring
+ * test). Keeping the wire calls here (not in the page) means every WebAuthn
+ * concern stays in this one module.
  */
-export async function signInWithPasskey(): Promise<AuthUser> {
-  const options = await postJson<PublicKeyCredentialRequestOptionsJSON>(
+
+/** Step 1 — fetch assertion options (the single-use server challenge). The raw
+ *  options are returned so the caller can read `options.timeout` for its own
+ *  timeout heuristic. */
+export async function getPasskeyAuthenticationOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return postJson<PublicKeyCredentialRequestOptionsJSON>(
     "/api/auth/webauthn/authenticate/options",
   );
-  const assertion = await startAuthentication({ optionsJSON: options });
+}
+
+/** Step 2 — run the browser ceremony (this is what raises the native passkey
+ *  sheet / QR). Rejects with a `NotAllowedError` on dismiss/timeout/no-match
+ *  (the WebAuthn spec keeps those three deliberately indistinguishable), or an
+ *  `AbortError` when {@link cancelPasskeyCeremony} is called. */
+export async function runPasskeyAuthenticationCeremony(
+  optionsJSON: PublicKeyCredentialRequestOptionsJSON,
+): Promise<AuthenticationResponseJSON> {
+  return startAuthentication({ optionsJSON });
+}
+
+/** Step 3 — post the assertion back. On success the server has set the session
+ *  cookie; we return the user profile so the caller can hydrate the auth context
+ *  exactly like a password login. Throws (via postJson) on a non-2xx verify. */
+export async function verifyPasskeyAuthentication(
+  assertion: AuthenticationResponseJSON,
+): Promise<AuthUser> {
   const result = await postJson<{ user: AuthUser }>(
     "/api/auth/webauthn/authenticate/verify",
     { response: assertion },
   );
   return result.user;
+}
+
+/**
+ * Abort an in-flight passkey ceremony (the "Cancel" action on the approval
+ * page, and unmount cleanup). @simplewebauthn/browser@13 routes every ceremony
+ * through a singleton abort controller; `cancelCeremony()` aborts the live
+ * `navigator.credentials.get()` so it doesn't linger or reject after the page
+ * has navigated away. Safe to call when no ceremony is active (it no-ops).
+ */
+export function cancelPasskeyCeremony(): void {
+  WebAuthnAbortService.cancelCeremony();
+}
+
+/**
+ * Sign in with a passkey (passwordless), start to finish. Composes the three
+ * steps above. On success the server has set the session cookie; we return the
+ * user profile so the caller can hydrate the auth context exactly like a
+ * password login.
+ */
+export async function signInWithPasskey(): Promise<AuthUser> {
+  const options = await getPasskeyAuthenticationOptions();
+  const assertion = await runPasskeyAuthenticationCeremony(options);
+  return verifyPasskeyAuthentication(assertion);
 }
