@@ -14,6 +14,7 @@
  * (invariant 3) — the caller passes it positionally; it is never
  * concatenated into the SQL.
  */
+import type { CatalogDialect } from "./version-detect.js";
 
 /** List base tables and their owners (brief §9.1). `table_type = 1` = base
  *  tables (excludes views/materialized views). */
@@ -50,3 +51,55 @@ FROM SYSCOLUMN c
 JOIN SYSTABLE t ON c.table_id = t.table_id
 WHERE t.table_name = ?
 ORDER BY c.column_id`;
+
+/**
+ * Triggers on base tables (write-safety, review B-5). A raw INSERT/UPDATE does
+ * NOT reproduce Eaglesoft's app-tier logic, but it DOES fire any DB triggers on
+ * the target — so a writable table carrying triggers must not be written blind;
+ * the write-enable gate (PR-3) refuses it. Modern catalog only (v10+); we do
+ * not write to ASA7 legacy installs.
+ */
+export const LIST_TRIGGERS_SQL = `SELECT tr.trigger_name, t.table_name, tr.event, tr.trigger_time
+FROM SYS.SYSTRIGGER tr
+JOIN SYS.SYSTAB t ON tr.table_id = t.table_id
+WHERE tr.table_id IS NOT NULL`;
+
+/**
+ * Foreign-key relationships (write-safety, review B-5). Before allow-listing a
+ * write we must know the target table's FK obligations. Modern catalog only.
+ */
+export const LIST_FOREIGN_KEYS_SQL = `SELECT ft.table_name AS foreign_table, pt.table_name AS primary_table
+FROM SYS.SYSFKEY fk
+JOIN SYS.SYSTAB ft ON fk.foreign_table_id = ft.table_id
+JOIN SYS.SYSTAB pt ON fk.primary_table_id = pt.table_id`;
+
+/**
+ * Candidate change-tracking watermark columns (research §3). SQL Anywhere has
+ * NO implicit rowversion — a usable watermark exists only where a table
+ * explicitly declares DEFAULT TIMESTAMP. This scan finds them; if a target
+ * entity has none, the sync/optimistic-guard falls back to the OnSchedule
+ * audit trail or a bounded poll+diff — never a silent no-guard downgrade
+ * (review B-4). Modern catalog only.
+ */
+export const FIND_WATERMARK_COLUMNS_SQL = `SELECT t.table_name, c.column_name, c."default" AS column_default
+FROM SYS.SYSTABCOL c
+JOIN SYS.SYSTAB t ON c.table_id = t.table_id
+WHERE c."default" LIKE '%TIMESTAMP%'`;
+
+/** The table+column introspection pair for a given catalog dialect. */
+export interface CatalogQuerySet {
+  listTables: string;
+  listColumns: string;
+}
+
+/**
+ * Pick the correct catalog-view family for the detected engine (review C-5).
+ * Choose the dialect with parseEngineVersion() at connect time — never assume
+ * the family, because introspecting ASA7 with SYS.SYSTAB* (or vice-versa) fails
+ * on exactly the installs where it matters.
+ */
+export function catalogQueriesFor(dialect: CatalogDialect): CatalogQuerySet {
+  return dialect === "legacy"
+    ? { listTables: LEGACY_LIST_TABLES_SQL, listColumns: LEGACY_LIST_COLUMNS_SQL }
+    : { listTables: LIST_TABLES_SQL, listColumns: LIST_COLUMNS_SQL };
+}

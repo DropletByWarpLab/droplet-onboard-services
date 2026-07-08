@@ -20,17 +20,23 @@ Full architecture and safety contract:
 > Anywhere client + copy of PattersonPM.db`. The blocked slice needs two things
 > that are **not present in this environment**:
 >
-> 1. the **SAP SQL Anywhere client** (native `sqlanywhere` npm addon, or the
->    unixODBC `libdbodm17` fallback — brief §7.1), and
+> 1. the **SAP SQL Anywhere client** — **unixODBC + `libdbodbc17_r.so`** driven
+>    from a Python/pyodbc bridge (the modern, maintained Linux path; the Node
+>    `sqlanywhere` npm addon is abandoned at Node 12 and does not build on the
+>    control plane — open decision **O-4 resolved → Python**, per
+>    `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` §5), and
 > 2. a **restored copy of `PattersonPM.db`** to introspect and to prove every
 >    read query and write command against (brief §16 — production is never the
 >    first place a write runs).
 >
-> The native `sqlanywhere` dependency is **deliberately not added yet** — it
-> requires the SAP client redistributable and native compilation, and there is
-> nothing to connect to. What **does** ship and is fully unit-tested: the schema
-> map + drift fingerprint, the read-query registry, and the write-command
-> registry (all pure — no I/O, no faked database).
+> The driver + Python bridge are **deliberately not added yet** — they require
+> the (license-governed) SAP client redistributable, and there is nothing to
+> connect to. The DB-touching sidecar is **x86_64-only**: SAP ships no aarch64
+> client, so an ARM box needs qemu or jConnect+TDS (research §5). What **does**
+> ship and is fully unit-tested: the connection-string builder, engine-version
+> detection, the schema map + drift fingerprint, the introspection SQL, the
+> read-query registry, and the write-command registry (all pure — no I/O, no
+> faked database).
 >
 > **This does NOT satisfy the full WARP-1094 Definition of Done**, which
 > requires connecting to a copy DB as `droplet_ro`, printing the introspected
@@ -41,8 +47,10 @@ Full architecture and safety contract:
 
 | Module | Purpose | Unit-tested |
 |---|---|---|
+| `src/connection-string.ts` | Builds the DSN-less SQL Anywhere string — `Host=` XOR `CommLinks=` (never both), `Encryption=NONE` default (§7.2, review C-1) | ✅ |
+| `src/version-detect.ts` | `PROPERTY('ProductVersion')` → engine major → catalog dialect (SA10+ modern / ASA7 legacy) + corrected Eaglesoft↔engine band map (§3, review C-5) | ✅ |
 | `src/schema-map.ts` | `computeSchemaFingerprint` (stable drift hash, §9.2) + identifier resolution through the introspected map (invariant 3) | ✅ |
-| `src/introspection.ts` | `SYS.SYSTAB` / `SYS.SYSTABCOL` / `SYS.SYSIDX` catalog SQL constants (§9.1), plus v7 legacy fallbacks | (constants) |
+| `src/introspection.ts` | `SYS.SYSTAB` / `SYS.SYSTABCOL` / `SYS.SYSIDX` catalog SQL (§9.1) + v7 legacy fallbacks + `catalogQueriesFor(dialect)` + trigger / FK / DEFAULT-TIMESTAMP-watermark discovery for write-safety (review B-4/B-5) | ✅ |
 | `src/read-queries.ts` | Parameterized named read queries; identifiers resolve only through the schema map; unknown names rejected (§10.1) | ✅ |
 | `src/write-commands.ts` | Named write commands `{name, targetTable, allowedColumns, requiredParams, buildStatement, reversalPlan, verifyQuery}`; ledger/clinical/claim tables are impossible targets (§11.3, invariant 5) | ✅ |
 | `src/connector.ts` | `Connector` provider interface + `EaglesoftConnector` (all driver/network calls stubbed) | ✅ (stub contract) |
@@ -64,9 +72,11 @@ orchestrator depends on (implemented once the driver lands):
 | `POST /read/:query` | `{ params }` | `{ rows }` | Runs a **named** read query (invariant 4). Values bind as `?`. Unknown query name → 404. |
 | `POST /write/:command` | `{ params }` | `{ result, reversal, verify }` | Applies a **named** write command in ONE transaction as `droplet_rw` (§11.1 step 3). Gated by write opt-in + confirmation + drift re-check upstream. |
 
-The REST layer is language-agnostic to the orchestrator (brief §6.2): if the
-Node driver won't build on the box's arch, the sidecar may become a thin Python
-service with the **same** REST contract (open decision O-4).
+The REST layer is language-agnostic to the orchestrator (brief §6.2). Open
+decision **O-4 is resolved → the DB-touching bridge is Python** (unixODBC +
+`libdbodbc17_r.so` via pyodbc); the Node addon is abandoned and does not build
+on the control plane (research §5). The orchestrator sees only this REST
+contract, so the bridge language is invisible to it.
 
 ## Safety invariants enforced here
 

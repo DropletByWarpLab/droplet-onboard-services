@@ -24,7 +24,30 @@ export {
   LIST_INDEXES_SQL,
   LEGACY_LIST_TABLES_SQL,
   LEGACY_LIST_COLUMNS_SQL,
+  LIST_TRIGGERS_SQL,
+  LIST_FOREIGN_KEYS_SQL,
+  FIND_WATERMARK_COLUMNS_SQL,
+  catalogQueriesFor,
+  type CatalogQuerySet,
 } from "./introspection.js";
+
+export {
+  buildConnectionString,
+  ConnectionStringError,
+  DEFAULT_PORT,
+  DEFAULT_DATABASE_NAME,
+  DEFAULT_SERVER_NAME,
+  type ConnectionParams,
+} from "./connection-string.js";
+
+export {
+  parseEngineVersion,
+  eaglesoftBandForEngine,
+  EngineVersionError,
+  PRODUCT_VERSION_SQL,
+  type EngineVersion,
+  type CatalogDialect,
+} from "./version-detect.js";
 
 export {
   READ_QUERIES,
