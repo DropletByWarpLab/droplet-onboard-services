@@ -1,0 +1,19 @@
+# =============================================================================
+# WARP-1106 — Protocol-faithful mock: real SQL Anywhere 17 (needs SAP binaries)
+# =============================================================================
+# Build requires `sqla17-linux-x86_64.tar.gz` (SAP Developer Edition) next to
+# the Dockerfile — see ./README.md. Then:
+#   docker compose -f services/erp-connector/harness/sqlanywhere/docker-compose.yml up --build -d
+name: eaglesoft-mock-sqla
+
+services:
+  mock-eaglesoft-sqla:
+    build: .
+    container_name: eaglesoft-mock-sqla
+    ports:
+      - "2638:2638"                      # real Eaglesoft port + protocol
+    volumes:
+      - ./init.sql:/init/init.sql:ro
+      - ../../sql/provision.sql:/provision/provision.sql:ro   # the REAL provisioning script
+    tmpfs:
+      - /data                            # throwaway PattersonPM.db
