@@ -21,6 +21,12 @@ There are two variants:
 
 ## Variant A — Postgres mock (runs now)
 
+**One command** (up + seed + smoke, leaves it running; add `--down` to tear down):
+```bash
+./services/erp-connector/harness/dry-run.sh
+```
+Or step by step:
+
 ### 1. Bring it up
 ```bash
 docker compose -f services/erp-connector/harness/docker-compose.yml up -d
