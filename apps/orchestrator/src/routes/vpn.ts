@@ -35,7 +35,7 @@ import {
   VpnConfigError,
   VpnIpExhaustedError,
 } from "../services/vpn.service.js";
-import { pickHomeEndpointFromSummary } from "../lib/vpn-home-endpoint.js";
+import { pickHomeEndpoint, fetchBridgeUplinkIp } from "../lib/vpn-home-endpoint.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -58,24 +58,37 @@ const createPeerSchema = z.object({
 
 /**
  * Resolve the box's home-network-facing LAN IP — the address a HOME-mode peer
- * dials directly. DHCP, so it is DISCOVERED from the routing-service network
- * summary (never hardcoded), with WIREGUARD_HOME_ENDPOINT_HOST as an explicit
- * operator fallback. Returns null when neither is available — the caller
- * surfaces that honestly rather than minting a conf pointed at a wrong guess.
+ * dials directly. DHCP, so it is DISCOVERED (never hardcoded). Precedence:
  *
- * A routing-service fault is swallowed to null here (the summary is
- * best-effort): status still renders, and a home-mode mint with a null result
- * fails with a clear 503. Away mode never calls this.
+ *   1. WIREGUARD_HOME_ENDPOINT_HOST env / routing-summary WAN IP
+ *      (pickHomeEndpointFromSummary — #897 semantics, unchanged).
+ *   2. Else the single-box host-uplink probe: the host device-bridge's
+ *      GET /host/uplink-ip (VPN home-mode P1.5). On single-box the WAN is
+ *      HOST-owned so the summary reports wan.present:false — the bridge, which
+ *      sees the host default route, supplies the egress source IP the summary
+ *      can't.
+ *   3. Else null — surfaced honestly rather than minting a conf pointed at a
+ *      wrong guess.
+ *
+ * Both the routing-service and device-bridge probes are best-effort — a fault in
+ * either swallows to null there: status still renders, and a home-mode mint with
+ * a null result fails with a clear 503. The bridge is only probed when the
+ * summary/env didn't already yield an IP, so the multi-box path adds no call.
+ * Away mode never calls this.
  */
 async function resolveHomeEndpointHost(): Promise<string | null> {
-  const fallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
+  const envFallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
   let summary: Awaited<ReturnType<typeof fetchNetworkSummary>> | null = null;
   try {
     summary = await fetchNetworkSummary();
   } catch (err) {
     logger.warn({ err }, "vpn: network summary unavailable for home-endpoint discovery");
   }
-  return pickHomeEndpointFromSummary(summary, fallback);
+  // Only reach for the bridge when env + summary came up empty (single-box).
+  const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null });
+  if (fromSummary) return fromSummary;
+  const bridgeIp = await fetchBridgeUplinkIp();
+  return pickHomeEndpoint({ envFallback, summary, bridgeIp });
 }
 
 /**
