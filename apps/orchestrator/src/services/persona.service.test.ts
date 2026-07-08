@@ -132,6 +132,7 @@ describe("updatePersona", () => {
             create,
             update,
           }: {
+            where: { id: string };
             create: Partial<PersonaRow>;
             update: Partial<PersonaRow>;
           }) => {
