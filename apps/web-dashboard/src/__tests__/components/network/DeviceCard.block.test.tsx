@@ -68,9 +68,10 @@ describe("<DeviceCard> Block → ConfirmDialog (WARP-291 / WARP-41)", () => {
       ),
     ).toBeInTheDocument();
 
-    // The confirm button (inside the dialog) uses the destructive bg-system-red class.
+    // The confirm button (inside the dialog) uses the destructive `btn danger`
+    // class (WARP-1079 indigo shell idiom).
     const confirmInDialog = screen.getAllByRole("button", { name: "Block" })[0];
-    expect(confirmInDialog.className).toMatch(/bg-system-red/);
+    expect(confirmInDialog.className).toMatch(/(^|\s)btn danger(\s|$)/);
   });
 
   it("clicking Unblock opens a neutral ConfirmDialog with the regain-access copy", () => {
@@ -85,7 +86,7 @@ describe("<DeviceCard> Block → ConfirmDialog (WARP-291 / WARP-41)", () => {
       screen.getByText("This device will regain internet access."),
     ).toBeInTheDocument();
     const confirmInDialog = screen.getAllByRole("button", { name: "Unblock" })[0];
-    expect(confirmInDialog.className).toMatch(/dp-btn-primary/);
+    expect(confirmInDialog.className).toMatch(/(^|\s)btn primary(\s|$)/);
   });
 
   it("Confirm fires toggleBlock; Cancel does NOT", async () => {

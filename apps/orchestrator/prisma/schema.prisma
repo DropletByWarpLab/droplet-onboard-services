@@ -1175,7 +1175,7 @@ model NotificationLog {
 // `failureReason` is non-null only when `status = FAILED`. Same shape
 // the WARP-218 brain-memory pattern uses for transient failures.
 model ApDevice {
-  mac              String         @id
+  mac              String           @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
   // override it (e.g. "AP (12:34:56)"). Editable from the
@@ -1195,7 +1195,7 @@ model ApDevice {
   lastIp           String?
   // Last DHCP-reported hostname.
   hostname         String?
-  status           ApDeviceStatus @default(DISCOVERED)
+  status           ApDeviceStatus   @default(DISCOVERED)
   // ADR-024: which onboarding backend owns this row's discovery +
   // provisioning. Explicit enum column (NOT derived from absence —
   // CLAUDE.md no-guessing rule, same discipline as `status`). Every
@@ -1220,10 +1220,10 @@ model ApDevice {
   // main router.
   approvedSsid     String?
   // First time the orchestrator saw this MAC announce on mDNS.
-  firstSeen        DateTime       @default(now())
+  firstSeen        DateTime         @default(now())
   // Updated on every fresh announce — drives the "stale extender"
   // dashboard warning.
-  lastSeen         DateTime       @default(now())
+  lastSeen         DateTime         @default(now())
   // Timestamp the operator hit Approve. Null until the row leaves
   // AWAITING_APPROVAL.
   approvedAt       DateTime?
@@ -1235,8 +1235,8 @@ model ApDevice {
   // service for a write touching this AP — lets the dashboard
   // resume polling after a refresh.
   lastOperationId  String?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([status])
   @@index([lastSeen])
@@ -1858,17 +1858,17 @@ model ActivityRow {
   // Who performed the action. Nullable ONLY for pre-upgrade v1 rows —
   // a CHECK constraint in the migration enforces
   // `schemaVersion = 1 OR actorType IS NOT NULL` (explicit-era rule).
-  actorType         ActivityActorType?
+  actorType     ActivityActorType?
   // Canonical user UUID when known (`type: user` rows always carry it;
   // `ai` rows carry the on-behalf-of UUID when it was already plumbed
   // through, else NULL). Never a username — display names stay in refs.
-  actorId           String?
+  actorId       String?
   // Canonical-content version this row was signed under. Existing rows
   // are backfilled to 1 by the migration; the recorder always writes 2
   // explicitly (no DB default — the migration drops it after backfill).
   // `canonicalizeRowContent` dispatches on this value so v1 rows keep
   // verifying byte-identically.
-  schemaVersion     Int
+  schemaVersion Int
 
   // Composite index for the GET /api/activity range/filter query
   // (sorted by `at` descending within an optional `kind` filter), and
@@ -2847,22 +2847,22 @@ model TlsCert {
 /// before the row settles to `closed`; `closed` rows are retained for audit.
 model FileEditSession {
   /// Nextcloud numeric fileId — the co-authoring session key.
-  ncFileId    Int                   @id
+  ncFileId     Int                   @id
   /// Last user observed to open/touch the session (NC username). Audit only.
-  ncUser      String
+  ncUser       String
   /// Path at session open, for human-readable audit/logs (may go stale on move).
-  filePath    String
+  filePath     String
   /// Engine-decided mode the session was opened in.
-  mode        FileEditSessionMode
+  mode         FileEditSessionMode
   /// EXPLICIT lifecycle state — never inferred from a null column.
-  status      FileEditSessionStatus @default(open)
+  status       FileEditSessionStatus @default(open)
   /// Opaque co-authoring document key handed to the engine.
-  documentKey String
-  openedAt    DateTime              @default(now())
+  documentKey  String
+  openedAt     DateTime              @default(now())
   /// Bumped on every editor-session mint / heartbeat for the same fileId.
-  lastActiveAt DateTime             @default(now())
+  lastActiveAt DateTime              @default(now())
   /// Set when the engine's save-callback reports the session fully closed.
-  closedAt    DateTime?
+  closedAt     DateTime?
 
   @@index([status])
   @@index([ncUser, status])
@@ -3230,15 +3230,15 @@ enum PmActivityVerb {
 /// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
 model PmActivity {
-  id         String          @id @default(uuid())
+  id         String         @id @default(uuid())
   workItemId String
-  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem   PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   actorId    String?
   verb       PmActivityVerb
   field      String?
   oldValue   String?
   newValue   String?
-  createdAt  DateTime   @default(now())
+  createdAt  DateTime       @default(now())
 
   @@index([workItemId, createdAt])
 }
@@ -3320,4 +3320,136 @@ model DeviceUpdate {
 
   @@index([status, createdAt])
   @@index([gitSha])
+}
+
+// ── WARP-1094: ERP-connector framework (Eaglesoft direct-SQL integration) ──
+//
+// Droplet-side control-plane models for the first-party ERP-connector
+// framework (EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF §12). Eaglesoft is
+// provider #1 behind a generic connector abstraction; the schema is
+// provider-agnostic. Every lifecycle state is an EXPLICIT enum column
+// (architecture-guard rule 10 / CLAUDE.md / WARP-218) — never derived from
+// a NULL. Credentials NEVER live here: `secretRef` is a pointer into the
+// encrypted secret store (brief §7.4). PHI in `ErpEntityCache` is encrypted
+// at rest by the application layer (brief §10.2, §14).
+//
+// This migration is the DB-INDEPENDENT foundation only — the live-database
+// read/write paths are stubbed until a copy of `PattersonPM.db` + the SAP
+// SQL Anywhere client are available (Phase 0 of the phased plan, brief §17).
+
+/// Connection status for an ERP integration. Explicit lifecycle (brief §12):
+/// NOT_CONFIGURED → PROVISIONING → CONNECTED, with DEGRADED (transient sync
+/// failure, §15), DRIFT_LOCKED (schema fingerprint mismatch froze writes,
+/// invariant 9), ERROR (unrecoverable), and DISABLED (operator turned it off).
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  PROVISIONING
+  CONNECTED
+  DEGRADED
+  DRIFT_LOCKED
+  ERROR
+  DISABLED
+}
+
+/// One configured ERP connection. `provider` keys the connector framework
+/// ("eaglesoft" today, many later). `secretRef` is a pointer into Droplet's
+/// encrypted secret store — the `droplet_ro`/`droplet_rw` passwords are NEVER
+/// persisted in a row, an export, or a log (brief §7.4, invariant 10).
+/// `schemaHash` is the drift-guard fingerprint (brief §9.2, invariant 9);
+/// `writeEnabled` is the per-practice write opt-in and defaults OFF
+/// (invariant 1, §11.5).
+model IntegrationConnection {
+  id            String            @id @default(cuid())
+  provider      String
+  status        IntegrationStatus @default(NOT_CONFIGURED)
+  host          String
+  databaseName  String
+  secretRef     String
+  schemaVersion String?
+  schemaHash    String?
+  writeEnabled  Boolean           @default(false)
+  lastHealthyAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([provider, status])
+}
+
+/// Incremental-sync watermark per (connection, entity). `watermark` is an
+/// EXPLICIT string column (a discovered timestamp / rowversion, brief §10.2)
+/// — the cursor position is never inferred from the absence of a row.
+model ErpSyncCursor {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  watermark    String
+  updatedAt    DateTime @updatedAt
+
+  @@unique([connectionId, entity])
+}
+
+/// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the
+/// system of record — every cached view is timestamped in the UI ("as of N
+/// min ago"). `payload` PHI is encrypted at rest by the application layer.
+model ErpEntityCache {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  sourceKey    String
+  payload      Json
+  syncedAt     DateTime @default(now())
+
+  @@unique([connectionId, entity, sourceKey])
+  @@index([connectionId, entity])
+}
+
+/// Lifecycle of a staged write in the outbox → confirm → apply → verify
+/// pipeline (brief §11.1). Explicit enum; a write advances through these
+/// states and is never derived from a NULL. DISCREPANCY = Eaglesoft's own
+/// app logic altered/rejected the write at VERIFY (brief §11.1 step 4).
+enum WriteStatus {
+  PENDING_CONFIRMATION
+  CONFIRMED
+  APPLYING
+  APPLIED
+  DISCREPANCY
+  FAILED
+  REVERSED
+  REJECTED
+}
+
+/// One staged write request (the outbox, brief §11.1). Created at INTENT
+/// with status PENDING_CONFIRMATION; nothing touches Eaglesoft until a human
+/// confirms (invariant 1, §11.2). `command` is a registered command NAME
+/// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
+/// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+model ErpWriteRequest {
+  id           String      @id @default(cuid())
+  connectionId String
+  command      String
+  params       Json
+  status       WriteStatus @default(PENDING_CONFIRMATION)
+  requestedBy  String
+  confirmedBy  String?
+  reversal     Json?
+  discrepancy  Json?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([connectionId, status])
+}
+
+/// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of
+/// patient data and every write records actor / action / entity / row scope.
+/// Rows are never updated or deleted — the table is write-once.
+model ErpAuditLog {
+  id           String   @id @default(cuid())
+  connectionId String
+  actor        String
+  action       String
+  entity       String
+  scope        Json
+  at           DateTime @default(now())
+
+  @@index([connectionId, at])
 }
