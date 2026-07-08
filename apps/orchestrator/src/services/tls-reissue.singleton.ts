@@ -1,5 +1,5 @@
 /**
- * WARP-1093 — process-wide TLS re-issue hook.
+ * WARP-1109 — process-wide TLS re-issue hook.
  *
  * The rename endpoint (`POST /api/setup/box-name/rename`) needs to trigger a
  * cert re-issue under the box's NEW FQDN right after it claims the new name — the

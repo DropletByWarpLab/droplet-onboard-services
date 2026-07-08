@@ -213,7 +213,7 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
   });
 });
 
-describe("AddressStep — already-named box shows the current address + Rename (WARP-1093)", () => {
+describe("AddressStep — already-named box shows the current address + Rename (WARP-1109)", () => {
   // The reveal affordance in the named view ("Rename this address"); distinct
   // from the picker's "Rename" primary CTA.
   const renameCta = () =>

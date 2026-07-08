@@ -323,11 +323,11 @@ export function createSetupRouter(
      *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
      *  fake so no HQ / sidecar is touched. */
     claimBoxName?: BoxNameClaimer;
-    /** WARP-1093 — device-auth name RELEASER for the rename flow. Frees the box's
+    /** WARP-1109 — device-auth name RELEASER for the rename flow. Frees the box's
      *  current name at HQ before the new claim. Defaults to the production
      *  `createBoxNameReleaser()`; route tests inject a fake. */
     releaseBoxName?: BoxNameReleaser;
-    /** WARP-1093 — trigger an immediate cert re-issue under the new FQDN after a
+    /** WARP-1109 — trigger an immediate cert re-issue under the new FQDN after a
      *  rename. Defaults to the process-wide issuance hook (`reissueTlsNow`, a
      *  no-op until boot registers the composed issuance service); route tests
      *  inject a spy so no issuance runtime is touched. */
@@ -825,7 +825,7 @@ export function createSetupRouter(
   //   valid + claimed → 200 { ok, slug, fqdn, authoritative:true, taken:false }
   //   valid + fallback→ 200 { ok, slug, fqdn, authoritative:false, taken:false }
   //   valid + taken   → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
-  //   valid + this box already holds a different name (WARP-1093)
+  //   valid + this box already holds a different name (WARP-1109)
   //                   → 409 { code:"BOX_NAME_ALREADY_NAMED", currentName? }
   //                     (the wizard offers Rename → POST /setup/box-name/rename)
   //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
@@ -866,7 +866,7 @@ export function createSetupRouter(
         claim: claimBoxNameToHq,
       });
 
-      // WARP-1093 — HQ says THIS box already holds a (different) name. Distinct
+      // WARP-1109 — HQ says THIS box already holds a (different) name. Distinct
       // 409 so the wizard shows the current address + a Rename affordance
       // (POST /setup/box-name/rename) instead of the misleading "that name is
       // taken". `currentName` lets the wizard name the address it already holds.
@@ -946,7 +946,7 @@ export function createSetupRouter(
 
   // ── POST /api/setup/box-name/rename { name } ───────────────────
   //
-  // WARP-1093 — CHANGE the box's secured address in place. This is the flow the
+  // WARP-1109 — CHANGE the box's secured address in place. This is the flow the
   // wizard's Rename affordance drives once a box already holds a name (the fix
   // for "every name reads as taken once the box holds one"): it RELEASES the
   // current name at HQ (device-auth PoP — the same signed release factory-reset

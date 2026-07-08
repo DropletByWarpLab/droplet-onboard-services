@@ -253,7 +253,7 @@ describe("claimBoxName", () => {
   });
 
   // -------------------------------------------------------------------------
-  // WARP-1093 (box half) — the 409 body discriminator. HQ hides TWO distinct
+  // WARP-1109 (box half) — the 409 body discriminator. HQ hides TWO distinct
   // conflicts behind a 409:
   //   (a) name held by ANOTHER device            → NAME_TAKEN (+ suggestions)
   //   (b) THIS device already holds a DIFFERENT   → ALREADY_NAMED (+ current_name)
@@ -561,7 +561,7 @@ describe("releaseFromHq", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseClaimConflict — code → reason → message-text precedence (WARP-1093)
+// parseClaimConflict — code → reason → message-text precedence (WARP-1109)
 // ---------------------------------------------------------------------------
 
 function conflictErr(body: string): Error {

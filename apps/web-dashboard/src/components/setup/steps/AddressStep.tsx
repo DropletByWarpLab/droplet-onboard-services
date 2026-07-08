@@ -27,7 +27,7 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * `<name>.droplet-us.com` — a publicly-trusted address (real green padlock,
  * nothing to install on any device).
  *
- * WARP-1093 — the step has THREE modes, chosen on mount from GET /setup/box-name:
+ * WARP-1109 — the step has THREE modes, chosen on mount from GET /setup/box-name:
  *   - `fresh`   — no name yet: type + check + POST /setup/box-name (first claim).
  *   - `named`   — the box ALREADY holds a name: show "Your box is named X" (its
  *                 fqdn + padlock) with Keep-this-address / Rename. This is the
@@ -75,13 +75,13 @@ export function AddressStep({
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // WARP-1093 — the address the box ALREADY holds (null = none yet, i.e. fresh).
+  // WARP-1109 — the address the box ALREADY holds (null = none yet, i.e. fresh).
   const [current, setCurrent] = useState<{ name: string; fqdn: string } | null>(
     null,
   );
   const [mode, setMode] = useState<Mode>("fresh");
 
-  // WARP-1093 — learn on mount whether the box already holds a name. If it does,
+  // WARP-1109 — learn on mount whether the box already holds a name. If it does,
   // show the "your box is named X" state (Keep / Rename) instead of the
   // fresh-pick flow — an already-named box must NEVER read a name as "taken".
   // Best-effort: a failed GET leaves the fresh flow (the honest fallback).
@@ -235,7 +235,7 @@ export function AddressStep({
       await persist(slug);
       onComplete();
     } catch (e) {
-      // WARP-1093 — the fresh POST can still race a box that already holds a
+      // WARP-1109 — the fresh POST can still race a box that already holds a
       // name; the orchestrator answers 409 { code: "BOX_NAME_ALREADY_NAMED" }.
       // Key the copy off the CODE and point the owner at Rename (NOT the old,
       // now-false "factory reset releases it").
@@ -396,7 +396,7 @@ export function AddressStep({
         </div>
       </label>
 
-      {/* WARP-1093 — while renaming, name the address we're replacing so the
+      {/* WARP-1109 — while renaming, name the address we're replacing so the
           owner sees exactly what's changing. */}
       {renaming && current && (
         <p className="type-footnote text-label-secondary mt-1.5">

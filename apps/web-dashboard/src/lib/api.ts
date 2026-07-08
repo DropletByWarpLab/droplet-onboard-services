@@ -4694,7 +4694,7 @@ export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
 }
 
 /**
- * WARP-1093 — CHANGE the box's secured address in place. The orchestrator
+ * WARP-1109 — CHANGE the box's secured address in place. The orchestrator
  * RELEASES the current name at HQ, then claims the NEW name and re-issues the
  * cert under the new FQDN. Same public-onboarding posture as the POST (re-gated
  * server-side once the appliance is claimed). Throws on a non-2xx so the step

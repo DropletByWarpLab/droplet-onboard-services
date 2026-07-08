@@ -1,5 +1,5 @@
 /**
- * WARP-1093 — the process-wide TLS re-issue hook. The rename endpoint triggers a
+ * WARP-1109 — the process-wide TLS re-issue hook. The rename endpoint triggers a
  * cert re-issue under the box's new FQDN via `reissueTlsNow()`; boot registers
  * the composed issuance service's `runOnce` via `initTlsReissueHook`. These tests
  * pin: no-op before registration, delegation after, idempotent registration, and

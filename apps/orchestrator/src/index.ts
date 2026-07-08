@@ -787,7 +787,7 @@ async function main() {
     },
     { lockKey: "droplet:tls-renewal" },
   );
-  // WARP-1093 — register the composed issuance service's runOnce so the rename
+  // WARP-1109 — register the composed issuance service's runOnce so the rename
   // endpoint (POST /api/setup/box-name/rename) can trigger an immediate re-issue
   // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
   // the setup route reads it via reissueTlsNow() (a no-op until this runs).

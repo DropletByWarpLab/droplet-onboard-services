@@ -564,7 +564,7 @@ export interface BoxNameCurrentResult {
 }
 
 /**
- * WARP-1093 — response from POST /api/setup/box-name/rename. Same shape as
+ * WARP-1109 — response from POST /api/setup/box-name/rename. Same shape as
  * BoxNameSetResult: the rename RELEASES the current name at HQ then claims the
  * new one, so `authoritative` is true only when HQ device-auth-confirmed the new
  * name (false = the new name was persisted but issuance fell back to

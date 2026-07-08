@@ -199,7 +199,7 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
     expect(result.suggestions).toEqual(["studio-2", "studio-hq"]);
   });
 
-  it("threads an already-named claim through as alreadyNamed:true with currentName (WARP-1093)", async () => {
+  it("threads an already-named claim through as alreadyNamed:true with currentName (WARP-1109)", async () => {
     const persist = vi.fn(async (_name: string) => {});
     const claim = claiming({
       outcome: CLAIM_RESULT_ALREADY_NAMED,
@@ -274,12 +274,12 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// WARP-1093 — renameBoxName: RELEASE the old name at HQ, THEN claim the new one
+// WARP-1109 — renameBoxName: RELEASE the old name at HQ, THEN claim the new one
 // and trigger a re-issue under the new FQDN. Non-fatal on a post-release claim
 // failure (the box falls back to opaque/bootstrap + re-claims on the next tick).
 // ---------------------------------------------------------------------------
 
-describe("box-name.service — renameBoxName (WARP-1093)", () => {
+describe("box-name.service — renameBoxName (WARP-1109)", () => {
   function claiming(over: Partial<ClaimBoxNameResult>): (
     raw: string,
   ) => Promise<ClaimBoxNameResult> {

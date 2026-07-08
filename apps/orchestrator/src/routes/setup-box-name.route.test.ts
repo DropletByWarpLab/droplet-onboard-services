@@ -100,7 +100,7 @@ function buildApp(
     claimed.push(raw);
     return claimResult;
   });
-  // WARP-1093 — rename collaborators. The release frees the CURRENT name at HQ;
+  // WARP-1109 — rename collaborators. The release frees the CURRENT name at HQ;
   // the reissue triggers a cert re-issue under the NEW fqdn. Both injected so no
   // HQ / issuance runtime is touched.
   const released: number[] = [];
@@ -270,7 +270,7 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
   });
 
-  it("409s with BOX_NAME_ALREADY_NAMED when THIS box already holds a name (WARP-1093)", async () => {
+  it("409s with BOX_NAME_ALREADY_NAMED when THIS box already holds a name (WARP-1109)", async () => {
     const { app, persistBoxNameToHost } = buildApp(
       prisma,
       makeClaimResult({
@@ -457,7 +457,7 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
   });
 });
 
-describe("POST /api/setup/box-name/rename (WARP-1093)", () => {
+describe("POST /api/setup/box-name/rename (WARP-1109)", () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   beforeEach(() => {
     prisma = createPrismaMock();

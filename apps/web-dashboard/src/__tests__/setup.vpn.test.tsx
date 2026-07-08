@@ -241,7 +241,7 @@ describe("setup VPN step (WARP-174)", () => {
     });
 
     // Onboarding-Flow redesign — the precheck jumps back to the dedicated
-    // Address step (not the old combined Internet step). WARP-1093 — because a
+    // Address step (not the old combined Internet step). WARP-1109 — because a
     // name is already saved, the step shows the "your box is named X" state (its
     // fqdn + padlock) instead of the empty fresh-pick input; the address is
     // NEVER rendered as an empty/blank picker once the box already holds a name.

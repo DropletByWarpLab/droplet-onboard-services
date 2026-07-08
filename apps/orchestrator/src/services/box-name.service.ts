@@ -155,11 +155,11 @@ export interface SetBoxNameResult {
   /** TRUE when HQ said the name is taken by ANOTHER device. The wizard shows
    *  the conflict + any `suggestions`. */
   taken: boolean;
-  /** WARP-1093 — TRUE when HQ said THIS box already holds a DIFFERENT name;
+  /** WARP-1109 — TRUE when HQ said THIS box already holds a DIFFERENT name;
    *  distinct from `taken` so the wizard shows the current address + a Rename
    *  affordance instead of the false "that name is taken". */
   alreadyNamed: boolean;
-  /** WARP-1093 — the name this box already holds at HQ (when HQ sent
+  /** WARP-1109 — the name this box already holds at HQ (when HQ sent
    *  `current_name` / it was recovered from the message on the already-named
    *  409). */
   currentName?: string;
@@ -234,7 +234,7 @@ function summarizeClaim(
 }
 
 // ---------------------------------------------------------------------------
-// WARP-1093 — renameBoxName: change a box's secured address in place.
+// WARP-1109 — renameBoxName: change a box's secured address in place.
 // ---------------------------------------------------------------------------
 
 /** A minimal logger shape (matches the pino child loggers the route composes).
@@ -279,7 +279,7 @@ export interface RenameBoxNameResult extends SetBoxNameResult {
 }
 
 /**
- * WARP-1093 — rename a box's secured address in place (the fix for "every name
+ * WARP-1109 — rename a box's secured address in place (the fix for "every name
  * reads as taken once the box already holds one"). The flow, all NON-FATAL past
  * the validation gate so the box is never stranded:
  *

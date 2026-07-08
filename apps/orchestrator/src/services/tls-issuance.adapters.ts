@@ -422,7 +422,7 @@ export function createBoxNameClaimer(): (raw: string) => Promise<ClaimBoxNameRes
 }
 
 /**
- * WARP-1093 — compose the production `releaseFromHq` bound to this box's identity
+ * WARP-1109 — compose the production `releaseFromHq` bound to this box's identity
  * (real HQ HTTP client + device-identity signer + `config.DROPLET_DEVICE_ID`).
  * The rename endpoint calls this FIRST (before claiming the new name) to free the
  * box's CURRENT name at HQ via device-auth PoP — the SAME signed release the

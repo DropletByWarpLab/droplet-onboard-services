@@ -679,7 +679,7 @@ export function parseTakenSuggestions(err: unknown): string[] {
 }
 
 /**
- * WARP-1093 (box half) — best-effort parse of the 409 conflict body's
+ * WARP-1109 (box half) — best-effort parse of the 409 conflict body's
  * discriminator. HQ hides TWO distinct conflicts behind a 409:
  *
  *   name_taken     — the name is held by ANOTHER device (+ `suggestions`)
@@ -761,7 +761,7 @@ export function parseClaimConflict(err: unknown): {
  *  crash issuance / the rename endpoint), so callers branch on these. */
 export const CLAIM_RESULT_CLAIMED = "claimed" as const;
 export const CLAIM_RESULT_NAME_TAKEN = "name_taken" as const;
-/** WARP-1093 — THIS box already holds a DIFFERENT name at HQ; distinct from
+/** WARP-1109 — THIS box already holds a DIFFERENT name at HQ; distinct from
  *  NAME_TAKEN so the wizard shows the current address + a Rename affordance
  *  instead of the false "that name is taken". Rename IS supported (the box
  *  releases the old name then claims the new one — see renameBoxName). */
@@ -789,7 +789,7 @@ export interface ClaimBoxNameResult {
   fqdn?: string;
   /** Alternate names HQ offered on a 409 name-taken. */
   suggestions?: string[];
-  /** WARP-1093 — on ALREADY_NAMED, the name this box already holds at HQ (from
+  /** WARP-1109 — on ALREADY_NAMED, the name this box already holds at HQ (from
    *  the 409 body's `current_name`, or recovered from the stable message). */
   currentName?: string;
 }
@@ -868,7 +868,7 @@ export async function claimBoxName(
   } catch (err) {
     const httpStatus = parseHqStatus(err);
     if (httpStatus === 409) {
-      // WARP-1093 — two distinct conflicts hide behind a 409. Discriminate on
+      // WARP-1109 — two distinct conflicts hide behind a 409. Discriminate on
       // the HQ `code` (preferred), the legacy `reason`, then the stable message
       // text so the wizard can tell "held by another box" from "THIS box already
       // holds a name". An absent/unparseable discriminator falls open to
