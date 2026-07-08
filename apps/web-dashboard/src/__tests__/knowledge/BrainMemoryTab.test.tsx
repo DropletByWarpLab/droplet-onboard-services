@@ -87,7 +87,7 @@ describe("BrainMemoryTab", () => {
     // WARP-291: clicking opens a ConfirmDialog; confirm to fire the DELETE.
     fireEvent.click(deleteBtn);
     const dialog = await screen.findByRole("dialog", { name: /Delete .*?brain memory/i });
-    const confirmBtn = dialog.querySelector('button.bg-system-red') as HTMLButtonElement;
+    const confirmBtn = dialog.querySelector('button.danger') as HTMLButtonElement;
     expect(confirmBtn).not.toBeNull();
     fireEvent.click(confirmBtn);
     await waitFor(() => {

@@ -75,6 +75,7 @@ import type {
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
+  BoxNameRenameResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -4689,6 +4690,29 @@ export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
     credentials: "same-origin",
   });
   if (!res.ok) throw new Error(`Failed to fetch box name: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1109 — CHANGE the box's secured address in place. The orchestrator
+ * RELEASES the current name at HQ, then claims the NEW name and re-issues the
+ * cert under the new FQDN. Same public-onboarding posture as the POST (re-gated
+ * server-side once the appliance is claimed). Throws on a non-2xx so the step
+ * surfaces the inline error and does NOT advance — a 409 name-taken on the new
+ * name carries `code: "BOX_NAME_TAKEN"` (+ suggestions) so the picker can show
+ * the conflict.
+ */
+export async function renameBox(name: string): Promise<BoxNameRenameResult> {
+  const res = await fetch(`${BASE}/api/setup/box-name/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwNetworkWriteError(body, res.status, "Failed to rename box");
+  }
   return res.json();
 }
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---

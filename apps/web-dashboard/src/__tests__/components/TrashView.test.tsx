@@ -81,13 +81,13 @@ describe("<TrashView> empty-trash migration to <ConfirmDialog>", () => {
     // The confirm button inside the dialog also reads "Empty trash".
     // It's distinguished from the header trigger because, while the
     // dialog is open, two buttons with that name exist — the dialog
-    // confirm is the destructive one (bg-system-red).
+    // confirm is the destructive one (`btn danger`, WARP-1079).
     const buttons = screen.getAllByRole("button", { name: /empty trash/i });
-    // Header trigger uses `text-system-red` + `hover:bg-system-red/10`; the
-    // ConfirmDialog confirm uses the solid `bg-system-red` background.
-    // Match the solid-bg one without picking up the hover variant.
+    // Header trigger uses the red text/hover-tint idiom; the ConfirmDialog
+    // confirm uses the shell's solid `btn danger` fill. Match the bare
+    // `danger` token, which only the dialog confirm carries.
     const confirmBtn = buttons.find((b) =>
-      /(^|\s)bg-system-red(\s|$)/.test(b.className),
+      /(^|\s)danger(\s|$)/.test(b.className),
     );
     expect(confirmBtn).toBeTruthy();
     fireEvent.click(confirmBtn!);
