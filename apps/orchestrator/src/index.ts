@@ -437,8 +437,8 @@ async function main() {
   // not). Multi-instance deploys lock on `droplet:scene-schedule-ticker`
   // so only one replica fires each due schedule.
   const sceneMatterDispatcher: MatterDispatcher = {
-    sendCommand: (nodeId, command, args) =>
-      sendMatterCommand(nodeId, command, args),
+    sendCommand: (nodeId, command, actor, args) =>
+      sendMatterCommand(nodeId, command, actor, args),
   };
   cronRuntime.scheduleInterval(
     60_000,
