@@ -157,25 +157,27 @@ describe("<Dialog> primitive", () => {
     });
   });
 
-  it("uses bg-black/50 + backdrop-blur-sm for centered placement (gold-standard parity)", () => {
-    // The audit's gold-standard backdrop is `bg-black/50 backdrop-blur-sm`
-    // (see users/page.tsx). Centered modals must match so the dashboard's
-    // modal surfaces read as one consistent weight. WARP-289 UX fold-in.
+  it("uses the indigo var(--scrim) + backdrop-blur-sm for centered placement (WARP-1079 parity)", () => {
+    // WARP-1079: every modal backdrop is the shell scrim token, and the
+    // backdrop carries the `droplet-shell` scope class so the token (and
+    // everything inside the portal) resolves on shell AND non-shell pages.
     render(<Harness initiallyOpen />);
     const dialog = screen.getByRole("dialog");
     const backdrop = dialog.parentElement!;
-    expect(backdrop.className).toContain("bg-black/50");
+    expect(backdrop.style.background).toBe("var(--scrim)");
+    expect(backdrop.className).toContain("droplet-shell");
     expect(backdrop.className).toContain("backdrop-blur-sm");
   });
 
-  it("uses bg-black/30 with NO blur for side placement (pre-existing side-panel convention)", () => {
-    // Side panels use a lighter scrim and no blur so the user can still
-    // scan the underlying list while the panel is open. Keep this
-    // separate from the centered case.
+  it("uses var(--scrim) with NO blur for side placement (pre-existing side-panel convention)", () => {
+    // Side panels stay blur-free so the user can still scan the
+    // underlying list while the panel is open. Keep this separate from
+    // the centered case.
     render(<Harness initiallyOpen placement="right" />);
     const dialog = screen.getByRole("dialog");
     const backdrop = dialog.parentElement!;
-    expect(backdrop.className).toContain("bg-black/30");
+    expect(backdrop.style.background).toBe("var(--scrim)");
+    expect(backdrop.className).toContain("droplet-shell");
     expect(backdrop.className).not.toContain("backdrop-blur-sm");
   });
 

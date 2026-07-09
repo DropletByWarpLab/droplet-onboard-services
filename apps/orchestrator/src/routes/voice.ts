@@ -33,8 +33,22 @@ const READ_TIMEOUT_MS = 10_000;
 /** `/voice/say` blocks for Piper synthesis + full playback duration. */
 const SAY_TIMEOUT_MS = 30_000;
 
+/**
+ * WARP-1055 — `/audio/measure` blocks for the requested capture window
+ * (up to 30 s) and `/audio/echo-check` for playback + simultaneous
+ * capture. Generous so a slow ALSA open on the box never reads as
+ * "voice unavailable" mid-wizard.
+ */
+const MEASURE_TIMEOUT_MS = 45_000;
+const ECHO_CHECK_TIMEOUT_MS = 30_000;
+
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
+
+/** Mirrors voice-io's MeasureRequest bounds (main.py). */
+const MEASURE_KINDS = new Set(["noise_floor", "speech_peak"]);
+const MEASURE_SECONDS_MIN = 1;
+const MEASURE_SECONDS_MAX = 30;
 
 function voiceIoBaseUrl(): string {
   // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
@@ -121,6 +135,55 @@ export function createVoiceRouter(): Router {
     // box-configured default; the wizard's speaker test has no business
     // switching voices.
     await proxy(res, "POST", "/voice/say", { text }, SAY_TIMEOUT_MS);
+  });
+
+  // ── WARP-1055: calibration wizard measurement + persistence ──
+
+  router.post("/voice/measure", guard, async (req, res) => {
+    const kind: unknown = req.body?.kind;
+    if (typeof kind !== "string" || !MEASURE_KINDS.has(kind)) {
+      res.status(400).json({ error: "invalid_kind" });
+      return;
+    }
+    const seconds: unknown = req.body?.seconds;
+    if (seconds !== undefined) {
+      if (
+        typeof seconds !== "number" ||
+        !Number.isFinite(seconds) ||
+        seconds < MEASURE_SECONDS_MIN ||
+        seconds > MEASURE_SECONDS_MAX
+      ) {
+        res.status(400).json({ error: "invalid_seconds" });
+        return;
+      }
+    }
+    // Only the validated fields are forwarded; when `seconds` is absent
+    // voice-io applies its own per-kind default.
+    const body: { kind: string; seconds?: number } = { kind };
+    if (typeof seconds === "number") body.seconds = seconds;
+    await proxy(res, "POST", "/audio/measure", body, MEASURE_TIMEOUT_MS);
+  });
+
+  router.post("/voice/echo-check", guard, async (_req, res) => {
+    // Fully automatic on the box side (play a tone + listen for it) —
+    // no client-controlled parameters to validate or forward.
+    await proxy(res, "POST", "/audio/echo-check", {}, ECHO_CHECK_TIMEOUT_MS);
+  });
+
+  router.get("/voice/calibration", guard, async (_req, res) => {
+    await proxy(res, "GET", "/voice/calibration");
+  });
+
+  router.post("/voice/calibration", guard, async (req, res) => {
+    // Shape validation belongs to voice-io's pydantic model (it 422s
+    // with field-level detail we relay verbatim); here we only reject
+    // bodies that aren't JSON objects at all.
+    const body: unknown = req.body;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: "invalid_calibration" });
+      return;
+    }
+    await proxy(res, "POST", "/voice/calibration", body);
   });
 
   return router;

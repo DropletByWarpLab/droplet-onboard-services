@@ -44,6 +44,12 @@ const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
 const MAX_PAIR_CLAIM_PER_IP_PER_HOUR = 20;
+// WARP-1030: brute-force budget for the unauthenticated Basic self-revoke
+// path. A legitimate client revokes once, so both budgets are generous;
+// the per-target bucket also caps a rotating-IP attacker guessing one
+// device's app password.
+const MAX_SELF_REVOKE_PER_IP_PER_HOUR = 20;
+const MAX_SELF_REVOKE_PER_TARGET_PER_HOUR = 10;
 
 const platformSchema = z.enum([
   "macos",
@@ -631,6 +637,29 @@ export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
       const match = /^Basic\s+(.+)$/i.exec(req.headers.authorization ?? "");
       if (!match || req.cookies?.[SESSION_COOKIE_NAME]) {
         next();
+        return;
+      }
+
+      // WARP-1030: this branch is an unauthenticated credential check —
+      // in principle an app-password oracle — so brute-force protection
+      // sits in front of the verify. Every engaged attempt counts against
+      // BOTH buckets, success or failure: per-IP catches one host
+      // spraying targets, per-target catches a rotating-IP attacker
+      // hammering one device id. Same IP derivation as /pair/claim.
+      const ip =
+        (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ??
+        req.ip ??
+        "unknown";
+      const byIp = await rateLimit(
+        `revoke:ip:${ip}`,
+        MAX_SELF_REVOKE_PER_IP_PER_HOUR,
+      );
+      const byTarget = await rateLimit(
+        `revoke:target:${req.params.id}`,
+        MAX_SELF_REVOKE_PER_TARGET_PER_HOUR,
+      );
+      if (!byIp.allowed || !byTarget.allowed) {
+        res.status(429).json({ error: "Too many revoke attempts" });
         return;
       }
 

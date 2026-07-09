@@ -29,6 +29,11 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
+import { getPersona, composePersonaBlock } from "../services/persona.service.js";
+import {
+  degradeToFit,
+  type RequestSizeParts,
+} from "../services/context-budget.service.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -304,12 +309,30 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
  * hallucinated-tool guard (and, after 3 guard-only iterations, a failed
  * turn). `allowed` undefined = privileged caller = every tool.
  */
-function buildBaseSystemPrompt(allowed: string[] | undefined): string {
+function buildBaseSystemPrompt(
+  allowed: string[] | undefined,
+  /**
+   * WARP-1118 — the composed personality block (persona.service.ts). Spliced
+   * in RIGHT AFTER identity and BEFORE tool guidance (§7.2): personality
+   * refines HOW Droplet talks without outranking the identity layer's
+   * safety/honesty rules (the block itself carries that reminder as its
+   * prefix). Read fresh from Prisma each request by the caller; passed in
+   * here so this stays a pure string builder. "" (or undefined) = no persona
+   * block this turn — e.g. the estimator degraded it away under overflow, or
+   * the fresh read failed (fail-open, same posture as the memory block).
+   */
+  personaBlock?: string,
+): string {
   const can = (name: string) => !allowed || allowed.includes(name);
   // Identity leads: the full "who you are / what this box does" block
   // from data/droplet-identity.md (fail-open to the legacy one-liner),
   // shared by every surface — dashboard, voice, external MCP clients.
   const lines = [loadIdentityPrompt()];
+  // Personality is appended immediately after identity, before tool
+  // guidance — one injection owner for the persona block on this path.
+  if (personaBlock && personaBlock.length > 0) {
+    lines.push("", personaBlock);
+  }
   const guidance: string[] = [];
   if (can("search_content")) {
     guidance.push(
@@ -1104,9 +1127,83 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // eslint-disable-next-line no-console
           console.warn("[llm/chat] memory-fact load failed:", err);
         }
+
+        // WARP-1118 — compose the personality block fresh from Prisma each
+        // request (§7.2: single-row read, no cache to invalidate). Fail-open
+        // to no persona block on any error, same posture as the memory block.
+        let personaBlock = "";
+        try {
+          personaBlock = composePersonaBlock(await getPersona(prisma));
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] persona load failed:", err);
+        }
+
+        // WARP-1118 §10 — the context-budget gate. Estimate the WHOLE
+        // assembled request (identity + persona + [business, Phase 2] +
+        // tool guidance + memory facts + serialized tools[] + the pins /
+        // attachments / history already spliced into agentMessages) against
+        // OLLAMA_CONTEXT_LENGTH − OUTPUT_RESERVE and drop deterministically:
+        // business first (none yet), then persona, before the request can
+        // hit the WARP-854 overflow. Identity + tool guidance are never
+        // dropped. At the shipping 16384 window nothing normally drops — this
+        // is defense-in-depth. `buildBaseSystemPrompt(allowedForUser, "")`
+        // gives us the identity+guidance chars without a persona block for the
+        // estimate; the guidance is folded into identityBlock here since both
+        // are never-dropped fixed blocks.
+        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
+        // Serialize the effective tools[] the same way llm-agent.service.ts
+        // does, so the estimate reflects what the model actually receives.
+        const effectiveTools = allowedForUser
+          ? Array.from(TOOLS.values()).filter((t) =>
+              allowedForUser!.includes(t.name),
+            )
+          : Array.from(TOOLS.values());
+        const toolSchemasJson = JSON.stringify(
+          effectiveTools.map((t) => ({
+            type: "function" as const,
+            function: {
+              name: t.name,
+              description: t.description,
+              parameters: t.inputSchema,
+            },
+          })),
+        );
+        // Everything already spliced onto agentMessages (pins, attachments,
+        // history) counts toward the window; serialize it as one blob.
+        const assembledText = agentMessages
+          .map((m) => contentToText(m.content))
+          .join("\n");
+        const sizeParts: RequestSizeParts = {
+          identityBlock: identityAndGuidance,
+          personaBlock,
+          businessBlock: "", // Phase 2 — no business block wired yet.
+          toolGuidance: "", // folded into identityBlock above.
+          memoryFactsBlock: memoryBlock,
+          toolSchemasJson,
+          pinsText: "",
+          attachmentsText: "",
+          historyText: assembledText,
+        };
+        const degraded = degradeToFit(sizeParts, {
+          contextWindow: config.OLLAMA_CONTEXT_LENGTH,
+          warn: (event) => {
+            // Structured warn on every drop (§10) so an overflow-driven
+            // degradation is diagnosable in the box logs.
+            // eslint-disable-next-line no-console
+            console.warn("[llm/chat] context-budget degradation", {
+              conversationId: chatReq.conversationId ?? null,
+              role: role ?? null,
+              ...event,
+            });
+          },
+        });
+
         const baseSystemMessage: ChatMessage = {
           role: "system",
-          content: buildBaseSystemPrompt(allowedForUser) + memoryBlock,
+          content:
+            buildBaseSystemPrompt(allowedForUser, degraded.personaBlock) +
+            memoryBlock,
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }

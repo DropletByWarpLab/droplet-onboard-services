@@ -22,6 +22,7 @@ import {
   LogOut,
   Mail,
   MessageSquare,
+  Mic,
   MoreHorizontal,
   Network,
   ScrollText,
@@ -165,6 +166,10 @@ const NAV_GROUPS: NavGroup[] = [
       // WARP-302: "Devices" uses Cpu (not Home) so it doesn't visually
       // collide with the Home tab's LayoutDashboard glyph at thumb distance.
       { href: "/devices", label: "Devices", icon: Cpu },
+      // WARP-1055: mic health + guided calibration. A peer surface, not
+      // a Settings subpage — calibration is living, health-bearing state
+      // (design brief §2). Ordered Cameras · Network · Devices · Voice.
+      { href: "/voice", label: "Voice", icon: Mic },
       { href: "/remote-access", label: "Remote Access", icon: Globe },
       // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
       // provider #1 (the Patterson dental PMS Droplet reads directly over its

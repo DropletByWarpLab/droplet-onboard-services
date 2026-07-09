@@ -64,15 +64,15 @@ describe("<ConfirmDialog> primitive", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
   });
 
-  it("destructive variant uses bg-system-red on the confirm button", () => {
+  it("destructive variant uses the shell's `btn danger` on the confirm button", () => {
     render(
       <Harness confirmFn={vi.fn().mockResolvedValue(undefined)} onCancelSpy={vi.fn()} />,
     );
     const confirm = screen.getByRole("button", { name: "Revoke" });
-    expect(confirm.className).toMatch(/bg-system-red/);
+    expect(confirm.className).toMatch(/(^|\s)btn danger(\s|$)/);
   });
 
-  it("neutral variant uses dp-btn-primary on the confirm button", () => {
+  it("neutral variant uses the shell's `btn primary` on the confirm button", () => {
     render(
       <Harness
         variant="neutral"
@@ -81,8 +81,8 @@ describe("<ConfirmDialog> primitive", () => {
       />,
     );
     const confirm = screen.getByRole("button", { name: "Revoke" });
-    expect(confirm.className).toMatch(/dp-btn-primary/);
-    expect(confirm.className).not.toMatch(/bg-system-red/);
+    expect(confirm.className).toMatch(/(^|\s)btn primary(\s|$)/);
+    expect(confirm.className).not.toMatch(/(^|\s)danger(\s|$)/);
   });
 
   it("click confirm resolves: calls onConfirm then onCancel (closes)", async () => {
