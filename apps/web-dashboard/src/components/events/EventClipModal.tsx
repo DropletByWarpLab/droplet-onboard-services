@@ -140,7 +140,9 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
   const startedAt = new Date(event.startTime * 1000);
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl">
+    // `flush`: sectioned layout — the full-width header divider + sections
+    // own their padding (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl" flush>
       <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
         <h2 id={headingId} className="type-headline text-label-primary capitalize truncate">
           {event.label}

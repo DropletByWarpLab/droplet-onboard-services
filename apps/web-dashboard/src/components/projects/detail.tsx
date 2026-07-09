@@ -428,7 +428,8 @@ export function DetailDrawer({
 }): JSX.Element {
   const titleId = useId();
   return (
-    <Dialog open onClose={onClose} placement="right" maxWidth="lg" labelledBy={titleId}>
+    // `flush`: the scoped `.pm-dialog-body.is-panel` owns the inset (WARP-1153).
+    <Dialog open onClose={onClose} placement="right" maxWidth="lg" labelledBy={titleId} flush>
       <div className="pm-scope pm-dialog-body is-panel">
         <div
           className="pm-row"

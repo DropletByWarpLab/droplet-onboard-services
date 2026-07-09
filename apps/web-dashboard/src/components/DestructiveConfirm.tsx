@@ -147,7 +147,8 @@ export function DestructiveConfirm({
       // is mid-way through typing into — require an explicit Cancel/Escape.
       closeOnBackdrop={false}
     >
-      <div className="p-6">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div>
         {/* Header: red warning mark + question title */}
         <div className="flex items-start gap-3">
           <span

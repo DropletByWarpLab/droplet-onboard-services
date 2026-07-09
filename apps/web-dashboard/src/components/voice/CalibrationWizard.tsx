@@ -722,6 +722,9 @@ export function CalibrationWizard({
       labelledBy="voice-wizard-title"
       maxWidth="2xl"
       initialFocusRef={closeRef}
+      // Sectioned scoped design (WARP-1055 brief §4) — `voice.css` owns the
+      // wizard's header/body insets (WARP-1153).
+      flush
     >
       <div className="voice-wizard">
         <div className="vwiz-h">

@@ -524,6 +524,9 @@ export function Sidebar() {
         triggerRef={moreTriggerRef}
         labelledBy={moreHeadingId}
         placement="right"
+        // Sectioned full-height drawer — sections own their padding
+        // (WARP-1153).
+        flush
       >
         <div className="flex flex-col h-full">
           <div className="flex items-center justify-between px-5 h-16 border-b border-separator">

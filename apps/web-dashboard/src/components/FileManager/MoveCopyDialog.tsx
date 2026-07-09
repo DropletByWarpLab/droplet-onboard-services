@@ -404,7 +404,9 @@ function TreeNodeView({
         ) : (
           <Folder size={14} className={selected ? "text-accent" : "text-system-blue"} />
         )}
-        <span className="type-footnote truncate flex-1">{node.name}</span>
+        {/* WARP-1153: min-w-0 lets the flex item shrink so long folder names
+            truncate instead of growing a horizontal scrollbar in the tree. */}
+        <span className="type-footnote truncate flex-1 min-w-0">{node.name}</span>
         {node.loading && (
           <span className="type-caption-2 text-label-tertiary">…</span>
         )}
