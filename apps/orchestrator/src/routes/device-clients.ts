@@ -107,6 +107,19 @@ async function rateLimit(
 }
 
 /**
+ * WARP-1138: caller IP for per-IP rate-limit bucket keys. Mirrors auth.ts
+ * callerIpFromReq (WARP-579 standard) — uses Express's proxy-aware `req.ip`
+ * (`trust proxy` is set in app.ts, so behind the nginx hop this resolves the
+ * real client). NEVER the leftmost `X-Forwarded-For` entry: that value is
+ * client-controlled, so keying the bucket on it lets an attacker mint a
+ * fresh bucket per request by rotating the header (and an empty header
+ * collapses everyone into one shared bucket).
+ */
+function callerIp(req: Request): string {
+  return req.ip ?? req.socket?.remoteAddress ?? "unknown";
+}
+
+/**
  * The box's mDNS hostname. A native client reaching the appliance over Bonjour/
  * Avahi uses this host, and it is in the TLS cert SANs (see
  * scripts/trust-droplet-cert.sh), so it is a legitimate served host even though
@@ -266,7 +279,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // already validated the caller's token via getUser/getToken.
   router.post("/devices/pair/claim", async (req, res, next) => {
     try {
-      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ?? req.ip ?? "unknown";
+      const ip = callerIp(req);
       const rl = await rateLimit(`pair:claim:${ip}`, MAX_PAIR_CLAIM_PER_IP_PER_HOUR);
       if (!rl.allowed) {
         res.status(429).json({ error: "Too many claim attempts from this IP" });
@@ -646,10 +659,7 @@ export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
       // BOTH buckets, success or failure: per-IP catches one host
       // spraying targets, per-target catches a rotating-IP attacker
       // hammering one device id. Same IP derivation as /pair/claim.
-      const ip =
-        (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ??
-        req.ip ??
-        "unknown";
+      const ip = callerIp(req);
       const byIp = await rateLimit(
         `revoke:ip:${ip}`,
         MAX_SELF_REVOKE_PER_IP_PER_HOUR,
