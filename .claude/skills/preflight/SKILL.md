@@ -56,8 +56,13 @@ the table. Its `bin/pip` shebang is stale: always
 missing from that venv:
 
 ```bash
-services/ai-gateway/.venv/bin/python3 -m pip install --only-binary=:all: APScheduler==3.10.4 cryptography==44.0.0
+services/ai-gateway/.venv/bin/python3 -m pip install --only-binary=:all: APScheduler==3.10.4 cryptography==49.0.0
 ```
+
+One more 3.14 quirk: litellm releases currently cap
+`requires-python <3.14`, so installing/upgrading litellm in this venv
+needs `--ignore-requires-python` (CI and the Docker images run 3.12
+and resolve normally).
 
 ## 4. Unexpected failure? Stash/replay before chasing
 
