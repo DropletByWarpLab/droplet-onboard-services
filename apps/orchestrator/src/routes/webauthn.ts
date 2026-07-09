@@ -67,10 +67,15 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("webauthn-routes");
 
-/** Caller IP for audit rows — mirrors auth.ts callerIpFromReq. */
+/**
+ * WARP-1160: caller IP for audit rows. Mirrors auth.ts callerIpFromReq (the
+ * WARP-579 standard) — uses Express's proxy-aware `req.ip` (`trust proxy` is
+ * set in app.ts, so behind the nginx hop this resolves the real client).
+ * NEVER the leftmost `X-Forwarded-For` entry: that value is client-controlled,
+ * so every WebAuthn audit row would record whatever IP the caller chose to
+ * claim.
+ */
 function callerIp(req: Request): string | null {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0]!.trim();
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
