@@ -53,6 +53,36 @@ describe("module registry — catalog integrity", () => {
   });
 });
 
+describe("route prefixes — must match a real router mount", () => {
+  it("every non-core module's prefixes are under /api/", () => {
+    // All orchestrator routers mount at "/api"; a prefix that doesn't start
+    // with "/api/" can never match a request path, so the gate silently
+    // no-ops (the module is un-gated). Guards findings on docs (was
+    // "/files/docs") and any future drift.
+    for (const m of MODULES) {
+      if (m.core) continue;
+      for (const p of m.routePrefixes) {
+        expect(p.startsWith("/api/"), `${m.id} prefix ${p} is not under /api/`).toBe(true);
+      }
+    }
+  });
+
+  it("prefixes point at the routers they claim to gate", () => {
+    // Canonical mounts verified against the live routers:
+    //   knowledge → /api/files/knowledge/* (files-knowledge.ts)
+    //   docs      → /api/files/docs/status (files.ts)
+    //   calendar  → /api/calendar/* (calendar.ts) — NOT /api/pm/events
+    //   smart_home→ /api/matter/* only (matter.ts); /api/devices is the
+    //               device registry/pairing/push surface, never gated here.
+    const prefixes = (id: string) => MODULE_BY_ID.get(id as never)!.routePrefixes;
+    expect(prefixes("knowledge")).toEqual(["/api/files/knowledge"]);
+    expect(prefixes("docs")).toEqual(["/api/files/docs"]);
+    expect(prefixes("calendar")).toEqual(["/api/calendar"]);
+    expect(prefixes("smart_home")).toEqual(["/api/matter"]);
+    expect(prefixes("smart_home")).not.toContain("/api/devices");
+  });
+});
+
 describe("business-type presets", () => {
   it("every preset references valid, non-core module ids", () => {
     for (const bt of BUSINESS_TYPES) {

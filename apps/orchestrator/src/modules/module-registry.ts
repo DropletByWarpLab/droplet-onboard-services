@@ -70,7 +70,7 @@ export const MODULES: readonly ModuleDef[] = [
   {
     id: "knowledge", label: "Knowledge",
     description: "Retrieval over your indexed files and notes (RAG).",
-    category: "workspace", routePrefixes: ["/api/files-knowledge"], navHrefs: ["/knowledge"],
+    category: "workspace", routePrefixes: ["/api/files/knowledge"], navHrefs: ["/knowledge"],
     toolDomains: ["knowledge"], core: false, defaultEnabled: true,
     available: (c) => isSet(c.FILE_INDEXER_URL),
   },
@@ -84,7 +84,7 @@ export const MODULES: readonly ModuleDef[] = [
   {
     id: "docs", label: "Documents",
     description: "In-browser document editing / co-authoring (OnlyOffice).",
-    category: "workspace", routePrefixes: ["/files/docs"], navHrefs: [],
+    category: "workspace", routePrefixes: ["/api/files/docs"], navHrefs: [],
     toolDomains: [], core: false, defaultEnabled: false,
     available: (c) => isTruthy(c.DOCS_ENABLED) && isSet(c.DOCS_INTERNAL_URL),
   },
@@ -98,7 +98,7 @@ export const MODULES: readonly ModuleDef[] = [
   {
     id: "calendar", label: "Calendar",
     description: "Scheduling and events.",
-    category: "workspace", routePrefixes: ["/api/pm/events"], navHrefs: ["/calendar"],
+    category: "workspace", routePrefixes: ["/api/calendar"], navHrefs: ["/calendar"],
     toolDomains: ["calendar"], core: false, defaultEnabled: true,
     available: () => true, // native to the orchestrator
   },
@@ -126,7 +126,13 @@ export const MODULES: readonly ModuleDef[] = [
   {
     id: "smart_home", label: "Devices",
     description: "Smart-home devices over Matter.",
-    category: "operations", routePrefixes: ["/api/matter", "/api/devices"], navHrefs: ["/devices"],
+    // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
+    // NOT gated here: it hosts the appliance/fleet device registry, device
+    // pairing (/api/devices/pair*), push-notification subscribe
+    // (/api/devices/push/*), and network device-clients (/api/devices/clients*)
+    // — none of which are smart-home. Toggling this module off must never 404
+    // pairing or push app-wide. Matter devices live under /api/matter/devices.
+    category: "operations", routePrefixes: ["/api/matter"], navHrefs: ["/devices"],
     toolDomains: ["matter", "devices"], core: false, defaultEnabled: false,
     available: (c) => isSet(c.DROPLET_MATTER_SERVICE_URL),
   },
