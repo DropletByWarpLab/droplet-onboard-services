@@ -327,4 +327,36 @@ describe("DrivesPanel — rename a storage pool (WARP-1048)", () => {
       displayName: "Family Vault",
     });
   });
+
+  // WARP-1141 — a failed pool rename must surface a visible, action-naming
+  // error and roll the optimistic name back; a role-blocked save (403) gets
+  // the permission copy, never the misleading files-load fallback.
+  it("rolls back and toasts the permission copy when the save is role-blocked (403)", async () => {
+    updatePoolLabelMock.mockRejectedValue(
+      Object.assign(new Error("Forbidden: role not permitted"), { status: 403 }),
+    );
+    usePoolsMock.mockReturnValue({
+      pools: [{ ...resyncingPool, displayName: "Vault" }],
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    render(<DrivesPanel />);
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    fireEvent.click(within(poolsList).getByRole("button", { name: /rename/i }));
+    fireEvent.change(within(poolsList).getByRole("textbox", { name: /pool name/i }), {
+      target: { value: "Family Vault" },
+    });
+    fireEvent.click(within(poolsList).getByRole("button", { name: /save/i }));
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        expect.stringMatching(/owner or an admin/i),
+        "error",
+      ),
+    );
+    // The optimistic "Family Vault" is rolled back to the persisted name.
+    expect(within(poolsList).getByText("Vault")).toBeInTheDocument();
+    expect(within(poolsList).queryByText("Family Vault")).not.toBeInTheDocument();
+  });
 });

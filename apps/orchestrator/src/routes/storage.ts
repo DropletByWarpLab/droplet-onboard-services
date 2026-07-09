@@ -13,10 +13,12 @@ import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
 
-// Drive labels are device-wide config that any user (incl. family
-// accounts) shares, so PATCH is admin-only — mirrors the gate around
-// other network-wide config routes. Family users can still see the
-// labels via the existing GET routes; they just can't change them.
+// Rescan / eject are owner+admin device-control actions. Family users can
+// still see drives via the existing GET routes; they just can't poke the
+// hardware. (WARP-1141: the rename PATCHes now use the canonical
+// requireRole("owner", "admin") middleware instead of this ad-hoc check, so
+// denials there get the WARP-237 mandatory-emit ACL audit row — an on-box
+// blocked rename is diagnosable from the activity log instead of vanishing.)
 function isAdmin(req: Request): boolean {
   const role = req.user?.role;
   return role === "owner" || role === "admin";
@@ -482,12 +484,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    *
    * Mirrors the shape of `PATCH /network/devices/:mac` from ADR-002
    * Phase 1 device intelligence.
+   *
+   * Owner/admin only via the canonical requireRole guard (WARP-1141) — the
+   * label is device-wide config any family account shares. requireRole (not
+   * the local isAdmin helper) so a denial emits the WARP-237 ACL audit row,
+   * matching every other owner-level storage action in this file.
    */
-  router.patch("/storage/drives/:uuid", async (req, res, next) => {
+  router.patch("/storage/drives/:uuid", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        return res.status(403).json({ error: "Admin access required" });
-      }
       const { uuid } = req.params;
       // FAT/exFAT UUIDs sometimes include `:` (rare on Linux blkid output,
       // common on macOS/Windows-formatted disks); accept it alongside the
@@ -715,8 +719,9 @@ export function createStorageRouter(prisma: PrismaClient): Router {
 
   /**
    * PATCH /api/storage/pools/:device — rename (+ annotate) a storage pool
-   * (WARP-1048). Admin-only, mirroring PATCH /storage/drives/:uuid: the pool
-   * name is device-wide config any family account shares, so only owner/admin
+   * (WARP-1048). Owner/admin only via requireRole (WARP-1141 — audited
+   * denials), mirroring PATCH /storage/drives/:uuid: the pool name is
+   * device-wide config any family account shares, so only owner/admin
    * may change it (family users still see it via GET). Non-destructive — this
    * only writes the owner's chosen label to the StoragePool row; it never
    * touches mdadm.
@@ -727,11 +732,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * bridge can't confirm the array exists, we refuse rather than fabricate a
    * row for a pool that isn't there.
    */
-  router.patch("/storage/pools/:device", async (req, res, next) => {
+  router.patch("/storage/pools/:device", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        return res.status(403).json({ error: "Admin access required" });
-      }
       const { device } = req.params;
       if (!validMdDevice(device)) {
         return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
