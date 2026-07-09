@@ -5032,6 +5032,26 @@ export async function fetchCapabilities(): Promise<AdminCapabilities> {
   return res.json();
 }
 
+// --- Module capabilities (nav-gating for user-facing modules) ---
+
+export interface AppCapabilities {
+  /** The Projects (native PM, ADR-026) surface is enabled on this Droplet. */
+  projects: boolean;
+}
+
+/**
+ * Probe which user-facing modules this Droplet is serving (WARP-1154/1155).
+ * Unlike `/api/admin/capabilities` this is readable by EVERY authenticated
+ * role — family/guest see the Projects nav entry too, so its gate can't live
+ * behind an admin-only probe. The consuming hook fails OPEN (module shown):
+ * a surface only hides when the orchestrator explicitly answers `false`.
+ */
+export async function fetchAppCapabilities(): Promise<AppCapabilities> {
+  const res = await authFetch(`${BASE}/api/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch app capabilities: ${res.status}`);
+  return res.json();
+}
+
 // --- WARP-825: Settings Danger Zone — factory reset ---
 
 /** Lifecycle of a factory-reset job, mirroring the orchestrator ResetJobStatus

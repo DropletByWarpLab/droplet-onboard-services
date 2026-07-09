@@ -20,6 +20,7 @@ import { useActivity, useComments, useSubIssues, useProjectLabels, pmActions } f
 import type { PmWorkItem } from "./types";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { translateError } from "@/lib/friendly-errors";
 
 function PropRow({
   icon,
@@ -86,7 +87,7 @@ function LabelsEditor({
       onChanged();
     } catch (e) {
       setSelected(prev); // roll back the optimistic flip
-      toast(e instanceof Error ? e.message : "Couldn't update labels", "error");
+      toast(translateError(e, "projects"), "error");
     } finally {
       setBusy(false);
     }

@@ -122,23 +122,39 @@ function ProjectCard({ p, onOpen }: { p: PmProject; onOpen: (p: PmProject) => vo
 }
 
 /** Map a projects-fetch error to recoverable copy + tone. An auth failure
- *  (401/403) reads as a session problem; a server fault (any other HTTP status)
- *  stays alarmingly red; a network/timeout blip (no status on the error) gets a
- *  calmer tone and connection-oriented copy. Mirrors the Try-again affordance in
- *  app/error.tsx — the user is never left at a dead end. */
-function describeError(error: Error & { status?: number }): {
+ *  (401/403) reads as a session problem; a disabled Projects module (the
+ *  orchestrator's `module_disabled` code, WARP-1154) is a PERMANENT condition
+ *  — calm tone, honest copy, and `retryable: false` so we never dangle a Retry
+ *  button that can't help; a server fault (any other HTTP status) stays
+ *  alarmingly red; a network/timeout blip (no status on the error) gets a
+ *  calmer tone and connection-oriented copy. Mirrors the Try-again affordance
+ *  in app/error.tsx — the user is never left at a dead end. */
+function describeError(error: Error & { status?: number; code?: string }): {
   icon: string;
   tone?: "error";
   heading: string;
   body: string;
+  retryable: boolean;
 } {
   const status = error.status;
+  if (error.code === "module_disabled") {
+    // The page is normally gated off the /api/capabilities probe before any
+    // PM request fires; this branch is defense in depth for a stale probe or
+    // a direct URL hit racing a toggle. Never "server error, try again".
+    return {
+      icon: "board",
+      heading: "Projects isn't enabled on this Droplet.",
+      body: "An owner or admin can turn it on.",
+      retryable: false,
+    };
+  }
   if (status === 401 || status === 403) {
     return {
       icon: "alert",
       tone: "error",
       heading: "You're signed out.",
       body: "Your session may have expired — sign in again.",
+      retryable: true,
     };
   }
   if (typeof status === "number") {
@@ -147,6 +163,7 @@ function describeError(error: Error & { status?: number }): {
       tone: "error",
       heading: "Couldn't load your projects.",
       body: "The appliance hit a server error. Try again in a moment.",
+      retryable: true,
     };
   }
   // No HTTP status → fetch never reached the server (network / timeout).
@@ -154,6 +171,7 @@ function describeError(error: Error & { status?: number }): {
     icon: "refresh",
     heading: "Couldn't reach the appliance.",
     body: "Check your connection and try again.",
+    retryable: true,
   };
 }
 
@@ -172,7 +190,7 @@ export function IndexView({
   projects: PmProject[] | undefined;
   summary: PmSummary | undefined;
   loading: boolean;
-  error: (Error & { status?: number }) | boolean | undefined;
+  error: (Error & { status?: number; code?: string }) | boolean | undefined;
   readOnly: boolean;
   showArchived: boolean;
   onToggleArchived: () => void;
@@ -182,7 +200,7 @@ export function IndexView({
 }): JSX.Element {
   if (error) {
     const e = typeof error === "object" ? error : (new Error("Request failed") as Error & { status?: number });
-    const { icon, tone, heading, body } = describeError(e);
+    const { icon, tone, heading, body, retryable } = describeError(e);
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
         <EmptyBlock
@@ -191,7 +209,7 @@ export function IndexView({
           heading={heading}
           body={body}
           cta={
-            onRetry ? (
+            retryable && onRetry ? (
               <button className="pm-btn primary" type="button" onClick={onRetry}>
                 <PmIcon name="refresh" size={14} />
                 Retry

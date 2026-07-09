@@ -47,6 +47,7 @@ export type ErrorDomain =
   | "network"
   | "vpn"
   | "camera"
+  | "projects"
   | "device"
   | "generic";
 
@@ -78,6 +79,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
   device:
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
+  projects:
+    "We couldn't save that change right now. Try again in a moment.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -304,6 +307,35 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
       "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
+  },
+  // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
+  // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in
+  // pm.service.ts) plus the module gate's `module_disabled`. Anything unmapped
+  // falls through to the domain fallback — the raw code NEVER reaches a toast.
+  projects: {
+    module_disabled:
+      "Projects isn't enabled on this Droplet. An owner or admin can turn it on.",
+    project_not_found:
+      "We couldn't find that project anymore. It may have been deleted.",
+    work_item_not_found:
+      "We couldn't find that item anymore. It may have been deleted.",
+    state_not_found:
+      "That column isn't available anymore. Refresh the board and try again.",
+    invalid_state:
+      "That column isn't available anymore. Refresh the board and try again.",
+    label_not_found:
+      "That label isn't available anymore. Refresh and try again.",
+    invalid_label:
+      "That label isn't available anymore. Refresh and try again.",
+    invalid_parent:
+      "That parent item isn't available anymore. Refresh and try again.",
+    identifier_taken:
+      "That project ID is already in use. Pick a different one.",
+    invalid_request:
+      "Some of those details weren't valid. Check the form and try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   generic: {
     NETWORK:

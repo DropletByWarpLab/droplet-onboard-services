@@ -13,10 +13,12 @@ import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
+import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
+import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
 
 import { PmIcon } from "@/components/projects/icons";
-import { PeopleContext } from "@/components/projects/bits";
+import { PeopleContext, EmptyBlock } from "@/components/projects/bits";
 import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
@@ -53,7 +55,39 @@ function applySavedView(items: PmWorkItem[], view: SavedView, uid: string | unde
   }
 }
 
+/** Honest "module off" state (WARP-1154/1155). Rendered when the orchestrator
+ *  explicitly reports the Projects module disabled — a PERMANENT condition, so
+ *  there is deliberately no Retry affordance and no PM request ever fires.
+ *  Exported for the capability-gating unit test. */
+export function ProjectsDisabled(): JSX.Element {
+  return (
+    <ShellPage icon={<FolderKanban size={15} />} label="Projects" title="Projects">
+      <div className="pm-scope">
+        <div className="pm-page">
+          <div className="pm-surface" style={{ padding: 8 }}>
+            <EmptyBlock
+              icon="board"
+              heading="Projects isn't enabled on this Droplet."
+              body="An owner or admin can turn it on."
+            />
+          </div>
+        </div>
+      </div>
+    </ShellPage>
+  );
+}
+
 export default function ProjectsPage(): JSX.Element {
+  // WARP-1154/1155 — the surface is driven by the orchestrator's explicit
+  // capability flag (GET /api/capabilities), never by catching PM errors.
+  // The hook fails open, so only an explicit `projects: false` lands here
+  // (the sidebar entry is hidden by the same flag; this covers direct URLs).
+  const { projects: projectsEnabled } = useAppCapabilities();
+  if (!projectsEnabled) return <ProjectsDisabled />;
+  return <ProjectsWorkspace />;
+}
+
+function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
@@ -133,7 +167,9 @@ export default function ProjectsPage(): JSX.Element {
         if (up) setDrawer(up);
       }
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Couldn't move the item", "error");
+      // Friendly copy only — the orchestrator's snake_case codes never reach
+      // a toast verbatim (WARP-1154; unknown codes get the domain fallback).
+      toast(translateError(e, "projects"), "error");
     }
   };
 
