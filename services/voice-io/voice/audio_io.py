@@ -147,6 +147,152 @@ def test_tone(
     play(audio, samplerate=samplerate, device=device)
 
 
+def detect_tone(
+    recording: np.ndarray,
+    samplerate: int,
+    frequency_hz: float,
+    band_hz: float = 30.0,
+    margin_db: float = 12.0,
+    min_tone_dbfs: float = -55.0,
+) -> dict[str, float | bool]:
+    """Did a played test tone actually arrive in this capture? (WARP-1055)
+
+    Pure numpy so /audio/echo-check's judgment is unit-testable without
+    hardware. Hann-windowed FFT; the tone's single-sided amplitude is
+    the max bin inside ``frequency_hz ± band_hz``; the floor is the
+    median bin amplitude across the speech band (100 Hz – 4 kHz)
+    OUTSIDE that band, so one loud off-frequency source can't fake a
+    detection. "Heard" requires the tone to clear the floor by
+    ``margin_db`` AND an absolute level gate (``min_tone_dbfs``) — a
+    dead speaker into a silent room yields a huge relative margin over
+    a ~-120 dB floor, which the absolute gate rejects.
+    """
+    x = np.asarray(recording)
+    if x.ndim > 1:
+        x = x[:, 0]
+    if x.dtype == np.int16:
+        x = x.astype(np.float32) / 32768.0
+    else:
+        x = x.astype(np.float32)
+    n = int(x.size)
+    if n == 0:
+        return {"heard": False, "tone_dbfs": -120.0, "floor_dbfs": -120.0}
+
+    window = np.hanning(n)
+    spectrum = np.abs(np.fft.rfft(x * window))
+    # Single-sided sine-amplitude estimate under a Hann window:
+    # |X(f0)| = A·n/4  →  A = 4|X|/n. (Scalloping loss ≤1.4 dB — noise
+    # next to the 12 dB margin.)
+    amp = spectrum * (4.0 / n)
+    freqs = np.fft.rfftfreq(n, 1.0 / samplerate)
+
+    band = (freqs >= frequency_hz - band_hz) & (freqs <= frequency_hz + band_hz)
+    floor_mask = (
+        (freqs >= 100.0)
+        & (freqs <= min(4000.0, samplerate / 2.0))
+        & ~band
+    )
+
+    def _db(a: float) -> float:
+        return 20.0 * float(np.log10(a)) if a > 0.0 else -120.0
+
+    tone_amp = float(amp[band].max()) if band.any() else 0.0
+    floor_amp = float(np.median(amp[floor_mask])) if floor_mask.any() else 0.0
+    tone_dbfs = max(-120.0, _db(tone_amp))
+    floor_dbfs = max(-120.0, _db(floor_amp))
+    heard = tone_dbfs >= min_tone_dbfs and tone_dbfs >= floor_dbfs + margin_db
+    return {
+        "heard": bool(heard),
+        "tone_dbfs": round(tone_dbfs, 1),
+        "floor_dbfs": round(floor_dbfs, 1),
+    }
+
+
+def _resolve_duplex_samplerate(
+    samplerate: int,
+    input_device: int,
+    output_device: int,
+) -> int:
+    """Pick a samplerate the full-duplex pair actually accepts.
+
+    Mirrors play()'s fallback: many USB sinks are 48 kHz-only and
+    reject the voice pipeline's 16 kHz (PortAudioError -9997) — without
+    this, /voice/say works (play() resamples) but the echo check could
+    NEVER pass on such hardware, forcing the user into "Skip this
+    check" forever. Falls back to the output device's default rate
+    (48 kHz when even that can't be queried).
+    """
+    try:
+        _sd.check_output_settings(
+            device=output_device, samplerate=samplerate, channels=1,
+            dtype="float32",
+        )
+        _sd.check_input_settings(
+            device=input_device, samplerate=samplerate, channels=1,
+            dtype="float32",
+        )
+        return samplerate
+    except Exception as exc:
+        try:
+            info = _sd.query_devices(output_device)
+            target = int(info.get("default_samplerate") or 48000)
+        except Exception:
+            target = 48000
+        logger.info(
+            "echo check: device pair rejects %d Hz (%s); using %d Hz",
+            samplerate, exc, target,
+        )
+        return target
+
+
+def echo_check(
+    duration_s: float = 2.0,
+    samplerate: int = 16000,
+    frequency_hz: float = 440.0,
+    input_device: Optional[int] = None,
+    output_device: Optional[int] = None,
+) -> dict[str, float | bool]:
+    """Play the test tone and record SIMULTANEOUSLY, then ask
+    `detect_tone` whether the tone made it back in. /audio/echo-check.
+
+    Uses sounddevice's full-duplex `playrec` so the capture window is
+    guaranteed to overlap the playback — a sequential play-then-record
+    would race the room's decay and mostly measure silence. Mirrors
+    /audio/test-record's mono-capture convention (channels=1). The
+    samplerate falls back to the device pair's supported rate when the
+    requested one is rejected (see _resolve_duplex_samplerate).
+    """
+    _require_sd()
+    if input_device is None:
+        raise AudioUnavailable("no input device resolved")
+    if output_device is None:
+        raise AudioUnavailable("no output device resolved")
+    rate = _resolve_duplex_samplerate(samplerate, input_device, output_device)
+    t = np.linspace(
+        0, duration_s, int(duration_s * rate), endpoint=False,
+    )
+    # Same 0.3 amplitude as test_tone — audible, not a blast.
+    tone = (0.3 * np.sin(2 * np.pi * frequency_hz * t)).astype(np.float32)
+    logger.debug(
+        "echo check: %.2fs %.0f Hz @ %d Hz, in=%s out=%s",
+        duration_s, frequency_hz, rate, input_device, output_device,
+    )
+    # Device pair order per sounddevice: (input, output).
+    recording = _sd.playrec(
+        tone,
+        samplerate=rate,
+        channels=1,
+        dtype="float32",
+        device=(input_device, output_device),
+    )
+    _sd.wait()
+    return detect_tone(
+        np.asarray(recording).reshape(-1),
+        samplerate=rate,
+        frequency_hz=frequency_hz,
+    )
+
+
 def measure_input_level(
     duration_s: float,
     samplerate: int,

@@ -1,7 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Settings as SettingsIcon, Trash2, Users, X } from "lucide-react";
+import Link from "next/link";
+import {
+  ChevronRight,
+  Mic,
+  Plus,
+  Settings as SettingsIcon,
+  Trash2,
+  Users,
+  X,
+} from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
@@ -314,6 +323,31 @@ export default function SettingsPage() {
               }
             />
             <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
+          </div>
+        </div>
+
+        {/* Voice (WARP-1055) — a single link row; calibration and mic
+            health live on the /voice peer surface (design brief §2 —
+            no duplicated controls here). */}
+        <Sect title="Voice" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <Link
+              href="/voice"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Mic size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Voice &amp; microphone</span>
+                <span className="sub">
+                  Mic health, wake word, and guided calibration
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
           </div>
         </div>
 

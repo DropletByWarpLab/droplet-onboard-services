@@ -158,7 +158,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     expect(result).toEqual({ inspected: 1, fired: 1, skipped: 0, disabled: 0 });
     // The due scene fired exactly its actions; the in-future one did not.
     expect(matter.sendCommand).toHaveBeenCalledTimes(1);
-    expect(matter.sendCommand).toHaveBeenCalledWith("n1", "toggle", undefined);
+    expect(matter.sendCommand).toHaveBeenCalledWith("n1", "toggle", { type: "ai", id: null }, undefined);
     const due = prisma.schedules.find((s) => s.id === "due-1");
     // Advanced to next 9 AM UTC (tomorrow, today's 9 AM is the past seed).
     expect(due?.nextFireAt.toISOString()).toBe("2026-05-28T09:00:00.000Z");
@@ -184,8 +184,8 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     await tickSceneSchedules(prisma as any, matter, now);
 
     const calls = (matter.sendCommand as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls[0]).toEqual(["n1", "toggle", undefined]);
-    expect(calls[1]).toEqual(["n2", "set_brightness", { brightness: 40 }]);
+    expect(calls[0]).toEqual(["n1", "toggle", { type: "ai", id: null }, undefined]);
+    expect(calls[1]).toEqual(["n2", "set_brightness", { type: "ai", id: null }, { brightness: 40 }]);
   });
 
   it("disables the schedule when the parent Scene is missing (+ audit)", async () => {

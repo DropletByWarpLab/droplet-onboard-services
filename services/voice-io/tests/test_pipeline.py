@@ -3,7 +3,9 @@
 The contract these tests pin:
 
   - Construction is cheap and produces state='idle'.
-  - start() with no input device → 'no_mic'; worker thread never spawns.
+  - start() with no input device → spawns the supervising loop, which
+    parks in 'no_mic' and keeps re-resolving until a mic appears
+    (WARP-1092); it never gives up before spawning a worker.
   - status() is atomic — readable from any thread without lock contention
     surfacing to the caller.
   - _on_frame() below threshold → no state change, no callback fire.
@@ -214,37 +216,72 @@ class TestConstruction:
 # ────────────────────────────────────────────────────────────────────
 
 class TestLifecycle:
-    def test_start_with_no_mic_transitions_to_no_mic_state(self):
-        # input_device_index=None is the signal that resolve_devices
-        # found no mic. The pipeline must NOT spawn a worker (would
-        # crash on stream.read()) — instead pin state='no_mic' so the
-        # dashboard can surface "plug in a mic" cleanly.
+    def test_start_with_no_mic_spawns_self_heal_loop(self):
+        # WARP-1092 contract change: input_device_index=None at boot (the
+        # reflash race where the ReSpeaker settles AFTER the container
+        # starts) must NOT permanently park voice-io. start() now spawns
+        # the supervising loop, which sits in no_mic and keeps re-resolving
+        # until a mic appears — instead of the old "never spawn a worker".
+        # sd_module=object() is never touched: a None index raises
+        # _DeviceError before any InputStream open, so the loop parks in
+        # no_mic deterministically.
         pipe = WakePipeline(
             detector=MockWakeWordDetector(),
             input_device_index=None,
+            sd_module=object(),
+            resolve_input_device=lambda: None,
+            recover_backoff_initial_s=0.01,
+            recover_backoff_max_s=0.01,
         )
         pipe.start()
-        s = pipe.status()
-        assert s.state == "no_mic"
-        assert s.listening is False
+        try:
+            # The worker thread WAS spawned (old code returned before this).
+            assert pipe._thread is not None and pipe._thread.is_alive()
+            # Converges to no_mic (loading → first _DeviceError → no_mic).
+            deadline = time.time() + 2.0
+            while pipe.status().state != "no_mic" and time.time() < deadline:
+                time.sleep(0.01)
+            assert pipe.status().state == "no_mic"
+            assert pipe.status().listening is False
+        finally:
+            pipe.stop()
+        assert pipe.status().state == "idle"
 
     def test_start_no_mic_idempotent(self):
-        # Calling start() twice when there's no mic must not double-spawn.
+        # Calling start() twice with no mic must not double-spawn the
+        # supervising worker. WARP-1092 makes the loop run even with no mic,
+        # so the idempotency guard has to actually hold (not rely on the old
+        # early-return that never created a thread).
         pipe = WakePipeline(
             detector=MockWakeWordDetector(),
             input_device_index=None,
+            sd_module=object(),
+            resolve_input_device=lambda: None,
+            recover_backoff_initial_s=0.01,
+            recover_backoff_max_s=0.01,
         )
         pipe.start()
-        pipe.start()  # no-op; no worker thread to double up
-        assert pipe.status().state == "no_mic"
+        try:
+            first = pipe._thread
+            assert first is not None and first.is_alive()
+            pipe.start()  # second call is a no-op while the worker is alive
+            assert pipe._thread is first
+        finally:
+            pipe.stop()
 
     def test_stop_is_idempotent(self):
         # Compose's shutdown flow can deliver SIGTERM mid-startup — the
         # second stop() call (from FastAPI's shutdown event handler)
-        # must not raise.
+        # must not raise. Even with no mic, start() now spawns the self-heal
+        # loop (WARP-1092), so stop() has a real worker + probe thread to
+        # tear down; injected sd/resolver keep it off the real audio stack.
         pipe = WakePipeline(
             detector=MockWakeWordDetector(),
             input_device_index=None,
+            sd_module=object(),
+            resolve_input_device=lambda: None,
+            recover_backoff_initial_s=0.01,
+            recover_backoff_max_s=0.01,
         )
         pipe.start()
         pipe.stop()
@@ -1034,6 +1071,51 @@ class TestLoopDeviceRecovery:
         # device=None after re-resolution returned nothing.
         assert fake_sd.opened_devices == [3]
         assert waits["n"] >= 2
+
+    def test_boot_with_no_mic_opens_when_mic_appears(self):
+        # WARP-1092 end-to-end: constructed with input_device_index=None —
+        # the reflash race where voice-io starts before the ReSpeaker's ALSA
+        # nodes settle. The supervising loop must park in no_mic, keep
+        # re-resolving, and open the mic the moment it enumerates — never
+        # open device=None, never give up. (Previously start() bailed before
+        # _loop ran, so this whole recovery never happened.)
+        shutdown = threading.Event()
+        # One successful capture session — reached only once the resolver
+        # hands back a real index; the None-index iterations never open.
+        sessions = [[_silence_frame()]]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        # Mic absent on the first re-resolve, then the XVF3800 shows up at 5.
+        resolutions = iter([None, 5])
+
+        def _resolve_input():
+            return next(resolutions, 5)
+
+        seen_states: list[str] = []
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=None,   # no mic at boot
+            sd_module=fake_sd,
+            resolve_input_device=_resolve_input,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            seen_states.append(pipe.status().state)
+            return real_wait(0)  # don't actually sleep in the test
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+        pipe._loop()
+
+        # Parked in no_mic while waiting for the mic to appear...
+        assert "no_mic" in seen_states
+        # ...then opened the ReSpeaker at its enumerated index — and ONLY
+        # that index; it never tried to open device=None.
+        assert fake_sd.opened_devices == [5]
+        # PortAudio was re-enumerated before re-resolving.
+        assert fake_sd.terminate_calls >= 1
 
     def test_backoff_exits_promptly_on_shutdown_mid_wait(self):
         # A genuinely-absent mic must not hot-loop, and must drop out the

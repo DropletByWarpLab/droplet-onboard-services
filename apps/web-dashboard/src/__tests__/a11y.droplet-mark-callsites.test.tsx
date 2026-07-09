@@ -50,9 +50,11 @@ describe("WARP-300 DropletMark callsite audit", () => {
     it("AuthGate loading-state mark is standalone and announces", () => {
       const src = read("components/AuthGate.tsx");
       // Loading state shows "Loading..." next to the mark — no
-      // "Droplet" wordmark adjacent. Opt-in to aria-label.
+      // "Droplet" wordmark adjacent. Opt-in to aria-label. (WARP-1079:
+      // the class moved to the GATE_BRAND_TEXT lockstep constant; the
+      // aria-label invariant is what this audit protects.)
       expect(src).toMatch(
-        /<DropletMark size=\{32\} className="text-accent" aria-label="Droplet"/,
+        /<DropletMark size=\{32\} className=\{GATE_BRAND_TEXT\} aria-label="Droplet"/,
       );
     });
   });

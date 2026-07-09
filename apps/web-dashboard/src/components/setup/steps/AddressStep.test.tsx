@@ -15,6 +15,7 @@ import { AddressStep } from "./AddressStep";
 
 const checkBoxName = vi.fn();
 const setBoxName = vi.fn();
+const renameBox = vi.fn();
 const fetchBoxName = vi.fn();
 
 vi.mock("@/lib/api", async () => {
@@ -23,6 +24,7 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     checkBoxName: (...a: unknown[]) => checkBoxName(...a),
     setBoxName: (...a: unknown[]) => setBoxName(...a),
+    renameBox: (...a: unknown[]) => renameBox(...a),
     fetchBoxName: (...a: unknown[]) => fetchBoxName(...a),
   };
 });
@@ -40,8 +42,14 @@ beforeEach(() => {
     slug: "studio",
     fqdn: "studio.droplet-us.com",
   });
+  renameBox.mockResolvedValue({
+    ok: true,
+    slug: "renamed",
+    fqdn: "renamed.droplet-us.com",
+    authoritative: true,
+  });
   // WARP-1039 — no saved name by default: every pre-existing test runs against
-  // the empty-input baseline.
+  // the empty-input baseline (the fresh-pick flow).
   fetchBoxName.mockResolvedValue({ name: null, fqdn: null });
 });
 
@@ -126,14 +134,15 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
-  it("shows the rename-unsupported copy when the box already holds a name (WARP-984)", async () => {
-    // The orchestrator answers 409 { code: "BOX_NAME_RENAME_UNSUPPORTED" }; the
-    // api client surfaces it as an error carrying that code. The step must key
-    // its copy off the CODE (not echo whatever message rode along) and show the
-    // honest "already holds an address — factory reset releases it" copy.
+  it("surfaces a Rename hint (not factory-reset) if the fresh POST races an already-named box", async () => {
+    // Defense-in-depth: the already-named box is normally caught on mount, but if
+    // the fresh-pick POST still hits a box that already holds a name, the
+    // orchestrator answers 409 { code: "BOX_NAME_ALREADY_NAMED" }. The step keys
+    // its copy off the CODE and points the owner at Rename — NOT "factory reset".
+    fetchBoxName.mockResolvedValue({ name: null, fqdn: null });
     setBoxName.mockRejectedValueOnce(
       Object.assign(new Error("Failed to save box name: 409"), {
-        code: "BOX_NAME_RENAME_UNSUPPORTED",
+        code: "BOX_NAME_ALREADY_NAMED",
       }),
     );
     const onComplete = vi.fn();
@@ -143,10 +152,11 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     await waitFor(() => expect(continueCta()).toBeEnabled());
     fireEvent.click(continueCta());
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /already holds a secure address/i,
-    );
-    expect(await screen.findByRole("alert")).toHaveTextContent(/factory reset/i);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/already holds a secure address/i);
+    expect(alert).toHaveTextContent(/rename/i);
+    // The old, now-false "factory reset releases it" copy must be gone.
+    expect(alert).not.toHaveTextContent(/factory reset/i);
     expect(onComplete).not.toHaveBeenCalled();
   });
 
@@ -203,98 +213,145 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
   });
 });
 
-describe("AddressStep — rehydrates the saved name (WARP-1039)", () => {
-  it("prefills the saved name on mount, shows the current-address hint, and enables Continue", async () => {
+describe("AddressStep — already-named box shows the current address + Rename (WARP-1109)", () => {
+  // The reveal affordance in the named view ("Rename this address"); distinct
+  // from the picker's "Rename" primary CTA.
+  const renameCta = () =>
+    screen.getByRole("button", { name: /rename this address/i });
+  const keepCta = () => screen.getByRole("button", { name: /keep this address/i });
+
+  it("renders the 'your box is named X' state (not the fresh-pick input) when a name is saved", async () => {
     fetchBoxName.mockResolvedValue({
       name: "studio",
       fqdn: "studio.droplet-us.com",
     });
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
 
-    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
-    expect(
-      screen.getByText(/this is your current address/i),
-    ).toBeInTheDocument();
-    // The prefilled name runs through the ordinary debounced availability
-    // check, which enables Continue — the owner can keep the name as-is.
-    await waitFor(() => expect(continueCta()).toBeEnabled());
-    expect(checkBoxName).toHaveBeenCalled();
+    // The current address is surfaced with its fqdn + a padlock — NEVER as
+    // "taken", and NOT as the fresh-pick input.
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText("studio.droplet-us.com")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/box name/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/is taken/i)).not.toBeInTheDocument();
+    // The fresh-pick "check it's free" flow is not what's shown.
+    expect(checkBoxName).not.toHaveBeenCalled();
+    // Rename is offered.
+    expect(renameCta()).toBeInTheDocument();
   });
 
-  it("leaves the input empty (no hint) when no name is saved yet", async () => {
+  it("lets the owner Continue (keep the current name) from the already-named state", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+
+    // "Keep this address" advances WITHOUT re-claiming (the name is already held).
+    fireEvent.click(keepCta());
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+    expect(setBoxName).not.toHaveBeenCalled();
+    expect(renameBox).not.toHaveBeenCalled();
+  });
+
+  it("Rename reveals the name picker; Continue there calls renameBox (release→claim) and advances", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+
+    // Reveal the picker.
+    fireEvent.click(renameCta());
+    expect(await screen.findByLabelText(/box name/i)).toBeInTheDocument();
+
+    // Type a NEW name; the ordinary availability check gates the Rename primary.
+    fireEvent.change(nameInput(), { target: { value: "renamed" } });
+    const renamePrimary = () =>
+      screen.getByRole("button", { name: /^rename$/i });
+    await waitFor(() => expect(renamePrimary()).toBeEnabled());
+    fireEvent.click(renamePrimary());
+
+    // The rename endpoint (release-then-claim) is used, NOT the fresh setBoxName.
+    await waitFor(() => expect(renameBox).toHaveBeenCalledWith("renamed"));
+    expect(setBoxName).not.toHaveBeenCalled();
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows a taken conflict with suggestions when the NEW rename name is taken", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    renameBox.mockRejectedValueOnce(
+      Object.assign(new Error("That name is already taken — pick another."), {
+        code: "BOX_NAME_TAKEN",
+      }),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+    fireEvent.click(renameCta());
+    fireEvent.change(await screen.findByLabelText(/box name/i), {
+      target: { value: "renamed" },
+    });
+    const renamePrimary = () =>
+      screen.getByRole("button", { name: /^rename$/i });
+    await waitFor(() => expect(renamePrimary()).toBeEnabled());
+    fireEvent.click(renamePrimary());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /already taken|pick another/i,
+    );
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("can cancel Rename and return to the current-address state", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(renameCta());
+    expect(await screen.findByLabelText(/box name/i)).toBeInTheDocument();
+
+    // Cancel returns to the current-address view; no rename happened.
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByLabelText(/box name/i)).not.toBeInTheDocument();
+    expect(renameBox).not.toHaveBeenCalled();
+  });
+
+  it("leaves the fresh-pick input (no already-named view) when no name is saved yet", async () => {
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
     expect(nameInput()).toHaveValue("");
-    expect(
-      screen.queryByText(/this is your current address/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/your box is named/i)).not.toBeInTheDocument();
   });
 
-  it("never overwrites a name the owner already typed (slow GET resolves late)", async () => {
-    let resolveGet: (v: unknown) => void = () => {};
-    fetchBoxName.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveGet = resolve;
-        }),
-    );
-    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-
-    fireEvent.change(nameInput(), { target: { value: "other-name" } });
-    resolveGet({ name: "studio", fqdn: "studio.droplet-us.com" });
-    // Give React a tick to (not) apply the late prefill.
-    await waitFor(() => expect(nameInput()).toHaveValue("other-name"));
-    expect(
-      screen.queryByText(/this is your current address/i),
-    ).not.toBeInTheDocument();
-  });
-
-  it("drops the hint once the owner edits away from the saved name", async () => {
-    fetchBoxName.mockResolvedValue({
-      name: "studio",
-      fqdn: "studio.droplet-us.com",
-    });
-    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
-
-    fireEvent.change(nameInput(), { target: { value: "new-name" } });
-    expect(
-      screen.queryByText(/this is your current address/i),
-    ).not.toBeInTheDocument();
-  });
-
-  it("associates the current-address hint with the input for screen readers, at AA contrast", async () => {
-    fetchBoxName.mockResolvedValue({
-      name: "studio",
-      fqdn: "studio.droplet-us.com",
-    });
-    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
-
-    // SR channel: the input must reference the hint so a screen-reader user
-    // learns the prefilled name is their CURRENT address, not a suggestion.
-    const hint = screen.getByText(/this is your current address/i);
-    expect(hint).toHaveAttribute("id", "box-name-current-hint");
-    expect(nameInput()).toHaveAttribute(
-      "aria-describedby",
-      "box-name-current-hint",
-    );
-    // Contrast: secondary label token (≥4.5:1), not the ~1.7:1 tertiary.
-    expect(hint.className).toContain("text-label-secondary");
-    expect(hint.className).not.toContain("text-label-tertiary");
-  });
-
-  it("drops the aria-describedby association when the hint is not shown", async () => {
-    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
-    expect(nameInput()).not.toHaveAttribute("aria-describedby");
-  });
-
-  it("keeps the empty-input baseline when the GET fails (best-effort rehydration)", async () => {
+  it("falls back to the fresh-pick flow when the GET fails (best-effort)", async () => {
     fetchBoxName.mockRejectedValueOnce(new Error("network down"));
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
     expect(nameInput()).toHaveValue("");
     expect(continueCta()).toBeDisabled();
+    expect(screen.queryByText(/your box is named/i)).not.toBeInTheDocument();
   });
 });
