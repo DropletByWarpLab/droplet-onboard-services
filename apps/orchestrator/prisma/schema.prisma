@@ -166,6 +166,12 @@ model ChatSession {
   updatedAt    DateTime      @default(now()) @updatedAt
   messages     ChatMessage[]
   pins         ContextPin[]
+  /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
+  /// requires the opposite side of the relation to be declared; it is the
+  /// onboarding-interview session a business profile was built from (at
+  /// most one profile points here). SetNull on delete so deleting the
+  /// interview session doesn't cascade the singleton profile away.
+  businessProfile BusinessProfile?
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -254,6 +260,112 @@ enum MemoryFactCategory {
   Scope
   Schedule
   Other
+  /// WARP-1118 (D-9) — business-knowledge facts extracted by the
+  /// onboarding interview. Added in its own migration
+  /// (20260708000000_warp_1118_memory_fact_business); a new Postgres enum
+  /// value cannot be USED in the same transaction that adds it, so nothing
+  /// references `Business` inside that migration. The five-value vocabulary
+  /// is hardcoded across ≥6 sites (extract/recall handlers, routes/memory.ts
+  /// zod, dashboard) and is threaded through them in Phase 2, not here.
+  Business
+}
+
+/// WARP-1118 — AI Personality & Business Onboarding (§11).
+///
+/// PRIVACY CONTRACT: like `Workspace.industry/size`, `AssistantPersona`,
+/// `BusinessProfile`, and interview transcripts are LOCAL box state —
+/// NEVER sent off the box. Personality is prompt + data only; it never
+/// changes which `LLM_MODEL` runs (One-Model Rule, §5-1).
+
+/// The four canonical personality presets. Prompt fragments live in code
+/// (`persona-presets.ts`), versioned with the app — the DB only stores
+/// which one is selected. Copy owned by the design brief §9.
+enum PersonaPreset {
+  warm_friendly // default
+  professional_precise
+  founder
+  direct_technical
+}
+
+/// Reply + recap length. One trait deliberately covers both — there is no
+/// separate recap-length field (§7.1).
+enum PersonaVerbosity {
+  concise
+  balanced // default
+  detailed
+}
+
+/// Workspace-level personality singleton (D-2). Injected as a
+/// char-budgeted block into the base system prompt right after identity
+/// (§7.2). Read fresh from Prisma each request — no cache to invalidate.
+model AssistantPersona {
+  id                 String           @id @default("singleton")
+  preset             PersonaPreset    @default(warm_friendly)
+  verbosity          PersonaVerbosity @default(balanced)
+  useFirstNames      Boolean          @default(true)
+  /// The one sanctioned free-text instruction channel (§7.1). Owner/admin
+  /// authored only. Cap enforced BOTH in the zod schema and as a real DB
+  /// constraint so an out-of-band writer can't exceed the prompt budget.
+  customInstructions String           @default("") @db.VarChar(1200)
+  updatedBy          String? // userId
+  updatedAt          DateTime         @updatedAt
+}
+
+/// Onboarding-interview state (§9.2). Explicit enum — state is NEVER
+/// derived from row-absence or a null timestamp (§5-2, WARP-218 precedent).
+enum BusinessOnboardingState {
+  not_started
+  in_progress
+  completed
+  skipped
+  re_running // re-run in flight; skip or interview-chat deletion restores completed
+}
+
+/// Provenance for the Settings meta line — which surface last wrote the
+/// profile. Explicit column, never inferred (§5-2).
+enum BusinessProfileSource {
+  onboarding
+  settings
+}
+
+/// Periodic refresh-nudge state (Phase 4). Explicit column — dismissal is
+/// a real write, never "we nulled the timestamp" (§5-2).
+enum ReviewNudgeState {
+  none
+  due
+  dismissed
+}
+
+/// Structured business-knowledge singleton (D-2, §8/§11). Created in
+/// Phase 0 so the schema is stable; only `AssistantPersona` is wired into
+/// the prompt this phase — the role-filtered business block is Phase 2.
+///
+/// Field set matches the design brief's six row labels 1:1 (no `hours`
+/// column — operating hours belong in `typicalDay` or a `Schedule` fact).
+/// `Workspace.industry/size` stay wizard-owned; this model never writes
+/// them.
+model BusinessProfile {
+  id                String                  @id @default("singleton")
+  onboardingState   BusinessOnboardingState @default(not_started)
+  /// The persisted onboarding-interview session this profile was built
+  /// from (D-4/§9.2). SetNull on delete: deleting the interview session
+  /// must not cascade the singleton profile away — the delete-hook
+  /// transitions state instead (Phase 3).
+  interviewChat     ChatSession?            @relation(fields: [interviewChatId], references: [id], onDelete: SetNull)
+  interviewChatId   String?                 @unique
+  summary           String                  @default("") @db.VarChar(1500) // prompt-injected (business block, Phase 2)
+  whatWeDo          String                  @default("") @db.VarChar(600)
+  customers         String                  @default("") @db.VarChar(600)
+  teamShape         String                  @default("") @db.VarChar(600)
+  toolsUsed         String                  @default("") @db.VarChar(600)
+  typicalDay        String                  @default("") @db.VarChar(600)
+  goals             String                  @default("") @db.VarChar(600)
+  lastSource        BusinessProfileSource? // provenance for the Settings meta line
+  reviewNudgeState  ReviewNudgeState        @default(none) // explicit, never derived
+  reviewDueAt       DateTime? // schedule timestamp only
+  reviewDismissedAt DateTime?
+  updatedBy         String?
+  updatedAt         DateTime                @updatedAt
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.

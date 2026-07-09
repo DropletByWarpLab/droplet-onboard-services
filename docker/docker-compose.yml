@@ -181,6 +181,13 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-1118 (§10): the orchestrator's request-size estimator
+      # (context-budget.service.ts) budgets the assembled chat request against
+      # this window before dispatch, PREVENTING (not merely detecting) the
+      # WARP-854 overflow. Mirrors the `ollama` service's OLLAMA_CONTEXT_LENGTH
+      # (both default 16384 via the same env token) so the estimator's window
+      # tracks the model server's actual window. NOT a model swap — window only.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
       - NEXTCLOUD_URL=http://nextcloud:80
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
