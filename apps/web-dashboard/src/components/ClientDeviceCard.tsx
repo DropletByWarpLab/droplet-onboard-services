@@ -42,7 +42,7 @@ export function ClientDeviceCard({
     <div
       onClick={onClick}
       className={`
-        dp-card p-4 cursor-pointer transition-all duration-200 group
+        card hover group
         ${isRevoked ? "opacity-60" : ""}
       `}
     >
@@ -51,7 +51,7 @@ export function ClientDeviceCard({
         <div
           className={`
             w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0
-            ${isRevoked ? "bg-surface-secondary text-label-tertiary" : "bg-accent/15 text-accent"}
+            ${isRevoked ? "bg-[var(--surface-2)] text-[var(--text-muted)]" : "bg-[var(--brand-subtle)] text-[var(--brand)]"}
           `}
         >
           <Icon size={20} />
@@ -59,10 +59,13 @@ export function ClientDeviceCard({
 
         {/* Name + meta */}
         <div className="flex-1 min-w-0">
-          <p className="type-subheadline text-label-primary font-medium truncate">
+          <p
+            className="type-subheadline font-medium truncate"
+            style={{ color: "var(--text)" }}
+          >
             {client.deviceName}
           </p>
-          <p className="type-caption-1 text-label-tertiary">
+          <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
             {client.platform} &middot; {client.deviceType}
             {client.appVersion ? ` \u00b7 v${client.appVersion}` : ""}
             {isRevoked ? (
@@ -94,7 +97,7 @@ export function ClientDeviceCard({
               e.stopPropagation();
               onRevoke(client);
             }}
-            className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            className="p-2.5 rounded-[var(--radius-input)] text-[var(--text-faint)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
             aria-label={`Revoke ${client.deviceName || client.id}`}
             title="Revoke this device"
           >

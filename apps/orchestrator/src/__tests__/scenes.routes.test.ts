@@ -342,9 +342,11 @@ describe("WARP-474 — POST /api/scenes/:id/run", () => {
       { nodeId: "1", command: "turn_on" },
       { nodeId: "2", command: "set_brightness" },
     ]);
+    // WARP-1010: the authed runner threads into the per-command rows.
     expect(matter.sendCommand).toHaveBeenLastCalledWith(
       "2",
       "set_brightness",
+      { type: "user", id: "user-family" },
       { level: 50 },
     );
   });

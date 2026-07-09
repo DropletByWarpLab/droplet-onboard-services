@@ -90,6 +90,10 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | pm_list_work_items | pm | List work items in a project (optional state/assignee filters). WARP-508. | false | false | orchestrator |
 | pm_get_work_item | pm | Fetch a single work item by id. WARP-508. | false | false | orchestrator |
 | pm_search_work_items | pm | Search work items in a workspace by query. WARP-508. | false | false | orchestrator |
+| erp_get_schedule_today | erp | Get the practice's appointment schedule for a day (Eaglesoft). Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
+| erp_find_patient | erp | Search patients in the ERP (Eaglesoft) by name, minimum-necessary fields. Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
+| erp_get_ar_summary | erp | Accounts-receivable summary (aggregated in SQL) from the ERP (Eaglesoft). Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
+| erp_schedule_appointment | erp | Schedule/reschedule an appointment (Eaglesoft). Write tier + confirmation; stages a write request, never writes directly. Returns ERP_NOT_CONNECTED until WARP-1095+. | true | true | orchestrator → erp-connector |
 
 ## Deferred (not ported in WARP-102)
 
@@ -100,6 +104,6 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 ## Counts
 
-- Registered: 80 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 previous PRs [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] + 1 WARP-864 [`restart_router`] = 80.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
+- Registered: 84 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 previous PRs [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] + 1 WARP-864 [`restart_router`] + 4 WARP-1094 [ERP-connector: 3 Read-tier + 1 Write-tier `erp_schedule_appointment`] = 84.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
 - Deferred: 2 tools.
 - Reconciled / collapsed: 4 (`block_device`, `unblock_device`, `get_cameras`, `get_camera_events`/`list_recent_camera_events`, `get_wifi_info`, `list_devices`/`get_connected_devices`) — all merged into the canonical names listed above.

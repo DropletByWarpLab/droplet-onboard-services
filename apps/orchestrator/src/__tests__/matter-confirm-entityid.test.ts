@@ -104,7 +104,7 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
 
     expect(confirm.status).toBe(200);
     expect(confirm.body.confirmed).toBe(true);
-    expect(sendMatterCommand).toHaveBeenCalledWith("12345", "lock", undefined);
+    expect(sendMatterCommand).toHaveBeenCalledWith("12345", "lock", { type: "user", id: "u-owner" }, undefined);
   });
 
   it("rejects confirming on a different nodeId (WARP-41 echo protection)", async () => {
@@ -155,7 +155,7 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
     // The mint-time pending record is authoritative; confirming must not
     // depend on the device being reachable or fully re-enumerated.
     expect(getDevice).not.toHaveBeenCalled();
-    expect(sendMatterCommand).toHaveBeenCalledWith("54321", "lock", undefined);
+    expect(sendMatterCommand).toHaveBeenCalledWith("54321", "lock", { type: "user", id: "u-owner" }, undefined);
   });
 
   it("echoes `service` in the 202 confirmation body so clients can confirm without re-deriving it (KAN-5)", async () => {
@@ -205,7 +205,7 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
 
     expect(confirm.status).toBe(200);
     expect(confirm.body.confirmed).toBe(true);
-    expect(sendMatterCommand).toHaveBeenCalledWith("31000", "set_temperature", {
+    expect(sendMatterCommand).toHaveBeenCalledWith("31000", "set_temperature", { type: "user", id: "u-owner" }, {
       temperature: 31,
     });
   });
@@ -240,7 +240,7 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
     expect(confirm.status).toBe(200);
     expect(confirm.body.confirmed).toBe(true);
     // The original command + data is what gets sent on confirm.
-    expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", {
+    expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", { type: "user", id: "u-owner" }, {
       mode: "off",
     });
   });
@@ -260,7 +260,7 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.tier).toBe(1);
-      expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", {
+      expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", { type: "user", id: "u-owner" }, {
         mode,
       });
     },

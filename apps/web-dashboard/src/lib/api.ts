@@ -72,9 +72,14 @@ import type {
   VpnPeerCreatedInfo,
   VoiceStatusInfo,
   VoiceSayResult,
+  VoiceCalibrationInfo,
+  VoiceCalibrationApply,
+  VoiceMeasureResult,
+  VoiceEchoCheckResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
+  BoxNameRenameResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -4635,6 +4640,63 @@ export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
   return res.json();
 }
 
+// --- WARP-1055: /voice surface — calibration wizard + health checks ---
+
+/** Persisted calibration record, or `{calibrated: false}`. */
+export async function fetchVoiceCalibration(): Promise<VoiceCalibrationInfo> {
+  const res = await authFetch(`${BASE}/api/voice/calibration`);
+  if (!res.ok) await throwVoiceError(res, "Failed to fetch voice calibration");
+  return res.json();
+}
+
+/**
+ * The wizard's SINGLE write (§10 `Write · confirm to apply`) — persists
+ * the measured calibration on the box and applies the tuned input gain
+ * + wake threshold live.
+ */
+export async function applyVoiceCalibration(
+  payload: VoiceCalibrationApply,
+): Promise<VoiceCalibrationInfo> {
+  const res = await authFetch(`${BASE}/api/voice/calibration`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to apply calibration");
+  return res.json();
+}
+
+/**
+ * One wizard capture — the box records `seconds` of mic audio and
+ * reports RMS + peak in dBFS. Blocks server-side for the capture
+ * window, so callers should show their own countdown/progress UI.
+ */
+export async function measureVoiceLevel(
+  kind: "noise_floor" | "speech_peak",
+  seconds?: number,
+): Promise<VoiceMeasureResult> {
+  const body: { kind: string; seconds?: number } = { kind };
+  if (seconds !== undefined) body.seconds = seconds;
+  const res = await authFetch(`${BASE}/api/voice/measure`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Measurement failed");
+  return res.json();
+}
+
+/** Fully automatic speaker→mic loop check (wizard step 4). */
+export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
+  const res = await authFetch(`${BASE}/api/voice/echo-check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
 // --- WARP-979: Secured / name-your-box ---
 
 /**
@@ -4689,6 +4751,29 @@ export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
     credentials: "same-origin",
   });
   if (!res.ok) throw new Error(`Failed to fetch box name: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1109 — CHANGE the box's secured address in place. The orchestrator
+ * RELEASES the current name at HQ, then claims the NEW name and re-issues the
+ * cert under the new FQDN. Same public-onboarding posture as the POST (re-gated
+ * server-side once the appliance is claimed). Throws on a non-2xx so the step
+ * surfaces the inline error and does NOT advance — a 409 name-taken on the new
+ * name carries `code: "BOX_NAME_TAKEN"` (+ suggestions) so the picker can show
+ * the conflict.
+ */
+export async function renameBox(name: string): Promise<BoxNameRenameResult> {
+  const res = await fetch(`${BASE}/api/setup/box-name/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwNetworkWriteError(body, res.status, "Failed to rename box");
+  }
   return res.json();
 }
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---

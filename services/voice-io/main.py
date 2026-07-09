@@ -16,17 +16,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from voice.audio_io import (
     AudioUnavailable,
+    echo_check,
     measure_input_level,
     test_tone,
 )
+
+# WARP-1055 (F5) — PortAudio's own error type, when the binding exists.
+# A device that's busy / unplugged / rate-rejected raises this out of a
+# capture, which is an operational 503 ("mic didn't respond, try again"),
+# never a raw 500 relayed to the dashboard. The placeholder class keeps
+# the except-clause valid on hosts without PortAudio (macOS dev).
+try:
+    from sounddevice import PortAudioError as _PortAudioError  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover — sounddevice absent on this host
+    class _PortAudioError(Exception):
+        """Stand-in when sounddevice isn't importable."""
+from voice.calibration import CalibrationStore
 from voice.devices import (
     DeviceResolution,
     resolve_devices,
@@ -128,6 +142,11 @@ VOICE_FLATLINE_DBFS = float(
 
 app = FastAPI(title="voice-io", version="0.1.0")
 
+# WARP-1055 — default capture window for /audio/measure when the
+# wizard doesn't specify one. Long enough for a stable noise-floor
+# read or a spoken phrase, short enough that the wizard stays snappy.
+DEFAULT_MEASURE_SECONDS = 5.0
+
 # Pipeline lives at module scope so /voice/status can read its state
 # from the request thread while the worker thread is mid-prediction.
 _pipeline: Optional[WakePipeline] = None
@@ -195,6 +214,39 @@ def _reresolve_input_index() -> Optional[int]:
     return r.input_device.index if r.input_device else None
 
 
+def apply_stored_calibration(pipeline: WakePipeline) -> None:
+    """Re-apply a persisted calibration over the env defaults (WARP-1055).
+
+    Called at startup right after the pipeline is constructed, and the
+    same value-application path runs after POST /voice/calibration
+    persists a fresh record. The calibration record wins over
+    VOICE_INPUT_GAIN / WAKE_THRESHOLD env defaults — the wizard's
+    measured tuning is more specific than a fleet-wide env knob. The
+    pipeline's setters reject nonsense values, so a hand-edited or
+    corrupt record degrades to "keep the defaults", never to a muted
+    mic or an impossible wake gate.
+    """
+    record = CalibrationStore().load()
+    if not record:
+        return
+    _apply_calibration_values(pipeline, record)
+    logger.info(
+        "applied stored calibration (gain=%s, threshold=%s, calibrated_at=%s)",
+        record.get("input_gain"),
+        record.get("wake_threshold"),
+        record.get("calibrated_at"),
+    )
+
+
+def _apply_calibration_values(pipeline: WakePipeline, record: dict) -> None:
+    gain = record.get("input_gain")
+    if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+        pipeline.set_input_gain(float(gain))
+    threshold = record.get("wake_threshold")
+    if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+        pipeline.set_wake_threshold(float(threshold))
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # Resolve audio devices on boot so the first /health hit is cheap.
@@ -259,6 +311,10 @@ async def startup() -> None:
             flatline_window_s=VOICE_FLATLINE_WINDOW_S,
             flatline_dbfs=VOICE_FLATLINE_DBFS,
         )
+        # WARP-1055 — a persisted calibration (named-volume JSON) wins
+        # over the env-derived gain/threshold. Applied before start()
+        # so the very first captured frame runs at the tuned gain.
+        apply_stored_calibration(_pipeline)
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:
         logger.error("wake pipeline failed to start: %s", exc)
@@ -342,7 +398,10 @@ class VoiceStatusResponse(BaseModel):
     # Input level (WARP-1037). `input_rms_dbfs` is a rolling RMS over the
     # last ~2 s of mic frames — measured inside the pipeline's own frame
     # handler, never via a second stream on the same hw device (ALSA
-    # EBUSY). The wizard's live level meter rides this field.
+    # EBUSY). Domain contract (WARP-1055): PRE-gain / raw capture — the
+    # same domain as /audio/measure and the persisted calibration floor,
+    # so the dashboard's noise-drift compare needs no gain math. The
+    # wizard's live level meter rides this field.
     # `last_audio_at` is when a frame last carried real signal;
     # `input_flatlined` is the wedged-DSP flag (see /health).
     input_rms_dbfs: Optional[float] = None
@@ -373,6 +432,51 @@ class TestToneResponse(BaseModel):
     played: bool
     duration_s: float
     frequency_hz: float
+
+
+# WARP-1055 — calibration-wizard measurement + persistence schemas.
+
+class MeasureRequest(BaseModel):
+    """One wizard capture. `kind` is descriptive (it rides back in the
+    response + logs so the dashboard can correlate) — the capture path
+    is identical for both; the wizard interprets rms (noise floor) vs
+    peak (speech)."""
+
+    kind: Literal["noise_floor", "speech_peak"]
+    seconds: Optional[float] = Field(default=None, ge=1.0, le=30.0)
+
+
+class MeasureResponse(BaseModel):
+    rms_dbfs: float
+    peak_dbfs: float
+    duration_s: float
+    kind: str
+
+
+class EchoCheckResponse(BaseModel):
+    heard: bool
+    tone_dbfs: float
+    floor_dbfs: float
+
+
+class CalibrationApplyRequest(BaseModel):
+    """The wizard's single write (§4 step 5 'Apply calibration').
+
+    `input_gain` / `wake_threshold` are the values the box applies
+    live + re-applies at startup; the measured fields + flags are
+    stored so the /voice page can render proof ('Calibrated 3 days
+    ago · noise floor -41 dB') and drift comparisons. Bounds mirror
+    what the pipeline setters accept — reject at the API edge rather
+    than persisting a record whose apply would be silently ignored.
+    """
+
+    input_gain: Optional[float] = Field(default=None, gt=0.0, le=16.0)
+    wake_threshold: Optional[float] = Field(default=None, gt=0.0, le=1.0)
+    noise_floor_dbfs: float
+    speech_peak_dbfs: float
+    wake_detections: int = Field(ge=0, le=3)
+    echo_ok: bool
+    flags: list[str] = []
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -594,3 +698,140 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
         samples=result["samples"],
         duration_s=duration_s,
     )
+
+
+# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
+# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
+# interleaved buffers); a second concurrent measure answers 409 so the
+# dashboard can tell "busy, retry" apart from "device broken" (503).
+# threading.Lock works because these endpoints are sync `def`s — FastAPI
+# runs each in its own threadpool thread.
+_capture_lock = threading.Lock()
+
+_CAPTURE_BUSY_DETAIL = (
+    "Another microphone measurement is already running — try again in a few seconds."
+)
+
+
+@app.post("/audio/measure", response_model=MeasureResponse)
+def audio_measure(req: MeasureRequest) -> MeasureResponse:
+    """Wizard measurement capture (WARP-1055): noise floor / speech peak.
+
+    Same capture mechanism as /audio/test-record (`measure_input_level`
+    → sounddevice.rec on the picked input) so it coexists with the wake
+    pipeline's stream exactly the way the proven test-record path does.
+    """
+    r = _resolve()
+    if r.input_device is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No input device available. Plug in a USB mic or check the onboard mic jack.",
+        )
+    seconds = (
+        req.seconds if req.seconds is not None else DEFAULT_MEASURE_SECONDS
+    )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
+    try:
+        result = measure_input_level(
+            duration_s=seconds,
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            device=r.input_device.index,
+        )
+    except AudioUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        # Device unplugged / busy / rate-rejected mid-capture — an
+        # operational fault the caller can retry, not a server bug.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The microphone didn't respond (device busy or "
+                f"disconnected: {exc}). Check the mic and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
+    return MeasureResponse(
+        rms_dbfs=result["rms_dbfs"],
+        peak_dbfs=result["peak_dbfs"],
+        duration_s=seconds,
+        kind=req.kind,
+    )
+
+
+@app.post("/audio/echo-check", response_model=EchoCheckResponse)
+def audio_echo_check() -> EchoCheckResponse:
+    """Wizard step 4 (WARP-1055): play the test tone and listen for it
+    in the same window (full-duplex playrec), then judge whether the
+    tone arrived (voice.audio_io.detect_tone). Fully automatic — the
+    user does nothing."""
+    r = _resolve()
+    if r.input_device is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No input device available. Plug in a USB mic or check the onboard mic jack.",
+        )
+    if r.output_device is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No output device available. Plug in a speaker / USB audio device.",
+        )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
+    try:
+        result = echo_check(
+            samplerate=SAMPLE_RATE,
+            input_device=r.input_device.index,
+            output_device=r.output_device.index,
+        )
+    except AudioUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The speaker/mic pair didn't respond (device busy or "
+                f"disconnected: {exc}). Check both connections and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
+    return EchoCheckResponse(
+        heard=bool(result["heard"]),
+        tone_dbfs=float(result["tone_dbfs"]),
+        floor_dbfs=float(result["floor_dbfs"]),
+    )
+
+
+@app.get("/voice/calibration")
+def get_voice_calibration() -> dict:
+    """Persisted calibration record, or {calibrated: false} (WARP-1055).
+
+    The dashboard's /voice hero keys its four states on this: a stored
+    record → calibrated/needs-attention; none → 'Not calibrated yet'.
+    """
+    record = CalibrationStore().load()
+    if not record or not record.get("calibrated"):
+        return {"calibrated": False}
+    return record
+
+
+@app.post("/voice/calibration")
+def post_voice_calibration(req: CalibrationApplyRequest) -> dict:
+    """The wizard's single write (WARP-1055): persist + apply live.
+
+    Persists the record to the named-volume JSON (survives container
+    restarts; startup() re-applies it), then applies the tuned input
+    gain + wake threshold to the running pipeline. When the pipeline
+    isn't up (no mic at boot), the record still persists — it applies
+    on the next successful start.
+    """
+    record = req.model_dump()
+    record["calibrated"] = True
+    record["calibrated_at"] = time.time()
+    CalibrationStore().save(record)
+    if _pipeline is not None:
+        _apply_calibration_values(_pipeline, record)
+    return record

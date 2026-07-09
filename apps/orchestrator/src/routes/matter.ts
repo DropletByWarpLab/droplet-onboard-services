@@ -27,10 +27,26 @@ import {
   getAuditLog,
 } from "../services/safety-tier.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import {
+  actorFromRequest,
+  type ActivityActor,
+} from "../services/activity.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("matter-routes");
+
+/**
+ * WARP-1010 — actor for matter.service's signed activity rows. Humans map
+ * through actorFromRequest as usual; the one service principal these routes
+ * admit is `_service:mcp` (requireRoleOrMcpService), i.e. the agent loop's
+ * tool dispatch — that surface is the AI, not "system", so the audit page's
+ * "what did the AI do" filter keeps catching it.
+ */
+function matterActor(req: Parameters<typeof actorFromRequest>[0]): ActivityActor {
+  const actor = actorFromRequest(req);
+  return actor.type === "system" ? { type: "ai", id: null } : actor;
+}
 
 /**
  * Empty grouped-devices payload served when the matter-controller sidecar can't
@@ -332,7 +348,7 @@ export function createMatterRouter(prisma: PrismaClient): Router {
           .status(400)
           .json({ error: "Missing 'pairing_code' in request body" });
       }
-      const result = await commissionDevice(pairing_code);
+      const result = await commissionDevice(pairing_code, matterActor(req));
       res.json({ status: "commissioned", ...result });
     } catch (err) {
       // WARP-102: matter.js raises errors with implementation-specific
@@ -464,6 +480,7 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       const cmdResult = await sendMatterCommand(
         req.params.nodeId,
         command,
+        matterActor(req),
         data,
       );
       res.json({
@@ -534,6 +551,7 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       const cmdResult = await sendMatterCommand(
         req.params.nodeId,
         result.command,
+        matterActor(req),
         result.data,
       );
       res.json({
@@ -561,7 +579,10 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isValidNodeId(req.params.nodeId)) {
         return res.status(400).json({ error: "Invalid node ID format" });
       }
-      const removed = await decommissionDevice(req.params.nodeId);
+      const removed = await decommissionDevice(
+        req.params.nodeId,
+        matterActor(req),
+      );
       if (!removed) {
         return res.status(404).json({ error: "Device not found" });
       }
