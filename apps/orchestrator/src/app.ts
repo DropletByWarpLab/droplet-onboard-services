@@ -16,6 +16,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
+import { createPersonaRouter } from "./routes/persona.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import { createFilesRouter } from "./routes/files.js";
@@ -100,8 +101,8 @@ export function createApp(
   // scene-schedule ticker. Tests / callers that pass only `prisma` get the
   // default inline dispatcher, preserving the WARP-474 wiring.
   matter: MatterDispatcher = {
-    sendCommand: (nodeId, command, args) =>
-      sendMatterCommand(nodeId, command, args),
+    sendCommand: (nodeId, command, actor, args) =>
+      sendMatterCommand(nodeId, command, actor, args),
   },
 ) {
   const app = express();
@@ -230,6 +231,8 @@ export function createApp(
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
+  // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
+  app.use("/api", createPersonaRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());

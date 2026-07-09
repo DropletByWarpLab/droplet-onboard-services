@@ -51,6 +51,10 @@ import {
   subscribeConnectionChanges,
 } from "../services/matter.service.js";
 
+// WARP-1010: the emitters now take a required actor; these contract tests
+// pass the AI surface and don't assert on it (attribution has its own tests).
+const AI_ACTOR = { type: "ai", id: null } as const;
+
 const RAW_DISCOVERY_MESSAGE =
   'No device discovered using identifier {"shortDiscriminator":7}! Please check that the relevant device is online.';
 
@@ -131,7 +135,7 @@ describe("error pass-through (WARP-851 contract)", () => {
         ),
     });
     let thrown: Error | null = null;
-    await commissionDevice("1602-004-8090").catch((err) => (thrown = err));
+    await commissionDevice("1602-004-8090", AI_ACTOR).catch((err) => (thrown = err));
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown!.message).toBe(RAW_DISCOVERY_MESSAGE);
     expect(thrown!.name).toBe("CommissionableDeviceDiscoveryFailedError");
@@ -141,7 +145,7 @@ describe("error pass-through (WARP-851 contract)", () => {
     installFetchMock({
       "/commission": () => new Response("boom", { status: 502 }),
     });
-    await expect(commissionDevice("34970112332")).rejects.toThrow(/502/);
+    await expect(commissionDevice("34970112332", AI_ACTOR)).rejects.toThrow(/502/);
   });
 });
 
@@ -176,41 +180,50 @@ describe("getMatterCapabilities — sidecar proxy", () => {
 });
 
 describe("WARP-456 activity wrappers stay orchestrator-side", () => {
-  it("records a smart_home activity row on successful commission", async () => {
+  it("records a smart_home activity row on successful commission, attributed to the passed actor (WARP-1010)", async () => {
     installFetchMock({
       "/commission": () => jsonResponse({ nodeId: "7" }),
     });
-    const result = await commissionDevice("34970112332");
+    const result = await commissionDevice("34970112332", {
+      type: "user",
+      id: "u-1",
+    });
     expect(result).toEqual({ nodeId: "7" });
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "smart_home",
         what: "Commissioned Matter device",
+        actor: { type: "user", id: "u-1" },
       }),
     );
   });
 
-  it("records a warn row on decommission", async () => {
+  it("records a warn row on decommission with the caller's actor", async () => {
     installFetchMock({
       "/devices/7": () => jsonResponse({ status: "decommissioned", nodeId: "7" }),
     });
-    await decommissionDevice("7");
+    await decommissionDevice("7", { type: "user", id: "u-1" });
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "smart_home",
         severity: "warn",
         what: "Decommissioned Matter device",
+        actor: { type: "user", id: "u-1" },
       }),
     );
   });
 
-  it("records success and failure rows for commands", async () => {
+  it("records success and failure rows for commands, preserving an ai actor", async () => {
     installFetchMock({
       "/devices/7/command": () => jsonResponse({ status: "ok" }),
     });
-    await sendMatterCommand("7", "turn_on");
+    await sendMatterCommand("7", "turn_on", { type: "ai", id: null });
     expect(recordActivityMock).toHaveBeenCalledWith(
-      expect.objectContaining({ severity: "ok", what: "Matter turn_on" }),
+      expect.objectContaining({
+        severity: "ok",
+        what: "Matter turn_on",
+        actor: { type: "ai", id: null },
+      }),
     );
 
     recordActivityMock.mockClear();
@@ -225,11 +238,15 @@ describe("WARP-456 activity wrappers stay orchestrator-side", () => {
           500,
         ),
     });
-    await expect(sendMatterCommand("7", "turn_on")).rejects.toThrow(
-      /not connected/,
-    );
+    await expect(
+      sendMatterCommand("7", "turn_on", { type: "ai", id: null }),
+    ).rejects.toThrow(/not connected/);
     expect(recordActivityMock).toHaveBeenCalledWith(
-      expect.objectContaining({ severity: "err", what: "Matter turn_on failed" }),
+      expect.objectContaining({
+        severity: "err",
+        what: "Matter turn_on failed",
+        actor: { type: "ai", id: null },
+      }),
     );
   });
 });
@@ -243,7 +260,7 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
       "/commission": () => jsonResponse({ nodeId: "7" }),
     });
     recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
-    await expect(commissionDevice("34970112332")).resolves.toEqual({
+    await expect(commissionDevice("34970112332", AI_ACTOR)).resolves.toEqual({
       nodeId: "7",
     });
   });
@@ -254,7 +271,7 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
         jsonResponse({ status: "decommissioned", nodeId: "7" }),
     });
     recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
-    await expect(decommissionDevice("7")).resolves.toBe(true);
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(true);
   });
 
   it("a failing audit row in the command finally block does not mask the matter.js error", async () => {
@@ -273,7 +290,7 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
         ),
     });
     recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
-    await expect(sendMatterCommand("7", "turn_on")).rejects.toThrow(
+    await expect(sendMatterCommand("7", "turn_on", AI_ACTOR)).rejects.toThrow(
       /not connected/,
     );
   });
@@ -283,7 +300,7 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
       "/devices/7/command": () => jsonResponse({ status: "ok" }),
     });
     recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
-    await expect(sendMatterCommand("7", "turn_on")).resolves.toEqual({
+    await expect(sendMatterCommand("7", "turn_on", AI_ACTOR)).resolves.toEqual({
       status: "ok",
     });
   });
@@ -302,7 +319,7 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
           404,
         ),
     });
-    await expect(decommissionDevice("7")).resolves.toBe(false);
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(false);
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });

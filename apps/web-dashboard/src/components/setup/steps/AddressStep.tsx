@@ -1,14 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Globe, Loader2, Lock, ShieldCheck, X } from "lucide-react";
+import {
+  Check,
+  Globe,
+  Loader2,
+  Lock,
+  Pencil,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import {
   validateBoxName,
   boxNameToFqdn,
   boxNameReasonMessage,
   BOX_NAME_SUFFIX,
 } from "@droplet/shared-types";
-import { checkBoxName, setBoxName, fetchBoxName } from "@/lib/api";
+import { checkBoxName, setBoxName, renameBox, fetchBoxName } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
@@ -19,19 +27,25 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * `<name>.droplet-us.com` — a publicly-trusted address (real green padlock,
  * nothing to install on any device).
  *
+ * WARP-1109 — the step has THREE modes, chosen on mount from GET /setup/box-name:
+ *   - `fresh`   — no name yet: type + check + POST /setup/box-name (first claim).
+ *   - `named`   — the box ALREADY holds a name: show "Your box is named X" (its
+ *                 fqdn + padlock) with Keep-this-address / Rename. This is the
+ *                 fix for the onboarding bug where an already-named box read
+ *                 EVERY name as "taken" — we never render the already-held name
+ *                 as a conflict, and the owner renames in place instead.
+ *   - `rename`  — Rename was clicked: the same picker, but Continue drives
+ *                 POST /setup/box-name/rename (release the old name → claim the
+ *                 new one → re-issue), with Cancel back to `named`.
+ *
  * The step KEY stays `address` (the STEPS/Step union + state machine are
  * unchanged — wifi/address still both persist as the single `internet`
  * SetupStep). Only this step's PURPOSE + UI changed.
  *
  * Validation mirrors the HQ ruleset via the SHARED `@droplet/shared-types`
- * box-name util (lowercase DNS-safe slug, 3–40 chars, no leading/trailing/double
- * hyphen, reserved blocklist, `d-<16hex>` lookalike rejection) so the live
- * client-side check here and the orchestrator's server-side re-check can never
- * drift. Availability is checked (debounced) against
- * GET /api/setup/box-name/check. Continue is disabled until a valid + available
- * name is chosen; Skip is always allowed. On Continue the chosen name is POSTed
- * to POST /api/setup/box-name so the box's tls-issuance requests
- * `<name>.droplet-us.com`.
+ * box-name util so the live client-side check and the orchestrator's server-side
+ * re-check can never drift. Availability is checked (debounced) against
+ * GET /api/setup/box-name/check.
  */
 
 /** Debounce (ms) before the availability check fires as the owner types. */
@@ -45,6 +59,11 @@ type CheckStatus =
   | { kind: "taken"; message: string }
   | { kind: "error" };
 
+/** Which of the three UI modes is showing. `null` = still resolving the mount
+ *  GET (brief) — we render the picker immediately so a slow/failed GET degrades
+ *  to the fresh flow, and only switch to `named` if a saved name comes back. */
+type Mode = "fresh" | "named" | "rename";
+
 export function AddressStep({
   onComplete,
   onSkip,
@@ -56,26 +75,26 @@ export function AddressStep({
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // WARP-1039 — the name the box already has saved (null = none yet). Drives
-  // the "this is your current address" hint while the input still shows it.
-  const [savedName, setSavedName] = useState<string | null>(null);
+  // WARP-1109 — the address the box ALREADY holds (null = none yet, i.e. fresh).
+  const [current, setCurrent] = useState<{ name: string; fqdn: string } | null>(
+    null,
+  );
+  const [mode, setMode] = useState<Mode>("fresh");
 
-  // WARP-1039 — rehydrate the saved name on mount so re-entering the step
-  // (e.g. from the VPN precheck, the rail, or Back) shows the name the owner
-  // already chose instead of an empty input. Best-effort: a failed GET keeps
-  // the empty-input baseline. Never overwrites what the owner already typed —
-  // a slow response must not stomp live input.
+  // WARP-1109 — learn on mount whether the box already holds a name. If it does,
+  // show the "your box is named X" state (Keep / Rename) instead of the
+  // fresh-pick flow — an already-named box must NEVER read a name as "taken".
+  // Best-effort: a failed GET leaves the fresh flow (the honest fallback).
   useEffect(() => {
     let cancelled = false;
     fetchBoxName()
       .then((r) => {
         if (cancelled || !r.name) return;
-        const saved = r.name;
-        setSavedName(saved);
-        setName((cur) => (cur.length === 0 ? saved : cur));
+        setCurrent({ name: r.name, fqdn: r.fqdn ?? boxNameToFqdn(r.name) });
+        setMode("named");
       })
       .catch(() => {
-        // Best-effort — the empty input is the honest fallback.
+        // Best-effort — the fresh picker is the honest fallback.
       });
     return () => {
       cancelled = true;
@@ -88,10 +107,6 @@ export function AddressStep({
   const local = validateBoxName(name);
   const slug = local.slug;
   const fqdn = boxNameToFqdn(slug || "your-box");
-  // WARP-1039 — true while the input still shows the exact name the box
-  // already saved; drives the current-address hint AND the input's
-  // aria-describedby so screen-reader users hear it too.
-  const showCurrentHint = savedName !== null && slug === savedName;
 
   // Cancel a stale in-flight availability check when the input changes.
   const abortRef = useRef<AbortController | null>(null);
@@ -149,8 +164,12 @@ export function AddressStep({
       });
   }, []);
 
+  // Only the picker modes run the live availability check.
+  const picking = mode === "fresh" || mode === "rename";
+
   // Debounced live validation + availability check as the owner types.
   useEffect(() => {
+    if (!picking) return;
     if (name.trim().length === 0) {
       wantSlugRef.current = null;
       abortRef.current?.abort();
@@ -177,27 +196,52 @@ export function AddressStep({
     setStatus({ kind: "checking" });
     const t = setTimeout(() => runCheck(name), CHECK_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [name, runCheck]);
+  }, [name, runCheck, picking]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const isAvailable = status.kind === "available";
 
-  async function handleContinue() {
+  // Enter the rename picker from the named state.
+  function startRename() {
+    setSaveError(null);
+    setName("");
+    setStatus({ kind: "idle" });
+    setMode("rename");
+  }
+
+  // Leave the rename picker, back to the confirmed current-address view.
+  function cancelRename() {
+    setSaveError(null);
+    wantSlugRef.current = null;
+    abortRef.current?.abort();
+    setName("");
+    setStatus({ kind: "idle" });
+    setMode("named");
+  }
+
+  // Keep the address the box already holds — no re-claim needed, just advance.
+  function keepCurrent() {
+    onComplete();
+  }
+
+  // Persist a name: `setBoxName` for a first claim (fresh), `renameBox`
+  // (release-then-claim) for a rename. Shared save/advance/error handling.
+  async function submitName(persist: (slug: string) => Promise<unknown>) {
     if (!isAvailable) return;
     setSaveError(null);
     setSaving(true);
     try {
-      await setBoxName(slug);
+      await persist(slug);
       onComplete();
     } catch (e) {
-      // WARP-984 — the orchestrator distinguishes "this box already holds a
-      // (different) name at HQ" from a name taken by another box. Key the copy
-      // off the error CODE so the owner gets the honest story instead of a
-      // misleading "taken".
-      if ((e as { code?: unknown })?.code === "BOX_NAME_RENAME_UNSUPPORTED") {
+      // WARP-1109 — the fresh POST can still race a box that already holds a
+      // name; the orchestrator answers 409 { code: "BOX_NAME_ALREADY_NAMED" }.
+      // Key the copy off the CODE and point the owner at Rename (NOT the old,
+      // now-false "factory reset releases it").
+      if ((e as { code?: unknown })?.code === "BOX_NAME_ALREADY_NAMED") {
         setSaveError(
-          "This box already holds a secure address — renaming isn't supported yet. A factory reset releases it.",
+          "This box already holds a secure address — use Rename to change it.",
         );
       } else {
         setSaveError(
@@ -211,6 +255,70 @@ export function AddressStep({
     }
   }
 
+  // ── Mode: the box already holds a name — show it + Keep / Rename ──
+  if (mode === "named" && current) {
+    return (
+      <StepShell
+        current="address"
+        title="Your secure address"
+        subtitle="Your Droplet already has a private, publicly-trusted web address. Keep it, or rename it to something new."
+        primary={{
+          label: "Keep this address",
+          onClick: keepCurrent,
+          showArrow: true,
+        }}
+        skip={{ label: "Skip — I'll do this later", onClick: onSkip }}
+      >
+        {/* The confirmed current address — the padlock is the one bold moment;
+            everything around it stays quiet. Never rendered as "taken". */}
+        <div className="dp-card !p-4 flex items-center gap-3.5 mb-4">
+          <span className="w-11 h-11 rounded-xl flex-none flex items-center justify-center bg-system-green/10 text-system-green">
+            <Lock size={22} aria-hidden="true" />
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="type-footnote text-label-tertiary">
+              Your box is named
+            </p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <Lock size={13} className="text-system-green" aria-hidden="true" />
+              <span className="font-mono type-subheadline font-semibold text-label-primary truncate">
+                {current.fqdn}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Rename — the quiet secondary affordance. Reveals the picker. */}
+        <button
+          type="button"
+          onClick={startRename}
+          className="inline-flex items-center gap-2 type-footnote font-semibold text-accent transition-colors hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 rounded-md px-1 -mx-1"
+        >
+          <Pencil size={15} aria-hidden="true" />
+          Rename this address
+        </button>
+
+        <LearnMoreCard title="What the padlock means" helpAnchor="internet">
+          <p>
+            The padlock in your browser&rsquo;s address bar tells you two things:
+            the connection to this box is <strong>encrypted</strong> (nobody on
+            the network can read it), and the box is{" "}
+            <strong>who it says it is</strong> — its identity was checked against
+            a certificate a trusted authority signed.
+          </p>
+          <p>
+            Renaming issues a fresh publicly-trusted certificate for the new
+            address — a real green padlock, zero install, and nothing is ever
+            published to the public internet.
+          </p>
+        </LearnMoreCard>
+      </StepShell>
+    );
+  }
+
+  // ── Mode: fresh pick OR rename — the name picker ──
+  const renaming = mode === "rename";
+
   // Ring + status glyph mirror the handoff's live-validation affordance, in our
   // tokens: accent while checking, green when available, red when invalid/taken.
   const ringClass =
@@ -223,23 +331,31 @@ export function AddressStep({
   return (
     <StepShell
       current="address"
-      title="Name your secure address"
-      subtitle="Your Droplet gives itself a private, publicly-trusted web address — pick the name you want and we'll check it's free. The padlock is real, with nothing to install on any device."
+      title={renaming ? "Rename your secure address" : "Name your secure address"}
+      subtitle={
+        renaming
+          ? "Pick a new name for your box. We'll release the old address, claim the new one, and re-issue its padlock — nothing to install on any device."
+          : "Your Droplet gives itself a private, publicly-trusted web address — pick the name you want and we'll check it's free. The padlock is real, with nothing to install on any device."
+      }
       primary={{
-        label: "Continue",
-        loadingLabel: "Saving…",
-        onClick: handleContinue,
+        label: renaming ? "Rename" : "Continue",
+        loadingLabel: renaming ? "Renaming…" : "Saving…",
+        onClick: () => submitName(renaming ? renameBox : setBoxName),
         isLoading: saving,
         disabled: !isAvailable,
         showArrow: true,
         ariaDescribedBy: !isAvailable ? "box-name-status" : undefined,
       }}
-      skip={{ label: "Skip — I'll do this later", onClick: onSkip }}
+      skip={
+        renaming
+          ? undefined
+          : { label: "Skip — I'll do this later", onClick: onSkip }
+      }
     >
       {/* Name input with the fixed .droplet-us.com suffix + live status glyph. */}
       <label className="block">
         <span className="type-subheadline text-label-secondary block mb-1.5">
-          Choose your address
+          {renaming ? "Choose a new address" : "Choose your address"}
         </span>
         <div
           className={`flex items-center gap-2 h-12 px-3.5 rounded-xl bg-surface-primary border transition-[border-color,box-shadow] duration-200 ${ringClass}`}
@@ -255,15 +371,13 @@ export function AddressStep({
             onChange={(e) => setName(e.target.value)}
             placeholder="your-box"
             aria-label="Box name"
-            aria-describedby={
-              showCurrentHint ? "box-name-current-hint" : undefined
-            }
             className="flex-1 min-w-0 border-none outline-none bg-transparent font-mono type-body font-semibold text-label-primary placeholder:text-label-quaternary"
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
             maxLength={40}
+            autoFocus={renaming}
           />
           <span className="font-mono type-body text-label-tertiary flex-none">
             {BOX_NAME_SUFFIX}
@@ -282,16 +396,11 @@ export function AddressStep({
         </div>
       </label>
 
-      {/* WARP-1039 — subtle current-address hint while the input still shows
-          the name the box already saved. Static (not in the live region) so it
-          doesn't compete with the availability announcement. */}
-      {showCurrentHint && (
-        <p
-          id="box-name-current-hint"
-          className="type-footnote text-label-secondary mt-1.5"
-        >
-          This is your current address — continue to keep it, or pick a new
-          name.
+      {/* WARP-1109 — while renaming, name the address we're replacing so the
+          owner sees exactly what's changing. */}
+      {renaming && current && (
+        <p className="type-footnote text-label-secondary mt-1.5">
+          Replacing <span className="font-mono">{current.fqdn}</span>.
         </p>
       )}
 
@@ -353,27 +462,42 @@ export function AddressStep({
         </div>
       </div>
 
-      {/* Two reassurance tiles — ported from the handoff. */}
-      <div className="flex items-stretch gap-2">
-        <div className="flex-1 min-w-0 dp-card !p-3.5">
-          <ShieldCheck size={17} className="text-accent" aria-hidden="true" />
-          <div className="type-footnote font-semibold mt-1.5 text-label-primary">
-            Nothing to install
+      {/* Cancel — return to the current-address view without renaming. Quiet
+          text button; only shown in the rename picker. */}
+      {renaming && (
+        <button
+          type="button"
+          onClick={cancelRename}
+          className="type-footnote font-semibold text-label-tertiary transition-colors hover:text-label-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 rounded-md px-1 -mx-1 mb-4"
+        >
+          Cancel
+        </button>
+      )}
+
+      {/* Two reassurance tiles — ported from the handoff. Shown on the fresh
+          pick; the rename picker keeps the surface tighter. */}
+      {!renaming && (
+        <div className="flex items-stretch gap-2">
+          <div className="flex-1 min-w-0 dp-card !p-3.5">
+            <ShieldCheck size={17} className="text-accent" aria-hidden="true" />
+            <div className="type-footnote font-semibold mt-1.5 text-label-primary">
+              Nothing to install
+            </div>
+            <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
+              no per-device certificate, no security warning to click through
+            </div>
           </div>
-          <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
-            no per-device certificate, no security warning to click through
+          <div className="flex-1 min-w-0 dp-card !p-3.5">
+            <Globe size={17} className="text-accent" aria-hidden="true" />
+            <div className="type-footnote font-semibold mt-1.5 text-label-primary">
+              One address everywhere
+            </div>
+            <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
+              the same trusted address resolves at home and over the VPN
+            </div>
           </div>
         </div>
-        <div className="flex-1 min-w-0 dp-card !p-3.5">
-          <Globe size={17} className="text-accent" aria-hidden="true" />
-          <div className="type-footnote font-semibold mt-1.5 text-label-primary">
-            One address everywhere
-          </div>
-          <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
-            the same trusted address resolves at home and over the VPN
-          </div>
-        </div>
-      </div>
+      )}
 
       {saveError && (
         <div

@@ -471,6 +471,52 @@ export interface VoiceSayResult {
   sample_rate?: number | null;
 }
 
+// --- WARP-1055: /voice surface — calibration + wizard measurements ---
+
+/**
+ * Persisted mic calibration (`GET /api/voice/calibration`). Written by
+ * the wizard's single write (`POST /api/voice/calibration`) and stored
+ * on the box; `{calibrated: false}` when no calibration exists yet.
+ */
+export interface VoiceCalibrationInfo {
+  calibrated: boolean;
+  /** Epoch seconds of the last applied calibration. */
+  calibrated_at?: number | null;
+  input_gain?: number | null;
+  wake_threshold?: number | null;
+  noise_floor_dbfs?: number | null;
+  speech_peak_dbfs?: number | null;
+  wake_detections?: number | null;
+  echo_ok?: boolean | null;
+  flags?: string[];
+}
+
+/** Payload of the wizard's single write (`POST /api/voice/calibration`). */
+export interface VoiceCalibrationApply {
+  input_gain?: number;
+  wake_threshold?: number;
+  noise_floor_dbfs: number;
+  speech_peak_dbfs: number;
+  wake_detections: number;
+  echo_ok: boolean;
+  flags: string[];
+}
+
+/** One wizard capture (`POST /api/voice/measure`). */
+export interface VoiceMeasureResult {
+  rms_dbfs: number;
+  peak_dbfs: number;
+  duration_s: number;
+  kind?: string;
+}
+
+/** Speaker→mic loop check (`POST /api/voice/echo-check`). */
+export interface VoiceEchoCheckResult {
+  heard: boolean;
+  tone_dbfs: number;
+  floor_dbfs: number;
+}
+
 // ── WARP-446: Coverage extender APs ──
 
 /** State machine values mirrored from the Prisma `ApDeviceStatus` enum.
@@ -562,6 +608,16 @@ export interface BoxNameCurrentResult {
   name: string | null;
   fqdn: string | null;
 }
+
+/**
+ * WARP-1109 — response from POST /api/setup/box-name/rename. Same shape as
+ * BoxNameSetResult: the rename RELEASES the current name at HQ then claims the
+ * new one, so `authoritative` is true only when HQ device-auth-confirmed the new
+ * name (false = the new name was persisted but issuance fell back to
+ * opaque/bootstrap and re-claims on the next tick). A 409 name-taken on the NEW
+ * name surfaces as a thrown error carrying `code: "BOX_NAME_TAKEN"` + suggestions.
+ */
+export type BoxNameRenameResult = BoxNameSetResult;
 // --- Auth types ---
 
 export interface AuthUser {
