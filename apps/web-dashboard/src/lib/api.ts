@@ -1082,6 +1082,15 @@ export async function updateDriveLabel(
     notes?: string | null;
   },
 ): Promise<DriveLabel> {
+  // WARP-1141: the bridge reports uuid:"" when the filesystem has no
+  // /dev/disk/by-uuid link (degraded / auto-read-only pools). An empty uuid
+  // builds PATCH /api/storage/drives/ — a different route — so fail loudly
+  // here instead of letting the label vanish into a mis-routed request.
+  if (!uuid) {
+    throw new Error(
+      "This drive doesn't have a stable identifier right now, so it can't be renamed.",
+    );
+  }
   const res = await authFetch(
     `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
     {

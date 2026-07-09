@@ -816,7 +816,12 @@ function DriveCard({
               <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
                 {busLabel(d.bus)}
               </span>
-              {isAdmin && (
+              {/* WARP-1141: the label row is keyed on the filesystem uuid; the
+                  bridge reports uuid:"" when /dev/disk/by-uuid has no link
+                  (e.g. a degraded / auto-read-only pool). With no durable key
+                  a rename can never persist, so don't render a control that
+                  silently can't work — same posture as the isAdmin gate. */}
+              {isAdmin && d.uuid && (
                 <button
                   ref={renameBtnRef}
                   onClick={beginEdit}
