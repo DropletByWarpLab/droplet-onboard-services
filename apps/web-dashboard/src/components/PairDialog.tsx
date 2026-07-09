@@ -77,7 +77,11 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       setPairing(info);
       setStep("waiting");
     } catch (err) {
-      setError(translateError(err, "device"));
+      // WARP-1150: this is the CREATE-a-pairing-session step — no device is
+      // involved yet, so the "device" domain's "couldn't reach that device"
+      // copy is nonsense here. The "pairing" domain keeps every failure at
+      // this step phrased as "couldn't create a code, retry".
+      setError(translateError(err, "pairing"));
     } finally {
       setSubmitting(false);
     }

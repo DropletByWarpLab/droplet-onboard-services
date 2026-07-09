@@ -41,6 +41,11 @@ class PairingCodeAlreadyClaimedError extends Error {
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const PAIRING_CODE_LENGTH = 6;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+// WARP-1151: `PairingCode.code` is unique and consumed/expired rows are never
+// purged, so a fresh random 6-char code can (rarely) collide with a historical
+// row. A collision is a retryable allocation miss, not a request failure —
+// regenerate up to this many times before giving up.
+const PAIRING_CODE_CREATE_ATTEMPTS = 5;
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
 const MAX_PAIR_CLAIM_PER_IP_PER_HOUR = 20;
@@ -195,12 +200,35 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const code = generatePairingCode();
       const expiresAt = new Date(Date.now() + PAIRING_CODE_TTL_MS);
 
-      await prisma.pairingCode.create({
-        data: { code, userId: user, expiresAt },
-      });
+      // WARP-1150/1151: allocate the code with a collision retry. Without it a
+      // P2002 clash with any historical code 500s the whole Generate-code step.
+      let code: string | null = null;
+      for (let attempt = 0; attempt < PAIRING_CODE_CREATE_ATTEMPTS; attempt++) {
+        const candidate = generatePairingCode();
+        try {
+          await prisma.pairingCode.create({
+            data: { code: candidate, userId: user, expiresAt },
+          });
+          code = candidate;
+          break;
+        } catch (err) {
+          if ((err as { code?: string })?.code !== "P2002") throw err;
+          logger.warn(
+            { attempt },
+            "pairing code collided with an existing row; regenerating"
+          );
+        }
+      }
+      if (!code) {
+        // Astronomically unlikely (5 independent collisions), but answer with
+        // retryable copy rather than a 500.
+        res.status(503).json({
+          error: "Couldn't allocate a pairing code. Try again.",
+        });
+        return;
+      }
 
       const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
       const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
