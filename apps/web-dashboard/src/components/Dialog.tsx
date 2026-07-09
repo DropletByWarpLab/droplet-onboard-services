@@ -76,8 +76,10 @@ export interface DialogProps {
   /**
    * Max width of the modal container. `md` is the default and matches
    * every existing dashboard modal. Sizes map to Tailwind `max-w-*`.
+   * `2xl` (720px) exists for the voice calibration wizard's modal
+   * contract (WARP-1055, design brief §4).
    */
-  maxWidth?: "sm" | "md" | "lg" | "xl";
+  maxWidth?: "sm" | "md" | "lg" | "xl" | "2xl";
   /**
    * Where the dialog sits on screen.
    *
@@ -107,6 +109,8 @@ const MAX_WIDTH_CLASS: Record<NonNullable<DialogProps["maxWidth"]>, string> = {
   md: "max-w-md",
   lg: "max-w-lg",
   xl: "max-w-xl",
+  // 720px — the voice calibration wizard (WARP-1055, brief §4).
+  "2xl": "max-w-[720px]",
 };
 
 const FOCUSABLE_SELECTOR = [

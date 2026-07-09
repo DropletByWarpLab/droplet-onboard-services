@@ -1500,8 +1500,15 @@ services:
     # voice-io. The bind is a live view of the host dir (late nodes appear)
     # and the wildcard cgroup rule permits them; voice-io's wake loop
     # re-resolves + opens the card when it shows up (pipeline.py).
+    #
+    # WARP-1055 — voice-calibration is a named volume so the wizard's
+    # applied mic calibration (voice/calibration.py, mounted at /data)
+    # survives container restarts/recreates; factory-reset's volume sweep
+    # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
+    # behaviour.
     volumes:
       - /dev/snd:/dev/snd
+      - voice-calibration:/data
     # ALSA sound-class char major is 116; the wildcard minor covers ANY
     # card, including one that enumerates after container-create (which the
     # old per-minor `devices:` rule could not). read / write / mknod.
@@ -1546,6 +1553,11 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1055 — where the applied mic calibration persists (JSON on
+      # the voice-calibration named volume above). The dashboard wizard
+      # writes it via POST /voice/calibration; startup re-applies the
+      # tuned gain + wake threshold over the env defaults.
+      - VOICE_CALIBRATION_PATH=${VOICE_CALIBRATION_PATH:-/data/calibration.json}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
@@ -2179,6 +2191,10 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
+  # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
+  # Named so a container recreate never silently reverts the tuned
+  # gain/threshold; factory-reset's volume sweep clears it.
+  voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
