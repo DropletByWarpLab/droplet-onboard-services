@@ -271,6 +271,26 @@ export default function FilesPage() {
     setPreviewFile(file);
   }, []);
 
+  // WARP-1143 — Home "Recent files" deep link: `?preview=<path>` (read once on
+  // mount, same pattern as the calendar's `?date=`) selects + previews that
+  // file once the target folder's listing has loaded. A target that no longer
+  // resolves (deleted/unindexed since the recents snapshot) fails with a toast,
+  // not silently.
+  const [pendingPreviewPath, setPendingPreviewPath] = useState<string | null>(
+    () => searchParams?.get("preview") ?? null
+  );
+  useEffect(() => {
+    if (!pendingPreviewPath || isLoading) return;
+    const target = files.find((f) => f.path === pendingPreviewPath);
+    setPendingPreviewPath(null);
+    if (target && !target.isDirectory) {
+      setSelectedFile(target);
+      handlePreview(target);
+    } else {
+      toast("Couldn't open that file — it may have been moved or deleted.");
+    }
+  }, [pendingPreviewPath, isLoading, files, handlePreview, toast]);
+
   // ── Rename ──
   const handleRenameCommit = useCallback(
     async (file: FileEntryInfo, newName: string) => {
