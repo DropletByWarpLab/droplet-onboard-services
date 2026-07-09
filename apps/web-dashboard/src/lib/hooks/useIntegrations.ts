@@ -20,7 +20,7 @@ const LIVE_STATUSES: IntegrationStatus[] = ["CONNECTED", "DEGRADED", "DRIFT_LOCK
  * honest first-run state, no error surfaced to the user.
  */
 export function useIntegrations() {
-  const { data, error, isLoading, mutate } = useSWR<IntegrationConnection[]>(
+  const { data, isLoading, mutate } = useSWR<IntegrationConnection[]>(
     "/api/integrations",
     fetchIntegrations,
     { refreshInterval: 30_000, shouldRetryOnError: false },
@@ -44,7 +44,6 @@ export function useIntegrations() {
   return {
     entries,
     connected,
-    hasBackend: !error,
     isLoading,
     refresh: () => mutate(),
   };

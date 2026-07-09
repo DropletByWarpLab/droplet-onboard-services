@@ -38,7 +38,7 @@ export function WriteConfirmModal({
   const [error, setError] = useState<string | null>(null);
   const isReschedule = !!request?.previousStartsAt;
 
-  async function confirm() {
+  async function handleConfirm() {
     if (!request) return;
     setBusy(true);
     setError(null);
@@ -106,7 +106,7 @@ export function WriteConfirmModal({
           <button type="button" className="type-footnote text-label-secondary px-3" onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="dp-btn-primary" onClick={confirm} disabled={busy || !request}>
+          <button type="button" className="dp-btn-primary" onClick={handleConfirm} disabled={busy || !request}>
             {busy ? "Writing…" : "Confirm and write"}
           </button>
         </div>

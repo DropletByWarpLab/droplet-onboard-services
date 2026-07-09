@@ -1,7 +1,7 @@
 "use client";
 
 import useSWR from "swr";
-import { fetchEaglesoft } from "../api.erp";
+import { fetchEaglesoft, fetchEaglesoftSchedule } from "../api.erp";
 import { useAuth } from "../auth";
 import type { EaglesoftDetail, ErpAccess, IntegrationConnection } from "../erp-types";
 
@@ -18,7 +18,7 @@ const DEFAULT_CONNECTION: IntegrationConnection = {
  * "Connect Eaglesoft" first-run state cleanly.
  */
 export function useEaglesoft() {
-  const { data, error, isLoading, mutate } = useSWR<EaglesoftDetail>(
+  const { data, isLoading, mutate } = useSWR<EaglesoftDetail>(
     "/api/integrations/eaglesoft",
     fetchEaglesoft,
     { refreshInterval: 30_000, shouldRetryOnError: false },
@@ -28,10 +28,26 @@ export function useEaglesoft() {
     connection: data?.connection ?? DEFAULT_CONNECTION,
     kpis: data?.kpis,
     schedule: data?.schedule ?? [],
-    hasBackend: !error,
     isLoading,
     refresh: () => mutate(),
   };
+}
+
+/**
+ * Schedule for a specific day. The base `useEaglesoft()` snapshot only carries
+ * today's schedule; the ERP surface's day navigation drives this to pull other
+ * days on demand (design brief §4.2). Pass `dateIso = null` to skip the fetch
+ * (e.g. for today, which the base snapshot already covers, or when data is
+ * RBAC-locked). Keyed per-date so SWR caches each day; a 404 from the not-yet-
+ * wired backend resolves to an empty list, matching the base hook's behaviour.
+ */
+export function useEaglesoftSchedule(dateIso: string | null) {
+  const { data, isLoading } = useSWR(
+    dateIso ? ["erp-schedule", dateIso] : null,
+    () => fetchEaglesoftSchedule(dateIso as string),
+    { shouldRetryOnError: false },
+  );
+  return { entries: data?.entries ?? [], isLoading };
 }
 
 /**

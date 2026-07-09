@@ -20,7 +20,7 @@ import { SyncFooter } from "@/components/erp/SyncFooter";
 import { ManageSheet } from "@/components/erp/ManageSheet";
 import { NewAppointmentDialog } from "@/components/erp/NewAppointmentDialog";
 import { WriteConfirmModal } from "@/components/erp/WriteConfirmModal";
-import { useEaglesoft, useErpAccess } from "@/lib/hooks/useEaglesoft";
+import { useEaglesoft, useEaglesoftSchedule, useErpAccess } from "@/lib/hooks/useEaglesoft";
 import { setEaglesoftWrites, disconnectEaglesoft } from "@/lib/api.erp";
 import { formatDayLabel, syncedAgo } from "@/lib/erp-format";
 import { writeModeOf, type AppointmentWriteRequest } from "@/lib/erp-types";
@@ -45,6 +45,13 @@ export default function EaglesoftPage() {
   const day = new Date();
   day.setDate(day.getDate() + dayOffset);
   const dateLabel = formatDayLabel(day.toISOString());
+
+  // Today's schedule rides on the base snapshot (polled every 30s); other days
+  // are fetched on demand and cached per-date. Skip the fetch when today or
+  // when data isn't shown (not connected / RBAC-locked).
+  const isToday = dayOffset === 0;
+  const otherDay = useEaglesoftSchedule(showData && !isToday ? day.toISOString().slice(0, 10) : null);
+  const entries = isToday ? schedule : otherDay.entries;
 
   async function toggleWrites(next: boolean) {
     try {
@@ -113,7 +120,7 @@ export default function EaglesoftPage() {
       {showData && (
         <>
           <ScheduleList
-            entries={schedule}
+            entries={entries}
             dateLabel={dateLabel}
             writeEnabled={writesEnabled}
             onPrevDay={() => setDayOffset((d) => d - 1)}

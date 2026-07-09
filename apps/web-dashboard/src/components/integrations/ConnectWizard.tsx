@@ -81,15 +81,7 @@ export function ConnectWizard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // One-time display credential for the setup panel. The REAL strong password is
-  // generated + stored (secretRef) by the backend; this is only the placeholder
-  // shown so the admin sees the shape of what they'll paste. Regenerated per open.
-  const [displayPassword, setDisplayPassword] = useState("");
   useEffect(() => {
-    if (open && !displayPassword) {
-      const raw = crypto.randomUUID().replace(/-/g, "");
-      setDisplayPassword(`Dp-${raw.slice(0, 20)}`);
-    }
     if (!open) {
       // reset on close so a re-open starts clean
       setStep(1);
@@ -100,15 +92,20 @@ export function ConnectWizard({
       setEnableWrites(false);
       setAdminPath(null);
       setError(null);
-      setDisplayPassword("");
     }
-  }, [open, displayPassword]);
+  }, [open]);
 
+  // The droplet_ro password is generated (strong, unique per box) and stored
+  // via a secret_ref by Droplet when it provisions — never fabricated in the
+  // browser (that would strand a live credential the connector can't retrieve).
+  // The script carries the placeholder Droplet fills in with the issued value;
+  // mirrors services/erp-connector/sql/provision.sql (WARP-1094, brief §8.1).
   const provisionScript = useMemo(
     () =>
       [
         "-- Run once as a SQL Anywhere DBA on the PattersonPM database.",
-        `CREATE USER droplet_ro IDENTIFIED BY '${displayPassword || "<generated>"}';`,
+        "-- Replace <GENERATED_BY_DROPLET> with the password Droplet issues on the setup screen.",
+        "CREATE USER droplet_ro IDENTIFIED BY '<GENERATED_BY_DROPLET>';",
         "GRANT SELECT ON dba.patient TO droplet_ro;",
         "GRANT SELECT ON dba.appointment TO droplet_ro;",
         "GRANT SELECT ON dba.provider TO droplet_ro;",
@@ -117,7 +114,7 @@ export function ConnectWizard({
         "GRANT SELECT ON dba.recall TO droplet_ro;",
         "GRANT SELECT ON dba.account TO droplet_ro;   -- AR read only",
       ].join("\n"),
-    [displayPassword],
+    [],
   );
 
   const selectedScopes = (Object.keys(scopes) as ErpScope[]).filter((s) => scopes[s]);
@@ -292,10 +289,10 @@ export function ConnectWizard({
                   </div>
                   <div className="min-w-0">
                     <div className="type-caption-1 text-label-tertiary flex items-center gap-1">
-                      <Lock size={11} /> One-time password
+                      <Lock size={11} /> Password
                     </div>
-                    <div className="type-callout text-label-primary truncate" style={{ fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
-                      {displayPassword}
+                    <div className="type-callout text-label-secondary truncate" style={{ fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
+                      Issued by Droplet
                     </div>
                   </div>
                   <button type="button" className="dp-btn-secondary shrink-0" onClick={copyScript}>
