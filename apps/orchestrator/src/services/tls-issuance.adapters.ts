@@ -20,7 +20,12 @@ import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
 import { RouterError, routingFetch } from "./openwrt.client.js";
-import { claimBoxName, type ClaimBoxNameResult } from "./tls-issuance.service.js";
+import {
+  claimBoxName,
+  releaseFromHq,
+  type ClaimBoxNameResult,
+  type ReleaseResult,
+} from "./tls-issuance.service.js";
 import { createDeviceIdentityClient } from "./device-identity.client.js";
 import type {
   DnsRegistrar,
@@ -416,6 +421,28 @@ export function createBoxNameClaimer(): (raw: string) => Promise<ClaimBoxNameRes
       // HQ_ISSUANCE_URL the HQ client's base URL is "" and hq.challenge would
       // throw `TypeError: Failed to parse URL`; short-circuit to NOT_REGISTERED.
       hqConfigured: !!config.HQ_ISSUANCE_URL,
+    });
+  };
+}
+
+/**
+ * WARP-1109 — compose the production `releaseFromHq` bound to this box's identity
+ * (real HQ HTTP client + device-identity signer + `config.DROPLET_DEVICE_ID`).
+ * The rename endpoint calls this FIRST (before claiming the new name) to free the
+ * box's CURRENT name at HQ via device-auth PoP — the SAME signed release the
+ * factory-reset path uses (`cli/tls-release.ts`). Injectable into the setup
+ * router so route tests pass a fake (no HQ / device-identity sidecar touched).
+ *
+ * `releaseFromHq` is itself non-fatal (never throws — returns a sentinel), so
+ * this is a thin binder.
+ */
+export function createBoxNameReleaser(): () => Promise<ReleaseResult> {
+  return function release(): Promise<ReleaseResult> {
+    return releaseFromHq({
+      deviceId: config.DROPLET_DEVICE_ID,
+      hq: createHqIssuanceClient(),
+      identity: createDeviceIdentityClient(),
+      logger,
     });
   };
 }

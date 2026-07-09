@@ -1732,16 +1732,19 @@ export function createPublicAuthRouter(
       });
 
       // Auto-login the invitee — same shape as /api/auth/login.
-      // WARP-171: preserve the pre-WARP-171 wire contract — "admin"
-      // invitee gets an "owner" session role (the original two-value
-      // semantics) — and add direct passthrough for the three new
-      // enum values an invite can now request explicitly.
+      // WARP-1051: the session role IS the canonical invite role. The old
+      // WARP-171 two-value promotion (admin invitee → "owner" session) made
+      // the accept path diverge from /auth/login (raw User.role) AND from
+      // the refresh path (WARP-116 re-derives from the DB row) — an invited
+      // admin held an "owner" session that silently downgraded to "admin"
+      // at the first token rotation, and an admin-minted admin invite
+      // yielded an owner session, defeating the ROLE_RANK_EXCEEDED cap on
+      // the create endpoint. Unknown/legacy values still collapse to
+      // "family" (fail-toward-least-privilege).
       const role: Role =
-        invite.role === "owner" || invite.role === "admin"
-          ? "owner"
-          : invite.role === "guest"
-            ? "guest"
-            : "family";
+        invite.role === "owner" || invite.role === "admin" || invite.role === "guest"
+          ? (invite.role as Role)
+          : "family";
 
       // WARP-485 round 2 — provision the local User row mapping this
       // Nextcloud identity to a local UUID BEFORE signing the JWT, so
@@ -1756,9 +1759,9 @@ export function createPublicAuthRouter(
       //
       // The User.role column uses the canonical Role enum value from
       // the invite (so DB-level RBAC matches the operator's intent on
-      // the create endpoint); the JWT session `role` keeps the legacy
-      // mapping above (admin invite → owner session) which existing
-      // routes still depend on.
+      // the create endpoint); since WARP-1051 the JWT session `role`
+      // carries the same canonical value, so the first session matches
+      // every subsequent login and refresh.
       // ADR-013 (PR #374): this email lands directly in User.email — the
       // case-sensitive unique-indexed login key. createInviteSchema already
       // normalizes new invites, but re-normalize here as defense in depth so
@@ -2962,12 +2965,13 @@ export function createProtectedAuthRouter(
 
       // Privilege-escalation guard. `requireRole("owner","admin")` proved the
       // caller may issue invites, but NOT which role they may assign. Without
-      // this cap an `admin` could mint an `owner` invite, and the accept path
-      // grants an owner/admin invite an `owner` session role + Nextcloud
-      // `admin` group (see POST /auth/invites/accept/:token above) — a
-      // straight privilege escalation. Reject any assigned role that outranks
-      // the inviter's own; owner→owner is allowed, admin→owner is not. Fail
-      // closed if the role claim is somehow absent.
+      // this cap an `admin` could mint an `owner` invite — the accept path
+      // grants the invite's canonical role as the session role (WARP-1051)
+      // and an owner/admin invite still lands the Nextcloud `admin` group
+      // (see POST /auth/invites/accept/:token above) — a straight privilege
+      // escalation. Reject any assigned role that outranks the inviter's
+      // own; owner→owner is allowed, admin→owner is not. Fail closed if the
+      // role claim is somehow absent.
       const inviterRole = req.user?.role;
       if (!inviterRole || roleOutranks(parsed.data.role, inviterRole)) {
         res.status(403).json({

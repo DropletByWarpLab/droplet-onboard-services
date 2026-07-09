@@ -43,6 +43,7 @@ import type {
   MatterGrouped,
 } from "../types/smart-home.js";
 import { recordActivity } from "./activity.singleton.js";
+import type { ActivityActor } from "./activity.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("matter");
@@ -259,6 +260,9 @@ export async function discoverDevices(
 
 export async function commissionDevice(
   pairingCode: string,
+  // WARP-1010: required, no default — every caller must declare who is
+  // acting (routes derive it from the request; the agent loop is `ai`).
+  actor: ActivityActor,
 ): Promise<{ nodeId: string }> {
   const result = await sidecarJson<{ nodeId: string }>(
     "/commission",
@@ -278,10 +282,7 @@ export async function commissionDevice(
     severity: "ok",
     sourceIcon: "plug",
     what: "Commissioned Matter device",
-    // WARP-181: matter.service has no caller identity plumbed through
-    // (commands arrive from routes AND the agent loop); attributed to
-    // the AI/automation surface with a null on-behalf-of id.
-    actor: { type: "ai", id: null },
+    actor,
     sub: `nodeId ${result.nodeId}`,
     refs: { nodeId: result.nodeId },
   });
@@ -298,6 +299,7 @@ export async function commissionDevice(
  */
 export async function decommissionDevice(
   nodeIdStr: string,
+  actor: ActivityActor,
 ): Promise<boolean> {
   const res = await internalFetch(`${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
     {
@@ -316,7 +318,7 @@ export async function decommissionDevice(
     severity: "warn",
     sourceIcon: "unplug",
     what: "Decommissioned Matter device",
-    actor: { type: "ai", id: null },
+    actor,
     sub: `nodeId ${nodeIdStr}`,
     refs: { nodeId: nodeIdStr },
   });
@@ -350,6 +352,9 @@ export async function getDevice(
 export async function sendMatterCommand(
   nodeIdStr: string,
   command: string,
+  // WARP-1010: actor precedes the optional payload so it can stay
+  // required — a compile error forces every caller to declare it.
+  actor: ActivityActor,
   data?: Record<string, unknown>,
 ): Promise<{ status: string; result?: unknown }> {
   // WARP-456: wrap the dispatcher so every Matter write — success or
@@ -375,7 +380,7 @@ export async function sendMatterCommand(
       severity: threw ? "err" : "ok",
       sourceIcon: "home",
       what: threw ? `Matter ${command} failed` : `Matter ${command}`,
-      actor: { type: "ai", id: null },
+      actor,
       sub: `nodeId ${nodeIdStr}`,
       refs: {
         nodeId: nodeIdStr,

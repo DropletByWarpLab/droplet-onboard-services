@@ -714,23 +714,33 @@ export default function UsersPage() {
       {/* Invite modal */}
       {showInvite && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+          className="droplet-shell fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-6"
+          style={{ position: "fixed", background: "var(--scrim)" }}
           onClick={closeInvite}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby={inviteHeadingId}
-            className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
+            className="max-w-md w-full overflow-hidden"
+            style={{
+              background: "var(--card-bg)",
+              border: "1px solid var(--card-bd)",
+              borderRadius: "var(--radius-card)",
+              boxShadow: "var(--lift)",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 id={inviteHeadingId} className="type-headline text-label-primary">
+            <div
+              className="flex items-center justify-between px-4 py-3"
+              style={{ borderBottom: "1px solid var(--card-bd)" }}
+            >
+              <h3 id={inviteHeadingId} className="type-headline" style={{ color: "var(--text)" }}>
                 {invitePhase === "form" ? "Invite user" : "Share this link"}
               </h3>
               <button
                 onClick={closeInvite}
-                className="p-1 text-label-tertiary hover:text-label-primary"
+                className="p-1 text-[var(--text-muted)] hover:text-[var(--text)]"
               >
                 <X size={18} />
               </button>
@@ -740,7 +750,7 @@ export default function UsersPage() {
               <>
                 <div className="p-4 space-y-3">
                   <div>
-                    <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                    <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                       Work email
                     </label>
                     <input
@@ -749,42 +759,66 @@ export default function UsersPage() {
                       value={inviteEmail}
                       onChange={(e) => setInviteEmail(e.target.value)}
                       placeholder="you@company.com"
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                   </div>
                   <div>
-                    <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                    <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                       Display name (optional)
                     </label>
                     <input
                       value={inviteDisplay}
                       onChange={(e) => setInviteDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                      <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Role
                       </label>
                       <select
                         value={inviteRole}
                         onChange={(e) => setInviteRole(e.target.value as InviteRole)}
-                        className="dp-input"
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        style={{
+                          background: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-input)",
+                          color: "var(--text)",
+                        }}
                       >
                         <option value="user">User</option>
                         <option value="admin">Admin</option>
                       </select>
                     </div>
                     <div>
-                      <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                      <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Link expires in
                       </label>
                       <select
                         value={inviteTtlHours}
                         onChange={(e) => setInviteTtlHours(Number(e.target.value))}
-                        className="dp-input"
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        style={{
+                          background: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-input)",
+                          color: "var(--text)",
+                        }}
                       >
                         {TTL_OPTIONS.map((opt) => (
                           <option key={opt.hours} value={opt.hours}>
@@ -795,17 +829,20 @@ export default function UsersPage() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
+                <div
+                  className="flex items-center justify-end gap-2 px-4 py-3"
+                  style={{ borderTop: "1px solid var(--card-bd)" }}
+                >
                   <button
                     onClick={closeInvite}
-                    className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                    className="btn ghost"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={handleGenerateInvite}
                     disabled={inviteSubmitting}
-                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    className="btn primary"
                   >
                     {inviteSubmitting ? "Generating..." : "Generate link"}
                   </button>
@@ -813,7 +850,7 @@ export default function UsersPage() {
               </>
             ) : (
               <div className="p-4 space-y-4">
-                <p className="type-subheadline text-label-secondary">
+                <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                   Send this link to {inviteEmail || "the new user"}. They'll set their own
                   password and join automatically.
                 </p>
@@ -822,20 +859,31 @@ export default function UsersPage() {
                     <div
                       role="img"
                       aria-label={`QR code containing invite link for ${inviteEmail || "the new user"}`}
-                      className="flex items-center justify-center bg-surface-secondary rounded-lg p-4"
+                      className="flex items-center justify-center p-4"
+                      style={{ background: "var(--inset)", borderRadius: "var(--radius-card)" }}
                     >
-                      <QRCodeSVG value={inviteResult.url} size={160} level="M" />
+                      {/* Solid white behind the QR — scanner contrast, not a
+                          theme surface (mirrors PairDialog, WARP-1079). */}
+                      <div className="p-4 bg-white rounded-[var(--radius-card)]">
+                        <QRCodeSVG value={inviteResult.url} size={160} level="M" />
+                      </div>
                     </div>
-                    <div className="flex items-stretch gap-2">
+                    <div className="flex items-center gap-2">
                       <input
                         readOnly
                         value={inviteResult.url}
-                        className="dp-input flex-1 type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 type-footnote"
+                        style={{
+                          background: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-input)",
+                          color: "var(--text)",
+                        }}
                         onFocus={(e) => e.currentTarget.select()}
                       />
                       <button
                         onClick={handleCopyInviteUrl}
-                        className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                        className="btn ghost sm flex-shrink-0"
                         aria-label="Copy invite link"
                       >
                         {inviteCopied ? (
@@ -849,7 +897,7 @@ export default function UsersPage() {
                         )}
                       </button>
                     </div>
-                    <p className="type-caption-1 text-label-tertiary">
+                    <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
                       Expires{" "}
                       {new Date(inviteResult.expiresAt).toLocaleString(undefined, {
                         dateStyle: "medium",
@@ -862,7 +910,7 @@ export default function UsersPage() {
                 <div className="flex items-center justify-end gap-2 pt-2">
                   <button
                     onClick={closeInvite}
-                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    className="btn primary"
                   >
                     Done
                   </button>
@@ -889,14 +937,17 @@ export default function UsersPage() {
         initialFocusRef={createDisplayRef}
       >
         <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 id={createHeadingId} className="type-headline text-label-primary">
+            <div
+              className="flex items-center justify-between px-4 py-3"
+              style={{ borderBottom: "1px solid var(--card-bd)" }}
+            >
+              <h3 id={createHeadingId} className="type-headline" style={{ color: "var(--text)" }}>
                 {createPhase === "form" ? "Create local account" : "Hand off the sign-in details"}
               </h3>
               <button
                 onClick={closeCreate}
                 aria-label="Close dialog"
-                className="p-1 text-label-tertiary hover:text-label-primary"
+                className="p-1 text-[var(--text-muted)] hover:text-[var(--text)]"
                 type="button"
               >
                 <X size={18} />
@@ -909,7 +960,7 @@ export default function UsersPage() {
                   <div>
                     <label
                       htmlFor={createDisplayId}
-                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                      className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                     >
                       Display name (optional)
                     </label>
@@ -919,13 +970,19 @@ export default function UsersPage() {
                       value={createDisplay}
                       onChange={(e) => setCreateDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                   </div>
                   <div>
                     <label
                       htmlFor={createEmailId}
-                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                      className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                     >
                       Login email
                     </label>
@@ -935,19 +992,31 @@ export default function UsersPage() {
                       value={createEmail}
                       onChange={(e) => setCreateEmail(e.target.value)}
                       placeholder="alex@example.com"
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                     {/* text-label-secondary, not tertiary: load-bearing helper
                         copy must clear WCAG 1.4.3 (tertiary ≈ 1.7:1 at caption
-                        size — UX review WARP-1042). */}
-                    <p className="type-caption-1 text-label-secondary mt-1.5">
+                        size — UX review WARP-1042). The class stays as the
+                        pinned contrast contract (users.local-account.test.tsx);
+                        the rendered color is the indigo --text-muted, which
+                        also clears 4.5:1 in both themes (WARP-1080). */}
+                    <p
+                      className="type-caption-1 text-label-secondary mt-1.5"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       Used to sign in — doesn't need to receive mail.
                     </p>
                   </div>
                   <div>
                     <label
                       htmlFor={createRoleId}
-                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                      className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                     >
                       Role
                     </label>
@@ -955,7 +1024,13 @@ export default function UsersPage() {
                       id={createRoleId}
                       value={createRole}
                       onChange={(e) => setCreateRole(e.target.value as CreateUserRole)}
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     >
                       <option value="family">User</option>
                       <option value="admin">Admin</option>
@@ -964,29 +1039,40 @@ export default function UsersPage() {
                   <div>
                     <label
                       htmlFor={createPasswordId}
-                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                      className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                     >
                       Temporary password
                     </label>
-                    <div className="flex items-stretch gap-2">
+                    <div className="flex items-center gap-2">
                       <input
                         id={createPasswordId}
                         value={createPassword}
                         onChange={(e) => setCreatePassword(e.target.value)}
-                        className="dp-input flex-1 font-mono type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                        style={{
+                          background: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-input)",
+                          color: "var(--text)",
+                        }}
                         autoComplete="off"
                         spellCheck={false}
                       />
                       <button
                         onClick={() => setCreatePassword(generateTempPassword())}
-                        className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                        className="btn primary sm flex-shrink-0"
                         aria-label="Regenerate password"
                         type="button"
                       >
                         <RefreshCw size={14} /> Regenerate
                       </button>
                     </div>
-                    <p className="type-caption-1 text-label-secondary mt-1.5">
+                    {/* Class = pinned WCAG contract (users.local-account.test.tsx);
+                        rendered color = indigo --text-muted (WARP-1080). */}
+                    <p
+                      className="type-caption-1 text-label-secondary mt-1.5"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       Auto-generated to meet the password rules — you can type your
                       own instead. They'll be asked to replace it at first sign-in.
                     </p>
@@ -1000,10 +1086,13 @@ export default function UsersPage() {
                     </p>
                   )}
                 </div>
-                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
+                <div
+                  className="flex items-center justify-end gap-2 px-4 py-3"
+                  style={{ borderTop: "1px solid var(--card-bd)" }}
+                >
                   <button
                     onClick={closeCreate}
-                    className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                    className="btn ghost"
                     type="button"
                   >
                     Cancel
@@ -1011,7 +1100,7 @@ export default function UsersPage() {
                   <button
                     onClick={handleCreateAccount}
                     disabled={createSubmitting}
-                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    className="btn primary"
                     type="button"
                   >
                     Create account
@@ -1020,14 +1109,14 @@ export default function UsersPage() {
               </>
             ) : (
               <div className="p-4 space-y-4">
-                <p className="type-subheadline text-label-secondary">
+                <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                   Give them this email and temporary password — they'll choose
                   their own the first time they sign in.
                 </p>
                 <div>
                   <label
                     htmlFor={createEmailId}
-                    className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                   >
                     Sign-in email
                   </label>
@@ -1035,14 +1124,20 @@ export default function UsersPage() {
                     id={createEmailId}
                     readOnly
                     value={createEmail}
-                    className="dp-input font-mono type-footnote"
+                    className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono type-footnote"
+                    style={{
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-input)",
+                      color: "var(--text)",
+                    }}
                     onFocus={(e) => e.currentTarget.select()}
                   />
                 </div>
                 <div>
                   <label
                     htmlFor={createPasswordId}
-                    className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}
                   >
                     Temporary password
                   </label>
@@ -1052,12 +1147,18 @@ export default function UsersPage() {
                       ref={createHandoffPwRef}
                       readOnly
                       value={createPassword}
-                      className="dp-input flex-1 font-mono type-footnote"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                       onFocus={(e) => e.currentTarget.select()}
                     />
                     <button
                       onClick={handleCopyTempPassword}
-                      className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                      className="btn ghost sm flex-shrink-0"
                       aria-label="Copy temporary password"
                       type="button"
                     >
@@ -1073,15 +1174,21 @@ export default function UsersPage() {
                     </button>
                   </div>
                   {/* The single most consequence-bearing sentence in the
-                      dialog — secondary emphasis so it clears WCAG 1.4.3. */}
-                  <p className="type-caption-1 text-label-secondary mt-1.5">
+                      dialog — secondary emphasis so it clears WCAG 1.4.3. The
+                      class stays as the pinned contrast contract
+                      (users.local-account.test.tsx); the rendered color is the
+                      indigo --text-muted (WARP-1080). */}
+                  <p
+                    className="type-caption-1 text-label-secondary mt-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     This password won't be shown again after you close this dialog.
                   </p>
                 </div>
                 <div className="flex items-center justify-end gap-2 pt-2">
                   <button
                     onClick={closeCreate}
-                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    className="btn primary"
                     type="button"
                   >
                     Done
@@ -1095,47 +1202,69 @@ export default function UsersPage() {
       {/* Edit dialog */}
       {editing && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+          className="droplet-shell fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-6"
+          style={{ position: "fixed", background: "var(--scrim)" }}
           onClick={closeEdit}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby={editHeadingId}
-            className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
+            className="max-w-md w-full overflow-hidden"
+            style={{
+              background: "var(--card-bg)",
+              border: "1px solid var(--card-bd)",
+              borderRadius: "var(--radius-card)",
+              boxShadow: "var(--lift)",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 id={editHeadingId} className="type-headline text-label-primary">
+            <div
+              className="flex items-center justify-between px-4 py-3"
+              style={{ borderBottom: "1px solid var(--card-bd)" }}
+            >
+              <h3 id={editHeadingId} className="type-headline" style={{ color: "var(--text)" }}>
                 Edit {editing.id}
               </h3>
               <button
                 onClick={closeEdit}
-                className="p-1 text-label-tertiary hover:text-label-primary"
+                className="p-1 text-[var(--text-muted)] hover:text-[var(--text)]"
               >
                 <X size={18} />
               </button>
             </div>
             <div className="p-4 space-y-3">
               <div>
-                <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                   Display name
                 </label>
                 <input
                   value={editDisplayName}
                   onChange={(e) => setEditDisplayName(e.target.value)}
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                 />
               </div>
               <div>
-                <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                   Set new password (leave blank to keep)
                 </label>
                 <input
                   type="password"
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   placeholder="••••••••"
                 />
                 {editPassword && (
@@ -1143,16 +1272,19 @@ export default function UsersPage() {
                 )}
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
+            <div
+              className="flex items-center justify-end gap-2 px-4 py-3"
+              style={{ borderTop: "1px solid var(--card-bd)" }}
+            >
               <button
                 onClick={closeEdit}
-                className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                className="btn ghost"
               >
                 Cancel
               </button>
               <button
                 onClick={handleEditSave}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                className="btn primary"
               >
                 <Check size={14} />
                 Save

@@ -494,6 +494,11 @@ VOLUMES=(
   "rag-eval-data"
   "whisper-models"
   "piper-voices"
+  # WARP-1055: voice-io's applied mic-calibration record (small JSON, mounted
+  # at /data). docker-compose.yml declares this named volume so a container
+  # recreate never silently reverts the tuned gain/threshold; the reset must
+  # wipe it so factory-reset truly returns to §6.4 "Not calibrated yet".
+  "voice-calibration"
   "ollama-data"
   "openwrt-config"
   "openwrt-overlay"

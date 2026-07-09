@@ -181,6 +181,13 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-1118 (§10): the orchestrator's request-size estimator
+      # (context-budget.service.ts) budgets the assembled chat request against
+      # this window before dispatch, PREVENTING (not merely detecting) the
+      # WARP-854 overflow. Mirrors the `ollama` service's OLLAMA_CONTEXT_LENGTH
+      # (both default 16384 via the same env token) so the estimator's window
+      # tracks the model server's actual window. NOT a model swap — window only.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
       - NEXTCLOUD_URL=http://nextcloud:80
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
@@ -1489,11 +1496,38 @@ services:
     build:
       context: ..
       dockerfile: services/voice-io/Dockerfile
-    # /dev/snd is the ALSA device tree; mounting it gives the container
-    # access to whatever the host kernel sees. No need to enumerate
-    # specific devices — sounddevice picks them up via PortAudio.
-    devices:
-      - "/dev/snd:/dev/snd"
+    # /dev/snd is the ALSA device tree. WARP-1092: mount it as a LIVE bind
+    # (not a static `devices:` snapshot) and grant the whole ALSA char
+    # class via a device-cgroup rule, so a ReSpeaker XVF3800 that settles a
+    # few seconds AFTER this container starts — the boot/reflash container-
+    # storm race — becomes visible AND usable WITHOUT a container restart.
+    # A `devices:` entry only mknods the minors present at create time and
+    # cgroup-permits exactly those, so a late-enumerating card is stranded
+    # (container sees no cards, /health flatlines) until a human restarts
+    # voice-io. The bind is a live view of the host dir (late nodes appear)
+    # and the wildcard cgroup rule permits them; voice-io's wake loop
+    # re-resolves + opens the card when it shows up (pipeline.py).
+    #
+    # WARP-1055 — voice-calibration is a named volume so the wizard's
+    # applied mic calibration (voice/calibration.py, mounted at /data)
+    # survives container restarts/recreates; factory-reset's volume sweep
+    # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
+    # behaviour.
+    volumes:
+      - /dev/snd:/dev/snd
+      - voice-calibration:/data
+    # ALSA sound-class char major is 116; the wildcard minor covers ANY
+    # card, including one that enumerates after container-create (which the
+    # old per-minor `devices:` rule could not). read / write / mknod.
+    device_cgroup_rules:
+      - "c 116:* rmw"
+    # Pairs with the device-cgroup grant above, matching the oled-display
+    # scoped-device pattern: the cgroup rule is the real access control;
+    # this just stops a setuid binary inside the container from escalating
+    # beyond its launch cap-bag. voice-io (a Python FastAPI service) needs
+    # no privilege elevation, so this is free belt-and-braces.
+    security_opt:
+      - no-new-privileges:true
     # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
@@ -1526,6 +1560,11 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1055 — where the applied mic calibration persists (JSON on
+      # the voice-calibration named volume above). The dashboard wizard
+      # writes it via POST /voice/calibration; startup re-applies the
+      # tuned gain + wake threshold over the env defaults.
+      - VOICE_CALIBRATION_PATH=${VOICE_CALIBRATION_PATH:-/data/calibration.json}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
@@ -2159,6 +2198,10 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
+  # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
+  # Named so a container recreate never silently reverts the tuned
+  # gain/threshold; factory-reset's volume sweep clears it.
+  voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.

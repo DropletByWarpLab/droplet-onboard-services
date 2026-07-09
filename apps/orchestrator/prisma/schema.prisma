@@ -166,6 +166,12 @@ model ChatSession {
   updatedAt    DateTime      @default(now()) @updatedAt
   messages     ChatMessage[]
   pins         ContextPin[]
+  /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
+  /// requires the opposite side of the relation to be declared; it is the
+  /// onboarding-interview session a business profile was built from (at
+  /// most one profile points here). SetNull on delete so deleting the
+  /// interview session doesn't cascade the singleton profile away.
+  businessProfile BusinessProfile?
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -254,6 +260,112 @@ enum MemoryFactCategory {
   Scope
   Schedule
   Other
+  /// WARP-1118 (D-9) — business-knowledge facts extracted by the
+  /// onboarding interview. Added in its own migration
+  /// (20260708000000_warp_1118_memory_fact_business); a new Postgres enum
+  /// value cannot be USED in the same transaction that adds it, so nothing
+  /// references `Business` inside that migration. The five-value vocabulary
+  /// is hardcoded across ≥6 sites (extract/recall handlers, routes/memory.ts
+  /// zod, dashboard) and is threaded through them in Phase 2, not here.
+  Business
+}
+
+/// WARP-1118 — AI Personality & Business Onboarding (§11).
+///
+/// PRIVACY CONTRACT: like `Workspace.industry/size`, `AssistantPersona`,
+/// `BusinessProfile`, and interview transcripts are LOCAL box state —
+/// NEVER sent off the box. Personality is prompt + data only; it never
+/// changes which `LLM_MODEL` runs (One-Model Rule, §5-1).
+
+/// The four canonical personality presets. Prompt fragments live in code
+/// (`persona-presets.ts`), versioned with the app — the DB only stores
+/// which one is selected. Copy owned by the design brief §9.
+enum PersonaPreset {
+  warm_friendly // default
+  professional_precise
+  founder
+  direct_technical
+}
+
+/// Reply + recap length. One trait deliberately covers both — there is no
+/// separate recap-length field (§7.1).
+enum PersonaVerbosity {
+  concise
+  balanced // default
+  detailed
+}
+
+/// Workspace-level personality singleton (D-2). Injected as a
+/// char-budgeted block into the base system prompt right after identity
+/// (§7.2). Read fresh from Prisma each request — no cache to invalidate.
+model AssistantPersona {
+  id                 String           @id @default("singleton")
+  preset             PersonaPreset    @default(warm_friendly)
+  verbosity          PersonaVerbosity @default(balanced)
+  useFirstNames      Boolean          @default(true)
+  /// The one sanctioned free-text instruction channel (§7.1). Owner/admin
+  /// authored only. Cap enforced BOTH in the zod schema and as a real DB
+  /// constraint so an out-of-band writer can't exceed the prompt budget.
+  customInstructions String           @default("") @db.VarChar(1200)
+  updatedBy          String? // userId
+  updatedAt          DateTime         @updatedAt
+}
+
+/// Onboarding-interview state (§9.2). Explicit enum — state is NEVER
+/// derived from row-absence or a null timestamp (§5-2, WARP-218 precedent).
+enum BusinessOnboardingState {
+  not_started
+  in_progress
+  completed
+  skipped
+  re_running // re-run in flight; skip or interview-chat deletion restores completed
+}
+
+/// Provenance for the Settings meta line — which surface last wrote the
+/// profile. Explicit column, never inferred (§5-2).
+enum BusinessProfileSource {
+  onboarding
+  settings
+}
+
+/// Periodic refresh-nudge state (Phase 4). Explicit column — dismissal is
+/// a real write, never "we nulled the timestamp" (§5-2).
+enum ReviewNudgeState {
+  none
+  due
+  dismissed
+}
+
+/// Structured business-knowledge singleton (D-2, §8/§11). Created in
+/// Phase 0 so the schema is stable; only `AssistantPersona` is wired into
+/// the prompt this phase — the role-filtered business block is Phase 2.
+///
+/// Field set matches the design brief's six row labels 1:1 (no `hours`
+/// column — operating hours belong in `typicalDay` or a `Schedule` fact).
+/// `Workspace.industry/size` stay wizard-owned; this model never writes
+/// them.
+model BusinessProfile {
+  id                String                  @id @default("singleton")
+  onboardingState   BusinessOnboardingState @default(not_started)
+  /// The persisted onboarding-interview session this profile was built
+  /// from (D-4/§9.2). SetNull on delete: deleting the interview session
+  /// must not cascade the singleton profile away — the delete-hook
+  /// transitions state instead (Phase 3).
+  interviewChat     ChatSession?            @relation(fields: [interviewChatId], references: [id], onDelete: SetNull)
+  interviewChatId   String?                 @unique
+  summary           String                  @default("") @db.VarChar(1500) // prompt-injected (business block, Phase 2)
+  whatWeDo          String                  @default("") @db.VarChar(600)
+  customers         String                  @default("") @db.VarChar(600)
+  teamShape         String                  @default("") @db.VarChar(600)
+  toolsUsed         String                  @default("") @db.VarChar(600)
+  typicalDay        String                  @default("") @db.VarChar(600)
+  goals             String                  @default("") @db.VarChar(600)
+  lastSource        BusinessProfileSource? // provenance for the Settings meta line
+  reviewNudgeState  ReviewNudgeState        @default(none) // explicit, never derived
+  reviewDueAt       DateTime? // schedule timestamp only
+  reviewDismissedAt DateTime?
+  updatedBy         String?
+  updatedAt         DateTime                @updatedAt
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
@@ -1175,7 +1287,7 @@ model NotificationLog {
 // `failureReason` is non-null only when `status = FAILED`. Same shape
 // the WARP-218 brain-memory pattern uses for transient failures.
 model ApDevice {
-  mac              String         @id
+  mac              String           @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
   // override it (e.g. "AP (12:34:56)"). Editable from the
@@ -1195,7 +1307,7 @@ model ApDevice {
   lastIp           String?
   // Last DHCP-reported hostname.
   hostname         String?
-  status           ApDeviceStatus @default(DISCOVERED)
+  status           ApDeviceStatus   @default(DISCOVERED)
   // ADR-024: which onboarding backend owns this row's discovery +
   // provisioning. Explicit enum column (NOT derived from absence —
   // CLAUDE.md no-guessing rule, same discipline as `status`). Every
@@ -1220,10 +1332,10 @@ model ApDevice {
   // main router.
   approvedSsid     String?
   // First time the orchestrator saw this MAC announce on mDNS.
-  firstSeen        DateTime       @default(now())
+  firstSeen        DateTime         @default(now())
   // Updated on every fresh announce — drives the "stale extender"
   // dashboard warning.
-  lastSeen         DateTime       @default(now())
+  lastSeen         DateTime         @default(now())
   // Timestamp the operator hit Approve. Null until the row leaves
   // AWAITING_APPROVAL.
   approvedAt       DateTime?
@@ -1235,8 +1347,8 @@ model ApDevice {
   // service for a write touching this AP — lets the dashboard
   // resume polling after a refresh.
   lastOperationId  String?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([status])
   @@index([lastSeen])
@@ -1858,17 +1970,17 @@ model ActivityRow {
   // Who performed the action. Nullable ONLY for pre-upgrade v1 rows —
   // a CHECK constraint in the migration enforces
   // `schemaVersion = 1 OR actorType IS NOT NULL` (explicit-era rule).
-  actorType         ActivityActorType?
+  actorType     ActivityActorType?
   // Canonical user UUID when known (`type: user` rows always carry it;
   // `ai` rows carry the on-behalf-of UUID when it was already plumbed
   // through, else NULL). Never a username — display names stay in refs.
-  actorId           String?
+  actorId       String?
   // Canonical-content version this row was signed under. Existing rows
   // are backfilled to 1 by the migration; the recorder always writes 2
   // explicitly (no DB default — the migration drops it after backfill).
   // `canonicalizeRowContent` dispatches on this value so v1 rows keep
   // verifying byte-identically.
-  schemaVersion     Int
+  schemaVersion Int
 
   // Composite index for the GET /api/activity range/filter query
   // (sorted by `at` descending within an optional `kind` filter), and
@@ -2847,22 +2959,22 @@ model TlsCert {
 /// before the row settles to `closed`; `closed` rows are retained for audit.
 model FileEditSession {
   /// Nextcloud numeric fileId — the co-authoring session key.
-  ncFileId    Int                   @id
+  ncFileId     Int                   @id
   /// Last user observed to open/touch the session (NC username). Audit only.
-  ncUser      String
+  ncUser       String
   /// Path at session open, for human-readable audit/logs (may go stale on move).
-  filePath    String
+  filePath     String
   /// Engine-decided mode the session was opened in.
-  mode        FileEditSessionMode
+  mode         FileEditSessionMode
   /// EXPLICIT lifecycle state — never inferred from a null column.
-  status      FileEditSessionStatus @default(open)
+  status       FileEditSessionStatus @default(open)
   /// Opaque co-authoring document key handed to the engine.
-  documentKey String
-  openedAt    DateTime              @default(now())
+  documentKey  String
+  openedAt     DateTime              @default(now())
   /// Bumped on every editor-session mint / heartbeat for the same fileId.
-  lastActiveAt DateTime             @default(now())
+  lastActiveAt DateTime              @default(now())
   /// Set when the engine's save-callback reports the session fully closed.
-  closedAt    DateTime?
+  closedAt     DateTime?
 
   @@index([status])
   @@index([ncUser, status])
@@ -3230,15 +3342,15 @@ enum PmActivityVerb {
 /// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
 model PmActivity {
-  id         String          @id @default(uuid())
+  id         String         @id @default(uuid())
   workItemId String
-  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem   PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   actorId    String?
   verb       PmActivityVerb
   field      String?
   oldValue   String?
   newValue   String?
-  createdAt  DateTime   @default(now())
+  createdAt  DateTime       @default(now())
 
   @@index([workItemId, createdAt])
 }
@@ -3320,4 +3432,136 @@ model DeviceUpdate {
 
   @@index([status, createdAt])
   @@index([gitSha])
+}
+
+// ── WARP-1094: ERP-connector framework (Eaglesoft direct-SQL integration) ──
+//
+// Droplet-side control-plane models for the first-party ERP-connector
+// framework (EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF §12). Eaglesoft is
+// provider #1 behind a generic connector abstraction; the schema is
+// provider-agnostic. Every lifecycle state is an EXPLICIT enum column
+// (architecture-guard rule 10 / CLAUDE.md / WARP-218) — never derived from
+// a NULL. Credentials NEVER live here: `secretRef` is a pointer into the
+// encrypted secret store (brief §7.4). PHI in `ErpEntityCache` is encrypted
+// at rest by the application layer (brief §10.2, §14).
+//
+// This migration is the DB-INDEPENDENT foundation only — the live-database
+// read/write paths are stubbed until a copy of `PattersonPM.db` + the SAP
+// SQL Anywhere client are available (Phase 0 of the phased plan, brief §17).
+
+/// Connection status for an ERP integration. Explicit lifecycle (brief §12):
+/// NOT_CONFIGURED → PROVISIONING → CONNECTED, with DEGRADED (transient sync
+/// failure, §15), DRIFT_LOCKED (schema fingerprint mismatch froze writes,
+/// invariant 9), ERROR (unrecoverable), and DISABLED (operator turned it off).
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  PROVISIONING
+  CONNECTED
+  DEGRADED
+  DRIFT_LOCKED
+  ERROR
+  DISABLED
+}
+
+/// One configured ERP connection. `provider` keys the connector framework
+/// ("eaglesoft" today, many later). `secretRef` is a pointer into Droplet's
+/// encrypted secret store — the `droplet_ro`/`droplet_rw` passwords are NEVER
+/// persisted in a row, an export, or a log (brief §7.4, invariant 10).
+/// `schemaHash` is the drift-guard fingerprint (brief §9.2, invariant 9);
+/// `writeEnabled` is the per-practice write opt-in and defaults OFF
+/// (invariant 1, §11.5).
+model IntegrationConnection {
+  id            String            @id @default(cuid())
+  provider      String
+  status        IntegrationStatus @default(NOT_CONFIGURED)
+  host          String
+  databaseName  String
+  secretRef     String
+  schemaVersion String?
+  schemaHash    String?
+  writeEnabled  Boolean           @default(false)
+  lastHealthyAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([provider, status])
+}
+
+/// Incremental-sync watermark per (connection, entity). `watermark` is an
+/// EXPLICIT string column (a discovered timestamp / rowversion, brief §10.2)
+/// — the cursor position is never inferred from the absence of a row.
+model ErpSyncCursor {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  watermark    String
+  updatedAt    DateTime @updatedAt
+
+  @@unique([connectionId, entity])
+}
+
+/// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the
+/// system of record — every cached view is timestamped in the UI ("as of N
+/// min ago"). `payload` PHI is encrypted at rest by the application layer.
+model ErpEntityCache {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  sourceKey    String
+  payload      Json
+  syncedAt     DateTime @default(now())
+
+  @@unique([connectionId, entity, sourceKey])
+  @@index([connectionId, entity])
+}
+
+/// Lifecycle of a staged write in the outbox → confirm → apply → verify
+/// pipeline (brief §11.1). Explicit enum; a write advances through these
+/// states and is never derived from a NULL. DISCREPANCY = Eaglesoft's own
+/// app logic altered/rejected the write at VERIFY (brief §11.1 step 4).
+enum WriteStatus {
+  PENDING_CONFIRMATION
+  CONFIRMED
+  APPLYING
+  APPLIED
+  DISCREPANCY
+  FAILED
+  REVERSED
+  REJECTED
+}
+
+/// One staged write request (the outbox, brief §11.1). Created at INTENT
+/// with status PENDING_CONFIRMATION; nothing touches Eaglesoft until a human
+/// confirms (invariant 1, §11.2). `command` is a registered command NAME
+/// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
+/// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+model ErpWriteRequest {
+  id           String      @id @default(cuid())
+  connectionId String
+  command      String
+  params       Json
+  status       WriteStatus @default(PENDING_CONFIRMATION)
+  requestedBy  String
+  confirmedBy  String?
+  reversal     Json?
+  discrepancy  Json?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([connectionId, status])
+}
+
+/// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of
+/// patient data and every write records actor / action / entity / row scope.
+/// Rows are never updated or deleted — the table is write-once.
+model ErpAuditLog {
+  id           String   @id @default(cuid())
+  connectionId String
+  actor        String
+  action       String
+  entity       String
+  scope        Json
+  at           DateTime @default(now())
+
+  @@index([connectionId, at])
 }
