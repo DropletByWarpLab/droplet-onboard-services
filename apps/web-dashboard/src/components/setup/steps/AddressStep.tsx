@@ -170,6 +170,10 @@ export function AddressStep({
   // Debounced live validation + availability check as the owner types.
   useEffect(() => {
     if (!picking) return;
+    // WARP-1104 — any edit to the name clears a stale claim/save-error banner, so
+    // the owner never sees a previous attempt's "already taken" stacked beneath a
+    // fresh green "available" for the name they're now typing.
+    setSaveError(null);
     if (name.trim().length === 0) {
       wantSlugRef.current = null;
       abortRef.current?.abort();
@@ -235,14 +239,32 @@ export function AddressStep({
       await persist(slug);
       onComplete();
     } catch (e) {
+      const code = (e as { code?: unknown })?.code;
       // WARP-1109 — the fresh POST can still race a box that already holds a
       // name; the orchestrator answers 409 { code: "BOX_NAME_ALREADY_NAMED" }.
       // Key the copy off the CODE and point the owner at Rename (NOT the old,
       // now-false "factory reset releases it").
-      if ((e as { code?: unknown })?.code === "BOX_NAME_ALREADY_NAMED") {
+      if (code === "BOX_NAME_ALREADY_NAMED") {
         setSaveError(
           "This box already holds a secure address — use Rename to change it.",
         );
+      } else if (code === "BOX_NAME_TAKEN") {
+        // WARP-1104 — the inline availability check is format-only
+        // (authoritative:false); the claim is the AUTHORITATIVE availability
+        // answer, so a name the check reported "available" can still come back
+        // taken here. Reconcile the FIELD to `taken` (green check → red X,
+        // Continue disabled) instead of leaving a stale green "…is available"
+        // beside a detached red "already taken" banner — the check and the claim
+        // must agree. Editing the name re-runs the live check and clears this.
+        wantSlugRef.current = null;
+        abortRef.current?.abort();
+        setStatus({
+          kind: "taken",
+          message:
+            e instanceof Error && e.message
+              ? e.message
+              : "That name isn't available — pick another.",
+        });
       } else {
         setSaveError(
           e instanceof Error

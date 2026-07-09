@@ -160,6 +160,63 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("reconciles the field to 'taken' (no green 'available' beside a red error) when the claim rejects a name the check called available (WARP-1104)", async () => {
+    // The inline availability check is format-only (authoritative:false), so a
+    // name it reports "available" can still come back TAKEN from the
+    // authoritative claim. The picker must NOT keep showing green
+    // "…is available" next to a red "already taken" banner — the two must
+    // agree. The field flips to taken and Continue disables.
+    setBoxName.mockRejectedValueOnce(
+      Object.assign(new Error("That name is already taken — pick another."), {
+        code: "BOX_NAME_TAKEN",
+      }),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    fireEvent.change(nameInput(), { target: { value: "studio" } });
+
+    await waitFor(() => expect(continueCta()).toBeEnabled());
+    const statusRegion = screen.getByRole("status");
+    await waitFor(() =>
+      expect(statusRegion).toHaveTextContent(/is available/i),
+    );
+
+    fireEvent.click(continueCta());
+
+    // The claim's authoritative "taken" is reflected IN the field status — the
+    // stale green "available" is gone, and there is no contradictory red banner
+    // stacked beneath the cards.
+    await waitFor(() =>
+      expect(statusRegion).toHaveTextContent(/already taken|pick another/i),
+    );
+    expect(statusRegion).not.toHaveTextContent(/is available/i);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(continueCta()).toBeDisabled();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale save-error banner when the owner edits the name (WARP-1104)", async () => {
+    // A failed claim leaves a red error banner. Typing a new name must clear it
+    // so the owner never sees a fresh green "available" beside the previous
+    // attempt's stale "already taken" error.
+    setBoxName.mockRejectedValueOnce(new Error("box is busy"));
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    fireEvent.change(nameInput(), { target: { value: "studio" } });
+
+    await waitFor(() => expect(continueCta()).toBeEnabled());
+    fireEvent.click(continueCta());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/box is busy/i);
+
+    // Edit the name — the stale banner must clear immediately.
+    fireEvent.change(nameInput(), { target: { value: "studio2" } });
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("does not let a slow availability response overwrite a newer invalid state (stale-check race)", async () => {
     // The first check resolves LATE (available); by then the owner has typed on
     // into an invalid name. The stale "available" result must be discarded so
@@ -311,8 +368,12 @@ describe("AddressStep — already-named box shows the current address + Rename (
     await waitFor(() => expect(renamePrimary()).toBeEnabled());
     fireEvent.click(renamePrimary());
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /already taken|pick another/i,
+    // WARP-1104 — the taken conflict is reconciled INTO the field status (where
+    // availability is shown) rather than a detached banner, so the check and the
+    // claim agree. The Rename primary disables and the step does not advance.
+    const statusRegion = screen.getByRole("status");
+    await waitFor(() =>
+      expect(statusRegion).toHaveTextContent(/already taken|pick another/i),
     );
     expect(onComplete).not.toHaveBeenCalled();
   });
