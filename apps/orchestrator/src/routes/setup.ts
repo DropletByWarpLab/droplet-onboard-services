@@ -88,6 +88,7 @@ import {
 import { config } from "../config.js";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
+import { checkSession } from "../services/session.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
@@ -840,14 +841,38 @@ export function createSetupRouter(
     try {
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      if (!session) {
+      {
+        // ORCH-002: on a claimed ("ready") box, changing the public secure
+        // address is an owner/admin action. verifyAccessToken alone accepts
+        // ANY role and a revoked-but-unexpired (<=15 min) token, so mirror
+        // authMiddleware here: require an elevated role AND a live server-side
+        // session before mutating the box name. First-run (pre-ready) keeps the
+        // anonymous wizard allowance so onboarding still works.
         const { appliance } = await getSetupState(prisma);
         if (appliance === "ready") {
-          res.status(401).json({
-            error: "Naming the box requires an authenticated session.",
-            code: "BOX_NAME_AUTH_REQUIRED",
-          });
-          return;
+          if (!session) {
+            res.status(401).json({
+              error: "Naming the box requires an authenticated session.",
+              code: "BOX_NAME_AUTH_REQUIRED",
+            });
+            return;
+          }
+          if (session.role !== "owner" && session.role !== "admin") {
+            res.status(403).json({
+              error: "Renaming the box requires an owner or admin.",
+              code: "BOX_NAME_FORBIDDEN",
+            });
+            return;
+          }
+          if (session.sid) {
+            const sess = await checkSession(session.sid);
+            // "ok"/"error" (Redis down → fail-open, same as authMiddleware) pass;
+            // "expired"/"missing" (revoked/GC'd) are dead now despite a valid JWT.
+            if (sess.kind !== "ok" && sess.kind !== "error") {
+              res.status(401).json({ error: "Your session is no longer valid.", code: "SESSION_EXPIRED" });
+              return;
+            }
+          }
         }
       }
 
@@ -969,14 +994,38 @@ export function createSetupRouter(
     try {
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      if (!session) {
+      {
+        // ORCH-002: on a claimed ("ready") box, changing the public secure
+        // address is an owner/admin action. verifyAccessToken alone accepts
+        // ANY role and a revoked-but-unexpired (<=15 min) token, so mirror
+        // authMiddleware here: require an elevated role AND a live server-side
+        // session before mutating the box name. First-run (pre-ready) keeps the
+        // anonymous wizard allowance so onboarding still works.
         const { appliance } = await getSetupState(prisma);
         if (appliance === "ready") {
-          res.status(401).json({
-            error: "Renaming the box requires an authenticated session.",
-            code: "BOX_NAME_AUTH_REQUIRED",
-          });
-          return;
+          if (!session) {
+            res.status(401).json({
+              error: "Renaming the box requires an authenticated session.",
+              code: "BOX_NAME_AUTH_REQUIRED",
+            });
+            return;
+          }
+          if (session.role !== "owner" && session.role !== "admin") {
+            res.status(403).json({
+              error: "Renaming the box requires an owner or admin.",
+              code: "BOX_NAME_FORBIDDEN",
+            });
+            return;
+          }
+          if (session.sid) {
+            const sess = await checkSession(session.sid);
+            // "ok"/"error" (Redis down → fail-open, same as authMiddleware) pass;
+            // "expired"/"missing" (revoked/GC'd) are dead now despite a valid JWT.
+            if (sess.kind !== "ok" && sess.kind !== "error") {
+              res.status(401).json({ error: "Your session is no longer valid.", code: "SESSION_EXPIRED" });
+              return;
+            }
+          }
         }
       }
 
