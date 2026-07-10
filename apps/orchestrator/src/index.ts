@@ -516,7 +516,11 @@ async function main() {
       // SsoLoginState (one per SSO authorize redirect). Neither had a wired
       // prune despite pruneExpiredChallenges' docstring claiming it — expired
       // WebAuthnChallenge / consumed+expired SsoLoginState rows accumulated
-      // forever, a slow DB-bloat DoS on the appliance Postgres.
+      // forever, a slow DB-bloat DoS on the appliance Postgres. Both prunes
+      // are batched + capped per run (same precedent as purgeAuditLogs above),
+      // so a months-deep first-run backlog can't push this handler past the
+      // 60 s advisory-lock transaction into a permanent P2028 retry loop; the
+      // backlog drains over nights.
       const challengesDeleted = await pruneExpiredChallenges(prisma);
       const loginStatesDeleted = await pruneExpiredLoginStates(prisma);
       logger.info(
