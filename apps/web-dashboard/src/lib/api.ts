@@ -3781,6 +3781,58 @@ export async function saveEmailChannel(
   return res.json();
 }
 
+// --- AI personality (WARP-1119, Settings → Workspace → AI personality) ---
+
+export type PersonaPreset =
+  | "warm_friendly"
+  | "professional_precise"
+  | "founder"
+  | "direct_technical";
+export type PersonaVerbosity = "concise" | "balanced" | "detailed";
+
+/**
+ * GET /api/persona is role-split server-side (WARP-1118 §7.3): owner/admin
+ * receive every field; family/guest receive `preset` + `verbosity` only.
+ * Everything beyond those two is therefore optional here — the card gates
+ * its edit surface on the caller's role, not on field presence.
+ */
+export interface PersonaSettings {
+  preset: PersonaPreset;
+  verbosity: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+  updatedBy?: string | null;
+  updatedAt?: string;
+}
+
+export interface PersonaUpdate {
+  preset?: PersonaPreset;
+  verbosity?: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+}
+
+export async function fetchPersona(): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`);
+  if (!res.ok) throw new Error(`Failed to load personality settings: ${res.status}`);
+  return res.json();
+}
+
+/** PATCH only the changed fields (the route requires at least one). A 400 —
+ *  e.g. customInstructions over the 1200-char cap — throws; the card keeps
+ *  the user's edits and shows the failed state (reject, never truncate). */
+export async function patchPersona(update: PersonaUpdate): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to save personality settings: ${res.status}`);
+  }
+  return res.json();
+}
+
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
 // listSessions, getSession, updateSessionTitle, deleteSession,
 // sendSessionChat) targeted the orchestrator's removed
