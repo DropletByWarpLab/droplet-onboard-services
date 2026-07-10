@@ -196,3 +196,41 @@ export function FinishedElsewhereBanner({ onView }: { onView: () => void }) {
     </div>
   );
 }
+
+/** WARP-1122 (design §7.12) — the review-due nudge: a single dismissible
+ *  chip above the composer in an empty chat. Orange accent, never a modal;
+ *  dismissal persists server-side (explicit column) so it does not
+ *  resurrect on reload within the same review period. */
+export function ReviewNudgeChip({
+  onUpdate,
+  onDismiss,
+}: {
+  onUpdate: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      data-testid="review-nudge-chip"
+      className="flex items-center gap-3 px-4 py-2 rounded-full border border-system-orange/40 bg-surface-secondary max-w-fit mx-auto"
+    >
+      <span className="type-footnote text-label-primary">
+        {INTERVIEW_COPY.nudgeLine}
+      </span>
+      <button
+        type="button"
+        onClick={onUpdate}
+        className="type-footnote text-accent hover:text-accent-hover shrink-0"
+      >
+        {INTERVIEW_COPY.nudgeAction}
+      </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        className="text-label-tertiary hover:text-label-primary shrink-0 leading-none"
+      >
+        ×
+      </button>
+    </div>
+  );
+}

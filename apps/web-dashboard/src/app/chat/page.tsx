@@ -24,6 +24,7 @@ import {
   InterviewIntroCard,
   InterviewProgress,
   InterviewResumeBanner,
+  ReviewNudgeChip,
 } from "@/components/chat/InterviewSurfaces";
 import { ReviewCard } from "@/components/chat/ReviewCard";
 import {
@@ -36,6 +37,7 @@ import {
 } from "@/lib/interview";
 import {
   commitBusinessOnboarding,
+  dismissReviewNudge,
   fetchBusinessProfile,
   skipBusinessOnboarding,
   startBusinessOnboarding,
@@ -692,6 +694,25 @@ export default function ChatPage() {
                 onSkip={() => void handleInterviewSkip()}
                 modelReady={Boolean(selectedModel)}
               />
+            )}
+          {/* WARP-1122 §7.12 — review-due nudge chip on the empty chat of a
+              completed profile. Dismissal persists server-side. */}
+          {messages.length === 0 &&
+            isPrivileged &&
+            bizProfile?.onboardingState === "completed" &&
+            bizProfile?.reviewNudgeState === "due" && (
+              <div className="px-4 pt-4">
+                <ReviewNudgeChip
+                  onUpdate={() => void handleInterviewStart()}
+                  onDismiss={() => {
+                    void dismissReviewNudge()
+                      .catch(() => {
+                        /* re-fetch below reconciles either way */
+                      })
+                      .finally(refreshBizProfile);
+                  }}
+                />
+              </div>
             )}
           {/* Resume banner on the empty new-chat view while an interview is
               parked mid-flight elsewhere. */}
