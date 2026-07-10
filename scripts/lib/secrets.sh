@@ -566,9 +566,15 @@ MAX_UPLOAD_SIZE_MB=100
 
 # --- WARP-230 device identity ---
 # Selects the device-identity-svc backend.
-#   real = use /dev/tpm0 via tpm2-pytss (when a TPM 2.0 chip is present).
 #   mock = pure-Python in-memory mock (dev / CI / hosts without a TPM).
-DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
+#   real = /dev/tpm0 via tpm2-pytss — currently an UNFINISHED scaffold
+#          (IDX-002): its crypto returns placeholder bytes, so the sidecar
+#          FAILS CLOSED on it unless DROPLET_TPM_ALLOW_SCAFFOLD is also set.
+# Default to 'mock' even on TPM-equipped hosts until the tss2 path lands —
+# auto-selecting 'real' would crash-loop device-identity-svc. An operator
+# knowingly running the scaffold sets DROPLET_TPM_BACKEND=real +
+# DROPLET_TPM_ALLOW_SCAFFOLD=1 by hand.
+DROPLET_TPM_BACKEND=mock
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Public-CA per-device TLS (ADR-023) ---
@@ -806,12 +812,23 @@ migrate_env() {
   # NOT start the engine (that needs DOCS_ENABLED=1 + \`docs\` in COMPOSE_PROFILES).
   _migrate_ensure_key ONLYOFFICE_JWT_SECRET "$(openssl rand -hex 32)"
 
-  # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
-  # on the host — hosts with a TPM hit 'real', everything else hits
-  # 'mock'. Operator can override either by editing .env.
-  local di_backend_default="mock"
-  [ -e /dev/tpm0 ] && di_backend_default="real"
-  _migrate_ensure_key DROPLET_TPM_BACKEND "$di_backend_default"
+  # WARP-230 device-identity backend. The 'real' (tpm2-pytss) backend is an
+  # UNFINISHED scaffold (IDX-002) — device-identity-svc fails closed on it
+  # unless DROPLET_TPM_ALLOW_SCAFFOLD is set, so auto-selecting it on a TPM
+  # host would crash-loop the sidecar. Backfill 'mock' when the key is absent;
+  # operators knowingly running the scaffold set real + the opt-in by hand.
+  _migrate_ensure_key DROPLET_TPM_BACKEND "mock"
+  # Reconcile pre-existing installs whose .env auto-selected 'real' (older
+  # setup, before the fail-closed guard) but never opted into the scaffold:
+  # left as-is they crash-loop the sidecar on upgrade. Flip them back to
+  # 'mock'. A deliberate opt-in (DROPLET_TPM_BACKEND=real together with a
+  # truthy DROPLET_TPM_ALLOW_SCAFFOLD) is preserved untouched.
+  if grep -qE '^DROPLET_TPM_BACKEND=real[[:space:]]*$' "$stage" \
+     && ! grep -qiE '^DROPLET_TPM_ALLOW_SCAFFOLD=(1|true|yes|on)[[:space:]]*$' "$stage"; then
+    sed -i.bak -E 's|^DROPLET_TPM_BACKEND=real[[:space:]]*$|DROPLET_TPM_BACKEND=mock|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: DROPLET_TPM_BACKEND real→mock (IDX-002 scaffold fails closed; no DROPLET_TPM_ALLOW_SCAFFOLD opt-in)"
+  fi
   _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
 
   # WARP-234: per-service Redis ACL identities for pre-existing installs.
