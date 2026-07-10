@@ -18,6 +18,7 @@ import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
+import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import { createFilesRouter } from "./routes/files.js";
@@ -237,6 +238,9 @@ export function createApp(
   // WARP-1120 — business-knowledge API (GET role-split read + PATCH owner/admin;
   // manual fill transitions onboarding state → completed).
   app.use("/api", createBusinessProfileRouter(prisma));
+  // WARP-1121 — onboarding-interview lifecycle (start/skip/commit, owner/admin;
+  // atomic conditional transitions, 409 on race).
+  app.use("/api", createBusinessOnboardingRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());

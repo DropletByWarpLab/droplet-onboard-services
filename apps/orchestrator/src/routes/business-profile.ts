@@ -36,6 +36,7 @@ import {
   checkContentHygiene,
   BUSINESS_PROFILE_FIELD_MAX_CHARS,
   BUSINESS_PROFILE_SUMMARY_MAX_CHARS,
+  BUSINESS_PROFILE_SINGLETON_ID,
   type BusinessProfileRow,
 } from "../services/business-profile.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -183,6 +184,43 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
             (req as AuthedRequest).user?.role,
           ),
         );
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-1121 (§12) — dismiss the review-due nudge. Explicit-state rule
+  // (§5-2): dismissal is a REAL enum value + timestamp, never a nulled
+  // schedule field. Phase 4's cron job sets `due`; this route is the only
+  // path to `dismissed`. Audited like every write.
+  router.post(
+    "/business-profile/review-dismiss",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        await getBusinessProfile(prisma); // materialise the singleton
+        const dismissedAt = new Date();
+        await prisma.businessProfile.update({
+          where: { id: BUSINESS_PROFILE_SINGLETON_ID },
+          data: {
+            reviewNudgeState: "dismissed",
+            reviewDismissedAt: dismissedAt,
+          },
+        });
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "building-2",
+          what: "review_dismiss",
+          sub: "business-profile review nudge dismissed",
+          refs: { surface: "chat-nudge" },
+          actor: actorFromRequest(req),
+        });
+        res.json({
+          reviewNudgeState: "dismissed",
+          reviewDismissedAt: dismissedAt,
+        });
       } catch (err) {
         next(err);
       }
