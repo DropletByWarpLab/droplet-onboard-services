@@ -36,6 +36,7 @@ import {
   checkContentHygiene,
   BUSINESS_PROFILE_FIELD_MAX_CHARS,
   BUSINESS_PROFILE_SUMMARY_MAX_CHARS,
+  BUSINESS_PROFILE_SINGLETON_ID,
   type BusinessProfileRow,
 } from "../services/business-profile.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -69,6 +70,9 @@ function readView(row: BusinessProfileRow, role: string | undefined) {
   if (role === "owner" || role === "admin") {
     return {
       onboardingState: row.onboardingState,
+      // WARP-1121 — the dashboard keys the interview overlay (progress
+      // eyebrow, resume banner, reopen-as-card) off this id.
+      interviewChatId: row.interviewChatId,
       summary: row.summary,
       whatWeDo: row.whatWeDo,
       customers: row.customers,
@@ -103,7 +107,23 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
       try {
         const profile = await getBusinessProfile(prisma);
         const role = (req as AuthedRequest).user?.role;
-        res.json(readView(profile, role));
+        const view = readView(profile, role);
+        // WARP-1121 §9.1 — the dashboard gates the interview intro card on
+        // the workspace type (HOME boxes get no business interview). Only
+        // the owner/admin view carries it.
+        if (role === "owner" || role === "admin") {
+          // Fail-open to HOME: a workspace-read hiccup must not 500 the
+          // profile read (HOME = no interview affordances, the safe side).
+          let workspaceType = "HOME";
+          try {
+            const ws = await prisma.workspace.findUnique({ where: { id: 1 } });
+            workspaceType = ws?.type ?? "HOME";
+          } catch {
+            /* keep HOME */
+          }
+          (view as Record<string, unknown>).workspaceType = workspaceType;
+        }
+        res.json(view);
       } catch (err) {
         next(err);
       }
@@ -183,6 +203,43 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
             (req as AuthedRequest).user?.role,
           ),
         );
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-1121 (§12) — dismiss the review-due nudge. Explicit-state rule
+  // (§5-2): dismissal is a REAL enum value + timestamp, never a nulled
+  // schedule field. Phase 4's cron job sets `due`; this route is the only
+  // path to `dismissed`. Audited like every write.
+  router.post(
+    "/business-profile/review-dismiss",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        await getBusinessProfile(prisma); // materialise the singleton
+        const dismissedAt = new Date();
+        await prisma.businessProfile.update({
+          where: { id: BUSINESS_PROFILE_SINGLETON_ID },
+          data: {
+            reviewNudgeState: "dismissed",
+            reviewDismissedAt: dismissedAt,
+          },
+        });
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "building-2",
+          what: "review_dismiss",
+          sub: "business-profile review nudge dismissed",
+          refs: { surface: "chat-nudge" },
+          actor: actorFromRequest(req),
+        });
+        res.json({
+          reviewNudgeState: "dismissed",
+          reviewDismissedAt: dismissedAt,
+        });
       } catch (err) {
         next(err);
       }

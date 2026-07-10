@@ -18,6 +18,7 @@ import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
+import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -258,6 +259,9 @@ export function createApp(
   // WARP-1120 — business-knowledge API (GET role-split read + PATCH owner/admin;
   // manual fill transitions onboarding state → completed).
   app.use("/api", createBusinessProfileRouter(prisma));
+  // WARP-1121 — onboarding-interview lifecycle (start/skip/commit, owner/admin;
+  // atomic conditional transitions, 409 on race).
+  app.use("/api", createBusinessOnboardingRouter(prisma));
   // WARP-1137 — Eaglesoft ERP integration control plane + data API. Reads
   // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
