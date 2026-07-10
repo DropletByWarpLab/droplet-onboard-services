@@ -21,7 +21,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
-const mockConfig: Record<string, unknown> = { DROPLET_SCIM_BEARER_TOKEN: "scim-token" };
+// vi.hoisted so the object exists before the hoisted vi.mock factory runs —
+// middleware/auth.ts (pulled in by scim-auth.ts for the WARP-1062 deny-row
+// helper) reads config keys at module-evaluation time, which would otherwise
+// hit the TDZ on a plain `const`.
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: { DROPLET_SCIM_BEARER_TOKEN: "scim-token" } as Record<string, unknown>,
+}));
 vi.mock("../config.js", () => ({
   get config() {
     return mockConfig;
@@ -165,6 +171,25 @@ describe("SCIM auth guard is mounted", () => {
     const res = await request(buildApp(createPrismaMock())).get("/scim/v2/Users");
     expect(res.status).toBe(401);
     expect(res.body.status).toBe("401");
+  });
+
+  // WARP-1062 (audit item B): a rejected SCIM bearer emits the WARP-237
+  // "Access denied" policy-violation row (path/method/reason only — never
+  // the presented token).
+  it("emits the Access denied audit row on a rejected bearer (WARP-1062)", async () => {
+    const res = await request(buildApp(createPrismaMock()))
+      .get("/scim/v2/Users")
+      .set("Authorization", "Bearer wrong-token");
+    expect(res.status).toBe(401);
+    const denied = recordedScim.filter((p) => p.what === "Access denied");
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).toMatchObject({
+      kind: "auth",
+      severity: "warn",
+      refs: expect.objectContaining({ reason: "scim-bearer-invalid" }),
+      actor: { type: "anonymous" },
+    });
+    expect(JSON.stringify(denied[0])).not.toContain("wrong-token");
   });
 });
 

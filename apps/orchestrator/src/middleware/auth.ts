@@ -597,6 +597,36 @@ function matchServiceToken(token: string): AuthUser | null {
 }
 
 /**
+ * WARP-237: ACL denials are mandatory-emit policy violations. Fire-and-forget
+ * (`void`) — the 403 must not wait on the append lock, and recordActivity is
+ * a no-op pre-init so this is safe in every test/boot ordering. Known
+ * trade-off: a misbehaving client can generate one row per denied request
+ * (same posture as the sign-in-throttle rows); dedup is a follow-up if it
+ * proves noisy.
+ *
+ * WARP-1062 (audit item B): exported so the LOCAL guards that mirror
+ * requireRole — the route-file `isAdmin()` helpers, audit-roots
+ * `requireOwnerOrAdmin`, the SCIM bearer guard — emit the same
+ * policy-violation row instead of denying silently.
+ */
+export function recordAccessDenied(req: Request, reason: string): void {
+  void recordActivity({
+    kind: "auth",
+    severity: "warn",
+    sourceIcon: "shield-off",
+    what: "Access denied",
+    sub: `${req.method} ${req.path}`,
+    refs: {
+      path: req.path,
+      method: req.method,
+      role: req.user?.role ?? null,
+      reason,
+    },
+    actor: actorFromRequest(req),
+  });
+}
+
+/**
  * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
  * `req.user.role` is populated by the upstream middleware (either from
  * a verified JWT, a matched service principal, or the Nextcloud OCS
@@ -632,30 +662,13 @@ export function requireRole(
   const allowedSet = new Set<string>(allowed);
   return (req: Request, res: Response, next: NextFunction): void => {
     const role = req.user?.role;
-    const deny = (reason: "no-role" | "role-not-permitted"): void => {
-      // WARP-237: ACL denials are mandatory-emit policy violations.
-      // Fire-and-forget (`void`) — the 403 must not wait on the append
-      // lock, and recordActivity is a no-op pre-init so this is safe in
-      // every test/boot ordering. Known trade-off: a misbehaving client
-      // can generate one row per denied request (same posture as the
-      // sign-in-throttle rows); dedup is a follow-up if it proves noisy.
-      void recordActivity({
-        kind: "auth",
-        severity: "warn",
-        sourceIcon: "shield-off",
-        what: "Access denied",
-        sub: `${req.method} ${req.path}`,
-        refs: { path: req.path, method: req.method, role: role ?? null, reason },
-        actor: actorFromRequest(req),
-      });
-    };
     if (typeof role !== "string" || role.length === 0) {
-      deny("no-role");
+      recordAccessDenied(req, "no-role");
       res.status(403).json({ error: "Forbidden: no role on session" });
       return;
     }
     if (!allowedSet.has(role)) {
-      deny("role-not-permitted");
+      recordAccessDenied(req, "role-not-permitted");
       res.status(403).json({ error: "Forbidden: role not permitted" });
       return;
     }
