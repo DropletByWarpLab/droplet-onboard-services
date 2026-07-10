@@ -503,6 +503,14 @@ VOLUMES=(
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
+  # INFRA-004: both are declared in docker-compose.yml but were missing here —
+  # in the swallowed-`down -v` scenario this fallback exists for, they SURVIVED
+  # a "factory reset" AND the verify gate (built from this same list) read clean.
+  # fleet-agent-state holds identity.json + the portal ingest token (credential
+  # remanence on a resold box); ota-updates holds per-update rollback backups +
+  # staged configs.tar.gz.
+  "ota-updates"
+  "fleet-agent-state"
 )
 
 # Free any container still mounting a target volume so the removals below are

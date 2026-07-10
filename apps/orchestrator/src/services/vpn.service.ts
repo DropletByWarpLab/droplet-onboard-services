@@ -167,6 +167,8 @@ export async function allocateMintAndPersistPeer<TMint extends { public_key: str
   deps: {
     deviceLabel: string;
     userId: string;
+    /** How this peer reaches the box. Persisted verbatim (default "away"). */
+    mode?: VpnPeerMode;
     mint: (peerIp: string) => Promise<TMint>;
     /**
      * Tear down the router-side peer for a failed persist attempt. `terminal`
@@ -204,6 +206,9 @@ export async function allocateMintAndPersistPeer<TMint extends { public_key: str
             deviceLabel: deps.deviceLabel,
             publicKey: minted.public_key,
             assignedIp: peerIp,
+            // Explicit column — never inferred (rule 10). Defaults to "away"
+            // so an omitted mode persists the pre-hybrid value.
+            mode: deps.mode ?? "away",
           },
         }),
       );
@@ -231,13 +236,27 @@ export async function allocateMintAndPersistPeer<TMint extends { public_key: str
   throw lastErr;
 }
 
+/** How a peer reaches the box. See renderPeerConf for the two shapes. */
+export type VpnPeerMode = "home" | "away";
+
 /**
  * Render a peer .conf file the user can paste into a WireGuard client.
  *
- * The Endpoint field is the value of `endpointHost`:`listenPort`. If the
- * caller set `endpointHost` to a placeholder string, the route handler
- * surfaces a warning to the dashboard so the user knows to configure
- * WIREGUARD_ENDPOINT_HOST before sharing the QR.
+ * Two shapes, selected by `mode` (default "away" — the pre-hybrid behavior,
+ * byte-identical when the field is omitted so nothing about away mode changes):
+ *
+ *   - AWAY: the client reaches the box from OUTSIDE the home LAN. `Endpoint` is
+ *     the resolved public host (`endpointHost`:`listenPort`); if the caller set
+ *     `endpointHost` to a placeholder, the route surfaces a warning. AllowedIPs
+ *     is split-tunnel to the LAN + VPN subnets (`lanCidr`, `vpnSubnet`).
+ *   - HOME (hybrid P1): the client dials the box DIRECTLY at its home-facing
+ *     LAN IP — no server, no public inbound (foundation-clean). `Endpoint` is
+ *     that LAN IP (passed in `endpointHost`), `DNS` is the box's split-horizon
+ *     resolver so the per-device FQDN resolves over the tunnel and the padlock
+ *     works (ADR-023 §3.4: the box answers the FQDN with 192.168.20.1 for
+ *     tunnel clients), and AllowedIPs is SPLIT-tunnel to the box subnets ONLY
+ *     (`homeAllowedIps` + `vpnSubnet`) — NEVER 0.0.0.0/0. The caller supplies
+ *     `dns`/`endpointHost`/`homeAllowedIps` already resolved for the mode.
  */
 export function renderPeerConf(opts: {
   privateKey: string;
@@ -248,7 +267,18 @@ export function renderPeerConf(opts: {
   listenPort: number;
   lanCidr: string;
   vpnSubnet: string;
+  mode?: VpnPeerMode;
+  /**
+   * Home-mode box subnet(s) the client routes over the tunnel (split-tunnel to
+   * the box). The VPN subnet is appended automatically. Required for home mode;
+   * ignored for away mode.
+   */
+  homeAllowedIps?: string;
 }): string {
+  const allowedIps =
+    opts.mode === "home"
+      ? `${(opts.homeAllowedIps ?? "").trim()}, ${opts.vpnSubnet}`
+      : `${opts.lanCidr}, ${opts.vpnSubnet}`;
   const lines = [
     "[Interface]",
     `PrivateKey = ${opts.privateKey}`,
@@ -258,7 +288,7 @@ export function renderPeerConf(opts: {
     "[Peer]",
     `PublicKey = ${opts.serverPublicKey}`,
     `Endpoint = ${opts.endpointHost}:${opts.listenPort}`,
-    `AllowedIPs = ${opts.lanCidr}, ${opts.vpnSubnet}`,
+    `AllowedIPs = ${allowedIps}`,
     "PersistentKeepalive = 25",
     "",
   ];

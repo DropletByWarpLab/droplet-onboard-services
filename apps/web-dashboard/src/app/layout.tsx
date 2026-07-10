@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, Instrument_Serif, Space_Grotesk } from "next/font/google";
+import { Inter, Instrument_Serif, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
 import { WorkspaceProvider } from "@/lib/workspace";
@@ -31,6 +31,16 @@ const spaceGrotesk = Space_Grotesk({
   weight: ["400", "500", "600"],
   display: "swap",
   variable: "--font-space-grotesk",
+});
+
+// JetBrains Mono — the design-system mono family (canon: IPs, hostnames,
+// schedules, metrics, code, all-caps eyebrows). The dashboard references
+// var(--font-mono) + `font-mono` widely, but the variable was never defined at
+// the root, so mono text fell back to the browser default. (handoff 6, D-A.)
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
@@ -65,7 +75,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${inter.variable} ${instrumentSerif.variable} ${spaceGrotesk.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${inter.variable} ${instrumentSerif.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

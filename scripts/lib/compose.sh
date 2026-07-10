@@ -492,7 +492,9 @@ start_stack() {
   log_info "Waiting for services to be healthy..."
   local health_retries=30
   while [ $health_retries -gt 0 ]; do
-    if curl -sf http://localhost/api/health >/dev/null 2>&1; then
+    # TLS listener, not :80 — nginx 301s :80 to https and `curl -sf` exits 0 on
+    # the redirect, reporting healthy against a dead orchestrator.
+    if curl -skf https://localhost/api/health >/dev/null 2>&1; then
       log_success "Stack is healthy (Nginx → Orchestrator responding)"
       break
     fi

@@ -25,6 +25,7 @@ import {
   vpnStatus,
   createVpnPeer,
   deleteVpnPeer,
+  fetchNetworkSummary,
   RouterError,
 } from "../services/openwrt.client.js";
 import {
@@ -34,6 +35,7 @@ import {
   VpnConfigError,
   VpnIpExhaustedError,
 } from "../services/vpn.service.js";
+import { pickHomeEndpointFromSummary } from "../lib/vpn-home-endpoint.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -43,7 +45,38 @@ const logger = createLogger("vpn-route");
 
 const createPeerSchema = z.object({
   deviceLabel: z.string().trim().min(1).max(64),
+  // How this device reaches the box (hybrid remote-access P1). Defaults to
+  // "away" so an omitted field mints the pre-hybrid AWAY-mode conf byte-for-
+  // byte — nothing about existing clients changes.
+  //   "away" — dials the box from OUTSIDE the home LAN via the public FQDN /
+  //            relay endpoint.
+  //   "home" — dials the box DIRECTLY at its home-facing LAN IP (split-tunnel to
+  //            the box, no public inbound). The Endpoint is the discovered LAN
+  //            IP, DNS is the split-horizon resolver.
+  mode: z.enum(["home", "away"]).default("away"),
 });
+
+/**
+ * Resolve the box's home-network-facing LAN IP — the address a HOME-mode peer
+ * dials directly. DHCP, so it is DISCOVERED from the routing-service network
+ * summary (never hardcoded), with WIREGUARD_HOME_ENDPOINT_HOST as an explicit
+ * operator fallback. Returns null when neither is available — the caller
+ * surfaces that honestly rather than minting a conf pointed at a wrong guess.
+ *
+ * A routing-service fault is swallowed to null here (the summary is
+ * best-effort): status still renders, and a home-mode mint with a null result
+ * fails with a clear 503. Away mode never calls this.
+ */
+async function resolveHomeEndpointHost(): Promise<string | null> {
+  const fallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
+  let summary: Awaited<ReturnType<typeof fetchNetworkSummary>> | null = null;
+  try {
+    summary = await fetchNetworkSummary();
+  } catch (err) {
+    logger.warn({ err }, "vpn: network summary unavailable for home-endpoint discovery");
+  }
+  return pickHomeEndpointFromSummary(summary, fallback);
+}
 
 /**
  * Resolve the WireGuard endpoint host for peer configs. Priority order mirrors
@@ -123,11 +156,19 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       // ADR-025 relay lands. Deterministic env inspection — no DNS lookups.
       // Every "from anywhere" surface in the dashboard gates on this.
       const offLanReachable = computeOffLanReachable();
+      // Hybrid P1: the box's home-facing LAN IP a HOME-mode peer dials directly.
+      // Discovered dynamically (DHCP — never hardcoded); null when it can't be
+      // discovered and no fallback is set. Unlike endpointHost this is a private
+      // LAN address that every household member on the home network already
+      // sees, so it is not admin-gated. `.local`-style leakage isn't a concern
+      // (it's an IP the client needs to build a home-mode conf).
+      const homeEndpointHost = await resolveHomeEndpointHost();
       if (!status) {
         return res.json({
           configured: false,
           endpointConfigured,
           offLanReachable,
+          homeEndpointHost,
           publicFqdn,
           message: "VPN not yet bootstrapped — POST /api/vpn/peers to start.",
         });
@@ -137,6 +178,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         endpointConfigured,
         offLanReachable,
         endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
+        homeEndpointHost,
         publicFqdn,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
@@ -166,6 +208,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
           publicKey: true,
           assignedIp: true,
           status: true,
+          mode: true,
           createdAt: true,
           revokedAt: true,
         },
@@ -205,13 +248,32 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         });
       }
       const user = getUser(req);
-      // FQDN-first endpoint resolution. See resolveEndpointHost above.
-      const endpointHost = await resolveEndpointHost();
-      if (!endpointHost) {
-        return res.status(503).json({
-          error:
-            "The box hasn't learned its web address yet — remote access turns on automatically once it does. (Operators can set WIREGUARD_ENDPOINT_HOST in .env to override.)",
-        });
+      const mode = parsed.data.mode;
+      // Resolve the .conf's Endpoint per mode BEFORE minting anything, so a
+      // box that can't yet produce a usable endpoint fails fast without leaking
+      // a router-side peer nobody can dial.
+      //   away — the public FQDN / operator override (resolveEndpointHost).
+      //   home — the box's discovered home-facing LAN IP (resolveHomeEndpointHost).
+      let confEndpointHost: string;
+      if (mode === "home") {
+        const homeHost = await resolveHomeEndpointHost();
+        if (!homeHost) {
+          return res.status(503).json({
+            error:
+              "The box couldn't determine its home-facing LAN IP for a direct (home) connection. It's assigned by your router (DHCP), so it can't be guessed — retry once the box is fully online, or set WIREGUARD_HOME_ENDPOINT_HOST in .env to pin it.",
+          });
+        }
+        confEndpointHost = homeHost;
+      } else {
+        // FQDN-first endpoint resolution. See resolveEndpointHost above.
+        const endpointHost = await resolveEndpointHost();
+        if (!endpointHost) {
+          return res.status(503).json({
+            error:
+              "The box hasn't learned its web address yet — remote access turns on automatically once it does. (Operators can set WIREGUARD_ENDPOINT_HOST in .env to override.)",
+          });
+        }
+        confEndpointHost = endpointHost;
       }
 
       // 1. Idempotently ensure server-side wg0 exists. /vpn/setup is a
@@ -237,6 +299,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         {
           userId: user.username,
           deviceLabel: parsed.data.deviceLabel,
+          mode,
           mint: (ip) =>
             createVpnPeer({
               description: parsed.data.deviceLabel,
@@ -273,12 +336,18 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       const conf = renderPeerConf({
         privateKey: minted.private_key,
         peerIp,
-        dns: config.WIREGUARD_DNS,
+        // Home mode points DNS at the split-horizon resolver so the per-device
+        // FQDN resolves over the tunnel (ADR-023 §3.4); away mode keeps the
+        // LAN DNS.
+        dns: mode === "home" ? config.WIREGUARD_HOME_DNS : config.WIREGUARD_DNS,
         serverPublicKey: setup.public_key,
-        endpointHost,
+        endpointHost: confEndpointHost,
         listenPort: config.WIREGUARD_LISTEN_PORT,
         lanCidr: config.WIREGUARD_LAN_CIDR,
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
+        mode,
+        // Split-tunnel box subnet(s) for home mode; ignored by away mode.
+        homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
       });
 
       // Status display screen QR — surface this peer for ~60 s so a phone
@@ -295,6 +364,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
           publicKey: saved.publicKey,
           assignedIp: saved.assignedIp,
           status: saved.status,
+          mode: saved.mode,
           createdAt: saved.createdAt,
         },
         // Plain text — dashboard renders as QR, mobile WireGuard scans.

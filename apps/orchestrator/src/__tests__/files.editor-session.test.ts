@@ -114,15 +114,31 @@ const ncSessionMock = ncSession as unknown as Record<string, AnyMock>;
 
 describe("Editor session + docs status routes (WARP-882)", () => {
   let app: ReturnType<typeof createApp>;
+  let prisma: PrismaClient;
+
+  // This suite models a box where Documents is turned ON (config above sets
+  // DOCS_ENABLED + DOCS_INTERNAL_URL, making the `docs` module available). The
+  // module gate on `/api/files/docs` reads ModuleSetting overrides; the global
+  // test mock returns no overrides, which would leave `docs` default-disabled
+  // and 404 the status route. Seed an explicit enablement row so the gate lets
+  // `/api/files/docs/status` through. Re-applied in beforeEach because
+  // clearAllMocks() below wipes the resolved value (the gate re-reads on cache
+  // expiry).
+  const enableDocs = () =>
+    (prisma as unknown as {
+      moduleSetting: { findMany: ReturnType<typeof vi.fn> };
+    }).moduleSetting.findMany.mockResolvedValue([{ moduleId: "docs", enabled: true }]);
 
   beforeAll(() => {
-    const prisma = new PrismaClient();
+    prisma = new PrismaClient();
+    enableDocs();
     initDeviceService(prisma);
     app = createApp(prisma);
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    enableDocs();
     ncMock.ncListSharedWithMe.mockResolvedValue([]);
     ncSessionMock.resolveNcToken.mockResolvedValue("nc-token");
     docsMock.docServerHealthy.mockResolvedValue(true);

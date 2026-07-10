@@ -359,7 +359,7 @@ async def chat(
 ):
     """Unified chat endpoint — routes to the selected provider.
 
-    Priority scheduling (via X-Request-Priority header or query param):
+    Priority scheduling (via the X-Request-Priority header):
     - 0: user-initiated (default)
     - 5: automation
     - 10: background
@@ -371,6 +371,7 @@ async def chat(
     principal = _principal(http_request)
 
     # Enqueue with priority
+    future = None
     try:
         future = await inference_scheduler.enqueue(x_request_priority, request)
         await future
@@ -380,6 +381,15 @@ async def chat(
             detail=str(e),
             headers={"Retry-After": str(e.retry_after)},
         )
+    except asyncio.CancelledError:
+        # GWV-003: the client disconnected while this request was queued. If the
+        # scheduler already GRANTED the slot (resolved the future + incremented
+        # _active_count) before we were cancelled, that slot would leak — one
+        # leaked slot at max_concurrent=1 permanently deadlocks every /ai/chat.
+        # Release it iff the grant actually landed, then re-raise the cancel.
+        if future is not None and future.done() and not future.cancelled():
+            await inference_scheduler.release()
+        raise
 
     # The scheduler slot is now held. It MUST stay held until the work is
     # actually done — and for a streaming response the work isn't done when

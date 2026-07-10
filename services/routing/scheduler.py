@@ -24,6 +24,7 @@ and skips POSTing — keeps the routing service running cleanly until
 the secret lands in a follow-up.
 """
 from __future__ import annotations
+import asyncio
 
 import logging
 import os
@@ -164,10 +165,13 @@ async def _tick(router: DropletRouter) -> None:
     POST. First successful read primes the cache; subsequent ticks
     emit a sample."""
     global _previous
-    device = _resolve_wan_device(router)
+    # PYNET-007: the SDK reads use blocking urllib (up to ~20s on a dead router)
+    # — run them off the event loop so a router outage can't stall /health and
+    # every other endpoint on this uvicorn worker.
+    device = await asyncio.to_thread(_resolve_wan_device, router)
     if device is None:
         return
-    current = _read_counters(router, device)
+    current = await asyncio.to_thread(_read_counters, router, device)
     if current is None:
         return
     if _previous is None:

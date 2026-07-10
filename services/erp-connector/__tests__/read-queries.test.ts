@@ -56,9 +56,11 @@ const TABLES: IntrospectedTable[] = [
 const map = buildSchemaMap(TABLES);
 
 describe("read-query registry", () => {
-  it("registers the three Phase-0/1/2 read queries", () => {
+  it("registers the read queries", () => {
     const names = READ_QUERIES.map((q) => q.name).sort();
-    expect(names).toEqual(["get_ar_summary", "get_schedule_today", "find_patient"].sort());
+    expect(names).toEqual(
+      ["get_ar_summary", "get_schedule_today", "find_patient", "get_patient", "get_recall_due"].sort(),
+    );
   });
 
   it("every registered query is parameterized and read-only (SELECT ...)", () => {
