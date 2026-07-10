@@ -36,7 +36,7 @@ export function PatientPeek({
   // balance + last/next visit load here by id when the panel opens. A 404 from
   // the not-yet-wired backend leaves the passed-in fields (name) and em-dashes
   // the rest, rather than surfacing an error.
-  const { data } = useSWR<PatientSummary>(
+  const { data } = useSWR<PatientSummary | null>(
     open && patient?.id ? ["erp-patient", patient.id] : null,
     () => fetchPatientSummary(patient!.id),
     { shouldRetryOnError: false },
