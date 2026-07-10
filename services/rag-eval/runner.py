@@ -65,6 +65,25 @@ def _ensure_dirs(target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
 
 
+_KEEP_RUNS = int(os.environ.get("RAG_EVAL_KEEP_RUNS", "500"))
+
+
+def _prune_old_runs(target: Path, keep: int = _KEEP_RUNS) -> None:
+    """Keep only the newest `keep` result pairs (results-<stamp>.json/.md).
+
+    GWV-016: the off-hours runs wrote a pair per run forever (~5,800 files/yr)
+    with no retention — unbounded growth on an appliance meant to run for years,
+    and /runs globs the whole directory on every call.
+    """
+    try:
+        jsons = sorted(target.glob("results-*.json"))
+        for old in jsons[:-keep] if keep > 0 else []:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".md").unlink(missing_ok=True)
+    except Exception:  # pragma: no cover - best-effort janitor
+        logger.warning("run-results prune failed", exc_info=True)
+
+
 def run_once(target_dir: Path | None = None) -> Path:
     """Execute one RAGAS pass. Returns the results.json path.
 
@@ -117,6 +136,7 @@ def run_once(target_dir: Path | None = None) -> Path:
         for line in proc.stdout:
             logger.info("[ragas] %s", line.rstrip())
     proc.wait()
+    _prune_old_runs(target)  # GWV-016: bound unbounded results-*.json growth
     if proc.returncode != 0:
         # Preserve the existing contract: non-zero exit raises
         # CalledProcessError so the scheduler's _safe_run catches + skips

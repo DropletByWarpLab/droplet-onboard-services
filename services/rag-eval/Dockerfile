@@ -61,4 +61,8 @@ EXPOSE 8090
 # tick instead of backfilling missed slots (coalesce=True on the apscheduler
 # job absorbs short outages); in-flight HTTP-triggered runs are forgotten on
 # restart (the filesystem is the source of truth for completed runs).
+# GWV-015: probe the real HTTP surface (:8090/health) so a wedged uvicorn or a
+# dead HTTP half is not reported healthy. python:3.11-slim has no curl.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \n  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)" || exit 1
+
 CMD ["python", "main.py"]
