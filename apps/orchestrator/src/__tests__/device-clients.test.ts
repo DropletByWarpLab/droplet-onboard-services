@@ -170,7 +170,7 @@ vi.mock("@prisma/client", () => {
   };
 });
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import * as nc from "../services/nextcloud.client.js";
@@ -234,6 +234,94 @@ describe("Device clients / pairing", () => {
       });
       expect(one.body.code).not.toBe(two.body.code);
     });
+
+    // WARP-1150/1151: Generate code must mint a code for EVERY platform the
+    // dialog offers (the repro was platform iOS), plus the API-only "other".
+    it.each([
+      ["macos", "desktop"],
+      ["windows", "desktop"],
+      ["linux", "desktop"],
+      ["ios", "mobile"],
+      ["android", "mobile"],
+      ["other", "desktop"],
+    ] as const)(
+      "generates a code for platform %s",
+      async (platform, deviceType) => {
+        const res = await request(app).post("/api/devices/pair").send({
+          deviceName: "bdeep",
+          deviceType,
+          platform,
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.code).toMatch(/^[A-Z2-9]{6}$/);
+        expect(res.body.pairUrl).toContain(`code=${res.body.code}`);
+      },
+    );
+
+    // WARP-1151: `PairingCode.code` is unique and old rows are never purged,
+    // so a random collision must be retried with a fresh code — not 500 the
+    // Generate-code step.
+    it("retries with a fresh code when the random code collides (P2002)", async () => {
+      const prisma = new PrismaClient() as unknown as {
+        pairingCode: { create: ReturnType<typeof vi.fn> };
+      };
+      const callsBefore = prisma.pairingCode.create.mock.calls.length;
+      prisma.pairingCode.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError(
+          "Unique constraint failed on the fields: (`code`)",
+          { code: "P2002", clientVersion: "test" },
+        ),
+      );
+
+      const res = await request(app).post("/api/devices/pair").send({
+        deviceName: "Collision survivor",
+        deviceType: "desktop",
+        platform: "macos",
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.code).toMatch(/^[A-Z2-9]{6}$/);
+      // One collided attempt + one successful retry.
+      expect(prisma.pairingCode.create.mock.calls.length).toBe(callsBefore + 2);
+    });
+
+    it("answers 503 (retryable), not 500, when every allocation attempt collides", async () => {
+      const prisma = new PrismaClient() as unknown as {
+        pairingCode: { create: ReturnType<typeof vi.fn> };
+      };
+      for (let i = 0; i < 5; i++) {
+        prisma.pairingCode.create.mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError(
+            "Unique constraint failed on the fields: (`code`)",
+            { code: "P2002", clientVersion: "test" },
+          ),
+        );
+      }
+
+      const res = await request(app).post("/api/devices/pair").send({
+        deviceName: "Unlucky",
+        deviceType: "desktop",
+        platform: "macos",
+      });
+
+      expect(res.status).toBe(503);
+      expect(res.body.error).toMatch(/try again/i);
+    });
+
+    it("still fails loudly on a non-collision create error", async () => {
+      const prisma = new PrismaClient() as unknown as {
+        pairingCode: { create: ReturnType<typeof vi.fn> };
+      };
+      prisma.pairingCode.create.mockRejectedValueOnce(new Error("db down"));
+
+      const res = await request(app).post("/api/devices/pair").send({
+        deviceName: "DB outage",
+        deviceType: "desktop",
+        platform: "macos",
+      });
+
+      expect(res.status).toBe(500);
+    });
   });
 
   describe("GET /api/devices/pair/:code/status", () => {
@@ -296,6 +384,34 @@ describe("Device clients / pairing", () => {
       const status = await request(app).get(`/api/devices/pair/${code}/status`);
       expect(status.body.used).toBe(true);
       expect(status.body.claimedBy).toMatch(/^dc-/);
+    });
+
+    // WARP-1150/1151: the full observed repro shape — an iOS device named
+    // "bdeep" — generate a code, then prove the claim endpoint accepts that
+    // exact code before its 10-minute expiry.
+    it("a freshly generated iOS code is accepted by /pair/claim before expiry", async () => {
+      const created = await request(app).post("/api/devices/pair").send({
+        deviceName: "bdeep",
+        deviceType: "mobile",
+        platform: "ios",
+      });
+      expect(created.status).toBe(200);
+      expect(new Date(created.body.expiresAt).getTime()).toBeGreaterThan(
+        Date.now(),
+      );
+
+      const claim = await request(app)
+        .post("/api/devices/pair/claim")
+        .send({ code: created.body.code, deviceName: "bdeep" });
+
+      expect(claim.status).toBe(200);
+      expect(claim.body.deviceId).toMatch(/^dc-/);
+      expect(claim.body.appPassword).toBe("nc-fresh-app-password-ABC");
+
+      const status = await request(app).get(
+        `/api/devices/pair/${created.body.code}/status`,
+      );
+      expect(status.body.used).toBe(true);
     });
 
     it("rejects replay: second claim with the same code 409s", async () => {

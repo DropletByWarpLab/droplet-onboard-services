@@ -4613,8 +4613,19 @@ export async function createPairingCode(data: {
     body: JSON.stringify(data),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to generate pairing code: ${res.status}`);
+    const body = await res.json().catch(() => ({} as { error?: unknown }));
+    // WARP-1150: keep the HTTP status and any machine-readable error token on
+    // the thrown error so the dialog can map it to step-appropriate copy via
+    // translateError (which never renders err.message verbatim). Without
+    // these, every create failure flattened to the domain fallback.
+    const message =
+      typeof body.error === "string"
+        ? body.error
+        : `Failed to generate pairing code: ${res.status}`;
+    const err = new Error(message) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.error === "string") err.code = body.error;
+    throw err;
   }
   return res.json();
 }

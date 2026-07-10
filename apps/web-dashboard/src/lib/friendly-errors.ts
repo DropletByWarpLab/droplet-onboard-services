@@ -49,6 +49,7 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "device"
+  | "pairing"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -81,6 +82,13 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
   device:
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
+  // WARP-1150: the Generate-code step of Pair-a-new-device. At this step
+  // there is no device to reach yet — the failure is the appliance failing
+  // to CREATE a pairing session — so the copy must be create-session +
+  // retryable, never the "device" domain's reach-device fallback (that one
+  // is reserved for the post-code handshake).
+  pairing:
+    "The Droplet couldn't create a pairing code right now. Try again in a moment.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -334,6 +342,27 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
       "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
+  },
+  // WARP-1150/1151 — creating a pairing session (POST /api/devices/pair).
+  // Only the appliance is involved at this step, so every entry talks about
+  // creating a code, never about reaching a device.
+  pairing: {
+    // The create route's per-user rate limit (429). The fallback's plain
+    // "try again in a moment" undersells the hour-long window.
+    "429":
+      "Too many pairing codes were created recently. Wait a while, then try again.",
+    "400": "Check the device name and try again.",
+    // The pairing routes answer 404 when the appliance doesn't serve them —
+    // e.g. a runtime module toggle gating /api/devices (the WARP-1150 on-box
+    // cause: {"error":"module_disabled"}). Pairing being unavailable is an
+    // admin-configuration fact, not an unreachable device.
+    module_disabled:
+      "Device pairing is turned off on this Droplet. Ask an admin to enable it, then try again.",
+    "404":
+      "Device pairing isn't available on this Droplet right now. Ask an admin to check it's enabled, then try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   generic: {
     NETWORK:
