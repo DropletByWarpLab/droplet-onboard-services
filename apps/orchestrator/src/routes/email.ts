@@ -339,8 +339,11 @@ export function createEmailRouter(
           res.status(409).json({ error: "Draft is no longer editable", status: existing.status });
           return;
         }
-        const updated = (await prisma.emailDraft.update({
-          where: { id: req.params.id },
+        // ORCH-003 (P1): push the status guard INTO the write so a concurrent
+        // /send (draft→queued) or the indexer's claim can't be overwritten
+        // between the check above and here. Branch on count to disambiguate.
+        const upd = await prisma.emailDraft.updateMany({
+          where: { id: req.params.id, status: "draft" },
           data: {
             toAddrs: (parsed.data.toAddrs ?? undefined) as any,
             ccAddrs: parsed.data.ccAddrs === undefined ? undefined : (parsed.data.ccAddrs as any),
@@ -348,6 +351,20 @@ export function createEmailRouter(
             subject: parsed.data.subject,
             body: parsed.data.body,
           },
+        });
+        if (upd.count === 0) {
+          const cur = (await prisma.emailDraft.findUnique({
+            where: { id: req.params.id },
+          })) as unknown as DraftRow | null;
+          if (!cur) {
+            res.status(404).json({ error: "Draft not found" });
+            return;
+          }
+          res.status(409).json({ error: "Draft is no longer editable", status: cur.status });
+          return;
+        }
+        const updated = (await prisma.emailDraft.findUniqueOrThrow({
+          where: { id: req.params.id },
         })) as unknown as DraftRow;
         res.json(updated);
       } catch (err) {
@@ -418,9 +435,18 @@ export function createEmailRouter(
         // up from here and drives the SMTP transaction. We track the
         // transition with one ActivityRow regardless of eventual
         // SMTP outcome so the audit feed has a clean enqueue record.
-        const queued = (await prisma.emailDraft.update({
-          where: { id: req.params.id },
+        // ORCH-003 (P1): conditional flip so two racing sends can't both
+        // enqueue (double "queued" ActivityRow). Only one observes count===1.
+        const flip = await prisma.emailDraft.updateMany({
+          where: { id: req.params.id, status: "draft" },
           data: { status: "queued" },
+        });
+        if (flip.count === 0) {
+          res.status(409).json({ error: "Draft already dispatched" });
+          return;
+        }
+        const queued = (await prisma.emailDraft.findUniqueOrThrow({
+          where: { id: req.params.id },
         })) as unknown as DraftRow;
 
         await recordActivity({
