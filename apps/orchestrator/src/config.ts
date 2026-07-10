@@ -71,7 +71,15 @@ const envSchema = z.object({
     .string()
     .default("true")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
-  BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().positive().default(90),
+  // `.nonnegative()` (not `.positive()`): 0 is a VALID interval meaning
+  // "review on every daily check / immediate" — the reviewer-notes DoD boots
+  // with BUSINESS_PROFILE_REVIEW_DAYS=0 to verify the nudge, and config.ts
+  // `.parse()`s (not safeParse), so rejecting 0 would crash boot. The consumer
+  // (business-review-nudge.service) uses this as a subtraction offset for the
+  // staleness cutoff, so 0 → cutoff===now → any past `updatedAt` fires; there
+  // is no division, so 0 needs no extra guard. Negatives stay rejected (a
+  // negative interval would push the cutoff into the future and never fire).
+  BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().nonnegative().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
