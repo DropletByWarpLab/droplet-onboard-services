@@ -88,42 +88,78 @@ reachability.
 | `bytes_out` | int | `flow_end` (with `nf_conntrack_acct=1`) | Origin-direction bytes. |
 | `bytes_in` | int | `flow_end` | Reply-direction bytes. |
 | `allowed` | bool | flow_* when allowlist available | `true` matched a rule, `false` unlisted. **Omitted** when allowlist unavailable. |
-| `policy` | string | flow_* | Matched `AllowRule.key`, or `allowlist-unavailable`. Omitted when `false`/no match. |
+| `policy` | string | flow_* | Matched `AllowRule.key` (`<service>-><entry-id>`), or `allowlist-unavailable`. Omitted when `false`/no match. |
 | `qname` | string | `dns_query` | Queried name (lowercased, no trailing dot). |
 
 `flow_start` is emitted on conntrack `NEW`, `flow_end` on `DESTROY` (which
 carries the byte counters). For long-lived flows, byte totals are only known at
 flow end — a documented v1 limitation (see below).
 
-## Expected `allowed-egress.yaml` schema — **SYNC NOTE TO WARP-269**
+## `allowed-egress.yaml` schema — one file, two consumers
 
-This collector **consumes** `docs/security/allowed-egress.yaml`. **That file is
-owned and created by WARP-269** (telemetry-free-invariant CI gate); this PR does
-**not** create it (only a test fixture,
-`services/egress-audit/tests/fixtures/allowed-egress.sample.yaml`, mirrors the
-schema). The schema below **must stay in sync** with the WARP-269 CI-gate spec —
-reconciled by the orchestrating session. On any schema mismatch the collector
-**fails soft** (tags records `allowlist-unavailable` + emits one
-`allowlist_unavailable` anomaly), never crashes.
+`docs/security/allowed-egress.yaml` is a **single source of truth** with two
+consumers that now agree on the same committed schema:
+
+- **WARP-269 CI gate** — `scripts/check-egress-allowlist.py` reads it statically
+  and fails any PR referencing an unregistered destination host.
+- **WARP-268 runtime collector** — `services/egress-audit/allowlist.py` reads
+  the same file at runtime and classifies live flows against it.
+
+The authoritative schema lives in the file's own header. The relevant shape for
+the runtime collector is:
 
 ```yaml
-schema_version: 1
+version: 1
 entries:
-  - service: ai-gateway            # compose service name, or "host" (host-netns aggregate)
-    destination: api.anthropic.com # hostname | "*.suffix" wildcard | IP | CIDR
-    port: 443                      # 1-65535 | "any"
-    protocol: tcp                  # tcp | udp | any
-    purpose: BYOK cloud LLM calls (user-initiated)   # required, human-readable
-    ticket: WARP-268               # required, provenance
+  - id: cloud-llm-providers-optin   # unique slug
+    kind: egress                    # egress | dynamic | reference
+    service: ai-gateway             # owning service dir, or "host"/"repo"/"ci"
+    destination:
+      hosts: [api.anthropic.com]    # hostname | "*.suffix" wildcard | IP | CIDR
+      cidrs: [1.1.1.1/32]           # optional — WARP-268 runtime IP/CIDR view
+      ports: [443]                  # list of 1-65535 | "any"; empty/absent == any
+      protocol: https               # advisory: https | quic | udp/ntp | dns | ...
+    purpose: BYOK cloud LLM calls (user-initiated)
+    ticket: WARP-269
 ```
 
-Matching semantics:
+The runtime collector **only allow-matches `kind: egress` entries** — the
+destinations the box actually reaches. `kind: dynamic` (config-driven, no
+literal destination) and `kind: reference` (hostnames that are not egress the
+box makes) are ignored for matching by design. On an unsupported `version` /
+unparseable file the collector **fails soft** (tags records
+`allowlist-unavailable` + emits one `allowlist_unavailable` anomaly), never
+crashes; a present, valid file loads and classifies.
 
-- `service` — exact match (no wildcard service in v1).
-- `destination` as CIDR/IP ⇒ `dst_ip ∈ network`; as `*.suffix` ⇒ any
-  DNS-observed name for `dst_ip` ends with `.suffix` (the leading dot enforces
-  the label boundary, so `evilopenai.com` does **not** match `*.openai.com`); as
-  a bare hostname ⇒ exact match against DNS-observed names.
+> **History:** the runtime consumer originally expected a *different* flat
+> schema (`schema_version: 1`, scalar `destination`/`port`) than the one the
+> committed file and the CI gate actually use, so on every box the collector
+> ran permanently in `allowlist-unavailable` mode. WARP-268 reworked
+> `allowlist.py` to consume the real nested schema; the two consumers now share
+> one documented format.
+
+Matching semantics (unchanged in spirit, applied to the nested shape):
+
+- `service` — exact match against the flow's **attributed** service (the
+  compose service name, or `host` for host-netns egress). Two registry entries
+  use human-readable owner labels that differ from what the attributor emits, so
+  they are canonicalized before matching: `openwrt-router` → `openwrt` (bridge
+  container `droplet-openwrt`) and `cloudflared` → `host` (`network_mode: host`).
+  No wildcard service in v1. A runtime-phase egress row whose `service` the
+  attributor can never emit is dead weight (a permanent false anomaly), so a
+  test cross-checks the registry's runtime services against `docker-compose.yml`
+  to trip on that drift.
+- `destination.hosts` / `destination.cidrs` — an IP/CIDR token ⇒ `dst_ip ∈
+  network`; a `*.suffix` token ⇒ any DNS-observed name for `dst_ip` ends with
+  `.suffix` (the leading dot enforces the label boundary, so `evilopenai.com`
+  does **not** match `*.openai.com`); a bare hostname ⇒ exact match against
+  DNS-observed names.
+- `destination.ports` — the flow's port must be in the list; an empty/absent
+  list or an explicit `any` means any port.
+- `destination.protocol` is **advisory**: rich labels (https/quic/dns/…) map to
+  a transport-class set (tcp/udp) and only filter a candidate when the mapping
+  is unambiguous and excludes the observed flow's transport; unknown or mixed
+  labels fall back to host + port.
 - Hostname matching depends on the collector having seen the DNS **answer**
   (IP→name cache, TTL-bounded, floor 300 s). A hostname-allowlisted destination
   reached **without** an observable DNS resolution (hardcoded IP, DoH) **will
@@ -135,7 +171,7 @@ Matching semantics:
 | Kind | Trigger | Where it lands |
 |---|---|---|
 | `unlisted_destination` | A traced flow does not match any allowlist rule. | `/admin/audit`, kind `network`, severity `warn`, `sub = unlisted_destination`, `what = "Egress anomaly: <service> → <dst>:<port>"`, full anomaly payload in `refs`. |
-| `allowlist_unavailable` | Allowlist file missing / unparseable / unsupported `schema_version`. | Same, `what = "Egress audit: allowed-egress.yaml unavailable — flows unclassified"`. |
+| `allowlist_unavailable` | Allowlist file missing / unparseable / unsupported `version`. | Same, `what = "Egress audit: allowed-egress.yaml unavailable — flows unclassified"`. |
 
 Anomalies POST to the orchestrator's `POST /api/security/egress-anomaly`
 (service-principal bearer). The orchestrator records each via `recordActivity`
@@ -156,8 +192,10 @@ suppress repeat warnings until recovery; a missing `SERVICE_TOKEN_EGRESS_AUDIT`
 1. **Host-netns services attribute as `host` (aggregate).** Services running
    `network_mode: host` (routing, matter-controller, switch, camera-discovery,
    oled-display, cloudflared) egress from the host's IPs → labelled `host`.
-   Notably **cloudflared's tunnel egress shows as `host`.** Per-process split is
-   a follow-up ticket.
+   Notably **cloudflared's tunnel egress shows as `host`.** The allowlist matcher
+   reconciles this — the `service: cloudflared` registry row is canonicalized to
+   `host` so the tunnel still matches instead of flagging (see Matching
+   semantics). Per-process split is a follow-up ticket.
 2. **QNAME visibility is host-aggregate.** Bridge containers resolve via
    Docker's embedded DNS (`127.0.0.11`); dockerd forwards upstream from the host
    netns, so per-container QNAME attribution is structurally impossible without

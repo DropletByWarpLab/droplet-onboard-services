@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { readFileSync } from "node:fs";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -6,11 +7,31 @@ const logger = createLogger("cache");
 
 let redis: Redis | null = null;
 
+/** WARP-234: CA path for the rediss:// listener — the WARP-236 per-service
+ *  bundle mount (compose) or DROPLET_TLS_CA (same env contract as
+ *  lib/internal-tls.ts). */
+export function redisCaPath(): string {
+  return process.env.DROPLET_TLS_CA ?? "/data/service-tls/ca.pem";
+}
+
+/** WARP-234: for a rediss:// URL, pin trust to the compose-internal CA —
+ *  the cache serves a WARP-236 leaf, which no public root signs. Plaintext
+ *  redis:// URLs (dev compose) get no TLS options. `readCa` is injectable
+ *  for tests. */
+export function redisConnectionOptions(
+  url: string,
+  readCa: (path: string) => Buffer = (p) => readFileSync(p),
+): { tls?: { ca: Buffer } } {
+  if (!url.startsWith("rediss://")) return {};
+  return { tls: { ca: readCa(redisCaPath()) } };
+}
+
 export function getRedis(): Redis {
   if (!redis) {
     redis = new Redis(config.REDIS_URL, {
       maxRetriesPerRequest: 3,
       lazyConnect: true,
+      ...redisConnectionOptions(config.REDIS_URL),
     });
   }
   return redis;

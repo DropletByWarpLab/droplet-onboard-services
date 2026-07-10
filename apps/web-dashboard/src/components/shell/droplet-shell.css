@@ -113,6 +113,17 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 @media (max-width: 1080px) { .droplet-shell .grid.c4 { grid-template-columns: repeat(2, 1fr); } .droplet-shell .grid.c3 { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 720px) { .droplet-shell .grid.c2, .droplet-shell .grid.c3, .droplet-shell .grid.c4 { grid-template-columns: 1fr; } .droplet-shell .span2 { grid-column: auto; } }
 
+/* Native <select> popup options inside the shell — same belt-and-braces as
+   globals.css's WARP-946 `.dp-input option` pin, for indigo-converted selects
+   that no longer carry `dp-input` (users modals, ShareDialog, …). The theme
+   root's `color-scheme` handles most engines; pin the option surface + label
+   to shell tokens for the ones that ignore it on the option list. */
+.droplet-shell select option,
+.droplet-shell select optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
 .droplet-shell .card { background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: 16px; padding: 18px; position: relative;
   transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease), transform 200ms var(--ease); }
 /* `.droplet-shell .card` (0,2,0) out-specifies Tailwind's position utilities
@@ -283,7 +294,12 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 .ds-ios-line { display: flex; align-items: center; gap: 14px; padding: 16px 20px; min-height: 56px; }
 .ds-ios-line + .ds-ios-line { border-top: 1px solid var(--border); }
 .ds-ios-line .il-ic { width: 24px; flex-shrink: 0; color: var(--brand); display: flex; }
-.ds-ios-line .il-l { font-size: 16px; color: var(--text); white-space: nowrap; }
+/* WARP-1153: the schedule-report rows put free-text event titles in `.il-l`
+   (calendar page), so it must be able to shrink + ellipsize instead of being
+   clipped by `.ds-ios-group { overflow: hidden }` and shoving the trailing
+   `.il-v` time out of the row. Harmless for the detail sheet's short fixed
+   labels. */
+.ds-ios-line .il-l { font-size: 16px; color: var(--text); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ds-ios-line .il-v { margin-left: auto; font-size: 16px; color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 12px; }
 .ds-ios-note { padding: 17px 20px; font-size: 15px; line-height: 1.55; color: var(--text); }
 .ds-ios-note textarea { width: 100%; min-height: 84px; resize: none; border: 0; outline: 0; background: transparent; font: inherit; font-size: 15px; line-height: 1.55; color: var(--text); }

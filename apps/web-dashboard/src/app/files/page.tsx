@@ -23,6 +23,10 @@ import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { DocEditorPanel } from "@/components/FileManager/DocEditorPanel";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
+import {
+  resolveSearchResultTarget,
+  toSpaceRelativePath,
+} from "@/components/FileManager/search-target";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
@@ -63,6 +67,13 @@ export default function FilesPage() {
   // resets the path to that space's root and re-lists.
   const [space, setSpace] = useState<FileSpaceId>("personal");
   const { spaces, sharedAvailable } = useSpaces();
+  // WARP-1140: the shared space's home-relative root (e.g. "/Household") —
+  // needed to translate between home-relative entry/search-result paths and
+  // the space-root-relative `currentPath`.
+  const sharedRoot = useMemo(
+    () => spaces.find((s) => s.id === "shared")?.root ?? null,
+    [spaces]
+  );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
@@ -271,6 +282,26 @@ export default function FilesPage() {
     setPreviewFile(file);
   }, []);
 
+  // WARP-1143 — Home "Recent files" deep link: `?preview=<path>` (read once on
+  // mount, same pattern as the calendar's `?date=`) selects + previews that
+  // file once the target folder's listing has loaded. A target that no longer
+  // resolves (deleted/unindexed since the recents snapshot) fails with a toast,
+  // not silently.
+  const [pendingPreviewPath, setPendingPreviewPath] = useState<string | null>(
+    () => searchParams?.get("preview") ?? null
+  );
+  useEffect(() => {
+    if (!pendingPreviewPath || isLoading) return;
+    const target = files.find((f) => f.path === pendingPreviewPath);
+    setPendingPreviewPath(null);
+    if (target && !target.isDirectory) {
+      setSelectedFile(target);
+      handlePreview(target);
+    } else {
+      toast("Couldn't open that file — it may have been moved or deleted.");
+    }
+  }, [pendingPreviewPath, isLoading, files, handlePreview, toast]);
+
   // ── Rename ──
   const handleRenameCommit = useCallback(
     async (file: FileEntryInfo, newName: string) => {
@@ -351,12 +382,19 @@ export default function FilesPage() {
   // info sidebar, which is the SINGLE-click affordance via handleRowSelect).
   const handleRowOpen = useCallback((file: FileEntryInfo) => {
     if (file.isDirectory) {
-      setCurrentPath(file.path);
+      // WARP-1140: listing entries carry HOME-relative paths ("/Household/…")
+      // but `currentPath` is relative to the ACTIVE space's root. Feeding the
+      // entry path back verbatim while the Household tab is active
+      // double-prefixed the next listing ("/Household/Household/…"), which
+      // rendered as a silently empty folder.
+      setCurrentPath(
+        space === "shared" ? toSpaceRelativePath(file.path, sharedRoot) : file.path
+      );
       fm.clearSelection();
     } else {
       handlePreview(file);
     }
-  }, [fm, handlePreview]);
+  }, [fm, handlePreview, space, sharedRoot]);
 
   // ── Context menu ──
   const handleRowContextMenu = useCallback(
@@ -501,15 +539,34 @@ export default function FilesPage() {
       sub="Everything on your Droplet, indexed locally for instant, private search."
       actions={filesActions}
     >
-      {/* Search bar */}
-      <div className="mb-4">
+      {/* Search bar.
+          WARP-1139: `relative z-40` — the shell's ds-rise entrance animation
+          (fill-mode: both, animates transform) leaves every `.page-inner`
+          child in its own stacking context, so later siblings (the scope
+          tabs, breadcrumbs, file rows) painted OVER the results dropdown
+          despite its own z-index. Lifting this wrapper's stacking context
+          above its z-auto siblings restores the expected layering. */}
+      <div className="mb-4 relative z-40">
         <SearchBar
           onPickResult={(file) => {
+            // WARP-1140: results are HOME-relative; one inside the shared
+            // root must open in the Household space with the prefix stripped
+            // (currentPath is space-root-relative), or the navigation lands
+            // on a double-prefixed, silently empty listing.
+            const target = resolveSearchResultTarget(
+              file.path,
+              sharedAvailable ? sharedRoot : null
+            );
+            if (target.space !== space) {
+              setSpace(target.space);
+              fm.clearSelection();
+            }
             if (file.isDirectory) {
-              setCurrentPath(file.path);
+              setCurrentPath(target.path);
             } else {
-              // Jump to parent dir and mark the file selected
-              const parent = file.path.replace(/\/[^/]*$/, "") || "/";
+              // Jump to parent dir and mark the file selected (selection
+              // compares against entry paths, which stay home-relative).
+              const parent = target.path.replace(/\/[^/]*$/, "") || "/";
               setCurrentPath(parent);
               setSelectedFile(file);
             }
@@ -802,6 +859,7 @@ export default function FilesPage() {
         <ShareDialog
           filePath={shareFile.path}
           fileName={shareFile.name}
+          isDirectory={shareFile.isDirectory}
           existingShares={existingShares}
           onChange={() => loadExistingShares(shareFile.path)}
           onClose={() => {

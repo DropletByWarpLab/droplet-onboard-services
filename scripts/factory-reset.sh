@@ -79,7 +79,7 @@ What gets deleted:
   - The Docker build cache (always reclaimed — largest rebuildable consumer)
   - Generated secrets (.env)
   - TLS certificates
-  - MQTT credentials
+  - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
 
 What is preserved:
@@ -450,6 +450,15 @@ log_divider
 
 log_step 2 4 "Removing Docker volumes"
 
+# WARP-234: a bind-mounted *.config.php inside a named volume (nextcloud
+# redis-TLS config) leaves a STALE bind-mount after `down -v` that Docker
+# does not clean up, so `docker volume rm droplet_nextcloud-data` fails
+# with "device or resource busy" and the reset aborts. Lazy-umount any
+# lingering submounts under our droplet_ volumes before the removal loop.
+for _stale in $(awk '$2 ~ /\/var\/lib\/docker\/volumes\/droplet_.*\/_data\// {print $2}' /proc/mounts 2>/dev/null); do
+  sudo umount -l "$_stale" 2>/dev/null || true
+done
+
 # Project prefixes whose volumes we OWN and may remove. PRIMARY_PROJECT is the
 # live name derived from the compose `name:` in Phase 1; droplet-pi-platform is
 # the retired pre-WARP-605 name whose volumes still linger on long-lived boxes.
@@ -485,10 +494,23 @@ VOLUMES=(
   "rag-eval-data"
   "whisper-models"
   "piper-voices"
+  # WARP-1055: voice-io's applied mic-calibration record (small JSON, mounted
+  # at /data). docker-compose.yml declares this named volume so a container
+  # recreate never silently reverts the tuned gain/threshold; the reset must
+  # wipe it so factory-reset truly returns to §6.4 "Not calibrated yet".
+  "voice-calibration"
   "ollama-data"
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
+  # INFRA-004: both are declared in docker-compose.yml but were missing here —
+  # in the swallowed-`down -v` scenario this fallback exists for, they SURVIVED
+  # a "factory reset" AND the verify gate (built from this same list) read clean.
+  # fleet-agent-state holds identity.json + the portal ingest token (credential
+  # remanence on a resold box); ota-updates holds per-update rollback backups +
+  # staged configs.tar.gz.
+  "ota-updates"
+  "fleet-agent-state"
 )
 
 # Free any container still mounting a target volume so the removals below are
@@ -711,10 +733,11 @@ if [ -d "$REPO_ROOT/data/secrets" ]; then
   log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
 
-# MQTT password file
+# Legacy MQTT password file (pre-WARP-235 installs; the passwd mechanism is
+# retired — MQTT identity is the client cert CN, wiped above with data/secrets)
 if [ -d "$REPO_ROOT/docker/mosquitto_passwd_dir" ]; then
   rm -rf "$REPO_ROOT/docker/mosquitto_passwd_dir"
-  log_success "Removed docker/mosquitto_passwd_dir/ (MQTT credentials)"
+  log_success "Removed docker/mosquitto_passwd_dir/ (legacy MQTT credentials)"
 fi
 
 # Generated mosquitto.conf (not git-tracked; may be a directory if Docker

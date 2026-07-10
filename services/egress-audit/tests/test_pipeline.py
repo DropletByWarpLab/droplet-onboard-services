@@ -63,7 +63,7 @@ class TestAllowedFlow:
         flows = [d for d in sink.lines if d["event"] in ("flow_start", "flow_end")]
         assert [d["event"] for d in flows] == ["flow_start", "flow_end"]
         assert all(d["service"] == "ai-gateway" and d["allowed"] is True and
-                   d["policy"] == "ai-gateway->api.anthropic.com:443/tcp"
+                   d["policy"] == "ai-gateway->cloud-llm-providers-optin"
                    for d in flows)
         assert flows[1]["bytes_out"] == 2412 and flows[1]["bytes_in"] == 9876
         assert flows[0]["dst_name"] == "api.anthropic.com"

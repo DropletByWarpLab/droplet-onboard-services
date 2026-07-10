@@ -15,6 +15,7 @@ on:
       - "packages/tools-core/**"
       - "packages/fips-selftest/**"
       - "services/mcp-server/**"
+      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -25,6 +26,7 @@ on:
       - "packages/tools-core/**"
       - "packages/fips-selftest/**"
       - "services/mcp-server/**"
+      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -42,7 +44,7 @@ jobs:
     # Docker — 15 min is a generous ceiling for the suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -71,6 +73,11 @@ jobs:
 
       - name: Build @droplet/mcp-server
         run: npm run -w @droplet/mcp-server build
+
+      # WARP-1137: erp.service imports @droplet/erp-connector; its types
+      # resolve from dist/, so build before typecheck (TS2307 otherwise).
+      - name: Build @droplet/erp-connector
+        run: npm run -w @droplet/erp-connector build
 
       # WARP-537: the update-agent verify suite execs the REAL cosign
       # binary over golden fixtures (src/services/update-agent/verify.test.ts)
@@ -119,7 +126,7 @@ jobs:
       DATABASE_URL: postgresql://droplet_test:droplet_test_pw@localhost:5432/droplet_test?schema=public
       RUN_PG_INTEGRATION: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

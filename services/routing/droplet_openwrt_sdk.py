@@ -528,6 +528,17 @@ class UCIApi:
         """Manually rollback unapplied changes."""
         return self._r._call("uci", "rollback")
 
+    def changes(self, config: Optional[str] = None) -> Any:
+        """List staged (uncommitted) UCI changes, grouped by config."""
+        args: dict[str, Any] = {}
+        if config:
+            args["config"] = config
+        return self._r._call("uci", "changes", args)
+
+    def revert(self, config: str) -> Any:
+        """Discard staged (uncommitted) changes for a config (rpcd staging area)."""
+        return self._r._call("uci", "revert", {"config": config})
+
 
 # ---------------------------------------------------------------------------
 # High-level API: Network
@@ -2378,7 +2389,30 @@ class DropletRouter:
         Default is 60s to match the orchestrator's confirmation-token TTL
         (WARP-41) — a Tier 2 token can never outlive the apply window.
         """
-        yield self
+        try:
+            yield self
+        except BaseException:
+            # PYNET-005: the with-block body raised (e.g. a UbusError partway
+            # through a uci.set/add sequence). The already-staged deltas must not
+            # linger in rpcd's SHARED staging area — a later, unrelated uci.apply
+            # from any endpoint would silently commit our half-configuration to
+            # the live router. Revert every config with pending changes, then
+            # re-raise. The droplet-ai ACL already grants uci "changes"+"revert".
+            try:
+                pending = self.uci.changes() or {}
+                changed = (
+                    pending.get("changes", pending)
+                    if isinstance(pending, dict)
+                    else {}
+                )
+                for cfg in list(changed.keys()) if isinstance(changed, dict) else []:
+                    try:
+                        self.uci.revert(cfg)
+                    except Exception:
+                        logger.exception("Safe apply: revert failed for config %s", cfg)
+            except Exception:
+                logger.exception("Safe apply: failed to enumerate staged UCI changes for revert")
+            raise
 
         # Apply all pending changes
         self.uci.apply(timeout=timeout, rollback=True)

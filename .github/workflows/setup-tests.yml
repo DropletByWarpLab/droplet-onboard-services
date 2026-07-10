@@ -7,15 +7,33 @@ on:
   pull_request:
     paths:
       - "scripts/**"
+      - "services/automount/**"
       - "tests/setup.test.sh"
       - "tests/fips-mode.test.sh"
+      - "tests/luks2-data-partition.test.sh"
+      - "tests/usb-luks-enroll.test.sh"
+      # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
+      - "tests/mosquitto-conf.test.sh"
+      - "docker/mosquitto.conf"
+      - "docker/mosquitto.acl"
+      - "docker/frigate/config.yml"
+      - "docker/docker-compose.yml"
       - ".github/workflows/setup-tests.yml"
   push:
     branches: [main]
     paths:
       - "scripts/**"
+      - "services/automount/**"
       - "tests/setup.test.sh"
       - "tests/fips-mode.test.sh"
+      - "tests/luks2-data-partition.test.sh"
+      - "tests/usb-luks-enroll.test.sh"
+      # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
+      - "tests/mosquitto-conf.test.sh"
+      - "docker/mosquitto.conf"
+      - "docker/mosquitto.acl"
+      - "docker/frigate/config.yml"
+      - "docker/docker-compose.yml"
       - ".github/workflows/setup-tests.yml"
   workflow_dispatch:
 
@@ -32,9 +50,13 @@ jobs:
     # lives in setup-e2e.yml. 15 min is a very wide ceiling here.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run setup unit tests
         run: bash tests/setup.test.sh
+      - name: Run mosquitto mTLS conf/ACL unit tests
+        # WARP-235: single :8883 mTLS listener, per-CN topic ACLs, generator/
+        # tracked-file parity, shared-password retirement. Pure bash, no Docker.
+        run: bash tests/mosquitto-conf.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean
@@ -48,3 +70,16 @@ jobs:
         # docker; the pin-resolution assertions run the real
         # `docker compose config` client-side (no daemon needed).
         run: bash scripts/test/apply-update.test.sh
+      - name: Run LUKS2 data-partition tests
+        # WARP-232: HERMETICALLY EXECUTES droplet-luks-provision.sh provision +
+        # the existing-LUKS re-run refusal, scripts/lib/luks.sh secrets
+        # relocation (real cp/symlink/perms, not grep), the symlink-aware .env
+        # writer, fstab/crypttab nofail, and crypto-shred partition-target — all
+        # against PATH-stubbed cryptsetup/systemd-cryptenroll + a tmp fs. No
+        # Docker, no root, no TPM.
+        run: bash tests/luks2-data-partition.test.sh
+      - name: Run USB LUKS2 enroll tests
+        # WARP-232: derivation KAT + the enroll drill, the .env-fallback for
+        # DEVICE_SECRET_KEY (production sudo has a scrubbed env), interrupt-safe
+        # keyslot ordering, and fail-fast when the recovery key is underivable.
+        run: bash tests/usb-luks-enroll.test.sh

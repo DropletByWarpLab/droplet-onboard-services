@@ -23,10 +23,12 @@ import { Dialog } from "./Dialog";
  *   - loading + long-running progress + error states, with the destructive
  *     button disabled while in flight so it can't double-fire.
  *
- * Tokens only: system-red for the destructive surface, dp-input / dp-btn-*,
- * type-* / text-label-* — no invented colors. 44px targets via the dp-btn-*
- * min-heights and the input's padding. WCAG AA: labelled inputs, role="alert"
- * on errors, aria-describedby wiring through <Dialog>.
+ * Indigo tokens only (WARP-1079): the shell ramp (`--text*`, `--surface`,
+ * `--border`) resolves via the `droplet-shell` scope the <Dialog> backdrop
+ * carries; the destructive fill is the established #ef4444 idiom — no
+ * invented colors. 44px targets via explicit min-heights and the input's
+ * padding. WCAG AA: labelled inputs, role="alert" on errors,
+ * aria-describedby wiring through <Dialog>.
  */
 export interface DestructiveConfirmProps {
   /** Whether the modal is open. */
@@ -145,33 +147,46 @@ export function DestructiveConfirm({
       // is mid-way through typing into — require an explicit Cancel/Escape.
       closeOnBackdrop={false}
     >
-      <div className="p-6">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div>
         {/* Header: red warning mark + question title */}
         <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-system-red/10">
-            <AlertTriangle size={20} className="text-system-red" aria-hidden="true" />
+          <span
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[rgba(239,68,68,0.1)]"
+          >
+            <AlertTriangle size={20} className="text-[#ef4444]" aria-hidden="true" />
           </span>
           <div className="min-w-0 pt-0.5">
-            <h2 id={titleId} className="type-headline text-label-primary">
+            <h2 id={titleId} className="type-headline" style={{ color: "var(--text)" }}>
               {title}
             </h2>
             {targetSummary != null && (
-              <p className="type-footnote text-label-tertiary mt-0.5">
-                <span className="text-label-secondary">Affects </span>
-                <span className="font-mono text-label-primary">{targetSummary}</span>
+              <p className="type-footnote mt-0.5" style={{ color: "var(--text-muted)" }}>
+                <span>Affects </span>
+                <span className="font-mono" style={{ color: "var(--text)" }}>
+                  {targetSummary}
+                </span>
               </p>
             )}
           </div>
         </div>
 
         {/* Consequence copy */}
-        <p id={bodyId} className="type-subheadline text-label-secondary mt-4 leading-relaxed">
+        <p
+          id={bodyId}
+          className="type-subheadline mt-4 leading-relaxed"
+          style={{ color: "var(--text-muted)" }}
+        >
           {consequence}
         </p>
 
         {/* Type-to-confirm friction step */}
         <div className="mt-5">
-          <label htmlFor={inputId} className="type-caption-1 text-label-secondary px-0.5">
+          <label
+            htmlFor={inputId}
+            className="type-caption-1 px-0.5"
+            style={{ color: "var(--text-muted)" }}
+          >
             Type{" "}
             {serverValidated ? (
               <>
@@ -179,12 +194,18 @@ export function DestructiveConfirm({
                 {confirmHint ? (
                   <>
                     {" "}
-                    (<span className="font-mono text-label-primary">{confirmHint}</span>)
+                    (
+                    <span className="font-mono" style={{ color: "var(--text)" }}>
+                      {confirmHint}
+                    </span>
+                    )
                   </>
                 ) : null}
               </>
             ) : (
-              <span className="font-mono text-label-primary">{confirmPhrase}</span>
+              <span className="font-mono" style={{ color: "var(--text)" }}>
+                {confirmPhrase}
+              </span>
             )}{" "}
             to confirm
           </label>
@@ -200,7 +221,13 @@ export function DestructiveConfirm({
             autoCapitalize="off"
             spellCheck={false}
             aria-invalid={typed.length > 0 && !phraseMatches}
-            className="dp-input mt-1.5 font-mono disabled:opacity-60"
+            className="w-full px-3 py-2.5 mt-1.5 font-mono outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-60"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             placeholder={serverValidated ? confirmHint : confirmPhrase}
           />
         </div>
@@ -209,7 +236,7 @@ export function DestructiveConfirm({
         {error && (
           <p
             role="alert"
-            className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2 mt-3"
+            className="type-footnote text-[#ef4444] bg-[rgba(239,68,68,0.1)] rounded-[var(--radius-input)] px-3 py-2 mt-3"
           >
             {error}
           </p>
@@ -222,7 +249,7 @@ export function DestructiveConfirm({
             type="button"
             onClick={handleCancel}
             disabled={busy}
-            className="dp-btn-secondary type-subheadline disabled:opacity-50"
+            className="btn ghost min-h-[44px]"
           >
             Cancel
           </button>
@@ -232,13 +259,14 @@ export function DestructiveConfirm({
             disabled={!canConfirm}
             aria-disabled={!canConfirm}
             className={
-              // Destructive button: system-red fill, white label, 44px target.
-              // Disabled until the friction step clears (and while in flight).
-              "inline-flex min-h-[44px] items-center justify-center gap-2 rounded-sm " +
-              "bg-system-red px-5 py-2.5 font-medium text-white type-subheadline " +
+              // Destructive button: #ef4444 fill (indigo shell destructive
+              // idiom), white label, 44px target. Disabled until the
+              // friction step clears (and while in flight).
+              "inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[var(--radius-input)] " +
+              "bg-[#ef4444] px-5 py-2.5 font-medium text-white type-subheadline " +
               "transition-all duration-200 ease-smooth " +
-              "hover:bg-system-red/90 active:scale-[0.97] " +
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/50 " +
+              "hover:bg-[#dc2626] active:scale-[0.97] " +
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(239,68,68,0.5)] " +
               "disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
             }
           >

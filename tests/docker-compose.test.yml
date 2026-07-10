@@ -23,8 +23,20 @@ services:
 
   broker:
     image: eclipse-mosquitto:2
-    volumes:
-      - ../docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    # Anonymous plaintext broker for the ephemeral test lane (same shape as
+    # docker/docker-compose.dev.yml). The tracked docker/mosquitto.conf is the
+    # WARP-235 mTLS config and requires the internal-CA cert mounts — not
+    # something this throwaway stack provisions.
+    command:
+      - "sh"
+      - "-c"
+      - |
+        cat > /mosquitto/config/mosquitto.conf <<'CONF'
+        listener 1883
+        allow_anonymous true
+        persistence false
+        CONF
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
 
   ai-gateway:
     build:

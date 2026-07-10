@@ -741,7 +741,8 @@ body:has(.droplet-home) {
 .dh-modal-head {
   display: flex;
   align-items: center;
-  padding: 16px 18px;
+  /* WARP-1153: 16/20 on the 4/8/…/32 spacing scale (was 16px 18px). */
+  padding: 16px 20px;
   border-bottom: 1px solid var(--border);
 }
 .dh-modal-title {
@@ -767,7 +768,9 @@ body:has(.droplet-home) {
   color: var(--text);
 }
 .dh-modal-body {
-  padding: 18px;
+  /* WARP-1153: 20px on the 4/8/…/32 spacing scale (was 18px), matching the
+     shared dialog body inset. */
+  padding: 20px;
 }
 .dh-set-h {
   display: flex;

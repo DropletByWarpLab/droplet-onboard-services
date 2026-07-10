@@ -16,6 +16,7 @@
  *     each listed member's role to at least the group's mapped role.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "./user-directory.service.js";
 import {
   provisionUser,
   deactivateUser,
@@ -62,16 +63,24 @@ function createPrismaMock(seed: UserRow[] = []) {
 
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      // WARP-233: provisioning resolves users through the blind index.
+      if (where.emailLookupHash !== undefined)
+        return self._users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null;
       if (where.email !== undefined) return self._users.find((u: UserRow) => u.email === where.email) ?? null;
       if (where.id !== undefined) return self._users.find((u: UserRow) => u.id === where.id) ?? null;
       return null;
     }),
+    // WARP-233 pre-backfill fallback probe (plaintext rows, no blind index).
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      self._users.find((u: any) => u.email === where.email && u.emailLookupHash == null) ?? null,
+    ),
     create: vi.fn(async ({ data }: { data: any }) => {
-      const row: UserRow = {
+      const row: UserRow & { emailLookupHash?: string | null } = {
         id: data.id ?? `u-new-${++useq}`,
         username: data.username,
         displayName: data.displayName,
         email: data.email ?? null,
+        emailLookupHash: data.emailLookupHash ?? null,
         passwordHash: data.passwordHash ?? null,
         role: data.role ?? "family",
         isLocal: data.isLocal ?? true,
@@ -159,7 +168,8 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
       externalId: "okta-1",
     });
     expect(created).toBe(true);
-    expect(user.email).toBe("newhire@acme.test");
+    // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
+    expect(readUserEmail(user.email)).toBe("newhire@acme.test");
     expect(user.role).toBe("family"); // least privilege
     expect(user.directoryStatus).toBe("ACTIVE");
     // SCIM users cannot password-login.
@@ -249,7 +259,7 @@ describe("findUserById / findUserByUserName", () => {
   it("findUserById resolves by local User.id (the SCIM resource id)", async () => {
     const prisma = createPrismaMock();
     const { user } = await provisionUser(prisma, { email: "f@acme.test", displayName: "F", active: true, externalId: "okta-9" });
-    expect((await findUserById(prisma, user.id))?.email).toBe("f@acme.test");
+    expect(readUserEmail((await findUserById(prisma, user.id))?.email)).toBe("f@acme.test");
   });
 
   it("findUserByUserName resolves by normalized email", async () => {

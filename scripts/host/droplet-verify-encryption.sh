@@ -41,9 +41,16 @@ VFY_OUTPUT_ROOT="${DROPLET_VFY_OUTPUT_ROOT:-/var/lib/droplet/verify}"
 VFY_REPO_ROOT="${DROPLET_VFY_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 VFY_COMPOSE_PROJECT="${DROPLET_VFY_COMPOSE_PROJECT:-droplet}"
 VFY_COMPOSE_FILE="${DROPLET_VFY_COMPOSE_FILE:-$VFY_REPO_ROOT/docker/docker-compose.yml}"
-VFY_DATA_PATHS="${DROPLET_VFY_DATA_PATHS:-/var/lib/docker/volumes /var/lib/droplet $VFY_REPO_ROOT/data/secrets $VFY_REPO_ROOT/.env}"
+# WARP-232 canonical data surfaces (docs/security/at-rest-encryption.md
+# "Coverage table"): the docker data-root plus the relocated .env and
+# data/secrets symlink targets on the encrypted data LV.
+VFY_DATA_PATHS="${DROPLET_VFY_DATA_PATHS:-/data/droplet/env/.env /data/droplet/secrets /data/docker}"
 VFY_USB_GLOB="${DROPLET_VFY_USB_GLOB:-/mnt/droplet/*}"
-VFY_MESH_TARGETS="${DROPLET_VFY_MESH_TARGETS:-ai-gateway:8000 mcp-server:9090 web-dashboard:3001}"
+# WARP-236 mesh hops that must refuse cert-less plain HTTP. mcp-server:9090
+# (JWT-gated, off-stack consumers) and web-dashboard:3001 (nginx user plane,
+# no service secrets) are by-design plain — listing them would make this
+# check FAIL forever (docs/security/internal-mtls.md, deviation 4).
+VFY_MESH_TARGETS="${DROPLET_VFY_MESH_TARGETS:-orchestrator:3000 ai-gateway:8000}"
 VFY_REDIS_TLS_PORT="${DROPLET_VFY_REDIS_TLS_PORT:-6380}"
 VFY_PCAP_SECONDS="${DROPLET_VFY_PCAP_SECONDS:-60}"
 VFY_SIGNER_CONTAINER="${DROPLET_VFY_SIGNER_CONTAINER:-droplet-device-identity-svc}"
@@ -96,6 +103,16 @@ vfy_env() { grep -m1 "^$1=" "$VFY_REPO_ROOT/.env" 2>/dev/null | cut -d= -f2-; }
 
 # vfy_compose ARGS — run docker compose against the pinned project + file.
 vfy_compose() { docker compose -p "$VFY_COMPOSE_PROJECT" -f "$VFY_COMPOSE_FILE" "$@"; }
+
+# vfy_container_running SERVICE — true when the compose service has a running
+# container. Every exec-based transit probe calls this first: `docker compose
+# exec` against a stopped service exits non-zero, which the expect-reject
+# probes would misread as "plaintext refused" — a fully stopped stack must
+# read SKIP ("container not running", the documented status contract), never
+# a green PASS.
+vfy_container_running() {
+  [ -n "$(vfy_compose ps --status running -q "$1" 2>/dev/null)" ]
+}
 
 # vfy_record ID STATUS DETAIL EVIDENCE_CSV — registry supplies family/maps/threats/desc.
 vfy_record() {
@@ -250,6 +267,15 @@ probe_transit_pg_plaintext_rejected() {
   local id="$1"
   local out="$VFY_EVID/$id/psql-disable.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running db || { vfy_record "$id" SKIP "container-not-running:db"; return; }
+  # WARP-233 ⇄ WARP-318: a FIPS-mode box deliberately serves pg_hba.fips.conf,
+  # which tolerates plaintext+SCRAM on the private container bridge (the P1011
+  # Prisma/libpq clash, decision A). Plaintext acceptance there is the
+  # configured posture, not a regression — record the exception, don't FAIL.
+  if [ "$(vfy_env DROPLET_FIPS_MODE)" = "1" ]; then
+    vfy_record "$id" SKIP "fips-mode-plaintext-exception (WARP-318 P1011 decision A — pg_hba.fips.conf)"
+    return
+  fi
   # Password passed inline in the conninfo (not via `-e PGPASSWORD`) so the
   # exec argv keeps `db psql` adjacent and the value never lands in the process
   # list of the host (it is inside the container's argv only).
@@ -259,8 +285,11 @@ probe_transit_pg_plaintext_rejected() {
     > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
+  # "pg_hba.conf rejects connection" = WARP-233's explicit terminal reject
+  # line matching (the shipped shape); "no pg_hba.conf entry" = the no-match
+  # wording kept for configs without a terminal reject.
   v="$(vfy_eval_expect_reject "$rc" "$out" \
-       'no pg_hba.conf entry.*(SSL off|no encryption)|server does not support SSL')"
+       '(no pg_hba.conf entry|pg_hba.conf rejects connection).*(SSL off|no encryption)|server does not support SSL')"
   vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/psql-disable.txt"
 }
 
@@ -268,6 +297,7 @@ probe_transit_pg_tls13() {
   local id="$1"
   local out="$VFY_EVID/$id/sclient-pg.txt" v
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running db || { vfy_record "$id" SKIP "container-not-running:db"; return; }
   vfy_compose exec -T db sh -c 'openssl s_client -starttls postgres -connect db:5432 </dev/null' \
     > "$out" 2>&1 || true
   v="$(vfy_eval_tls_protocol "$out" 'TLSv1\.3')"
@@ -278,6 +308,7 @@ probe_transit_pg_scram() {
   local id="$1"
   local out="$VFY_EVID/$id/pg-settings.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running db || { vfy_record "$id" SKIP "container-not-running:db"; return; }
   pw="$(vfy_env POSTGRES_PASSWORD)"
   vfy_compose exec -T db \
     psql "host=db user=droplet password=$pw dbname=droplet" -tAc 'SHOW password_encryption; SHOW ssl;' \
@@ -293,6 +324,7 @@ probe_transit_redis_plaintext_refused() {
   local id="$1"
   local out="$VFY_EVID/$id/redis-plain.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running cache || { vfy_record "$id" SKIP "container-not-running:cache"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
   vfy_compose exec -T cache redis-cli -h cache -p 6379 -a "$pw" --no-auth-warning PING \
     > "$out" 2>&1
@@ -310,13 +342,21 @@ probe_transit_redis_tls() {
   local id="$1"
   local out="$VFY_EVID/$id/redis-tls.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running cache || { vfy_record "$id" SKIP "container-not-running:cache"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
-  vfy_compose exec -T cache redis-cli -h cache --tls -p "$VFY_REDIS_TLS_PORT" \
+  # WARP-234: the cache serves a compose-internal-CA leaf (WARP-236 trust
+  # root) that no public root signs — redis-cli must be pointed at the CA
+  # the launch wrapper stages inside the container. REDIS_PASSWORD is the
+  # ping-only `default` ACL user, which is exactly what PING needs.
+  vfy_compose exec -T cache redis-cli -h cache --tls \
+    --cacert /tmp/redis-ca.crt -p "$VFY_REDIS_TLS_PORT" \
     -a "$pw" --no-auth-warning PING > "$out" 2>&1 || true
   if grep -qx 'PONG' "$out" 2>/dev/null; then
     vfy_record "$id" PASS "tls-ping-ok (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   else
-    vfy_record "$id" SKIP "tls-port-not-listening (WARP-234 not landed)" "evidence/$id/redis-tls.txt"
+    # WARP-234 landed the TLS listener — a non-PONG is a regression now,
+    # not a not-yet-shipped feature.
+    vfy_record "$id" FAIL "tls-ping-failed (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   fi
 }
 
@@ -324,8 +364,13 @@ probe_transit_mqtt_plaintext_closed() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_container_running broker || { vfy_record "$id" SKIP "container-not-running:broker"; return; }
+  # WARP-235 retired MQTT_PASSWORD from .env — fall back to a placeholder so
+  # the probe still ATTEMPTS the plaintext connection (the check is "no 1883
+  # listener", not "wrong credentials"); pre-235 installs still use the real
+  # value so a lingering password listener is caught either way.
   pw="$(vfy_env MQTT_PASSWORD)"
-  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "${pw:-warp235-retired}" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
@@ -340,7 +385,9 @@ probe_transit_mqtt_mtls_required() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/certs/ca.crt}"
+  vfy_container_running broker || { vfy_record "$id" SKIP "container-not-running:broker"; return; }
+  # WARP-235 mounts the broker bundle at /mosquitto/config/tls (ca.pem).
+  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/config/tls/ca.pem}"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?
@@ -358,6 +405,10 @@ probe_transit_mesh_plain_http_refused() {
   local id="$1"
   local t accepted="" out
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  # The orchestrator container is the exec host for the fetch probes — a
+  # stopped stack would otherwise read as "refused" (green) for every target.
+  vfy_container_running orchestrator \
+    || { vfy_record "$id" SKIP "container-not-running:orchestrator"; return; }
   for t in $VFY_MESH_TARGETS; do
     out="$VFY_EVID/$id/mesh-${t//[:\/]/_}.txt"
     if vfy_compose exec -T orchestrator node -e \

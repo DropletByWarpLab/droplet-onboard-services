@@ -12,11 +12,15 @@ A file-based internal CA lives at `data/secrets/internal-ca/` (minted once by
 into `data/secrets/service-tls/<service>/{cert.pem,key.pem,ca.pem}`. Each
 container bind-mounts only its own bundle read-only at `/data/service-tls`.
 
-- **Servers** (orchestrator HTTPS :3000, FastAPI/uvicorn services, ai-gateway
-  gRPC :50051, Mosquitto :8883, matter-controller :8083) require and verify a
-  CA-signed client cert on every connection.
+- **Servers** — the design target is that every first-party listener
+  (orchestrator HTTPS :3000, FastAPI/uvicorn services, ai-gateway gRPC :50051,
+  Mosquitto :8883, matter-controller :8083) requires and verifies a CA-signed
+  client cert on every connection. **Wired today:** the orchestrator :3000
+  listener (flag-gated) and Mosquitto :8883 (live) only — see "Wiring status"
+  below.
 - **Clients** (undici fetch, httpx, paho, mqtt.js, grpc, nginx `proxy_ssl_*`)
-  present their own bundle and pin trust to the internal CA.
+  present their own bundle and pin trust to the internal CA. Most HTTP clients
+  are wired (flag-gated); the gaps are listed under "Wiring status".
 - **Mosquitto** maps the peer CN to the MQTT username
   (`use_identity_as_username true`) and a static ACL file scopes each CN to
   exactly the topics it uses.
@@ -63,9 +67,9 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (first-party hops secured)
+## Enforcement matrix (design target)
 
-| # | Client → Server | Transport | Was | Now (DROPLET_INTERNAL_TLS=1) |
+| # | Client → Server | Transport | Was | Design (DROPLET_INTERNAL_TLS=1) |
 |---|---|---|---|---|
 | 1 | nginx gateway → orchestrator :3000 | `proxy_pass` | plain | mTLS (gateway client cert) |
 | 2 | nginx gateway → ai-gateway :8000 | `proxy_pass` | plain | mTLS (gateway client cert) |
@@ -88,6 +92,40 @@ device-identity-svc issuance. Rationale:
 (third-party servers); orchestrator → device-identity-svc (Unix socket,
 filesystem-scoped); ai-gateway → ollama, voice-io → wyoming (third-party, no/raw
 TLS). `ORCHESTRATOR_URL` on the ai-gateway container is dead config (no reader).
+
+### Wiring status (verified against main, 2026-07-09 — WARP-1062 doc-truth)
+
+The table above is the **design target**, not the shipped posture. What has
+actually landed from WARP-236:
+
+- **Live everywhere:** the internal CA + per-service bundle issuance/rotation,
+  and the certs' non-mesh consumers — Postgres TLS (WARP-233), Redis TLS
+  (WARP-234), and MQTT mTLS :8883 (WARP-235, scheme-gated, always on).
+- **Wired but dormant (flag-gated, and nothing sets `DROPLET_INTERNAL_TLS=1`
+  today — neither `scripts/setup.sh` nor compose):** the orchestrator :3000
+  HTTPS+client-cert listener (`index.ts` / `lib/internal-tls.ts`) and the
+  HTTP client sides of hops 4–7, 9–12, 14–15 (undici/httpx helpers).
+- **Not wired at all (code gap, not just a flag):**
+  - nginx `proxy_ssl_*` client certs for hops 1–2 (`docker/nginx/nginx.conf`
+    has no `proxy_ssl` directives);
+  - every FastAPI/uvicorn **server** listener (ai-gateway :8000, routing,
+    switch, voice-io, ops-console, camera-discovery, email-indexer, rag-eval —
+    all launch plain `uvicorn` with no ssl args; `uvicorn_ssl_kwargs()` in
+    `services/_shared/internal_tls.py` has no callers);
+  - ai-gateway gRPC :50051 (`grpc_server.py` uses `add_insecure_port`) and the
+    file-indexer gRPC client (`embedder.py` uses `insecure_channel`) — hop 16;
+  - matter-controller :8083 server (plain `node:http`);
+  - rag-eval → orchestrator client (hop 8) and switch/camera-discovery →
+    routing clients (hop 13) — no `internal_tls` usage;
+  - the compose orchestrator healthcheck (inline plain-HTTP fetch, not
+    `dist/healthcheck.js`).
+
+Enabling the flag on a box today would therefore break hops 1–2 (nginx speaks
+plain to an HTTPS orchestrator) and 4/9–13/15–16 (TLS clients or plain clients
+against mismatched servers). Completing the server-side wiring + on-box
+enablement is a separate follow-up ticket; the harness check
+`transit.mesh.plain-http-refused` (WARP-966) tracks the observable posture and
+FAILs until that lands.
 
 ## Env contract
 
@@ -115,6 +153,66 @@ MQTT TLS is keyed off the broker URL scheme (`mqtts://`), NOT off
   host-net services add `DNS:host.docker.internal` (+ single-box bridge-gateway
   IP). The Postgres/Redis workstream extends `INTERNAL_CA_SERVICES` / calls
   `internal_ca_issue db`, `internal_ca_issue cache`.
+
+## MQTT broker (WARP-235)
+
+Single mosquitto listener on **:8883** with `require_certificate true` +
+`use_identity_as_username true` — the TLS-verified certificate CN **is** the
+MQTT username. There is no password file and no plaintext listener; the shared
+`MQTT_PASSWORD` is retired (stale keys in old `.env`s are unread). The broker
+publishes **127.0.0.1:8883** on the host so host-network services
+(camera-discovery) can connect; it is never bound on LAN interfaces.
+
+`docker/mosquitto.conf` and `docker/mosquitto.acl` are tracked in git AND
+regenerated byte-identically by `scripts/lib/secrets.sh`
+(`_write_mosquitto_conf` / `_write_mosquitto_acl`) so an on-box
+`--sync-secrets` never dirties the checkout — parity is pinned by
+`tests/mosquitto-conf.test.sh`.
+
+### Per-CN topic grants (deny-by-default)
+
+| CN (identity) | Grants | Why (real topics on main) |
+|---|---|---|
+| `orchestrator` | `readwrite droplet/#`, `read frigate/#`, `read email/#` | publishes `droplet/files/<user>/*`, `droplet/devices/<user>/*`, `droplet/notifications/<user>`, `droplet/chat/<user>/*`, `droplet/device/state`, `droplet/transcription/run-one`; subscribes the same trees plus `frigate/events`, `frigate/+/status`, `droplet/cameras/discovered`, `droplet/index/+/*`; `email/#` is pre-granted for the dashboard email-refresh bridge |
+| `file-indexer` | `write droplet/index/+/{indexed,deleted}`, `write droplet/files/+/brain/indexed`, `write droplet/context-stats/invalidate`, `read droplet/files/brain/uploaded`, `read droplet/transcription/run-one` | watcher + brain-ingest + transcription pipelines |
+| `email-indexer` | `write email/+/new` | one publish per ingested mail |
+| `camera-discovery` | `write droplet/cameras/discovered` | discovery events over the loopback listener |
+| `frigate` | `readwrite frigate/#` | events, per-camera status, LWT `frigate/available`, `frigate/<cam>/<control>/set` command topics |
+
+A publish outside a CN's grant is dropped server-side (QoS-0 publishers get no
+error — verify delivery, not exit codes). `droplet/audit/*` is never granted:
+the audit log is HTTP + HMAC-chained rows, not MQTT.
+
+### Adding a new MQTT client
+
+1. Add the CN to `INTERNAL_CA_SERVICES` in `scripts/lib/internal-ca.sh`.
+2. Grant its topics in **both** `docker/mosquitto.acl` and the
+   `_write_mosquitto_acl` heredoc in `scripts/lib/secrets.sh` (byte-identical).
+3. Mount its bundle in `docker-compose.yml`:
+   `- ../data/secrets/service-tls/<service>:/data/service-tls:ro`.
+4. Point the client at `mqtts://broker:8883` (scheme-gated helpers:
+   `mqttConnectOptions` in TS, `paho_configure` in Python).
+5. Run `./scripts/setup.sh --sync-secrets`.
+
+### MQTT rotation / revocation
+
+```
+./scripts/rotate-internal-certs.sh --service broker \
+  --service orchestrator --service file-indexer --service email-indexer \
+  --service camera-discovery --service frigate --deploy
+```
+
+The broker restart drops all live MQTT sessions; clients auto-reconnect with
+fresh material (the orchestrator/file-indexer re-subscribe on connect — the
+IDX-06 replay path). Emergency revocation is the same CA rebuild as HTTP
+(`--rebuild-ca --deploy`): old certs stop validating when the broker restarts
+with the new `ca.pem` — proven by the rogue-CA and cert-removal probes in
+`tests/mqtt-mtls.integration.test.sh`.
+
+**Broker key permissions (WARP-185 lineage):** mosquitto runs as uid 1883, so
+`internal_ca_issue broker` chowns `key.pem` to 1883 or falls back to 0644
+inside the 0700 `data/secrets` tree — the same readability constraint that
+shaped the old passwd-file handling.
 
 ## Runbook
 

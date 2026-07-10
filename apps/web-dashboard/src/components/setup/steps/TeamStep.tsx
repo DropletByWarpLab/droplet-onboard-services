@@ -583,7 +583,8 @@ export function TeamStep({
         describedBy="create-account-sub"
         maxWidth="md"
       >
-        <div className="p-5">
+        {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+        <div>
           {acctCreated === null ? (
             <>
               <div className="mb-4 flex items-start gap-3">

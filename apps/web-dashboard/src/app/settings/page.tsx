@@ -1,12 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Settings as SettingsIcon, Trash2, Users, X } from "lucide-react";
+import Link from "next/link";
+import {
+  ChevronRight,
+  Mic,
+  Plus,
+  Settings as SettingsIcon,
+  Trash2,
+  Users,
+  X,
+} from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
+import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
+import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -139,6 +150,12 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+
+        {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
+            Card 1). Owns its own "Workspace" group header and self-gates to
+            owner/admin. The business-profile card (Phase 3) slots into the
+            same group, after the personality card. */}
+        <PersonalityCard />
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
         <PasskeysSection />
@@ -317,6 +334,31 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* Voice (WARP-1055) — a single link row; calibration and mic
+            health live on the /voice peer surface (design brief §2 —
+            no duplicated controls here). */}
+        <Sect title="Voice" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <Link
+              href="/voice"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Mic size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Voice &amp; microphone</span>
+                <span className="sub">
+                  Mic health, wake word, and guided calibration
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
+
         {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
         <LogsSection />
 
@@ -361,6 +403,12 @@ export default function SettingsPage() {
             />
           </div>
         </div>
+
+        {/* WARP-1121 — Business profile (design brief §6 Card 2): what
+            Droplet knows about the business + the interview entry points
+            (Run business setup / Re-run onboarding). Renders nothing for
+            roles whose GET view carries no onboardingState. */}
+        <BusinessProfileCard />
 
         {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
             device actions (reformat/remake storage AND factory reset). The

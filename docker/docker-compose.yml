@@ -68,12 +68,35 @@ x-logging: &default-logging
 services:
   # --- Ingress ---
   gateway:
-    image: nginx:alpine
+    # WARP-1021: Bookworm-based nginx with the NIST-validated OpenSSL FIPS
+    # provider (CMVP #4282) baked DORMANT — replaces the pulled nginx:alpine
+    # (Alpine/musl has no validated FIPS path; same reason WARP-229 moved every
+    # service image off Alpine). Repo root as context so the Dockerfile COPYs
+    # the shared docker/fips/** + docker/openssl-fips.cnf exactly like the
+    # five service images. Default posture is byte-identical to the old
+    # gateway: same nginx.conf (mounted below), same cipher lines
+    # (cipher-profile.default.conf is verbatim the old inline pair).
+    build:
+      context: ..
+      dockerfile: docker/nginx/Dockerfile
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      # WARP-1021: /docker-entrypoint.d/00-fips-profile.sh keys the edge-TLS
+      # cipher profile on the single customer knob — 0 (default) → modern
+      # posture, 1 → FIPS-approved suites only. OPENSSL_CONF is the same
+      # setup.sh-derived var the service images consume (belt-and-suspenders:
+      # the entrypoint also exports it when DROPLET_FIPS_MODE=1); nginx links
+      # the SYSTEM OpenSSL 3, so the conf alone activates the provider.
+      - DROPLET_FIPS_MODE=${DROPLET_FIPS_MODE:-0}
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
+      # (WARP-1021). Still mounted read-only over the baked copy (same file)
+      # so config edits keep applying with a reload, no rebuild — the
+      # ADR-023 cert-swap flow and ops muscle memory are unchanged.
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
     depends_on:
       orchestrator:
@@ -158,6 +181,13 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-1118 (§10): the orchestrator's request-size estimator
+      # (context-budget.service.ts) budgets the assembled chat request against
+      # this window before dispatch, PREVENTING (not merely detecting) the
+      # WARP-854 overflow. Mirrors the `ollama` service's OLLAMA_CONTEXT_LENGTH
+      # (both default 16384 via the same env token) so the estimator's window
+      # tracks the model server's actual window. NOT a model swap — window only.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
       - NEXTCLOUD_URL=http://nextcloud:80
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
@@ -235,28 +265,31 @@ services:
       # WITHOUT a rebuild (Node needs all three vars together — its bundled
       # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
       #
-      # ┌─ P1011 orchestrator↔Postgres TLS clash — DECISION FOR ROMAIN ────────┐
-      # │ Under the FIPS openssl config the FIPS cipher set rejects the        │
-      # │ non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's      │
-      # │ libpq then fails to open ANY connection with P1011: "library has no  │
-      # │ ciphers". The WARP-318 plan's decision (A): run the intra-compose    │
-      # │ orchestrator↔`db` hop PLAINTEXT (sslmode=disable) on the private     │
-      # │ container bridge, so the FIPS policy never touches the libpq         │
-      # │ handshake; the FIPS boundary auditors care about (edge TLS,          │
-      # │ data-at-rest, signatures) is unaffected.                             │
+      # ┌─ Postgres-under-FIPS (P1011) — VERIFIED behavior today (WARP-317) ───┐
+      # │ Under `setup.sh --fips` the interpolations below DO hand this        │
+      # │ container the FIPS config (OPENSSL_CONF=/etc/ssl/openssl-fips.cnf    │
+      # │ + MODULES + NODE_OPTIONS + REQUIRED=true): the provider loads and    │
+      # │ enforces (the boot self-test passes, MD5 is refused). But the        │
+      # │ orchestrator then CANNOT complete startup: Prisma's `$connect()`     │
+      # │ (before the API server ever listens) throws P1011 "library has no    │
+      # │ ciphers" (OpenSSL 0A0000A1). WARP-317's fips-stack smoke test        │
+      # │ surfaced this in CI and asserts it as the documented exception.      │
       # │                                                                      │
-      # │ *** UNRESOLVED CROSS-CLUSTER TENSION ***                             │
-      # │ WARP-233 is enforcing Postgres TLS 1.3 + SCRAM and pins             │
-      # │ DATABASE_URL ...?sslmode=REQUIRE (the exact opposite). This PR       │
-      # │ deliberately does NOT edit the DATABASE_URL line (WARP-233 owns it)  │
-      # │ and does NOT force sslmode=disable — decision (A) needs Romain's     │
-      # │ sign-off AND reconciliation with WARP-233 at review. Until then the  │
-      # │ orchestrator keeps the system openssl config (below) so it always    │
-      # │ reaches Postgres; its "boots FIPS-enforcing" AC is descoped (see     │
-      # │ the skip in tests/integration/fips-stack.test.sh, WARP-317).         │
-      # │ To apply (A) once ratified — reversible, FIPS-path-scoped: append    │
-      # │ `?sslmode=disable` to the orchestrator/mcp-server DATABASE_URL ONLY  │
-      # │ when DROPLET_FIPS_MODE=1 (or drop server-side FIPS ciphers, opt B).  │
+      # │ ROOT CAUSE is NOT the plaintext db hop — it is the shared FIPS        │
+      # │ config: docker/openssl-fips.cnf activates only fips+base and pins    │
+      # │ default_properties=fips=yes, which leaves a DEFAULT client SSL_CTX   │
+      # │ with ZERO usable ciphersuites, so quaint/libpq fails constructing    │
+      # │ the TLS client before it even reaches `db`. (ai-gateway hits the     │
+      # │ same wall in httpx — see its LIBRARY_HAS_NO_CIPHERS at boot.) A      │
+      # │ correct FIPS config needs an ssl_conf/system_default section that    │
+      # │ keeps the FIPS-approved suites available to the default context;     │
+      # │ that fix is WARP-967/WARP-318 provider-config territory, NOT this    │
+      # │ ticket, and NOT a DATABASE_URL edit (WARP-233 owns that line).       │
+      # │                                                                      │
+      # │ Once the config is fixed, set EXPECT_FIPS_STACK_BOOTS=1 in the        │
+      # │ fips-stack test to assert the full FIPS-enforcing boot. The separate │
+      # │ WARP-233 clash (Postgres TLS + sslmode=require) still lands on top    │
+      # │ of that and keeps decision (A) `?sslmode=disable` on the FIPS path.  │
       # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - OPENSSL_MODULES=${OPENSSL_MODULES:-}
@@ -279,12 +312,19 @@ services:
       - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-/opt/droplet/docker/docker-compose.yml}
       - DROPLET_OTA_UPDATES_DIR=/data/updates
+      # WARP-234: per-service Redis ACL identity over TLS. Overrides the
+      # .env default-user URL (which is ping-only); cache.service.ts pins
+      # trust to the internal CA from the /data/service-tls bundle below.
+      - REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR:-}@cache:6380
     volumes:
       # WARP-539: the OTA apply host helper, bind-mounted read-only so the
       # orchestrator can exec it against the docker socket below. Its container
       # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
       # orchestrator only ever execs it, never rewrites it.
       - ../scripts/lib/apply-update.sh:/opt/droplet/scripts/lib/apply-update.sh:ro
+      # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
+      # canonical /data/service-tls path — the Redis client reads ca.pem.
+      - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
       # WARP-573: pre-migration DB snapshots written by the guarded boot
       # entrypoint (scripts/migrate-and-start.sh) immediately before applying
       # pending migrations, so a power-cut mid-migration can be auto-recovered.
@@ -303,7 +343,16 @@ services:
       # initActivityRecorder() throws at boot and the orchestrator
       # restart-loops. Read-only — the key is loaded once and never
       # mutated.
-      - ../data/secrets:/data/secrets:ro
+      # WARP-235 decision-4 hardening: mount ONLY the audit key, not the
+      # data/secrets ROOT — the root now holds the internal CA private key
+      # (internal-ca/ca.key) and every service's TLS bundle; a root mount
+      # would let this container mint arbitrary service identities.
+      # (Single-file bind: setup.sh materializes audit.key before compose up.)
+      - ../data/secrets/audit.key:/data/secrets/audit.key:ro
+      # WARP-235/236: this service's own TLS bundle (cert+key+CA, CN =
+      # "orchestrator") from the internal CA. The MQTT clients present it on
+      # mqtts:// brokers; the DROPLET_TLS_* defaults point here.
+      - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
       # WARP-230: share the device-identity sidecar's Unix-socket dir so
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
@@ -385,10 +434,24 @@ services:
       - path: ../.env
         required: false
     environment:
-      # Backend selection — defaults to 'real' in production. Override
-      # to 'mock' on hosts without /dev/tpm0 (Mac dev, CI runners).
+      # WARP-317: this image ships the FIPS cnf + self-test helper but NOT
+      # the validated fips.so module (only the five provider images +
+      # gateway carry it). The env_file above would leak a FIPS-on .env's
+      # DROPLET_FIPS_REQUIRED=true / OPENSSL_CONF=<fips cnf> straight into
+      # this container — boot self-test exit 1 (restart-loop) and, even
+      # with the gate off, a cnf-without-module libcrypto that fails at
+      # first crypto use. `environment:` beats env_file, so pin both to
+      # the literal OFF posture (identical to the pre-WARP-318 render).
+      DROPLET_FIPS_REQUIRED: "false"
+      OPENSSL_CONF: /etc/ssl/openssl.cnf
+      # Backend selection. The 'real' (tpm2-pytss) backend is an unfinished
+      # scaffold (IDX-002) that device-identity-svc fails closed on unless
+      # DROPLET_TPM_ALLOW_SCAFFOLD is set, so the default is 'mock' — a box
+      # whose .env omits the key must NOT auto-land on the crash-looping
+      # scaffold. secrets.sh writes DROPLET_TPM_BACKEND=mock into .env; an
+      # operator knowingly running the scaffold sets real + the opt-in by hand.
       # docker-compose.test.override.yml forces 'mock' for the test lane.
-      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-real}
+      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-mock}
       DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
       # Auto-provision on first start: if /var/lib/droplet/tpm/ has no
       # provisioned.json, generate the EK / SRK / device-id key and
@@ -436,6 +499,9 @@ services:
       context: ..
       dockerfile: services/mcp-server/Dockerfile
     container_name: droplet-mcp-server
+    volumes:
+      # WARP-234/236: internal-TLS bundle — redis-tls.ts reads ca.pem.
+      - ../data/secrets/service-tls/mcp-server:/data/service-tls:ro
     restart: unless-stopped
     <<: *default-logging
     env_file:
@@ -445,6 +511,9 @@ services:
       - MCP_PORT=${MCP_PORT:-9090}
       - JWT_SECRET=${JWT_SECRET}
       - DATABASE_URL=${DATABASE_URL}
+      # WARP-234: rerank-cache Redis identity (get/setex on rerank:* only)
+      # over TLS; trust pinned to the internal CA from the bundle below.
+      - REDIS_URL=rediss://mcp-server:${REDIS_PASSWORD_MCP:-}@cache:6380
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       # WARP-861: the files-domain tools speak the orchestrator's
@@ -517,6 +586,16 @@ services:
   # bypass auth/HTTPS the gateway enforces.
   nextcloud:
     image: nextcloud:29-apache
+    # WARP-234: the zz-redis-tls.config.php file-mount makes Docker pre-create
+    # config/ as root:root (www-data cannot write config.php -> install fails)
+    # AND, under the TLS-only Postgres (WARP-233, PGSSLMODE=require), the
+    # auto-install runs with HOME=/root so libpq probes /root/.postgresql/
+    # postgresql.crt -> EACCES. Chown config/ + set HOME=/var/www so the
+    # client-cert probe is skipped. Validated live on .87.
+    entrypoint:
+      - bash
+      - -c
+      - 'export HOME=/var/www; chown 33:33 /var/www/html/config 2>/dev/null || true; exec /entrypoint.sh apache2-foreground'
     depends_on:
       db:
         condition: service_healthy
@@ -529,6 +608,24 @@ services:
       # Static Nextcloud config — passwords come from .env via env_file
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
+      # WARP-233: the db's pg_hba.conf is TLS-only (hostssl + reject plaintext),
+      # so Nextcloud must speak TLS to Postgres or it can never reach
+      # 'installed'. Nextcloud connects via PHP's PDO_pgsql/libpq, which honours
+      # libpq's PGSSLMODE env var for EVERY connection — the entrypoint's
+      # auto-install (occ maintenance:install, before the post-installation
+      # hook runs) AND all ongoing config.php connections. PG_SSLMODE is the same
+      # shared knob the DATABASE_URL producers key on (default `require`, flipped
+      # to `disable` under `setup.sh --fips` where the FIPS pg_hba tolerates
+      # plaintext from the private bridge), so this stays in lockstep with the
+      # orchestrator/file-indexer posture. `require` (encrypt, don't verify CA)
+      # matches those services; the internal CA is NOT mounted into this
+      # container so verify-full is not available here.
+      - PGSSLMODE=${PG_SSLMODE:-require}
+      # WARP-234: the entrypoint-written redis.config.php (from REDIS_HOST)
+      # still points at plaintext :6379; the zz-redis-tls.config.php mount
+      # below overrides the whole `redis` config key with the TLS listener +
+      # the `nextcloud` ACL user. REDIS_HOST stays so a pre-WARP-234 config
+      # volume keeps its baseline keys (memcache.* etc.).
       - REDIS_HOST=cache
       # Nextcloud rejects requests whose Host header isn't in this list with
       # "Access through untrusted domain". droplet-ai.local (mDNS) and
@@ -552,6 +649,11 @@ services:
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro
       - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      # WARP-234: Redis-over-TLS config override (sorts after the
+      # entrypoint's redis.config.php, so its `redis` key wins) + the
+      # internal-CA bundle phpredis verifies the cache cert against.
+      - ./nextcloud/zz-redis-tls.config.php:/var/www/html/config/zz-redis-tls.config.php:ro
+      - ../data/secrets/service-tls/nextcloud:/data/service-tls:ro
       # USB drives auto-mounted on the host (services/automount/) show up
       # under /mnt/droplet/<name>. Bind-mounting with rshared propagation
       # lets new drives appear inside Nextcloud without a container
@@ -621,9 +723,30 @@ services:
     # pre-installed. The 20260412000000_add_file_content_index migration
     # needs `CREATE EXTENSION vector`, which plain postgres:16-alpine lacks.
     image: pgvector/pgvector:pg16
+    # WARP-233: TLS 1.3 + SCRAM enforced via server flags (equivalent to
+    # postgresql.conf edits; the stock image config stays untouched). The
+    # bash -c wrapper stages the key with postgres-uid ownership BEFORE
+    # exec'ing the stock entrypoint — its argv[1] is `postgres`, so
+    # first-boot initdb still runs. pg_hba.conf has NO plaintext host lines.
+    # The server cert is the WARP-236 internal-CA `db` bundle
+    # (data/secrets/service-tls/db, issued by scripts/lib/internal-ca.sh) —
+    # one trust root for mesh mTLS AND infra TLS, not a second CA.
+    #
+    # PG_HBA (default pg_hba.conf) is DERIVED from DROPLET_FIPS_MODE by
+    # setup.sh's apply_fips_mode — never hand-edit. FIPS-on selects
+    # pg_hba.fips.conf, which tolerates plaintext+SCRAM from the private
+    # container bridge because Prisma/libpq under the FIPS provider cannot
+    # do TLS at all (P1011; decision A — see the orchestrator env comment).
+    command:
+      - bash
+      - -c
+      - install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
+      - ../data/secrets/service-tls/db:/certs-src:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/pg_hba.fips.conf:/etc/postgresql/pg_hba.fips.conf:ro
     env_file:
       - path: ../.env
         required: false
@@ -658,7 +781,35 @@ services:
     env_file:
       - path: ../.env
         required: false
-    command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
+    # WARP-234: TLS-only (plaintext :6379 disabled via --port 0) with
+    # per-service least-privilege ACLs (--aclfile, generated by
+    # scripts/lib/secrets.sh into data/secrets/redis/users.acl — sha256
+    # hashes only; the shared requirepass flag is retired, the `default`
+    # user is the ping-only health/harness identity). The cert is the WARP-236
+    # internal-CA `cache` bundle — same trust root as the mesh, staged with
+    # redis-uid ownership before the stock entrypoint drops privileges
+    # (mirrors the WARP-233 db pattern). TLS 1.3 only, matching the db
+    # posture. --tls-auth-clients no: clients authenticate with ACL
+    # passwords; the CA pin is the transport trust.
+    command:
+      - "sh"
+      - "-c"
+      - >-
+        install -o redis -g redis -m 600 /certs-src/key.pem /tmp/redis.key
+        && install -o redis -g redis -m 644 /certs-src/cert.pem /tmp/redis.crt
+        && install -o redis -g redis -m 644 /certs-src/ca.pem /tmp/redis-ca.crt
+        && exec docker-entrypoint.sh redis-server
+        --port 0
+        --tls-port 6380
+        --tls-cert-file /tmp/redis.crt
+        --tls-key-file /tmp/redis.key
+        --tls-ca-cert-file /tmp/redis-ca.crt
+        --tls-auth-clients no
+        --tls-protocols "TLSv1.3"
+        --aclfile /etc/redis/users.acl
+    volumes:
+      - ../data/secrets/service-tls/cache:/certs-src:ro
+      - ../data/secrets/redis/users.acl:/etc/redis/users.acl:ro
     restart: always
     <<: *default-logging
     # mem_reservation on cache: session + auth data — OOM kills here cascade
@@ -670,9 +821,20 @@ services:
 
   broker:
     image: eclipse-mosquitto:2
+    ports:
+      # WARP-235: host-LOOPBACK TLS listener for host-network clients
+      # (camera-discovery). Never bound on LAN interfaces. Also fixes the
+      # pre-WARP-235 latent bug where camera-discovery (network_mode: host)
+      # could never reach the unpublished broker at localhost:1883.
+      - "127.0.0.1:8883:8883"
     volumes:
+      # WARP-235: single mTLS listener — client identity is the cert CN
+      # (use_identity_as_username), per-CN topic grants in mosquitto.acl,
+      # server bundle issued by the WARP-236 internal CA. The shared-password
+      # file mount is retired.
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
+      - ./mosquitto.acl:/mosquitto/config/droplet.acl:ro
+      - ../data/secrets/service-tls/broker:/mosquitto/config/tls:ro
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
@@ -707,6 +869,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       # Static config only — secrets come from .env via env_file
+      # WARP-234: session-store + rate-limit Redis identity over TLS.
+      # redis-py's from_url maps the query params onto ssl kwargs, so the
+      # sessions/rate-limit code needs no changes; ca.pem comes from the
+      # /data/service-tls bundle mounted below.
+      - REDIS_URL=rediss://ai-gateway:${REDIS_PASSWORD_AI_GATEWAY:-}@cache:6380/0?ssl_cert_reqs=required&ssl_ca_certs=/data/service-tls/ca.pem
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
       # WARP-560: inbound service-auth bearer. The ai-gateway's
@@ -735,6 +902,9 @@ services:
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     volumes:
       - aikeys:/data/keys
+      # WARP-234/236: internal-TLS bundle — the rediss:// URL above points
+      # ssl_ca_certs at this mount.
+      - ../data/secrets/service-tls/ai-gateway:/data/service-tls:ro
     depends_on:
       - cache
       - broker
@@ -770,23 +940,35 @@ services:
       # written here by the orchestrator and read by file-indexer to
       # run the extract → embed → upsert pipeline.
       - brain-memory-data:/data/brain-memory
+      # WARP-235: this service's own TLS bundle (CN = "file-indexer") for the
+      # mqtts:// broker connection — identity is the cert CN, no password.
+      - ../data/secrets/service-tls/file-indexer:/data/service-tls:ro
     env_file:
       - path: ../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD}@broker:1883
+      # WARP-233: sslmode pinned; PG_SSLMODE (default require) is DERIVED from
+      # DROPLET_FIPS_MODE by setup.sh's apply_fips_mode — FIPS-on flips it to
+      # `disable` because this container's Prisma/libpq connection hits the
+      # P1011 clash (decision A, see the orchestrator comment). Never hand-edit.
+      - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet?sslmode=${PG_SSLMODE:-require}
+      - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+      # WARP-1140: shared "Household" groupfolder — display-path prefix for
+      # chunks indexed from __groupfolders/. Must match the orchestrator's
+      # DROPLET_SHARED_FOLDER_NAME (same "Household" default).
+      - DROPLET_SHARED_FOLDER_NAME=${DROPLET_SHARED_FOLDER_NAME:-Household}
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
       # false default → byte-identical to today. NOTE: like the orchestrator,
-      # this container opens a Prisma/libpq connection to `db`, so the P1011
-      # Postgres-TLS-under-FIPS clash (decision A, see the orchestrator comment)
-      # applies to it too — its FIPS enforcement is subject to the same
-      # unresolved WARP-233 reconciliation. The DATABASE_URL line above is left
-      # exactly as-is (WARP-233 owns it).
+      # this container opens a Prisma/libpq connection to `db`, so under
+      # `setup.sh --fips` it hits the SAME shared-FIPS-config no-ciphers wall
+      # (P1011 "library has no ciphers" at TLS-client construction — see the
+      # orchestrator's Postgres-under-FIPS box; root cause is docker/
+      # openssl-fips.cnf offering no default-context ciphers, WARP-967/318, not
+      # this line). DATABASE_URL is left exactly as-is (WARP-233 owns it).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:
@@ -978,11 +1160,17 @@ services:
       - DROPLET_MATTER_WIFI_PSK=${DROPLET_MATTER_WIFI_PSK:-}
       - DROPLET_MATTER_WIFI_PSK_FILE=${DROPLET_MATTER_WIFI_PSK_FILE:-}
       - DROPLET_MATTER_REGULATORY_COUNTRY=${DROPLET_MATTER_REGULATORY_COUNTRY:-XX}
-      # Same FIPS posture note as the orchestrator: the slim image has no
-      # NIST-validated provider module yet, so default to the system
-      # OpenSSL config until provider provisioning lands.
-      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
-      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-317: this image does NOT ship the validated fips.so (only the
+      # five provider images + gateway do — see docker-build.yml), so the
+      # FIPS boot gate is pinned OFF *literally*, never interpolated from
+      # the global knob. Before this pin, `setup.sh --fips` (WARP-318)
+      # wrote DROPLET_FIPS_REQUIRED=true into .env and the old
+      # `${...:-false}` interpolation passed it through → getFips()==false
+      # → exit 1 → restart-loop. Same values as the old OFF-path render, so
+      # the default posture is unchanged. Revisit only if this image gains
+      # the provider (then also add it to tests/integration/fips-stack).
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - DROPLET_FIPS_REQUIRED=false
     volumes:
       # Fabric continuity (WARP-850 requirement #2): the named volume
       # moves here from the orchestrator UNCHANGED.
@@ -1026,7 +1214,7 @@ services:
       # Compose service names are `db` and `broker` (NOT `postgres` /
       # `mosquitto`). Match the rest of the file's interpolations
       # otherwise the indexer can't open its Prisma connection.
-      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@db:5432/droplet}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@db:5432/droplet?sslmode=require}
       - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
       # SERVICE_TOKEN_EMAIL is generated by scripts/lib/secrets.sh into
       # .env on first install. The email-indexer reads it as
@@ -1034,22 +1222,32 @@ services:
       # to call the orchestrator"); the orchestrator stores it as
       # SERVICE_TOKEN_EMAIL (TS convention SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_EMAIL:-}
+      # WARP-235: mTLS broker — identity is the client cert CN
+      # ("email-indexer"); the username/password pair is retired.
       - MQTT_HOST=${MQTT_HOST:-broker}
-      - MQTT_PORT=${MQTT_PORT:-1883}
-      - MQTT_USERNAME=${MQTT_USERNAME:-}
-      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - MQTT_PORT=${MQTT_PORT:-8883}
+      - MQTT_TLS=${MQTT_TLS:-1}
       - EMAIL_KEY_PATH=/data/secrets/email.key
       - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
       - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
-      # WARP-318 note: this service's DROPLET_FIPS_REQUIRED default-on
-      # (`:-true`) predates the single knob and is left as-is. When the operator
-      # runs setup.sh --fips/--no-fips, apply_fips_mode writes an explicit
-      # DROPLET_FIPS_REQUIRED into .env that OVERRIDES this `:-true` default in
-      # both directions, so the single DROPLET_FIPS_MODE knob stays the source
-      # of truth. (Behavior unchanged for installs that never touch the flag.)
-      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
+      # WARP-317: pinned OFF, replacing the legacy `${...:-true}` default.
+      # This image does not ship the validated fips.so, so REQUIRED=true can
+      # only ever crash-loop it — and because `:-` treats an *empty* .env
+      # value the same as unset, any install that never ran `setup.sh
+      # --fips/--no-fips` rendered `true` here and hit exactly that loop on
+      # the `full` profile. Literal false is the only boot posture this
+      # image can honor; the FIPS boundary (the five provider images +
+      # gateway) is asserted by tests/integration/fips-stack.test.sh.
+      - DROPLET_FIPS_REQUIRED=false
     volumes:
-      - ../data/secrets:/data/secrets:ro
+      # WARP-235 decision-4 hardening: mount ONLY the Fernet key this service
+      # reads (creds.py EMAIL_KEY_PATH), never the data/secrets ROOT — the
+      # root holds the internal CA private key + every service's TLS bundle.
+      # (Single-file bind: setup.sh materializes email.key before compose up.)
+      - ../data/secrets/email.key:/data/secrets/email.key:ro
+      # WARP-235: this service's own TLS bundle (CN = "email-indexer") for the
+      # mqtts:// broker connection.
+      - ../data/secrets/service-tls/email-indexer:/data/service-tls:ro
     depends_on:
       # `db` / `broker` are the canonical service names. `orchestrator`
       # is required because the indexer POSTs ingest deltas on every
@@ -1199,13 +1397,14 @@ services:
       # and docker-compose skips the mount with a warning.
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro
       - /usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/nvidia:ro
+      # WARP-235: this service's own TLS bundle (CN = "frigate") for the
+      # mqtts:// broker connection — host/port/cert paths are static in
+      # docker/frigate/config.yml now (no env substitution, no password).
+      - ../data/secrets/service-tls/frigate:/data/service-tls:ro
     env_file:
       - path: ../.env
         required: false
     environment:
-      # Static config — FRIGATE_MQTT_USER and FRIGATE_MQTT_PASSWORD from .env
-      - FRIGATE_MQTT_HOST=broker
-      - FRIGATE_MQTT_PORT=1883
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       # JP6 image only: ``YOLO_MODELS`` triggers the ``trt-model-prepare``
@@ -1241,9 +1440,20 @@ services:
     env_file:
       - path: ../.env
         required: false
+    volumes:
+      # WARP-235: this service's own TLS bundle (CN = "camera-discovery") for
+      # the mqtts:// broker connection over the loopback :8883 publish.
+      - ../data/secrets/service-tls/camera-discovery:/data/service-tls:ro
     environment:
-      # Host-mode service — uses MQTT_BROKER_LOCAL from .env (localhost, not broker)
-      - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtt://localhost:1883}
+      # WARP-317: no validated fips.so in this image — pin the FIPS boot
+      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
+      # inherited via env_file can't crash-loop it (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Host-mode service — dials the broker's host-loopback TLS publish
+      # (127.0.0.1:8883) via MQTT_BROKER_LOCAL from .env
+      - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtts://localhost:8883}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       - FRIGATE_URL=http://localhost:5000
@@ -1294,11 +1504,38 @@ services:
     build:
       context: ..
       dockerfile: services/voice-io/Dockerfile
-    # /dev/snd is the ALSA device tree; mounting it gives the container
-    # access to whatever the host kernel sees. No need to enumerate
-    # specific devices — sounddevice picks them up via PortAudio.
-    devices:
-      - "/dev/snd:/dev/snd"
+    # /dev/snd is the ALSA device tree. WARP-1092: mount it as a LIVE bind
+    # (not a static `devices:` snapshot) and grant the whole ALSA char
+    # class via a device-cgroup rule, so a ReSpeaker XVF3800 that settles a
+    # few seconds AFTER this container starts — the boot/reflash container-
+    # storm race — becomes visible AND usable WITHOUT a container restart.
+    # A `devices:` entry only mknods the minors present at create time and
+    # cgroup-permits exactly those, so a late-enumerating card is stranded
+    # (container sees no cards, /health flatlines) until a human restarts
+    # voice-io. The bind is a live view of the host dir (late nodes appear)
+    # and the wildcard cgroup rule permits them; voice-io's wake loop
+    # re-resolves + opens the card when it shows up (pipeline.py).
+    #
+    # WARP-1055 — voice-calibration is a named volume so the wizard's
+    # applied mic calibration (voice/calibration.py, mounted at /data)
+    # survives container restarts/recreates; factory-reset's volume sweep
+    # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
+    # behaviour.
+    volumes:
+      - /dev/snd:/dev/snd
+      - voice-calibration:/data
+    # ALSA sound-class char major is 116; the wildcard minor covers ANY
+    # card, including one that enumerates after container-create (which the
+    # old per-minor `devices:` rule could not). read / write / mknod.
+    device_cgroup_rules:
+      - "c 116:* rmw"
+    # Pairs with the device-cgroup grant above, matching the oled-display
+    # scoped-device pattern: the cgroup rule is the real access control;
+    # this just stops a setuid binary inside the container from escalating
+    # beyond its launch cap-bag. voice-io (a Python FastAPI service) needs
+    # no privilege elevation, so this is free belt-and-braces.
+    security_opt:
+      - no-new-privileges:true
     # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
@@ -1331,6 +1568,11 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1055 — where the applied mic calibration persists (JSON on
+      # the voice-calibration named volume above). The dashboard wizard
+      # writes it via POST /voice/calibration; startup re-applies the
+      # tuned gain + wake threshold over the env defaults.
+      - VOICE_CALIBRATION_PATH=${VOICE_CALIBRATION_PATH:-/data/calibration.json}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
@@ -1900,6 +2142,12 @@ services:
       - path: ../.env
         required: false
     environment:
+      # WARP-317: no validated fips.so in this image — pin the FIPS boot
+      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
+      # inherited via env_file can't crash-loop it (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - DROPLET_TELEMETRY_ENABLED=${DROPLET_TELEMETRY_ENABLED:-0}
       - DROPLET_TELEMETRY_PORTAL_URL=${DROPLET_TELEMETRY_PORTAL_URL:-https://analytics.warp-lab.ai/api/v1}
       - DROPLET_TELEMETRY_PROVISIONING_CODE=${DROPLET_TELEMETRY_PROVISIONING_CODE:-}
@@ -1958,6 +2206,10 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
+  # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
+  # Named so a container recreate never silently reverts the tuned
+  # gain/threshold; factory-reset's volume sweep clears it.
+  voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.

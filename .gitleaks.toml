@@ -1,0 +1,35 @@
+# gitleaks configuration — WARP-243.
+#
+# Extends the default ruleset. The allowlist below encodes the audited
+# baseline (2026-07-04, commit 1ee9e858): all 56 working-tree findings on
+# main were test fixtures, docs-plan examples, or one false positive.
+# Test paths are allowlisted wholesale because they never ship and the
+# repo intentionally commits TEST-ONLY key material for the cosign verify
+# suite (see apps/orchestrator/src/services/update-agent/__fixtures__/).
+#
+# A REAL secret accidentally added under a test path will NOT be caught —
+# reviewers must treat "new credential-looking blob in tests/" as a
+# review-blocking smell. See docs/SECURITY.md#gitleaks.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Committed test fixtures and audited false positives (never production secrets)"
+paths = [
+  '''.*\.test\.(ts|tsx|js|jsx|py|sh)$''',
+  '''(^|/)__tests__/.*''',
+  '''(^|/)__fixtures__/.*''',
+  '''(^|/)__mocks__/.*''',
+  '''(^|/)tests?/.*''',
+  '''(^|/)testing/.*''',
+  '''(^|/)conftest\.py$''',
+  '''^docs/superpowers/.*''',
+]
+regexes = [
+  # services/oled-display/device-bridge.py:803 — claim-code alphabet
+  # constant, not a key (base32-ish charset for human-readable codes).
+  # gitleaks matches allowlist regexes against the captured secret value,
+  # so this pattern targets the alphabet literal itself.
+  '''abcdefghijkmnpqrstuvwxyz23456789''',
+]

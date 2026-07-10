@@ -47,6 +47,16 @@ cd apps/orchestrator && npx prisma generate && cd ../..
 npm run test
 ```
 
+### Optional: pre-commit secret scanning
+
+CI blocks any PR containing a secret (gitleaks, see `docs/SECURITY.md`). To
+catch it before you even commit:
+
+```bash
+pipx install pre-commit   # or: pip install --user pre-commit
+pre-commit install
+```
+
 ## Running Tests
 
 ### All unit tests (via Turbo, parallel)

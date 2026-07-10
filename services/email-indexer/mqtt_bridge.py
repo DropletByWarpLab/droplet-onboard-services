@@ -17,12 +17,16 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
+from _shared.internal_tls import paho_configure
+
 logger = logging.getLogger(__name__)
 
-MQTT_HOST = os.environ.get("MQTT_HOST", "mosquitto")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_USERNAME = os.environ.get("MQTT_USERNAME") or None
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
+# WARP-235: the compose service name is `broker`, the listener is mTLS-only
+# (:8883) and identity is the client cert CN — the old username/password pair
+# is retired. MQTT_TLS=0 keeps a plaintext connection for dev brokers.
+MQTT_HOST = os.environ.get("MQTT_HOST", "broker")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
+MQTT_TLS = os.environ.get("MQTT_TLS", "1") == "1"
 
 _client: Optional[mqtt.Client] = None
 
@@ -33,8 +37,9 @@ def start() -> None:
     if _client is not None:
         return
     client = mqtt.Client(client_id="email-indexer")
-    if MQTT_USERNAME:
-        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    if MQTT_TLS:
+        # WARP-235: present this service's bundle; identity = cert CN.
+        paho_configure(client)
     try:
         client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
         client.loop_start()

@@ -166,6 +166,12 @@ model ChatSession {
   updatedAt    DateTime      @default(now()) @updatedAt
   messages     ChatMessage[]
   pins         ContextPin[]
+  /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
+  /// requires the opposite side of the relation to be declared; it is the
+  /// onboarding-interview session a business profile was built from (at
+  /// most one profile points here). SetNull on delete so deleting the
+  /// interview session doesn't cascade the singleton profile away.
+  businessProfile BusinessProfile?
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -254,6 +260,112 @@ enum MemoryFactCategory {
   Scope
   Schedule
   Other
+  /// WARP-1118 (D-9) — business-knowledge facts extracted by the
+  /// onboarding interview. Added in its own migration
+  /// (20260708000000_warp_1118_memory_fact_business); a new Postgres enum
+  /// value cannot be USED in the same transaction that adds it, so nothing
+  /// references `Business` inside that migration. The five-value vocabulary
+  /// is hardcoded across ≥6 sites (extract/recall handlers, routes/memory.ts
+  /// zod, dashboard) and is threaded through them in Phase 2, not here.
+  Business
+}
+
+/// WARP-1118 — AI Personality & Business Onboarding (§11).
+///
+/// PRIVACY CONTRACT: like `Workspace.industry/size`, `AssistantPersona`,
+/// `BusinessProfile`, and interview transcripts are LOCAL box state —
+/// NEVER sent off the box. Personality is prompt + data only; it never
+/// changes which `LLM_MODEL` runs (One-Model Rule, §5-1).
+
+/// The four canonical personality presets. Prompt fragments live in code
+/// (`persona-presets.ts`), versioned with the app — the DB only stores
+/// which one is selected. Copy owned by the design brief §9.
+enum PersonaPreset {
+  warm_friendly // default
+  professional_precise
+  founder
+  direct_technical
+}
+
+/// Reply + recap length. One trait deliberately covers both — there is no
+/// separate recap-length field (§7.1).
+enum PersonaVerbosity {
+  concise
+  balanced // default
+  detailed
+}
+
+/// Workspace-level personality singleton (D-2). Injected as a
+/// char-budgeted block into the base system prompt right after identity
+/// (§7.2). Read fresh from Prisma each request — no cache to invalidate.
+model AssistantPersona {
+  id                 String           @id @default("singleton")
+  preset             PersonaPreset    @default(warm_friendly)
+  verbosity          PersonaVerbosity @default(balanced)
+  useFirstNames      Boolean          @default(true)
+  /// The one sanctioned free-text instruction channel (§7.1). Owner/admin
+  /// authored only. Cap enforced BOTH in the zod schema and as a real DB
+  /// constraint so an out-of-band writer can't exceed the prompt budget.
+  customInstructions String           @default("") @db.VarChar(1200)
+  updatedBy          String? // userId
+  updatedAt          DateTime         @updatedAt
+}
+
+/// Onboarding-interview state (§9.2). Explicit enum — state is NEVER
+/// derived from row-absence or a null timestamp (§5-2, WARP-218 precedent).
+enum BusinessOnboardingState {
+  not_started
+  in_progress
+  completed
+  skipped
+  re_running // re-run in flight; skip or interview-chat deletion restores completed
+}
+
+/// Provenance for the Settings meta line — which surface last wrote the
+/// profile. Explicit column, never inferred (§5-2).
+enum BusinessProfileSource {
+  onboarding
+  settings
+}
+
+/// Periodic refresh-nudge state (Phase 4). Explicit column — dismissal is
+/// a real write, never "we nulled the timestamp" (§5-2).
+enum ReviewNudgeState {
+  none
+  due
+  dismissed
+}
+
+/// Structured business-knowledge singleton (D-2, §8/§11). Created in
+/// Phase 0 so the schema is stable; only `AssistantPersona` is wired into
+/// the prompt this phase — the role-filtered business block is Phase 2.
+///
+/// Field set matches the design brief's six row labels 1:1 (no `hours`
+/// column — operating hours belong in `typicalDay` or a `Schedule` fact).
+/// `Workspace.industry/size` stay wizard-owned; this model never writes
+/// them.
+model BusinessProfile {
+  id                String                  @id @default("singleton")
+  onboardingState   BusinessOnboardingState @default(not_started)
+  /// The persisted onboarding-interview session this profile was built
+  /// from (D-4/§9.2). SetNull on delete: deleting the interview session
+  /// must not cascade the singleton profile away — the delete-hook
+  /// transitions state instead (Phase 3).
+  interviewChat     ChatSession?            @relation(fields: [interviewChatId], references: [id], onDelete: SetNull)
+  interviewChatId   String?                 @unique
+  summary           String                  @default("") @db.VarChar(1500) // prompt-injected (business block, Phase 2)
+  whatWeDo          String                  @default("") @db.VarChar(600)
+  customers         String                  @default("") @db.VarChar(600)
+  teamShape         String                  @default("") @db.VarChar(600)
+  toolsUsed         String                  @default("") @db.VarChar(600)
+  typicalDay        String                  @default("") @db.VarChar(600)
+  goals             String                  @default("") @db.VarChar(600)
+  lastSource        BusinessProfileSource? // provenance for the Settings meta line
+  reviewNudgeState  ReviewNudgeState        @default(none) // explicit, never derived
+  reviewDueAt       DateTime? // schedule timestamp only
+  reviewDismissedAt DateTime?
+  updatedBy         String?
+  updatedAt         DateTime                @updatedAt
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
@@ -752,16 +864,77 @@ model FileContentChunk {
   // Read-only from the app side; computed by Postgres on insert/update.
   // Declared as Unsupported() because Prisma has no first-class tsvector type.
   text_tsv    Unsupported("tsvector")?
+  /// WARP-233 @encrypted(aes-256-gcm, dek=brain:<brainItemId>) when
+  /// sensitivity=sensitive: `text` holds a dcv1: blob; excluded from the
+  /// lexical (text_tsv) search arm; snippets are computed app-side post-decrypt.
+  sensitivity ChunkSensitivity           @default(standard)
 
   @@unique([ncFileId, chunkIdx])
   @@index([userId])
   @@index([userId, source, indexedAt]) // recency dashboard query
   @@index([brainItemId])
+  @@index([userId, sensitivity]) // WARP-233: lexical-arm sensitivity filter
 }
 
 enum FileContentSource {
   nextcloud
   brain
+}
+
+/// WARP-1139/WARP-1140 — explicit per-file indexing status for the
+/// file-indexer's Nextcloud watcher corpus. Per the CLAUDE.md "no guessing"
+/// rule (the WARP-218 convention): search surfaces must distinguish "not
+/// indexed yet / skipped / failed" from "no match", which is impossible when
+/// indexing state is derived from FileContentChunk row ABSENCE. Written by
+/// services/file-indexer at each pipeline stage (indexing → ready | skipped |
+/// failed); read by GET /api/files/search/status so the dashboard can render
+/// an honest "still indexing" empty state.
+///
+/// `userId` follows the FileContentChunk convention: the Nextcloud username,
+/// or the `__household__` sentinel for files in the shared groupfolder space.
+/// `path` is the home-relative display path (e.g. "/Docs/report.pdf" or
+/// "/Household/Trips/notes.txt") — same shape as FileContentChunk.path.
+/// `reason` is non-null only when status is `failed` or `skipped` (mirrors
+/// BrainMemoryItem.failureReason).
+model FileIndexStatus {
+  userId    String
+  path      String
+  ncFileId  Int?
+  status    FileIndexState
+  reason    String?
+  updatedAt DateTime       @default(now())
+
+  @@id([userId, path])
+  @@index([userId, status])
+}
+
+enum FileIndexState {
+  indexing
+  ready
+  skipped
+  failed
+}
+
+/// WARP-233 — explicit sensitivity tag (no guessing / no prefix-sniffing for
+/// policy; the dcv1: prefix is a FORMAT marker, this column is the POLICY).
+enum ChunkSensitivity {
+  standard
+  sensitive
+}
+
+/// WARP-233 — wrapped per-document data-encryption keys (deviation D1: app-layer
+/// AES-256-GCM instead of pg_tde). `keyId` scope: `brain:<brainItemId>` (one DEK
+/// per chat-attached document). User.email deliberately does NOT get a stored
+/// DEK — a whole-column logical key has no per-user crypto-shred story, so it
+/// is HKDF-derived instead (column-crypto.service.ts deriveEmailColumnKey).
+/// `wrappedDek` = base64(iv‖ct‖tag) of the raw 32-byte DEK sealed under the
+/// device doc-KEK (HKDF of DEVICE_SECRET_KEY) with AAD = keyId.
+/// Crypto-shred = DELETE the row: every ciphertext under that DEK is
+/// permanently unreadable. TPM-sealing the KEK is WARP-1033.
+model DocumentEncryptionKey {
+  keyId      String   @id
+  wrappedDek String
+  createdAt  DateTime @default(now())
 }
 
 // ── WARP-203: Per-user brain memory ──
@@ -1091,6 +1264,15 @@ model VpnPeer {
   // without CIDR mask (mask is implied by the subnet).
   assignedIp  String
   status      String    @default("active") // "active" | "revoked"
+  // How this peer reaches the box (hybrid remote-access P1). EXPLICIT enum-
+  // checked value, never inferred from another field's absence (rule 10):
+  //   "away" (default) — dials the box from OUTSIDE the home LAN via the public
+  //           FQDN / relay endpoint. The pre-hybrid behavior; every existing row
+  //           is "away", so the default keeps them correct without a backfill.
+  //   "home" — dials the box DIRECTLY at its home-facing LAN IP (split-tunnel to
+  //           the box, no public inbound). The .conf's Endpoint is the LAN IP.
+  // A CHECK constraint pins it to exactly these two values (see the migration).
+  mode        String    @default("away")
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?
 
@@ -1148,7 +1330,7 @@ model NotificationLog {
 // `failureReason` is non-null only when `status = FAILED`. Same shape
 // the WARP-218 brain-memory pattern uses for transient failures.
 model ApDevice {
-  mac              String         @id
+  mac              String           @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
   // override it (e.g. "AP (12:34:56)"). Editable from the
@@ -1168,7 +1350,7 @@ model ApDevice {
   lastIp           String?
   // Last DHCP-reported hostname.
   hostname         String?
-  status           ApDeviceStatus @default(DISCOVERED)
+  status           ApDeviceStatus   @default(DISCOVERED)
   // ADR-024: which onboarding backend owns this row's discovery +
   // provisioning. Explicit enum column (NOT derived from absence —
   // CLAUDE.md no-guessing rule, same discipline as `status`). Every
@@ -1193,10 +1375,10 @@ model ApDevice {
   // main router.
   approvedSsid     String?
   // First time the orchestrator saw this MAC announce on mDNS.
-  firstSeen        DateTime       @default(now())
+  firstSeen        DateTime         @default(now())
   // Updated on every fresh announce — drives the "stale extender"
   // dashboard warning.
-  lastSeen         DateTime       @default(now())
+  lastSeen         DateTime         @default(now())
   // Timestamp the operator hit Approve. Null until the row leaves
   // AWAITING_APPROVAL.
   approvedAt       DateTime?
@@ -1208,8 +1390,8 @@ model ApDevice {
   // service for a write touching this AP — lets the dashboard
   // resume polling after a refresh.
   lastOperationId  String?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([status])
   @@index([lastSeen])
@@ -1296,7 +1478,18 @@ model User {
   // Still nullable: service-only principals and locally-minted rows that
   // predate ADR-013 may have no email; the login route fails closed when
   // email or passwordHash is null.
-  email              String?             @unique
+  /// WARP-233 @encrypted(aes-256-gcm, key=hkdf:user-email-column): `email` stores a dcv1:
+  /// blob (write path: column-crypto.service.ts encryptColumn; read path:
+  /// decryptColumn). Equality lookups go through emailLookupHash — a
+  /// deterministic HMAC-SHA256 blind index over trim+lowercase(email); the
+  /// plaintext-uniqueness guarantee moves there because GCM ciphertext is
+  /// non-deterministic. `@unique` dropped from email for that reason.
+  email              String?
+  /// WARP-233 — HMAC-SHA256 blind index over trim+lowercase(email). Carries
+  /// the plaintext-uniqueness guarantee that email's @unique used to hold.
+  /// Nullable: service-only principals without an email stay null (Postgres
+  /// treats NULLs as distinct, matching the old email @unique semantics).
+  emailLookupHash    String?             @unique
   // ADR-013: argon2id PHC hash — the built-in directory is the auth
   // source of truth (Nextcloud is demoted to downstream WebDAV
   // provisioning). Written at account-creation (/auth/setup, invite
@@ -1820,17 +2013,17 @@ model ActivityRow {
   // Who performed the action. Nullable ONLY for pre-upgrade v1 rows —
   // a CHECK constraint in the migration enforces
   // `schemaVersion = 1 OR actorType IS NOT NULL` (explicit-era rule).
-  actorType         ActivityActorType?
+  actorType     ActivityActorType?
   // Canonical user UUID when known (`type: user` rows always carry it;
   // `ai` rows carry the on-behalf-of UUID when it was already plumbed
   // through, else NULL). Never a username — display names stay in refs.
-  actorId           String?
+  actorId       String?
   // Canonical-content version this row was signed under. Existing rows
   // are backfilled to 1 by the migration; the recorder always writes 2
   // explicitly (no DB default — the migration drops it after backfill).
   // `canonicalizeRowContent` dispatches on this value so v1 rows keep
   // verifying byte-identically.
-  schemaVersion     Int
+  schemaVersion Int
 
   // Composite index for the GET /api/activity range/filter query
   // (sorted by `at` descending within an optional `kind` filter), and
@@ -2580,6 +2773,16 @@ model Workspace {
   industry      String?
   size          String?
   logoPath      String?
+  /// Module-toggles feature — BOUNDED module-preset selector. Distinct from the
+  /// free-form `industry` hint above: module enablement keys off THIS enum so the
+  /// preset a customer picks maps to a deterministic module set (CLAUDE.md
+  /// no-guessing / explicit-enum rule — a free-form string can't back a reliable
+  /// preset map). The setup wizard MAY derive it from `industry`. Null until a
+  /// preset is applied, in which case the registry's per-module `defaultEnabled`
+  /// applies. See docs/superpowers/specs/2026-07-07-module-toggles-design.md.
+  businessType      BusinessType?
+  businessTypeSetBy String?
+  businessTypeSetAt DateTime?
   /// PR #380 — EXPLICIT completion flag for the org step. The wizard / state
   /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
@@ -2591,6 +2794,58 @@ model Workspace {
   setAt         DateTime      @default(now())
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+}
+
+/// Module-toggles feature — the bounded set of vertical presets. Each maps (in
+/// code, src/modules/module-registry.ts BUSINESS_TYPE_PRESETS) to a default set
+/// of enabled modules. `custom` = no preset (leave current toggles as-is).
+/// Adding a value here is a schema change — keep the set stable and update the
+/// preset map + the design spec together.
+enum BusinessType {
+  home
+  professional_office
+  retail
+  clinic
+  hospitality
+  custom
+}
+
+/// Module-toggles feature — the canonical id of every user-facing capability
+/// module. The catalog (label, category, route prefixes, tool domains,
+/// availability signal, defaults) lives in code (src/modules/module-registry.ts,
+/// the one-registry discipline mirroring packages/tools-core); THIS enum is the
+/// shared id vocabulary between the registry, the ModuleSetting rows, and the
+/// dashboard. Admin-only surfaces (activity, rag-eval) stay on the existing
+/// GET /api/admin/capabilities probe and are intentionally NOT here.
+enum ModuleId {
+  chat
+  knowledge
+  files
+  docs
+  email
+  calendar
+  projects
+  voice
+  cameras
+  smart_home
+  network
+  managed_switch
+}
+
+/// Module-toggles feature — per-install runtime enablement of a module. ONE row
+/// per module, keyed by the ModuleId enum. `enabled` is an EXPLICIT boolean,
+/// never derived from absence (CLAUDE.md no-guessing rule; same discipline as
+/// UserInvite.role / BrainMemoryItemStatus / Workspace.orgConfigured). A MISSING
+/// row means "the operator hasn't decided" → the registry's versioned
+/// `defaultEnabled` applies; it is NOT an inferred runtime state. Applying a
+/// business type materializes a row for every non-core module, so post-onboard
+/// the table is fully explicit. Effective = available (deploy-time, from config)
+/// AND enabled (this row). See the design spec for the two-axis model.
+model ModuleSetting {
+  moduleId ModuleId @id
+  enabled  Boolean
+  setBy    String?
+  setAt    DateTime @default(now()) @updatedAt
 }
 
 /// PR #372 — first-run setup is RESUMABLE and EXPLICIT.
@@ -2809,22 +3064,22 @@ model TlsCert {
 /// before the row settles to `closed`; `closed` rows are retained for audit.
 model FileEditSession {
   /// Nextcloud numeric fileId — the co-authoring session key.
-  ncFileId    Int                   @id
+  ncFileId     Int                   @id
   /// Last user observed to open/touch the session (NC username). Audit only.
-  ncUser      String
+  ncUser       String
   /// Path at session open, for human-readable audit/logs (may go stale on move).
-  filePath    String
+  filePath     String
   /// Engine-decided mode the session was opened in.
-  mode        FileEditSessionMode
+  mode         FileEditSessionMode
   /// EXPLICIT lifecycle state — never inferred from a null column.
-  status      FileEditSessionStatus @default(open)
+  status       FileEditSessionStatus @default(open)
   /// Opaque co-authoring document key handed to the engine.
-  documentKey String
-  openedAt    DateTime              @default(now())
+  documentKey  String
+  openedAt     DateTime              @default(now())
   /// Bumped on every editor-session mint / heartbeat for the same fileId.
-  lastActiveAt DateTime             @default(now())
+  lastActiveAt DateTime              @default(now())
   /// Set when the engine's save-callback reports the session fully closed.
-  closedAt    DateTime?
+  closedAt     DateTime?
 
   @@index([status])
   @@index([ncUser, status])
@@ -3192,15 +3447,15 @@ enum PmActivityVerb {
 /// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
 model PmActivity {
-  id         String          @id @default(uuid())
+  id         String         @id @default(uuid())
   workItemId String
-  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem   PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   actorId    String?
   verb       PmActivityVerb
   field      String?
   oldValue   String?
   newValue   String?
-  createdAt  DateTime   @default(now())
+  createdAt  DateTime       @default(now())
 
   @@index([workItemId, createdAt])
 }
@@ -3282,4 +3537,136 @@ model DeviceUpdate {
 
   @@index([status, createdAt])
   @@index([gitSha])
+}
+
+// ── WARP-1094: ERP-connector framework (Eaglesoft direct-SQL integration) ──
+//
+// Droplet-side control-plane models for the first-party ERP-connector
+// framework (EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF §12). Eaglesoft is
+// provider #1 behind a generic connector abstraction; the schema is
+// provider-agnostic. Every lifecycle state is an EXPLICIT enum column
+// (architecture-guard rule 10 / CLAUDE.md / WARP-218) — never derived from
+// a NULL. Credentials NEVER live here: `secretRef` is a pointer into the
+// encrypted secret store (brief §7.4). PHI in `ErpEntityCache` is encrypted
+// at rest by the application layer (brief §10.2, §14).
+//
+// This migration is the DB-INDEPENDENT foundation only — the live-database
+// read/write paths are stubbed until a copy of `PattersonPM.db` + the SAP
+// SQL Anywhere client are available (Phase 0 of the phased plan, brief §17).
+
+/// Connection status for an ERP integration. Explicit lifecycle (brief §12):
+/// NOT_CONFIGURED → PROVISIONING → CONNECTED, with DEGRADED (transient sync
+/// failure, §15), DRIFT_LOCKED (schema fingerprint mismatch froze writes,
+/// invariant 9), ERROR (unrecoverable), and DISABLED (operator turned it off).
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  PROVISIONING
+  CONNECTED
+  DEGRADED
+  DRIFT_LOCKED
+  ERROR
+  DISABLED
+}
+
+/// One configured ERP connection. `provider` keys the connector framework
+/// ("eaglesoft" today, many later). `secretRef` is a pointer into Droplet's
+/// encrypted secret store — the `droplet_ro`/`droplet_rw` passwords are NEVER
+/// persisted in a row, an export, or a log (brief §7.4, invariant 10).
+/// `schemaHash` is the drift-guard fingerprint (brief §9.2, invariant 9);
+/// `writeEnabled` is the per-practice write opt-in and defaults OFF
+/// (invariant 1, §11.5).
+model IntegrationConnection {
+  id            String            @id @default(cuid())
+  provider      String
+  status        IntegrationStatus @default(NOT_CONFIGURED)
+  host          String
+  databaseName  String
+  secretRef     String
+  schemaVersion String?
+  schemaHash    String?
+  writeEnabled  Boolean           @default(false)
+  lastHealthyAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([provider, status])
+}
+
+/// Incremental-sync watermark per (connection, entity). `watermark` is an
+/// EXPLICIT string column (a discovered timestamp / rowversion, brief §10.2)
+/// — the cursor position is never inferred from the absence of a row.
+model ErpSyncCursor {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  watermark    String
+  updatedAt    DateTime @updatedAt
+
+  @@unique([connectionId, entity])
+}
+
+/// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the
+/// system of record — every cached view is timestamped in the UI ("as of N
+/// min ago"). `payload` PHI is encrypted at rest by the application layer.
+model ErpEntityCache {
+  id           String   @id @default(cuid())
+  connectionId String
+  entity       String
+  sourceKey    String
+  payload      Json
+  syncedAt     DateTime @default(now())
+
+  @@unique([connectionId, entity, sourceKey])
+  @@index([connectionId, entity])
+}
+
+/// Lifecycle of a staged write in the outbox → confirm → apply → verify
+/// pipeline (brief §11.1). Explicit enum; a write advances through these
+/// states and is never derived from a NULL. DISCREPANCY = Eaglesoft's own
+/// app logic altered/rejected the write at VERIFY (brief §11.1 step 4).
+enum WriteStatus {
+  PENDING_CONFIRMATION
+  CONFIRMED
+  APPLYING
+  APPLIED
+  DISCREPANCY
+  FAILED
+  REVERSED
+  REJECTED
+}
+
+/// One staged write request (the outbox, brief §11.1). Created at INTENT
+/// with status PENDING_CONFIRMATION; nothing touches Eaglesoft until a human
+/// confirms (invariant 1, §11.2). `command` is a registered command NAME
+/// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
+/// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+model ErpWriteRequest {
+  id           String      @id @default(cuid())
+  connectionId String
+  command      String
+  params       Json
+  status       WriteStatus @default(PENDING_CONFIRMATION)
+  requestedBy  String
+  confirmedBy  String?
+  reversal     Json?
+  discrepancy  Json?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([connectionId, status])
+}
+
+/// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of
+/// patient data and every write records actor / action / entity / row scope.
+/// Rows are never updated or deleted — the table is write-once.
+model ErpAuditLog {
+  id           String   @id @default(cuid())
+  connectionId String
+  actor        String
+  action       String
+  entity       String
+  scope        Json
+  at           DateTime @default(now())
+
+  @@index([connectionId, at])
 }

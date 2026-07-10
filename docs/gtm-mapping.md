@@ -41,7 +41,7 @@ edge-platform/
     docker-compose.yml      Unified Compose stack (20 services)
     nginx.conf              Reverse proxy
     frigate/config.yml
-    mosquitto.conf, mosquitto_passwd_dir/
+    mosquitto.conf, mosquitto.acl (WARP-235 per-CN topic grants)
     certs/                  TLS certs
     nextcloud-skeleton/, nextcloud-init.sh, init-nextcloud-db.sh
   proto/
@@ -64,7 +64,7 @@ edge-platform/
 | `services/assistant-api/app/config.py` | `apps/orchestrator/src/config.ts` (Zod-validated) + `services/ai-gateway/` Pydantic settings | Split across the control plane (Node/Zod) and the gateway (Python/Pydantic). |
 | `services/device-api-stub/app/main.py` | **does not exist** | The stub has been replaced by `apps/orchestrator` + `services/routing` + `services/camera-discovery` + `services/file-indexer`. The stub role is obsolete. |
 | `services/assistant-ui/index.html` | `apps/web-dashboard/` (Next.js 14) | Static HTML UI replaced by a full Next.js App Router SPA with Tailwind. |
-| `services/assistant-ui/nginx.conf` | `docker/nginx.conf` | Same file, different location; still runs in the `gateway` service (`nginx:alpine` on `:80/:443`). |
+| `services/assistant-ui/nginx.conf` | `docker/nginx/nginx.conf` | Same file, different location; still runs in the `gateway` service (`nginx:alpine` on `:80/:443`). |
 | `docker/entrypoint.sh` | **does not exist** in this repo | The router/NAS "entrypoint script" model was abandoned. Router bring-up now goes through OpenWrt's own init system (`openwrt/`). App containers have per-service entrypoints inside their Dockerfiles. `scripts/setup.sh` handles host-side orchestration. |
 | `docker/configs/smb.conf` | `openwrt/files/` (OpenWrt Samba package config) | Samba now lives on the OpenWrt router as a native package, not a Docker container. |
 | `docker/configs/sshd_config` | `openwrt/files/` | Same — SSH is an OpenWrt package, not a Docker container. |

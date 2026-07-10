@@ -257,7 +257,8 @@ export function HelpLauncher() {
           aria-label="Help"
           className="fixed bottom-[calc(140px+env(safe-area-inset-bottom))] right-5 z-[60] w-[308px] overflow-hidden rounded-2xl border border-separator bg-surface-primary shadow-xl motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 lg:bottom-[88px] lg:right-7"
         >
-          <div className="border-b border-separator px-4 py-3.5">
+          {/* WARP-1153: py-3 on the spacing scale (was py-3.5 = 14px). */}
+          <div className="border-b border-separator px-4 py-3">
             <p className="type-subheadline font-semibold text-label-primary">
               How can we help?
             </p>

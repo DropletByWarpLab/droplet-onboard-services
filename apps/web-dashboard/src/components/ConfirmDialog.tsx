@@ -22,9 +22,10 @@ import { Dialog } from "./Dialog";
  *     (typically via toast). Never close on error — the user may want
  *     to retry without re-opening.
  *   - `variant="destructive"` (default) paints the confirm button red
- *     (`bg-system-red`). `variant="neutral"` uses the standard
- *     `dp-btn-primary` so non-destructive confirms (Unblock, Allow,
- *     etc.) don't carry a misleading warning hue.
+ *     (`.btn danger`, the indigo shell's destructive fill).
+ *     `variant="neutral"` uses the standard `.btn primary` so
+ *     non-destructive confirms (Unblock, Allow, etc.) don't carry a
+ *     misleading warning hue.
  *   - Enter on the confirm button activates it via default button
  *     semantics (no special key handling needed here).
  *   - `triggerRef` is plumbed through to <Dialog> for focus restore on
@@ -98,14 +99,14 @@ export function ConfirmDialog({
     }
   }, [onConfirm, onCancel, pending]);
 
-  // Confirm button styling differs by variant. The destructive red is
-  // already used for system-wide destructive affordances (Block,
-  // delete, revoke). Neutral uses the dashboard's standard primary
-  // button class so positive confirms (Unblock, Allow) read correctly.
+  // Confirm button styling differs by variant. Both resolve via the
+  // `droplet-shell` scope the <Dialog> backdrop carries (WARP-1079):
+  // `.btn danger` is the shell's destructive fill (#ef4444), already used
+  // for system-wide destructive affordances (Block, delete, revoke).
+  // Neutral uses the shell's `.btn primary` so positive confirms
+  // (Unblock, Allow) read correctly.
   const confirmClass =
-    variant === "destructive"
-      ? "type-subheadline px-4 py-1.5 rounded-md bg-system-red text-white hover:bg-system-red/90 disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[36px]"
-      : "dp-btn-primary type-subheadline !min-h-[36px] !py-1.5";
+    variant === "destructive" ? "btn danger" : "btn primary";
 
   return (
     <Dialog
@@ -117,16 +118,24 @@ export function ConfirmDialog({
       maxWidth="sm"
       placement="center"
     >
-      <div className="p-5 space-y-4">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div className="space-y-4">
         <div>
-          <h2 id={headingId} className="type-headline text-label-primary">
+          <h2 id={headingId} className="type-headline" style={{ color: "var(--text)" }}>
             {title}
           </h2>
-          <p id={descId} className="type-subheadline text-label-secondary mt-1.5">
+          <p
+            id={descId}
+            className="type-subheadline mt-1.5"
+            style={{ color: "var(--text-muted)" }}
+          >
             {description}
           </p>
           {confirmedIdentifier && (
-            <p className="type-caption-1 text-label-tertiary font-mono mt-2 break-all">
+            <p
+              className="type-caption-1 font-mono mt-2 break-all"
+              style={{ color: "var(--text-muted)" }}
+            >
               {confirmedIdentifier}
             </p>
           )}
@@ -137,7 +146,7 @@ export function ConfirmDialog({
             type="button"
             onClick={onCancel}
             disabled={pending}
-            className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            className="btn ghost"
           >
             {cancelLabel}
           </button>

@@ -119,6 +119,8 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import { createPublicAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { config } from "../config.js";
+import { readUserEmail } from "../services/user-directory.service.js";
+import { emailLookupHash } from "../services/column-crypto.service.js";
 
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
@@ -147,20 +149,19 @@ function createPrismaMock(seed: any[] = []) {
         users[idx] = { ...users[idx], ...update };
         return users[idx];
       }
-      // Enforce the plain (case-sensitive) unique index on email exactly
-      // as Postgres would: a CREATE whose email already exists on another
-      // row trips P2002. The route hands an already-normalized
-      // (trim+lowercased) value, so an exact-string match here faithfully
-      // models the DB rejecting `Owner@x` once `owner@x` is present.
+      // Enforce the unique index exactly as Postgres would — WARP-233 moved
+      // it to emailLookupHash (the deterministic blind index; GCM ciphertext
+      // cannot carry uniqueness). Two casings of one address produce the
+      // SAME hash, so the collision still trips P2002.
       if (
-        create.email != null &&
-        users.some((u) => u.email === create.email)
+        create.emailLookupHash != null &&
+        users.some((u) => u.emailLookupHash === create.emailLookupHash)
       ) {
         const e: any = new Error(
-          'Unique constraint failed on the fields: ("email")',
+          'Unique constraint failed on the fields: ("emailLookupHash")',
         );
         e.code = "P2002";
-        e.meta = { target: ["email"] };
+        e.meta = { target: ["emailLookupHash"] };
         throw e;
       }
       const row = {
@@ -250,7 +251,10 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
         email: "owner2@warp.test",
       });
 
-    expect(prisma._users[0].email).toBe("owner2@warp.test");
+    // WARP-233: at rest the email is a dcv1 blob + blind index; the
+    // plaintext round-trips through readUserEmail.
+    expect(readUserEmail(prisma._users[0].email)).toBe("owner2@warp.test");
+    expect(prisma._users[0].emailLookupHash).toBe(emailLookupHash("owner2@warp.test"));
   });
 
   it("still provisions the Nextcloud admin downstream, after the local write", async () => {
@@ -319,7 +323,7 @@ describe("BLOCKER — /auth/setup normalizes the email login key (trim + lowerca
 
     expect(res.status).toBe(200);
     // Stored value is normalized — NOT the verbatim mixed-case input.
-    expect(prisma._users[0].email).toBe("foo@x.com");
+    expect(readUserEmail(prisma._users[0].email)).toBe("foo@x.com");
   });
 
   it("two casings of the same email converge to one normalized value → the plain unique index now catches the collision", async () => {
@@ -337,7 +341,10 @@ describe("BLOCKER — /auth/setup normalizes the email login key (trim + lowerca
         id: "u-existing",
         username: "existing",
         displayName: "Existing",
+        // Post-backfill shape: the blind index carries the uniqueness
+        // (encrypt-existing-phi-columns.ts populated it).
         email: "owner@x.com",
+        emailLookupHash: emailLookupHash("owner@x.com"),
         nextcloudUsername: "existing",
         passwordHash: "$argon2id$existing",
         role: "family",
@@ -453,7 +460,9 @@ describe("N2 — first owner cannot be created login-unable (email required at s
       .post("/api/auth/setup")
       .send({ email: "owner@warp.test", password: "Owner-secret123" });
     expect(res.status).toBe(200);
-    const created = prisma._users.find((u: any) => u.email === "owner@warp.test");
+    const created = prisma._users.find(
+      (u: any) => readUserEmail(u.email) === "owner@warp.test",
+    );
     expect(created.username).toBe("owner-2");
     expect(created.nextcloudUsername).toBe("owner-2");
   });

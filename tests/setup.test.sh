@@ -62,17 +62,18 @@ export LOG_FILE
 # shellcheck source=../scripts/lib/logging.sh
 source "$REPO_ROOT_REAL/scripts/lib/logging.sh"
 
-# Stub out Docker/openssl-dependent helpers before sourcing secrets.sh
-_generate_mosquitto_passwd() { return 0; }
+# Stub out artifact-writing helpers before sourcing secrets.sh
+# (_generate_mosquitto_passwd was retired by WARP-235 — MQTT is mTLS-only)
 _write_mosquitto_conf()       { return 0; }
+_write_mosquitto_acl()        { return 0; }
 _generate_tls_cert()          { return 0; }
 
 # shellcheck source=../scripts/lib/secrets.sh
 source "$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 
 # Re-stub after sourcing secrets.sh (it defines these functions — override them)
-_generate_mosquitto_passwd() { return 0; }
 _write_mosquitto_conf()       { return 0; }
+_write_mosquitto_acl()        { return 0; }
 _generate_tls_cert()          { return 0; }
 
 # Run generate_env
@@ -186,6 +187,43 @@ if [ "$OPENWRT_PASS_LINE_COUNT" = "1" ] && [ -n "$OPENWRT_PASS_MIGRATED" ]; then
 else
   fail "migrate_env backfill wrong (lines=${OPENWRT_PASS_LINE_COUNT}, value='${OPENWRT_PASS_MIGRATED:0:4}…')"
 fi
+
+# --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
+# The 'real' (tpm2-pytss) device-identity backend is an UNFINISHED scaffold:
+# device-identity-svc (services/device-identity-svc/backends/__init__.py)
+# fails closed on it unless DROPLET_TPM_ALLOW_SCAFFOLD is set. generate_env
+# must therefore never auto-select 'real' — even on a TPM host it would
+# crash-loop the sidecar. Default to 'mock' until the tss2 path lands.
+DI_BACKEND=$( { grep -E '^DROPLET_TPM_BACKEND=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2- )
+if [ "$DI_BACKEND" = "mock" ]; then
+  pass "generate_env selects DROPLET_TPM_BACKEND=mock (never the fail-closed scaffold)"
+else
+  fail "generate_env set DROPLET_TPM_BACKEND=$DI_BACKEND (expected mock; 'real' crash-loops the sidecar)"
+fi
+
+# migrate_env must flip a pre-existing auto-selected 'real' (no scaffold
+# opt-in) back to 'mock' so an upgraded TPM box stops crash-looping.
+sed -i.bak -E 's|^DROPLET_TPM_BACKEND=.*$|DROPLET_TPM_BACKEND=real|' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+migrate_env >/dev/null 2>&1 || true
+DI_BACKEND_AFTER=$( { grep -E '^DROPLET_TPM_BACKEND=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2- )
+if [ "$DI_BACKEND_AFTER" = "mock" ]; then
+  pass "migrate_env flips auto-selected DROPLET_TPM_BACKEND real→mock (no scaffold opt-in)"
+else
+  fail "migrate_env left DROPLET_TPM_BACKEND=$DI_BACKEND_AFTER (expected mock — upgraded TPM box crash-loops)"
+fi
+
+# migrate_env must PRESERVE a knowing scaffold opt-in (real + ALLOW_SCAFFOLD).
+sed -i.bak -E 's|^DROPLET_TPM_BACKEND=.*$|DROPLET_TPM_BACKEND=real|' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+printf 'DROPLET_TPM_ALLOW_SCAFFOLD=1\n' >> "$TMP_ROOT/.env"
+migrate_env >/dev/null 2>&1 || true
+DI_BACKEND_OPTIN=$( { grep -E '^DROPLET_TPM_BACKEND=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2- )
+if [ "$DI_BACKEND_OPTIN" = "real" ]; then
+  pass "migrate_env preserves a knowing scaffold opt-in (real + DROPLET_TPM_ALLOW_SCAFFOLD)"
+else
+  fail "migrate_env changed an opted-in DROPLET_TPM_BACKEND to $DI_BACKEND_OPTIN (should stay real)"
+fi
+# Clean the opt-in back out so later phases see the default posture.
+sed -i.bak -E '/^DROPLET_TPM_ALLOW_SCAFFOLD=/d' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
 
 # =============================================================================
 # Phase 3: single-box .env knobs — configure_single_box_env (WARP-654 follow-up)

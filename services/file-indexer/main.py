@@ -232,8 +232,20 @@ def main():
     http_thread.start()
 
     # Start watching
-    from watcher import start_watcher
+    from watcher import start_watcher, reconcile_index
     observer = start_watcher()
+
+    # WARP-1139/WARP-1140: one-shot reconcile scan. inotify only reports
+    # events that happen while we're running, so anything uploaded before
+    # this process started (first boot, restarts, crash windows) would
+    # otherwise never be indexed — and search would say "no match" for
+    # content that was simply never looked at. Runs in a daemon thread so
+    # a large backlog doesn't delay live event handling; it's a single
+    # pass, not a scheduling loop (the apscheduler rule governs schedules).
+    reconcile_thread = threading.Thread(
+        target=reconcile_index, name="warp1140-reconcile", daemon=True
+    )
+    reconcile_thread.start()
 
     # Graceful shutdown
     def shutdown(sig, _frame):

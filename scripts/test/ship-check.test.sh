@@ -250,9 +250,9 @@ test_frigate_env_scan_catches_unresolved_substitution() {
   # shellcheck disable=SC2064
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$cfg_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: passes on the unmutated tree (the live config uses only
-  #    FRIGATE_MQTT_USER + FRIGATE_MQTT_PASSWORD, both seeded by
-  #    secrets.sh).
+  # 1. Sanity: passes on the unmutated tree (since WARP-235 the live config
+  #    has NO {VAR} substitutions — MQTT auth is the client cert, with static
+  #    tls_* paths — so the baseline hits the no-substitution PASS branch).
   if ! _assert_check_passes "$REPO_ROOT_REAL" frigate-env-scan; then
     printf "    baseline frigate-env-scan failed against unmodified real repo\n" >&2
     return 1
@@ -980,7 +980,7 @@ STUB
 test_tls_invariants_catches_deregister_regression() {
   local needed=(
     "scripts/lib/secrets.sh"
-    "docker/nginx.conf"
+    "docker/nginx/nginx.conf"
     "scripts/factory-reset.sh"
     "scripts/lib/logging.sh"
   )
@@ -998,10 +998,10 @@ test_tls_invariants_catches_deregister_regression() {
   trap "rm -rf '$synth'" RETURN
 
   mkdir -p "$synth/.git"
-  mkdir -p "$synth/scripts/lib" "$synth/docker"
+  mkdir -p "$synth/scripts/lib" "$synth/docker/nginx"
   cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
   cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"   "$synth/scripts/lib/logging.sh"
-  cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
+  cp "$REPO_ROOT_REAL/docker/nginx/nginx.conf"  "$synth/docker/nginx/nginx.conf"
   cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
 
   # 1. Faithful copy → check PASSES.

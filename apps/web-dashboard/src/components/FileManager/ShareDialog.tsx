@@ -27,6 +27,14 @@ import { translateError } from "@/lib/friendly-errors";
 interface ShareDialogProps {
   filePath: string;
   fileName: string;
+  /**
+   * WARP-1148/1149: whether the share target is a folder. Nextcloud rejects
+   * single-FILE shares that carry the CREATE or DELETE permission bits
+   * ("File shares cannot have create or delete permissions"), so for files the
+   * dialog masks those bits out of whatever preset the user picks before
+   * sending. Folders keep the full bitmask.
+   */
+  isDirectory?: boolean;
   existingShares?: ShareDetail[];
   onClose: () => void;
   onChange?: () => void;
@@ -96,6 +104,7 @@ export function presetBitsFor(rawPermissions: number): number {
 export function ShareDialog({
   filePath,
   fileName,
+  isDirectory = false,
   existingShares = [],
   onClose,
   onChange,
@@ -148,6 +157,14 @@ export function ShareDialog({
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
+  // WARP-1148/1149: Nextcloud's generalCreateChecks rejects any share of a
+  // single FILE whose bitmask carries CREATE or DELETE — so the "Full access"
+  // preset (31) could never be created or applied on a file. Mask those bits
+  // for files (leaving READ|UPDATE|SHARE) so the most-capable valid share is
+  // sent instead of a guaranteed 400.
+  const sendablePermissions = (bits: number): number =>
+    isDirectory ? bits : bits & ~(PERM_CREATE | PERM_DELETE);
+
   const handleCreate = async () => {
     if (mode === "person" && !selectedRecipient) return;
     setCreating(true);
@@ -158,11 +175,11 @@ export function ShareDialog({
           ? await createShare(filePath, {
               shareType: SHARE_TYPE_USER,
               shareWith: selectedRecipient as string,
-              permissions,
+              permissions: sendablePermissions(permissions),
             })
           : await createShare(filePath, {
               shareType: SHARE_TYPE_LINK,
-              permissions,
+              permissions: sendablePermissions(permissions),
               expireDate: expireDate || undefined,
               password: password || undefined,
               note: note || undefined,
@@ -174,7 +191,9 @@ export function ShareDialog({
       setSelectedRecipient(null);
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "files"));
+      // WARP-1148: share failures translate through the share domain — never
+      // the "files" domain, whose fallback is the file-LOADING copy.
+      setError(translateError(err, "share"));
     } finally {
       setCreating(false);
     }
@@ -193,7 +212,7 @@ export function ShareDialog({
       setRevokeTargetId(null);
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "files"));
+      setError(translateError(err, "share"));
       throw err;
     }
   };
@@ -206,16 +225,17 @@ export function ShareDialog({
   };
 
   const handleUpdatePermissions = async (shareId: number, bits: number) => {
+    const masked = sendablePermissions(bits);
     try {
-      await updateShare(shareId, { permissions: bits });
+      await updateShare(shareId, { permissions: masked });
       setShares(
         shares.map((s) =>
-          s.id === shareId ? { ...s, permissions: bits } : s
+          s.id === shareId ? { ...s, permissions: masked } : s
         )
       );
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "files"));
+      setError(translateError(err, "share"));
     }
   };
 

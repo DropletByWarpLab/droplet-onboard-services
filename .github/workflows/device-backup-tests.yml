@@ -34,6 +34,6 @@ jobs:
     # build) — 20 min covers the pull + round-trip with headroom.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run full-device backup + restore drill
         run: bash tests/device-backup.test.sh

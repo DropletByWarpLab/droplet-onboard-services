@@ -679,40 +679,81 @@ export function parseTakenSuggestions(err: unknown): string[] {
 }
 
 /**
- * WARP-984 (box half) — best-effort parse of the 409 conflict body's
- * discriminator. A worker with rename semantics distinguishes its two 409s:
+ * WARP-1109 (box half) — best-effort parse of the 409 conflict body's
+ * discriminator. HQ hides TWO distinct conflicts behind a 409:
  *
- *   { reason: "name_taken", suggestions?: [...] }            — held by ANOTHER box
- *   { reason: "device_already_named", current_name?: "..." } — THIS box already
- *     holds a (different) name; rename isn't supported yet, factory reset frees it
+ *   name_taken     — the name is held by ANOTHER device (+ `suggestions`)
+ *   already_named  — THIS device already holds a DIFFERENT name (+ `current_name`);
+ *                    rename IS supported (release-then-claim), so the wizard offers
+ *                    the rename flow instead of the false "that name is taken".
  *
- * Fail-open by contract: an absent / non-JSON / unknown `reason` returns
- * `reason: null` so the caller keeps EXACTLY today's NAME_TAKEN mapping —
- * deployed workers that predate the discriminator must not break the wizard.
+ * Discrimination precedence (forward-compatible whether or not the coupled
+ * fleet-hq change is deployed):
+ *   1. MACHINE-READABLE `code` field — `"already_named"` | `"name_taken"`
+ *      (the coupled fleet-hq change adds these to the 409 body).
+ *   2. LEGACY `reason` field — `"device_already_named"` | `"name_taken"`
+ *      (an interim worker shipped this discriminator; kept for back-compat).
+ *   3. STABLE distinct MESSAGE text in the `error` string —
+ *        `device already named "<name>" (rename not supported yet)` → already_named
+ *        `name "<name>" is taken; try: …`                            → name_taken
+ *      This makes the box correct TODAY, before HQ's `code` is deployed.
+ *
+ * Returns the box-canonical `reason` (`"already_named"` | `"name_taken"`), plus
+ * `currentName` on already_named (from `current_name`, or recovered from the
+ * quoted name in the stable message). Fail-open by contract: an absent /
+ * non-JSON / unrecognizable body returns `reason: null` so the caller keeps
+ * EXACTLY today's NAME_TAKEN mapping (deployed workers that predate the
+ * discriminator must not break the wizard).
  */
 export function parseClaimConflict(err: unknown): {
-  reason: "name_taken" | "device_already_named" | null;
+  reason: "name_taken" | "already_named" | null;
   currentName?: string;
 } {
   if (!(err instanceof Error)) return { reason: null };
   const jsonStart = err.message.indexOf("{");
   if (jsonStart < 0) return { reason: null };
+  let body: {
+    code?: unknown;
+    reason?: unknown;
+    current_name?: unknown;
+    error?: unknown;
+  };
   try {
-    const body = JSON.parse(err.message.slice(jsonStart)) as {
-      reason?: unknown;
-      current_name?: unknown;
-    };
-    if (body.reason === "name_taken" || body.reason === "device_already_named") {
-      return {
-        reason: body.reason,
-        ...(typeof body.current_name === "string"
-          ? { currentName: body.current_name }
-          : {}),
-      };
-    }
+    body = JSON.parse(err.message.slice(jsonStart));
   } catch {
     // Non-JSON / truncated body — treat as an undiscriminated 409.
+    return { reason: null };
   }
+
+  const currentName =
+    typeof body.current_name === "string" ? body.current_name : undefined;
+  const withCurrent = (
+    reason: "already_named",
+    fallbackName?: string,
+  ): { reason: "already_named"; currentName?: string } => {
+    const name = currentName ?? fallbackName;
+    return { reason, ...(name ? { currentName: name } : {}) };
+  };
+
+  // 1. Preferred: the machine-readable `code`.
+  if (body.code === "already_named") return withCurrent("already_named");
+  if (body.code === "name_taken") return { reason: "name_taken" };
+
+  // 2. Legacy: the interim `reason` discriminator.
+  if (body.reason === "device_already_named") return withCurrent("already_named");
+  if (body.reason === "name_taken") return { reason: "name_taken" };
+
+  // 3. Fallback: the stable distinct message text (HQ `code` not deployed yet).
+  const message = typeof body.error === "string" ? body.error : "";
+  if (/rename not supported yet/i.test(message) || /already named/i.test(message)) {
+    // Recover the quoted current name from `… already named "<name>" …`.
+    const quoted = /already named\s+"([^"]+)"/i.exec(message);
+    return withCurrent("already_named", quoted?.[1]);
+  }
+  if (/\bis taken\b/i.test(message)) {
+    return { reason: "name_taken" };
+  }
+
   return { reason: null };
 }
 
@@ -720,17 +761,18 @@ export function parseClaimConflict(err: unknown): {
  *  crash issuance / the rename endpoint), so callers branch on these. */
 export const CLAIM_RESULT_CLAIMED = "claimed" as const;
 export const CLAIM_RESULT_NAME_TAKEN = "name_taken" as const;
-/** WARP-984 — THIS box already holds a different name (HQ rename not supported
- *  yet); distinct from NAME_TAKEN so the wizard can say "factory reset releases
- *  it" instead of the false "that name is taken". */
-export const CLAIM_RESULT_RENAME_UNSUPPORTED = "rename_unsupported" as const;
+/** WARP-1109 — THIS box already holds a DIFFERENT name at HQ; distinct from
+ *  NAME_TAKEN so the wizard shows the current address + a Rename affordance
+ *  instead of the false "that name is taken". Rename IS supported (the box
+ *  releases the old name then claims the new one — see renameBoxName). */
+export const CLAIM_RESULT_ALREADY_NAMED = "already_named" as const;
 export const CLAIM_RESULT_NOT_REGISTERED = "not_registered" as const;
 export const CLAIM_RESULT_INVALID = "invalid" as const;
 export const CLAIM_RESULT_FAILED = "failed" as const;
 export type ClaimOutcome =
   | typeof CLAIM_RESULT_CLAIMED
   | typeof CLAIM_RESULT_NAME_TAKEN
-  | typeof CLAIM_RESULT_RENAME_UNSUPPORTED
+  | typeof CLAIM_RESULT_ALREADY_NAMED
   | typeof CLAIM_RESULT_NOT_REGISTERED
   | typeof CLAIM_RESULT_INVALID
   | typeof CLAIM_RESULT_FAILED;
@@ -747,8 +789,8 @@ export interface ClaimBoxNameResult {
   fqdn?: string;
   /** Alternate names HQ offered on a 409 name-taken. */
   suggestions?: string[];
-  /** WARP-984 — on RENAME_UNSUPPORTED, the name this box already holds at HQ
-   *  (when the worker included `current_name` in the 409 body). */
+  /** WARP-1109 — on ALREADY_NAMED, the name this box already holds at HQ (from
+   *  the 409 body's `current_name`, or recovered from the stable message). */
   currentName?: string;
 }
 
@@ -760,6 +802,15 @@ export interface ClaimBoxNameDeps {
     "signWithDeviceKey" | "getDeviceIdentityStatus"
   >;
   logger: TlsLogger;
+  /**
+   * WARP-978 — `!!config.HQ_ISSUANCE_URL`: whether this box is wired to a live HQ.
+   * When FALSE, the real HQ client's base URL is empty, so `hq.challenge` would
+   * build a RELATIVE path and throw `TypeError: Failed to parse URL`. The claim
+   * short-circuits to a non-authoritative NOT_REGISTERED before touching HQ.
+   * Optional + treated as configured when omitted, so existing callers/tests
+   * that never set it keep exactly their prior HQ-reaching behavior.
+   */
+  hqConfigured?: boolean;
 }
 
 /**
@@ -783,8 +834,23 @@ export async function claimBoxName(
   rawName: string,
   deps: ClaimBoxNameDeps,
 ): Promise<ClaimBoxNameResult> {
-  const { deviceId, hq, identity, logger } = deps;
+  const { deviceId, hq, identity, logger, hqConfigured } = deps;
   try {
+    // WARP-978 — HQ not configured (HQ_ISSUANCE_URL empty on a dev/CI box, or a
+    // reflashed box before the baked default lands). The real HQ client's base
+    // URL is "", so hq.challenge would build a RELATIVE
+    // "/api/issuance/order/challenge" and throw `TypeError: Failed to parse URL`.
+    // Short-circuit to a non-authoritative NOT_REGISTERED before touching HQ.
+    // `hqConfigured === undefined` (unset by legacy callers) is treated as
+    // configured, preserving the pre-existing HQ-reaching behavior.
+    if (hqConfigured === false) {
+      logger.warn(
+        { deviceId, name: rawName },
+        "tls-claim: HQ_ISSUANCE_URL not configured — cannot device-auth claim the name; falling back to opaque/bootstrap issuance",
+      );
+      return { outcome: CLAIM_RESULT_NOT_REGISTERED, authoritative: false };
+    }
+
     // No provisioned identity → no trusted key to sign the PoP with. The device
     // isn't claimable yet (e.g. a fresh box before first-factory enroll) — fall
     // back gracefully (bootstrap/opaque issuance) with a clear log.
@@ -826,19 +892,19 @@ export async function claimBoxName(
   } catch (err) {
     const httpStatus = parseHqStatus(err);
     if (httpStatus === 409) {
-      // WARP-984 — two distinct conflicts hide behind a 409. A worker with the
-      // rename semantics sends a `reason` discriminator; branch on it so the
-      // wizard can tell "held by another box" from "THIS box already holds a
-      // name". An absent/unparseable reason falls open to NAME_TAKEN — old
-      // deployed workers must keep exactly today's behavior.
+      // WARP-1109 — two distinct conflicts hide behind a 409. Discriminate on
+      // the HQ `code` (preferred), the legacy `reason`, then the stable message
+      // text so the wizard can tell "held by another box" from "THIS box already
+      // holds a name". An absent/unparseable discriminator falls open to
+      // NAME_TAKEN — old deployed workers keep exactly today's behavior.
       const conflict = parseClaimConflict(err);
-      if (conflict.reason === "device_already_named") {
+      if (conflict.reason === "already_named") {
         logger.warn(
           { deviceId, name: rawName, currentName: conflict.currentName },
-          "tls-claim: HQ says this device already holds a name (409 device_already_named) — rename is not supported yet; a factory reset releases it",
+          "tls-claim: HQ says this device already holds a DIFFERENT name (409 already_named) — the owner can rename (release-then-claim)",
         );
         return {
-          outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+          outcome: CLAIM_RESULT_ALREADY_NAMED,
           authoritative: true,
           ...(conflict.currentName ? { currentName: conflict.currentName } : {}),
         };

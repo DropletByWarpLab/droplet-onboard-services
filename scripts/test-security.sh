@@ -32,7 +32,9 @@ FAIL=0
 pass() { printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; PASS=$((PASS + 1)); }
 fail() { printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"; FAIL=$((FAIL + 1)); }
 
-SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
+# MQTT_PASSWORD retired by WARP-235 — MQTT identity is the per-service client
+# certificate CN (see docker/mosquitto.acl + docs/security/internal-mtls.md).
+SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
 
 # =============================================================================
 # Test 1: Compose file contains NO :? patterns (always parseable)
@@ -454,6 +456,87 @@ if grep -q 'cosign sign --yes' "$REPO_ROOT/.github/workflows/publish-release.yml
   pass "publish-release.yml keyless-signs every pushed image (WARP-244)"
 else
   fail "publish-release.yml lost the keyless image-signing step (WARP-244)"
+fi
+
+# =============================================================================
+# Test 17: WARP-233 — db must enforce TLS 1.3 + SCRAM + custom pg_hba
+# =============================================================================
+# No silent regression to plaintext Postgres. Static invariants:
+#   1-3. the db service command carries the TLS 1.3 / SCRAM / hba_file flags
+#        (hba_file keyed on PG_HBA with the TLS-only file as the DEFAULT —
+#        the FIPS variant must never become the fallback),
+#   4.   pg_hba.conf has the hostssl+scram line AND no plaintext `host` auth
+#        line at all (only the terminal reject may start with `host `),
+#   5.   pg_hba.fips.conf (the FIPS P1011 exception file) still SCRAMs its
+#        plaintext lines (no trust/md5/password TCP auth) and keeps the
+#        terminal reject.
+
+PG_HBA="$REPO_ROOT/docker/postgres/pg_hba.conf"
+PG_HBA_FIPS="$REPO_ROOT/docker/postgres/pg_hba.fips.conf"
+
+if grep -q "ssl_min_protocol_version=TLSv1.3" "$COMPOSE_FILE" &&
+   grep -q "password_encryption=scram-sha-256" "$COMPOSE_FILE" &&
+   grep -q 'hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}' "$COMPOSE_FILE" &&
+   grep -q "hostssl all   all   0.0.0.0/0     scram-sha-256" "$PG_HBA" &&
+   ! grep -qE "^host[[:space:]]+all[[:space:]]+all[[:space:]]+[^[:space:]]+[[:space:]]+(trust|md5|password|scram-sha-256)" "$PG_HBA"; then
+  pass "db service enforces TLS 1.3 + SCRAM + custom pg_hba (WARP-233)"
+else
+  fail "db service TLS 1.3 / SCRAM / pg_hba invariants regressed (WARP-233)"
+fi
+
+if [ -f "$PG_HBA_FIPS" ] &&
+   grep -qE "^host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+reject" "$PG_HBA_FIPS" &&
+   ! grep -qE "^host(ssl)?[[:space:]]+all[[:space:]]+all[[:space:]]+[^[:space:]]+[[:space:]]+(trust|md5|password)" "$PG_HBA_FIPS"; then
+  pass "pg_hba.fips.conf keeps SCRAM-only TCP auth + terminal reject (WARP-233/318)"
+else
+  fail "pg_hba.fips.conf regressed — plaintext TCP must stay SCRAM-authed with a terminal reject (WARP-233/318)"
+fi
+
+# =============================================================================
+# Test 18: WARP-234 — cache must stay TLS-only with per-service ACLs
+# =============================================================================
+# (Test 17 above is the WARP-233 db guard.) No silent regression to a plaintext/shared-password Redis. All
+# static:
+#   1. plaintext listener disabled (--port 0) and TLS listener on 6380,
+#   2. the ACL file is served (--aclfile) and --requirepass is retired,
+#   3. every first-party client dials its own ACL identity over rediss://,
+#   4. Nextcloud's TLS config override is mounted.
+
+if grep -q -- "--port 0" "$COMPOSE_FILE" &&
+   grep -q -- "--tls-port 6380" "$COMPOSE_FILE" &&
+   grep -q -- "--aclfile /etc/redis/users.acl" "$COMPOSE_FILE" &&
+   ! grep -q -- "--requirepass" "$COMPOSE_FILE"; then
+  pass "cache serves TLS-only on 6380 with the generated ACL file (WARP-234)"
+else
+  fail "cache TLS/ACL launch flags regressed (WARP-234)"
+fi
+
+if grep -q 'REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_URL=rediss://mcp-server:${REDIS_PASSWORD_MCP' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_URL=rediss://ai-gateway:${REDIS_PASSWORD_AI_GATEWAY' "$COMPOSE_FILE" &&
+   grep -q 'zz-redis-tls.config.php' "$COMPOSE_FILE"; then
+  pass "every Redis client dials its own ACL identity over rediss:// (WARP-234)"
+else
+  fail "a Redis client lost its per-service rediss:// identity (WARP-234)"
+fi
+
+# =============================================================================
+# Test 19: WARP-235 — no compose service may mount the data/secrets ROOT
+# =============================================================================
+# Since WARP-236, data/secrets holds the internal CA PRIVATE key
+# (internal-ca/ca.key) and every service's TLS bundle (service-tls/<svc>/).
+# A container that bind-mounts the ROOT can read the CA key and mint
+# arbitrary service identities, defeating per-service mTLS + the MQTT
+# per-CN ACLs. Only scoped mounts are allowed:
+#   - ../data/secrets/service-tls/<svc>:...   (a service's OWN bundle)
+#   - ../data/secrets/<single-file-key>:...   (e.g. audit.key, email.key)
+# The match targets the exact bare-root bind (../data/secrets:/...), so the
+# scoped patterns above never trip it.
+
+if grep -qE '\.\./data/secrets:' "$COMPOSE_FILE"; then
+  fail "docker-compose.yml: a service mounts the data/secrets ROOT (exposes internal-ca/ca.key — use a scoped service-tls/<svc> or single-key mount)"
+else
+  pass "docker-compose.yml: no service mounts the data/secrets root (CA key stays unmountable)"
 fi
 
 # =============================================================================

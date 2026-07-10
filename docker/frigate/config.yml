@@ -1,9 +1,13 @@
 mqtt:
   enabled: true
   host: broker
-  port: 1883
-  user: '{FRIGATE_MQTT_USER}'
-  password: '{FRIGATE_MQTT_PASSWORD}'
+  port: 8883
+  # WARP-235: identity = client cert CN ("frigate"); no username/password.
+  # The bundle is issued by the WARP-236 internal CA and mounted by compose
+  # at /data/service-tls (see the frigate service's volumes).
+  tls_ca_certs: /data/service-tls/ca.pem
+  tls_client_cert: /data/service-tls/cert.pem
+  tls_client_key: /data/service-tls/key.pem
 
 # Detector:
 #   type: cpu                 — works on every image variant, 10-20 FPS

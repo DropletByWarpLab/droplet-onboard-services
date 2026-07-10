@@ -6,6 +6,7 @@ import type { HttpClient } from "@droplet/tools-core";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { createServer } from "./server.js";
 import { internalBaseUrl, internalFetch } from "./internal-tls.js";
+import { redisConnectionOptions } from "./redis-tls.js";
 import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
@@ -62,7 +63,15 @@ function baseUrlFor(target: HttpTarget): string {
     case "switchSvc":
       return process.env.SWITCH_SERVICE_URL ?? "http://host.docker.internal:8081";
     case "fileIndexer":
-      return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8000";
+      // WARP-1144: the file-indexer's HTTP server listens on :8090
+      // (FILE_INDEXER_HTTP_PORT default — see services/file-indexer/main.py
+      // and the port table in docs/COMPONENTS.md). The previous :8000
+      // fallback pointed at a port nothing listens on, so every call from a
+      // handler using this target died as a raw "fetch failed" (compose
+      // never sets FILE_INDEXER_URL, so the fallback is what actually runs).
+      // Matches the orchestrator's own config default
+      // (apps/orchestrator/src/config.ts FILE_INDEXER_URL).
+      return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8090";
     case "nextcloud":
       // WARP-861: despite the target's historical name, the files-domain
       // tools speak the ORCHESTRATOR's /api/files contract (JSON entries,
@@ -220,8 +229,13 @@ async function main(): Promise<void> {
   // `rerankPassages` swallows Redis errors and falls back to live rerank
   // calls without caching.
   const redisUrl = process.env.REDIS_URL;
+  // WARP-234: rediss:// (TLS-only cache) pins trust to the internal CA.
   const redis = redisUrl
-    ? new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true })
+    ? new Redis(redisUrl, {
+        maxRetriesPerRequest: 3,
+        lazyConnect: true,
+        ...redisConnectionOptions(redisUrl),
+      })
     : null;
 
   // Connect lazily — the stdio child process should not block the parent's

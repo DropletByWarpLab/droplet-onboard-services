@@ -1,7 +1,17 @@
 /** WARP-237 — signed-daily-roots read surface. Owner/admin only. */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import express, { type Express } from "express";
 import request from "supertest";
+
+// WARP-1062 (audit item B): the local requireOwnerOrAdmin guard must emit the
+// WARP-237 policy-violation row on deny — capture the singleton to assert it.
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
 import { createAuditRootsRouter } from "./audit-roots.js";
 
 const ROOT = {
@@ -81,6 +91,26 @@ describe("audit roots routes", () => {
     expect((await request(guest).get("/api/audit/roots")).status).toBe(403);
     expect((await request(app).get("/api/audit/roots/not-a-date")).status).toBe(
       400,
+    );
+  });
+
+  // WARP-1062 (audit item B): the local guard emits the same WARP-237
+  // "Access denied" policy-violation row as the central requireRole.
+  it("emits the Access denied audit row on a 403 (WARP-1062)", async () => {
+    recordActivityMock.mockClear();
+    const guest = makeApp("guest");
+    const res = await request(guest).get("/api/audit/roots");
+    expect(res.status).toBe(403);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "warn",
+        what: "Access denied",
+        refs: expect.objectContaining({
+          role: "guest",
+          reason: "role-not-permitted",
+        }),
+      }),
     );
   });
 });

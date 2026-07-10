@@ -96,3 +96,71 @@ def test_subscribe_when_client_set_but_not_connected_defers(mc):
     mc.subscribe("droplet/transcription/run-one", lambda p: None)
     assert fake.subscribed == []
     assert "droplet/transcription/run-one" in mc._handlers
+
+
+def test_mqtts_scheme_enables_tls_and_port_8883(mc, monkeypatch, tmp_path):
+    """WARP-235 — a mqtts:// broker URL must flip paho to mTLS (bundle from the
+    DROPLET_TLS_* env contract) with NO username/password, defaulting to 8883."""
+    for name in ("cert", "key", "ca"):
+        (tmp_path / f"{name}.pem").write_text("PEM")
+    monkeypatch.setenv("DROPLET_TLS_CERT", str(tmp_path / "cert.pem"))
+    monkeypatch.setenv("DROPLET_TLS_KEY", str(tmp_path / "key.pem"))
+    monkeypatch.setenv("DROPLET_TLS_CA", str(tmp_path / "ca.pem"))
+    monkeypatch.setattr(mc, "MQTT_BROKER", "mqtts://broker:8883", raising=True)
+
+    recorded = {}
+
+    class FakePaho:
+        def __init__(self, *a, **kw):
+            pass
+
+        def tls_set(self, ca_certs=None, certfile=None, keyfile=None):
+            recorded["tls"] = (ca_certs, certfile, keyfile)
+
+        def username_pw_set(self, *a):
+            recorded["userpass"] = True
+
+        def connect(self, host, port, keepalive=60):
+            recorded["connect"] = (host, port)
+
+        def loop_start(self):
+            pass
+
+    monkeypatch.setattr(mc.mqtt, "Client", FakePaho)
+    mc.connect()
+    assert recorded["connect"] == ("broker", 8883)
+    assert recorded["tls"] == (
+        str(tmp_path / "ca.pem"),
+        str(tmp_path / "cert.pem"),
+        str(tmp_path / "key.pem"),
+    )
+    assert "userpass" not in recorded
+
+
+def test_plain_mqtt_url_keeps_userpass_and_no_tls(mc, monkeypatch):
+    """Dev brokers (mqtt://) keep the inline-credential path and never tls_set."""
+    monkeypatch.setattr(mc, "MQTT_BROKER", "mqtt://u:p@localhost:1883", raising=True)
+
+    recorded = {}
+
+    class FakePaho:
+        def __init__(self, *a, **kw):
+            pass
+
+        def tls_set(self, **kw):
+            recorded["tls"] = True
+
+        def username_pw_set(self, user, password):
+            recorded["userpass"] = (user, password)
+
+        def connect(self, host, port, keepalive=60):
+            recorded["connect"] = (host, port)
+
+        def loop_start(self):
+            pass
+
+    monkeypatch.setattr(mc.mqtt, "Client", FakePaho)
+    mc.connect()
+    assert recorded["connect"] == ("localhost", 1883)
+    assert recorded["userpass"] == ("u", "p")
+    assert "tls" not in recorded

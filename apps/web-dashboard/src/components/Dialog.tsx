@@ -9,6 +9,14 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+// WARP-1079 — indigo ramp + shell primitives. The dialog is portal-mounted to
+// document.body, OUTSIDE any `.droplet-shell` page scope (and outside
+// `.droplet-home` / the chat frame), so it carries the `droplet-shell` scope
+// class on its own backdrop and imports the token/primitive CSS itself
+// (class-scoping pattern from WARP-1072). Dialogs then resolve the indigo
+// tokens identically on shell pages, the home board, chat, and auth routes.
+import "@/components/shell/indigo-tokens.css";
+import "@/components/shell/droplet-shell.css";
 
 /**
  * Canonical modal-dialog primitive for the dashboard (WARP-289).
@@ -36,18 +44,25 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
  *     transition when the user has reduce-motion preference on. The
  *     dialog still mounts/unmounts; only the animation is gated.
  *
- * Padding contract (WARP-945 / WARP-949): the dialog CONTAINER is
- * intentionally padding-free for BOTH placements. Centered modals get a
- * `dp-card` shell (radius + shadow) and side panels get an edge-to-edge
- * surface — neither insets the content. This is deliberate so consumers can
- * render full-width headers / footers with `border-b` / `border-t` dividers
- * that span the whole surface. The flip side: every consumer MUST pad its
- * own body — wrap children in a div with the dashboard spacing tokens
- * (`p-5` ≈ 20px for centered bodies, `p-5` / `px-4 py-3` per section for side
- * panels; the Projects surface uses its scoped `.pm-dialog-body`). A bare,
- * unpadded child renders flush against the edge — the exact regression
- * WARP-945 fixed on the Projects surfaces. Do NOT add padding to the
- * container here: it would double-pad the ~18 consumers that already self-pad.
+ * Padding + overflow contract (WARP-1152/WARP-1153, supersedes the
+ * WARP-945/949 "every consumer self-pads" contract): the PRIMITIVE owns the
+ * body inset and the horizontal-overflow policy, so a dialog can't opt out
+ * silently.
+ *
+ *   - By default children render inside the standard body region: `p-5`
+ *     (20px, spacing scale) with, for centered modals, vertical-only
+ *     scrolling (`max-h-[90vh] overflow-y-auto`). Horizontal overflow is
+ *     clipped (`overflow-x-hidden`) so a too-wide row can neither sit flush
+ *     against the card edge nor grow an internal horizontal scrollbar — the
+ *     exact WARP-1152 regression on the calendar's New-event dialog.
+ *   - Sectioned layouts (full-width headers / footers with `border-b` /
+ *     `border-t` dividers spanning the surface, e.g. PairDialog and the
+ *     right-edge detail panels) opt out EXPLICITLY with `flush` and then own
+ *     per-section padding on the spacing scale (`p-5` / `px-4 py-3`; the
+ *     Projects surfaces use their scoped `.pm-dialog-body`). `flush` is a
+ *     padding opt-out only — centered modals keep the vertical-scroll +
+ *     horizontal-clip body region either way, and side panels keep
+ *     horizontal clipping on the panel itself.
  */
 export interface DialogProps {
   /** Whether the dialog is open. */
@@ -68,8 +83,10 @@ export interface DialogProps {
   /**
    * Max width of the modal container. `md` is the default and matches
    * every existing dashboard modal. Sizes map to Tailwind `max-w-*`.
+   * `2xl` (720px) exists for the voice calibration wizard's modal
+   * contract (WARP-1055, design brief §4).
    */
-  maxWidth?: "sm" | "md" | "lg" | "xl";
+  maxWidth?: "sm" | "md" | "lg" | "xl" | "2xl";
   /**
    * Where the dialog sits on screen.
    *
@@ -79,7 +96,7 @@ export interface DialogProps {
    *     detail panels (smart-home device, network device, paired
    *     client) that the user keeps open while scanning context.
    *
-   * Side panels skip the `dp-card` shell + max-width and instead
+   * Side panels skip the centered card radius + max-width and instead
    * render edge-to-edge against the right border.
    */
   placement?: "center" | "right";
@@ -90,6 +107,13 @@ export interface DialogProps {
    * descendant of the dialog gets focus on open.
    */
   initialFocusRef?: RefObject<HTMLElement | null>;
+  /**
+   * Opt out of the default `p-5` body inset for sectioned layouts that
+   * render full-width `border-b` / `border-t` dividers and own per-section
+   * padding (see the padding + overflow contract above). Never an overflow
+   * opt-out: horizontal clipping and the centered scroll region stay on.
+   */
+  flush?: boolean;
   /** Dialog body. The heading element referenced by `labelledBy` must be inside. */
   children: ReactNode;
 }
@@ -99,6 +123,8 @@ const MAX_WIDTH_CLASS: Record<NonNullable<DialogProps["maxWidth"]>, string> = {
   md: "max-w-md",
   lg: "max-w-lg",
   xl: "max-w-xl",
+  // 720px — the voice calibration wizard (WARP-1055, brief §4).
+  "2xl": "max-w-[720px]",
 };
 
 const FOCUSABLE_SELECTOR = [
@@ -120,6 +146,7 @@ export function Dialog({
   placement = "center",
   closeOnBackdrop = true,
   initialFocusRef,
+  flush = false,
   children,
 }: DialogProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -259,20 +286,64 @@ export function Dialog({
 
   const isSide = placement === "right";
 
-  // Backdrop opacity differs by placement to match dashboard convention:
-  //   - Centered modals: bg-black/50 + blur, matching the WARP-217 gold
-  //     standard (users/page.tsx) so every centered modal in the
-  //     dashboard reads as the same surface weight.
-  //   - Side panels: bg-black/30, no blur — matches the pre-existing
-  //     side-panel convention (lighter scrim so the user can still scan
-  //     the underlying list while the panel is open).
+  // Backdrop: the indigo `var(--scrim)` for both placements (WARP-1066
+  // token mapping). Centered modals keep the blur; side panels stay
+  // blur-free so the user can still scan the underlying list while the
+  // panel is open. The `droplet-shell` class ON the backdrop is what makes
+  // every `--scrim` / `--card-*` / `.btn` reference inside the dialog
+  // resolve regardless of which page the portal escapes from.
   const backdropClass = isSide
-    ? "fixed inset-0 z-50 flex justify-end bg-black/30"
-    : "fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6";
+    ? "droplet-shell fixed inset-0 z-50 flex justify-end"
+    : "droplet-shell fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-6";
+
+  // Inline `position: fixed` + scrim: `.droplet-shell` declares
+  // `position: relative` and `background: var(--bg)` at the same
+  // specificity as the Tailwind utilities, and component-CSS bundle order
+  // is not guaranteed — inline wins deterministically.
+  const backdropStyle: React.CSSProperties = {
+    position: "fixed",
+    background: "var(--scrim)",
+  };
 
   const containerClass = isSide
-    ? "relative w-full max-w-md h-full bg-surface-primary border-l border-separator shadow-xl overflow-y-auto"
-    : `dp-card ${widthClass} w-full shadow-xl overflow-hidden p-0`;
+    ? "relative w-full max-w-md h-full overflow-y-auto overflow-x-hidden"
+    : `${widthClass} w-full overflow-hidden`;
+
+  // Body region (padding + overflow contract, see the component doc):
+  //   - centered: ALWAYS a vertical-only scroll region that clips horizontal
+  //     overflow; `flush` only drops the `p-5` inset.
+  //   - side: the container above is already the (horizontally clipped)
+  //     scroll region; `flush` renders children directly so full-height
+  //     `h-full` section layouts keep working, the default adds the `p-5`
+  //     inset.
+  const centeredBodyClass = flush
+    ? "max-h-[90vh] overflow-y-auto overflow-x-hidden"
+    : "max-h-[90vh] overflow-y-auto overflow-x-hidden p-5";
+  const body = isSide ? (
+    flush ? (
+      children
+    ) : (
+      <div className="p-5">{children}</div>
+    )
+  ) : (
+    <div className={centeredBodyClass}>{children}</div>
+  );
+
+  // Indigo card chrome (WARP-1066 modal idiom: card surface + card border
+  // + card radius + `--lift` shadow). Side panels swap the full border for
+  // a left edge against `var(--border)`.
+  const containerStyle: React.CSSProperties = isSide
+    ? {
+        background: "var(--card-bg)",
+        borderLeft: "1px solid var(--border)",
+        boxShadow: "var(--lift)",
+      }
+    : {
+        background: "var(--card-bg)",
+        border: "1px solid var(--card-bd)",
+        borderRadius: "var(--radius-card)",
+        boxShadow: "var(--lift)",
+      };
 
   // Side panels slide in from the right when motion is allowed; the
   // centered variant gets the existing fade+scale.
@@ -300,6 +371,7 @@ export function Dialog({
           exit={{ opacity: prefersReducedMotion ? 1 : 0 }}
           transition={{ duration: prefersReducedMotion ? 0 : 0.12 }}
           className={backdropClass}
+          style={backdropStyle}
           onClick={handleBackdropClick}
         >
           <motion.div
@@ -309,11 +381,12 @@ export function Dialog({
             aria-labelledby={labelledBy}
             aria-describedby={describedBy}
             className={containerClass}
+            style={containerStyle}
             onClick={(e) => e.stopPropagation()}
             onKeyDown={handleContainerKeyDown}
             {...panelMotion}
           >
-            {children}
+            {body}
           </motion.div>
         </motion.div>
       )}

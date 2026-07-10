@@ -197,6 +197,58 @@ describe("the guard admits exactly the MCP principal", () => {
   });
 });
 
+// WARP-1010 — the route layer threads the real caller into
+// matter.service's signed activity rows: a dashboard human is `user`
+// with their UUID; the MCP/agent-loop service principal is the AI
+// surface (`ai`, null on-behalf-of id) — never "system".
+describe("WARP-1010 actor attribution threads from the route layer", () => {
+  it("a dashboard owner's Tier-1 command is attributed {user, <uuid>}", async () => {
+    mockDevice("110", "light");
+    const res = await request(buildApp(owner))
+      .post("/api/matter/devices/110/command")
+      .send({ command: "turn_on" });
+
+    expect(res.status).toBe(200);
+    expect(matterService.sendMatterCommand).toHaveBeenCalledWith(
+      "110",
+      "turn_on",
+      { type: "user", id: "u-owner" },
+      undefined,
+    );
+  });
+
+  it("an MCP/agent-loop command stays attributed {ai, null}", async () => {
+    mockDevice("111", "light");
+    const res = await request(buildApp(mcpPrincipal))
+      .post("/api/matter/devices/111/command")
+      .send({ command: "turn_on" });
+
+    expect(res.status).toBe(200);
+    expect(matterService.sendMatterCommand).toHaveBeenCalledWith(
+      "111",
+      "turn_on",
+      { type: "ai", id: null },
+      undefined,
+    );
+  });
+
+  it("commission carries the human caller; decommission carries the MCP principal as ai", async () => {
+    await request(buildApp(owner))
+      .post("/api/matter/commission")
+      .send({ pairing_code: "34970112332" });
+    expect(matterService.commissionDevice).toHaveBeenCalledWith(
+      "34970112332",
+      { type: "user", id: "u-owner" },
+    );
+
+    await request(buildApp(mcpPrincipal)).delete("/api/matter/devices/112");
+    expect(matterService.decommissionDevice).toHaveBeenCalledWith("112", {
+      type: "ai",
+      id: null,
+    });
+  });
+});
+
 describe("the confirm endpoint never accepts the MCP principal", () => {
   // The "202 only, never executes" invariant above holds only if the
   // principal that mints a token cannot also confirm it. Human-only,

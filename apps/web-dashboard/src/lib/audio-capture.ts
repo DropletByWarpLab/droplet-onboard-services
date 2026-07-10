@@ -114,6 +114,13 @@ export class PcmRecorder {
 
     const all = concatFloat32(this.chunks);
     this.chunks = [];
+    // DASH-003: a Bluetooth handsfree mic can capture below 16 kHz, and
+    // downsampleBuffer throws on upsample — which silently lost the whole
+    // recording. Send at the capture rate instead (transcribeAudio is told the
+    // real rate); only downsample when we're above the target.
+    if (captureRate < TARGET_SAMPLE_RATE) {
+      return { pcm: floatTo16BitPcm(all), rate: captureRate };
+    }
     const at16k = downsampleBuffer(all, captureRate, TARGET_SAMPLE_RATE);
     return { pcm: floatTo16BitPcm(at16k), rate: TARGET_SAMPLE_RATE };
   }

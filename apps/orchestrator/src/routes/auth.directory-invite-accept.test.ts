@@ -33,6 +33,7 @@
  * flow. argon2's own correctness is unit-tested in password.service.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 import cookieParser from "cookie-parser";
@@ -163,6 +164,9 @@ function createPrismaMock() {
       return row;
     }),
     findUnique: vi.fn(async ({ where }: any) => {
+      // WARP-233: the accepted row carries the blind index — login resolves it.
+      if (where?.emailLookupHash !== undefined)
+        return users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null;
       if (where?.email !== undefined)
         return users.find((u) => u.email === where.email) ?? null;
       if (where?.nextcloudUsername !== undefined)
@@ -326,7 +330,7 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
       .send({ password: INVITE_PASSWORD });
     expect(res.status).toBe(200);
 
-    const row = prisma._users.find((u: any) => u.email === "alice@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "alice@warp.test");
     expect(row).toBeDefined();
     // The directory is the auth source of truth — accept must persist the
     // argon2id hash (same as /auth/setup), not leave it null.
@@ -446,8 +450,87 @@ describe("Fix B — invite-accept upsert refreshes email on the UPDATE path (re-
     // now carry the invite's fresh email, not the stale one.
     const row = prisma._users.find((u: any) => u.nextcloudUsername === "fresh");
     expect(row).toBeDefined();
-    expect(row.email).toBe("fresh@warp.test");
+    expect(readUserEmail(row.email)).toBe("fresh@warp.test");
     // Verify that the old stale email is gone.
     expect(row.email).not.toBe("stale@old.test");
+  });
+});
+
+// WARP-1051 — session-role mapping must not diverge by account-creation
+// path. /auth/login uses the raw User.role, and the refresh path re-derives
+// from the DB row (WARP-116), so the old accept-time admin→owner promotion
+// gave an invited admin an "owner" session that silently downgraded to
+// "admin" at the first token rotation — and let an admin-minted admin
+// invite yield an owner session, defeating the ROLE_RANK_EXCEEDED guard.
+// The invite's canonical role is now the session role on every path.
+describe("WARP-1051 — invite-accept session role matches the canonical invite role", () => {
+  it("an admin invite mints an 'admin' session (not 'owner') and role survives re-login", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Morpheus",
+      email: "morpheus@warp.test",
+      role: "admin",
+    });
+
+    const publicApp = buildApp(prisma, null);
+    const accept = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    // Response body and the minted access JWT agree: admin, not owner.
+    expect(accept.body.user.role).toBe("admin");
+    expect(sessionJwt(accept).role).toBe("admin");
+    // The DB row carries the canonical role too.
+    const row = prisma._users.find(
+      (u: any) => readUserEmail(u.email) === "morpheus@warp.test",
+    );
+    expect(row.role).toBe("admin");
+
+    // Convergence: a normal /auth/login for the same account yields the
+    // SAME session role the accept path minted.
+    (nc.ncLoginWithCredentials as any).mockResolvedValue({
+      token: "nc-app-password",
+      loginName: "morpheus",
+    });
+    const login = await request(publicApp)
+      .post("/api/auth/login")
+      .send({ email: "morpheus@warp.test", password: INVITE_PASSWORD });
+    expect(login.status).toBe(200);
+    expect(sessionJwt(login).role).toBe("admin");
+  });
+
+  it("an owner invite still mints an 'owner' session (passthrough unchanged)", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Trinity",
+      email: "trinity@warp.test",
+      role: "owner",
+    });
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    expect(accept.body.user.role).toBe("owner");
+    expect(sessionJwt(accept).role).toBe("owner");
+  });
+
+  it("a guest invite still mints a 'guest' session", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Mouse",
+      email: "mouse@warp.test",
+      role: "guest",
+    });
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    expect(accept.body.user.role).toBe("guest");
+    expect(sessionJwt(accept).role).toBe("guest");
   });
 });

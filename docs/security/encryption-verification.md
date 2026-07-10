@@ -22,8 +22,8 @@ Threat-model mapping (`docs/THREAT_MODEL.md`):
 
 - **T5.8 / accepted-risk R4** — plaintext data-at-rest. Covered by the `rest.*`
   checks (LUKS2 header, Argon2id KDF, TPM-sealed keyslot, raw-partition entropy,
-  mount coverage across the Docker volumes / `/var/lib/droplet` / `data/secrets`
-  / `.env`, USB automounts).
+  mount coverage across the WARP-232 surfaces — `/data/docker` docker data-root,
+  `/data/droplet/env/.env`, `/data/droplet/secrets` — plus USB automounts).
 - **T1.2** — edge terminator protocol floor. Covered by `transit.pg.tls13` and
   `transit.edge.tls-policy`.
 - **T2.8 / T5.x** — internal service-to-service plaintext. Covered by
@@ -93,29 +93,37 @@ explicit-enum contract as `droplet-watchdog.sh`:
 (the bundle is still fully produced — this is the AC's "plaintext path is a
 release blocker" surface); `2` = harness error (could not even produce a bundle).
 
-### Current-posture expectation (main, pre-encryption-tickets)
+### Current-posture expectation (main)
 
-The encryption features under verification are **in flight and not yet on main**
-(WARP-232 LUKS2, WARP-233 Postgres TLS, WARP-234 Redis TLS, WARP-235 MQTT mTLS,
-WARP-236 internal mTLS). A run against today's stack is therefore **expected to
-FAIL several checks** — those FAILs are the *documented plaintext paths* the AC
-requires filing as blockers, not harness bugs. They flip to PASS as each ticket
-lands.
+All five encryption tickets have merged to main: WARP-232 (LUKS2 at-rest),
+WARP-233 (Postgres TLS), WARP-234 (Redis TLS), WARP-235 (MQTT mTLS), and
+WARP-236 (internal-CA issuance + mTLS *code*). The one caveat is the WARP-236
+HTTP/gRPC mesh: the code is flag-gated behind `DROPLET_INTERNAL_TLS` and
+**nothing sets that flag to `1` today** (neither `scripts/setup.sh` nor
+compose), and several server-side listeners are not yet wired — see
+`docs/security/internal-mtls.md` "Wiring status". Until the enablement work
+lands, the two mesh-sensitive checks are **expected to FAIL** — those FAILs
+are the *documented plaintext paths* the AC requires filing as blockers, not
+harness bugs.
 
 | Check | Expected today | Why |
 |---|---|---|
-| `rest.luks.device` / `rest.luks.header` / `rest.luks.tpm-token` / `rest.entropy` / `rest.mount-coverage` (R-01..R-05) | FAIL | no LUKS yet — WARP-232 open; `.env`/pgdata plaintext is THREAT_MODEL T5.8 / accepted-risk R4 |
+| `rest.luks.device` / `rest.luks.header` / `rest.luks.tpm-token` / `rest.entropy` / `rest.mount-coverage` (R-01..R-05) | PASS | WARP-232 landed: `droplet-data` LUKS2/Argon2id LV with TPM2 keyslot, provisioned at first boot; `/data/docker`, `/data/droplet/env/.env`, `/data/droplet/secrets` all sit on the encrypted LV. FAILs here mean the box predates WARP-232 provisioning |
 | `rest.usb-luks` (R-06) | SKIP | no USB mounts on the bench box by default |
-| `transit.pg.plaintext-rejected` (T-01) | FAIL | `db` is stock `pgvector/pgvector:pg16` — no `ssl=on`, `sslmode=disable` accepted |
-| `transit.pg.tls13` (T-02) | FAIL | server has no TLS to negotiate |
-| `transit.pg.scram` (T-03) | PASS | PG16 defaults `password_encryption=scram-sha-256` |
-| `transit.redis.plaintext-refused` (T-04) | FAIL | `cache` runs `redis-server --requirepass` only — 6379 is plaintext |
-| `transit.redis.tls` (T-05) | SKIP | no tls-port until WARP-234 |
-| `transit.mqtt.plaintext-closed` (T-06) | FAIL | `docker/mosquitto.conf` = `listener 1883` + password file; transport is plaintext |
-| `transit.mqtt.mtls-required` (T-07) | SKIP | no 8883 listener until WARP-235 |
-| `transit.mesh.plain-http-refused` (T-08) | FAIL | orchestrator/ai-gateway/mcp-server speak plain HTTP (WARP-236 open) |
-| `transit.edge.tls-policy` (T-09) | PASS | `docker/nginx.conf` — TLSv1.2/1.3 only, HIGH ciphers |
-| `transit.pcap.canary` (T-10) | FAIL | canary visible on the wire in pg/redis/MQTT hops |
+| `transit.pg.plaintext-rejected` (T-01) | PASS | WARP-233: `hostssl`-only `docker/postgres/pg_hba.conf` — plaintext TCP hits the terminal reject. On a FIPS-mode box (`DROPLET_FIPS_MODE=1`) the probe records SKIP: `pg_hba.fips.conf` deliberately tolerates plaintext+SCRAM on the private container bridge (P1011 decision A, WARP-318) |
+| `transit.pg.tls13` (T-02) | PASS | WARP-233: `ssl=on` + `ssl_min_protocol_version=TLSv1.3` with the WARP-236 internal-CA `db` bundle as the server cert |
+| `transit.pg.scram` (T-03) | PASS | WARP-233 pins `password_encryption=scram-sha-256` as an explicit server flag (was the PG16 default) |
+| `transit.redis.plaintext-refused` (T-04) | PASS | WARP-234: the plaintext listener is gone (`--port 0`) — 6379 refuses connections |
+| `transit.redis.tls` (T-05) | PASS | WARP-234: TLS 1.3-only listener on 6380 (WARP-236 internal-CA `cache` leaf), authenticated PING as the ping-only `default` ACL user |
+| `transit.mqtt.plaintext-closed` (T-06) | PASS | WARP-235 landed: no 1883 listener — `docker/mosquitto.conf` is a single mTLS listener on :8883 |
+| `transit.mqtt.mtls-required` (T-07) | PASS | WARP-235 landed: `require_certificate true` — a certless publish is refused at the TLS handshake |
+| `transit.mesh.plain-http-refused` (T-08) | FAIL | probes `orchestrator:3000` + `ai-gateway:8000` — the hops WARP-236 mesh mTLS is meant to protect. Both still accept plain HTTP because `DROPLET_INTERNAL_TLS=1` is never set and the ai-gateway listener is unwired. (`mcp-server:9090` and `web-dashboard:3001` are deliberately NOT probed: they are by-design plain — JWT-gated / nginx user plane) |
+| `transit.edge.tls-policy` (T-09) | PASS | `docker/nginx/nginx.conf` — TLSv1.2/1.3 only, HIGH ciphers |
+| `transit.pcap.canary` (T-10) | FAIL | canary visible on the wire in the mesh HTTP hops — pg/redis/MQTT are all TLS (WARP-233/234/235); the dormant service-to-service mesh mTLS is the remaining exposure (see T-08) |
+
+A **fully stopped stack reads SKIP** (`container-not-running:<service>`) on
+every exec-based transit probe — never PASS. Start the stack before a
+verification pass you intend to file as evidence.
 
 ## Filing blockers
 

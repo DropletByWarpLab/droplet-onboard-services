@@ -41,7 +41,7 @@ describe("decommission_ap (WARP-446)", () => {
     );
     const r = await decommissionAp.handler({ mac: "B8:27:EB:00:00:01" }, ctxWith(post));
     expect(post).toHaveBeenCalledWith(
-      "/api/aps/B8:27:EB:00:00:01/decommission",
+      "/api/aps/B8%3A27%3AEB%3A00%3A00%3A01/decommission",
       undefined,
     );
     expect(r.ok).toBe(true);

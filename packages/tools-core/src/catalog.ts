@@ -41,6 +41,8 @@ export type ToolDomain =
   | "email"
   | "memory"
   | "pm"
+  | "erp"
+  | "business"
   | "system";
 
 export interface ToolCatalogEntry {
@@ -147,6 +149,13 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "pm_get_work_item",
     "pm_search_work_items",
   ],
+  erp: [
+    "erp_get_schedule_today",
+    "erp_find_patient",
+    "erp_get_ar_summary",
+    "erp_schedule_appointment",
+  ],
+  business: ["business_profile_get"],
   system: ["get_system_health", "list_drives", "list_storage_pools"],
 };
 
@@ -262,6 +271,13 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   pm_list_work_items: "See the tasks in a project",
   pm_get_work_item: "See the full details of one task",
   pm_search_work_items: "Search your tasks",
+  // ERP (Eaglesoft practice-management integration)
+  erp_get_schedule_today: "See the day's appointment schedule from your practice software",
+  erp_find_patient: "Look up a patient in your practice software",
+  erp_get_ar_summary: "See what patients still owe at a glance",
+  erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Business (business-knowledge profile)
+  business_profile_get: "Look up what Droplet knows about your business",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

@@ -79,6 +79,7 @@ vi.mock("../config.js", () => ({
 
 import { ncDeleteAppPassword } from "../services/nextcloud.client.js";
 import { publish } from "../services/mqtt.service.js";
+import { cacheGet, cacheSet } from "../services/cache.service.js";
 import {
   createDeviceClientsRouter,
   createDeviceSelfRevokeRouter,
@@ -89,6 +90,8 @@ import type { RecordParams } from "../services/activity.service.js";
 
 const mockNcDelete = vi.mocked(ncDeleteAppPassword);
 const mockPublish = vi.mocked(publish);
+const mockCacheGet = vi.mocked(cacheGet);
+const mockCacheSet = vi.mocked(cacheSet);
 
 // WARP-237: capture the self-revoke audit row.
 const recordedRevoke: RecordParams[] = [];
@@ -357,5 +360,148 @@ describe("DELETE /api/devices/clients/:id — Basic-auth device self-revoke (WAR
 
     expect(res.status).toBe(404);
     expect(mockNcDelete).not.toHaveBeenCalled();
+  });
+
+  it("401s undecryptable stored ciphertext (tamper / key mismatch) like any credential failure", async () => {
+    // decryptSecret's mock throws for anything not "enc:"-prefixed.
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ ncAppPassword: "corrupt-ciphertext" }),
+    );
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Invalid device credentials" });
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-1030 — the Basic branch is an unauthenticated credential oracle;
+// brute-force protection must sit in front of the verify.
+describe("DELETE /api/devices/clients/:id — Basic-path rate limiting (WARP-1030)", () => {
+  it("429s when the per-IP bucket is exhausted, before any DB lookup", async () => {
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key.startsWith("ratelimit:revoke:ip:") ? 20 : undefined,
+    );
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(429);
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("429s when the per-target bucket is exhausted (rotating-IP attacker)", async () => {
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key === "ratelimit:revoke:target:dc-1" ? 10 : undefined,
+    );
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(429);
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("counts failed attempts against both buckets", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "wrong-password"));
+
+    const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
+    expect(bumped).toContain("ratelimit:revoke:ip:::ffff:127.0.0.1");
+    expect(bumped).toContain("ratelimit:revoke:target:dc-1");
+  });
+
+  it("a legitimate single revoke is unaffected", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ revoked: "dc-1" });
+  });
+
+  it("does not rate-limit the session-cookie path", async () => {
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key.startsWith("ratelimit:revoke:") ? 999 : undefined,
+    );
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp("owner-1")).delete(
+      "/api/devices/clients/dc-1",
+    );
+
+    expect(res.status).toBe(200);
+  });
+});
+
+// WARP-1138 — the per-IP bucket key must come from proxy-aware `req.ip`
+// (the auth.ts callerIpFromReq standard, WARP-579), never the raw
+// client-controlled X-Forwarded-For header: rotating that header used to
+// mint a fresh `revoke:ip:<forged>` bucket per request, zeroing the limit.
+describe("DELETE /api/devices/clients/:id — forged X-Forwarded-For cannot mint fresh per-IP buckets (WARP-1138)", () => {
+  it("still 429s an exhausted per-IP bucket under rotating forged X-Forwarded-For values", async () => {
+    // Only the socket-derived bucket is exhausted; any XFF-derived key
+    // would read as a fresh bucket and let the request through.
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key === "ratelimit:revoke:ip:::ffff:127.0.0.1" ? 20 : undefined,
+    );
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const app = makeApp();
+    for (const forged of ["6.6.6.6", "7.7.7.7", "8.8.8.8"]) {
+      const res = await request(app)
+        .delete("/api/devices/clients/dc-1")
+        .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+        .set("X-Forwarded-For", forged);
+      expect(res.status).toBe(429);
+    }
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("bumps the req.ip-keyed bucket, never an attacker-named one", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+      .set("X-Forwarded-For", "6.6.6.6");
+
+    const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
+    expect(bumped).toContain("ratelimit:revoke:ip:::ffff:127.0.0.1");
+    expect(bumped.some((k) => String(k).includes("6.6.6.6"))).toBe(false);
+  });
+
+  it("an empty X-Forwarded-For does not collapse callers into a shared empty-key bucket", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+      .set("X-Forwarded-For", "");
+
+    const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
+    expect(bumped).toContain("ratelimit:revoke:ip:::ffff:127.0.0.1");
+    expect(bumped).not.toContain("ratelimit:revoke:ip:");
   });
 });

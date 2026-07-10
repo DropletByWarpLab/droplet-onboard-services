@@ -1,0 +1,7 @@
+# Opt-in local hooks — CI enforces the same gates regardless (WARP-243).
+# Install once per clone:  pipx install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

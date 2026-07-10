@@ -95,6 +95,13 @@ const EXPECTED_TOOL_NAMES = [
   "pm_list_work_items",
   "pm_list_workspaces",
   "pm_search_work_items",
+  // WARP-1094 — ERP-connector (Eaglesoft) tools
+  "erp_get_schedule_today",
+  "erp_find_patient",
+  "erp_get_ar_summary",
+  "erp_schedule_appointment",
+  // WARP-1120 — business-knowledge layer (read-only Tier 1)
+  "business_profile_get",
 ];
 
 describe("TOOLS registry", () => {
@@ -124,6 +131,18 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
     expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
+    // WARP-1094 — ERP-connector (Eaglesoft). The three reads are Read-tier;
+    // erp_schedule_appointment is Write-tier (every ERP write hits a live
+    // third-party PMS through the confirmed outbox pipeline, brief §11.6).
+    expect(TOOLS.get("erp_get_schedule_today")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("erp_get_schedule_today")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("erp_find_patient")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("erp_get_ar_summary")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("erp_schedule_appointment")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("erp_schedule_appointment")?.requiresConfirmation).toBe(true);
+    // WARP-1120 — business_profile_get is a Tier-1 read (no write, no confirm).
+    expect(TOOLS.get("business_profile_get")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_profile_get")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

@@ -61,8 +61,10 @@ export function ProviderKeyForm({
     <div className="px-4 py-3">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2.5">
-          <Key size={16} className="text-label-secondary" />
-          <h3 className="type-headline text-label-primary">{label}</h3>
+          <Key size={16} style={{ color: "var(--text-muted)" }} />
+          <h3 className="type-headline" style={{ color: "var(--text)" }}>
+            {label}
+          </h3>
         </div>
         {hasKey && (
           <div className="flex items-center gap-2">
@@ -71,7 +73,7 @@ export function ProviderKeyForm({
             </span>
             <button
               onClick={() => setConfirmingDelete(true)}
-              className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
+              className="p-1.5 rounded-full text-[var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.1)] transition-colors"
               aria-label="Delete key"
             >
               <Trash2 size={14} />
@@ -80,25 +82,31 @@ export function ProviderKeyForm({
         )}
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex items-center gap-2">
         <input
           type="password"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder={hasKey ? "Replace existing key..." : "Paste your API key..."}
-          className="dp-input !rounded-sm"
+          className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
         />
         <button
           onClick={handleSave}
           disabled={saving || !apiKey.trim()}
-          className="dp-btn-primary type-subheadline !min-h-[40px]"
+          className="btn primary"
         >
           {saving ? "Saving..." : "Save"}
         </button>
       </div>
 
       {error && (
-        <p className="mt-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+        <p className="mt-2 type-footnote text-[#ef4444] bg-[rgba(239,68,68,0.1)] rounded-[var(--radius-input)] px-3 py-2">
           {error}
         </p>
       )}

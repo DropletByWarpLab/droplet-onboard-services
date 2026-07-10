@@ -1,0 +1,37 @@
+name: release-scripts-tests
+
+# WARP-1062 (audit item D, WARP-245 follow-up) — PR-lane coverage for the
+# release scripts: the SBOM aggregator (aggregate-sboms.py) and the release
+# manifest generator (gen-release-manifest.py). Their pytest suites previously
+# ran ONLY inside publish-release.yml, which triggers on push to main — so a
+# PR that broke SBOM aggregation merged green and the breakage surfaced at
+# release time. This runs the exact same command as the publish gate
+# ("Test release manifest generator" step) in the PR lane.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/release/**"
+      - ".github/workflows/release-scripts-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/release/**"
+      - ".github/workflows/release-scripts-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: release-scripts-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-scripts:
+    runs-on: ubuntu-latest
+    # Pure-stdlib fixtures + pytest; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run release-script tests (SBOM aggregate + manifest generator)
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pytest scripts/release/ -q

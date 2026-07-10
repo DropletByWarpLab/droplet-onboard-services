@@ -37,6 +37,6 @@ jobs:
     # ceiling for a sub-minute suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run security regression suite
         run: ./scripts/test-security.sh

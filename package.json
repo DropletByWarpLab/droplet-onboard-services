@@ -23,6 +23,8 @@
     "test:backup": "bash tests/device-backup.test.sh",
     "test:restic-backup": "bash tests/restic-backup.test.sh",
     "test:verify-encryption": "bash tests/verify-encryption.test.sh",
+    "test:luks": "bash tests/luks2-data-partition.test.sh",
+    "test:usb-enroll": "bash tests/usb-luks-enroll.test.sh",
     "test:openwrt-attach": "bash tests/openwrt-attach-firewall.test.sh",
     "test:storage-pool": "bash tests/storage-pool-destroy-superblock.test.sh",
     "test:integration": "cd tests && npm run test:docker",

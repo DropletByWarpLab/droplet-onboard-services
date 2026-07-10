@@ -49,11 +49,11 @@ INTERNAL_CA_FORCE=1 internal_ca_issue orchestrator "DNS:host.docker.internal"
 fp3="$(openssl x509 -in "$B/cert.pem" -noout -fingerprint)"
 [ "$fp1" != "$fp3" ] || fail "force did not reissue"
 
-# 4. issue_all covers the canonical list incl. broker + frigate
+# 4. issue_all covers the canonical list incl. broker + frigate + cache (WARP-234)
 internal_ca_issue_all
 for svc in orchestrator gateway ai-gateway mcp-server voice-io email-indexer rag-eval \
            ops-console file-indexer routing switch oled-display matter-controller \
-           camera-discovery broker frigate; do
+           camera-discovery broker frigate cache nextcloud db; do
   [ -s "$WORK/data/secrets/service-tls/$svc/cert.pem" ] || fail "issue_all missed $svc"
 done
 # 5. rotate-internal-certs.sh --service reissues exactly that bundle

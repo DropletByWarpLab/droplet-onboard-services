@@ -63,6 +63,29 @@ describe("activityRowsToCsv (WARP-246)", () => {
     },
   );
 
+  // WARP-1031 — Excel/Sheets trim leading whitespace before deciding a
+  // cell is a formula, so a leader preceded by space/tab/CR is still
+  // executable and must be neutralized too (OWASP CSV-injection).
+  it.each([
+    ["tab", "\t=cmd|' /C calc'!A0"],
+    ["space", " =2+5|dangerous"],
+    ["double space", "  @SUM(1+9)"],
+    ["CR", "\r=1+1"],
+    ["tab then minus", "\t-2+3"],
+  ])(
+    "neutralizes a %s-prefixed formula leader (WARP-1031)",
+    (_label, cell) => {
+      const csv = activityRowsToCsv([makeRow({ what: cell })]);
+      expect(csv).toContain(`'${cell}`);
+    },
+  );
+
+  it("leaves whitespace-led plain text un-neutralized", () => {
+    const csv = activityRowsToCsv([makeRow({ what: " hello world" })]);
+    expect(csv).toContain(", hello world,");
+    expect(csv).not.toContain("' hello world");
+  });
+
   it("serializes null sub as an empty cell", () => {
     const csv = activityRowsToCsv([makeRow({ sub: null })]);
     const row = csv.split("\r\n")[1]!;

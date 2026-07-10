@@ -22,7 +22,10 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
-import { actorFromRequest } from "../services/activity.service.js";
+import {
+  actorFromRequest,
+  type ActivityActor,
+} from "../services/activity.service.js";
 import { executeScene } from "../services/scene-runner.service.js";
 import {
   isSupportedRrule,
@@ -124,6 +127,10 @@ export interface MatterDispatcher {
   sendCommand(
     nodeId: string,
     command: string,
+    // WARP-1010: per-command activity rows carry the scene's actor
+    // (the authed runner, or ai for the schedule ticker) instead of a
+    // hardcoded {ai, null}. Position mirrors sendMatterCommand.
+    actor: ActivityActor,
     args?: Record<string, unknown>,
   ): Promise<{ status: string; result?: unknown }>;
 }

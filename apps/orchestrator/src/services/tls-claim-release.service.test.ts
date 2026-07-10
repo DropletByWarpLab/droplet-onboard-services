@@ -5,9 +5,10 @@ import {
   releaseFromHq,
   buildClaimNameMessage,
   buildReleaseMessage,
+  parseClaimConflict,
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
-  CLAIM_RESULT_RENAME_UNSUPPORTED,
+  CLAIM_RESULT_ALREADY_NAMED,
   CLAIM_RESULT_NOT_REGISTERED,
   CLAIM_RESULT_INVALID,
   CLAIM_RESULT_FAILED,
@@ -252,16 +253,79 @@ describe("claimBoxName", () => {
   });
 
   // -------------------------------------------------------------------------
-  // WARP-984 (box half) — the 409 body discriminator. A worker that implements
-  // the rename semantics sends `reason: "name_taken" | "device_already_named"`
-  // (+ `current_name`); the box maps device_already_named to a DISTINCT
-  // RENAME_UNSUPPORTED outcome so the wizard can say "this box already holds a
-  // name — factory reset releases it" instead of the false "that name is taken".
-  // Absent / unparseable reason ⇒ EXACTLY today's NAME_TAKEN (fail-open to old
-  // workers).
+  // WARP-1109 (box half) — the 409 body discriminator. HQ hides TWO distinct
+  // conflicts behind a 409:
+  //   (a) name held by ANOTHER device            → NAME_TAKEN (+ suggestions)
+  //   (b) THIS device already holds a DIFFERENT   → ALREADY_NAMED (+ current_name)
+  //       name (rename is now supported, so the wizard offers the rename flow
+  //       instead of the false "that name is taken")
+  //
+  // The coupled fleet-hq change adds a MACHINE-READABLE `code` field
+  // (`code: "already_named" | "name_taken"`). The box PREFERS `code`, falls back
+  // to the legacy `reason` discriminator (`device_already_named` | `name_taken`,
+  // shipped by an interim worker), and finally falls back to the STABLE distinct
+  // message text so this is forward-compatible whether or not HQ's `code` is
+  // deployed. Absent / unparseable ⇒ NAME_TAKEN (fail-open to old workers).
   // -------------------------------------------------------------------------
 
-  it("409 reason 'device_already_named' → RENAME_UNSUPPORTED carrying current_name (WARP-984)", async () => {
+  it("409 code 'already_named' → ALREADY_NAMED carrying current_name (preferred HQ code)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"device already named \\"scruceru\\" (rename not supported yet)","code":"already_named","current_name":"scruceru"}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_ALREADY_NAMED);
+    expect(result.authoritative).toBe(true);
+    expect(result.currentName).toBe("scruceru");
+  });
+
+  it("409 code 'name_taken' → NAME_TAKEN with suggestions (preferred HQ code)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"name \\"studio\\" is taken; try: studio-2","code":"name_taken","suggestions":["studio-2"]}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
+    expect(result.authoritative).toBe(true);
+    expect(result.suggestions).toEqual(["studio-2"]);
+  });
+
+  it("409 with NO code but the stable already-named MESSAGE → ALREADY_NAMED + current_name (message fallback)", async () => {
+    // The coupled HQ `code` isn't deployed yet — discriminate on the stable
+    // distinct message text so the wizard is correct today.
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"device already named \\"scruceru\\" (rename not supported yet)"}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_ALREADY_NAMED);
+    // current_name is recovered from the quoted name in the stable message.
+    expect(result.currentName).toBe("scruceru");
+  });
+
+  it("409 with the taken MESSAGE (name is taken; try:) → NAME_TAKEN (message fallback)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"name \\"studio\\" is taken; try: studio-2, studio-hq","suggestions":["studio-2","studio-hq"]}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
+    expect(result.suggestions).toEqual(["studio-2", "studio-hq"]);
+  });
+
+  it("still honors the legacy reason 'device_already_named' discriminator → ALREADY_NAMED (back-compat)", async () => {
     const hq = makeHqClient({
       claimName: vi.fn(async () => {
         throw new Error(
@@ -270,36 +334,21 @@ describe("claimBoxName", () => {
       }),
     });
     const result = await claimBoxName("studio", makeClaimDeps({ hq }));
-    expect(result.outcome).toBe(CLAIM_RESULT_RENAME_UNSUPPORTED);
-    expect(result.authoritative).toBe(true);
+    expect(result.outcome).toBe(CLAIM_RESULT_ALREADY_NAMED);
     expect(result.currentName).toBe("scruceru");
   });
 
-  it("409 reason 'device_already_named' WITHOUT current_name → RENAME_UNSUPPORTED, currentName undefined", async () => {
+  it("409 code 'already_named' WITHOUT current_name → ALREADY_NAMED, currentName undefined", async () => {
     const hq = makeHqClient({
       claimName: vi.fn(async () => {
         throw new Error(
-          'HQ /api/issuance/claim-name returned 409: {"reason":"device_already_named"}',
+          'HQ /api/issuance/claim-name returned 409: {"code":"already_named"}',
         );
       }),
     });
     const result = await claimBoxName("studio", makeClaimDeps({ hq }));
-    expect(result.outcome).toBe(CLAIM_RESULT_RENAME_UNSUPPORTED);
+    expect(result.outcome).toBe(CLAIM_RESULT_ALREADY_NAMED);
     expect(result.currentName).toBeUndefined();
-  });
-
-  it("409 reason 'name_taken' (explicit discriminator) → NAME_TAKEN with suggestions", async () => {
-    const hq = makeHqClient({
-      claimName: vi.fn(async () => {
-        throw new Error(
-          'HQ /api/issuance/claim-name returned 409: {"error":"name taken","reason":"name_taken","suggestions":["studio-2"]}',
-        );
-      }),
-    });
-    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
-    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
-    expect(result.authoritative).toBe(true);
-    expect(result.suggestions).toEqual(["studio-2"]);
   });
 
   it("409 with NO body at all → NAME_TAKEN (fail-open to old workers)", async () => {
@@ -391,6 +440,38 @@ describe("claimBoxName", () => {
     expect(result.outcome).toBe(CLAIM_RESULT_NOT_REGISTERED);
     expect(hq.challenge).not.toHaveBeenCalled();
     expect(hq.claimName).not.toHaveBeenCalled();
+  });
+
+  // WARP-978 — HQ_ISSUANCE_URL empty (dev/CI, or a reflashed box before the
+  // baked default lands): the real HQ client's base URL is "", so hq.challenge
+  // would build a RELATIVE "/api/issuance/order/challenge" and throw
+  // `TypeError: Failed to parse URL`. Short-circuit BEFORE touching HQ so the
+  // name-claim degrades to a non-authoritative NOT_REGISTERED instead of
+  // crashing the rename flow.
+  it("HQ not configured (hqConfigured=false) → NOT_REGISTERED, never reaches HQ, never throws", async () => {
+    const hq = makeHqClient();
+    let result: { outcome: string; authoritative: boolean } | undefined;
+    await expect(
+      (async () => {
+        result = await claimBoxName(
+          "studio",
+          makeClaimDeps({ hq, hqConfigured: false }),
+        );
+      })(),
+    ).resolves.toBeUndefined();
+    expect(result?.outcome).toBe(CLAIM_RESULT_NOT_REGISTERED);
+    expect(result?.authoritative).toBe(false);
+    expect(hq.challenge).not.toHaveBeenCalled();
+    expect(hq.claimName).not.toHaveBeenCalled();
+  });
+
+  it("hqConfigured omitted (undefined) preserves the existing HQ-reaching posture", async () => {
+    // Backward-compat: existing callers/tests never pass hqConfigured. An absent
+    // flag must NOT gate — the claim proceeds to HQ exactly as before.
+    const hq = makeHqClient();
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_CLAIMED);
+    expect(hq.challenge).toHaveBeenCalledTimes(1);
   });
 
   it("a challenge/sign network failure → FAILED, never throws (issuance is never crashed)", async () => {
@@ -508,5 +589,69 @@ describe("releaseFromHq", () => {
     ];
     expect(req.nonce).toBe(NONCE);
     expect(hq.challenge).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseClaimConflict — code → reason → message-text precedence (WARP-1109)
+// ---------------------------------------------------------------------------
+
+function conflictErr(body: string): Error {
+  return new Error(`HQ /api/issuance/claim-name returned 409: ${body}`);
+}
+
+describe("parseClaimConflict (discriminator precedence)", () => {
+  it("prefers the machine-readable `code` over everything", () => {
+    const c = parseClaimConflict(
+      conflictErr('{"code":"already_named","current_name":"scruceru"}'),
+    );
+    expect(c.reason).toBe("already_named");
+    expect(c.currentName).toBe("scruceru");
+  });
+
+  it("maps code 'name_taken' to name_taken", () => {
+    const c = parseClaimConflict(conflictErr('{"code":"name_taken"}'));
+    expect(c.reason).toBe("name_taken");
+  });
+
+  it("falls back to the legacy `reason` when no `code` is present", () => {
+    const c = parseClaimConflict(
+      conflictErr('{"reason":"device_already_named","current_name":"warp"}'),
+    );
+    expect(c.reason).toBe("already_named");
+    expect(c.currentName).toBe("warp");
+  });
+
+  it("falls back to the stable already-named MESSAGE text (no code, no reason)", () => {
+    const c = parseClaimConflict(
+      conflictErr(
+        '{"error":"device already named \\"scruceru\\" (rename not supported yet)"}',
+      ),
+    );
+    expect(c.reason).toBe("already_named");
+    // The quoted current name is recovered from the message.
+    expect(c.currentName).toBe("scruceru");
+  });
+
+  it("falls back to the stable taken MESSAGE text (…is taken; try:)", () => {
+    const c = parseClaimConflict(
+      conflictErr('{"error":"name \\"studio\\" is taken; try: studio-2"}'),
+    );
+    expect(c.reason).toBe("name_taken");
+  });
+
+  it("returns reason:null for a body with no discriminator at all (fail-open)", () => {
+    const c = parseClaimConflict(conflictErr('{"error":"conflict"}'));
+    expect(c.reason).toBeNull();
+  });
+
+  it("returns reason:null for a non-JSON body (fail-open)", () => {
+    const c = parseClaimConflict(conflictErr("{not json"));
+    expect(c.reason).toBeNull();
+  });
+
+  it("ignores an unknown code value (forward-compatible fail-open)", () => {
+    const c = parseClaimConflict(conflictErr('{"code":"some_future_code"}'));
+    expect(c.reason).toBeNull();
   });
 });

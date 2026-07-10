@@ -1,0 +1,82 @@
+# Custom Droplet Semgrep rules — WARP-243.
+#
+# Scope notes:
+#   - Banned-crypto rules deliberately overlap scripts/test-fips.sh
+#     (WARP-229): test-fips is the registry-backed primary gate with the
+#     fips:allowed escape hatch; these rules are a second engine so the
+#     security lane doesn't silently regress if the bash lint is refactored.
+#     Escape hatch here: `// nosemgrep: droplet.banned-hash-node` on the
+#     line (requires a registered FIPS exception per
+#     docs/security/fips-exceptions.md — reviewers enforce that pairing).
+#   - TLS-verification and injection rules have no test-fips equivalent.
+rules:
+  - id: droplet.banned-hash-node
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      MD5/SHA-1 are banned algorithms (FIPS 140-3 — see
+      docs/security/fips-allowed-algorithms.md). Use SHA-256+. If this use
+      is non-cryptographic and unavoidable, register an exception in
+      docs/security/fips-exceptions.md and annotate with a fips:allowed
+      comment AND a nosemgrep comment referencing this rule id.
+    pattern-either:
+      - pattern: $CRYPTO.createHash("md5")
+      - pattern: $CRYPTO.createHash("sha1")
+      - pattern: $CRYPTO.createHash('md5')
+      - pattern: $CRYPTO.createHash('sha1')
+
+  - id: droplet.banned-hash-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      MD5/SHA-1 are banned algorithms (FIPS 140-3 — see
+      docs/security/fips-allowed-algorithms.md). Use hashlib.sha256+. For a
+      registered exception (e.g. RTSP digest auth), add fips:allowed AND
+      nosemgrep comments.
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: droplet.no-tls-verify-disable-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Never disable TLS certificate verification in shipped code — the
+      appliance promises verified channels for all egress
+      (docs/SECURITY.md#egress). Pin a CA bundle instead.
+    pattern-either:
+      - pattern: requests.$METHOD(..., verify=False, ...)
+      - pattern: httpx.$METHOD(..., verify=False, ...)
+      - pattern: httpx.Client(..., verify=False, ...)
+      - pattern: httpx.AsyncClient(..., verify=False, ...)
+
+  - id: droplet.no-tls-verify-disable-node
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Never disable TLS certificate verification in shipped code
+      (docs/SECURITY.md#egress). Use a pinned CA (NODE_EXTRA_CA_CERTS or
+      the https.Agent ca option) instead.
+    pattern-either:
+      - pattern: |
+          { ..., rejectUnauthorized: false, ... }
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  - id: droplet.no-child-process-shell-interpolation
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Shell-interpolated exec() is command injection waiting to happen. Use
+      execFile()/spawn() with an argv array.
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(`...${$X}...`, ...)
+          - pattern: exec(`...${$X}...`, ...)
+
+  - id: droplet.no-eval
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Dynamic code evaluation is banned in shipped code.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)

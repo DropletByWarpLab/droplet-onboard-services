@@ -37,6 +37,6 @@ jobs:
     name: Every service and app has a test workflow
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run CI coverage audit
         run: bash scripts/check-ci-coverage.sh

@@ -51,11 +51,29 @@ autoinstall:
     install-server: true
     allow-pw: false
 
-  # Storage: use the whole target disk with the default LVM layout. The flasher
-  # (`droplet-image flash`) chose the device; subiquity lays it out.
+  # Storage (WARP-232): explicit curtin config instead of the implicit `lvm`
+  # layout. The root LV is BOUNDED (64G) so the VG keeps free extents for the
+  # LUKS2 data LV that scripts/host/droplet-luks-provision.sh creates on first
+  # boot (setup.sh Phase 1.5) and seals to the TPM. An ext4 root can't shrink
+  # online — this split is why the partition layout is a build-time change.
+  # The data LV is deliberately NOT declared here: setup.sh owns it (ADR-020
+  # §D1 — setup.sh is the single source of provisioning truth).
   storage:
-    layout:
-      name: lvm
+    config:
+      - { type: disk, id: disk0, ptable: gpt, wipe: superblock-recursive,
+          match: { size: largest }, grub_device: false }
+      - { type: partition, id: part-esp,  device: disk0, size: 1G, flag: boot,
+          grub_device: true }
+      - { type: partition, id: part-boot, device: disk0, size: 2G }
+      - { type: partition, id: part-pv,   device: disk0, size: -1 }
+      - { type: format, id: fmt-esp,  volume: part-esp,  fstype: fat32 }
+      - { type: format, id: fmt-boot, volume: part-boot, fstype: ext4 }
+      - { type: lvm_volgroup, id: vg0, name: ubuntu-vg, devices: [ part-pv ] }
+      - { type: lvm_partition, id: lv-root, volgroup: vg0, name: ubuntu-lv, size: 64G }
+      - { type: format, id: fmt-root, volume: lv-root, fstype: ext4 }
+      - { type: mount, id: mount-root, device: fmt-root, path: / }
+      - { type: mount, id: mount-boot, device: fmt-boot, path: /boot }
+      - { type: mount, id: mount-esp,  device: fmt-esp,  path: /boot/efi }
 
   # Base packages the first-boot clone + setup.sh need before Docker is
   # installed by setup.sh itself. Kept minimal — setup.sh owns the rest.

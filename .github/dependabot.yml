@@ -1,0 +1,70 @@
+# Dependabot version updates — WARP-243.
+#
+# npm: the root lockfile covers all workspaces (apps/*, services/*,
+# packages/*); tests/ has its own lockfile. pip: every requirements*.txt
+# directory (13). github-actions keeps workflow pins fresh. The docker
+# ecosystem is intentionally OMITTED: base-image CVEs are gated by the
+# Trivy step in docker-build.yml, and 20 Dockerfile update PRs/week is
+# noise without that signal.
+#
+# NOTE: Dependabot ALERTS + SECURITY updates are separate one-time repo
+# settings — see docs/SECURITY.md#dependabot for the enable commands.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: npm
+    directory: "/tests"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 2
+    groups:
+      npm-tests-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: pip
+    directories:
+      - "/services/ai-gateway"
+      - "/services/camera-discovery"
+      - "/services/device-identity-svc"
+      - "/services/email-indexer"
+      - "/services/file-indexer"
+      - "/services/fleet-agent"
+      - "/services/oled-display"
+      - "/services/ops-console"
+      - "/services/rag-eval"
+      - "/services/routing"
+      - "/services/switch"
+      - "/services/voice-io"
+      - "/tests/retrieval-eval/ragas"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    groups:
+      pip-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 3
+    labels: ["dependencies"]

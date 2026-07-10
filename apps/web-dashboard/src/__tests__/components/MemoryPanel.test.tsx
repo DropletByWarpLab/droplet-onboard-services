@@ -141,6 +141,42 @@ describe("MemoryPanel", () => {
     });
   });
 
+  it("offers the WARP-1120 Business category (D-9) and adds a Business fact", async () => {
+    mockCreateMemoryFact.mockResolvedValueOnce({
+      fact: {
+        ...FACT,
+        id: "f3",
+        category: "Business",
+        fact: "Invoices go out on the 1st",
+      },
+    });
+    render(<MemoryPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /memory/i }));
+    await waitFor(() => screen.getByText("Prefers recaps under 200 words"));
+
+    const categorySelect = screen.getByLabelText(/category/i);
+    expect(
+      within(categorySelect as HTMLElement).getByRole("option", {
+        name: "Business",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(categorySelect, { target: { value: "Business" } });
+    fireEvent.change(screen.getByLabelText(/new fact/i), {
+      target: { value: "Invoices go out on the 1st" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Invoices go out on the 1st")).toBeInTheDocument();
+    });
+    expect(mockCreateMemoryFact).toHaveBeenCalledWith({
+      category: "Business",
+      fact: "Invoices go out on the 1st",
+      audience: "family",
+    });
+  });
+
   it("shows an empty state when no facts exist", async () => {
     mockListMemoryFacts.mockResolvedValue({ facts: [] });
     render(<MemoryPanel />);

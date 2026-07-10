@@ -78,6 +78,7 @@ import {
   findMatchingRecoveryCodeHash,
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
+import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
@@ -762,12 +763,14 @@ export function createPublicAuthRouter(
         update: {
           displayName: displayName || username,
           passwordHash,
-          email,
+          // WARP-233: dcv1 ciphertext + blind index (the login key lives on
+          // emailLookupHash; findUserByEmail resolves it case-insensitively).
+          ...emailWriteData(email),
         },
         create: {
           username,
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           nextcloudUsername: username,
           passwordHash,
           role: "owner" as any,
@@ -988,9 +991,10 @@ export function createPublicAuthRouter(
       // (anti-enumeration). A user without a passwordHash (service-only
       // principal, pre-first-login invitee) is treated identically — no
       // leak distinguishing "no account" from "account, no password".
-      const localUser = await prisma.user.findUnique({
-        where: { email: loginEmail },
-      });
+      // WARP-233: equality goes through the emailLookupHash blind index
+      // (email at rest is a dcv1 ciphertext; plaintext fallback covers
+      // pre-backfill rows).
+      const localUser = await findUserByEmail(prisma, loginEmail);
       // WARP (SCIM directory sync): a user the directory deactivated
       // (Okta SCIM `active:false` → `directoryStatus = DEACTIVATED`, a SOFT
       // disable, never a row delete) must be denied even if the row + hash
@@ -1728,16 +1732,19 @@ export function createPublicAuthRouter(
       });
 
       // Auto-login the invitee — same shape as /api/auth/login.
-      // WARP-171: preserve the pre-WARP-171 wire contract — "admin"
-      // invitee gets an "owner" session role (the original two-value
-      // semantics) — and add direct passthrough for the three new
-      // enum values an invite can now request explicitly.
+      // WARP-1051: the session role IS the canonical invite role. The old
+      // WARP-171 two-value promotion (admin invitee → "owner" session) made
+      // the accept path diverge from /auth/login (raw User.role) AND from
+      // the refresh path (WARP-116 re-derives from the DB row) — an invited
+      // admin held an "owner" session that silently downgraded to "admin"
+      // at the first token rotation, and an admin-minted admin invite
+      // yielded an owner session, defeating the ROLE_RANK_EXCEEDED cap on
+      // the create endpoint. Unknown/legacy values still collapse to
+      // "family" (fail-toward-least-privilege).
       const role: Role =
-        invite.role === "owner" || invite.role === "admin"
-          ? "owner"
-          : invite.role === "guest"
-            ? "guest"
-            : "family";
+        invite.role === "owner" || invite.role === "admin" || invite.role === "guest"
+          ? (invite.role as Role)
+          : "family";
 
       // WARP-485 round 2 — provision the local User row mapping this
       // Nextcloud identity to a local UUID BEFORE signing the JWT, so
@@ -1752,9 +1759,9 @@ export function createPublicAuthRouter(
       //
       // The User.role column uses the canonical Role enum value from
       // the invite (so DB-level RBAC matches the operator's intent on
-      // the create endpoint); the JWT session `role` keeps the legacy
-      // mapping above (admin invite → owner session) which existing
-      // routes still depend on.
+      // the create endpoint); since WARP-1051 the JWT session `role`
+      // carries the same canonical value, so the first session matches
+      // every subsequent login and refresh.
       // ADR-013 (PR #374): this email lands directly in User.email — the
       // case-sensitive unique-indexed login key. createInviteSchema already
       // normalizes new invites, but re-normalize here as defense in depth so
@@ -1786,13 +1793,13 @@ export function createPublicAuthRouter(
           // Also refresh `email` (the email-keyed login key) so a
           // re-acceptance always lands the correct login identifier.
           displayName: invite.displayName || invite.username,
-          email: inviteEmail,
+          ...emailWriteDataOrNull(inviteEmail),
           passwordHash,
         },
         create: {
           username: invite.username,
           displayName: invite.displayName || invite.username,
-          email: inviteEmail,
+          ...emailWriteDataOrNull(inviteEmail),
           nextcloudUsername: invite.username,
           passwordHash,
           role: invite.role as any, // canonical Role enum from the invite
@@ -2569,7 +2576,7 @@ export function createProtectedAuthRouter(
         where: { nextcloudUsername: username },
         update: {
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           passwordHash,
           // WARP-824: a re-issued temp password (idempotent retry, or an
           // operator re-creating the same account with a fresh temp secret)
@@ -2585,7 +2592,7 @@ export function createProtectedAuthRouter(
         create: {
           username,
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           nextcloudUsername: username,
           passwordHash,
           // WARP-1042: caller-selected role (rank-guarded above); was
@@ -2710,7 +2717,8 @@ export function createProtectedAuthRouter(
       if (prisma) {
         const data: Record<string, unknown> = {};
         if (displayName !== undefined) data.displayName = displayName;
-        if (email !== undefined) data.email = email;
+        // WARP-233: an email change re-encrypts + re-indexes atomically.
+        if (email !== undefined) Object.assign(data, emailWriteData(email));
         if (password !== undefined) data.passwordHash = await hashPassword(password);
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
@@ -2771,6 +2779,8 @@ export function createProtectedAuthRouter(
         // every live refresh token so the next /auth/refresh fails. Best-effort
         // — a missing local row (legacy NC-only account) just means there were
         // no JWT sessions to revoke.
+        let targetUserId: string | null = null;
+        let revoked = 0;
         if (prisma) {
           const row = await prisma.user.findUnique({
             where: { nextcloudUsername: req.params.username },
@@ -2779,8 +2789,28 @@ export function createProtectedAuthRouter(
           // WARP-247 — kill session RECORDS (access tokens die at the next
           // middleware check) as well as the refresh denylist (swept
           // internally by revokeAllSessions).
-          if (row) await revokeAllSessions(row.id);
+          if (row) {
+            targetUserId = row.id;
+            revoked = await revokeAllSessions(row.id);
+          }
         }
+        // WARP-1062 (audit item B): account disablement is a mandatory-emit
+        // privileged action — it revokes sessions too, yet was the one
+        // unaudited sibling of enable/revoke-sessions. Same row shape as the
+        // revoke-sessions emit below (WARP-237).
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-off",
+          what: "User disabled",
+          sub: req.params.username,
+          refs: {
+            username: req.params.username,
+            targetUserId,
+            sessionsRevoked: revoked,
+          },
+          actor: actorFromRequest(req),
+        });
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
         if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -2957,12 +2987,13 @@ export function createProtectedAuthRouter(
 
       // Privilege-escalation guard. `requireRole("owner","admin")` proved the
       // caller may issue invites, but NOT which role they may assign. Without
-      // this cap an `admin` could mint an `owner` invite, and the accept path
-      // grants an owner/admin invite an `owner` session role + Nextcloud
-      // `admin` group (see POST /auth/invites/accept/:token above) — a
-      // straight privilege escalation. Reject any assigned role that outranks
-      // the inviter's own; owner→owner is allowed, admin→owner is not. Fail
-      // closed if the role claim is somehow absent.
+      // this cap an `admin` could mint an `owner` invite — the accept path
+      // grants the invite's canonical role as the session role (WARP-1051)
+      // and an owner/admin invite still lands the Nextcloud `admin` group
+      // (see POST /auth/invites/accept/:token above) — a straight privilege
+      // escalation. Reject any assigned role that outranks the inviter's
+      // own; owner→owner is allowed, admin→owner is not. Fail closed if the
+      // role claim is somehow absent.
       const inviterRole = req.user?.role;
       if (!inviterRole || roleOutranks(parsed.data.role, inviterRole)) {
         res.status(403).json({

@@ -171,6 +171,11 @@ function createPrismaMock(seed: UserRow[] = []) {
     findUnique: vi.fn(async () => null),
   };
   self.user = {
+    // WARP-233 pre-backfill fallback probe from findUserByEmail: plaintext
+    // equality on rows without a blind index.
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      users.find((u: any) => u.email === where.email) ?? null,
+    ),
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       if (where.email !== undefined) {
         return users.find((u) => u.email === where.email) ?? null;

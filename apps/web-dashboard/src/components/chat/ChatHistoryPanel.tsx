@@ -463,7 +463,8 @@ export function ChatHistoryPanel({
         labelledBy={deleteHeadingId}
         maxWidth="sm"
       >
-        <div className="p-5">
+        {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+        <div>
           <h2 id={deleteHeadingId} className="type-headline mb-2">
             Delete this chat?
           </h2>
@@ -498,7 +499,7 @@ export function ChatHistoryPanel({
         labelledBy="move-chat-heading"
         maxWidth="sm"
       >
-        <div className="p-5">
+        <div>
           <h2 id="move-chat-heading" className="type-headline mb-2">
             Move chat to…
           </h2>
@@ -550,7 +551,7 @@ export function ChatHistoryPanel({
         labelledBy="delete-project-heading"
         maxWidth="sm"
       >
-        <div className="p-5">
+        <div>
           <h2 id="delete-project-heading" className="type-headline mb-2">
             Delete this project?
           </h2>

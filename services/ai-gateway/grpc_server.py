@@ -49,6 +49,10 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     # or the canonical name. Unknown ids fail closed with INVALID_ARGUMENT
     # rather than silently falling back to a default.
     _RERANK_SUPPORTED_MODELS = frozenset({"", "bge-reranker-base"})
+    # GWV-009: mirror the Rerank allowlist for EmbedText — an arbitrary model
+    # name would be handed to SentenceTransformer, which downloads any HF repo
+    # (unbounded egress + disk/memory), and mixed dimensions could corrupt pgvector.
+    _EMBED_SUPPORTED_MODELS = frozenset({"", "all-MiniLM-L6-v2"})
 
     def __init__(self, provider_router: ProviderRouter, scheduler: InferenceScheduler):
         self._router = provider_router
@@ -202,6 +206,12 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 return inference_pb2.EmbedResponse()
 
             model_name = request.model if request.HasField("model") else None
+            if model_name is not None and model_name not in self._EMBED_SUPPORTED_MODELS:
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"Unsupported embed model '{model_name}'. "
+                    f"Supported: {sorted(m for m in self._EMBED_SUPPORTED_MODELS if m)}",
+                )
 
             # Run the synchronous encode in a thread to keep the event loop responsive.
             loop = asyncio.get_running_loop()

@@ -1,5 +1,6 @@
 import mqtt, { MqttClient } from "mqtt";
 import { config } from "../config.js";
+import { mqttConnectOptions } from "../lib/internal-tls.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("mqtt");
@@ -17,7 +18,9 @@ const handlersByTopic = new Map<string, Set<TopicHandler>>();
 
 export async function connectMqtt(): Promise<void> {
   return new Promise((resolve, reject) => {
-    client = mqtt.connect(config.MQTT_BROKER);
+    // WARP-235: on mqtts:// brokers, present this service's client cert
+    // (identity = CN "orchestrator"); plain mqtt:// (dev) stays credential-free.
+    client = mqtt.connect(config.MQTT_BROKER, mqttConnectOptions(config.MQTT_BROKER));
 
     client.on("connect", () => {
       logger.info("Connected to MQTT broker");
