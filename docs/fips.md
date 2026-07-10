@@ -86,7 +86,8 @@ Every provider service refuses to start if FIPS is required but not active,
 and emits one structured log line when it is:
 
 ```sh
-# 1) The knob and derived vars are consistent:
+# 1) The knob and derived vars are consistent (OPENSSL_MODULES must NOT
+#    appear at all — WARP-1063):
 grep -E '^(DROPLET_FIPS_MODE|OPENSSL_CONF|DROPLET_FIPS_REQUIRED|OPENSSL_MODULES|NODE_OPTIONS)=' .env
 
 # 2) Each self-testing service logged its boot self-test. Since WARP-1063 a
