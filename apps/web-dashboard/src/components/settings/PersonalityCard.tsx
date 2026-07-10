@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 import { SafetyChip } from "@/components/email/SafetyChip";
+import { ToggleSwitch } from "@/components/smart-home/ToggleSwitch";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import {
@@ -216,7 +217,7 @@ export function PersonalityCard() {
                           setVerbosity(o.value);
                           touch();
                         }}
-                        className={`px-3 py-1.5 rounded-md type-footnote transition-colors duration-200 ease-smooth
+                        className={`px-3 py-1.5 min-h-[32px] rounded-md type-footnote transition-colors duration-200 ease-smooth
                           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
                           ${on ? "bg-surface-primary text-label-primary shadow-sm font-medium" : "text-label-secondary"}`}
                       >
@@ -226,30 +227,22 @@ export function PersonalityCard() {
                   })}
                 </div>
               </div>
-              <label className="flex items-center gap-2.5 cursor-pointer">
+              {/* The canonical design-system switch (smart-home/ToggleSwitch)
+                  — reused, not re-drawn, so on-state color and thumb motion
+                  stay cohesive with every other toggle on the dashboard. */}
+              <span className="flex items-center gap-2.5">
                 <span className="type-footnote text-label-secondary">
                   Use first names
                 </span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={useFirstNames}
-                  aria-label="Use first names"
-                  onClick={() => {
+                <ToggleSwitch
+                  on={useFirstNames}
+                  ariaLabel="Use first names"
+                  onToggle={() => {
                     setUseFirstNames((v) => !v);
                     touch();
                   }}
-                  className={`relative inline-flex h-[22px] w-9 shrink-0 rounded-full transition-colors duration-200 ease-smooth
-                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
-                    ${useFirstNames ? "bg-accent" : "bg-surface-secondary border border-separator"}`}
-                >
-                  <span
-                    aria-hidden
-                    className={`absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform duration-200 ease-smooth
-                      ${useFirstNames ? "translate-x-[16px]" : "translate-x-[2px]"}`}
-                  />
-                </button>
-              </label>
+                />
+              </span>
             </div>
 
             {/* Custom instructions */}
