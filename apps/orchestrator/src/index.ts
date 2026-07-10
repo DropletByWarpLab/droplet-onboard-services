@@ -31,6 +31,7 @@ import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
@@ -466,6 +467,27 @@ async function main() {
       easymeshEnabled: config.DROPLET_AP_EASYMESH_ENABLED,
       unifiEnabled: config.DROPLET_AP_UNIFI_ENABLED,
     });
+  }
+
+  // WARP-1122 — daily business-profile review check (03:30, offset from the
+  // purge job). Registration gated on the EXPLICIT enable boolean; the
+  // handler is one conditional update, so a skipped/raced tick is harmless.
+  if (config.BUSINESS_PROFILE_REVIEW_ENABLED) {
+    cronRuntime.scheduleCron(
+      "30 3 * * *",
+      async () => {
+        const r = await runBusinessReviewCheck(
+          prisma,
+          config.BUSINESS_PROFILE_REVIEW_DAYS,
+        );
+        if (r.markedDue) {
+          console.log(
+            `[review-nudge] business profile marked review-due (via ${r.via})`,
+          );
+        }
+      },
+      { lockKey: "business-profile-review-nudge" },
+    );
   }
 
   cronRuntime.scheduleCron(

@@ -65,6 +65,13 @@ const envSchema = z.object({
   // doesn't degrade blocks the model could actually carry. This configures the
   // window only — it is NOT a model swap and does not touch the One-Model Rule.
   OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
+  // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
+  // is an EXPLICIT boolean, never derived from the days var's emptiness.
+  BUSINESS_PROFILE_REVIEW_ENABLED: z
+    .string()
+    .default("true")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().positive().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
