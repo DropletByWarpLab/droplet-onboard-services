@@ -220,6 +220,16 @@ COPY --from=builder /app/packages/auth-policy/package.json ./packages/auth-polic
 COPY --from=builder /app/packages/auth-policy/dist ./packages/auth-policy/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
+# @droplet/erp-connector is built in the builder stage (npm run -w
+# @droplet/erp-connector build) and eagerly required by
+# apps/orchestrator/src/services/integrations.service.ts at boot (the
+# Eaglesoft provider). Without copying its built dist here the
+# node_modules/@droplet/erp-connector symlink dangles at runtime and the
+# orchestrator crashloops on `Cannot find module '@droplet/erp-connector'`
+# — builds pass (builder has it) but the container never boots. Mirrors the
+# mcp-server COPY above.
+COPY --from=builder /app/services/erp-connector/package.json ./services/erp-connector/package.json
+COPY --from=builder /app/services/erp-connector/dist ./services/erp-connector/dist
 # WARP-858: the embedding + reranker gRPC clients in the mcp-server stdio
 # child use @grpc/proto-loader to read inference.proto AT RUNTIME (their
 # last-resort lookup is /app/proto/inference.proto). Without this copy,
