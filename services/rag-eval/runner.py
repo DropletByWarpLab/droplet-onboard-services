@@ -32,6 +32,7 @@ followed by a wall of text (WARP-520).
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
