@@ -33,6 +33,7 @@ Honors the architecture-guard rules:
     SAME bearer shared by scheduler.py + egress_meter.py. NO new env var.
 """
 from __future__ import annotations
+import asyncio
 
 import logging
 import os
@@ -194,7 +195,7 @@ async def _tick(router: DropletRouter) -> None:
     First successful read primes the cache and emits nothing; subsequent
     ticks POST the per-tick delta."""
     global _previous
-    current = read_counters_via_ubus(router)
+    current = await asyncio.to_thread(read_counters_via_ubus, router)  # PYNET-007: blocking urllib off the event loop
     if current is None:
         return
     delta = _derive_delta(_previous, current)
