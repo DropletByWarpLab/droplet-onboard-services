@@ -78,6 +78,17 @@
 #       process, so the swap (and its rollback) survive the orchestrator's
 #       own recreation. The DB verdict is written by whichever orchestrator
 #       boots next (resumeInterruptedApply).
+#   list-self-swap-helpers
+#       Print one {"name","status","finishedAt"} JSON object per line for
+#       every droplet-ota-self-swap-* helper container, running or exited
+#       (WARP-1044 — the GC's read surface).
+#   capture-self-swap-logs --update-id ID
+#       Persist `docker logs` of the self-swap helper for ID into
+#       <updatesDir>/<ID>/self-swap-helper.log — the WARP-1044 GC captures
+#       BEFORE it removes, because the kept container was the only log store.
+#   rm-self-swap-helper --update-id ID
+#       `docker rm` (deliberately never -f) the self-swap helper container
+#       for ID; the daemon itself refuses a still-running helper.
 #
 # ── TEST / DRY-RUN HOOK ──
 #   DROPLET_OTA_APPLY_DRY_RUN=1  — print each `docker`/`docker compose` command
@@ -530,7 +541,11 @@ cmd_recreate_self_detached() {
   # leave no orchestrator to write it). `--rm` would delete that container —
   # and its logs — the instant it exits. The container is instead reaped by
   # the collision guard above on the next apply, so `docker logs
-  # droplet-ota-self-swap-<id>` survives for post-mortem in between.
+  # droplet-ota-self-swap-<id>` survives for post-mortem in between. Helpers
+  # from OLDER update ids (which the collision guard never touches) are GC'd
+  # by the orchestrator's daily purge cron once past backup retention, logs
+  # captured to the update's state dir first (WARP-1044, the
+  # list/capture/rm-self-swap subcommands below + purge-self-swap-helpers.ts).
   run docker run -d \
     --name "$helper_name" \
     -v /var/run/docker.sock:/var/run/docker.sock \
@@ -544,6 +559,74 @@ cmd_recreate_self_detached() {
     -e "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=$interval" \
     docker:27-cli \
     /bin/sh -c "$SELF_SWAP_SUPERVISOR"
+}
+
+# ── WARP-1044: GC surface for exited self-swap helper containers ─────────────
+# The helper above launches WITHOUT --rm and the collision guard only reaps
+# the previous helper for the SAME update id — so every applied update leaves
+# one exited droplet-ota-self-swap-<id> container behind forever. The
+# orchestrator's daily purge cron (purge-self-swap-helpers.ts) drives the
+# three subcommands below to remove helpers past the backup-retention window,
+# capturing their logs into the update's state dir first. ALL decision logic
+# (retention window, running / in-flight-update exclusions, skip-if-already-
+# captured) lives in the TS caller — this surface stays fixed and dumb, same
+# posture as every other subcommand here.
+
+cmd_list_self_swap_helpers() {
+  # Read-only: one {"name":…,"status":…,"finishedAt":…} JSON object per line
+  # for EVERY droplet-ota-self-swap-* container, running or exited. The
+  # {{json …}} template functions guarantee valid JSON whatever the daemon
+  # reports.
+  if [ -n "$DRY_RUN" ]; then
+    run docker ps -a --filter name=droplet-ota-self-swap- --format '{{.ID}}'
+    return 0
+  fi
+  local ids
+  ids="$(docker ps -a --filter name=droplet-ota-self-swap- --format '{{.ID}}' 2>/dev/null || true)"
+  [ -n "$ids" ] || return 0
+  # A container vanishing between ps and inspect (manual rm mid-sweep) must
+  # not fail the listing — inspect still prints the ones it found. $ids is
+  # unquoted ON PURPOSE: a newline list of daemon-issued hex ids to split.
+  # shellcheck disable=SC2086
+  docker inspect \
+    --format '{"name":{{json .Name}},"status":{{json .State.Status}},"finishedAt":{{json .State.FinishedAt}}}' \
+    $ids || true
+}
+
+cmd_capture_self_swap_logs() {
+  validate_update_id "$UPDATE_ID"
+  local name="droplet-ota-self-swap-$UPDATE_ID"
+  local dir logfile
+  dir="$(updates_dir)/$UPDATE_ID"
+  logfile="$dir/self-swap-helper.log"
+  log "capture-self-swap-logs $name -> $logfile"
+  if [ -n "$DRY_RUN" ]; then
+    run docker logs "$name"
+    return 0
+  fi
+  mkdir -p "$dir"
+  # Both streams — the supervisor's `say` lines ride stdout, compose noise
+  # rides stderr, and a post-mortem wants both. Atomic (tmp + mv): an
+  # EXISTING self-swap-helper.log tells the GC caller the capture is done,
+  # so a failed `docker logs` (daemon hiccup) must leave nothing behind —
+  # a poisoned partial file would skip the real capture forever.
+  if docker logs "$name" > "$logfile.tmp" 2>&1; then
+    mv "$logfile.tmp" "$logfile"
+  else
+    rm -f "$logfile.tmp"
+    die "docker logs $name failed — nothing persisted, capture left for the next sweep"
+  fi
+}
+
+cmd_rm_self_swap_helper() {
+  validate_update_id "$UPDATE_ID"
+  local name="droplet-ota-self-swap-$UPDATE_ID"
+  log "rm-self-swap-helper $name"
+  # Deliberately NOT `rm -f`: the daemon refuses to remove a RUNNING
+  # container, so even if a helper for this id relaunched between the
+  # caller's listing and this removal, an in-flight swap/rollback can never
+  # be killed from here.
+  run docker rm "$name"
 }
 
 # =============================================================================
@@ -578,5 +661,8 @@ case "$SUBCOMMAND" in
   recreate-services) cmd_recreate_services ;;
   restore-configs) cmd_restore_configs ;;
   recreate-self-detached) cmd_recreate_self_detached ;;
+  list-self-swap-helpers) cmd_list_self_swap_helpers ;;
+  capture-self-swap-logs) cmd_capture_self_swap_logs ;;
+  rm-self-swap-helper) cmd_rm_self_swap_helper ;;
   *) die "unknown subcommand: $SUBCOMMAND" ;;
 esac
