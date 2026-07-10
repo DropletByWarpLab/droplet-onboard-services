@@ -833,13 +833,15 @@ async def accept_camera(mac: str, request: Request):
     into Frigate is a privileged write, not a public action.
     """
     _require_auth(request)
-    camera = pending_cameras.pop(mac, None)
+    # PYNET-014: peek, don't pop — the record stays in pending until the add
+    # actually succeeds, so a transient exception from verify_stream/add_camera
+    # can't silently drop the camera from the list until the next scan.
+    camera = pending_cameras.get(mac)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")
 
     rtsp_url = camera.get("rtsp_url")
     if not rtsp_url:
-        pending_cameras[mac] = camera  # Put back
         raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
 
     # Verify the stream actually answers before committing it to Frigate, so a
@@ -848,7 +850,6 @@ async def accept_camera(mac: str, request: Request):
     # first — stays pending so the operator can supply them, rather than
     # silently landing a dead feed.
     if not await verify_stream(rtsp_url):
-        pending_cameras[mac] = camera  # Put back
         raise HTTPException(
             status_code=422,
             detail=(
@@ -863,13 +864,13 @@ async def accept_camera(mac: str, request: Request):
     name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
     success = await frigate.add_camera(name, rtsp_url)
     if success:
+        pending_cameras.pop(mac, None)  # committed — remove from pending now
         camera["status"] = "active"
         known_cameras[mac] = camera
         publish_discovery({"event": "camera_accepted", "camera": camera})
         return {"status": "accepted", "camera": camera}
 
-    # Put back in pending
-    pending_cameras[mac] = camera
+    # Still in pending (peeked, not popped) — just surface the failure.
     raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
 
 
@@ -884,8 +885,16 @@ async def reject_camera(mac: str, request: Request):
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-    if len(rejected_macs) < MAX_REJECTED_MACS:
-        rejected_macs.add(mac)
+    if mac not in rejected_macs and len(rejected_macs) >= MAX_REJECTED_MACS:
+        # PYNET-015: the cap is full — be honest that the rejection won't
+        # persist (the camera would silently reappear next scan) rather than
+        # returning "rejected". Keep it in pending so the operator can retry.
+        pending_cameras[mac] = camera
+        raise HTTPException(
+            status_code=507,
+            detail="Rejected-camera list is full; cannot persist this rejection. Clear rejected cameras first.",
+        )
+    rejected_macs.add(mac)
     return {"status": "rejected", "mac": mac}
 
 
@@ -1010,7 +1019,10 @@ async def get_driver_status(request: Request):
     gate — the read leaks host kernel-module / driver state.
     """
     _require_auth(request)
-    return full_driver_report()
+    # PYNET-016: full_driver_report is fully synchronous (subprocess.run with
+    # 5s timeouts per module) — run it off the event loop so it can't stall
+    # /health and the scan scheduler.
+    return await asyncio.to_thread(full_driver_report)
 
 
 @app.post("/drivers/fix")
@@ -1018,5 +1030,5 @@ async def fix_drivers(request: Request):
     """Attempt to auto-fix camera driver issues. Requires DEVICE_SECRET auth."""
     _require_auth(request)
     report = await auto_fix_drivers()
-    status = full_driver_report()
+    status = await asyncio.to_thread(full_driver_report)
     return {"fix_report": report, "current_status": status}
