@@ -490,4 +490,40 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.status).toBe(400);
     expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
   });
+
+  // WARP-1160 — the audit-row IP must come from proxy-aware `req.ip` (the
+  // auth.ts callerIpFromReq standard, WARP-579), never the raw
+  // client-controlled X-Forwarded-For header: the old derivation recorded
+  // whatever IP the caller chose to claim in every WebAuthn audit row.
+  it("verify: audit row records the socket-derived IP, ignoring a forged X-Forwarded-For (WARP-1160)", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: "mock-challenge-aaaaaaaaaaaaaaaaaaaaaa",
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 6 },
+    });
+
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .set("X-Forwarded-For", "6.6.6.6")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const activity = recordActivity.mock.calls[0]![0] as {
+      sub: string;
+      refs: { ip: string | null };
+    };
+    // Supertest connects over loopback; the recorded IP is the socket-derived
+    // address, never the attacker-claimed 6.6.6.6.
+    expect(activity.refs.ip).toBe("::ffff:127.0.0.1");
+    expect(activity.sub).not.toContain("6.6.6.6");
+  });
 });

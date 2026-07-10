@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { AlertCircle, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import type { SystemHealth, SystemHealthStatus } from "@/lib/api";
 
@@ -56,6 +57,8 @@ const SERVICE_LABELS: Record<string, string> = {
   frigate: "Cameras (Frigate)",
   switch: "Network switch",
   display: "Front display",
+  // WARP-1146 — degraded/failed RAID pools surface through the monitor.
+  storage: "Storage pools",
 };
 
 function serviceLabel(name: string): string {
@@ -170,6 +173,18 @@ function HealthBody({ health }: { health: SystemHealth }) {
                 <span className="rt">
                   <span className="nm">{serviceLabel(c.name)}</span>
                 </span>
+                {/* WARP-1146 — a flagged storage pool is actionable: point the
+                    owner straight at the Drives page that shows which pool
+                    dropped a member and what to do about it. */}
+                {c.name === "storage" && !up && (
+                  <Link
+                    href="/files/drives"
+                    className="rmeta text-accent"
+                    style={{ textDecoration: "none" }}
+                  >
+                    View drives
+                  </Link>
+                )}
                 {up && c.latencyMs > 0 && (
                   <span className="rmeta mono">{c.latencyMs}ms</span>
                 )}

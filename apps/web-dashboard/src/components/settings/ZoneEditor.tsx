@@ -503,7 +503,8 @@ export function ZoneEditor({
         labelledBy={namePromptHeadingId}
         maxWidth="sm"
       >
-        <div className="p-4">
+        {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+        <div>
           <h3
             id={namePromptHeadingId}
             className="type-title-3 text-label-primary mb-2"

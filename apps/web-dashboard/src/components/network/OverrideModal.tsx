@@ -322,11 +322,11 @@ export function OverrideModal({
       onClose={onClose}
       labelledBy={headingId}
       maxWidth="md"
+      // Sectioned layout (full-width header divider) — sections own their
+      // padding; scroll comes from the primitive body (WARP-1153).
+      flush
     >
-      <div
-        data-testid="override-modal-backdrop"
-        className="max-h-[90vh] overflow-y-auto"
-      >
+      <div data-testid="override-modal-backdrop">
         <div className="p-4 border-b border-separator flex items-center justify-between">
           <h2
             id={headingId}

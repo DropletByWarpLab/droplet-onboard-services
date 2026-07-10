@@ -473,8 +473,10 @@ async def get_port(port: int):
 @app.post("/ports/{port}/enable")
 async def enable_port(port: int):
     try:
-        await get_driver().set_port_enabled(port, True)
-        return {"status": "ok", "port": port, "enabled": True}
+        drv = get_driver()
+        await drv.set_port_enabled(port, True)
+        dry = bool(getattr(drv, "plan_only", False))
+        return {"status": "planned" if dry else "ok", "port": port, "enabled": True, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -482,8 +484,10 @@ async def enable_port(port: int):
 @app.post("/ports/{port}/disable")
 async def disable_port(port: int):
     try:
-        await get_driver().set_port_enabled(port, False)
-        return {"status": "ok", "port": port, "enabled": False}
+        drv = get_driver()
+        await drv.set_port_enabled(port, False)
+        dry = bool(getattr(drv, "plan_only", False))
+        return {"status": "planned" if dry else "ok", "port": port, "enabled": False, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -503,8 +507,10 @@ async def list_vlans():
 @app.post("/vlans")
 async def create_vlan(req: CreateVlanRequest):
     try:
-        await get_driver().create_vlan(req.vlan_id, req.name)
-        return {"status": "ok", "vlan_id": req.vlan_id, "name": req.name}
+        drv = get_driver()
+        await drv.create_vlan(req.vlan_id, req.name)
+        dry = bool(getattr(drv, "plan_only", False))
+        return {"status": "planned" if dry else "ok", "vlan_id": req.vlan_id, "name": req.name, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -512,8 +518,10 @@ async def create_vlan(req: CreateVlanRequest):
 @app.delete("/vlans/{vlan_id}")
 async def delete_vlan(vlan_id: int):
     try:
-        await get_driver().delete_vlan(vlan_id)
-        return {"status": "ok", "vlan_id": vlan_id, "deleted": True}
+        drv = get_driver()
+        await drv.delete_vlan(vlan_id)
+        dry = bool(getattr(drv, "plan_only", False))
+        return {"status": "planned" if dry else "ok", "vlan_id": vlan_id, "deleted": not dry, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -533,8 +541,10 @@ async def set_vlan_membership(vlan_id: int, req: SetVlanMembershipRequest):
             {"port": p.port, "tagged": p.tagged, "member": p.member}
             for p in req.ports
         ]
-        await get_driver().set_vlan_membership(vlan_id, membership)
-        return {"status": "ok", "vlan_id": vlan_id, "ports_updated": len(membership)}
+        drv = get_driver()
+        await drv.set_vlan_membership(vlan_id, membership)
+        dry = bool(getattr(drv, "plan_only", False))
+        return {"status": "planned" if dry else "ok", "vlan_id": vlan_id, "ports_updated": len(membership), "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -563,7 +573,8 @@ async def get_port_poe(port: int):
 async def enable_port_poe(port: int):
     try:
         await get_driver().set_port_poe(port, True)
-        return {"status": "ok", "port": port, "poe_enabled": True}
+        dry = bool(getattr(get_driver(), "plan_only", False))
+        return {"status": "planned" if dry else "ok", "port": port, "poe_enabled": True, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -572,7 +583,8 @@ async def enable_port_poe(port: int):
 async def disable_port_poe(port: int):
     try:
         await get_driver().set_port_poe(port, False)
-        return {"status": "ok", "port": port, "poe_enabled": False}
+        dry = bool(getattr(get_driver(), "plan_only", False))
+        return {"status": "planned" if dry else "ok", "port": port, "poe_enabled": False, "dry_run": dry}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -637,12 +649,25 @@ async def setup_cameras(req: CameraSetupRequest):
             len(req.uplink_ports),
         )
 
+        dry = bool(getattr(driver, "plan_only", False))
+        if dry:
+            # Plan-only: the driver never wrote, so say so — don't claim
+            # "configured" (mirrors the "planned"/dry-run write responses above).
+            message = (
+                f"VLAN {req.vlan_id} planned (dry-run): ports {req.camera_ports} "
+                f"(untagged) + {req.uplink_ports} (tagged trunk) would be configured"
+            )
+        else:
+            message = (
+                f"VLAN {req.vlan_id} configured: ports {req.camera_ports} "
+                f"(untagged) + {req.uplink_ports} (tagged trunk)"
+            )
         return CameraSetupResult(
-            status="ok",
+            status="planned" if dry else "ok",
             vlan_id=req.vlan_id,
             camera_ports=req.camera_ports,
             uplink_ports=req.uplink_ports,
-            message=f"VLAN {req.vlan_id} configured: ports {req.camera_ports} (untagged) + {req.uplink_ports} (tagged trunk)",
+            message=message,
         )
 
     except SwitchError as exc:

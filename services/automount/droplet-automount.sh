@@ -188,7 +188,9 @@ nextcloud_add() {
         "/$name" local null::null -c datadir="/host/$name" 2>&1) || true
   log "nextcloud create: $rc"
   local mid
-  mid=$(echo "$rc" | grep -oE '[0-9]+' | head -1)
+  # PYNET-018: only extract the id from occ's actual success line ("... created
+  # with id N"), not the first number in an arbitrary error/warning ("config.php: 33").
+  mid=$(echo "$rc" | grep -oiE 'created with id [0-9]+' | grep -oE '[0-9]+' | head -1)
   if [ -n "$mid" ]; then
     nc_occ files_external:applicable \
       --add-user="$NEXTCLOUD_USER" "$mid" >/dev/null 2>&1 || true
@@ -217,7 +219,14 @@ state_add() {
   # `trust` (5th arg): "enrolled" | "trusted" | "untrusted-ro". Defaults to
   # "trusted" for backward compatibility.
   local device="$1" mount="$2" label="$3" uuid="$4" trust="${5:-trusted}" mapper="${6:-}"
-  python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" "$trust" "$mapper" <<'PYEOF'
+  # PYNET-009: serialize the read-modify-write of mounts.json. Concurrent
+  # automount@ instances (boot coldplug, or a multi-partition drive firing
+  # sda1+sda2 together) otherwise race and silently drop a drive's entry — its
+  # REMOVE then never unmounts it or closes the LUKS mapper. Lock held only for
+  # the state op, not the slow mount/chown.
+  (
+    flock 9
+    python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" "$trust" "$mapper" <<'PYEOF'
 import json, os, sys
 path, device, mount, label, uuid, trust, mapper = sys.argv[1:8]
 try:
@@ -235,13 +244,17 @@ state["mounts"].append(entry)
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f: json.dump(state, f, indent=2)
 PYEOF
+  ) 9>"${STATE_DIR}/.lock"
 }
 
 state_remove() {
   local device="$1"
   # Prints, per removed entry, a TAB-separated "<mount>\t<mapper>" line so the
   # remove path can unmount AND close the mapper (mapper empty for plain drives).
-  python3 - "$STATE_FILE" "$device" <<'PYEOF'
+  # PYNET-009: same flock as state_add — serialize the mounts.json mutation.
+  (
+    flock 9
+    python3 - "$STATE_FILE" "$device" <<'PYEOF'
 import json, sys
 path, device = sys.argv[1:3]
 try:
@@ -254,6 +267,7 @@ with open(path, "w") as f: json.dump(state, f, indent=2)
 for m in removed:
     print("%s\t%s" % (m.get("mount", ""), m.get("mapper", "")))
 PYEOF
+  ) 9>"${STATE_DIR}/.lock"
 }
 
 case "$ACTION" in
@@ -426,7 +440,7 @@ case "$ACTION" in
       name="$(basename "$m")"
       nextcloud_remove "$name" || true
       if mountpoint -q "$m"; then
-        umount -l "$m" && log "unmounted $m"
+        umount -l "$m" && log "unmounted $m" || log "umount failed for $m"
       fi
       rmdir "$m" 2>/dev/null || true
       # Close the LUKS mapper so the dm node is released and a replug re-unlocks

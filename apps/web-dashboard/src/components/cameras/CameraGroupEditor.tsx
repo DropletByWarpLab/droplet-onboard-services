@@ -285,7 +285,10 @@ function MemberRow({
           disabled={saving}
           className="h-4 w-4 accent-accent"
         />
-        <span className="flex-1 type-subheadline text-label-primary truncate">
+        {/* WARP-1153: min-w-0 lets the flex item shrink so a long camera name
+            truncates instead of bleeding past the sheet edge (the sheet only
+            scrolls vertically). */}
+        <span className="flex-1 min-w-0 type-subheadline text-label-primary truncate">
           {camera.displayName}
         </span>
         {saving && (

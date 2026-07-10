@@ -141,7 +141,9 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   const seenDays = (data?.presence ?? []).filter((p) => p.seenMinutes > 0).length;
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} placement="right">
+    // `flush`: sectioned side panel — full-width dividers, sections own their
+    // padding (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} placement="right" flush>
       {/*
         Off-screen heading provides the aria-labelledby target. The
         visible "title" is the editable display-name input, which

@@ -52,13 +52,15 @@ export function useEaglesoftSchedule(dateIso: string | null) {
 
 /**
  * PHI + write authority for the current dashboard user. PHI is minimum-necessary
- * and RBAC-gated (arch §14): owner/admin/family may view patient data; guests
- * may not. Only owner/admin may enable writes or confirm a write.
+ * and RBAC-gated (arch §14): only clinical roles (owner/admin) may view patient
+ * data. The household-default `family` role (assigned to any un-grouped account)
+ * and guests get the lock — matching the backend PHI_READ_ROLES. Only owner/admin
+ * may enable writes or confirm a write.
  */
 export function useErpAccess(): ErpAccess {
   const { user } = useAuth();
   const role = user?.role;
-  const canViewPhi = role === "owner" || role === "admin" || role === "family";
+  const canViewPhi = role === "owner" || role === "admin";
   const privileged = role === "owner" || role === "admin";
   return {
     canViewPhi,

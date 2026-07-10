@@ -237,6 +237,52 @@ describe("ShareDialog — existing shares (WS-1 fast-follow)", () => {
 });
 
 /**
+ * WARP-1148/1149 — Nextcloud rejects single-FILE shares that carry the CREATE
+ * or DELETE permission bits (generalCreateChecks: "File shares cannot have
+ * create or delete permissions"), so the "Full access" preset (31) could never
+ * be created on a file — the exact Share-dialog dead end behind WARP-1148.
+ * The dialog now masks CREATE|DELETE out of the outgoing bitmask when the
+ * target is a file (isDirectory falsy), and keeps the full mask for folders.
+ */
+describe("WARP-1148/1149 — file shares never send CREATE/DELETE permission bits", () => {
+  it("Link mode + 'Full access' on a FILE sends permissions without CREATE|DELETE (19)", async () => {
+    createShareMock.mockResolvedValue(makeLinkShare());
+    renderDialog(); // isDirectory defaults to false (a file)
+    fireEvent.click(await screen.findByRole("button", { name: "Link" }));
+    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create link" }));
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalled());
+    const [, opts] = createShareMock.mock.calls[0];
+    // READ|UPDATE|SHARE — the most-capable mask Nextcloud accepts on a file.
+    expect(opts.permissions).toBe(19);
+  });
+
+  it("Link mode + 'Full access' on a FOLDER keeps the full mask (31)", async () => {
+    createShareMock.mockResolvedValue(makeLinkShare());
+    renderDialog({ filePath: "/Trips", fileName: "Trips", isDirectory: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Link" }));
+    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create link" }));
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalled());
+    const [, opts] = createShareMock.mock.calls[0];
+    expect(opts.permissions).toBe(31);
+  });
+
+  it("Person mode + 'Full access' on a FILE also masks CREATE|DELETE", async () => {
+    renderDialog();
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    fireEvent.click(screen.getByRole("button", { name: /share|create/i }));
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalled());
+    const [, opts] = createShareMock.mock.calls[0];
+    expect(opts.permissions).toBe(19);
+  });
+});
+
+/**
  * WARP-939 — the access-level dropdown on an EXISTING share must reflect the
  * share's real Nextcloud permission bitmask, and let the user pick any preset.
  *

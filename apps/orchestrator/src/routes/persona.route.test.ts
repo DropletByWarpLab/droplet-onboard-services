@@ -18,6 +18,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createPersonaRouter } from "./persona.js";
+import {
+  composePersonaBlock,
+  PERSONA_BLOCK_PREFIX,
+  type PersonaRow as ServicePersonaRow,
+} from "../services/persona.service.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import { createActivityRecorder } from "../services/activity.service.js";
 import { createHmacSigner } from "../services/audit-signing.service.js";
@@ -155,6 +160,7 @@ function buildApp(
 const OWNER = { id: "11111111-1111-1111-1111-111111111111", username: "stefan", role: "owner" };
 const FAMILY = { id: "22222222-2222-2222-2222-222222222222", username: "kid", role: "family" };
 const GUEST = { id: "33333333-3333-3333-3333-333333333333", username: "guest", role: "guest" };
+const SERVICE = { id: "44444444-4444-4444-4444-444444444444", username: "voice-io", role: "service" };
 
 beforeEach(() => {
   // Real recorder over a per-test fake prisma is wired per-case (below), so
@@ -223,6 +229,53 @@ describe("GET /api/persona", () => {
     const res = await request(buildApp(prisma, OWNER)).get("/api/persona");
     expect(res.status).toBe(200);
     expect(res.body.preset).toBe("warm_friendly");
+    expect(prisma._row()).not.toBeNull();
+  });
+});
+
+describe("GET /api/persona/prompt (WARP-1119 — voice threading §14)", () => {
+  const ROW: ServicePersonaRow = {
+    id: "singleton",
+    preset: "direct_technical",
+    verbosity: "concise",
+    useFirstNames: false,
+    customInstructions: "Always give the numbers first.",
+    updatedBy: null,
+    updatedAt: new Date(),
+  };
+
+  it("returns the composed persona block as plain text to the service role", async () => {
+    const prisma = makePrisma({ ...ROW });
+    const res = await request(buildApp(prisma, SERVICE)).get("/api/persona/prompt");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/plain");
+    expect(res.text).toBe(composePersonaBlock(ROW));
+    // Composed block, not raw fields — starts with the style-only guard line.
+    expect(res.text.startsWith(PERSONA_BLOCK_PREFIX)).toBe(true);
+    expect(res.text).toContain("Always give the numbers first.");
+  });
+
+  it("returns the block to an owner (debugging read, §12)", async () => {
+    const prisma = makePrisma({ ...ROW });
+    const res = await request(buildApp(prisma, OWNER)).get("/api/persona/prompt");
+    expect(res.status).toBe(200);
+    expect(res.text.startsWith(PERSONA_BLOCK_PREFIX)).toBe(true);
+  });
+
+  it("403s family and guest (the composed block carries customInstructions text)", async () => {
+    const prisma = makePrisma({ ...ROW });
+    const famRes = await request(buildApp(prisma, FAMILY)).get("/api/persona/prompt");
+    expect(famRes.status).toBe(403);
+    expect(famRes.text).not.toContain("Always give the numbers first.");
+    const guestRes = await request(buildApp(prisma, GUEST)).get("/api/persona/prompt");
+    expect(guestRes.status).toBe(403);
+  });
+
+  it("materialises the default singleton on first read (fresh box)", async () => {
+    const prisma = makePrisma(null);
+    const res = await request(buildApp(prisma, SERVICE)).get("/api/persona/prompt");
+    expect(res.status).toBe(200);
+    expect(res.text.startsWith(PERSONA_BLOCK_PREFIX)).toBe(true);
     expect(prisma._row()).not.toBeNull();
   });
 });

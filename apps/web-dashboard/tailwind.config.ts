@@ -5,21 +5,28 @@ const config: Config = {
   content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
   theme: {
     extend: {
+      // D-A (handoff 6): `font-mono` resolves to the wired --font-mono
+      // (JetBrains Mono, set in app/layout.tsx) with a safe system fallback.
+      fontFamily: {
+        mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+      },
       colors: {
-        // Brand ramp — violet (re-pointed from indigo on 2026-05-18).
-        // Anchor accent is droplet-700 #6d28d9; tinted backgrounds use
-        // droplet-50/100/200, hover states use droplet-800, ink uses 900.
+        // Brand ramp — indigo (canon). The `--color-accent` tokens + the design
+        // system are indigo #6366f1 (500); the 2026-05-18 violet re-point never
+        // matched canon and was reverted here (handoff 6, decision D-F: Droplet
+        // product stays indigo). Primary is droplet-500 #6366f1; 400 #818cf8 is
+        // the dark-mode accent; 600 #4f46e5 is hover.
         droplet: {
-          50: "#f5f3ff",
-          100: "#ede9fe",
-          200: "#ddd6fe",
-          300: "#c4b5fd",
-          400: "#a78bfa",
-          500: "#8b5cf6",
-          600: "#7c3aed",
-          700: "#6d28d9",
-          800: "#5b21b6",
-          900: "#4c1d95",
+          50: "#eef2ff",
+          100: "#e0e7ff",
+          200: "#c7d2fe",
+          300: "#a5b4fc",
+          400: "#818cf8",
+          500: "#6366f1",
+          600: "#4f46e5",
+          700: "#4338ca",
+          800: "#3730a3",
+          900: "#312e81",
         },
         // Semantic surface colors (CSS custom properties)
         surface: {

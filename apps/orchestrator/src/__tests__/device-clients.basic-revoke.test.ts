@@ -451,3 +451,57 @@ describe("DELETE /api/devices/clients/:id — Basic-path rate limiting (WARP-103
     expect(res.status).toBe(200);
   });
 });
+
+// WARP-1138 — the per-IP bucket key must come from proxy-aware `req.ip`
+// (the auth.ts callerIpFromReq standard, WARP-579), never the raw
+// client-controlled X-Forwarded-For header: rotating that header used to
+// mint a fresh `revoke:ip:<forged>` bucket per request, zeroing the limit.
+describe("DELETE /api/devices/clients/:id — forged X-Forwarded-For cannot mint fresh per-IP buckets (WARP-1138)", () => {
+  it("still 429s an exhausted per-IP bucket under rotating forged X-Forwarded-For values", async () => {
+    // Only the socket-derived bucket is exhausted; any XFF-derived key
+    // would read as a fresh bucket and let the request through.
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key === "ratelimit:revoke:ip:::ffff:127.0.0.1" ? 20 : undefined,
+    );
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const app = makeApp();
+    for (const forged of ["6.6.6.6", "7.7.7.7", "8.8.8.8"]) {
+      const res = await request(app)
+        .delete("/api/devices/clients/dc-1")
+        .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+        .set("X-Forwarded-For", forged);
+      expect(res.status).toBe(429);
+    }
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("bumps the req.ip-keyed bucket, never an attacker-named one", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+      .set("X-Forwarded-For", "6.6.6.6");
+
+    const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
+    expect(bumped).toContain("ratelimit:revoke:ip:::ffff:127.0.0.1");
+    expect(bumped.some((k) => String(k).includes("6.6.6.6"))).toBe(false);
+  });
+
+  it("an empty X-Forwarded-For does not collapse callers into a shared empty-key bucket", async () => {
+    mockCacheGet.mockResolvedValue(undefined as never);
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"))
+      .set("X-Forwarded-For", "");
+
+    const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
+    expect(bumped).toContain("ratelimit:revoke:ip:::ffff:127.0.0.1");
+    expect(bumped).not.toContain("ratelimit:revoke:ip:");
+  });
+});

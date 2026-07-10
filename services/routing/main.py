@@ -1887,7 +1887,7 @@ def aps_get(mac: str):
         handle_router_error(exc)
 
 
-@app.post("/aps/_test_seed")
+@app.post("/aps/_test_seed", include_in_schema=False)
 def aps_test_seed(req: ApTestSeedRequest):
     """Inject a discovered AP into the mock router. Test-only.
 

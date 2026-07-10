@@ -179,3 +179,50 @@ def test_recovery_after_flatline_reports_ok_again(client, monkeypatch):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# ── persona threading observability (WARP-1119, §14) ────────────────
+#
+# The greeting-path persona fetch must never be silently broken: /health
+# mirrors the PersonaFetcher's fetch_ok / last_fetch_at so a rotated
+# ORCHESTRATOR_TOKEN (or an orchestrator that never came back) is visible
+# in health, not months of undiagnosed drift. The fields are
+# observability-only — they NEVER degrade health (voice keeps working on
+# the built-in prompt).
+
+class _FakePersonaFetcher:
+    def __init__(self, ok, at):
+        self.fetch_ok = ok
+        self.last_fetch_at = at
+
+
+def test_health_exposes_persona_fetch_fields(client, monkeypatch):
+    _set_pipeline_state(monkeypatch, "listening")
+    monkeypatch.setattr(
+        main, "_persona_fetcher", _FakePersonaFetcher(True, 1751920000.0)
+    )
+    body = client.get("/health").json()
+    assert body["personaFetchOk"] is True
+    assert body["personaLastFetchAt"] == 1751920000.0
+
+
+def test_health_persona_fetch_failure_is_visible_but_not_degrading(
+    client, monkeypatch,
+):
+    _set_pipeline_state(monkeypatch, "listening")
+    monkeypatch.setattr(
+        main, "_persona_fetcher", _FakePersonaFetcher(False, 1751920001.0)
+    )
+    resp = client.get("/health")
+    assert resp.status_code == 200  # fallback prompt keeps voice alive
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["personaFetchOk"] is False
+
+
+def test_health_persona_fields_null_before_any_fetch(client, monkeypatch):
+    _set_pipeline_state(monkeypatch, "listening")
+    monkeypatch.setattr(main, "_persona_fetcher", None)
+    body = client.get("/health").json()
+    assert body["personaFetchOk"] is None
+    assert body["personaLastFetchAt"] is None

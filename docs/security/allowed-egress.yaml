@@ -218,18 +218,25 @@ entries:
 
   # ── dynamic (config-driven) destinations ────────────────────────────────
   - id: fleet-hq-issuance
-    kind: dynamic
+    kind: egress
     service: orchestrator
-    config_key: HQ_ISSUANCE_URL
+    destination:
+      hosts: [fleet-hq.droplet-us.com]
+      ports: [443]
+      protocol: https
     phase: runtime
     data_class: none
     purpose: >-
-      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS01);
-      CSR/cert material only, operator/fleet-provisioned URL.
+      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS-01);
+      CSR/cert material only. Now baked as the default HQ_ISSUANCE_URL in
+      .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
+      self-provisions its publicly-trusted cert with zero hand-patching;
+      still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
+      before the default host became a repo literal.
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts]
+    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, scripts/lib/secrets.sh, .env.example]
 
   - id: user-mail-servers
     kind: dynamic

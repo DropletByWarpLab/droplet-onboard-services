@@ -207,11 +207,10 @@ export function ScheduleEditorModal({
   }
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl">
-      <div
-        data-testid="schedule-editor-backdrop"
-        className="max-h-[90vh] overflow-y-auto"
-      >
+    // `flush`: sectioned layout — the full-width header divider + sections
+    // own their padding; scroll comes from the primitive body (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl" flush>
+      <div data-testid="schedule-editor-backdrop">
         <div className="p-4 border-b border-separator flex items-center justify-between">
           <h2
             id={headingId}

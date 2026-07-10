@@ -48,6 +48,13 @@ export interface SearchHit {
 export interface SearchByVectorParams {
   /** Nextcloud username — the per-user RBAC boundary. */
   userId: string;
+  /**
+   * WARP-1140: extra index owners to search IN ADDITION to `userId`. The one
+   * production caller passes the `__household__` sentinel (the shared
+   * groupfolder corpus) after confirming the requesting user actually has the
+   * shared space mounted — membership is checked by the caller, never here.
+   */
+  additionalUserIds?: string[];
   /** Embedding vector. Length must match `FileContentChunk.embedding` (384 for all-MiniLM-L6-v2). */
   vector: number[];
   /** Maximum rows to return (caller-clamped). */
@@ -65,6 +72,8 @@ export interface SearchByVectorParams {
 export interface SearchByLexicalParams {
   /** Nextcloud username — the per-user RBAC boundary. */
   userId: string;
+  /** WARP-1140: extra index owners (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
   /** Raw user query string. `websearch_to_tsquery` handles punctuation safely. */
   query: string;
   /** Maximum rows to return (caller-clamped). */
@@ -75,6 +84,28 @@ export interface SearchByLexicalParams {
   since?: Date;
   /** WARP-437: optional case-sensitive substring match on `path` (SQL LIKE). */
   filenameContains?: string;
+}
+
+/**
+ * WARP-1140 — build the `"userId"` predicate for one-or-more index owners.
+ * Single owner keeps the historical `"userId" = $1` shape; multiple owners
+ * expand to an `IN ($1, $2, …)` list with one bind parameter per id (no
+ * driver-specific array binding). Returns the SQL fragment and the next free
+ * parameter position.
+ */
+function buildUserIdPredicate(
+  userId: string,
+  additionalUserIds: string[] | undefined,
+  args: unknown[],
+): { predicate: string; nextParam: number } {
+  const ids = [userId, ...(additionalUserIds ?? [])];
+  const placeholders = ids.map((_, i) => `$${i + 1}`);
+  args.push(...ids);
+  const predicate =
+    ids.length === 1
+      ? `"userId" = $1`
+      : `"userId" IN (${placeholders.join(", ")})`;
+  return { predicate, nextParam: ids.length + 1 };
 }
 
 interface RawSearchRow {
@@ -93,9 +124,14 @@ export async function searchByVector(
   params: SearchByVectorParams,
 ): Promise<SearchHit[]> {
   const vec = `[${params.vector.join(",")}]`;
-  const where: string[] = [`"userId" = $1`];
-  const args: unknown[] = [params.userId];
-  let p = 2;
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  const where: string[] = [predicate];
+  let p = nextParam;
   if (params.source !== undefined) {
     where.push(`source = $${p}::"FileContentSource"`);
     args.push(params.source);
@@ -158,12 +194,19 @@ export async function searchByLexical(
   prisma: PrismaClient,
   params: SearchByLexicalParams,
 ): Promise<SearchHit[]> {
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  const queryParam = nextParam;
   const where: string[] = [
-    `"userId" = $1`,
-    `"text_tsv" @@ websearch_to_tsquery('english', $2)`,
+    predicate,
+    `"text_tsv" @@ websearch_to_tsquery('english', $${queryParam})`,
   ];
-  const args: unknown[] = [params.userId, params.query];
-  let p = 3;
+  args.push(params.query);
+  let p = queryParam + 1;
   if (params.source !== undefined) {
     where.push(`source = $${p}::"FileContentSource"`);
     args.push(params.source);
@@ -185,7 +228,7 @@ export async function searchByLexical(
   const sql = `SELECT
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
        LEFT(text, 280) AS snippet,
-       ts_rank_cd("text_tsv", websearch_to_tsquery('english', $2), 32) AS score
+       ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
      FROM "FileContentChunk"
      WHERE ${where.join(" AND ")}
      ORDER BY score DESC
@@ -423,6 +466,8 @@ export interface QueryEnhancementOption {
 export interface SearchHybridParams {
   /** Nextcloud username — the per-user RBAC boundary. */
   userId: string;
+  /** WARP-1140: extra index owners (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
   /** Embedding vector for the query. */
   vector: number[];
   /** Raw query text for the lexical arm. */
@@ -496,6 +541,7 @@ export async function searchHybrid(
       vectorQueries.map((vec) =>
         searchByVector(prisma, {
           userId: params.userId,
+          additionalUserIds: params.additionalUserIds,
           vector: vec,
           limit: perArmK,
           minSimilarity:
@@ -508,6 +554,7 @@ export async function searchHybrid(
     ),
     searchByLexical(prisma, {
       userId: params.userId,
+      additionalUserIds: params.additionalUserIds,
       query: params.query,
       limit: perArmK,
       source: params.source,

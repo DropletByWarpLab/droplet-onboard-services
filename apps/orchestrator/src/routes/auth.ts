@@ -2779,6 +2779,8 @@ export function createProtectedAuthRouter(
         // every live refresh token so the next /auth/refresh fails. Best-effort
         // — a missing local row (legacy NC-only account) just means there were
         // no JWT sessions to revoke.
+        let targetUserId: string | null = null;
+        let revoked = 0;
         if (prisma) {
           const row = await prisma.user.findUnique({
             where: { nextcloudUsername: req.params.username },
@@ -2787,8 +2789,28 @@ export function createProtectedAuthRouter(
           // WARP-247 — kill session RECORDS (access tokens die at the next
           // middleware check) as well as the refresh denylist (swept
           // internally by revokeAllSessions).
-          if (row) await revokeAllSessions(row.id);
+          if (row) {
+            targetUserId = row.id;
+            revoked = await revokeAllSessions(row.id);
+          }
         }
+        // WARP-1062 (audit item B): account disablement is a mandatory-emit
+        // privileged action — it revokes sessions too, yet was the one
+        // unaudited sibling of enable/revoke-sessions. Same row shape as the
+        // revoke-sessions emit below (WARP-237).
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-off",
+          what: "User disabled",
+          sub: req.params.username,
+          refs: {
+            username: req.params.username,
+            targetUserId,
+            sessionsRevoked: revoked,
+          },
+          actor: actorFromRequest(req),
+        });
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
         if (err.message?.includes("403") || err.message?.includes("997")) {

@@ -1,6 +1,7 @@
 # Workspace-aware build. The orchestrator depends on @droplet/tools-core,
-# @droplet/mcp-server, and @droplet/fips-selftest (workspace packages);
-# at runtime it spawns the mcp-server's `dist/index.js` as a stdio child.
+# @droplet/mcp-server, @droplet/fips-selftest, and @droplet/erp-connector
+# (workspace packages); at runtime it spawns the mcp-server's `dist/index.js`
+# as a stdio child.
 # Build context is the repo root (see docker/docker-compose.yml
 # `context: ..`).
 #
@@ -47,6 +48,7 @@ COPY apps/web-dashboard/package.json ./apps/web-dashboard/package.json
 COPY services/ai-gateway/package.json ./services/ai-gateway/package.json
 COPY services/matter-controller/package.json ./services/matter-controller/package.json
 COPY services/mcp-server/package.json ./services/mcp-server/package.json
+COPY services/erp-connector/package.json ./services/erp-connector/package.json
 COPY packages/tools-core/package.json ./packages/tools-core/package.json
 COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 COPY packages/shared-types/package.json ./packages/shared-types/package.json
@@ -58,6 +60,7 @@ COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 RUN npm ci \
     -w @droplet/orchestrator \
     -w @droplet/tools-core \
+    -w @droplet/erp-connector \
     -w @droplet/mcp-server \
     -w @droplet/fips-selftest \
     -w @droplet/shared-types \
@@ -70,6 +73,7 @@ COPY packages/fips-selftest ./packages/fips-selftest
 COPY packages/shared-types ./packages/shared-types
 COPY packages/auth-policy ./packages/auth-policy
 COPY services/mcp-server ./services/mcp-server
+COPY services/erp-connector ./services/erp-connector
 COPY apps/orchestrator ./apps/orchestrator
 
 # Generate the Prisma client (orchestrator's schema is canonical;
@@ -81,6 +85,7 @@ RUN npm run -w @droplet/orchestrator db:generate
 RUN npm run -w @droplet/shared-types build
 RUN npm run -w @droplet/auth-policy build
 RUN npm run -w @droplet/tools-core build
+RUN npm run -w @droplet/erp-connector build
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
 RUN npm run -w @droplet/orchestrator build
