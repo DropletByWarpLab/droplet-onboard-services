@@ -77,3 +77,21 @@ export async function consumeLoginState(
   // We won the claim; fetch the row to read its trusted fields.
   return prisma.ssoLoginState.findUnique({ where: { state } });
 }
+
+/**
+ * Prune spent (consumed) and abandoned (expired) login-state rows. `create`
+ * and `consumeLoginState` are the only writers and neither deletes, so on an
+ * SSO-enabled box this table grows unbounded. Consumed rows are single-use and
+ * useless once claimed; expired rows are past the short authorize→callback
+ * window and can never be consumed again. Wired to the 03:00 daily purge in
+ * index.ts (NOT a `while True`) — losing a tick is harmless because
+ * consumeLoginState independently rejects consumed/expired rows.
+ */
+export async function pruneExpiredLoginStates(
+  prisma: PrismaClient,
+): Promise<number> {
+  const { count } = await prisma.ssoLoginState.deleteMany({
+    where: { OR: [{ consumedAt: { not: null } }, { expiresAt: { lt: new Date() } }] },
+  });
+  return count;
+}

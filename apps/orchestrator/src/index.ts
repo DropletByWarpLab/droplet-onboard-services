@@ -67,6 +67,8 @@ import {
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
 import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
+import { pruneExpiredChallenges } from "./services/webauthn-challenge.service.js";
+import { pruneExpiredLoginStates } from "./services/sso-login-state.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
 import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-tz-backfill.service.js";
@@ -508,6 +510,15 @@ async function main() {
       const backupPurge = await purgeUpdateBackups(prisma, {
         updatesDir: config.DROPLET_OTA_UPDATES_DIR,
       });
+      // Bounded-growth sweeps for two auth tables whose mint endpoints run
+      // before authMiddleware: WebAuthnChallenge (every /login/passkey page
+      // load inserts one via the public authenticate/options route) and
+      // SsoLoginState (one per SSO authorize redirect). Neither had a wired
+      // prune despite pruneExpiredChallenges' docstring claiming it — expired
+      // WebAuthnChallenge / consumed+expired SsoLoginState rows accumulated
+      // forever, a slow DB-bloat DoS on the appliance Postgres.
+      const challengesDeleted = await pruneExpiredChallenges(prisma);
+      const loginStatesDeleted = await pruneExpiredLoginStates(prisma);
       logger.info(
         {
           eventsDeleted,
@@ -521,6 +532,8 @@ async function main() {
           notificationDeleted: auditPurge.notificationDeleted,
           auditRetentionSkipped: auditPurge.skipped,
           updateBackupsPurged: backupPurge.purged,
+          challengesDeleted,
+          loginStatesDeleted,
         },
         "daily purges complete",
       );

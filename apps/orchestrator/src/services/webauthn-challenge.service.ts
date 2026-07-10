@@ -98,10 +98,11 @@ export async function consumeChallenge(
 
 /**
  * Prune abandoned (expired) challenges. Ceremonies the user walked away from
- * leave rows that consumeChallenge never reaches; this keeps the table from
- * growing unbounded. Wired to the cron runtime (NOT a `while True`), called
- * opportunistically — losing a tick is harmless because consumeChallenge
- * independently rejects anything past `expiresAt`.
+ * leave rows that consumeChallenge never reaches, and the mint endpoint
+ * (POST /auth/webauthn/authenticate/options) is public + unthrottled, so this
+ * keeps the table from growing unbounded. Wired to the 03:00 daily purge in
+ * index.ts (NOT a `while True`) — losing a tick is harmless because
+ * consumeChallenge independently rejects anything past `expiresAt`.
  */
 export async function pruneExpiredChallenges(prisma: PrismaClient): Promise<number> {
   const { count } = await prisma.webAuthnChallenge.deleteMany({
