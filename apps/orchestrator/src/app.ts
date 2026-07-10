@@ -17,6 +17,8 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
+import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import { createFilesRouter } from "./routes/files.js";
@@ -252,6 +254,11 @@ export function createApp(
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
   app.use("/api", createPersonaRouter(prisma));
+  // WARP-1137 — Eaglesoft ERP integration control plane + data API. Reads
+  // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
+  // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
+  app.use("/api", createIntegrationsRouter(prisma));
+  app.use("/api", createErpRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());

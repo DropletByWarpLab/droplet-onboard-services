@@ -135,7 +135,50 @@ const getArSummary: ReadQuery = {
   },
 };
 
-export const READ_QUERIES: readonly ReadQuery[] = [getScheduleToday, findPatient, getArSummary];
+const getPatient: ReadQuery = {
+  name: "get_patient",
+  description: "One patient's minimum-necessary summary, by id.",
+  dependsOnTables: ["patient"],
+  exampleParams: { patientId: "p-123" },
+  build(map, params) {
+    const patient = resolveTable(map, "patient");
+    const patientId = resolveColumn(map, "patient", "patient_id");
+    const firstName = resolveColumn(map, "patient", "first_name");
+    const lastName = resolveColumn(map, "patient", "last_name");
+    const sql =
+      `SELECT ${patientId}, ${firstName}, ${lastName} ` +
+      `FROM ${patient} ` +
+      `WHERE ${patientId} = ?`;
+    return { sql, params: [params.patientId] };
+  },
+};
+
+const getRecallDue: ReadQuery = {
+  name: "get_recall_due",
+  description:
+    "Patients overdue for recare/recall (minimum-necessary). The recall predicate + recall-table join are refined against the live schema in WARP-1096.",
+  dependsOnTables: ["patient"],
+  exampleParams: {},
+  build(map) {
+    const patient = resolveTable(map, "patient");
+    const patientId = resolveColumn(map, "patient", "patient_id");
+    const firstName = resolveColumn(map, "patient", "first_name");
+    const lastName = resolveColumn(map, "patient", "last_name");
+    const sql =
+      `SELECT ${patientId}, ${firstName}, ${lastName} ` +
+      `FROM ${patient} ` +
+      `ORDER BY ${lastName}, ${firstName}`;
+    return { sql, params: [] };
+  },
+};
+
+export const READ_QUERIES: readonly ReadQuery[] = [
+  getScheduleToday,
+  findPatient,
+  getArSummary,
+  getPatient,
+  getRecallDue,
+];
 
 const BY_NAME: ReadonlyMap<string, ReadQuery> = new Map(READ_QUERIES.map((q) => [q.name, q]));
 
