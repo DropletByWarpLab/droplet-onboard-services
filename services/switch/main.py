@@ -649,12 +649,25 @@ async def setup_cameras(req: CameraSetupRequest):
             len(req.uplink_ports),
         )
 
+        dry = bool(getattr(driver, "plan_only", False))
+        if dry:
+            # Plan-only: the driver never wrote, so say so — don't claim
+            # "configured" (mirrors the "planned"/dry-run write responses above).
+            message = (
+                f"VLAN {req.vlan_id} planned (dry-run): ports {req.camera_ports} "
+                f"(untagged) + {req.uplink_ports} (tagged trunk) would be configured"
+            )
+        else:
+            message = (
+                f"VLAN {req.vlan_id} configured: ports {req.camera_ports} "
+                f"(untagged) + {req.uplink_ports} (tagged trunk)"
+            )
         return CameraSetupResult(
-            status="planned" if bool(getattr(driver, "plan_only", False)) else "ok",
+            status="planned" if dry else "ok",
             vlan_id=req.vlan_id,
             camera_ports=req.camera_ports,
             uplink_ports=req.uplink_ports,
-            message=f"VLAN {req.vlan_id} configured: ports {req.camera_ports} (untagged) + {req.uplink_ports} (tagged trunk)",
+            message=message,
         )
 
     except SwitchError as exc:
