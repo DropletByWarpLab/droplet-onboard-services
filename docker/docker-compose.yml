@@ -181,6 +181,13 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-1118 (§10): the orchestrator's request-size estimator
+      # (context-budget.service.ts) budgets the assembled chat request against
+      # this window before dispatch, PREVENTING (not merely detecting) the
+      # WARP-854 overflow. Mirrors the `ollama` service's OLLAMA_CONTEXT_LENGTH
+      # (both default 16384 via the same env token) so the estimator's window
+      # tracks the model server's actual window. NOT a model swap — window only.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
       - NEXTCLOUD_URL=http://nextcloud:80
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
@@ -437,10 +444,14 @@ services:
       # the literal OFF posture (identical to the pre-WARP-318 render).
       DROPLET_FIPS_REQUIRED: "false"
       OPENSSL_CONF: /etc/ssl/openssl.cnf
-      # Backend selection — defaults to 'real' in production. Override
-      # to 'mock' on hosts without /dev/tpm0 (Mac dev, CI runners).
+      # Backend selection. The 'real' (tpm2-pytss) backend is an unfinished
+      # scaffold (IDX-002) that device-identity-svc fails closed on unless
+      # DROPLET_TPM_ALLOW_SCAFFOLD is set, so the default is 'mock' — a box
+      # whose .env omits the key must NOT auto-land on the crash-looping
+      # scaffold. secrets.sh writes DROPLET_TPM_BACKEND=mock into .env; an
+      # operator knowingly running the scaffold sets real + the opt-in by hand.
       # docker-compose.test.override.yml forces 'mock' for the test lane.
-      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-real}
+      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-mock}
       DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
       # Auto-provision on first start: if /var/lib/droplet/tpm/ has no
       # provisioned.json, generate the EK / SRK / device-id key and
@@ -944,6 +955,10 @@ services:
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+      # WARP-1140: shared "Household" groupfolder — display-path prefix for
+      # chunks indexed from __groupfolders/. Must match the orchestrator's
+      # DROPLET_SHARED_FOLDER_NAME (same "Household" default).
+      - DROPLET_SHARED_FOLDER_NAME=${DROPLET_SHARED_FOLDER_NAME:-Household}
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
@@ -1500,8 +1515,15 @@ services:
     # voice-io. The bind is a live view of the host dir (late nodes appear)
     # and the wildcard cgroup rule permits them; voice-io's wake loop
     # re-resolves + opens the card when it shows up (pipeline.py).
+    #
+    # WARP-1055 — voice-calibration is a named volume so the wizard's
+    # applied mic calibration (voice/calibration.py, mounted at /data)
+    # survives container restarts/recreates; factory-reset's volume sweep
+    # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
+    # behaviour.
     volumes:
       - /dev/snd:/dev/snd
+      - voice-calibration:/data
     # ALSA sound-class char major is 116; the wildcard minor covers ANY
     # card, including one that enumerates after container-create (which the
     # old per-minor `devices:` rule could not). read / write / mknod.
@@ -1546,6 +1568,11 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1055 — where the applied mic calibration persists (JSON on
+      # the voice-calibration named volume above). The dashboard wizard
+      # writes it via POST /voice/calibration; startup re-applies the
+      # tuned gain + wake threshold over the env defaults.
+      - VOICE_CALIBRATION_PATH=${VOICE_CALIBRATION_PATH:-/data/calibration.json}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
@@ -2179,6 +2206,10 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
+  # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
+  # Named so a container recreate never silently reverts the tuned
+  # gain/threshold; factory-reset's volume sweep clears it.
+  voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.

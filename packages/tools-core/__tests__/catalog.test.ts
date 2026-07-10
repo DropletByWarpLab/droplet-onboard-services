@@ -75,6 +75,7 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     expect(byName.get("memory_recall")?.domain).toBe("memory");
     expect(byName.get("pm_list_projects")?.domain).toBe("pm");
     expect(byName.get("get_system_health")?.domain).toBe("system");
+    expect(byName.get("business_profile_get")?.domain).toBe("business");
   });
 
   it("marks a destructive tool as write + confirm and a read tool as neither", () => {

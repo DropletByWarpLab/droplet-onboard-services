@@ -228,6 +228,22 @@ DEFAULT_STT_MAX_RECORD_S = 3.0  # hard cap on captured audio per wake. The
                                 # background audio where no silence is ever
                                 # detected). Overridable via STT_MAX_RECORD_S.
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
+# Calibration mode (WARP-1059, from WARP-1055 review F6). While the
+# dashboard wizard measures (noise floor / speech peak / echo / wake
+# test), the pipeline must not HANDLE wakes: the step-2 spec phrase
+# ("Hey Droplet, …") would otherwise start a full turn — STT capture
+# pauses the detector ~3-4 s (swallowing step-3 tries), the LLM reply is
+# SPOKEN through the box speaker (inflating step-2's speech_peak so
+# auto-gain tunes to the box's own voice, +2 s cooldown), and a step-2
+# wake can pre-count for step 3. In calibration mode wake DETECTION
+# still runs and still records last_wake_at/score/model (the wizard's
+# step-3 counter rides those), but the wake→STT→LLM→TTS chain never
+# starts. Fail-safe: a wall-clock TTL computed on read — no timer
+# thread, nothing persisted — renewed by the wizard while it's open, so
+# an abandoned wizard/dead tab leaves the assistant deaf for at most the
+# TTL and a process restart clears it instantly.
+DEFAULT_CALIBRATION_MODE_TTL_S = 90.0
+
 # Window after TTS playback ends during which wake detection is suppressed.
 # The reSpeaker XVF3800 is both speaker and mic on the same USB endpoint;
 # even with hardware AEC, the tail of a synthesized reply can bleed back
@@ -377,6 +393,12 @@ class PipelineStatus:
     input_rms_dbfs: Optional[float] = None
     last_audio_at: Optional[float] = None
     input_flatlined: bool = False
+    # Calibration mode (WARP-1059). True while the wizard's suppression
+    # window is live: wakes are counted (last_wake_at/score/model) but
+    # not handled (no STT/LLM/TTS). `calibration_mode_expires_at` is the
+    # fail-safe expiry the wizard renews; None when the mode is off.
+    calibration_mode: bool = False
+    calibration_mode_expires_at: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -528,6 +550,10 @@ class WakePipeline:
         self._last_response_at: Optional[float] = None
         self._error_message: Optional[str] = None
         self._last_fire_at: float = 0.0  # debounce tracking
+        # Calibration mode (WARP-1059) — wall-clock expiry of the
+        # wizard's suppression window; None = off. Deliberately
+        # in-memory only: a restart must never come back deaf.
+        self._calibration_mode_until: Optional[float] = None
 
         # STT capture session — only set while state=='transcribing'.
         # The pipeline thread is the sole writer; reads from status()
@@ -776,6 +802,103 @@ class WakePipeline:
             self._speak_ended_at = time.time()
 
     # ──────────────────────────────────────────────────────────────
+    # Calibration live-apply (WARP-1055)
+    # ──────────────────────────────────────────────────────────────
+
+    def set_input_gain(self, gain: float) -> None:
+        """Live-apply a calibrated digital input gain.
+
+        Driven by POST /voice/calibration (the wizard's single write)
+        and by main.apply_stored_calibration at startup, overriding the
+        VOICE_INPUT_GAIN env default. Nonsense values are ignored — a
+        bad record must never mute the mic (gain 0) or flip the signal
+        (negative). The worker thread reads the float without the lock
+        (atomic under the GIL, same as the construct-time value); the
+        write takes the lock only to pair with status() reads.
+        """
+        try:
+            g = float(gain)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(g) or g <= 0.0:
+            logger.warning("set_input_gain(%r) ignored — not a usable gain", gain)
+            return
+        with self._lock:
+            self._input_gain = g
+        logger.info("input gain set to %.2f (calibration)", g)
+
+    def set_wake_threshold(self, threshold: float) -> None:
+        """Live-apply a calibrated wake threshold (0 < t ≤ 1).
+
+        Same contract as set_input_gain: calibration overrides the
+        env/engine default, garbage is ignored so a corrupt record
+        can't set an impossible gate (0 fires on everything, >1 never
+        fires under either engine's score semantics).
+        """
+        try:
+            t = float(threshold)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(t) or not (0.0 < t <= 1.0):
+            logger.warning(
+                "set_wake_threshold(%r) ignored — outside (0, 1]", threshold,
+            )
+            return
+        with self._lock:
+            self._threshold = t
+        logger.info("wake threshold set to %.2f (calibration)", t)
+
+    # ──────────────────────────────────────────────────────────────
+    # Calibration mode (WARP-1059)
+    # ──────────────────────────────────────────────────────────────
+
+    def enter_calibration_mode(
+        self, ttl_s: float = DEFAULT_CALIBRATION_MODE_TTL_S,
+    ) -> float:
+        """Open (or renew) the wizard's suppression window: wake
+        DETECTION keeps running and keeps recording last_wake_at/score/
+        model, but detected wakes are NOT handled — no STT capture, no
+        LLM call, no spoken reply (see _run_wake_detect).
+
+        Fail-safe by construction: the mode is a wall-clock expiry
+        computed on read — no timer thread, nothing persisted — so an
+        abandoned wizard leaves the assistant deaf for at most `ttl_s`
+        and a process restart clears it instantly. Nonsense TTLs fall
+        back to the default rather than arming an unbounded window.
+        Returns the expiry (epoch seconds) for the API response.
+        """
+        try:
+            ttl = float(ttl_s)
+        except (TypeError, ValueError):
+            ttl = DEFAULT_CALIBRATION_MODE_TTL_S
+        if not math.isfinite(ttl) or ttl <= 0:
+            ttl = DEFAULT_CALIBRATION_MODE_TTL_S
+        expires = time.time() + ttl
+        with self._lock:
+            self._calibration_mode_until = expires
+        logger.info(
+            "calibration mode entered (ttl %.0fs) — wake handling "
+            "suppressed, detection still counting", ttl,
+        )
+        return expires
+
+    def exit_calibration_mode(self) -> None:
+        """Explicit exit (wizard closed). Idempotent — the TTL expiry
+        is the fail-safe for every path that never calls this."""
+        with self._lock:
+            was_active = self._calibration_mode_until is not None
+            self._calibration_mode_until = None
+        if was_active:
+            logger.info("calibration mode exited — wake handling restored")
+
+    def _calibration_mode_active(self, now: float) -> bool:
+        """Read the mode against a caller-supplied clock. Reading the
+        float without the lock is safe (atomic under the GIL); callers
+        that pair it with other status fields hold _lock anyway."""
+        until = self._calibration_mode_until
+        return until is not None and now < until
+
+    # ──────────────────────────────────────────────────────────────
     # Status — atomic snapshot
     # ──────────────────────────────────────────────────────────────
 
@@ -851,6 +974,12 @@ class WakePipeline:
                 input_rms_dbfs=self._input_rms_dbfs,
                 last_audio_at=self._last_audio_at,
                 input_flatlined=input_flatlined,
+                calibration_mode=self._calibration_mode_active(now),
+                calibration_mode_expires_at=(
+                    self._calibration_mode_until
+                    if self._calibration_mode_active(now)
+                    else None
+                ),
             )
 
     # ──────────────────────────────────────────────────────────────
@@ -1003,15 +1132,12 @@ class WakePipeline:
                         mono = np.ascontiguousarray(frames[:, 0])
                 else:
                     mono = frames.reshape(-1)
-                if self._input_gain != 1.0:
-                    # Digital boost for quiet capture chains; clip into
-                    # int16 so an over-eager gain distorts instead of
-                    # wrapping around.
-                    mono = np.clip(
-                        mono.astype(np.float32) * self._input_gain,
-                        -32768.0,
-                        32767.0,
-                    ).astype(np.int16)
+                # The RAW mono frame goes to _on_frame; the digital input
+                # gain is applied THERE, after level tracking, so
+                # input_rms_dbfs stays in the same pre-gain domain as
+                # /audio/measure and the stored calibration floor
+                # (WARP-1055 — a gained RMS compared against a raw floor
+                # read as permanent noise drift on the dashboard).
                 self._on_frame(mono)
 
     def _refresh_audio_enumeration(self, sd: Any) -> None:
@@ -1082,6 +1208,13 @@ class WakePipeline:
         `rms_window_frames` frames) and refreshes `last_audio_at` whenever
         a frame's own level clears the flatline threshold. status() turns
         those into the read-time `input_flatlined` flag.
+
+        Domain contract (WARP-1055): the frame here is the RAW capture,
+        BEFORE the digital input gain — the same domain as
+        /audio/measure and the persisted calibration floor, so the
+        dashboard can compare the live RMS against the calibrated floor
+        without gain math. Flatline semantics are unaffected: a wedged
+        DSP emits digital zeros, which are zeros in any gain domain.
         """
         n = int(frame.size)
         if n == 0:
@@ -1124,8 +1257,19 @@ class WakePipeline:
     def _on_frame(self, frame: np.ndarray) -> None:
         # Input-level tracking first (WARP-1037): every frame counts,
         # regardless of which state it dispatches to below — a wedged
-        # DSP flows silence in ALL states.
+        # DSP flows silence in ALL states. Tracked on the RAW frame,
+        # BEFORE gain (WARP-1055 domain contract — see _track_input_level).
         self._track_input_level(frame)
+        # Digital input gain applies AFTER tracking, so the detector /
+        # VAD / STT paths below see the boosted signal while the
+        # published level stays in the raw capture domain. Clip into
+        # int16 so an over-eager gain distorts instead of wrapping.
+        if self._input_gain != 1.0:
+            frame = np.clip(
+                frame.astype(np.float32) * self._input_gain,
+                -32768.0,
+                32767.0,
+            ).astype(np.int16)
         # Apply visual-decay BEFORE dispatch so a stale wake_detected /
         # transcript_ready that should have decayed actually does. status()
         # decays lazily on read, but the worker thread reads _state
@@ -1250,10 +1394,27 @@ class WakePipeline:
 
         event = WakeEvent(model_name=model, score=score, detected_at=now)
         with self._lock:
+            # Calibration mode (WARP-1059): count, don't handle. The
+            # wake fields still update — the wizard's step-3 "say it
+            # three times" counter rides last_wake_at changes — but the
+            # state stays 'listening', so _on_frame never routes into
+            # the STT capture path and nothing gets spoken back.
+            calibrating = self._calibration_mode_active(now)
             self._last_wake_at = event.detected_at
             self._last_wake_score = event.score
             self._last_wake_model = event.model_name
-            self._state = "wake_detected"
+            if not calibrating:
+                self._state = "wake_detected"
+
+        if calibrating:
+            logger.info(
+                "wake detected in calibration mode (model=%s score=%.3f) — "
+                "counted, not handled", event.model_name, event.score,
+            )
+            # Same rationale as the decay path: don't carry a stateful
+            # recognizer's half-decoded utterance into the next try.
+            self._reset_detector()
+            return
 
         try:
             self._on_wake(event)

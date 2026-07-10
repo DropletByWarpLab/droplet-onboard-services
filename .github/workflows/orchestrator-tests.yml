@@ -15,6 +15,7 @@ on:
       - "packages/tools-core/**"
       - "packages/fips-selftest/**"
       - "services/mcp-server/**"
+      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -25,6 +26,7 @@ on:
       - "packages/tools-core/**"
       - "packages/fips-selftest/**"
       - "services/mcp-server/**"
+      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -71,6 +73,11 @@ jobs:
 
       - name: Build @droplet/mcp-server
         run: npm run -w @droplet/mcp-server build
+
+      # WARP-1137: erp.service imports @droplet/erp-connector; its types
+      # resolve from dist/, so build before typecheck (TS2307 otherwise).
+      - name: Build @droplet/erp-connector
+        run: npm run -w @droplet/erp-connector build
 
       # WARP-537: the update-agent verify suite execs the REAL cosign
       # binary over golden fixtures (src/services/update-agent/verify.test.ts)

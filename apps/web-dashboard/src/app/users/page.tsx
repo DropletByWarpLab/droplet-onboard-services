@@ -31,6 +31,7 @@ import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-poli
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import type {
   AuthUser,
+  RosterUser,
   InviteListItem,
   InviteRole,
   CreateUserRole,
@@ -91,7 +92,15 @@ function generateTempPassword(): string {
  */
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
-  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [users, setUsers] = useState<RosterUser[]>([]);
+  // DASH-001: self-identity compares the LOCAL user UUID (u.userId ↔
+  // currentUser.id), never the Nextcloud username (u.id) against the local
+  // username — separate namespaces (WARP-947). Falls back to the username
+  // compare only when the row has no linked local UUID.
+  const isSelf = (u: RosterUser): boolean =>
+    u.userId != null && currentUser?.id != null
+      ? u.userId === currentUser.id
+      : u.id === currentUser?.username;
   const [invites, setInvites] = useState<InviteListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
@@ -391,8 +400,8 @@ export default function UsersPage() {
     }
   };
 
-  const handleDelete = (u: AuthUser) => {
-    if (u.id === currentUser?.username) {
+  const handleDelete = (u: RosterUser) => {
+    if (isSelf(u)) {
       setError("You can't delete your own account.");
       return;
     }
@@ -613,7 +622,7 @@ export default function UsersPage() {
                 <span className="nm">{u.displayName || u.id}</span>
                 <span className="sub mono">
                   {u.id}
-                  {u.id === currentUser?.username && (
+                  {isSelf(u) && (
                     <span style={{ color: "var(--brand)" }}> · you</span>
                   )}
                 </span>
@@ -636,7 +645,7 @@ export default function UsersPage() {
                 >
                   <Edit3 size={14} />
                 </button>
-                {u.id !== currentUser?.username && (
+                {!isSelf(u) && (
                   <>
                     <button
                       onClick={() => handleSetEnabled(u, false)}
@@ -935,6 +944,9 @@ export default function UsersPage() {
         labelledBy={createHeadingId}
         closeOnBackdrop={createPhase === "form"}
         initialFocusRef={createDisplayRef}
+        // Sectioned layout (full-width header divider) — sections own their
+        // padding (WARP-1153).
+        flush
       >
         <>
             <div

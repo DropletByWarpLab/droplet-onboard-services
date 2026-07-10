@@ -8,8 +8,12 @@
 # host's br-lan. See scripts/host/usr-local-sbin/droplet-host-net for details.
 Description=Droplet host networking (br-lan DHCP + managed switch route)
 After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
+# Wants=, NOT Requires=docker.service (P6): ExecStart never calls Docker — it
+# assigns br-lan's address/route and runs dnsmasq. A hard Requires= cascade-stops
+# this unit on any clean docker.service stop (engine upgrade, `systemctl restart
+# docker`), and a clean stop does not trip Restart=on-failure — the single-box LAN
+# loses DHCP until reboot. After= still orders us after Docker; Wants= won't cascade.
+Wants=network-online.target docker.service
 
 [Service]
 Type=simple

@@ -59,8 +59,11 @@ import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
+import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
+import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
+import type { FileEntryInfo } from "@/lib/types";
 
 export interface WidgetProps {
   w: number;
@@ -229,7 +232,8 @@ const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
-function CalendarWidget({ h }: WidgetProps) {
+export function CalendarWidget({ h }: WidgetProps) {
+  const router = useRouter();
   const today = new Date();
   const [view, setView] = useState({ y: today.getFullYear(), m: today.getMonth() });
   const agendaRef = useRef<HTMLDivElement>(null);
@@ -311,11 +315,34 @@ function CalendarWidget({ h }: WidgetProps) {
         {cells.map((c, i) => {
           const isToday = isThisMonth && !c.out && c.d === today.getDate();
           const ev = !c.out && eventDays.has(c.d);
+          const cls = "w-cal-cell" + (c.out ? " out" : "") + (isToday ? " today" : "");
+          // Out-of-month filler cells stay non-interactive (WARP-1131).
+          if (c.out) {
+            return (
+              <div className={cls} key={i}>
+                {c.d}
+              </div>
+            );
+          }
+          // In-month cells are real buttons: click / Enter / Space deep-links
+          // to the Calendar page anchored on that day (WARP-1130/1131).
+          const date = new Date(view.y, view.m, c.d);
           return (
-            <div className={"w-cal-cell" + (c.out ? " out" : "") + (isToday ? " today" : "")} key={i}>
+            <button
+              type="button"
+              className={cls}
+              key={i}
+              onClick={() => router.push(`/calendar?date=${dayKey(date)}`)}
+              aria-label={date.toLocaleDateString(undefined, {
+                weekday: "long",
+                month: "long",
+                day: "numeric",
+                year: "numeric",
+              })}
+            >
               {c.d}
               {ev && <span className="ev" />}
-            </div>
+            </button>
           );
         })}
       </div>
@@ -347,15 +374,35 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { models } = useModels();
   const { totalCameras } = useCameras();
   const { totalDevices } = useSmartHome();
+  // WARP-1055 — the Home surface's Voice status line lives inside this
+  // existing system-health tile (design brief §2), not a new tile.
+  const { state: voiceState, unavailable: voiceUnavailable } =
+    useVoiceHealthSummary();
 
   const local = models.filter((m) => m.provider === "ollama").length;
   const cloud = models.length - local;
+
+  const voiceRow: [LucideIcon, string, string, string, string] =
+    // Review F7 — voice-io not deployed (macOS/dev installs) is not a
+    // fault: render a quiet em-dash row, never a permanent red.
+    voiceUnavailable
+      ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
+      : voiceState == null
+        ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+        : voiceState.kind === "calibrated"
+          ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+          : voiceState.kind === "attention"
+            ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+            : voiceState.kind === "broken"
+              ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
+              : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
 
   const stats: [LucideIcon, string, string, string, string][] = [
     [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
     [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
     [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart-home online", "var(--success)"],
     [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
+    voiceRow,
   ];
 
   if (w <= 2 || h <= 2) {
@@ -409,29 +456,48 @@ function ActivityWidget() {
 }
 
 /* ─────────────────────────── Recent files ─────────────────────────── */
-function FilesWidget() {
+export function FilesWidget() {
+  const router = useRouter();
   const { items } = useRecents(8);
-  const rows: [string, string, string][] = items
-    .slice(0, 8)
-    .map((f) => [fileKind(f), f.name, relTime(f.modifiedAt)]);
+  const rows = items.slice(0, 8);
   const iconFor: Record<string, LucideIcon> = {
     doc: FileText, pdf: FileText, sheet: FileSpreadsheet, video: Video, image: ImageIcon,
   };
   if (rows.length === 0) {
     return <WEmpty>No recent files</WEmpty>;
   }
+  // Deep-link into the Files page (WARP-1142/1143): folders open at that
+  // folder; files open their parent with `?preview=<path>` so the page
+  // selects + previews the item once its listing loads.
+  const open = (f: FileEntryInfo) => {
+    if (f.isDirectory) {
+      router.push(`/files?path=${encodeURIComponent(f.path)}`);
+    } else {
+      const parent = f.path.replace(/\/[^/]*$/, "") || "/";
+      router.push(
+        `/files?path=${encodeURIComponent(parent)}&preview=${encodeURIComponent(f.path)}`,
+      );
+    }
+  };
   return (
     <div className="w-list">
-      {rows.map(([kind, name, meta], i) => {
+      {rows.map((f, i) => {
+        const kind = fileKind(f);
         const Ic = iconFor[kind] ?? FileText;
         return (
-          <div className="w-row" key={name + i}>
+          <button
+            type="button"
+            className="w-row"
+            key={f.path + i}
+            onClick={() => open(f)}
+            aria-label={f.isDirectory ? `Open folder ${f.name}` : `Open ${f.name}`}
+          >
             <span className={"f-ico " + kind} style={{ width: 24, height: 24, borderRadius: 6 }}>
               <Ic size={12} />
             </span>
-            <span className="grow nm">{name}</span>
-            <span className="meta">{meta}</span>
-          </div>
+            <span className="grow nm">{f.name}</span>
+            <span className="meta">{relTime(f.modifiedAt)}</span>
+          </button>
         );
       })}
     </div>

@@ -25,6 +25,15 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncGetUserQuota: vi.fn(),
 }));
 
+// WARP-1062 (audit item B): the local isAdmin() denials now emit the WARP-237
+// policy-violation row — capture the singleton to assert it.
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
 import { createStorageRouter } from "../routes/storage.js";
 
 // Bridge response fixture — three drives, one with a friendly name in
@@ -281,6 +290,23 @@ describe("storage routes (WARP-174)", () => {
         .send({ displayName: "X" });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Invalid drive UUID/i);
+    });
+
+    it("rejects the literal 'undefined'/'null' uuid instead of upserting a junk row (WARP-1141)", async () => {
+      // A client that stringifies a missing uuid produces
+      // PATCH /storage/drives/undefined — which passes the charset regex,
+      // upserts a Drive row keyed "undefined", answers 200, and the rename
+      // silently never joins back to any real drive.
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      for (const junk of ["undefined", "null"]) {
+        const res = await request(app)
+          .patch(`/api/storage/drives/${junk}`)
+          .send({ displayName: "Burrito" });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/Invalid drive UUID/i);
+        expect(prisma.rows.has(junk)).toBe(false);
+      }
     });
   });
 });
@@ -773,6 +799,19 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       app.use("/api", createStorageRouter(createPrismaMock() as any));
       const res = await request(app).post("/api/storage/drives/rescan");
       expect(res.status).toBe(403);
+      // WARP-1062 (audit item B): the local isAdmin() deny emits the same
+      // WARP-237 "Access denied" row as the central requireRole.
+      expect(recordActivityMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "auth",
+          severity: "warn",
+          what: "Access denied",
+          refs: expect.objectContaining({
+            role: "family",
+            reason: "role-not-permitted",
+          }),
+        }),
+      );
     });
 
     it("fails closed when no authenticated user is present", async () => {

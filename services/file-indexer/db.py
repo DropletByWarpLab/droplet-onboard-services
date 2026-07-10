@@ -143,6 +143,81 @@ def upsert_chunk(
         )
 
 
+# ── WARP-1139/WARP-1140: explicit per-file index status ──
+#
+# Search UIs must distinguish "not indexed yet / skipped / failed" from
+# "no match", which is impossible when indexing state is derived from
+# FileContentChunk row ABSENCE (the CLAUDE.md no-guessing rule; WARP-218
+# is the pattern). The watcher upserts one row per watched file at each
+# pipeline stage; the orchestrator's GET /api/files/search/status reads
+# the pending/failed counts.
+#
+# All three helpers are best-effort at the CALL SITE (watcher wraps them
+# in try/except): a deployment where the FileIndexStatus migration has
+# not run yet must degrade to the old behaviour, never break indexing.
+
+
+def set_index_status(
+    user_id: str,
+    path: str,
+    status: str,
+    *,
+    nc_file_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """Upsert the explicit index status for one (userId, path).
+
+    `status` is one of 'indexing' | 'ready' | 'skipped' | 'failed'
+    (the FileIndexState enum). `reason` is persisted only for
+    skipped/failed rows (truncated to 200 chars, mirroring
+    BrainMemoryItem.failureReason).
+    """
+    with _db_lock, get_conn().cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO "FileIndexStatus"
+                ("userId", "path", "ncFileId", "status", "reason", "updatedAt")
+            VALUES (%s, %s, %s, %s::"FileIndexState", %s, NOW())
+            ON CONFLICT ("userId", "path")
+            DO UPDATE SET
+                "ncFileId"  = EXCLUDED."ncFileId",
+                "status"    = EXCLUDED."status",
+                "reason"    = EXCLUDED."reason",
+                "updatedAt" = NOW()
+            """,
+            (
+                user_id,
+                path,
+                nc_file_id,
+                status,
+                (reason or "")[:200] if reason else None,
+            ),
+        )
+
+
+def delete_index_status(user_id: str, path: str) -> None:
+    """Drop the status row for a deleted file (its state is 'gone', not a
+    lingering 'ready')."""
+    with _db_lock, get_conn().cursor() as cur:
+        cur.execute(
+            'DELETE FROM "FileIndexStatus" WHERE "userId" = %s AND "path" = %s',
+            (user_id, path),
+        )
+
+
+def fetch_index_status_map() -> dict[tuple[str, str], tuple[str, float]]:
+    """Return {(userId, path): (status, updatedAt-epoch-seconds)} for every
+    row. Used by the startup reconcile scan to decide which on-disk files
+    still need indexing without a per-file query."""
+    with _db_lock, get_conn().cursor() as cur:
+        cur.execute(
+            'SELECT "userId", "path", "status"::text, '
+            'EXTRACT(EPOCH FROM "updatedAt") FROM "FileIndexStatus"'
+        )
+        rows = cur.fetchall()
+    return {(r[0], r[1]): (r[2], float(r[3])) for r in rows}
+
+
 def delete_chunks_for_brain_item(brain_item_id: str) -> None:
     """Remove all chunks for a single BrainMemoryItem.
 

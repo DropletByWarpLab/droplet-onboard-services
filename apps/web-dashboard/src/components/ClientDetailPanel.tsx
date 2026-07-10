@@ -36,7 +36,9 @@ export function ClientDetailPanel({
   const headingId = useId();
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} placement="right">
+    // `flush`: sectioned side panel — full-width dividers, sections own their
+    // padding (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} placement="right" flush>
       {/* Header */}
       <div className="flex items-center justify-between p-5 border-b border-separator">
         <div className="flex items-center gap-3">

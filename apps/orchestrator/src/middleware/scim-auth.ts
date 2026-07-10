@@ -26,6 +26,7 @@ import type { Request, Response, NextFunction } from "express";
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
 import { config } from "../config.js";
+import { recordAccessDenied } from "./auth.js";
 import { scimError, SCIM_CONTENT_TYPE } from "../services/scim-resource.js";
 
 /** Constant-time bearer comparison. Empty `expected` (unset secret) always
@@ -44,6 +45,10 @@ export function scimAuthMiddleware(req: Request, res: Response, next: NextFuncti
   const presented = header?.startsWith("Bearer ") ? header.slice(7) : null;
 
   if (!presented || !bearerMatches(presented, config.DROPLET_SCIM_BEARER_TOKEN)) {
+    // WARP-1062 (audit item B): a rejected SCIM bearer is a policy violation
+    // on the provisioning surface — emit the same WARP-237 row as requireRole
+    // denials (the row carries only path/method/reason, never the token).
+    recordAccessDenied(req, "scim-bearer-invalid");
     // Never log the presented or expected token.
     res
       .status(401)

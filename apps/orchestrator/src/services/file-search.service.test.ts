@@ -150,6 +150,33 @@ describe("searchByLexical", () => {
     });
     expect(hits).toEqual([]);
   });
+
+  // WARP-1140 — the Files search route passes the shared-household corpus as
+  // an extra owner; single-owner calls keep the historic $1/$2/… positions.
+  it("expands the user filter to an IN list for additionalUserIds", async () => {
+    const prisma = mockPrisma([]);
+    await searchByLexical(prisma, {
+      userId: "alice",
+      additionalUserIds: ["__household__"],
+      query: "hello",
+      limit: 5,
+      source: "nextcloud",
+    });
+    const call = (
+      prisma as unknown as { $queryRawUnsafe: { mock: { calls: unknown[][] } } }
+    ).$queryRawUnsafe.mock.calls[0]!;
+    const sql = call[0] as string;
+    expect(sql).toContain('"userId" IN ($1, $2)');
+    expect(sql).toContain("websearch_to_tsquery('english', $3)");
+    expect(sql).toContain('source = $4::"FileContentSource"');
+    expect(call.slice(1)).toEqual([
+      "alice",
+      "__household__",
+      "hello",
+      "nextcloud",
+      5,
+    ]);
+  });
 });
 
 describe("searchHybrid (BM25 + RRF, pre-reranker)", () => {

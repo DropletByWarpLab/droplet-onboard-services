@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Plus,
   RefreshCw,
@@ -22,6 +23,7 @@ import {
 } from "@/lib/hooks/useCalendar";
 import {
   dayKey,
+  parseDateParam,
   paletteColor,
   eventVisibilityKey,
   compareByStart,
@@ -99,11 +101,21 @@ function reportWindow(scope: ReportScope, cursor: Date): { from: Date; to: Date;
  *  from the loaded events. All driven by real `/api/calendar` data; the fetched
  *  range follows the active view. */
 export default function CalendarPage() {
+  // WARP-1131 — Home calendar-widget deep link: `?date=YYYY-MM-DD` seeds the
+  // month cursor and the selected day. Read once on mount (useState initial
+  // values only); a malformed or absent param falls back to today, unselected.
+  const searchParams = useSearchParams();
+  const linkedDate = parseDateParam(searchParams?.get("date"));
   const [view, setView] = useState<View>("month");
-  const [cursor, setCursor] = useState(() => new Date());
+  const [cursor, setCursor] = useState(() => linkedDate ?? new Date());
   // Day clicked in the mini-month while in Agenda view — drives the scroll-to +
-  // highlight of that day's section.
-  const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
+  // highlight of that day's section. Also seeded by the `?date=` deep link:
+  // unlike the WARP-944 stale-selection case, a deep-linked day WAS explicitly
+  // picked by the user (on the Home widget), so highlighting it in a later
+  // Agenda switch is intended.
+  const [selectedKey, setSelectedKey] = useState<string | undefined>(
+    linkedDate ? dayKey(linkedDate) : undefined,
+  );
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   const { toast } = useToast();
 

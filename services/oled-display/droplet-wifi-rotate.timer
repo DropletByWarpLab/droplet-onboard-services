@@ -1,6 +1,6 @@
 [Unit]
 Description=Rotate Droplet-AI Wi-Fi WPA key every 24h
-Documentation=file:///home/droplet/Documents/droplet-onboard-services/services/oled-display/device-bridge.py
+Documentation=file://@REPO_ROOT@/services/oled-display/device-bridge.py
 
 [Timer]
 # Fire once at boot (catches the "we've been off for days" case), then

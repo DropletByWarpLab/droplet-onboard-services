@@ -17,9 +17,20 @@
  *
  * Proven RED first: HealthStatusView does not exist yet (import fails).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import React from "react";
+
+// The global setup stringifies next/link; override with a real anchor so the
+// WARP-1146 "View drives" link is assertable (same pattern as DrivesPanel.test).
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 import { HealthStatusView } from "@/components/health/HealthStatusView";
 import type { SystemHealth } from "@/lib/api";
 
@@ -83,6 +94,24 @@ describe("HealthStatusView (PR #382)", () => {
     render(<HealthStatusView health={makeHealth({ status: "down" })} isLoading={false} error={undefined} />);
     const banner = screen.getByRole("status", { name: /system health/i });
     expect(banner).toHaveTextContent(/needs attention/i);
+  });
+
+  it("surfaces a flagged storage pool with a link to Drives (WARP-1146)", () => {
+    // The monitor's `storage` component goes down when a RAID pool is
+    // degraded/failed. The row must render the friendly label AND point the
+    // owner at the Drives page that explains which pool dropped a member.
+    const health = makeHealth({
+      status: "degraded",
+      components: [
+        { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+        { name: "storage", status: "down", latencyMs: 3, lastCheckedAt: "2026-05-31T00:00:00Z", error: "pool md127 is degraded" },
+      ],
+    });
+    render(<HealthStatusView health={health} isLoading={false} error={undefined} />);
+    const list = screen.getByRole("list", { name: /service health/i });
+    expect(within(list).getByText(/storage pools/i)).toBeInTheDocument();
+    const link = within(list).getByRole("link", { name: /view drives/i });
+    expect(link).toHaveAttribute("href", "/files/drives");
   });
 
   it("renders a loading state without crashing when health is undefined", () => {

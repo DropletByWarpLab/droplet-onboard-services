@@ -147,9 +147,10 @@ describe("SearchBar mode toggle (WARP-880)", () => {
       target: { value: "anything" },
     });
     await waitFor(() => expect(searchFileContentMock).toHaveBeenCalled(), { timeout: 1500 });
-    // keyword never needs the gateway → readiness probe is not fired and
-    // the pill never renders.
-    expect(fetchSearchStatusMock).not.toHaveBeenCalled();
+    // WARP-1139: the probe now fires for BOTH content modes (its explicit
+    // indexer counts drive the "still indexing" empty state), but keyword
+    // never needs the gateway → the traffic-light pill still never renders.
+    expect(fetchSearchStatusMock).toHaveBeenCalled();
     expect(screen.queryByTestId("search-readiness")).not.toBeInTheDocument();
   });
 

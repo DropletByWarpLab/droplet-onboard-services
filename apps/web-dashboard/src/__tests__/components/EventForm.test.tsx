@@ -47,6 +47,43 @@ describe("EventForm ARIA (WARP-289)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("relies on the Dialog primitive for body padding + horizontal clipping (WARP-1152/1153)", () => {
+    // The New-event dialog used to self-pad with an overflow-y-auto wrapper;
+    // a too-wide Starts/Ends row then overflowed past the right padding and
+    // grew an internal horizontal scrollbar. The primitive now owns the p-5
+    // inset and the overflow-x-hidden policy — assert EventForm gets it (and
+    // doesn't double-pad).
+    render(
+      <EventForm open onClose={vi.fn()} onSaved={vi.fn()} initial={null} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.firstElementChild as HTMLElement;
+    expect(body.className).toContain("p-5");
+    expect(body.className).toContain("overflow-x-hidden");
+    expect(body.className).toContain("overflow-y-auto");
+    // No second p-5 layer inside the primitive's body region.
+    const doublePadded = Array.from(
+      body.querySelectorAll<HTMLElement>("*"),
+    ).filter((el) => el.classList.contains("p-5"));
+    expect(doublePadded).toHaveLength(0);
+  });
+
+  it("Starts/Ends datetime rows wrap instead of overflowing the dialog width (WARP-1152)", () => {
+    // Each DateTimePicker row (date input + time select) has a min-content
+    // width of ~250px, wider than one half of the sm:grid-cols-2 split inside
+    // the max-w-md dialog. flex-wrap lets the time select drop to its own
+    // line instead of pushing past the dialog's content box.
+    render(
+      <EventForm open onClose={vi.fn()} onSaved={vi.fn()} initial={null} />,
+    );
+    for (const stem of ["Starts", "Ends"]) {
+      const dateInput = screen.getByLabelText(`${stem} date`);
+      const row = dateInput.parentElement as HTMLElement;
+      expect(row.className).toMatch(/\bflex\b/);
+      expect(row.className).toMatch(/\bflex-wrap\b/);
+    }
+  });
+
   it("stacks the Starts/Ends grid on narrow viewports and goes 2-col at sm (WARP-943)", () => {
     // The date input carries an 8.5rem floor so the year isn't clipped; on a
     // ~360px phone two such columns overflow the cell, so the grid must stack

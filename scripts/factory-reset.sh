@@ -494,10 +494,23 @@ VOLUMES=(
   "rag-eval-data"
   "whisper-models"
   "piper-voices"
+  # WARP-1055: voice-io's applied mic-calibration record (small JSON, mounted
+  # at /data). docker-compose.yml declares this named volume so a container
+  # recreate never silently reverts the tuned gain/threshold; the reset must
+  # wipe it so factory-reset truly returns to §6.4 "Not calibrated yet".
+  "voice-calibration"
   "ollama-data"
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
+  # INFRA-004: both are declared in docker-compose.yml but were missing here —
+  # in the swallowed-`down -v` scenario this fallback exists for, they SURVIVED
+  # a "factory reset" AND the verify gate (built from this same list) read clean.
+  # fleet-agent-state holds identity.json + the portal ingest token (credential
+  # remanence on a resold box); ota-updates holds per-update rollback backups +
+  # staged configs.tar.gz.
+  "ota-updates"
+  "fleet-agent-state"
 )
 
 # Free any container still mounting a target volume so the removals below are

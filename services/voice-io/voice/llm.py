@@ -54,6 +54,9 @@ import httpx
 # present voice-io's client cert when DROPLET_INTERNAL_TLS=1.
 from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
 
+# WARP-1119 — workspace persona for greeting turns (arch brief §14).
+from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
+
 logger = logging.getLogger("voice.llm")
 
 
@@ -235,6 +238,7 @@ class OrchestratorLLM(LLMClient):
         location: Optional[str] = None,
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
+        persona_fetcher: Optional[PersonaFetcher] = None,
     ):
         self._base_url = _internal_base_url(base_url.rstrip("/"))
         self._chat_path = chat_path
@@ -254,6 +258,13 @@ class OrchestratorLLM(LLMClient):
         # `now_provider` lets tests inject a deterministic clock without
         # patching datetime globally. Production passes None → real time.
         self._now_provider = now_provider
+        # WARP-1119 (§14): the workspace persona block for GREETING turns
+        # only. tool_choice="none" turns skip the orchestrator base prompt
+        # (which carries the persona for tool-enabled turns), so they must
+        # bring the persona themselves — and ONLY they may, or the block
+        # would ride twice on tool-enabled turns. None → pre-persona
+        # behavior (tests, __mock__ deployments).
+        self._persona_fetcher = persona_fetcher
 
     @property
     def available(self) -> bool:
@@ -291,8 +302,21 @@ class OrchestratorLLM(LLMClient):
         # "right now" timestamp is current. Cheap (string concat +
         # one datetime.now()) — no need to cache.
         now = self._now_provider() if self._now_provider else None
+        # WARP-1119 (§14): greeting turns (tool_choice="none") skip the
+        # orchestrator base prompt, so the workspace persona block is
+        # prepended HERE — and only here. Tool-enabled turns get the
+        # persona from the orchestrator base prompt; consulting the
+        # fetcher there would double-inject (§16: exactly one block per
+        # path). On any fetch failure get_block() returns None and the
+        # built-in prompt stands alone — voice never breaks because the
+        # orchestrator is restarting.
+        base_prompt = self._system_prompt
+        if tool_choice == "none" and self._persona_fetcher is not None:
+            persona_block = self._persona_fetcher.get_block()
+            if persona_block:
+                base_prompt = f"{persona_block}\n\n{self._system_prompt}"
         system_msg = build_system_prompt(
-            self._system_prompt,
+            base_prompt,
             location=self._location,
             timezone=self._timezone,
             now=now,
@@ -459,8 +483,15 @@ class MockLLM(LLMClient):
 # Factory — pick the right client for the current env.
 # ────────────────────────────────────────────────────────────────────
 
-def build_llm_from_env() -> LLMClient:
+def build_llm_from_env(
+    persona_fetcher: Optional[PersonaFetcher] = None,
+) -> LLMClient:
     """Resolve env config → LLM client.
+
+    `persona_fetcher` (WARP-1119): main.py builds it once at startup (via
+    `voice.persona.build_persona_fetcher_from_env`) and passes it in so the
+    /health endpoint can read the same instance's `fetch_ok` /
+    `last_fetch_at`. Ignored on the __mock__ path.
 
     `LLM_URL`:
       - `http://...` / `https://...` → OrchestratorLLM
@@ -515,4 +546,5 @@ def build_llm_from_env() -> LLMClient:
         bearer_token=token,
         location=geo.description,
         timezone=geo.timezone,
+        persona_fetcher=persona_fetcher,
     )

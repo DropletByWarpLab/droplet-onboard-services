@@ -462,6 +462,12 @@ export interface VoiceStatusInfo {
   input_rms_dbfs?: number | null;
   last_audio_at?: number | null;
   input_flatlined?: boolean;
+  /** WARP-1059 — true while the wizard's calibration mode is live on the
+   *  box (wakes counted for the step-3 ticker but not handled — no
+   *  STT/LLM/TTS). `calibration_mode_expires_at` is the fail-safe TTL
+   *  expiry the wizard renews; null/absent when the mode is off. */
+  calibration_mode?: boolean;
+  calibration_mode_expires_at?: number | null;
 }
 
 /** Result of the wizard's speaker test (`POST /api/voice/say`). */
@@ -469,6 +475,62 @@ export interface VoiceSayResult {
   ok: boolean;
   duration_s?: number;
   sample_rate?: number | null;
+}
+
+// --- WARP-1055: /voice surface — calibration + wizard measurements ---
+
+/**
+ * Persisted mic calibration (`GET /api/voice/calibration`). Written by
+ * the wizard's single write (`POST /api/voice/calibration`) and stored
+ * on the box; `{calibrated: false}` when no calibration exists yet.
+ */
+export interface VoiceCalibrationInfo {
+  calibrated: boolean;
+  /** Epoch seconds of the last applied calibration. */
+  calibrated_at?: number | null;
+  input_gain?: number | null;
+  wake_threshold?: number | null;
+  noise_floor_dbfs?: number | null;
+  speech_peak_dbfs?: number | null;
+  wake_detections?: number | null;
+  echo_ok?: boolean | null;
+  flags?: string[];
+}
+
+/** Payload of the wizard's single write (`POST /api/voice/calibration`). */
+export interface VoiceCalibrationApply {
+  input_gain?: number;
+  wake_threshold?: number;
+  noise_floor_dbfs: number;
+  speech_peak_dbfs: number;
+  wake_detections: number;
+  echo_ok: boolean;
+  flags: string[];
+}
+
+/** One wizard capture (`POST /api/voice/measure`). */
+export interface VoiceMeasureResult {
+  rms_dbfs: number;
+  peak_dbfs: number;
+  duration_s: number;
+  kind?: string;
+}
+
+/** Speaker→mic loop check (`POST /api/voice/echo-check`). */
+export interface VoiceEchoCheckResult {
+  heard: boolean;
+  tone_dbfs: number;
+  floor_dbfs: number;
+}
+
+/**
+ * WARP-1059 — calibration-mode toggle result (`POST`/`DELETE`
+ * `/api/voice/calibration-mode`). `expires_at` is the fail-safe TTL
+ * expiry (epoch seconds) after an enter/renew; null after an exit.
+ */
+export interface VoiceCalibrationModeResult {
+  active: boolean;
+  expires_at?: number | null;
 }
 
 // ── WARP-446: Coverage extender APs ──
@@ -579,6 +641,15 @@ export interface AuthUser {
   username: string;
   displayName: string;
   email?: string | null;
+}
+
+/** A row from GET /auth/users. Carries `userId` (the local User UUID, or null
+ *  when the Nextcloud account has no matching local row) IN ADDITION to `id`,
+ *  which is the Nextcloud username — a DIFFERENT namespace (WARP-947). Self /
+ *  identity checks must compare `userId` against the caller's local id, never
+ *  `id` against a local username. */
+export interface RosterUser extends AuthUser {
+  userId: string | null;
 }
 
 // ── WARP-217 invite types ──

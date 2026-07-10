@@ -43,12 +43,10 @@ RAGAS_VARIANT = os.environ.get("RAGAS_VARIANT", "hybrid")
 # Top-K results per query. Matches the NDCG@10 harness's k.
 RAGAS_LIMIT = int(os.environ.get("RAGAS_LIMIT", "10"))
 
-# Per-call timeout for the orchestrator retrieval endpoint. The cloud
-# judge can take a few seconds; the local judge can take longer if the
-# GPU is contested. ragas_runner.py honors this via its env var.
-SEARCH_TIMEOUT_SEC = float(
-    os.environ.get("RAGAS_SEARCH_TIMEOUT_SEC", "30")
-)
+# NOTE: the per-call retrieval timeout is read directly from the
+# RAGAS_SEARCH_TIMEOUT_SEC env var by tests/retrieval-eval/ragas/ragas_runner.py
+# (which runs in the subprocess). This service does not consume it, so no
+# module constant is kept here — a dead constant just invites drift (GWV-014).
 
 # Skip the scheduler entirely and run nothing — useful for the test
 # Compose lane where we just want the image present but inert.

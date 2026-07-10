@@ -877,6 +877,55 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       );
     });
 
+    it("POST /api/files/share forwards the WARP-1148 repro options (Can edit link + expiry + password + note) verbatim", async () => {
+      // The exact 2026-07-08 field repro: public link on a file with
+      // "Can edit" (READ|UPDATE = 3), an expiration date, a password, and a
+      // note. The route must pass every option through to Nextcloud unchanged
+      // — any main-side serialization drop here would make the dialog's
+      // options silently vanish.
+      ncMock.ncCreateShareV2.mockResolvedValue({
+        id: 12,
+        url: "https://nextcloud/s/xyz",
+        token: "xyz",
+        shareType: 3,
+        permissions: 3,
+        path: "/welcome-to-droplet.md",
+        expireDate: "2026-07-09",
+        hasPassword: true,
+        note: "for the launch review",
+        shareWith: null,
+        shareWithDisplayName: null,
+        uidOwner: "dev",
+        ownerDisplayName: "Admin",
+        stime: 1783000000,
+      });
+
+      const res = await request(app)
+        .post("/api/files/share")
+        .send({
+          path: "/welcome-to-droplet.md",
+          shareType: 3,
+          permissions: 3,
+          expireDate: "2026-07-09",
+          password: "correct horse battery staple",
+          note: "for the launch review",
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.permissions).toBe(3);
+      expect(res.body.expireDate).toBe("2026-07-09");
+      expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+        expect.any(String),
+        "/welcome-to-droplet.md",
+        expect.objectContaining({
+          shareType: 3,
+          permissions: 3,
+          expireDate: "2026-07-09",
+          password: "correct horse battery staple",
+          note: "for the launch review",
+        })
+      );
+    });
+
     it("POST /api/files/share surfaces NextcloudOcsError as the upstream status", async () => {
       const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
       ncMock.ncCreateShareV2.mockRejectedValue(

@@ -214,6 +214,13 @@ function createPrismaMock(opts: {
           return { count };
         },
       ),
+      findUniqueOrThrow: vi.fn(
+        async ({ where }: { where: { id: string } }) => {
+          const row = drafts.get(where.id);
+          if (!row) throw new Error("No EmailDraft found");
+          return row;
+        },
+      ),
     },
   };
 }

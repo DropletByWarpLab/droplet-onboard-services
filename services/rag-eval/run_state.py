@@ -26,7 +26,10 @@ exclusive.
 
 from __future__ import annotations
 
+import logging
 import threading
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -158,6 +161,16 @@ class RunStateStore:
                 rec.finished_at = self._now()
                 rec.error = error
             if self._current_run_id == run_id:
+                self._busy = False
+                self._current_run_id = None
+            elif self._busy:
+                # GWV-013: honor the docstring — a finish() with a mismatched id
+                # must still release the busy flag, or a caller bug wedges the
+                # service permanently busy (every /run, /bootstrap, tick 409s).
+                logger.warning(
+                    "RunStateStore.finish(%s) while current_run_id=%s — clearing busy anyway",
+                    run_id, self._current_run_id,
+                )
                 self._busy = False
                 self._current_run_id = None
 
