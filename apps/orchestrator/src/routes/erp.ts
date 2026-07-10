@@ -39,6 +39,14 @@ function handleErpError(res: Response, err: unknown): boolean {
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** A syntactically-valid ISO date that is ALSO a real calendar date. Rejects
+ *  2026-13-45 (which would make scheduleDayBounds throw a 500) and 2026-02-30
+ *  (which would silently roll over to March). */
+function isRealIsoDate(s: string): boolean {
+  if (!ISO_DATE.test(s)) return false;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -51,13 +59,13 @@ const writeRequestSchema = z.object({
 export function createErpRouter(prisma: PrismaClient): Router {
   const router = Router();
   const svc = createErpService(prisma);
-  const canRead = requireRole("owner", "admin", "family");
+  const canRead = requireRole("owner", "admin");
   const canWrite = requireRole("owner", "admin");
 
   router.get("/erp/schedule", canRead, async (req, res, next) => {
     try {
       const q = req.query.date;
-      const date = typeof q === "string" && ISO_DATE.test(q) ? q : todayIso();
+      const date = typeof q === "string" && isRealIsoDate(q) ? q : todayIso();
       res.json(await svc.getSchedule({ date }, erpUser(req)));
     } catch (err) {
       if (!handleErpError(res, err)) next(err);

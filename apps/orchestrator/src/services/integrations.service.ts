@@ -52,23 +52,36 @@ export interface IntegrationSummary {
   writeEnabled: boolean;
 }
 
-/** Connection detail (brief §13 `GET /api/integrations/eaglesoft`). */
+/** Connection detail (brief §13 `GET /api/integrations/eaglesoft`). Shaped to
+ *  the dashboard's IntegrationConnection type; the route nests it under
+ *  `connection`. */
 export interface IntegrationDetail extends IntegrationSummary {
   host: string | null;
   databaseName: string | null;
   schemaVersion: string | null;
   schemaHash: string | null;
+  /** The dedicated read account (droplet_ro) once configured. */
+  account: string | null;
+  /** ISO of the last successful read — the dashboard reads this as lastSyncedAt. */
+  lastSyncedAt: string | null;
   lastHealthyAt: string | null;
 }
 
-/** Input for connect / test — the `secretRef` is a POINTER only. */
+/** Input for connect / test. In this slice the backend owns the credential —
+ *  the wizard shows a generated password for the DBA to run the GRANT and the
+ *  orchestrator mints the `secretRef` pointer — so the client need not send it. */
 export interface ConnectInput {
   host: string;
-  databaseName: string;
-  /** Pointer into the encrypted secret store; NEVER a cleartext password. */
-  secretRef: string;
+  databaseName?: string;
+  /** Pointer into the encrypted secret store; NEVER a cleartext password.
+   *  Optional — generated server-side when the client doesn't supply one. */
+  secretRef?: string;
   serverName?: string;
   port?: number;
+  /** Read scopes the operator chose in the wizard (metadata; not yet persisted). */
+  scopes?: string[];
+  /** Connect-time write opt-in — sets `writeEnabled` on the new connection. */
+  enableWrites?: boolean;
 }
 
 export interface TestResult {
@@ -95,11 +108,11 @@ function defaultConnectorFor(_provider: string, input: ConnectInput): Connector 
   return new EaglesoftConnector({
     host: input.host,
     port: input.port ?? DEFAULT_PORT,
-    serverName: input.serverName ?? input.databaseName,
+    serverName: input.serverName ?? input.databaseName ?? DEFAULT_DATABASE_NAME,
     databaseName: input.databaseName || DEFAULT_DATABASE_NAME,
     // Pointer only — the connector resolves it against the secret store when
     // the live driver lands. Nothing here dereferences a password.
-    readSecretRef: input.secretRef,
+    readSecretRef: input.secretRef ?? "",
   });
 }
 
@@ -112,6 +125,7 @@ export interface IntegrationsService {
     enabled: boolean,
     ctx: { actor: string },
   ): Promise<IntegrationDetail>;
+  disconnect(ctx: { actor: string }): Promise<IntegrationDetail>;
 }
 
 export function createIntegrationsService(
@@ -142,9 +156,12 @@ export function createIntegrationsService(
         databaseName: null,
         schemaVersion: null,
         schemaHash: null,
+        account: null,
+        lastSyncedAt: null,
         lastHealthyAt: null,
       };
     }
+    const lastSynced = row.lastHealthyAt ? row.lastHealthyAt.toISOString() : null;
     return {
       provider: row.provider,
       status: row.status as IntegrationStatusName,
@@ -154,7 +171,9 @@ export function createIntegrationsService(
       databaseName: row.databaseName,
       schemaVersion: row.schemaVersion,
       schemaHash: row.schemaHash,
-      lastHealthyAt: row.lastHealthyAt ? row.lastHealthyAt.toISOString() : null,
+      account: "droplet_ro",
+      lastSyncedAt: lastSynced,
+      lastHealthyAt: lastSynced,
     };
   }
 
@@ -187,13 +206,20 @@ export function createIntegrationsService(
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
       const existing = await findEaglesoftRow();
+      const databaseName = input.databaseName || DEFAULT_DATABASE_NAME;
+      // The backend owns the credential — mint a pointer if the client didn't
+      // send one (the real secret is created during live provisioning).
+      const secretRef = input.secretRef ?? `${EAGLESOFT_PROVIDER}:pending`;
+      // Honor the wizard's connect-time write opt-in (default off / read-only).
+      const writeEnabled = !!input.enableWrites;
       const base = existing
         ? await prisma.integrationConnection.update({
             where: { id: existing.id },
             data: {
               host: input.host,
-              databaseName: input.databaseName,
-              secretRef: input.secretRef,
+              databaseName,
+              secretRef,
+              writeEnabled,
               status: "PROVISIONING",
             },
           })
@@ -202,9 +228,10 @@ export function createIntegrationsService(
               provider: EAGLESOFT_PROVIDER,
               status: "PROVISIONING",
               host: input.host,
-              databaseName: input.databaseName,
+              databaseName,
               // POINTER only — see module docstring / invariant 10.
-              secretRef: input.secretRef,
+              secretRef,
+              writeEnabled,
             },
           });
 
@@ -289,6 +316,25 @@ export function createIntegrationsService(
         },
       });
 
+      return toDetail(updated);
+    },
+
+    async disconnect(ctx) {
+      const row = await findEaglesoftRow();
+      if (!row) return toDetail(null); // idempotent — nothing to disconnect
+      const updated = await prisma.integrationConnection.update({
+        where: { id: row.id },
+        data: { status: "DISABLED", writeEnabled: false },
+      });
+      await prisma.erpAuditLog.create({
+        data: {
+          connectionId: row.id,
+          actor: ctx.actor,
+          action: "disconnect",
+          entity: "integration",
+          scope: { provider: EAGLESOFT_PROVIDER },
+        },
+      });
       return toDetail(updated);
     },
   };

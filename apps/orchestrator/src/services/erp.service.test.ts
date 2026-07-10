@@ -6,8 +6,9 @@
  * so the service must degrade honestly (ERP_NOT_CONNECTED / empty) — never
  * fabricate PHI. Covers:
  *  • read paths degrade to not-connected + still write an audit row;
- *  • the full write-request lifecycle state machine (PENDING_CONFIRMATION →
- *    CONFIRMED → APPLYING → APPLIED/DISCREPANCY/FAILED), explicit-enum only;
+ *  • the reachable write-request lifecycle (PENDING_CONFIRMATION → APPLYING →
+ *    APPLIED | FAILED), explicit-enum only; DISCREPANCY lands with the live
+ *    verify step (WARP-1095+) and CONFIRMED is unused in this slice;
  *  • a write is never applied without a confirmed request;
  *  • an audit row on every read AND every write transition.
  */
@@ -155,11 +156,16 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       expect(audit.actor).toBe(OWNER.id);
     });
 
-    it("searchPatients degrades to empty + not-connected and audits", async () => {
+    it("searchPatients degrades to empty + not-connected, audits, and keeps the term OUT of scope", async () => {
       const res = await svc.searchPatients({ query: "smith" }, OWNER);
       expect(res.connected).toBe(false);
       expect(res.items).toEqual([]);
-      expect(mock._state.auditLog.at(-1)!.action).toBe("read:patients");
+      const audit = mock._state.auditLog.at(-1)!;
+      expect(audit.action).toBe("read:patients");
+      // PHI-free audit scope (§14): the raw term (a name) is never persisted —
+      // only its length.
+      expect((audit.scope as { termLength?: number }).termLength).toBe(5);
+      expect(JSON.stringify(audit.scope)).not.toContain("smith");
     });
 
     it("getPatient degrades to not-found/not-connected and audits the id scope", async () => {
@@ -290,6 +296,59 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       );
       const applied = await svc.confirmWriteRequest(req.id, OWNER);
       expect(applied.status).toBe("APPLIED");
+    });
+
+    it("a non-blocked apply failure records FAILED with a discrepancy (never a fake APPLIED)", async () => {
+      const failing = makeBlockedConnector({
+        applyWrite: vi.fn(async () => {
+          throw new Error("optimistic guard miss");
+        }),
+      });
+      build({ writeEnabled: true, connector: failing });
+      const req = await svc.createWriteRequest(
+        { command: "reschedule_appointment", params: { appt_id: "a1", last_modified: "t0", appt_time: "t1" } },
+        OWNER,
+      );
+      const applied = await svc.confirmWriteRequest(req.id, OWNER);
+      expect(applied.status).toBe("FAILED");
+      expect(applied.discrepancy).toBeTruthy();
+    });
+
+    it("confirm is refused when writes were turned off after staging (kill-switch, invariant 1)", async () => {
+      const req = await svc.createWriteRequest(
+        { command: "reschedule_appointment", params: { appt_id: "a1", last_modified: "t0", appt_time: "t1" } },
+        OWNER,
+      );
+      // Flip the per-practice kill-switch after the request was staged.
+      mock._state.conn.writeEnabled = false;
+      await expect(svc.confirmWriteRequest(req.id, OWNER)).rejects.toMatchObject({
+        code: "WRITE_NOT_ENABLED",
+      });
+    });
+  });
+
+  describe("RBAC — PHI minimum-necessary (§14)", () => {
+    const FAMILY = { id: "u-family", role: "family" };
+    const GUEST = { id: "u-guest", role: "guest" };
+
+    it("denies a non-clinical role (family/guest) every PHI read — and never audits the denial", async () => {
+      for (const u of [FAMILY, GUEST]) {
+        const before = mock._state.auditLog.length;
+        await expect(svc.getSchedule({ date: "2026-07-08" }, u)).rejects.toMatchObject({ code: "FORBIDDEN" });
+        await expect(svc.searchPatients({ query: "smith" }, u)).rejects.toMatchObject({ code: "FORBIDDEN" });
+        await expect(svc.getPatient("p-1", u)).rejects.toMatchObject({ code: "FORBIDDEN" });
+        await expect(svc.getArSummary(u)).rejects.toMatchObject({ code: "FORBIDDEN" });
+        await expect(svc.getRecallDue(u)).rejects.toMatchObject({ code: "FORBIDDEN" });
+        expect(mock._state.auditLog.length).toBe(before); // a denied read touches nothing
+      }
+    });
+
+    it("denies a non-owner/admin role staging or confirming a write", async () => {
+      build({ writeEnabled: true });
+      await expect(
+        svc.createWriteRequest({ command: "reschedule_appointment", params: {} }, FAMILY),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(svc.confirmWriteRequest("wr-x", FAMILY)).rejects.toMatchObject({ code: "FORBIDDEN" });
     });
   });
 });

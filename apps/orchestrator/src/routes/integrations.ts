@@ -33,13 +33,17 @@ function handleErpError(res: Response, err: unknown): boolean {
   return false;
 }
 
-/** Connect / test body. `secretRef` is a POINTER — never a cleartext password. */
+/** Connect / test body. The backend owns the credential (the wizard shows a
+ *  generated password for the DBA to run the GRANT), so `secretRef` is optional
+ *  and minted server-side; `scopes` / `enableWrites` carry the wizard choices. */
 const connectSchema = z.object({
   host: z.string().min(1),
   databaseName: z.string().min(1).default("PattersonPM"),
-  secretRef: z.string().min(1),
+  secretRef: z.string().min(1).optional(),
   serverName: z.string().optional(),
   port: z.number().int().positive().optional(),
+  scopes: z.array(z.string()).optional(),
+  enableWrites: z.boolean().optional(),
 });
 
 export function createIntegrationsRouter(prisma: PrismaClient): Router {
@@ -51,7 +55,8 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin", "family", "guest", "service"),
     async (_req, res, next) => {
       try {
-        res.json({ integrations: await svc.list() });
+        // Bare array — the dashboard hub maps it by provider (api.erp.ts).
+        res.json(await svc.list());
       } catch (err) {
         if (!handleErpError(res, err)) next(err);
       }
@@ -63,7 +68,11 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin", "family"),
     async (_req, res, next) => {
       try {
-        res.json(await svc.getEaglesoft());
+        // The dashboard's EaglesoftDetail nests the connection plus the
+        // at-a-glance snapshot. kpis/schedule are null/empty until the live
+        // read path lands (WARP-1095+); the dashboard fetches those separately.
+        const connection = await svc.getEaglesoft();
+        res.json({ connection, kpis: null, schedule: [] });
       } catch (err) {
         if (!handleErpError(res, err)) next(err);
       }
@@ -118,6 +127,19 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
     "/integrations/eaglesoft/write-disable",
     requireRole("owner", "admin"),
     toggleWrites(false),
+  );
+
+  router.post(
+    "/integrations/eaglesoft/disconnect",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const actor = (req as AuthedRequest).user?.id ?? "unknown";
+        res.json(await svc.disconnect({ actor }));
+      } catch (err) {
+        if (!handleErpError(res, err)) next(err);
+      }
+    },
   );
 
   return router;

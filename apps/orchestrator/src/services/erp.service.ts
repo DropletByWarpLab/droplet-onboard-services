@@ -38,8 +38,11 @@ import { EAGLESOFT_PROVIDER } from "./integrations.service.js";
 
 const logger = createLogger("erp-service");
 
-/** Roles allowed to view PHI (schedule/patients/AR/recall) — minimum-necessary. */
-const PHI_READ_ROLES = new Set(["owner", "admin", "family"]);
+/** Roles allowed to view PHI (schedule/patients/AR/recall) — minimum-necessary.
+ *  Clinical staff only. NOT the household-default `family` role: roleFromGroups
+ *  assigns `family` to any un-grouped account, so admitting it here would make
+ *  patient PHI readable by default (fail-open). Non-clinical roles get the lock. */
+const PHI_READ_ROLES = new Set(["owner", "admin"]);
 /** Roles allowed to stage/confirm a write back into Eaglesoft. */
 const WRITE_ROLES = new Set(["owner", "admin"]);
 /** The registered write-command names — the validation allow-list (brief §11.3). */
@@ -201,11 +204,17 @@ export function createErpService(
 
     async searchPatients({ query }, user) {
       assertCanReadPhi(user);
+      // Reject empty/too-short terms so the query builder can never emit a
+      // match-all LIKE '%' that dumps the whole patient table (PHI over-fetch).
+      const term = query.trim();
+      if (term.length < 2) {
+        throw ErpError.validation("patient search term must be at least 2 characters");
+      }
       const conn = await eaglesoftRow();
-      const r = await runReadOrBlocked(conn, "find_patient", { query });
+      const r = await runReadOrBlocked(conn, "find_patient", { query: term });
       // The raw search term can contain a name → keep it OUT of the audit scope
       // (redaction contract, review D-1). Length only.
-      await audit(conn, user.id, "read:patients", { termLength: query.length });
+      await audit(conn, user.id, "read:patients", { termLength: term.length });
       return { connected: r.connected, reason: r.reason, items: r.rows };
     },
 
@@ -282,6 +291,12 @@ export function createErpService(
       }
 
       const conn = await eaglesoftRow();
+      // Re-check the connection + the per-practice write kill-switch at APPLY
+      // time (invariant 1) — the request may have been staged before writes
+      // were turned off, or the connection removed. Guard BEFORE the APPLYING
+      // transition so neither case can strand the request (clean 409 instead).
+      if (!conn) throw ErpError.notConfigured(EAGLESOFT_PROVIDER);
+      if (!conn.writeEnabled) throw ErpError.writeNotEnabled();
       // Human confirmation recorded (brief §11.1 step 2). Move to APPLYING.
       await prisma.erpWriteRequest.update({
         where: { id },
