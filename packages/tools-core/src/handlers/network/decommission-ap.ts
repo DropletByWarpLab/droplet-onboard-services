@@ -30,7 +30,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // Colons in MAC are RFC 3986 §3.3 unreserved in path segments;
   // no need to percent-encode.
   const res = await ctx.http.orchestrator.post(
-    `/api/aps/${mac}/decommission`,
+    `/api/aps/${encodeURIComponent(mac)}/decommission`,
     undefined,
   );
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);

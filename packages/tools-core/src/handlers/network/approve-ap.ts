@@ -77,7 +77,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // orchestrator's route is mounted at `/api/aps/:mac` so the path
   // would have to decode them anyway.
   const res = await ctx.http.orchestrator.post(
-    `/api/aps/${mac}/approve`,
+    `/api/aps/${encodeURIComponent(mac)}/approve`,
     body,
   );
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);
