@@ -72,10 +72,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     const v = args[k];
     if (typeof v === "string" && v.length > 0) body[k] = v;
   }
-  // MAC is constrained-shape; no need to percent-encode the colons
-  // (RFC 3986 §3.3 allows `:` unencoded in path segments). The
-  // orchestrator's route is mounted at `/api/aps/:mac` so the path
-  // would have to decode them anyway.
+  // Percent-encode the mac: it originates from AP discovery — an
+  // untrusted, network-advertised value — so its shape can't be
+  // assumed; encoding prevents a crafted value from injecting extra
+  // path segments. Express decodes `:mac` once, so the orchestrator
+  // route still receives the original address.
   const res = await ctx.http.orchestrator.post(
     `/api/aps/${encodeURIComponent(mac)}/approve`,
     body,
