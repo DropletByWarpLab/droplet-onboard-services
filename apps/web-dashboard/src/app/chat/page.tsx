@@ -973,6 +973,9 @@ export default function ChatPage() {
         triggerRef={historyTriggerRef}
         labelledBy="mobile-history-heading"
         placement="right"
+        // Full-height panel — ChatHistoryPanel owns its own insets
+        // (WARP-1153).
+        flush
       >
         <div className="flex flex-col h-full w-[320px] max-w-[85vw]">
           <h2 id="mobile-history-heading" className="sr-only">

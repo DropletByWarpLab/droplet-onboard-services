@@ -944,6 +944,9 @@ export default function UsersPage() {
         labelledBy={createHeadingId}
         closeOnBackdrop={createPhase === "form"}
         initialFocusRef={createDisplayRef}
+        // Sectioned layout (full-width header divider) — sections own their
+        // padding (WARP-1153).
+        flush
       >
         <>
             <div

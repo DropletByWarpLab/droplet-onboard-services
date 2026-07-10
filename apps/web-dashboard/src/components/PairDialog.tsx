@@ -133,7 +133,9 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
     : 0;
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md">
+    // `flush`: sectioned layout — the full-width header divider + per-step
+    // bodies own their padding (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md" flush>
       {/* Header */}
       <div
         className="flex items-center justify-between px-4 py-3"

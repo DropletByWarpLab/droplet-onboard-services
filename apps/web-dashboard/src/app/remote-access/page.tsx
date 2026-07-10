@@ -415,6 +415,9 @@ function AddDeviceDialog({
       labelledBy={headingId}
       maxWidth="md"
       initialFocusRef={inputRef}
+      // Sectioned layout (full-width header divider) — sections own their
+      // padding (WARP-1153).
+      flush
     >
       <div>
         <div className="flex items-center justify-between px-4 py-3 border-b border-separator">

@@ -37,11 +37,13 @@ function Harness({
   closeOnBackdrop = true,
   withDescribedBy = false,
   placement,
+  flush,
 }: {
   initiallyOpen?: boolean;
   closeOnBackdrop?: boolean;
   withDescribedBy?: boolean;
   placement?: "center" | "right";
+  flush?: boolean;
 }) {
   const [open, setOpen] = React.useState(initiallyOpen);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -58,6 +60,7 @@ function Harness({
         describedBy={withDescribedBy ? "dialog-desc" : undefined}
         closeOnBackdrop={closeOnBackdrop}
         placement={placement}
+        flush={flush}
       >
         <h2 id="dialog-heading">Confirm</h2>
         {withDescribedBy && <p id="dialog-desc">Are you sure?</p>}
@@ -239,6 +242,52 @@ describe("<Dialog> primitive", () => {
     await waitFor(() => {
       expect(document.activeElement).toBe(buttons[buttons.length - 1]);
     });
+  });
+
+  // ── Padding + overflow contract (WARP-1152 / WARP-1153) ──────────────
+  // The primitive owns the body inset and horizontal-overflow policy so a
+  // consumer can't render content flush against the card edge or grow an
+  // internal horizontal scrollbar (the WARP-1152 New-event regression).
+
+  it("centered: wraps children in a p-5 body that scrolls vertically and clips horizontally", () => {
+    render(<Harness initiallyOpen />);
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.firstElementChild as HTMLElement;
+    expect(body.className).toContain("p-5");
+    expect(body.className).toContain("max-h-[90vh]");
+    expect(body.className).toContain("overflow-y-auto");
+    expect(body.className).toContain("overflow-x-hidden");
+    // The consumer's children live inside the body region.
+    expect(body.contains(document.getElementById("dialog-heading"))).toBe(true);
+  });
+
+  it("centered + flush: drops the p-5 inset but keeps the scroll/clip region (flush is never an overflow opt-out)", () => {
+    render(<Harness initiallyOpen flush />);
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.firstElementChild as HTMLElement;
+    expect(body.className).not.toContain("p-5");
+    expect(body.className).toContain("max-h-[90vh]");
+    expect(body.className).toContain("overflow-y-auto");
+    expect(body.className).toContain("overflow-x-hidden");
+  });
+
+  it("side placement: container clips horizontal overflow; default adds the p-5 inset", () => {
+    render(<Harness initiallyOpen placement="right" />);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("overflow-y-auto");
+    expect(dialog.className).toContain("overflow-x-hidden");
+    const body = dialog.firstElementChild as HTMLElement;
+    expect(body.className).toContain("p-5");
+  });
+
+  it("side placement + flush: children render directly so h-full section layouts keep working", () => {
+    render(<Harness initiallyOpen placement="right" flush />);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("overflow-x-hidden");
+    // No injected body wrapper — the heading is a direct child.
+    expect(
+      (document.getElementById("dialog-heading") as HTMLElement).parentElement,
+    ).toBe(dialog);
   });
 
   it("locks body scroll while open and restores on close", async () => {

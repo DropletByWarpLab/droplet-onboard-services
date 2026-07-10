@@ -261,7 +261,8 @@ function InterfaceEditorDialog({
         maxWidth="sm"
         placement="center"
       >
-        <div className="p-5 space-y-4">
+        {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+        <div className="space-y-4">
           <div>
             <h2 id={titleId} className="type-headline text-label-primary">
               {isEdit ? `Edit ${name}` : "Add interface"}
