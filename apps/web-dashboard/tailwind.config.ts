@@ -5,6 +5,11 @@ const config: Config = {
   content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
   theme: {
     extend: {
+      // D-A (handoff 6): `font-mono` resolves to the wired --font-mono
+      // (JetBrains Mono, set in app/layout.tsx) with a safe system fallback.
+      fontFamily: {
+        mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+      },
       colors: {
         // Brand ramp — violet (re-pointed from indigo on 2026-05-18).
         // Anchor accent is droplet-700 #6d28d9; tinted backgrounds use
