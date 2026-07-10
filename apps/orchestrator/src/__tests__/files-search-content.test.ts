@@ -142,6 +142,12 @@ vi.mock("@prisma/client", () => {
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
     },
+    // Full-app suite: the module gate on the `/api/files` mount reads
+    // ModuleSetting overrides. `[]` => registry defaults (files is
+    // default-enabled) => gate passes.
+    moduleSetting: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
   class PrismaClientKnownRequestError extends Error {
     code: string;
