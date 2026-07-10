@@ -69,12 +69,14 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
   const [contentError, setContentError] = useState<string | null>(null);
   const contentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // WARP-310: readiness probe. Semantic needs the AI gateway, so the
-  // green/yellow/red signal only applies there. Keyword is lexical-only and
-  // works gateway-down — it never fires the probe or shows the pill.
+  // WARP-310: readiness probe. The traffic-light pill only renders for
+  // Semantic (keyword is lexical-only and works gateway-down), but WARP-1139
+  // fires the probe for BOTH content modes: its explicit indexer counts
+  // (pendingCount, from FileIndexStatus) drive the honest "still indexing"
+  // empty state, which applies to keyword and semantic alike.
   const [readiness, setReadiness] = useState<SearchReadinessStatus | null>(null);
   useEffect(() => {
-    if (mode !== "semantic") {
+    if (mode === "filename") {
       setReadiness(null);
       return;
     }
@@ -86,6 +88,14 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
       cancelled = true;
     };
   }, [mode]);
+
+  // WARP-1139: "no results" is only an honest statement when the indexer has
+  // actually looked at the files. If chunks exist for none of them yet, or
+  // some files are still pending, say so instead of "no match".
+  const pendingCount = readiness?.pendingCount ?? 0;
+  const stillIndexing =
+    readiness !== null &&
+    (readiness.state === "indexing" || pendingCount > 0);
 
   useEffect(() => {
     if (!isContentMode || query.trim().length < 2) {
@@ -347,15 +357,38 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
             </button>
           ))}
 
-          {/* Content results (keyword / semantic) */}
+          {/* Content results (keyword / semantic) — empty-state variants.
+              WARP-1139: distinguish "still indexing" (indexer hasn't finished
+              looking at the files) from a genuine no-match, so search never
+              claims content is absent when it simply wasn't indexed yet. */}
           {isContentMode && !contentLoading && contentItems.length === 0 && !contentError && (
-            <div className="px-3 py-6 text-center type-footnote text-label-tertiary">
+            <div
+              data-testid="content-empty-state"
+              data-variant={stillIndexing ? "still-indexing" : "no-match"}
+              className="px-3 py-6 text-center type-footnote text-label-tertiary"
+            >
               {mode === "keyword" ? (
                 <Type size={16} className="mx-auto mb-2 text-label-quaternary" />
               ) : (
                 <Sparkles size={16} className="mx-auto mb-2 text-label-quaternary" />
               )}
-              No content matches for &ldquo;{query.trim()}&rdquo;
+              {stillIndexing ? (
+                <>
+                  <p>
+                    Still indexing
+                    {pendingCount > 0
+                      ? ` ${pendingCount} file${pendingCount === 1 ? "" : "s"}`
+                      : " your files"}
+                    …
+                  </p>
+                  <p className="mt-1 type-caption-2 text-label-quaternary">
+                    &ldquo;{query.trim()}&rdquo; may match content that
+                    isn&rsquo;t searchable yet — try again shortly.
+                  </p>
+                </>
+              ) : (
+                <>No content matches for &ldquo;{query.trim()}&rdquo;</>
+              )}
             </div>
           )}
           {isContentMode && contentItems.map((result, idx) => {
