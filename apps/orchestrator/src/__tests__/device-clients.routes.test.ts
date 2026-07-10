@@ -342,4 +342,21 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(res.status).toBe(429);
     expect(mockPrisma.pairingCode.findUnique).not.toHaveBeenCalled();
   });
+
+  // WARP-1138: the bucket key comes from proxy-aware req.ip, never the raw
+  // client-controlled X-Forwarded-For header — a forged header must not
+  // mint a fresh per-IP bucket and dodge the limit.
+  it("still 429s an exhausted per-IP bucket when the claim carries a forged X-Forwarded-For (WARP-1138)", async () => {
+    mockCacheGet.mockImplementation(async (key: string) =>
+      key === "ratelimit:pair:claim:::ffff:127.0.0.1" ? MAX_CLAIM : undefined,
+    );
+
+    const res = await request(makeApp())
+      .post("/api/devices/pair/claim")
+      .set("X-Forwarded-For", "6.6.6.6")
+      .send({ code: "ABC123", deviceName: "MacBook", appVersion: "1.0.0" });
+
+    expect(res.status).toBe(429);
+    expect(mockPrisma.pairingCode.findUnique).not.toHaveBeenCalled();
+  });
 });
