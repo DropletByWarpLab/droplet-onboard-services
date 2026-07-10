@@ -55,7 +55,10 @@ describe("ScheduleRow", () => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
   });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it("exposes the enabled toggle with role=switch + aria-checked", () => {
     mockListEndpoints(fetchMock);
@@ -80,8 +83,15 @@ describe("ScheduleRow", () => {
 
   it("'Active now' dot renders when current time is inside a window", () => {
     mockListEndpoints(fetchMock);
-    // Craft a window that spans the current hour: start an hour earlier,
-    // end an hour later, for today's day-of-week.
+    // Pin the clock to a fixed, safe mid-day instant instead of reading the
+    // real wall clock. The old version derived start/end from `new Date()`
+    // and clamped them into [0, 1439] — near midnight (e.g. 23:59) the
+    // clamp collapsed endMin down to nowMin, and since isWindowActive's
+    // end bound is exclusive, the window went inactive right when the test
+    // ran in that minute (a real, if rare, CI flake). Freezing time removes
+    // the dependency on when CI happens to execute entirely.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 15, 12, 0, 0));
     const now = new Date();
     const dayBit = [1, 2, 4, 8, 16, 32, 64][now.getDay()];
     const startMin = now.getHours() * 60 + now.getMinutes() - 60;
@@ -102,7 +112,10 @@ describe("ScheduleRow", () => {
 
   it("'Active now' dot absent when no window is currently active", () => {
     mockListEndpoints(fetchMock);
-    // Pick a day-of-week mask that definitely excludes today.
+    // Same fixed-clock rationale as the test above — deterministic instead
+    // of wall-clock-derived, so "today" can never shift mid-run.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 15, 12, 0, 0));
     const today = new Date().getDay();
     const dayBit = [1, 2, 4, 8, 16, 32, 64];
     let mask = 0;
