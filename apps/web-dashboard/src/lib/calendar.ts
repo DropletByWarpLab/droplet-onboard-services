@@ -7,6 +7,20 @@ export function dayKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** Parse a `?date=YYYY-MM-DD` deep-link param (Home calendar widget →
+ *  /calendar, WARP-1131) into a local-midnight Date. Returns null for
+ *  anything malformed (wrong shape) or non-existent (e.g. 2026-02-31 —
+ *  the Date constructor would silently roll it into March) so callers can
+ *  fall back to today. */
+export function parseDateParam(raw: string | null | undefined): Date | null {
+  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [y, m, d] = raw.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const exists =
+    date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+  return exists ? date : null;
+}
+
 /** Distinct hues for subscribed calendars in the rail. Local events use the
  *  brand accent; external sources draw from this palette via {@link paletteColor}. */
 export const SOURCE_PALETTE = ["#0891b2", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"];
