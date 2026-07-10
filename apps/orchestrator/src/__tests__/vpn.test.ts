@@ -20,6 +20,10 @@ vi.mock("../config.js", () => ({
     WIREGUARD_LISTEN_PORT: 51820,
     WIREGUARD_LAN_CIDR: "192.168.50.0/24",
     WIREGUARD_DNS: "192.168.50.1",
+    // Hybrid home-mode config (P1).
+    WIREGUARD_HOME_DNS: "192.168.20.1",
+    WIREGUARD_HOME_ALLOWED_IPS: "192.168.20.0/24",
+    WIREGUARD_HOME_ENDPOINT_HOST: "",
   },
 }));
 
@@ -34,6 +38,12 @@ vi.mock("../services/openwrt.client.js", async () => {
     listVpnPeers: vi.fn(),
     createVpnPeer: vi.fn(),
     deleteVpnPeer: vi.fn(),
+    // Home-mode LAN-IP discovery reads the network summary. Default: no WAN IP
+    // (single-box shape), so home mode leans on the config fallback. Tests that
+    // exercise multi-box discovery override this per-case.
+    fetchNetworkSummary: vi.fn(async () => ({
+      wan: { present: false, "ipv4-address": [] },
+    })),
   };
 });
 
@@ -275,6 +285,58 @@ describe("GET /api/vpn/status", () => {
     // Never expose private key shape via this endpoint.
     expect(JSON.stringify(res.body)).not.toMatch(/private/i);
   });
+
+  // Hybrid P1: the box's home-facing LAN IP (what a HOME-mode peer dials
+  // directly) is surfaced dynamically from the network summary — never
+  // hardcoded, and null when it can't be discovered.
+  describe("homeEndpointHost (hybrid P1)", () => {
+    it("surfaces the discovered WAN IPv4 address", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+        wan: { present: true, "ipv4-address": [{ address: "192.168.1.87", mask: 24 }] },
+      });
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body.homeEndpointHost).toBe("192.168.1.87");
+    });
+
+    it("is null when the box IP can't be discovered and no fallback is set", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+        wan: { present: false, "ipv4-address": [] },
+      });
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body.homeEndpointHost).toBeNull();
+    });
+
+    it("falls back to WIREGUARD_HOME_ENDPOINT_HOST when the summary has no WAN IP", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+        wan: { present: false, "ipv4-address": [] },
+      });
+      const orig = (config as any).WIREGUARD_HOME_ENDPOINT_HOST;
+      (config as any).WIREGUARD_HOME_ENDPOINT_HOST = "192.168.1.50";
+      try {
+        const app = buildApp(createPrismaMock());
+        const res = await request(app).get("/api/vpn/status");
+        expect(res.body.homeEndpointHost).toBe("192.168.1.50");
+      } finally {
+        (config as any).WIREGUARD_HOME_ENDPOINT_HOST = orig;
+      }
+    });
+
+    it("stays null (never crashes) when the routing summary lookup fails", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      (openwrt.fetchNetworkSummary as any).mockRejectedValue(new Error("routing down"));
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body.homeEndpointHost).toBeNull();
+    });
+  });
 });
 
 describe("GET /api/vpn/peers", () => {
@@ -431,6 +493,138 @@ describe("POST /api/vpn/peers", () => {
     expect(res.status).toBe(500);
     // Ensure the rollback delete was attempted with the orphan pubkey.
     expect(openwrt.deleteVpnPeer).toHaveBeenCalledWith({ publicKey: "PEERPUB=" });
+  });
+
+  // Away mode is the default: an omitted `mode` must persist "away" so existing
+  // clients and existing rows are unchanged.
+  it("defaults mode to 'away' and persists it", async () => {
+    setupHappyPath();
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "iPhone" });
+    expect(res.status).toBe(201);
+    expect(res.body.peer.mode).toBe("away");
+    expect(prisma.rows[0].mode).toBe("away");
+    // Away-mode conf shape is unchanged (regression).
+    expect(res.body.conf).toContain("Endpoint = vpn.example.com:51820");
+    expect(res.body.conf).toContain("AllowedIPs = 192.168.50.0/24, 10.13.13.0/24");
+  });
+
+  it("rejects an unknown mode value", async () => {
+    setupHappyPath();
+    const app = buildApp(createPrismaMock());
+    const res = await request(app)
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "iPhone", mode: "sideways" });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/vpn/peers — home mode (hybrid P1)", () => {
+  function setupHappyPath() {
+    (openwrt.vpnSetup as any).mockResolvedValue({
+      status: "ok",
+      created: false,
+      interface: "wg0",
+      public_key: "SERVERPUB=",
+      listen_port: 51820,
+      addresses: ["10.13.13.1/24"],
+    });
+    (openwrt.createVpnPeer as any).mockResolvedValue({
+      status: "ok",
+      interface: "wg0",
+      public_key: "PEERPUB=",
+      private_key: "PEERPRIV=",
+      allowed_ips: ["10.13.13.5/32"],
+      description: "iPhone",
+      persistent_keepalive: 25,
+    });
+  }
+
+  it("mints a home-mode peer that dials the discovered LAN IP with split-tunnel + split-horizon DNS", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.87", mask: 24 }] },
+    });
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "iPhone", mode: "home" });
+    expect(res.status).toBe(201);
+    // Endpoint = box home-facing LAN IP (discovered), NOT the public FQDN host.
+    expect(res.body.conf).toContain("Endpoint = 192.168.1.87:51820");
+    // DNS = split-horizon resolver so the FQDN resolves over the tunnel.
+    expect(res.body.conf).toContain("DNS = 192.168.20.1");
+    // Split-tunnel to the box subnet + the VPN subnet — never 0.0.0.0/0, never
+    // the away-mode LAN CIDR.
+    expect(res.body.conf).toContain("AllowedIPs = 192.168.20.0/24, 10.13.13.0/24");
+    expect(res.body.conf).not.toContain("0.0.0.0/0");
+    expect(res.body.conf).not.toContain("192.168.50.0/24");
+    // Mode persisted.
+    expect(res.body.peer.mode).toBe("home");
+    expect(prisma.rows[0].mode).toBe("home");
+  });
+
+  it("falls back to WIREGUARD_HOME_ENDPOINT_HOST when the box IP isn't discovered", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: false, "ipv4-address": [] },
+    });
+    const orig = (config as any).WIREGUARD_HOME_ENDPOINT_HOST;
+    (config as any).WIREGUARD_HOME_ENDPOINT_HOST = "192.168.1.99";
+    try {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app)
+        .post("/api/vpn/peers")
+        .send({ deviceLabel: "iPhone", mode: "home" });
+      expect(res.status).toBe(201);
+      expect(res.body.conf).toContain("Endpoint = 192.168.1.99:51820");
+    } finally {
+      (config as any).WIREGUARD_HOME_ENDPOINT_HOST = orig;
+    }
+  });
+
+  it("returns 503 with a clear error (and mints NOTHING) when the box IP can't be discovered", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: false, "ipv4-address": [] },
+    });
+    // No config fallback → honest failure rather than a wrong guess.
+    const app = buildApp(createPrismaMock());
+    const res = await request(app)
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "iPhone", mode: "home" });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/home[- ]?facing|LAN IP|WIREGUARD_HOME_ENDPOINT_HOST/i);
+    // Must not leak a router-side peer nobody can dial.
+    expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("does NOT require the away-mode public endpoint to be configured", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.87", mask: 24 }] },
+    });
+    // Home mode reaches the box on-LAN, so an empty public endpoint host must
+    // NOT block it (unlike away mode, which 503s without one).
+    const origHost = config.WIREGUARD_ENDPOINT_HOST;
+    const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
+    (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    (config as any).DROPLET_PUBLIC_FQDN = "";
+    try {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app)
+        .post("/api/vpn/peers")
+        .send({ deviceLabel: "iPhone", mode: "home" });
+      expect(res.status).toBe(201);
+      expect(res.body.conf).toContain("Endpoint = 192.168.1.87:51820");
+    } finally {
+      (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
+      (config as any).DROPLET_PUBLIC_FQDN = origFqdn;
+    }
   });
 });
 

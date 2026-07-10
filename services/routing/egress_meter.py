@@ -37,6 +37,7 @@ Honors the architecture-guard rules:
     with the WARP-470 throughput sampler).
 """
 from __future__ import annotations
+import asyncio
 
 import logging
 import os
@@ -206,7 +207,7 @@ async def _tick(router: DropletRouter) -> None:
     First successful read primes the cache; subsequent ticks emit a
     batch of samples (one per channel that moved)."""
     global _previous
-    current = read_counters_via_ubus(router)
+    current = await asyncio.to_thread(read_counters_via_ubus, router)  # PYNET-007: blocking urllib off the event loop
     if not current:
         return
     if not _previous:

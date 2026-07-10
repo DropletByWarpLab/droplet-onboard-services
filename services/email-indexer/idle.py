@@ -201,6 +201,15 @@ def start_account_idle_loop(
     state = BackoffState()
     job_id = f"email-idle-{account.id}"
 
+    # IDX-001: if this account already has a live job, do NOT re-register.
+    # add_job(replace_existing=True) below would discard the live BackoffState
+    # and re-ramp exponential backoff from scratch — the 5-min refresh cron
+    # calls this for EVERY account, so a persistently-failing account re-ramps
+    # 1→2→…→60s every 5 min, ~doubling the failed-IMAP-login rate (provider
+    # lockout risk). The refresh should only start genuinely-new accounts.
+    if account.id in _account_jobs and scheduler.get_job(job_id) is not None:
+        return
+
     async def _tick() -> None:
         ok = await run_idle_session(account, deps)
         if ok:

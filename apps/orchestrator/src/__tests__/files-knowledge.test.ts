@@ -28,6 +28,11 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // The module gate reads FILE_INDEXER_URL to decide the `knowledge` module's
+    // availability; this suite hits the (now correctly-gated)
+    // `/api/files/knowledge/*` mount, so knowledge must read as available or
+    // the gate 404s it. The real config defaults this URL.
+    FILE_INDEXER_URL: "http://file-indexer:8090",
     // camera-retention-purge.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
@@ -100,6 +105,12 @@ vi.mock("@prisma/client", () => {
     },
     fileContentChunk: {
       findMany: findManyMock,
+    },
+    // This suite drives the full app, whose module gate reads ModuleSetting
+    // overrides for the `/api/files/knowledge` mount. `[]` = no overrides =>
+    // registry defaults (knowledge is default-enabled) => gate passes.
+    moduleSetting: {
+      findMany: vi.fn().mockResolvedValue([]),
     },
   };
   class PrismaClientKnownRequestError extends Error {

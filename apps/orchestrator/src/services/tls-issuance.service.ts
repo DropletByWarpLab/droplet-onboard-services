@@ -802,6 +802,15 @@ export interface ClaimBoxNameDeps {
     "signWithDeviceKey" | "getDeviceIdentityStatus"
   >;
   logger: TlsLogger;
+  /**
+   * WARP-978 — `!!config.HQ_ISSUANCE_URL`: whether this box is wired to a live HQ.
+   * When FALSE, the real HQ client's base URL is empty, so `hq.challenge` would
+   * build a RELATIVE path and throw `TypeError: Failed to parse URL`. The claim
+   * short-circuits to a non-authoritative NOT_REGISTERED before touching HQ.
+   * Optional + treated as configured when omitted, so existing callers/tests
+   * that never set it keep exactly their prior HQ-reaching behavior.
+   */
+  hqConfigured?: boolean;
 }
 
 /**
@@ -825,8 +834,23 @@ export async function claimBoxName(
   rawName: string,
   deps: ClaimBoxNameDeps,
 ): Promise<ClaimBoxNameResult> {
-  const { deviceId, hq, identity, logger } = deps;
+  const { deviceId, hq, identity, logger, hqConfigured } = deps;
   try {
+    // WARP-978 — HQ not configured (HQ_ISSUANCE_URL empty on a dev/CI box, or a
+    // reflashed box before the baked default lands). The real HQ client's base
+    // URL is "", so hq.challenge would build a RELATIVE
+    // "/api/issuance/order/challenge" and throw `TypeError: Failed to parse URL`.
+    // Short-circuit to a non-authoritative NOT_REGISTERED before touching HQ.
+    // `hqConfigured === undefined` (unset by legacy callers) is treated as
+    // configured, preserving the pre-existing HQ-reaching behavior.
+    if (hqConfigured === false) {
+      logger.warn(
+        { deviceId, name: rawName },
+        "tls-claim: HQ_ISSUANCE_URL not configured — cannot device-auth claim the name; falling back to opaque/bootstrap issuance",
+      );
+      return { outcome: CLAIM_RESULT_NOT_REGISTERED, authoritative: false };
+    }
+
     // No provisioned identity → no trusted key to sign the PoP with. The device
     // isn't claimable yet (e.g. a fresh box before first-factory enroll) — fall
     // back gracefully (bootstrap/opaque issuance) with a clear log.

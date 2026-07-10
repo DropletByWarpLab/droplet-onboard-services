@@ -1,0 +1,152 @@
+# Adding a new integration provider — developer guide
+
+> **Audience:** an engineer adding a new integration (a second PMS, an accounting system, a generic ODBC ERP).
+> **Prereq reading:** [`README.md`](README.md) (architecture) and the build spec `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md`.
+> **Reference implementation:** Eaglesoft (`services/erp-connector/`, provider #1). Copy its shape.
+
+The orchestrator service + route layer and the dashboard hub are **provider-agnostic** — you rarely touch them. Adding a provider is mostly: implement the `Connector`, declare its read/write operations, provision its least-privilege accounts, expose tools, and add dashboard metadata.
+
+---
+
+## 0. Where a provider lives
+
+Today all providers live in the `@droplet/erp-connector` package (`services/erp-connector/`). If you're adding an ERP/PMS-shaped provider, add it there behind the same `Connector` interface. A radically different category (non-database, API-based) may warrant its own sidecar package following the same contract — discuss in an ADR first (`droplet-architecture-guard`).
+
+---
+
+## 1. Implement the `Connector`
+
+`services/erp-connector/src/connector.ts` defines the interface. Every database-touching method is async and, until the driver is wired, rejects with `ConnectorBlockedError` (the DB-independent slice — see [`README.md`](README.md) §7).
+
+```ts
+export interface Connector {
+  readonly provider: string;
+  connect(): Promise<void>;
+  close(): Promise<void>;
+  health(): Promise<{ ok: boolean }>;            // SELECT 1 + last-read + fingerprint + pool stats
+  introspect(): Promise<IntrospectionResult>;    // discover the live schema, fingerprint it
+  runRead(name: string, params): Promise<unknown[]>;
+  applyWrite(name: string, params): Promise<unknown>;
+}
+```
+
+Provide, alongside it:
+
+- **A connection string builder** (`connection-string.ts` pattern) — provider-specific, secrets by `secretRef` pointer, prefer TLS. *(SQL Anywhere e.g. forbids `Host=` and `CommLinks=` together — provider quirks live here.)*
+- **Version + catalog detection** (`version-detect.ts` pattern) — detect the engine/product version and branch the introspection queries to the right catalog dialect. Never assume one schema shape.
+- **Schema map + drift fingerprint** (reuse `schema-map.ts`: `buildSchemaMap`, `computeSchemaFingerprint`). The fingerprint is what freezes writes on an upstream upgrade — reuse it verbatim.
+
+Keep the driver dependency **inside the sidecar package** (and, if native, inside its container image), so the orchestrator stays language-agnostic behind the internal REST contract.
+
+---
+
+## 2. Declare read operations (the read-query registry)
+
+Reads leave the external system **only** through a fixed set of named, parameterized queries (`read-queries.ts`). This is the injection- and over-fetch-proof data plane.
+
+- Each query resolves table/column **identifiers through the schema map** (`resolveTable` / `resolveColumn`) — never string-concatenated, never from caller input.
+- Every **value** binds as `?`.
+- Escape user-supplied search terms (see `escapeLike` — a bare `%` must not turn a name search into a full-table scan; PHI minimum-necessary).
+- Register the query; an unknown query name throws `UnknownReadQueryError`.
+
+The orchestrator's `erp.service.ts` calls `connector.runRead("<name>", params)` and maps rows to the API shape; the assistant reaches reads only via tools (§5).
+
+---
+
+## 3. Declare write operations (the write-command registry)
+
+Writes are the sharp edge (`write-commands.ts`). Each command is a named object with:
+
+- a `targetTable` and an **`allowedColumns`** list (a bind outside it throws `DisallowedColumnError`);
+- an **optimistic guard** on the discovered watermark column (e.g. `WHERE id = ? AND last_modified = ?`) so Droplet never clobbers a change a front-desk user made a second earlier;
+- a `buildStatement`, a `reversalPlan`, and a `verifyQuery`.
+
+**`FORBIDDEN_WRITE_TABLES` + `assertTargetAllowed` make ledger / clinical / claim tables impossible targets** — enforced at registration, at `buildStatement`, and at `verifyQuery`. An unknown command name throws `UnknownWriteCommandError`.
+
+> **Before allow-listing any write:** on a **copy** database, capture what the external application does when *it* performs the same operation (triggers, audit-trail rows, side-effect tables) vs. what your raw SQL touches. If the app writes tables your `droplet_rw` won't, the raw write will desync the system — escalate to the vendor's sanctioned write API instead. Raw writes can also be **invisible to live clients until a service restart** — surface this. (Eaglesoft: [`eaglesoft.md`](eaglesoft.md).)
+
+---
+
+## 4. Provision least-privilege accounts
+
+Ship a `provision.sql` and a `revoke.sql` (`services/erp-connector/sql/` pattern):
+
+- `droplet_ro` — `SELECT` only, on the specific tables/views the read registry uses (prefer granting on **views** to pin the contract).
+- `droplet_rw` — created but **no grants at creation**; each enabled write capability adds exactly the `INSERT`/`UPDATE(cols)` it needs. Never `DELETE`, DDL, or admin.
+
+Provisioning must be **idempotent / self-healing** (re-runnable on connect-failure). Passwords are Droplet-generated, referenced by `secretRef`, and use placeholders in the tracked SQL — **never** a literal credential in the repo.
+
+---
+
+## 5. Expose assistant tools
+
+The assistant reaches the provider **only** through named tools in `packages/tools-core/src/handlers/erp/`:
+
+- Add a handler per operation; register it in `registry.ts`; set `requiresWrite` + `requiresConfirmation` to match the tier (reads: both false; writes: both true).
+- A write tool **creates a write-request** (stages the outbox) — it must **never** apply a write directly.
+- Update `INVENTORY.md` + the registry test's expected tool set.
+
+The MCP server picks tools up automatically; the orchestrator's `WRITE_TOOLS` is **derived** from `requiresWrite` — never maintain a parallel list.
+
+---
+
+## 6. Add dashboard metadata
+
+The hub renders a provider from static metadata — `apps/web-dashboard/src/lib/connectors.ts`:
+
+```ts
+{ id, name, category, description, availability: "available" | "coming-soon" }
+```
+
+Live connection **status** is merged in from `GET /api/integrations`; this file is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
+
+---
+
+## 7. Wire the build graph (don't skip this — it's a silent CI-redder)
+
+The moment the **orchestrator imports your connector package**, the build graph changes. If you add a *new* connector package (rather than extending `erp-connector`), you must also:
+
+1. **Declare the dependency** in `apps/orchestrator/package.json` (`"@droplet/<pkg>": "0.1.0"`). Without it, workspace resolution + the Docker targeted-install won't include it → build/runtime failure.
+2. **Build it before the orchestrator** in:
+   - `apps/orchestrator/Dockerfile` — `COPY` its `package.json` + source, add `-w @droplet/<pkg>` to the targeted `npm ci`, and `RUN npm run -w @droplet/<pkg> build`;
+   - `scripts/test/ship-check.sh` — add it to the **leaf-build list** (the `for leaf_pkg in …` loop), so `ship-check tsc-full` and CI build its `dist` + `.d.ts` before the orchestrator typecheck.
+3. **Sync the lockfile** — `npm install --package-lock-only` (a new workspace/dependency edge reddens all node CI at `npm ci` if the lockfile is stale — see the `new-npm-workspace-needs-lockfile-sync` note).
+
+*(Extending the existing `erp-connector` package avoids most of this — it's already wired.)*
+
+---
+
+## 8. The hard rules (a review will block violations)
+
+- **The assistant never emits SQL** — named registry commands only; no raw-SQL escape hatch against a live third-party system.
+- **Read-only by default**; writes are a per-practice opt-in behind the confirm-outbox.
+- **Financial/clinical/claim tables are never written** (`FORBIDDEN_WRITE_TABLES`).
+- **Explicit-enum state** — never derive status from a null/absent row (WARP-218).
+- **`secretRef` pointer** — never a cleartext password in a row, log, or export.
+- **Audit `scope` is PHI-free** — ids/counts/tokens only; redact search terms.
+- **No `while True`** — schedule via `cron-runtime`; **no new `MATTER_*` env vars**; **no `any`**; **no** "poc"/"test"/"dev"/"prototype" naming in surfaces.
+- **On-box / LAN-only** — no egress from the connector.
+
+---
+
+## 9. Testing
+
+- **Unit tests with a stubbed connector** (`*.service.test.ts`, `erp-connector/__tests__/*`): the connector's live methods throw `ConnectorBlockedError`; the service/registry logic is fully testable with **no database** — honest degradation, the write-request state machine, RBAC, audit emission, identifier resolution, forbidden-target rejection, fingerprint stability.
+- **No mock-database integration tests** (team rule — a prior mock/prod divergence incident). DB-touching paths stay stubbed + unit-tested, or run against a **real** database.
+- **The copy-DB harness** (`services/erp-connector/harness/`, WARP-1106): a PostgreSQL mock (`Variant A`, runs in CI now) and a real-engine template (`Variant B`, needs the provider's dev-edition binaries). It runs the connector's **actual built SQL** against a synthetic schema to prove reads/writes/guards before a live driver exists. Use it as the live target for a new provider's driver.
+- **Gate:** `./scripts/test/ship-check.sh tsc-full` (typecheck all workspaces) + `lifecycle-naming`. Run before every PR.
+
+---
+
+## 10. Checklist
+
+- [ ] `Connector` implemented; live methods stubbed until the driver lands.
+- [ ] Connection-string + version/catalog detection + schema-map/fingerprint.
+- [ ] Read-query registry (parameterized, identifiers via schema map, terms escaped).
+- [ ] Write-command registry (allowlist, forbidden tables, optimistic guard, reversal, verify).
+- [ ] `provision.sql` / `revoke.sql` (idempotent, least-privilege, `secretRef`).
+- [ ] tools-core handlers (`requiresWrite`/`requiresConfirmation`, writes stage a request).
+- [ ] Dashboard connector metadata + visual.
+- [ ] Build graph wired (dep + Dockerfile + ship-check leaf + lockfile) — if a new package.
+- [ ] Unit tests green; ship-check `tsc-full` + `lifecycle-naming` pass.
+- [ ] A WARP ticket filed for the work; PR opened review-ready (never self-merged).

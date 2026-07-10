@@ -14,6 +14,7 @@ import {
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
+import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
@@ -149,6 +150,12 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+
+        {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
+            Card 1). Owns its own "Workspace" group header and self-gates to
+            owner/admin. The business-profile card (Phase 3) slots into the
+            same group, after the personality card. */}
+        <PersonalityCard />
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
         <PasskeysSection />

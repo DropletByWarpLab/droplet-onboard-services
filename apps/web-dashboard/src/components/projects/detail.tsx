@@ -242,6 +242,7 @@ function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): J
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const actions = pmActions();
+  const { toast } = useToast();
   const submit = async () => {
     const body = text.trim();
     if (!body || busy) return;
@@ -250,6 +251,11 @@ function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): J
       await actions.addComment(itemId, `<p>${escapeHtml(body)}</p>`);
       setText("");
       onSent();
+    } catch (e) {
+      // DASH-002: a failed comment POST used to surface as an unhandled
+      // rejection — the button just reset with no feedback. Toast like the
+      // sibling composers (NewItemModal / LabelsEditor).
+      toast(e instanceof Error ? e.message : "Couldn't send the comment", "error");
     } finally {
       setBusy(false);
     }

@@ -7,8 +7,9 @@
 #   - generate /etc/hostapd.conf + /etc/dnsmasq-ap.conf, start AP
 #   - re-kick routing service if it's caught with a stale OpenWrt session
 #
-# This is the systemd glue around scripts/poc/droplet-openwrt-attach.sh —
-# install via `bash scripts/poc/install-attach-service.sh` on the POC box.
+# This is the systemd glue around /usr/local/sbin/droplet-openwrt-attach,
+# installed by scripts/lib/single-box.sh (setup.sh --single-box). (The old
+# scripts/poc/* paths were retired with the single-box rename — INFRA-009.)
 Description=Bootstrap droplet-openwrt container (AP + RPC + routing recovery)
 After=docker.service
 Wants=docker.service
