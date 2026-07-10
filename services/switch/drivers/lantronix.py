@@ -518,6 +518,14 @@ class LantronixDriver(SwitchDriver):
         except httpx.HTTPStatusError as exc:
             raise SwitchAPIError(exc.response.status_code, str(exc))
 
+    @property
+    def plan_only(self) -> bool:
+        """True when writes are computed but NOT applied (SWITCH_LIVE_WRITES off).
+        The REST layer reflects this as dry_run/planned so callers — and the
+        LLM switch tools — never report a hardware change that didn't happen
+        (PYNET-001)."""
+        return self._plan_only
+
     async def _gated_write(
         self,
         config_path: str,
@@ -966,4 +974,19 @@ class LantronixDriver(SwitchDriver):
         resp = await self._client.get("/config/download")
         if resp.status_code != 200:
             raise SwitchAPIError(resp.status_code, "Config backup failed")
-        return resp.content
+        # PYNET-004: an idle-expired session answers 200 with a login-redirect
+        # body ({"redirect_url": "/login"}), not a config. Accepting that as a
+        # "backup" silently defeats the provisioner's refuse-to-write-blind
+        # restore-point gate — detect it and fail closed.
+        content = resp.content
+        if b"redirect_url" in content[:256]:
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+            if isinstance(data, dict) and "redirect_url" in data:
+                raise SwitchAPIError(
+                    resp.status_code,
+                    "Config backup returned a login redirect (session expired) — refusing to treat it as a valid backup",
+                )
+        return content

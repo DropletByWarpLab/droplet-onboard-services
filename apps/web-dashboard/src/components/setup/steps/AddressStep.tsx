@@ -170,6 +170,10 @@ export function AddressStep({
   // Debounced live validation + availability check as the owner types.
   useEffect(() => {
     if (!picking) return;
+    // WARP-1104 — any edit to the name clears a stale claim/save-error banner, so
+    // the owner never sees a previous attempt's "already taken" stacked beneath a
+    // fresh green "available" for the name they're now typing.
+    setSaveError(null);
     if (name.trim().length === 0) {
       wantSlugRef.current = null;
       abortRef.current?.abort();
@@ -229,20 +233,50 @@ export function AddressStep({
   // (release-then-claim) for a rename. Shared save/advance/error handling.
   async function submitName(persist: (slug: string) => Promise<unknown>) {
     if (!isAvailable) return;
+    // The slug this submit is claiming. The name <input> stays editable while
+    // `saving` (StepShell only disables the primary button), so by the time this
+    // claim resolves the owner may have typed on to a different name — capture
+    // what we submitted so a late rejection can tell whether it's still current.
+    const submittedSlug = slug;
     setSaveError(null);
     setSaving(true);
     try {
-      await persist(slug);
+      await persist(submittedSlug);
       onComplete();
     } catch (e) {
+      const code = (e as { code?: unknown })?.code;
       // WARP-1109 — the fresh POST can still race a box that already holds a
       // name; the orchestrator answers 409 { code: "BOX_NAME_ALREADY_NAMED" }.
       // Key the copy off the CODE and point the owner at Rename (NOT the old,
       // now-false "factory reset releases it").
-      if ((e as { code?: unknown })?.code === "BOX_NAME_ALREADY_NAMED") {
+      if (code === "BOX_NAME_ALREADY_NAMED") {
         setSaveError(
           "This box already holds a secure address — use Rename to change it.",
         );
+      } else if (code === "BOX_NAME_TAKEN") {
+        // WARP-1104 — the inline availability check is format-only
+        // (authoritative:false); the claim is the AUTHORITATIVE availability
+        // answer, so a name the check reported "available" can still come back
+        // taken here. Reconcile the FIELD to `taken` (green check → red X,
+        // Continue disabled) instead of leaving a stale green "…is available"
+        // beside a detached red "already taken" banner — the check and the claim
+        // must agree. Editing the name re-runs the live check and clears this.
+        //
+        // Staleness guard (same idiom as runCheck / the debounced check): only
+        // apply this if the slug we submitted is STILL the one the owner is on.
+        // The field is editable while saving, so a late rejection for an OLD
+        // name must NOT stomp a fresher "available" for a name typed since —
+        // that would re-open the very check/claim disagreement this fixes.
+        if (wantSlugRef.current !== submittedSlug) return;
+        wantSlugRef.current = null;
+        abortRef.current?.abort();
+        setStatus({
+          kind: "taken",
+          message:
+            e instanceof Error && e.message
+              ? e.message
+              : "That name isn't available — pick another.",
+        });
       } else {
         setSaveError(
           e instanceof Error

@@ -48,6 +48,7 @@ import type {
   DriveLabel,
   WirelessScanResult,
   AuthUser,
+  RosterUser,
   InviteCreateRequest,
   CreateUserRole,
   InviteCreateResponse,
@@ -493,7 +494,7 @@ export async function fetchMe(): Promise<AuthUser> {
   return res.json();
 }
 
-export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
+export async function fetchUsers(): Promise<{ users: RosterUser[] }> {
   const res = await authFetch(`${BASE}/api/auth/users`);
   if (!res.ok) throw new Error(`Failed to fetch users: ${res.status}`);
   return res.json();
@@ -1082,6 +1083,15 @@ export async function updateDriveLabel(
     notes?: string | null;
   },
 ): Promise<DriveLabel> {
+  // WARP-1141: the bridge reports uuid:"" when the filesystem has no
+  // /dev/disk/by-uuid link (degraded / auto-read-only pools). An empty uuid
+  // builds PATCH /api/storage/drives/ — a different route — so fail loudly
+  // here instead of letting the label vanish into a mis-routed request.
+  if (!uuid) {
+    throw new Error(
+      "This drive doesn't have a stable identifier right now, so it can't be renamed.",
+    );
+  }
   const res = await authFetch(
     `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
     {
@@ -3872,6 +3882,59 @@ export async function dismissReviewNudge(): Promise<void> {
   });
   if (!res.ok) throw new Error(`review_dismiss_${res.status}`);
 }
+
+// --- AI personality (WARP-1119, Settings → Workspace → AI personality) ---
+
+export type PersonaPreset =
+  | "warm_friendly"
+  | "professional_precise"
+  | "founder"
+  | "direct_technical";
+export type PersonaVerbosity = "concise" | "balanced" | "detailed";
+
+/**
+ * GET /api/persona is role-split server-side (WARP-1118 §7.3): owner/admin
+ * receive every field; family/guest receive `preset` + `verbosity` only.
+ * Everything beyond those two is therefore optional here — the card gates
+ * its edit surface on the caller's role, not on field presence.
+ */
+export interface PersonaSettings {
+  preset: PersonaPreset;
+  verbosity: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+  updatedBy?: string | null;
+  updatedAt?: string;
+}
+
+export interface PersonaUpdate {
+  preset?: PersonaPreset;
+  verbosity?: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+}
+
+export async function fetchPersona(): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`);
+  if (!res.ok) throw new Error(`Failed to load personality settings: ${res.status}`);
+  return res.json();
+}
+
+/** PATCH only the changed fields (the route requires at least one). A 400 —
+ *  e.g. customInstructions over the 1200-char cap — throws; the card keeps
+ *  the user's edits and shows the failed state (reject, never truncate). */
+export async function patchPersona(update: PersonaUpdate): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to save personality settings: ${res.status}`);
+  }
+  return res.json();
+}
+
 
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
 // listSessions, getSession, updateSessionTitle, deleteSession,

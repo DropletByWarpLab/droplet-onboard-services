@@ -57,6 +57,7 @@ from voice.pipeline import (
     WakePipeline,
 )
 from voice.llm import build_llm_from_env
+from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 from voice.stt import build_stt_from_env
 from voice.tts import build_tts_from_env
 from voice.wake import (
@@ -150,6 +151,12 @@ DEFAULT_MEASURE_SECONDS = 5.0
 # Pipeline lives at module scope so /voice/status can read its state
 # from the request thread while the worker thread is mid-prediction.
 _pipeline: Optional[WakePipeline] = None
+
+# WARP-1119 — the greeting-path persona fetcher (arch brief §14). Module
+# scope so /health can mirror its fetch_ok / last_fetch_at from the
+# request thread. None until startup builds it (and always None under
+# LLM_URL=__mock__).
+_persona_fetcher: Optional[PersonaFetcher] = None
 
 
 # Cached on first call; /audio/devices refreshes on demand.
@@ -272,12 +279,21 @@ async def startup() -> None:
     # case (DNS failures, dropped packets). Run them in a worker thread
     # so the FastAPI `/health` endpoint stays responsive within the
     # Dockerfile `HEALTHCHECK --start-period=10s` window.
-    global _pipeline
+    global _pipeline, _persona_fetcher
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
         tts = build_tts_from_env()
-        llm = await asyncio.to_thread(build_llm_from_env)
+        # WARP-1119 — build the persona fetcher FIRST so the same instance
+        # is shared by the LLM's greeting path and /health's observability
+        # fields. Prime it once off the event loop: the result is cached
+        # for the short TTL and, more importantly, /health shows a real
+        # fetch_ok immediately instead of null until the first greeting.
+        # A failed prime is fine — greeting turns fall back and retry.
+        _persona_fetcher = build_persona_fetcher_from_env()
+        if _persona_fetcher is not None:
+            await asyncio.to_thread(_persona_fetcher.get_block)
+        llm = await asyncio.to_thread(build_llm_from_env, _persona_fetcher)
         wake_threshold = resolve_wake_threshold(detector)
         # Announce the EFFECTIVE threshold: boxes that relied on the old
         # compose default (`:-0.3`) silently moved to the engine-aware
@@ -358,6 +374,15 @@ class HealthResponse(BaseModel):
     inputRmsDbfs: Optional[float] = None
     lastAudioAt: Optional[float] = None
     inputFlatlined: bool = False
+    # WARP-1119 (§14). Greeting-path persona fetch observability: whether
+    # the last GET /api/persona/prompt succeeded + wall time of the last
+    # attempt (None/None = never attempted, e.g. __mock__ deployments).
+    # NEVER degrades health — a failed fetch falls back to the built-in
+    # greeting prompt and voice keeps working; these fields exist so a
+    # rotated ORCHESTRATOR_TOKEN is visible here instead of drifting
+    # silently for months.
+    personaFetchOk: Optional[bool] = None
+    personaLastFetchAt: Optional[float] = None
 
 
 class VoiceStatusResponse(BaseModel):
@@ -537,6 +562,11 @@ def health(response: Response) -> HealthResponse:
         inputRmsDbfs=input_rms_dbfs,
         lastAudioAt=last_audio_at,
         inputFlatlined=input_flatlined,
+        # WARP-1119 — persona-fetch observability (never degrades health).
+        personaFetchOk=_persona_fetcher.fetch_ok if _persona_fetcher else None,
+        personaLastFetchAt=(
+            _persona_fetcher.last_fetch_at if _persona_fetcher else None
+        ),
     )
 
 

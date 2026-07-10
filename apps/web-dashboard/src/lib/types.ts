@@ -627,6 +627,15 @@ export interface AuthUser {
   email?: string | null;
 }
 
+/** A row from GET /auth/users. Carries `userId` (the local User UUID, or null
+ *  when the Nextcloud account has no matching local row) IN ADDITION to `id`,
+ *  which is the Nextcloud username — a DIFFERENT namespace (WARP-947). Self /
+ *  identity checks must compare `userId` against the caller's local id, never
+ *  `id` against a local username. */
+export interface RosterUser extends AuthUser {
+  userId: string | null;
+}
+
 // ── WARP-217 invite types ──
 export type InviteRole = "user" | "admin";
 

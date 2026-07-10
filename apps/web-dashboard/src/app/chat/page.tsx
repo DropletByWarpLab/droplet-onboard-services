@@ -145,10 +145,20 @@ export default function ChatPage() {
     },
   });
 
-  // WARP-1121 — is the open conversation the live onboarding interview?
+  // WARP-1121 — is the open conversation the onboarding-interview session at
+  // all? True across the WHOLE lifecycle (in_progress / re_running /
+  // completed): `interviewChatId` keeps pointing at the session after commit —
+  // only the deletion hook clears it. Message SHAPING (marker stripping +
+  // ReviewCard for the fenced proposal) keys off THIS so a just-completed
+  // session still renders the card and never leaks raw fenced JSON or
+  // `[topic n/7]` markers as plain text.
+  const interviewConversation =
+    Boolean(conversationId) && bizProfile?.interviewChatId === conversationId;
+  // …the LIVE interview is the active subset — it flips false the moment
+  // onboardingState settles. This drives the genuinely-active-only chrome
+  // (progress dots, topic chips, wrap-up auto-send), NOT the message shaping.
   const interviewActive =
-    Boolean(conversationId) &&
-    bizProfile?.interviewChatId === conversationId &&
+    interviewConversation &&
     (bizProfile?.onboardingState === "in_progress" ||
       bizProfile?.onboardingState === "re_running");
 
@@ -772,9 +782,12 @@ export default function ChatPage() {
               // token paint (ChatMessage's own thinking indicator shows via
               // empty streaming content) and renders as the review card on
               // done. Reopening the session re-renders the stored proposal
-              // as the card, never as text.
+              // as the card, never as text. Keyed off `interviewConversation`
+              // (the whole lifecycle, incl. "completed") — NOT the live
+              // `interviewActive` flag — so a finished session keeps the card
+              // and never leaks raw JSON / `[topic n/7]` markers.
               if (
-                interviewActive &&
+                interviewConversation &&
                 msg.role === "assistant" &&
                 typeof msg.content === "string"
               ) {

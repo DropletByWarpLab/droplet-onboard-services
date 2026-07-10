@@ -334,7 +334,7 @@ run_check_tsc_full() {
   # downstream type resolution. These are the same RUN steps the
   # orchestrator Dockerfile executes.
   local leaf_pkg
-  for leaf_pkg in @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
+  for leaf_pkg in @droplet/erp-connector @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
     if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
       printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
       printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2

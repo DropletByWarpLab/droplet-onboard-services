@@ -1764,6 +1764,105 @@ def pools_snapshot(invalidate=False):
     return snap
 
 
+# ---------------------------------------------------------------------------
+# Single-box host-uplink probe (VPN home-mode P1.5)
+# ---------------------------------------------------------------------------
+# On the single-box deployment shape the WAN uplink is HOST-owned (not inside the
+# containerised OpenWrt), so the routing-service network summary reports
+# wan.present == false and the orchestrator's home-mode endpoint discovery has no
+# IP to hand a HOME-mode WireGuard peer (homeEndpointHost stays null, the mobile
+# home toggle stays hidden). This bridge runs in the host's network namespace
+# (User=droplet, no PrivateNetwork), so it CAN see the host's real default route.
+#
+# GET /host/uplink-ip reports the default-route egress source IPv4 — the address
+# a HOME-mode peer on the same home LAN dials directly. READ-ONLY: it only
+# queries `ip route get` (no host mutation), so — unlike the .env write-backs —
+# there is no host script; it shells `ip` directly, exactly like pools_snapshot
+# reads /proc/mdstat. Returns {"uplinkIp": "<ip>" | null} — honest null, never a
+# fabricated guess.
+
+# The public resolver 1.1.1.1 is used ONLY as a route-lookup target; no packet is
+# sent (`ip route get` is a kernel FIB query). It picks the default route the box
+# would use to reach the internet, whose `prefsrc` is the box's uplink source IP.
+_UPLINK_ROUTE_TARGET = "1.1.1.1"
+
+# Extracts the `src <ip>` field from `ip route get` plain-text output.
+_IP_ROUTE_SRC_RE = re.compile(r'\bsrc\s+(\d{1,3}(?:\.\d{1,3}){3})\b')
+
+
+def _usable_uplink_ip(addr):
+    """True unless `addr` is a placeholder that could never be a dial-able home
+    endpoint. RFC1918 (192.168/10/172.16-31) is VALID — the home client is on the
+    same LAN and reaches the box at its private address. Mirrors the orchestrator's
+    isUsableHostIp() in lib/vpn-home-endpoint.ts."""
+    if not isinstance(addr, str):
+        return False
+    a = addr.strip()
+    if not a:
+        return False
+    if a == "0.0.0.0":            # unspecified / DHCP-pending placeholder
+        return False
+    if a.startswith("127."):      # loopback (no default route → resolves to lo)
+        return False
+    if a.startswith("169.254."):  # link-local (no DHCP lease)
+        return False
+    return True
+
+
+def _parse_uplink_ip(output):
+    """Parse the default-route source IPv4 out of `ip route get` output.
+
+    Accepts BOTH shapes so we don't depend on iproute2 JSON support:
+      - `ip -j route get`  → a JSON array; read the first entry's `prefsrc`.
+      - `ip route get`     → plain text `... src <ip> ...`.
+    Returns the usable source IP, or None (never a guess) when the output has no
+    usable address (loopback/link-local/unspecified placeholders are filtered)."""
+    if not output:
+        return None
+    text = output.strip()
+    # JSON shape first (only if it actually looks like JSON — a plain-text line
+    # starting with the target IP is not JSON).
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict):
+                    src = entry.get("prefsrc") or entry.get("src")
+                    if isinstance(src, str) and _usable_uplink_ip(src):
+                        return src.strip()
+            return None
+    # Plain-text fallback.
+    m = _IP_ROUTE_SRC_RE.search(text)
+    if m and _usable_uplink_ip(m.group(1)):
+        return m.group(1)
+    return None
+
+
+def uplink_ip_snapshot():
+    """Return {"uplinkIp": "<ip>" | null} — the host default-route egress source
+    IPv4. READ-ONLY. Tries `ip -j route get` first, then falls back to plain-text
+    `ip route get` for older iproute2 builds. Honest null on any failure; never
+    raises (mirrors pools_snapshot's degrade-cleanly posture)."""
+    try:
+        rc, out, _err = _run(
+            ["ip", "-j", "route", "get", _UPLINK_ROUTE_TARGET])
+        ip = _parse_uplink_ip(out) if rc == 0 else None
+        if ip is None:
+            # -j unsupported (older iproute2) or empty JSON — try plain text.
+            rc, out, _err = _run(
+                ["ip", "route", "get", _UPLINK_ROUTE_TARGET])
+            ip = _parse_uplink_ip(out) if rc == 0 else None
+        return {"uplinkIp": ip}
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("uplink-ip probe failed: %s", e)
+        return {"uplinkIp": None}
+
+
 # Destructive pool operations the bridge will forward to the host script.
 # This is an allow-list — anything else is refused before we shell out. These
 # are Tier-3-class (data-destroying); they are owner-only + confirm-token-gated
@@ -2692,6 +2791,16 @@ class Handler(BaseHTTPRequestHandler):
                 # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []
                 # honestly when no array exists — never a fabricated pool.
                 return self._send(200, pools_snapshot())
+            if path == "/host/uplink-ip":
+                # VPN home-mode P1.5: the host default-route egress source IP,
+                # for the orchestrator's single-box home-endpoint fallback. The
+                # source IP is box-internal network topology, so gate it like
+                # /drives and /openwrt/qr now the bridge binds all interfaces.
+                # READ-ONLY (`ip route get` FIB query) — returns
+                # {"uplinkIp": <ip>|null}, an honest null, never a guess.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, uplink_ip_snapshot())
             if path == "/logs/bundle":
                 # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
                 # and /drives — the logs can carry box-internal (and, pre-host-
