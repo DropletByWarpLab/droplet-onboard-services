@@ -588,7 +588,7 @@ DROPLET_PUBLIC_FQDN=
 #   the box permanently lost its droplet-us.com cert + FQDN → remote access
 #   dead-ends (WARP-978), which is exactly the reflash-self-signed regression the
 #   baked default fixes. Plain outbound HTTPS; no WG tunnel required.
-HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
 #   relay OFF — single-box.sh only activates the `relay` compose profile
@@ -739,7 +739,7 @@ migrate_env() {
   # off). Pairs with the seed-block defaults above. `_migrate_ensure_key` only
   # appends when the key is ABSENT, so an existing (even intentionally-empty)
   # value is never clobbered on re-run.
-  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}"
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs

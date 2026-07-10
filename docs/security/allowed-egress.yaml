@@ -221,7 +221,7 @@ entries:
     kind: egress
     service: orchestrator
     destination:
-      hosts: [droplet-fleet-hq.rjouffret.workers.dev]
+      hosts: [fleet-hq.droplet-us.com]
       ports: [443]
       protocol: https
     phase: runtime
