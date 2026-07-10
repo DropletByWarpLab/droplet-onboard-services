@@ -6,6 +6,7 @@ import {
   FipsSelfTestError,
   isFipsEnabled,
   md5ShouldFail,
+  sha256ShouldWork,
 } from "../src/index.js";
 
 // These tests pin the *contract* of the helper without requiring an
@@ -38,10 +39,13 @@ describe("isFipsEnabled", () => {
 
 describe("md5ShouldFail", () => {
   it("returns the error message when MD5 throws (FIPS enforcing)", () => {
-    const spy = vi.spyOn(crypto, "createHash").mockImplementation((alg: string) => {
+    // Bind the real implementation BEFORE spying — calling crypto.createHash
+    // inside the mock would recurse into the mock itself.
+    const realCreateHash = crypto.createHash.bind(crypto);
+    const spy = vi.spyOn(crypto, "createHash").mockImplementation(((alg: string) => {
       if (alg === "md5") throw new Error("disabled for FIPS");
-      return crypto.createHash("sha256");
-    });
+      return realCreateHash(alg);
+    }) as typeof crypto.createHash);
     expect(md5ShouldFail()).toBe("disabled for FIPS");
     spy.mockRestore();
   });
@@ -52,13 +56,34 @@ describe("md5ShouldFail", () => {
   });
 });
 
+describe("sha256ShouldWork", () => {
+  it("returns null when SHA-256 works (provider active)", () => {
+    // Default behavior everywhere: an approved digest is available.
+    expect(sha256ShouldWork()).toBeNull();
+  });
+
+  it("returns the error message when SHA-256 throws (provider dead)", () => {
+    // WARP-1063: a failed provider activation under the fips=yes property
+    // pin leaves NOTHING fetchable — even approved digests die.
+    const spy = vi.spyOn(crypto, "createHash").mockImplementation(() => {
+      throw new Error("unsupported");
+    });
+    expect(sha256ShouldWork()).toBe("unsupported");
+    spy.mockRestore();
+  });
+});
+
 describe("assertFipsAtBoot", () => {
   it("emits a structured log line on success", () => {
     const getFipsSpy = vi.spyOn(crypto, "getFips").mockReturnValue(1 as any);
-    const md5Spy = vi.spyOn(crypto, "createHash").mockImplementation((alg: string) => {
+    // Bind the real implementation BEFORE spying (see md5ShouldFail test) —
+    // the WARP-1063 positive probe calls createHash("sha256") through the
+    // mock, and a self-referencing mock would recurse.
+    const realCreateHash = crypto.createHash.bind(crypto);
+    const md5Spy = vi.spyOn(crypto, "createHash").mockImplementation(((alg: string) => {
       if (alg === "md5") throw new Error("disabled for FIPS");
-      return crypto.createHash("sha256");
-    });
+      return realCreateHash(alg);
+    }) as typeof crypto.createHash);
 
     const lines: string[] = [];
     const result = assertFipsAtBoot("orchestrator", { log: (l) => lines.push(l) });
@@ -94,6 +119,23 @@ describe("assertFipsAtBoot", () => {
     expect(() => assertFipsAtBoot("orchestrator", { log: () => {} })).toThrow(
       /FIPS provider is loaded but not enforcing/,
     );
+    getFipsSpy.mockRestore();
+  });
+
+  it("throws when the approved digest is unavailable (provider did not activate)", () => {
+    // WARP-1063: fips=yes pinned (getFips()==1) but the provider never
+    // activated — EVERY digest is unfetchable, not just MD5. The self-test
+    // must fail closed with the provider-not-active diagnosis instead of
+    // reporting fips:true and letting TLS clients die later with
+    // LIBRARY_HAS_NO_CIPHERS.
+    const getFipsSpy = vi.spyOn(crypto, "getFips").mockReturnValue(1 as any);
+    const hashSpy = vi.spyOn(crypto, "createHash").mockImplementation(() => {
+      throw new Error("unsupported");
+    });
+    expect(() => assertFipsAtBoot("orchestrator", { log: () => {} })).toThrow(
+      /approved digest SHA-256 unavailable/,
+    );
+    hashSpy.mockRestore();
     getFipsSpy.mockRestore();
   });
 

@@ -164,36 +164,54 @@ COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 # MD5 is rejected (negative probe). Any failure fails the image build.
 # Shipping the module does NOT activate FIPS at runtime — see the
 # activation-strategy comment above the CMD (WARP-318 owns activation).
+# WARP-1063: the process hosts TWO libcrypto instances — Node's bundled
+# OpenSSL AND Prisma's query engine linking the system libssl3. The FIPS
+# module cannot be initialized by two libcryptos resolving the SAME
+# fips.so file (upstream limitation, openssl#25553: the second activation
+# fails with `common libcrypto routines::init fail`, leaving that
+# instance with ZERO fetchable algorithms under the fips=yes pin — the
+# exact P1011 "library has no ciphers" boot block WARP-317 surfaced). So:
+# no process-wide OPENSSL_MODULES at runtime; instead EACH instance
+# resolves fips.so from its OWN baked MODULESDIR and gets its OWN copy:
+#   - system libssl (Prisma): Debian's ossl-modules dir (installed by
+#     install-fips-provider.sh as before);
+#   - Node's bundled OpenSSL: its baked MODULESDIR, extracted from the
+#     node binary itself (release binaries bake a build-tree path like
+#     /home/iojs/build/...; the literal "$(BUILDTYPE)" segment is just a
+#     directory name). The probe below fails the build if extraction or
+#     resolution ever drifts on a Node upgrade.
 COPY --from=fips-builder /out/fips.so /tmp/fips.so
 COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
-RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+RUN node_moddir="$(grep -a -o -m1 'MODULESDIR: "[^"]*"' "$(command -v node)" | sed 's/^MODULESDIR: "//; s/"$//')" && \
+    { [ -n "$node_moddir" ] || { echo "FIPS: could not extract node's baked MODULESDIR" >&2; exit 1; }; } && \
+    sh /tmp/install-fips-provider.sh /tmp/fips.so "$node_moddir" && \
     rm -f /tmp/fips.so /tmp/install-fips-provider.sh
 
-# WARP-967: probe the exact combination WARP-318 will activate at
-# runtime — Node's BUNDLED OpenSSL loading the validated module. The
-# node release binaries statically link their own libcrypto (Debian's
-# libssl3 is not what `node` uses), and two things differ from the
-# system CLI as a result:
-#   - node's baked-in MODULESDIR is not Debian's, so OPENSSL_MODULES
-#     must point at the system ossl-modules dir;
+# WARP-967: probe the exact combination WARP-318 activates at runtime —
+# Node's BUNDLED OpenSSL loading the validated module. The node release
+# binaries statically link their own libcrypto (Debian's libssl3 is not
+# what `node` uses):
+#   - node resolves fips.so from its own baked MODULESDIR — served by the
+#     dedicated copy installed above (WARP-1063; deliberately NOT via
+#     OPENSSL_MODULES, which would collapse Node and Prisma onto one
+#     module file and break whichever initializes second);
 #   - node reads the OpenSSL config under its own `nodejs_conf` appname;
 #     `--openssl-shared-config` (NODE_OPTIONS-compatible, verified) makes
 #     it honor the shared `openssl_conf` key in docker/openssl-fips.cnf.
 #     We probe with the flag rather than baking a `nodejs_conf` alias
 #     into the shared config: with an alias present, any node started
-#     with OPENSSL_CONF pointing at the FIPS config but without
-#     OPENSSL_MODULES aborts at startup (no providers -> CSPRNG assert),
-#     which would brick this image's default, non-activated posture.
-# Flag + env vars are scoped to this RUN only; runtime posture is
+#     with OPENSSL_CONF pointing at the FIPS config would activate FIPS
+#     even in this image's default, non-activated posture.
+# Flag + env var are scoped to this RUN only; runtime posture is
 # unchanged (without the flag node ignores the `openssl_conf` key).
 RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf \
-    OPENSSL_MODULES="$(openssl version -m | sed -n 's/^MODULESDIR: "\(.*\)"$/\1/p')" \
     node --openssl-shared-config -e 'const c = require("node:crypto"); \
       if (c.getFips() !== 1) { console.error("FIPS node self-test FAILED: bundled OpenSSL did not enter FIPS mode"); process.exit(1); } \
+      try { c.createHash("sha256").update("probe").digest("hex"); } catch (e) { console.error("FIPS node self-test FAILED: approved digest unavailable — node did not activate its fips.so copy: " + e.message); process.exit(1); } \
       let md5ok = false; \
       try { c.createHash("md5").update("probe").digest("hex"); md5ok = true; } catch {} \
       if (md5ok) { console.error("FIPS node self-test FAILED: MD5 succeeded under the FIPS config"); process.exit(1); } \
-      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active, MD5 rejected");'
+      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active from node MODULESDIR copy, SHA-256 works, MD5 rejected");'
 
 WORKDIR /app
 

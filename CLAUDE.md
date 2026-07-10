@@ -202,8 +202,8 @@ Full per-variable reference (defaults, ports, resource limits):
   `docs/ENVIRONMENT.md`.
 - `DROPLET_FIPS_MODE` is the SINGLE FIPS 140-3 knob (per-customer,
   default OFF; flipped only via `setup.sh --fips` / `--no-fips`, which
-  derives `OPENSSL_CONF` / `DROPLET_FIPS_REQUIRED` / `OPENSSL_MODULES` /
-  `NODE_OPTIONS` — never hand-edit those). Only the six provider-carrying
+  derives `OPENSSL_CONF` / `DROPLET_FIPS_REQUIRED` / `NODE_OPTIONS` —
+  never hand-edit those; `OPENSSL_MODULES` is actively removed, WARP-1063). Only the six provider-carrying
   images (orchestrator, web-dashboard, mcp-server, ai-gateway,
   file-indexer, gateway) enforce; the others are pinned out in compose.
   Operator/auditor guide incl. verification commands and the "library

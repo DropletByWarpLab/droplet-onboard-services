@@ -92,32 +92,38 @@ ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
 # Runtime posture note: the ENV above stays baked (re-baking it is
 # WARP-315's scope), and shipping the module does NOT flip this
 # container into FIPS mode — `node` statically links its own bundled
-# OpenSSL, whose baked-in MODULESDIR is not Debian's AND which reads
-# the config under its own `nodejs_conf` appname (absent from the
-# shared config), so startup behaves exactly as before this change
-# (verified: getFips()=0, MD5 available, clean boot). Activation
-# (WARP-318) = NODE_OPTIONS=--openssl-shared-config + OPENSSL_MODULES +
+# OpenSSL, which reads the config under its own `nodejs_conf` appname
+# (absent from the shared config), so startup behaves exactly as before
+# this change (verified: getFips()=0, MD5 available, clean boot).
+# Activation (WARP-318) = NODE_OPTIONS=--openssl-shared-config +
 # DROPLET_FIPS_REQUIRED=true alongside the config.
+#
+# WARP-1063: node resolves fips.so from its OWN baked MODULESDIR (a
+# dedicated copy installed below) rather than a process-wide
+# OPENSSL_MODULES — the FIPS module cannot be initialized by two
+# libcrypto instances resolving the same .so file (openssl#25553; see
+# apps/orchestrator/Dockerfile for the full story).
 COPY --from=fips-builder /out/fips.so /tmp/fips.so
 COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
-RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+RUN node_moddir="$(grep -a -o -m1 'MODULESDIR: "[^"]*"' "$(command -v node)" | sed 's/^MODULESDIR: "//; s/"$//')" && \
+    { [ -n "$node_moddir" ] || { echo "FIPS: could not extract node's baked MODULESDIR" >&2; exit 1; }; } && \
+    sh /tmp/install-fips-provider.sh /tmp/fips.so "$node_moddir" && \
     rm -f /tmp/fips.so /tmp/install-fips-provider.sh
 
-# WARP-967: probe the exact combination WARP-318 will activate at
-# runtime — Node's BUNDLED OpenSSL loading the validated module. See
-# apps/orchestrator/Dockerfile for the full rationale (OPENSSL_MODULES
-# because node's baked-in MODULESDIR is not Debian's;
-# `--openssl-shared-config` because node reads the config under its own
-# `nodejs_conf` appname). Flag + env vars are scoped to this RUN;
-# runtime posture is unchanged.
+# WARP-967: probe the exact combination WARP-318 activates at runtime —
+# Node's BUNDLED OpenSSL loading the validated module from its own baked
+# MODULESDIR copy (WARP-1063 — deliberately NO OPENSSL_MODULES; see
+# apps/orchestrator/Dockerfile). `--openssl-shared-config` because node
+# reads the config under its own `nodejs_conf` appname. Flag + env var
+# are scoped to this RUN; runtime posture is unchanged.
 RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf \
-    OPENSSL_MODULES="$(openssl version -m | sed -n 's/^MODULESDIR: "\(.*\)"$/\1/p')" \
     node --openssl-shared-config -e 'const c = require("node:crypto"); \
       if (c.getFips() !== 1) { console.error("FIPS node self-test FAILED: bundled OpenSSL did not enter FIPS mode"); process.exit(1); } \
+      try { c.createHash("sha256").update("probe").digest("hex"); } catch (e) { console.error("FIPS node self-test FAILED: approved digest unavailable — node did not activate its fips.so copy: " + e.message); process.exit(1); } \
       let md5ok = false; \
       try { c.createHash("md5").update("probe").digest("hex"); md5ok = true; } catch {} \
       if (md5ok) { console.error("FIPS node self-test FAILED: MD5 succeeded under the FIPS config"); process.exit(1); } \
-      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active, MD5 rejected");'
+      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active from node MODULESDIR copy, SHA-256 works, MD5 rejected");'
 
 WORKDIR /app
 

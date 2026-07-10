@@ -15,7 +15,8 @@ contract), [`docs/compliance-progress.md`](compliance-progress.md) (program
 status). Tickets: WARP-229 (apparatus + lint), WARP-967 (validated module in
 every image), WARP-316 (CI build gate + sabotage proof), WARP-318 (customer
 option), WARP-1021 (FIPS-capable nginx edge), WARP-317 (this guide + the
-full-stack activation smoke test).
+full-stack activation smoke test), WARP-1063 (the boot fix: per-libcrypto
+module copies + explicit TLS posture + positive self-test probes).
 
 ---
 
@@ -54,15 +55,27 @@ docker compose -f docker/docker-compose.yml --env-file .env up -d
 
 `DROPLET_FIPS_MODE` is the **only** thing an operator sets, and only through
 `setup.sh` (explicit boolean — the flag is tri-state: absent means "leave the
-.env as it is", never a silent flip). `setup.sh` derives the four activation
+.env as it is", never a silent flip). `setup.sh` derives the activation
 variables from it and manages them atomically:
 
 | Derived var | FIPS ON | FIPS OFF | Who consumes it |
 |---|---|---|---|
-| `OPENSSL_CONF` | `/etc/ssl/openssl-fips.cnf` | *(empty → stock)* | Python services (system libcrypto) + nginx + Prisma engines |
+| `OPENSSL_CONF` | `/etc/ssl/openssl-fips.cnf` | *(empty → stock)* | Every OpenSSL in every provider container: system libcrypto (Python, Prisma engines, nginx), Node's bundled OpenSSL, pyca `cryptography`'s static OpenSSL |
 | `DROPLET_FIPS_REQUIRED` | `true` | `false` | The boot self-test gate in every provider service |
-| `OPENSSL_MODULES` | system `ossl-modules` dir | *(empty)* | Node's bundled OpenSSL (its baked-in module dir is not Debian's) |
 | `NODE_OPTIONS` | `--openssl-shared-config` | *(empty)* | Node (reads the shared `openssl_conf` key instead of `nodejs_conf`) |
+
+`OPENSSL_MODULES` is deliberately **not** set — `setup.sh` actively deletes it
+from older `.env`s. The validated `fips.so` cannot be initialized by two
+libcrypto instances in one process (upstream limitation,
+[openssl#25553](https://github.com/openssl/openssl/issues/25553); the second
+activation fails with `common libcrypto routines::init fail`), and several
+Droplet processes carry two — Node's bundled OpenSSL + Prisma's system libssl
+in the orchestrator/mcp-server, pyca `cryptography`'s static OpenSSL + the
+system libssl in ai-gateway/file-indexer. A process-wide `OPENSSL_MODULES`
+forces every instance onto the *same* module file; instead each image installs
+a dedicated **copy** of `fips.so` into each bundled runtime's own baked
+`MODULESDIR` (`docker/fips/install-fips-provider.sh`, WARP-1063), so every
+libcrypto resolves and activates its own module.
 
 Do **not** hand-edit the derived vars; `setup.sh --fips/--no-fips` converges
 them in both directions (`tests/fips-mode.test.sh` proves the round-trip).
@@ -76,7 +89,10 @@ and emits one structured log line when it is:
 # 1) The knob and derived vars are consistent:
 grep -E '^(DROPLET_FIPS_MODE|OPENSSL_CONF|DROPLET_FIPS_REQUIRED|OPENSSL_MODULES|NODE_OPTIONS)=' .env
 
-# 2) Each self-testing service logged its boot self-test:
+# 2) Each self-testing service logged its boot self-test. Since WARP-1063 a
+#    fips:true line also proves the provider is ALIVE (the self-test requires
+#    an approved digest, SHA-256, to WORK — a dead provider logs fips:false
+#    with a provider-not-active reason instead):
 for s in orchestrator mcp-server ai-gateway file-indexer; do
   docker compose -f docker/docker-compose.yml --env-file .env logs "$s" \
     | grep '"event":"fips_self_test"'
@@ -115,55 +131,71 @@ If you flipped a dev box on and want out: `./scripts/setup.sh --no-fips
 
 ## Failure mode: "library has no ciphers" (`P1011` / `LIBRARY_HAS_NO_CIPHERS`)
 
-**Symptom.** With FIPS ON, a service that constructs a TLS client at startup
-dies immediately: OpenSSL reports `library has no ciphers` (error `0A0000A1`).
-Prisma surfaces it as `P1011: Error opening a TLS connection`; Python's `ssl`
-raises `ssl.SSLError: [SSL: LIBRARY_HAS_NO_CIPHERS]`. Observed on the
-orchestrator (Prisma `$connect`, before the API server listens) and the
-ai-gateway (httpx `ssl.create_default_context()` building the Ollama client).
+**Symptom.** With FIPS ON, a service that constructs a TLS client dies:
+OpenSSL reports `library has no ciphers` (error `0A0000A1`). Prisma surfaces
+it as `P1011: Error opening a TLS connection`; Python's `ssl` raises
+`ssl.SSLError: [SSL: LIBRARY_HAS_NO_CIPHERS]`.
 
-**KNOWN OPEN DEFECT (WARP-317 finding, awaiting a WARP-967/WARP-318 fix).**
-This is **not** about a peer offering the wrong suites. The shared FIPS config
-`docker/openssl-fips.cnf` activates only the `fips` + `base` providers and pins
-`default_properties = fips=yes`. Under that config a **default client
-`SSL_CTX` comes up with zero usable ciphersuites**, so *constructing any TLS
-client fails before a peer is contacted*. The validated provider itself is
-fine — it loads and enforces (boot self-tests pass, MD5 is refused); the gap is
-that the config never re-exposes the FIPS-approved TLS suites to the default
-context. **The fix belongs to the provider-config work** (add an
-`ssl_conf`/`system_default` section to `docker/openssl-fips.cnf` that sets a
-FIPS-approved `CipherString`/`Ciphersuites` on the default context), not to any
-one service and not to a `DATABASE_URL` edit. WARP-317's `fips-stack` test
-asserts this failure as the *expected* current behavior and flips to asserting
-a clean boot once `EXPECT_FIPS_STACK_BOOTS=1` is set after the config fix.
+**What it means (root-caused + fixed by WARP-1063).** This error means **the
+validated provider is not active in the libcrypto instance that threw** — not
+that a peer offered bad suites. Under the shared config's
+`default_properties = fips=yes` pin, a libcrypto whose `fips` provider failed
+to activate has **zero fetchable algorithms**, so a default `SSL_CTX` comes up
+with no ciphersuites and TLS-client construction fails *before any peer is
+contacted*. Deceptively, such a process still *looks* enforcing to the old
+checks: Node's `getFips()` and pyca `cryptography`'s `_fips_enabled` mirror
+the property pin (not provider state), and MD5 is refused because *everything*
+is refused. That is exactly how the WARP-317 smoke test first hit this as an
+undiagnosed boot block: several Droplet processes host **two** libcrypto
+instances (Node bundled OpenSSL + Prisma's system libssl; pyca
+`cryptography`'s static OpenSSL + the system libssl), and the FIPS module
+cannot be initialized by two libcryptos resolving the *same* `fips.so` file
+([openssl#25553](https://github.com/openssl/openssl/issues/25553) — the second
+activation fails with `common libcrypto routines::init fail`). The old
+process-wide `OPENSSL_MODULES` forced exactly that collision; whichever
+instance initialized second lost, and its first TLS client crashed the boot.
 
-**Quick diagnosis.**
+**The WARP-1063 fix** (all landed):
+- no process-wide `OPENSSL_MODULES`; each image installs a dedicated **copy**
+  of `fips.so` into every bundled runtime's own baked `MODULESDIR`
+  (`docker/fips/install-fips-provider.sh`), so each libcrypto activates its
+  own module;
+- `docker/openssl-fips.cnf` pins an explicit FIPS-approved TLS posture on the
+  default context (`ssl_conf`/`system_default`: AES-GCM `CipherString` +
+  `Ciphersuites`, `MinProtocol TLSv1.2`) matching the nginx edge profile;
+- both boot self-tests gained a **positive probe** — an approved digest
+  (SHA-256) must *work* — so a dead provider now fails the boot with
+  `fips_self_test fips:false` and a provider-not-active reason instead of an
+  opaque TLS error three stack frames later.
 
-1. *Is the provider loaded + enforcing?* Inside the container:
-   `openssl list -providers` (with the container's `OPENSSL_CONF`) must show
-   `fips … version: 3.0.9 … status: active`. If it does **not**, a
-   non-provider image got the FIPS env by mistake (see the compose pins) or
-   the image predates WARP-967 — that is a *different* bug from the one above.
-2. *Where does it throw?* If the traceback is in TLS-client construction
-   (`create_default_context`, `SSL_CTX_new`, Prisma `$connect`) rather than
-   during a handshake with a specific peer, it is the default-context
-   no-ciphers defect above — the config, not the peer.
+**Quick diagnosis if you ever see it again.**
+
+1. *Which libcrypto threw?* If the `fips_self_test` line says `fips:false`
+   with an "approved digest SHA-256 unavailable" reason, the provider did not
+   activate in that service's *primary* instance — check `fips.so` presence in
+   the consuming runtime's baked `MODULESDIR`, `/etc/ssl/fipsmodule.cnf`
+   integrity, and that nothing reintroduced a process-wide `OPENSSL_MODULES`
+   (an empty value is NOT harmless: it becomes a real, empty search path).
+2. *Self-test green but a TLS client still dies?* Then a *secondary* libcrypto
+   instance in that process lost its activation — the openssl#25553 collision
+   above. Verify the per-runtime module copies exist (the image build probes
+   enforce this) and that the two instances resolve *different* `fips.so`
+   inodes.
 3. *Is a specific peer the problem instead?* If a handshake reaches a peer and
    only *then* fails, check whether that peer offers a FIPS-approved suite
    (ChaCha-only / CBC-SHA1 peers are unfixable without changing the peer or
    scoping it out). The **future** Postgres-TLS case (WARP-233 enforcing
    `sslmode=require`) is this kind — its reconciliation (FIPS-path-scoped
-   `sslmode=disable` vs. server-side FIPS ciphers) is owned by that review and
-   stacks *on top of* fixing the default-context defect first.
+   `sslmode=disable` vs. server-side FIPS ciphers) is owned by that review.
 
 ## Scope — which services enforce
 
 | Service | Provider in image | Under `--fips` | Why |
 |---|---|---|---|
-| orchestrator | ✅ (WARP-967) | provider enforces (self-test passes); **app boot currently blocked** by the default-context no-ciphers defect (Prisma `$connect` → `P1011`) | The FIPS boundary |
-| ai-gateway | ✅ (WARP-967) | provider enforces (self-test passes); **app boot currently blocked** (httpx `create_default_context` → `LIBRARY_HAS_NO_CIPHERS`) | The FIPS boundary |
-| web-dashboard, mcp-server | ✅ (WARP-967) | enforce; no boot-time default-context TLS client, so they stay up (mcp-server's Postgres use is lazy) | The FIPS boundary |
-| file-indexer | ✅ (WARP-967) | provider enforces; same Prisma-client boot block as the orchestrator when its watch loop connects | The FIPS boundary |
+| orchestrator | ✅ (WARP-967) | boots FIPS-enforcing with working TLS clients — Node and Prisma's system libssl each activate their own `fips.so` copy (WARP-1063) | The FIPS boundary |
+| ai-gateway | ✅ (WARP-967) | boots FIPS-enforcing with working TLS clients — pyca `cryptography` and the system libssl each activate their own copy (WARP-1063) | The FIPS boundary |
+| web-dashboard, mcp-server | ✅ (WARP-967) | enforce (mcp-server's lazy Postgres hop works via the system-libssl copy) | The FIPS boundary |
+| file-indexer | ✅ (WARP-967) | boots FIPS-enforcing — same dual-instance shape and fix as ai-gateway | The FIPS boundary |
 | gateway (nginx edge) | ✅ (WARP-1021) | FIPS cipher profile + provider for edge TLS | Customer-facing TLS termination |
 | matter-controller, email-indexer, device-identity-svc, camera-discovery, fleet-agent | ❌ | **pinned OFF** in compose (`DROPLET_FIPS_REQUIRED=false`, stock `OPENSSL_CONF`) | No validated module in the image — the pin prevents a `setup.sh --fips` crash-loop (the boot self-test would exit 1 forever). Enforcement here is a deliberate future decision, not an oversight. |
 | cache (redis:7-alpine) | ❌ | untouched | Terminates no TLS (plaintext on the private bridge, `requirepass`-guarded; WARP-234 owns the Redis-TLS hop) and performs no customer-facing crypto. Alpine/musl has no validated provider path. |

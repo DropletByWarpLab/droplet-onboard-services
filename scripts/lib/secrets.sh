@@ -58,6 +58,27 @@ _upsert_env_kv() {
   mv "$stage" "$target"
 }
 
+# Remove a key from .env entirely (same atomicity/symlink discipline as
+# _upsert_env_kv). WARP-1063 needs this for OPENSSL_MODULES: an env var that
+# is PRESENT BUT EMPTY is not harmless there — OpenSSL treats an empty
+# OPENSSL_MODULES as a real (empty) search path, so provider resolution
+# becomes "/fips.so" and activation fails. Absent is the only safe "off".
+_remove_env_kv() {
+  local key="$1"
+  local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
+  local target="$env_file"
+  if [ -L "$env_file" ]; then
+    target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$target" ] || target="$env_file"
+  fi
+  [ -f "$target" ] || return 0
+  local stage="${target}.upsert.$$"
+  rm -f "${target}".upsert.* 2>/dev/null || true
+  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; } > "$stage" )
+  chmod 600 "$stage"
+  mv "$stage" "$target"
+}
+
 # WARP-318: translate the single DROPLET_FIPS_MODE customer knob into the
 # per-service FIPS activation env vars. Explicit boolean arg — never derived
 # from ambient state (mirrors the DOCS_ENABLED / SINGLE_BOX_MODE convention).
@@ -68,10 +89,24 @@ _upsert_env_kv() {
 # posture (empty OPENSSL_CONF → compose per-service `:-/etc/ssl/openssl.cnf`).
 #
 # Node vs Python activation asymmetry (see the Dockerfiles): Python uses the
-# system libcrypto, so OPENSSL_CONF alone activates FIPS; Node uses its bundled
-# OpenSSL and additionally needs OPENSSL_MODULES (system ossl-modules dir) +
-# NODE_OPTIONS=--openssl-shared-config. All are written here; the OFF path
-# clears them.
+# system libcrypto, so OPENSSL_CONF alone activates FIPS; Node's bundled
+# OpenSSL additionally needs NODE_OPTIONS=--openssl-shared-config (to honor
+# the shared `openssl_conf` key). Both are written here; the OFF path clears
+# them.
+#
+# OPENSSL_MODULES is deliberately NOT set — and is actively REMOVED from any
+# older .env (WARP-1063). The validated fips.so cannot be initialized by two
+# libcrypto instances in one process (upstream limitation, openssl#25553:
+# second activation fails with `common libcrypto routines::init fail`), and
+# several of our processes carry two: Node's bundled OpenSSL + Prisma's
+# system libssl (orchestrator/mcp-server), pyca cryptography's static
+# OpenSSL + the system libssl (ai-gateway/file-indexer). A process-wide
+# OPENSSL_MODULES forces every instance onto the SAME fips.so file — the
+# second loser then boots with zero usable algorithms and TLS dies with
+# LIBRARY_HAS_NO_CIPHERS (Prisma P1011). Instead each image installs a
+# dedicated COPY of fips.so into every bundled runtime's own baked
+# MODULESDIR (docker/fips/install-fips-provider.sh), so each libcrypto
+# resolves its own module and all of them activate.
 #
 # WARP-233 ⇄ WARP-318 reconciliation (P1011, decision A — pending Romain's
 # ratification): under the FIPS openssl config Prisma/libpq cannot open ANY
@@ -87,17 +122,12 @@ _upsert_env_kv() {
 # require). Both directions are idempotent and driven by this ONE knob.
 apply_fips_mode() {
   local mode="${1:-}"
-  local ossl_modules
-  case "$(uname -m)" in
-    aarch64|arm64) ossl_modules="/usr/lib/aarch64-linux-gnu/ossl-modules" ;;
-    *)             ossl_modules="/usr/lib/x86_64-linux-gnu/ossl-modules" ;;
-  esac
   case "$mode" in
     on)
       _upsert_env_kv DROPLET_FIPS_MODE      1
       _upsert_env_kv OPENSSL_CONF           /etc/ssl/openssl-fips.cnf
       _upsert_env_kv DROPLET_FIPS_REQUIRED  true
-      _upsert_env_kv OPENSSL_MODULES        "$ossl_modules"
+      _remove_env_kv OPENSSL_MODULES
       _upsert_env_kv NODE_OPTIONS           --openssl-shared-config
       _upsert_env_kv PG_SSLMODE             disable
       _upsert_env_kv PG_HBA                 pg_hba.fips.conf
@@ -107,7 +137,7 @@ apply_fips_mode() {
       _upsert_env_kv DROPLET_FIPS_MODE      0
       _upsert_env_kv OPENSSL_CONF           ""
       _upsert_env_kv DROPLET_FIPS_REQUIRED  false
-      _upsert_env_kv OPENSSL_MODULES        ""
+      _remove_env_kv OPENSSL_MODULES
       _upsert_env_kv NODE_OPTIONS           ""
       _upsert_env_kv PG_SSLMODE             require
       _upsert_env_kv PG_HBA                 pg_hba.conf

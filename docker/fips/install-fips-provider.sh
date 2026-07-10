@@ -14,9 +14,21 @@
 #      (`openssl version -m`) because it is arch-dependent on Debian:
 #      /usr/lib/x86_64-linux-gnu/ossl-modules vs
 #      /usr/lib/aarch64-linux-gnu/ossl-modules.
+#      WARP-1063: any EXTRA directories passed as $2..$n receive their own
+#      REAL COPY of fips.so (distinct inode — never a symlink/hardlink).
+#      The FIPS module cannot be initialized by two libcrypto instances in
+#      one process when both resolve the SAME .so file (upstream
+#      limitation, openssl#25553 — the second activation fails with
+#      `common libcrypto routines::init fail`). Several of our processes
+#      carry two libcryptos (Node bundled OpenSSL + Prisma's system libssl;
+#      pyca cryptography's static OpenSSL + Python's system libssl), so
+#      each Dockerfile passes the baked MODULESDIR of every bundled
+#      runtime, giving each instance its own module copy to activate.
 #   2. `openssl fipsinstall` — executes the module's Known Answer Tests
 #      (the FIPS self-test) and emits /etc/ssl/fipsmodule.cnf carrying the
-#      module integrity MAC. A KAT failure fails the docker build.
+#      module integrity MAC. A KAT failure fails the docker build. (The
+#      MAC is over the module file CONTENT, so the byte-identical copies
+#      from step 1 all validate against the same fipsmodule.cnf.)
 #   3. Positive probe — under /etc/ssl/openssl-fips.cnf the FIPS provider
 #      reports active at version 3.0.9 and a FIPS-approved digest works.
 #   4. Negative probe — MD5 is not FIPS-approved; under the FIPS config it
@@ -29,7 +41,8 @@
 # in the container environment (deployment activation is WARP-318).
 set -eu
 
-FIPS_SO="${1:?usage: install-fips-provider.sh /path/to/fips.so}"
+FIPS_SO="${1:?usage: install-fips-provider.sh /path/to/fips.so [extra-modulesdir ...]}"
+shift
 FIPS_CONF="/etc/ssl/openssl-fips.cnf"
 
 # The Node images bake `ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf`
@@ -50,6 +63,18 @@ if [ -z "$MODULESDIR" ]; then
 fi
 
 install -D -m 0644 "$FIPS_SO" "${MODULESDIR}/fips.so"
+
+# WARP-1063 — per-runtime module copies (see the header). `install` writes a
+# fresh file, so every destination is a distinct inode and each libcrypto
+# instance in a multi-OpenSSL process activates its own module state.
+for extra_dir in "$@"; do
+  [ -n "$extra_dir" ] || continue
+  if [ "$extra_dir" = "$MODULESDIR" ]; then
+    continue
+  fi
+  install -D -m 0644 "$FIPS_SO" "${extra_dir}/fips.so"
+  echo "install-fips-provider: extra fips.so copy at ${extra_dir}/fips.so (WARP-1063 per-libcrypto module copy)"
+done
 
 # Step 2 — run the module KATs and write the integrity-MAC config that
 # /etc/ssl/openssl-fips.cnf `.include`s.

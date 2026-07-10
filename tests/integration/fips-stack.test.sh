@@ -7,40 +7,39 @@
 # written by the REAL activation path: scripts/setup.sh --fips) and asserts the
 # ACTUAL merged behavior of FIPS activation — not an aspirational one.
 #
-# ┌─ WHAT THIS TEST FOUND, AND WHY IT ASSERTS WHAT IT DOES ─────────────────────┐
-# │ Booting the stack with DROPLET_FIPS_MODE=1 for the first time in CI         │
-# │ surfaced that the merged FIPS OpenSSL config (docker/openssl-fips.cnf)      │
-# │ pins `default_properties = fips=yes` with only the fips+base providers      │
-# │ active. Under that config a DEFAULT client SSL_CTX comes up with ZERO       │
-# │ usable ciphersuites, so *constructing any TLS client* raises                │
-# │ `LIBRARY_HAS_NO_CIPHERS` (OpenSSL err 0A0000A1) BEFORE a peer is even        │
-# │ contacted:                                                                  │
-# │   - orchestrator: Prisma `$connect()` → P1011 "library has no ciphers"      │
-# │   - ai-gateway:   httpx `ssl.create_default_context()` in the Ollama        │
-# │                   provider ctor → ssl.SSLError LIBRARY_HAS_NO_CIPHERS       │
-# │ The validated provider IS loaded and IS enforcing (the boot self-tests      │
-# │ below pass and MD5 is refused) — the defect is purely that the shared       │
-# │ FIPS config offers no TLS ciphersuites to the default context. That is a    │
-# │ WARP-967/WARP-318 provider-config issue (a correct FIPS config needs a      │
-# │ `ssl_conf`/`system_default` section keeping the FIPS-approved suites        │
-# │ available), NOT a WARP-317 test bug and NOT the WARP-318 crash-loop.        │
+# ┌─ WHAT THIS TEST ASSERTS (WARP-317 found the defect; WARP-1063 fixed it) ────┐
+# │ The first CI boots of this harness surfaced that under DROPLET_FIPS_MODE=1  │
+# │ the two TLS-client services could not boot: constructing ANY TLS client     │
+# │ raised `LIBRARY_HAS_NO_CIPHERS` (OpenSSL 0A0000A1) before a peer was even   │
+# │ contacted (orchestrator: Prisma `$connect()` → P1011; ai-gateway: httpx     │
+# │ `ssl.create_default_context()`), while every self-test signal still read    │
+# │ "enforcing". WARP-1063's root-cause analysis: that error signature means    │
+# │ the validated provider did NOT activate in the failing process — under the  │
+# │ config's `default_properties = fips=yes` pin a dead provider leaves NOTHING │
+# │ fetchable, so MD5 is "refused" (self-test green) and the default SSL_CTX    │
+# │ has zero ciphersuites (TLS client construction dies). The old fips:true     │
+# │ signals (Node getFips(), cryptography _fips_enabled, MD5-refusal) are all   │
+# │ property-pin-based and cannot see a dead provider.                          │
 # │                                                                             │
-# │ Per the WARP-317 mandate ("if the merged activation path runs a hop with a  │
-# │ documented exception, assert the ACTUAL merged behavior with an explicit    │
-# │ comment, not an aspirational one"), this test therefore:                    │
-# │   * ASSERTS the parts that genuinely work end-to-end — the provider loads   │
-# │     and enforces per service (fips_self_test fips:true), the edge TLS       │
-# │     profile restricts to AES-GCM (WARP-1021), and MD5 is refused at         │
-# │     runtime in both stacks;                                                 │
-# │   * ASSERTS the LIBRARY_HAS_NO_CIPHERS boot block AS THE EXPECTED CURRENT    │
-# │     behavior for the two TLS-client services (documented exception), rather │
-# │     than waiting for an app health/endpoint that cannot come up today;      │
-# │   * ASSERTS the WARP-318 collateral fix: non-provider images never enter    │
-# │     the FIPS boot gate (no fips_self_test fips:false, no FIPS-caused        │
-# │     restart-loop).                                                          │
-# │ When the FIPS config defect is fixed, EXPECT_FIPS_STACK_BOOTS=1 flips this   │
-# │ test to assert the services boot healthy + the three API endpoints serve —  │
-# │ so this file is the regression guard that proves the fix when it lands.     │
+# │ The WARP-1063 fix this harness now guards:                                  │
+# │   * docker/openssl-fips.cnf pins an explicit FIPS-approved TLS posture on   │
+# │     the default context (ssl_conf/system_default: AES-GCM CipherString +    │
+# │     Ciphersuites, MinProtocol TLSv1.2) matching the nginx edge profile;     │
+# │   * both boot self-tests gained a POSITIVE probe — an approved digest       │
+# │     (SHA-256) must WORK — so a dead provider now fails the boot with the    │
+# │     real diagnosis (fips_self_test fips:false, provider-not-active reason)  │
+# │     instead of an opaque downstream TLS error.                              │
+# │                                                                             │
+# │ This test therefore asserts, end to end:                                    │
+# │   * the provider loads and enforces per service (fips_self_test fips:true — │
+# │     which now implies the positive probe passed);                           │
+# │   * the FULL FIPS-enforcing app boot: orchestrator healthy + the three API  │
+# │     endpoints serve (TLS clients to Postgres/internal HTTP constructed);    │
+# │   * the edge TLS profile restricts to AES-GCM (WARP-1021);                  │
+# │   * runtime crypto is enforcing AND alive in both stacks (SHA-256 works,    │
+# │     MD5 refused);                                                           │
+# │   * the WARP-318 collateral fix: non-provider images never enter the FIPS   │
+# │     boot gate (no fips_self_test fips:false, no FIPS-caused restart-loop).  │
 # └─────────────────────────────────────────────────────────────────────────────┘
 #
 # Environment seams (CI-runner-safe — no PATH tricks, runners ship docker in
@@ -53,9 +52,13 @@
 #   FIPS_STACK_RENDER_ONLY=1        stop after the rendered-config posture
 #                                   assertions (no image builds, no boot) —
 #                                   the fast dev-box sanity path
-#   EXPECT_FIPS_STACK_BOOTS=1       assert the full FIPS-enforcing app boot +
-#                                   the three API endpoints (set this once the
-#                                   FIPS-config no-ciphers defect is fixed)
+#   EXPECT_FIPS_STACK_BOOTS=1       accepted for backward compatibility and as
+#                                   the ticket-acceptance invocation — since
+#                                   the WARP-1063 config fix, the full
+#                                   FIPS-enforcing boot + the three API
+#                                   endpoints are ALWAYS asserted (the flag is
+#                                   a no-op; the pre-fix exception branch that
+#                                   expected LIBRARY_HAS_NO_CIPHERS is gone)
 #   FIPS_STACK_EDGE_HTTPS_PORT      host port for the gateway :443 (18443)
 #   DROPLET_COMPOSE_BUILD_EXTRA_FILE  optional GHCR BuildKit cache overlay,
 #                                   merged exactly like scripts/lib/compose.sh
@@ -84,11 +87,8 @@ PROJECT="droplet-fips-stack"
 # the Nextcloud data volume), nextcloud/ollama (heavy, no FIPS signal here).
 BOOT_SERVICES=(gateway db cache broker ai-gateway mcp-server orchestrator device-identity-svc)
 # Services whose images ship the validated provider AND run a boot self-test we
-# can observe before their (possibly TLS-blocked) app startup.
+# can observe at the top of their app startup.
 SELFTEST_SERVICES=(orchestrator mcp-server ai-gateway)
-# The two provider services whose app startup constructs a default TLS client
-# and is therefore blocked by the shared-config no-ciphers defect today.
-TLS_BLOCKED_SERVICES=(orchestrator ai-gateway)
 # device-identity-svc is a non-provider image we boot; step 7 asserts its
 # WARP-318 pin keeps it OFF the FIPS gate (checked directly by name there).
 
@@ -142,10 +142,19 @@ trap teardown EXIT
 
 # wait_for_log SERVICE PATTERN SECONDS — poll a service's logs for a grep -E
 # pattern until it appears or the deadline passes.
+#
+# WARP-1063: capture the logs FIRST, then grep a herestring — never
+# `compose logs | grep -q`. Under `set -o pipefail`, once the logs outgrow
+# the pipe buffer grep's early exit SIGPIPEs `docker compose`, the pipeline
+# reports the kill signal instead of grep's match, and the `if` discards a
+# REAL match every iteration (observed locally: the fips_self_test line was
+# in the logs for minutes while this loop "never" saw it; CI dodged it only
+# while boot logs still fit in one pipe buffer).
 wait_for_log() {
-  local svc="$1" pat="$2" deadline="$3" i
+  local svc="$1" pat="$2" deadline="$3" i out
   for ((i = 0; i < deadline; i += 2)); do
-    if compose logs --no-color "$svc" 2>/dev/null | grep -qE "$pat"; then return 0; fi
+    out="$(compose logs --no-color "$svc" 2>/dev/null || true)"
+    if grep -qE "$pat" <<<"$out"; then return 0; fi
     sleep 2
   done
   return 1
@@ -218,11 +227,15 @@ compose up -d "${BOOT_SERVICES[@]}"
 
 # ── 4) fips_self_test lines — the provider loads AND enforces per service ────
 # This is the primary "FIPS is genuinely active" signal. It fires at the top
-# of each service's boot, BEFORE the TLS-client startup that the config defect
-# blocks, so we can observe it regardless of the boot outcome.
+# of each service's boot, and since WARP-1063 a fips:true line also implies
+# the positive probe passed (an approved digest WORKS — a dead provider now
+# logs fips:false with the provider-not-active reason instead).
 echo "── structured self-test log lines ──"
+# 300s: the orchestrator's entrypoint runs `prisma migrate deploy` against a
+# cold pgdata volume BEFORE dist/index.js (and its self-test) starts — on a
+# first boot that alone can exceed two minutes on slower disks/VMs.
 for svc in "${SELFTEST_SERVICES[@]}"; do
-  if wait_for_log "$svc" '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*true' 120; then
+  if wait_for_log "$svc" '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*true' 300; then
     echo "  ✓ $svc: fips_self_test fips:true (provider active + enforcing)"
   else
     echo "FAIL: $svc never logged fips_self_test fips:true"; exit 1
@@ -231,7 +244,7 @@ done
 
 # ── 5) Edge TLS under the FIPS cipher profile (WARP-1021) ───────────────────
 echo "── edge TLS ──"
-wait_for_log gateway '"event":[[:space:]]*"fips_edge_tls".*"fips":[[:space:]]*true' 60 \
+wait_for_log gateway '"event":[[:space:]]*"fips_edge_tls".*"fips":[[:space:]]*true' 120 \
   || { echo "FAIL: gateway did not log fips_edge_tls fips:true"; exit 1; }
 neg="$(echo | openssl s_client -connect "127.0.0.1:${EDGE_PORT}" -brief 2>&1 || true)"
 printf '%s' "$neg" | grep -qE 'Ciphersuite: TLS_AES_(128|256)_GCM_SHA(256|384)' \
@@ -242,24 +255,42 @@ if echo | openssl s_client -connect "127.0.0.1:${EDGE_PORT}" -tls1_3 \
 fi
 echo "  ✓ gateway: AES-GCM negotiated, ChaCha refused, fips_edge_tls logged"
 
-# ── 6) Runtime enforcement execs — MD5 refused, provider genuinely on ───────
-# mcp-server stays up (its Postgres use is lazy, not at boot), so exec into it
-# for the Node runtime check; ai-gateway's app exits under the defect, so probe
-# the Python runtime with a one-shot `run` under the same FIPS env instead.
-echo "── runtime MD5 refusal ──"
+# ── 6) Runtime enforcement execs — provider ALIVE and enforcing ─────────────
+# WARP-1063: "MD5 refused" alone is also true of a DEAD provider (under the
+# fips=yes property pin, a failed activation refuses everything), so each
+# probe additionally requires an approved digest to WORK — enforcing AND
+# alive, per libcrypto instance.
+echo "── runtime enforcement (approved crypto works, MD5 refused) ──"
 if ! compose exec -T mcp-server node -e '
   const c = require("crypto");
   if (c.getFips() !== 1) process.exit(1);
+  try { c.createHash("sha256").update("x").digest(); } catch { process.exit(1) }
   try { c.createHash("md5").update("x").digest(); process.exit(1) } catch { process.exit(0) }
 ' >/dev/null 2>&1; then
-  echo "FAIL: mcp-server getFips()!=1 or MD5 succeeded under FIPS mode"; exit 1
+  echo "FAIL: mcp-server getFips()!=1, SHA-256 unavailable, or MD5 succeeded under FIPS mode"; exit 1
 fi
-echo "  ✓ mcp-server (Node bundled OpenSSL): getFips()==1, MD5 refused"
-if compose run --rm --no-deps -T ai-gateway \
-     python -c 'import _hashlib; _hashlib.new("md5", b"x", usedforsecurity=True)' >/dev/null 2>&1; then
-  echo "FAIL: ai-gateway accepted MD5 under FIPS mode"; exit 1
+echo "  ✓ mcp-server (Node bundled OpenSSL): getFips()==1, SHA-256 works, MD5 refused"
+# ai-gateway probes BOTH of its libcrypto instances in the production order
+# (pyca cryptography's static OpenSSL first, then the system libssl) — the
+# exact dual-instance shape whose collision WARP-1063 fixed.
+if ! compose exec -T ai-gateway python -c '
+from cryptography.hazmat.backends import default_backend
+assert getattr(default_backend(), "_fips_enabled", False), "pyca not FIPS"
+from cryptography.hazmat.primitives import hashes
+h = hashes.Hash(hashes.SHA256()); h.update(b"x"); h.finalize()
+import ssl
+ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+import _hashlib
+_hashlib.new("sha256", b"x", usedforsecurity=True)
+try:
+    _hashlib.new("md5", b"x", usedforsecurity=True)
+except ValueError:
+    raise SystemExit(0)
+raise SystemExit(1)
+' >/dev/null 2>&1; then
+  echo "FAIL: ai-gateway dual-libcrypto probe failed (pyca/system not both FIPS-enforcing + alive)"; exit 1
 fi
-echo "  ✓ ai-gateway (Python/_hashlib): MD5 refused"
+echo "  ✓ ai-gateway (pyca + system OpenSSL): both enforcing, TLS context constructible, MD5 refused"
 
 # ── 7) Non-provider services must not enter the FIPS gate (WARP-318 fix) ─────
 # The load-bearing assertion: with DROPLET_FIPS_MODE=1, NO non-provider service
@@ -271,72 +302,54 @@ echo "  ✓ ai-gateway (Python/_hashlib): MD5 refused"
 # existing test-lane TPM perm quirk in device-identity-svc), because the pin's
 # effect is "the self-test is SKIPPED", i.e. no fips line at all.
 echo "── non-provider services stay off the FIPS boot gate (WARP-318 fix) ──"
-if compose logs --no-color 2>/dev/null | grep -qE '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false'; then
+# Herestring greps, not `compose logs | grep -q` — same pipefail/SIGPIPE trap
+# as wait_for_log (worse here: a SIGPIPE-poisoned pipeline looks like "no
+# match", i.e. a silent false PASS on the load-bearing negative assertion).
+all_logs="$(compose logs --no-color 2>/dev/null || true)"
+if grep -qE '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false' <<<"$all_logs"; then
   echo "FAIL: a service emitted fips_self_test fips:false under FIPS mode —"
   echo "      a non-provider image entered the boot gate (WARP-318 pin regressed):"
-  compose logs --no-color 2>/dev/null | grep -E '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false' | head
+  grep -E '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false' <<<"$all_logs" | head
   exit 1
 fi
 # And positively confirm device-identity-svc (a non-provider image we booted)
 # ran WITHOUT ever hitting the gate: it must have logged NO fips_self_test line
 # at all (skipped), never a fips:true (would mean it wrongly got the provider).
-if compose logs --no-color device-identity-svc 2>/dev/null | grep -qE '"event":[[:space:]]*"fips_self_test"'; then
+dis_logs="$(compose logs --no-color device-identity-svc 2>/dev/null || true)"
+if grep -qE '"event":[[:space:]]*"fips_self_test"' <<<"$dis_logs"; then
   echo "FAIL: device-identity-svc ran the FIPS self-test — its pin (no provider) regressed"; exit 1
 fi
 echo "  ✓ no non-provider service entered the FIPS boot gate; device-identity-svc skipped it"
 
-# ── 8) The documented Postgres/TLS-client exception (or the fixed boot) ──────
-if [ "${EXPECT_FIPS_STACK_BOOTS:-}" = "1" ]; then
-  # The FIPS-config no-ciphers defect is fixed — assert the full boot.
-  echo "── EXPECT_FIPS_STACK_BOOTS=1: full FIPS-enforcing boot ──"
-  ok=""
-  for ((i = 0; i < 300; i += 2)); do
-    if curl -sf http://localhost:3000/api/orchestrator/health >/dev/null 2>&1; then ok=1; break; fi
+# ── 8) The full FIPS-enforcing app boot (WARP-1063 fixed the boot block) ─────
+# Always asserted since the WARP-1063 fix. EXPECT_FIPS_STACK_BOOTS=1 remains
+# accepted (it was the pre-fix opt-in for these assertions and is the ticket's
+# acceptance invocation) but is now a no-op — the pre-fix branch that expected
+# LIBRARY_HAS_NO_CIPHERS as the documented exception is gone. If a service
+# regresses into that state, the fips_self_test fips:false line (dead provider,
+# WARP-1063 positive probe) or these boot assertions catch it, and the teardown
+# log dump carries the diagnosis.
+echo "── full FIPS-enforcing boot ──"
+ok=""
+for ((i = 0; i < 300; i += 2)); do
+  if curl -sf http://localhost:3000/api/orchestrator/health >/dev/null 2>&1; then ok=1; break; fi
+  sleep 2
+done
+[ -n "$ok" ] || { echo "FAIL: orchestrator never became healthy under FIPS"; exit 1; }
+echo "  ✓ orchestrator healthy under FIPS"
+for ep in /api/llm/conversations /api/files/search/status /api/calendar/places; do
+  ok=""; code=""
+  for ((i = 0; i < 120; i += 2)); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000${ep}" || true)"
+    if [ "$code" = "200" ]; then ok=1; break; fi
     sleep 2
   done
-  [ -n "$ok" ] || { echo "FAIL: orchestrator never became healthy under FIPS (EXPECT_FIPS_STACK_BOOTS=1)"; exit 1; }
-  echo "  ✓ orchestrator healthy under FIPS"
-  for ep in /api/llm/conversations /api/files/search/status /api/calendar/places; do
-    ok=""; code=""
-    for ((i = 0; i < 120; i += 2)); do
-      code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000${ep}" || true)"
-      if [ "$code" = "200" ]; then ok=1; break; fi
-      sleep 2
-    done
-    [ -n "$ok" ] || { echo "FAIL: ${ep} never returned 200 under FIPS (last=$code)"; exit 1; }
-    echo "  ✓ ${ep} → 200 (orchestrator↔Postgres reached under FIPS)"
-  done
-else
-  # ACTUAL merged behavior today: the shared FIPS config leaves the default
-  # SSL_CTX with no ciphers, so each TLS-client service fails to construct its
-  # client at startup (orchestrator=Prisma P1011, ai-gateway=httpx SSLError).
-  # Assert THAT explicitly — it is the documented exception, not a flake.
-  echo "── documented exception: TLS-client boot blocked by the FIPS config ──"
-  for svc in "${TLS_BLOCKED_SERVICES[@]}"; do
-    if wait_for_log "$svc" 'library has no ciphers|LIBRARY_HAS_NO_CIPHERS' 120; then
-      echo "  ✓ $svc: LIBRARY_HAS_NO_CIPHERS at TLS-client startup (expected under the current FIPS config)"
-    else
-      # If this service now BOOTS instead of erroring, the defect is fixed —
-      # tell the operator to flip EXPECT_FIPS_STACK_BOOTS=1 rather than pass
-      # silently on a stale assertion.
-      echo "FAIL: $svc did NOT hit LIBRARY_HAS_NO_CIPHERS — the FIPS-config no-ciphers"
-      echo "      defect appears fixed. Re-run with EXPECT_FIPS_STACK_BOOTS=1 to assert"
-      echo "      the full FIPS-enforcing boot + the three API endpoints, and drop this"
-      echo "      exception branch."
-      exit 1
-    fi
-  done
-  echo ""
-  echo "  NOTE FOR REVIEW: FIPS is genuinely active + enforcing (self-tests pass,"
-  echo "  MD5 refused, edge TLS restricted), but the shared FIPS OpenSSL config"
-  echo "  (docker/openssl-fips.cnf) offers no ciphers to a default TLS client, so"
-  echo "  the orchestrator/ai-gateway app boot is blocked. That is a WARP-967/"
-  echo "  WARP-318 provider-config fix (add a ssl_conf/system_default section);"
-  echo "  once landed, set EXPECT_FIPS_STACK_BOOTS=1 here."
-fi
+  [ -n "$ok" ] || { echo "FAIL: ${ep} never returned 200 under FIPS (last=$code)"; exit 1; }
+  echo "  ✓ ${ep} → 200 (orchestrator↔Postgres reached under FIPS)"
+done
 
 echo ""
 echo "  PASS: FIPS activates + enforces across the provider services (self-tests,"
-echo "  edge TLS restriction, runtime MD5 refusal), non-provider images stay off"
-echo "  the boot gate (WARP-318 fix), and the TLS-client boot behaves exactly as"
-echo "  the current merged FIPS config dictates."
+echo "  edge TLS restriction, runtime approved-crypto + MD5-refusal probes), the"
+echo "  full app boot completes with working TLS clients (WARP-1063), and"
+echo "  non-provider images stay off the boot gate (WARP-318 fix)."
