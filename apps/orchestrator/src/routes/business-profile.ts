@@ -70,6 +70,9 @@ function readView(row: BusinessProfileRow, role: string | undefined) {
   if (role === "owner" || role === "admin") {
     return {
       onboardingState: row.onboardingState,
+      // WARP-1121 — the dashboard keys the interview overlay (progress
+      // eyebrow, resume banner, reopen-as-card) off this id.
+      interviewChatId: row.interviewChatId,
       summary: row.summary,
       whatWeDo: row.whatWeDo,
       customers: row.customers,
@@ -104,7 +107,23 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
       try {
         const profile = await getBusinessProfile(prisma);
         const role = (req as AuthedRequest).user?.role;
-        res.json(readView(profile, role));
+        const view = readView(profile, role);
+        // WARP-1121 §9.1 — the dashboard gates the interview intro card on
+        // the workspace type (HOME boxes get no business interview). Only
+        // the owner/admin view carries it.
+        if (role === "owner" || role === "admin") {
+          // Fail-open to HOME: a workspace-read hiccup must not 500 the
+          // profile read (HOME = no interview affordances, the safe side).
+          let workspaceType = "HOME";
+          try {
+            const ws = await prisma.workspace.findUnique({ where: { id: 1 } });
+            workspaceType = ws?.type ?? "HOME";
+          } catch {
+            /* keep HOME */
+          }
+          (view as Record<string, unknown>).workspaceType = workspaceType;
+        }
+        res.json(view);
       } catch (err) {
         next(err);
       }

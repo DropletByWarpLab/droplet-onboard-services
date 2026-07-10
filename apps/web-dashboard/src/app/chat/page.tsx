@@ -20,6 +20,27 @@ import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
+import {
+  InterviewIntroCard,
+  InterviewProgress,
+  InterviewResumeBanner,
+} from "@/components/chat/InterviewSurfaces";
+import { ReviewCard } from "@/components/chat/ReviewCard";
+import {
+  INTERVIEW_COPY,
+  TOPIC_CHIPS,
+  containsProposalFenceStart,
+  parseProposal,
+  parseTopicMarker,
+  stripTopicMarkers,
+} from "@/lib/interview";
+import {
+  commitBusinessOnboarding,
+  fetchBusinessProfile,
+  skipBusinessOnboarding,
+  startBusinessOnboarding,
+  type BusinessProfileView,
+} from "@/lib/api";
 import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
@@ -70,6 +91,27 @@ export default function ChatPage() {
   useEffect(() => {
     activeProjectRef.current = activeProject;
   }, [activeProject]);
+
+  // WARP-1121 — the onboarding-interview overlay. The profile fetch is
+  // owner/admin-gated server-side (others get {}); a fetch failure renders
+  // plain chat (fail-open, never blocks the surface).
+  const [bizProfile, setBizProfile] = useState<
+    (BusinessProfileView & { workspaceType?: string }) | null
+  >(null);
+  const refreshBizProfile = useCallback(() => {
+    fetchBusinessProfile()
+      .then((p) => setBizProfile(p))
+      .catch(() => setBizProfile(null));
+  }, []);
+  useEffect(() => {
+    if (user) refreshBizProfile();
+  }, [user, refreshBizProfile]);
+
+  const isPrivileged = user?.role === "owner" || user?.role === "admin";
+  const isBusinessBox = bizProfile?.workspaceType === "BUSINESS";
+  // Send the canonical wrap-up turn once the interview session finishes
+  // loading (Resume-banner "Skip the rest" defers it through navigation).
+  const pendingWrapUpRef = useRef(false);
   const {
     messages,
     isStreaming,
@@ -100,6 +142,13 @@ export default function ChatPage() {
       setSystemPrompt(persistedPrompt ?? "");
     },
   });
+
+  // WARP-1121 — is the open conversation the live onboarding interview?
+  const interviewActive =
+    Boolean(conversationId) &&
+    bizProfile?.interviewChatId === conversationId &&
+    (bizProfile?.onboardingState === "in_progress" ||
+      bizProfile?.onboardingState === "re_running");
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
   // sync, both directions. The history panel calls router.push("/chat?c=X")
@@ -301,6 +350,26 @@ export default function ChatPage() {
     prevMessagesLengthRef.current = messages.length;
   }, [messages, scrollToBottom]);
 
+  // WARP-1121 — interview lifecycle handlers.
+  const handleInterviewStart = useCallback(async () => {
+    try {
+      const r = await startBusinessOnboarding();
+      refreshBizProfile();
+      router.push(`/chat?c=${encodeURIComponent(r.conversationId)}`);
+    } catch {
+      refreshBizProfile(); // 409 = another admin moved it — re-sync.
+    }
+  }, [refreshBizProfile, router]);
+
+  const handleInterviewSkip = useCallback(async () => {
+    try {
+      await skipBusinessOnboarding();
+    } catch {
+      /* 409 → state already moved; the refresh below reconciles */
+    }
+    refreshBizProfile();
+  }, [refreshBizProfile]);
+
   const handleSend = useCallback(
     (content: string) => {
       if (!selectedModel) return;
@@ -308,6 +377,47 @@ export default function ChatPage() {
     },
     [selectedModel, sendMessage, systemPrompt]
   );
+
+  // WARP-1121 — "Skip the rest" = the canonical wrap-up turn, everywhere it
+  // appears (design §4.3). It never abandons the interview.
+  const handleWrapUp = useCallback(() => {
+    handleSend(INTERVIEW_COPY.wrapUpTurn);
+  }, [handleSend]);
+
+  // Resume-banner "Skip the rest": open the interview session, then send
+  // the wrap-up once its messages have loaded.
+  const handleResumeWrapUp = useCallback(() => {
+    pendingWrapUpRef.current = true;
+    if (bizProfile?.interviewChatId) {
+      router.push(`/chat?c=${encodeURIComponent(bizProfile.interviewChatId)}`);
+    }
+  }, [bizProfile, router]);
+  useEffect(() => {
+    if (
+      pendingWrapUpRef.current &&
+      interviewActive &&
+      messages.length > 0 &&
+      !isStreaming &&
+      selectedModel
+    ) {
+      pendingWrapUpRef.current = false;
+      handleSend(INTERVIEW_COPY.wrapUpTurn);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interviewActive, messages.length, isStreaming, selectedModel]);
+
+  // Latest parsed topic marker across the transcript — the dots hold on
+  // turns without a marker (never guess).
+  const interviewTopic = useMemo(() => {
+    if (!interviewActive) return null;
+    let topic: number | null = null;
+    for (const m of messages) {
+      if (m.role !== "assistant" || typeof m.content !== "string") continue;
+      const t = parseTopicMarker(m.content);
+      if (t !== null) topic = t;
+    }
+    return topic;
+  }, [interviewActive, messages]);
 
   const handleNewChat = useCallback(() => {
     setActiveProject(null);
@@ -544,6 +654,14 @@ export default function ChatPage() {
           </div>
         )}
 
+        {/* WARP-1121 §4 — pinned interview progress (marker-driven). */}
+        {interviewActive && (
+          <InterviewProgress
+            topic={interviewTopic}
+            onSkipTheRest={handleWrapUp}
+            onPause={() => router.push("/chat")}
+          />
+        )}
         {/* Messages */}
         <div
           ref={scrollRef}
@@ -551,7 +669,46 @@ export default function ChatPage() {
           data-testid="chat-scroll"
           className="chat-scroll relative"
         >
-          {messages.length === 0 && (
+          {/* WARP-1121 §9.1 — the interview intro card replaces the standard
+              empty-state hint for owner/admin on an untouched BUSINESS box.
+              Typing normally still works (composer stays live); the card
+              returns on the next empty visit until started or skipped. */}
+          {messages.length === 0 &&
+            isPrivileged &&
+            isBusinessBox &&
+            bizProfile?.onboardingState === "not_started" && (
+              <InterviewIntroCard
+                onStart={() => void handleInterviewStart()}
+                onSkip={() => void handleInterviewSkip()}
+                modelReady={Boolean(selectedModel)}
+              />
+            )}
+          {/* Resume banner on the empty new-chat view while an interview is
+              parked mid-flight elsewhere. */}
+          {messages.length === 0 &&
+            isPrivileged &&
+            !interviewActive &&
+            (bizProfile?.onboardingState === "in_progress" ||
+              bizProfile?.onboardingState === "re_running") && (
+              <div className="max-w-[640px] mx-auto px-4 pt-4">
+                <InterviewResumeBanner
+                  onResume={() => {
+                    if (bizProfile?.interviewChatId) {
+                      router.push(
+                        `/chat?c=${encodeURIComponent(bizProfile.interviewChatId)}`,
+                      );
+                    }
+                  }}
+                  onSkipTheRest={handleResumeWrapUp}
+                />
+              </div>
+            )}
+          {messages.length === 0 &&
+            !(
+              isPrivileged &&
+              isBusinessBox &&
+              bizProfile?.onboardingState === "not_started"
+            ) && (
             <div className="chat-empty">
               <div className="ico" aria-hidden="true">
                 <Sparkles size={26} />
@@ -562,6 +719,11 @@ export default function ChatPage() {
                   ? "Your local AI is ready — nothing leaves the device."
                   : "Select a model above to get started."}
               </p>
+              {!isPrivileged && isBusinessBox && (
+                <p className="type-caption-1 text-label-quaternary mt-1">
+                  {INTERVIEW_COPY.nonOwnerHint}
+                </p>
+              )}
               {selectedModel && (
                 <div className="chat-suggs">
                   {[
@@ -583,7 +745,82 @@ export default function ChatPage() {
             </div>
           )}
           <div className="chat-wrap">
-            {messages.map((msg, idx) => (
+            {messages.map((msg, idx) => {
+              // WARP-1121 §9.3 — interview turn shaping: markers are
+              // stripped before render; a proposal fence suppresses raw
+              // token paint (ChatMessage's own thinking indicator shows via
+              // empty streaming content) and renders as the review card on
+              // done. Reopening the session re-renders the stored proposal
+              // as the card, never as text.
+              if (
+                interviewActive &&
+                msg.role === "assistant" &&
+                typeof msg.content === "string"
+              ) {
+                const streamingThis =
+                  isStreaming && idx === messages.length - 1;
+                if (containsProposalFenceStart(msg.content)) {
+                  if (streamingThis) {
+                    return (
+                      <ChatMessage
+                        key={msg.id}
+                        message={{ ...msg, content: "" }}
+                        isStreaming
+                        isLastAssistant={idx === lastAssistantIdx}
+                        onRetry={handleRetry}
+                        onCopy={handleCopy}
+                        onQuote={handleQuote}
+                        onRegenerate={handleRegenerate}
+                        onApproveScene={approveScene}
+                        onFeedback={(id, fb) => void rateMessage(id, fb)}
+                      />
+                    );
+                  }
+                  const proposal = parseProposal(msg.content);
+                  if (proposal) {
+                    return (
+                      <div key={msg.id} className="my-3">
+                        <ReviewCard
+                          proposal={proposal}
+                          onApply={async (payload) => {
+                            await commitBusinessOnboarding(payload);
+                            refreshBizProfile();
+                            // Pull the server-authored closing turn into view.
+                            if (conversationId) loadConversation(conversationId);
+                          }}
+                          onNotYet={() => {
+                            /* card stays; conversation stays open (§5) */
+                          }}
+                          onViewSaved={() => router.push("/settings")}
+                        />
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={msg.id}
+                      data-testid="proposal-parse-failure"
+                      className="my-3 rounded-2xl border border-system-red/30 px-5 py-4 flex items-center gap-3"
+                    >
+                      <span className="type-body text-label-primary">
+                        {INTERVIEW_COPY.parseFailure}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleWrapUp}
+                        className="type-subheadline text-accent hover:text-accent-hover ml-auto shrink-0"
+                      >
+                        {INTERVIEW_COPY.tryAgain}
+                      </button>
+                    </div>
+                  );
+                }
+                const stripped = stripTopicMarkers(msg.content);
+                if (stripped !== msg.content) {
+                  msg = { ...msg, content: stripped };
+                }
+              }
+              return (
               <ChatMessage
                 key={msg.id}
                 message={msg}
@@ -599,7 +836,8 @@ export default function ChatPage() {
                 onEdit={isStreaming ? undefined : handleEdit}
                 onFeedback={(id, fb) => void rateMessage(id, fb)}
               />
-            ))}
+              );
+            })}
           </div>
         </div>
         {/* WARP-295: Jump-to-latest pill — visible only when the user
@@ -675,6 +913,28 @@ export default function ChatPage() {
         )}
 
         {/* Input */}
+        {/* WARP-1121 §4.2 — canned per-topic suggestion chips (never
+            model-generated); shortcuts that submit their label. */}
+        {interviewActive &&
+          interviewTopic !== null &&
+          TOPIC_CHIPS[interviewTopic] &&
+          !isStreaming && (
+            <div
+              data-testid="interview-chips"
+              className="flex flex-wrap gap-2 px-4 pb-2 max-w-[720px] mx-auto w-full"
+            >
+              {TOPIC_CHIPS[interviewTopic].map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => handleSend(chip)}
+                  className="px-3.5 py-1.5 rounded-full border border-separator type-footnote text-label-primary hover:bg-surface-secondary"
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+          )}
         <ChatInput
           ref={chatInputRef}
           onSend={handleSend}

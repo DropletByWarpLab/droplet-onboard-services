@@ -3771,6 +3771,108 @@ export async function saveEmailChannel(
   return res.json();
 }
 
+// --- WARP-1121: business profile + onboarding interview ---
+
+export type BusinessOnboardingState =
+  | "not_started"
+  | "in_progress"
+  | "completed"
+  | "skipped"
+  | "re_running";
+
+/** GET /api/business-profile is role-split server-side: owner/admin get every
+ *  field; family gets `summary` only; guest/service get `{}`. Everything is
+ *  optional here so one type serves all roles. */
+export interface BusinessProfileView {
+  onboardingState?: BusinessOnboardingState;
+  interviewChatId?: string | null;
+  summary?: string;
+  whatWeDo?: string;
+  customers?: string;
+  teamShape?: string;
+  toolsUsed?: string;
+  typicalDay?: string;
+  goals?: string;
+  lastSource?: "onboarding" | "settings" | null;
+  reviewNudgeState?: "none" | "due" | "dismissed";
+  updatedAt?: string;
+}
+
+export async function fetchBusinessProfile(): Promise<BusinessProfileView> {
+  const res = await authFetch(`${BASE}/api/business-profile`);
+  if (!res.ok) throw new Error(`Failed to load business profile: ${res.status}`);
+  return res.json();
+}
+
+export async function patchBusinessProfile(
+  update: Partial<Record<
+    "summary" | "whatWeDo" | "customers" | "teamShape" | "toolsUsed" | "typicalDay" | "goals",
+    string
+  >>,
+): Promise<BusinessProfileView> {
+  const res = await authFetch(`${BASE}/api/business-profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) throw new Error(`Failed to save business profile: ${res.status}`);
+  return res.json();
+}
+
+export interface OnboardingStartResult {
+  conversationId: string;
+  state: BusinessOnboardingState;
+  created: boolean;
+}
+
+/** 409 = another admin moved the state first (finished-elsewhere banner). */
+export async function startBusinessOnboarding(): Promise<OnboardingStartResult> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/start`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`onboarding_start_${res.status}`);
+  return res.json();
+}
+
+export async function skipBusinessOnboarding(): Promise<{
+  from: BusinessOnboardingState;
+  state: BusinessOnboardingState;
+}> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/skip`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`onboarding_skip_${res.status}`);
+  return res.json();
+}
+
+export interface OnboardingCommitPayload {
+  profile?: Partial<Record<
+    "whatWeDo" | "customers" | "teamShape" | "toolsUsed" | "typicalDay" | "goals",
+    string
+  >>;
+  summary?: string;
+  facts?: Array<{ category: string; fact: string; audience: string }>;
+}
+
+export async function commitBusinessOnboarding(
+  payload: OnboardingCommitPayload,
+): Promise<{ state: BusinessOnboardingState; factsSaved: number }> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/commit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`onboarding_commit_${res.status}`);
+  return res.json();
+}
+
+export async function dismissReviewNudge(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/business-profile/review-dismiss`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`review_dismiss_${res.status}`);
+}
+
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
 // listSessions, getSession, updateSessionTitle, deleteSession,
 // sendSessionChat) targeted the orchestrator's removed
