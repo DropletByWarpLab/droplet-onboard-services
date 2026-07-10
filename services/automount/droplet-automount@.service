@@ -1,6 +1,12 @@
 [Unit]
 Description=Droplet USB auto-mount for %I
-Requires=docker.service
+# Wants=, NOT Requires=docker.service (P6): Docker is only needed for the opt-in
+# (NEXTCLOUD_AUTO_REGISTER=0 default) occ registration, which already tolerates
+# failure. A hard Requires= makes any docker.service stop/restart cascade a stop to
+# every droplet-automount@ instance, whose ExecStop lazily unmounts every user drive
+# and closes their LUKS mappers — and udev add events don't re-fire, so the drives
+# stay gone until replug/reboot. After= still orders us after Docker; Wants= won't cascade.
+Wants=docker.service
 After=docker.service local-fs.target
 # We depend on udisks staying out of our way — but don't hard-require it
 # off, since many user-space apps want it running for other purposes.
