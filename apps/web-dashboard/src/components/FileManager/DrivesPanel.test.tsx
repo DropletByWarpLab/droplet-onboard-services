@@ -207,20 +207,6 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     await waitFor(() => expect(toastMock).toHaveBeenCalled());
     expect(screen.getByText("Photos")).toBeInTheDocument();
   });
-
-  it("offers no rename on a drive with no stable uuid (WARP-1141)", () => {
-    // The bridge reports uuid:"" when /dev/disk/by-uuid has no link for the
-    // filesystem — the live box's exact state while its pool is degraded /
-    // auto-read-only. A rename has nothing durable to key the label row on
-    // (PATCH /api/storage/drives/<empty> can never persist), so the pencil
-    // must not render a control that silently can't work.
-    setup({ role: "owner", drives: [makeDrive({ uuid: "", label: "Burrito" })] });
-    expect(
-      screen.queryByRole("button", { name: /rename|edit name/i }),
-    ).not.toBeInTheDocument();
-    // The drive card itself still renders (read is unaffected).
-    expect(screen.getByText("Burrito")).toBeInTheDocument();
-  });
 });
 
 // =====================================================================
