@@ -115,7 +115,8 @@ function validRecord(overrides: Record<string, unknown> = {}) {
     id: "pc-1",
     code: "ABC123",
     userId: "owner-1",
-    used: false,
+    // WARP-1202: lifecycle is the explicit status enum, not a used boolean.
+    status: "active",
     claimedBy: null,
     expiresAt: new Date(Date.now() + 60_000),
     ...overrides,
@@ -164,16 +165,18 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(res.body.deviceId).toBe("client-1");
     expect(res.body.appPassword).toBe("nc-app-pw");
     expect(res.body.ncUsername).toBe("owner-1");
-    // The authoritative gate is the conditional updateMany, not the in-memory read.
+    // The authoritative gate is the conditional updateMany, not the in-memory
+    // read. WARP-1202: the consume keys on the explicit status enum and writes
+    // the active→claimed transition.
     expect(mockPrisma.pairingCode.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           id: "pc-1",
-          used: false,
+          status: "active",
           // Expiry is authoritative at consume time too (closes the read→consume window).
           expiresAt: { gt: expect.any(Date) },
         }),
-        data: expect.objectContaining({ used: true }),
+        data: expect.objectContaining({ status: "claimed" }),
       }),
     );
     // Consume + create happen inside one transaction.
@@ -253,9 +256,9 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(mockNcDelete).toHaveBeenCalledWith("nc-app-pw");
   });
 
-  it("rejects an already-used code at read time with 409 (fast path)", async () => {
+  it("rejects an already-claimed code at read time with 409 (fast path, keyed on status)", async () => {
     mockPrisma.pairingCode.findUnique.mockResolvedValue(
-      validRecord({ used: true }),
+      validRecord({ status: "claimed" }),
     );
 
     const res = await claim(makeApp());
@@ -265,6 +268,37 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
     expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
     // No credential generated for a code already consumed.
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+  });
+
+  // WARP-1202: a row the daily sweep already stamped `expired` is rejected on
+  // its explicit status alone — even if expiresAt were somehow in the future,
+  // the persisted state wins.
+  it("rejects a sweep-stamped expired code with 410 on status alone", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(
+      validRecord({ status: "expired", expiresAt: new Date(Date.now() + 60_000) }),
+    );
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe("Pairing code expired");
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+  });
+
+  // WARP-1202: `revoked` has no writer yet (reserved), but a non-active row
+  // must never be claimable — defensive 410.
+  it("rejects a revoked code with 410", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(
+      validRecord({ status: "revoked" }),
+    );
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe("Pairing code no longer valid");
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
     expect(mockNcGenerate).not.toHaveBeenCalled();
   });
 
