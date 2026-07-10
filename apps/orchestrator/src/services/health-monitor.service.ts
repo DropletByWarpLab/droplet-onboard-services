@@ -22,6 +22,7 @@ import { healthCheck as routingHealth } from "./openwrt.client.js";
 import { healthCheck as displayHealth } from "./display.client.js";
 import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
+import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("health-monitor");
@@ -33,7 +34,8 @@ export type ComponentName =
   | "ai-gateway"
   | "nextcloud"
   | "display"
-  | "file-indexer";
+  | "file-indexer"
+  | "storage";
 export type ComponentHealthStatus = "ok" | "down";
 export type AggregateStatus = "ok" | "degraded" | "down";
 
@@ -90,6 +92,36 @@ async function runProbe(name: ComponentName, probe: Probe): Promise<ComponentHea
   }
 }
 
+/**
+ * WARP-1146: storage-pool health. A RAID pool that lost a member (degraded)
+ * or died (failed) is exactly what the global status pill exists to surface —
+ * a home user who never opens Drives must not see a green "All systems
+ * operational" over a mirror with no redundancy left.
+ *
+ * Reads the device-bridge's /pools snapshot (same source the Drives page
+ * uses; unauthenticated read like GET /api/storage/pools). `resyncing` counts
+ * as ok — the array is actively repairing, and flagging a planned rebuild for
+ * hours would train owners to ignore the pill. An unreachable bridge is down
+ * too: we can't verify redundancy, so we must not claim green.
+ * Exported for tests.
+ */
+export async function storagePoolsHealth(): Promise<boolean> {
+  const r = await fetch(`${config.DEVICE_BRIDGE_URL}/pools`);
+  if (!r.ok) throw new Error(`bridge returned ${r.status}`);
+  const snap = (await r.json()) as {
+    pools?: Array<{ device?: string; status?: string }>;
+  };
+  const bad = (snap.pools ?? []).filter(
+    (p) => p.status === "degraded" || p.status === "failed",
+  );
+  if (bad.length > 0) {
+    throw new Error(
+      bad.map((p) => `pool ${p.device ?? "unknown"} is ${p.status}`).join("; "),
+    );
+  }
+  return true;
+}
+
 function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: Probe }> {
   return [
     {
@@ -113,6 +145,10 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     // search; the rest of the appliance is fully usable, so it never
     // trips the aggregate to `down`.
     { name: "file-indexer", probe: fileIndexerHealth },
+    // WARP-1146: storage pools are SOFT (degraded-class) — the box still
+    // serves on a degraded mirror; the point is the WARNING pill, not a
+    // container restart (`down` would 503 the Docker healthcheck).
+    { name: "storage", probe: storagePoolsHealth },
   ];
 }
 
