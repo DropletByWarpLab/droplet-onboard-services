@@ -46,6 +46,7 @@ from voice.devices import (
     resolve_devices,
 )
 from voice.pipeline import (
+    DEFAULT_CALIBRATION_MODE_TTL_S,
     DEFAULT_DEBOUNCE_S,
     DEFAULT_FLATLINE_DBFS,
     DEFAULT_FLATLINE_WINDOW_S,
@@ -407,6 +408,13 @@ class VoiceStatusResponse(BaseModel):
     input_rms_dbfs: Optional[float] = None
     last_audio_at: Optional[float] = None
     input_flatlined: bool = False
+    # Calibration mode (WARP-1059). True while the wizard's suppression
+    # window is live — wakes are counted (last_wake_at still updates,
+    # which the wizard's step-3 ticker rides) but not handled (no
+    # STT/LLM/TTS). `calibration_mode_expires_at` is the fail-safe TTL
+    # expiry the wizard renews; None when the mode is off.
+    calibration_mode: bool = False
+    calibration_mode_expires_at: Optional[float] = None
 
 
 class SayRequest(BaseModel):
@@ -457,6 +465,21 @@ class EchoCheckResponse(BaseModel):
     heard: bool
     tone_dbfs: float
     floor_dbfs: float
+
+
+# WARP-1059 — calibration-mode schemas. The wizard enters/renews the
+# suppression window around its measure/echo/wake-test steps and exits
+# on close; the TTL bounds mirror what the pipeline treats as sane
+# (long enough to cover a slow step, short enough that an abandoned
+# wizard never leaves the assistant deaf for minutes on end).
+
+class CalibrationModeRequest(BaseModel):
+    ttl_s: Optional[float] = Field(default=None, ge=5.0, le=300.0)
+
+
+class CalibrationModeResponse(BaseModel):
+    active: bool
+    expires_at: Optional[float] = None
 
 
 class CalibrationApplyRequest(BaseModel):
@@ -580,6 +603,8 @@ def voice_status() -> VoiceStatusResponse:
         input_rms_dbfs=s.input_rms_dbfs,
         last_audio_at=s.last_audio_at,
         input_flatlined=s.input_flatlined,
+        calibration_mode=s.calibration_mode,
+        calibration_mode_expires_at=s.calibration_mode_expires_at,
     )
 
 
@@ -803,6 +828,44 @@ def audio_echo_check() -> EchoCheckResponse:
         tone_dbfs=float(result["tone_dbfs"]),
         floor_dbfs=float(result["floor_dbfs"]),
     )
+
+
+@app.post("/voice/calibration-mode", response_model=CalibrationModeResponse)
+def enter_voice_calibration_mode(
+    req: Optional[CalibrationModeRequest] = None,
+) -> CalibrationModeResponse:
+    """Enter (or renew) calibration mode (WARP-1059).
+
+    While active, the pipeline counts wakes (last_wake_at still updates
+    for the wizard's step-3 ticker) but never handles them — no STT
+    capture pausing the detector, no LLM call, no reply spoken through
+    the box speaker to pollute a measurement. Fail-safe: auto-expires
+    after `ttl_s` (default DEFAULT_CALIBRATION_MODE_TTL_S) unless the
+    wizard renews it, and a voice-io restart clears it — the assistant
+    can never be left permanently deaf.
+    """
+    if _pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="pipeline not started — usually means no input device at boot",
+        )
+    ttl = (
+        req.ttl_s
+        if req is not None and req.ttl_s is not None
+        else DEFAULT_CALIBRATION_MODE_TTL_S
+    )
+    expires_at = _pipeline.enter_calibration_mode(ttl)
+    return CalibrationModeResponse(active=True, expires_at=expires_at)
+
+
+@app.delete("/voice/calibration-mode", response_model=CalibrationModeResponse)
+def exit_voice_calibration_mode() -> CalibrationModeResponse:
+    """Exit calibration mode (WARP-1059). Idempotent and deliberately
+    error-free even without a pipeline: clearing suppression must always
+    be safe to call (wizard close/cancel paths fire it best-effort)."""
+    if _pipeline is not None:
+        _pipeline.exit_calibration_mode()
+    return CalibrationModeResponse(active=False)
 
 
 @app.get("/voice/calibration")

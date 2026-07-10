@@ -76,6 +76,7 @@ import type {
   VoiceCalibrationApply,
   VoiceMeasureResult,
   VoiceEchoCheckResult,
+  VoiceCalibrationModeResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -4694,6 +4695,39 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
     body: JSON.stringify({}),
   });
   if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
+// --- WARP-1059: calibration mode (wizard-scoped wake suppression) ---
+
+/**
+ * Enter (or renew) calibration mode on the box: wakes keep counting
+ * (the wizard's step-3 ticker rides `last_wake_at`) but are not
+ * handled — no STT capture, no LLM call, no reply spoken through the
+ * speaker mid-measurement. Auto-expires after `ttlS` (voice-io default
+ * when omitted), so callers renew while the wizard stays open.
+ */
+export async function enterVoiceCalibrationMode(
+  ttlS?: number,
+): Promise<VoiceCalibrationModeResult> {
+  const body: { ttl_s?: number } = {};
+  if (ttlS !== undefined) body.ttl_s = ttlS;
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to enter calibration mode");
+  return res.json();
+}
+
+/** Exit calibration mode. Idempotent — safe to fire from any wizard
+ *  close path; the TTL expiry is the fail-safe when this never runs. */
+export async function exitVoiceCalibrationMode(): Promise<VoiceCalibrationModeResult> {
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to exit calibration mode");
   return res.json();
 }
 

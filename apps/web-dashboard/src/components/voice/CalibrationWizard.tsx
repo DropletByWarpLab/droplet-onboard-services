@@ -21,6 +21,11 @@
  * previous settings kept." Re-entry always restarts at step 1.
  * Every failure maps to a cause + action; never a raw error code.
  * All step copy ships verbatim from §4/§9.
+ *
+ * WARP-1059: while open, the wizard holds the box in "calibration
+ * mode" (enter on open, renew on an interval, exit on close) so the
+ * pipeline counts wakes without handling them — no STT/LLM/TTS turn
+ * can pollute a measurement window. Best-effort + TTL fail-safe.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -29,6 +34,8 @@ import { Dialog } from "@/components/Dialog";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import {
   applyVoiceCalibration,
+  enterVoiceCalibrationMode,
+  exitVoiceCalibrationMode,
   measureVoiceLevel,
   runVoiceEchoCheck,
 } from "@/lib/api";
@@ -47,6 +54,16 @@ import "./voice.css";
    gives a spoken sentence room to land. */
 const NOISE_SECONDS = 5;
 const SPEECH_SECONDS = 6;
+/* WARP-1059 — calibration mode: while the wizard is open, the box
+   counts wakes (step 3 rides last_wake_at) but never HANDLES them, so
+   the step-2 spec phrase can't start a full turn (STT pausing the
+   detector, the LLM reply spoken through the speaker inflating the
+   measured peak, a step-2 wake pre-counting for step 3). Fail-safe on
+   the box side: the mode auto-expires after the TTL, so we renew well
+   inside it and exit explicitly on close — an abandoned tab can never
+   leave the assistant deaf. */
+const CALIBRATION_MODE_TTL_S = 90;
+const CALIBRATION_MODE_RENEW_MS = 30_000;
 /* Wake-word listening window before the 3 tries are evaluated. */
 const WAKE_WINDOW_MS = 30_000;
 /* Brief green-check beat between a pass and the next step. */
@@ -172,6 +189,25 @@ export function CalibrationWizard({
     setFlags([]);
     setApplying(false);
     setApplyFailed(false);
+  }, [open]);
+
+  /* ── WARP-1059 · calibration mode brackets the whole session ── */
+  // Entered on open + renewed on an interval, exited on ANY close path
+  // (cancel, X, Esc, Done — the effect cleanup covers them all).
+  // Best-effort by design: a box that can't enter the mode (older
+  // voice-io, pipeline down) must not block calibration itself, and the
+  // TTL auto-expiry is the fail-safe when the exit call never lands.
+  useEffect(() => {
+    if (!open) return;
+    const enter = () => {
+      enterVoiceCalibrationMode(CALIBRATION_MODE_TTL_S).catch(() => {});
+    };
+    enter();
+    const renew = setInterval(enter, CALIBRATION_MODE_RENEW_MS);
+    return () => {
+      clearInterval(renew);
+      exitVoiceCalibrationMode().catch(() => {});
+    };
   }, [open]);
 
   /* ── Step 1 · quiet check ── */
