@@ -11,9 +11,13 @@
  *   4. health strip: failing card exposes exactly one inline action;
  *      collapses to one explanatory card when no mic;
  *   5. no dead-end affordances: no "Add a voice" (WARP-1056), no
- *      "See all in Activity" (WARP-1058), no Restart button (WARP-1057);
+ *      "See all in Activity" (WARP-1058);
  *   6. §7.4 cancel-safety: closing the wizard mid-flow writes nothing
  *      and toasts "Calibration canceled — previous settings kept."
+ *   7. WARP-1057 — the wedged-processor card's "Restart processor"
+ *      action: confirm dialog (~10 s outage warning) → restart call →
+ *      success on flatline clear; two failed restarts escalate to the
+ *      §7.3 power-cycle copy + Get help.
  *
  * Proven RED first: VoiceSurface does not exist yet.
  */
@@ -33,12 +37,15 @@ vi.mock("@/lib/api", () => ({
   applyVoiceCalibration: vi.fn(),
   fetchVoiceCalibration: vi.fn(),
   fetchVoiceStatus: vi.fn(),
+  restartVoiceProcessor: vi.fn(),
 }));
 
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
-import { applyVoiceCalibration } from "@/lib/api";
+import { applyVoiceCalibration, restartVoiceProcessor } from "@/lib/api";
 import { ToastProvider } from "@/components/Toast";
 import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
+
+const restartMock = vi.mocked(restartVoiceProcessor);
 
 const NOW = 1_751_000_000;
 
@@ -193,7 +200,7 @@ describe("VoiceSurface hero states (WARP-1055)", () => {
     ).toBeInTheDocument();
   });
 
-  it("wedged DSP (input_flatlined): red hero + processor card with Test again", () => {
+  it("wedged DSP (input_flatlined): red hero + processor card with Restart processor", () => {
     renderSurface({ status: status({ input_flatlined: true }) });
     expect(screen.getByText("Microphone not working")).toBeInTheDocument();
     expect(
@@ -202,11 +209,12 @@ describe("VoiceSurface hero states (WARP-1055)", () => {
     const dspCard = screen.getByText("Mic processor").closest(".vcheck");
     expect(dspCard).not.toBeNull();
     expect(within(dspCard as HTMLElement).getByText("Not responding.")).toBeInTheDocument();
+    // WARP-1057 — the inline action is the DSP restart.
     expect(
-      within(dspCard as HTMLElement).getByRole("button", { name: "Test again" }),
+      within(dspCard as HTMLElement).getByRole("button", {
+        name: "Restart processor",
+      }),
     ).toBeInTheDocument();
-    // WARP-1057 is NOT this PR — no dead Restart button anywhere.
-    expect(screen.queryByText(/Restart processor/)).toBeNull();
   });
 
   it("loading (§7.8): flat meter with the connecting caption", () => {
@@ -254,6 +262,118 @@ describe("VoiceSurface sections (WARP-1055)", () => {
     expect(
       within(noiseCard as HTMLElement).getByText(/Checked 3 days ago/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("VoiceSurface processor restart (WARP-1057, §7.3)", () => {
+  function clickCardRestart() {
+    const dspCard = screen.getByText("Mic processor").closest(".vcheck");
+    fireEvent.click(
+      within(dspCard as HTMLElement).getByRole("button", {
+        name: "Restart processor",
+      }),
+    );
+  }
+
+  it("confirm dialog warns about the ~10 s outage; Cancel issues nothing", async () => {
+    renderSurface({ status: status({ input_flatlined: true }) });
+    clickCardRestart();
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("Restart the mic processor?"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "Droplet's hearing will pause for about 10 seconds while the processor restarts. It comes back on its own — nothing else is interrupted.",
+      ),
+    ).toBeInTheDocument();
+    // Write-tier chip on the confirm (§10 safety framing).
+    expect(
+      within(dialog).getByText("Write · confirm to apply"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(restartMock).not.toHaveBeenCalled();
+  });
+
+  it("confirming issues the restart, toasts the outage, and re-polls", async () => {
+    restartMock.mockResolvedValue({
+      ok: true,
+      method: "xvf_host",
+      restarted_at: NOW,
+    });
+    const onRefresh = vi.fn();
+    const { rerender } = renderSurface({
+      status: status({ input_flatlined: true }),
+      onRefresh,
+    });
+    clickCardRestart();
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Restart processor" }),
+    );
+    await waitFor(() => expect(restartMock).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByText(
+        "Restarting the mic processor — listening pauses for about 10 seconds.",
+      ),
+    ).toBeInTheDocument();
+    expect(onRefresh).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // The live poll shows audio flowing again → success toast.
+    rerender(
+      <ToastProvider>
+        <VoiceSurface
+          status={status({ input_flatlined: false })}
+          calibration={calibration()}
+          unavailable={false}
+          loading={false}
+          noiseSustained={false}
+          nowS={NOW}
+          onRefresh={onRefresh}
+          onCalibrationApplied={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+    expect(
+      await screen.findByText("Mic processor is back — audio is flowing again."),
+    ).toBeInTheDocument();
+  });
+
+  it("two failed restarts escalate to the power-cycle copy + Get help", async () => {
+    restartMock.mockRejectedValue(new Error("Processor restart failed: 503"));
+    renderSurface({ status: status({ input_flatlined: true }) });
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      clickCardRestart();
+      // eslint-disable-next-line no-await-in-loop
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Restart processor" }),
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await waitFor(() => expect(restartMock).toHaveBeenCalledTimes(attempt));
+      // eslint-disable-next-line no-await-in-loop
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+
+    // §7.3 escalation: power-cycle copy + Get help, no inline restart.
+    expect(
+      await screen.findByText(
+        "The processor didn't come back. A power cycle of the Droplet usually clears this.",
+      ),
+    ).toBeInTheDocument();
+    const dspCard = screen.getByText("Mic processor").closest(".vcheck");
+    expect(
+      within(dspCard as HTMLElement).getByText(/Get help/),
+    ).toBeInTheDocument();
+    expect(
+      within(dspCard as HTMLElement).queryByRole("button", {
+        name: "Restart processor",
+      }),
+    ).toBeNull();
   });
 });
 

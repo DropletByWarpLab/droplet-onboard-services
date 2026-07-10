@@ -517,6 +517,17 @@ export interface VoiceEchoCheckResult {
   floor_dbfs: number;
 }
 
+/**
+ * WARP-1057 — DSP reboot issued (`POST /api/voice/restart-processor`).
+ * `restarted_at` anchors the health card's "wait for audio to return"
+ * window (~10 s while the XVF3800 re-enumerates).
+ */
+export interface VoiceRestartResult {
+  ok: boolean;
+  method: string;
+  restarted_at: number;
+}
+
 // ── WARP-446: Coverage extender APs ──
 
 /** State machine values mirrored from the Prisma `ApDeviceStatus` enum.

@@ -12,9 +12,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
+// WARP-1057 — the restart route audits via the activity singleton;
+// mock it so assertions see the call and no recorder wiring is needed.
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: vi.fn(async () => null),
+}));
+
 import { createVoiceRouter } from "./voice.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
+
+const recordActivityMock = vi.mocked(recordActivity);
 
 function mkUser(role: Role): AuthUser {
   return {
@@ -50,6 +59,7 @@ let fetchSpy: ReturnType<typeof spyOnFetch>;
 
 beforeEach(() => {
   fetchSpy = spyOnFetch();
+  recordActivityMock.mockClear();
 });
 
 afterEach(() => {
@@ -337,6 +347,75 @@ describe("GET/POST /api/voice/calibration (WARP-1055)", () => {
   });
 });
 
+describe("POST /api/voice/restart-processor (WARP-1057)", () => {
+  it("proxies to voice-io and audits the successful restart", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, { ok: true, method: "xvf_host", restarted_at: 123 }),
+    );
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/restart-processor")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, method: "xvf_host", restarted_at: 123 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/restart-processor",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "system",
+      severity: "info",
+      what: "Voice processor restarted",
+      refs: { surface: "voice-restart-processor", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-owner" },
+    });
+  });
+
+  it("relays an upstream fault verbatim and audits the failure", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(503, { detail: "xvf_host REBOOT 1 failed (exit 1)" }),
+    );
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/restart-processor")
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.detail).toMatch(/xvf_host REBOOT 1 failed/);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "system",
+      severity: "err",
+      what: "Voice processor restart failed",
+      refs: { upstreamStatus: 503 },
+    });
+  });
+
+  it("answers 503 voice_unavailable when unreachable — audited as a failure", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/restart-processor")
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("voice_unavailable");
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      severity: "err",
+    });
+  });
+
+  it("denied roles never reach upstream nor record a restart row", async () => {
+    const res = await request(buildApp(mkUser("family")))
+      .post("/api/voice/restart-processor")
+      .send({});
+    expect(res.status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // requireRole records its own "Access denied" row; what must NOT
+    // exist is a restart-outcome row from the handler.
+    const whats = recordActivityMock.mock.calls.map((c) => c[0].what);
+    expect(whats).not.toContain("Voice processor restarted");
+    expect(whats).not.toContain("Voice processor restart failed");
+  });
+});
+
 describe("voice routes RBAC (owner/admin only — service principals denied)", () => {
   const DENIED: (Role | null)[] = ["family", "guest", "service", null];
   const ROUTES: { method: "get" | "post"; path: string; body?: unknown }[] = [
@@ -358,6 +437,8 @@ describe("voice routes RBAC (owner/admin only — service principals denied)", (
         flags: [],
       },
     },
+    // WARP-1057 — DSP restart rides the same guard.
+    { method: "post", path: "/api/voice/restart-processor", body: {} },
   ];
 
   for (const route of ROUTES) {

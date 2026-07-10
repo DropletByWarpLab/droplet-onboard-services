@@ -45,6 +45,7 @@ from voice.devices import (
     DeviceResolution,
     resolve_devices,
 )
+from voice.dsp import DspRestartError, restart_dsp
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
     DEFAULT_FLATLINE_DBFS,
@@ -459,6 +460,15 @@ class EchoCheckResponse(BaseModel):
     floor_dbfs: float
 
 
+class RestartProcessorResponse(BaseModel):
+    """WARP-1057 — successful DSP reboot. `restarted_at` lets the
+    dashboard anchor its "re-poll until audio returns" window."""
+
+    ok: bool
+    method: str
+    restarted_at: float
+
+
 class CalibrationApplyRequest(BaseModel):
     """The wizard's single write (§4 step 5 'Apply calibration').
 
@@ -835,3 +845,44 @@ def post_voice_calibration(req: CalibrationApplyRequest) -> dict:
     if _pipeline is not None:
         _apply_calibration_values(_pipeline, record)
     return record
+
+
+# WARP-1057 — one DSP reboot at a time. A second concurrent restart while
+# the chip is mid-re-enumeration answers 409 so the dashboard can tell
+# "already restarting, wait" apart from a real fault (503). Same sync-def
+# threadpool + non-blocking-lock pattern as _capture_lock above.
+_restart_lock = threading.Lock()
+
+
+@app.post("/voice/restart-processor", response_model=RestartProcessorResponse)
+def voice_restart_processor() -> RestartProcessorResponse:
+    """Reboot the XVF3800's XMOS DSP over USB (WARP-1057).
+
+    Recovery for the WARP-1037 wedge: `input_flatlined` on /voice/status
+    means the DSP is delivering pure silence with the stream still open.
+    This issues the host watchdog's proven heal (`xvf_host REBOOT 1`,
+    voice/dsp.py); the chip drops off USB and re-enumerates (~10 s audio
+    outage), the pipeline's device self-heal reopens the card, and the
+    flatline flag clears on the next real audio frame.
+
+    Deliberately NOT gated on the pipeline or on input_flatlined: the
+    reboot is a USB control write that works even when the wake loop
+    never started, and an operator diagnosing by hand may restart at any
+    time (the watchdog keys on kernel-log overruns instead — neither
+    signal is a precondition for the other).
+    """
+    if not _restart_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A processor restart is already in progress — give it a "
+                "few seconds, then check the status again."
+            ),
+        )
+    try:
+        result = restart_dsp()
+    except DspRestartError as exc:
+        raise HTTPException(status_code=503, detail=exc.detail)
+    finally:
+        _restart_lock.release()
+    return RestartProcessorResponse(**result)

@@ -18,10 +18,12 @@
  * pipeline faulted) is relayed verbatim instead, so a real fault stays
  * visible rather than reading as "not installed".
  */
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { requireRole } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 const logger = createLogger("voice");
 
@@ -42,6 +44,13 @@ const SAY_TIMEOUT_MS = 30_000;
 const MEASURE_TIMEOUT_MS = 45_000;
 const ECHO_CHECK_TIMEOUT_MS = 30_000;
 
+/**
+ * WARP-1057 — `/voice/restart-processor` execs `xvf_host REBOOT 1` on
+ * the box (voice-io's subprocess deadline is 10 s by default); double
+ * that so a slow USB control write never reads as "voice unavailable".
+ */
+const RESTART_TIMEOUT_MS = 20_000;
+
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
 
@@ -59,7 +68,9 @@ function voiceIoBaseUrl(): string {
 /**
  * Proxy one request to voice-io and relay its status + JSON verbatim.
  * Centralises the 503-on-unreachable contract so every endpoint behaves
- * identically when the `linux` profile is inactive.
+ * identically when the `linux` profile is inactive. Returns the HTTP
+ * status it relayed (503 on unreachable) so a caller that audits the
+ * outcome (WARP-1057 restart) doesn't need its own fetch path.
  */
 async function proxy(
   res: Response,
@@ -67,7 +78,7 @@ async function proxy(
   path: string,
   body?: unknown,
   timeoutMs: number = READ_TIMEOUT_MS,
-): Promise<void> {
+): Promise<number> {
   const target = `${voiceIoBaseUrl()}${path}`;
   try {
     const init: RequestInit = {
@@ -96,6 +107,7 @@ async function proxy(
       }
     }
     res.status(upstream.status).json(payload);
+    return upstream.status;
   } catch (err) {
     // Connection refused / DNS failure (profile inactive) or timeout.
     logger.warn(
@@ -103,6 +115,7 @@ async function proxy(
       "voice-io proxy fetch failed — treating as unavailable",
     );
     res.status(503).json({ error: "voice_unavailable" });
+    return 503;
   }
 }
 
@@ -184,6 +197,37 @@ export function createVoiceRouter(): Router {
       return;
     }
     await proxy(res, "POST", "/voice/calibration", body);
+  });
+
+  // ── WARP-1057: XVF3800 DSP restart (wedge recovery) ──
+
+  router.post("/voice/restart-processor", guard, async (req: Request, res) => {
+    // No client-controlled parameters — the action IS the payload.
+    // voice-io execs `xvf_host REBOOT 1` (the host watchdog's exact
+    // heal); the DSP re-enumerates over ~10 s and the flatline flag
+    // clears once audio flows again.
+    const status = await proxy(
+      res,
+      "POST",
+      "/voice/restart-processor",
+      {},
+      RESTART_TIMEOUT_MS,
+    );
+    // Audited like the sibling write surfaces (scenes, people, device
+    // identity): a write that drives hardware always leaves an activity
+    // row, success or failure. Fire-and-forget AFTER the response is
+    // committed — an audit hiccup must never turn a completed DSP
+    // reboot into a 500 (recordActivity swallows recorder failures).
+    const ok = status >= 200 && status < 300;
+    void recordActivity({
+      kind: "system",
+      severity: ok ? "info" : "err",
+      sourceIcon: "mic",
+      what: ok ? "Voice processor restarted" : "Voice processor restart failed",
+      sub: "XVF3800 DSP reboot (xvf_host REBOOT 1)",
+      refs: { surface: "voice-restart-processor", upstreamStatus: status },
+      actor: actorFromRequest(req),
+    });
   });
 
   return router;

@@ -76,6 +76,7 @@ import type {
   VoiceCalibrationApply,
   VoiceMeasureResult,
   VoiceEchoCheckResult,
+  VoiceRestartResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -4694,6 +4695,23 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
     body: JSON.stringify({}),
   });
   if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
+// --- WARP-1057: mic-processor (XVF3800 DSP) restart ---
+
+/**
+ * Reboot the wedged mic processor (`xvf_host REBOOT 1` on the box).
+ * The mic goes quiet for ~10 s while the DSP re-enumerates; callers
+ * re-poll `/api/voice/status` until `input_flatlined` clears.
+ */
+export async function restartVoiceProcessor(): Promise<VoiceRestartResult> {
+  const res = await authFetch(`${BASE}/api/voice/restart-processor`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) await throwVoiceError(res, "Processor restart failed");
   return res.json();
 }
 
