@@ -77,6 +77,19 @@ describe("memory_recall", () => {
     );
   });
 
+  it("accepts the WARP-1120 Business category (D-9)", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    await memoryRecall.handler(
+      { query: "invoices", category: "Business" },
+      ctxWith(findMany),
+    );
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ category: "Business" }),
+      }),
+    );
+  });
+
   it("ignores an unknown category", async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     await memoryRecall.handler(
