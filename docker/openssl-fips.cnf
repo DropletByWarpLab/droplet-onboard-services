@@ -37,6 +37,16 @@ ssl_conf = ssl_configuration_sect
 # is intentionally NOT activated; any algorithm not available in
 # `fips`+`base` will fail rather than silently fall through to non-FIPS.
 #
+# WARP-1209 — [fips_sect] is defined in EXACTLY ONE place: the included
+# /etc/ssl/fipsmodule.cnf that `openssl fipsinstall` generates at image
+# build time. That single section carries the module integrity MAC AND
+# the `activate = 1` flag (emitted by fipsinstall on our Debian bases;
+# docker/fips/install-fips-provider.sh ensures it is present and fails
+# the image build if the section name or the activation flag ever
+# drifts). Do NOT re-declare [fips_sect] here — OpenSSL's NCONF happens
+# to merge duplicate sections today, but that behavior is undocumented,
+# fragile across OpenSSL versions, and confusing to auditors.
+#
 # Fail-closed consequence (WARP-1063): if the fips provider fails to
 # ACTIVATE in a process (unreadable fips.so, wrong OPENSSL_MODULES path,
 # module integrity MAC mismatch), no cipher/digest is fetchable under
@@ -51,9 +61,6 @@ ssl_conf = ssl_configuration_sect
 [provider_sect]
 fips = fips_sect
 base = base_sect
-
-[fips_sect]
-activate = 1
 
 [base_sect]
 activate = 1
