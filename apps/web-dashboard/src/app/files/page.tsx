@@ -791,6 +791,7 @@ export default function FilesPage() {
         <ShareDialog
           filePath={shareFile.path}
           fileName={shareFile.name}
+          isDirectory={shareFile.isDirectory}
           existingShares={existingShares}
           onChange={() => loadExistingShares(shareFile.path)}
           onClose={() => {

@@ -4407,6 +4407,31 @@ export function getThumbnailUrl(path: string, x = 256, y = 256): string {
   return `${BASE}/api/files/thumbnail?path=${encodeURIComponent(path)}&x=${x}&y=${y}`;
 }
 
+/**
+ * WARP-1148/1149 — error thrown by the share mutation helpers on a non-2xx
+ * response. Carries the HTTP status plus the wire `error` string as `code` so
+ * `translateError(err, "share")` can dispatch on stable codes (e.g.
+ * `module_disabled` from a module-gated build) and on the Nextcloud OCS
+ * policy-message shapes, instead of flattening every failure into a plain
+ * Error whose message the translator must discard.
+ */
+export class ShareRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ShareRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwShareError(res: Response, fallback: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+  const wire = typeof body.error === "string" ? body.error : undefined;
+  throw new ShareRequestError(wire || `${fallback}: ${res.status}`, res.status, wire);
+}
+
 export async function createShare(
   path: string,
   opts: ShareCreateOptions = { shareType: 3 }
@@ -4416,10 +4441,7 @@ export async function createShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, ...opts }),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share failed");
   return res.json();
 }
 
@@ -4432,17 +4454,14 @@ export async function updateShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share update failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share update failed");
 }
 
 export async function deleteShare(shareId: number): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw new Error(`Share delete failed: ${res.status}`);
+  if (!res.ok) await throwShareError(res, "Share delete failed");
 }
 
 export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
