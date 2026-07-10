@@ -5,8 +5,10 @@ import { AlertCircle, Loader2, MessageSquare, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { fetchModels, sendChat } from "@/lib/api";
+import { fetchModels, fetchPersona, patchPersona, sendChat } from "@/lib/api";
+import type { PersonaPreset } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
+import { PRESET_TILES } from "@/lib/persona-preview";
 import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -121,6 +123,15 @@ export function AiStep({
   // for WAKING_NOTICE_DELAY_MS. Kept separate from `notice` (a settled,
   // retryable outcome) so the two soft states can't clobber each other.
   const [wakingNotice, setWakingNotice] = useState(false);
+  // WARP-1119 — optional persona preset picker (architecture brief §7.3).
+  // null = hidden: the fetch failed (persona API unavailable, or the
+  // caller's role can't read it) and the wizard must never block — or even
+  // visibly error — on personality. Settings owns the full card; this is
+  // a preselect convenience only, with no setup-state semantics.
+  const [personaPreset, setPersonaPreset] = useState<PersonaPreset | null>(
+    null,
+  );
+  const [personaNote, setPersonaNote] = useState<string | null>(null);
 
   // Three curated prompts tuned to the home-user persona — short,
   // sensible, demonstrate that the AI knows what it's running on.
@@ -157,6 +168,41 @@ export function AiStep({
   useEffect(() => {
     load();
   }, [load]);
+
+  // WARP-1119 — load the live preset once; any failure keeps the control
+  // hidden (see personaPreset above). Cancelled-flag cleanup so a mid-skip
+  // unmount can't land a late setState.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await fetchPersona();
+        if (!cancelled) setPersonaPreset(p.preset);
+      } catch {
+        // Persona unavailable — the wizard renders without the picker.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // WARP-1119 — optimistic preset change; a failed PATCH reverts and says
+  // so in the step's soft-notice styling (personality is never a wizard
+  // failure, so the red error box is off-limits here).
+  async function handlePresetChange(next: PersonaPreset) {
+    const prev = personaPreset;
+    setPersonaPreset(next);
+    setPersonaNote(null);
+    try {
+      await patchPersona({ preset: next });
+    } catch {
+      setPersonaPreset(prev);
+      setPersonaNote(
+        "Couldn't save that personality just now — you can set it anytime from Settings.",
+      );
+    }
+  }
 
   // WARP-849 — while the initial load came back empty (model still
   // pulling on first boot, or the gateway still waking), re-poll on a
@@ -370,6 +416,52 @@ export function AiStep({
             </div>
           )}
         </div>
+
+        {/* WARP-1119 — optional preset preselect (brief §7.3). Hidden unless
+            the persona loaded; the full card (verbosity, first names, custom
+            instructions, preview) lives in Settings → AI personality. */}
+        {personaPreset !== null && (
+          <div>
+            <label
+              htmlFor="ai-step-persona"
+              className="type-subheadline text-label-secondary block mb-1.5"
+            >
+              Personality
+            </label>
+            <select
+              id="ai-step-persona"
+              value={personaPreset}
+              onChange={(e) =>
+                handlePresetChange(e.target.value as PersonaPreset)
+              }
+              className="dp-input"
+              disabled={submitting}
+            >
+              {PRESET_TILES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1.5 type-footnote text-label-tertiary">
+              How your AI talks — fine-tune it anytime in Settings.
+            </p>
+            {personaNote && (
+              <div
+                data-testid="persona-save-note"
+                role="status"
+                className="mt-2 flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+              >
+                <AlertCircle
+                  size={14}
+                  className="mt-0.5 flex-shrink-0 text-label-tertiary"
+                  aria-hidden="true"
+                />
+                <span>{personaNote}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         <div>
           <p className="type-subheadline text-label-secondary mb-2">
