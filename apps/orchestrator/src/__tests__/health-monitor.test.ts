@@ -216,8 +216,39 @@ describe("runAllProbes (WARP-43)", () => {
     expect(results.find((r) => r.name === "storage")?.status).toBe("ok");
   });
 
-  it("marks storage down when the bridge is unreachable (can't verify redundancy → not green)", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+  it("keeps storage ok when the bridge isn't listening — single-box-only device-bridge, so a connection refusal is an expected shape not a fault (WARP-1146 review)", async () => {
+    // undici wraps the socket error in `cause` ("fetch failed" + cause.code);
+    // isBridgeConnectionError classifies that as an expected-absence, not a
+    // fault. A bare Error("ECONNREFUSED") message would NOT be recognised — the
+    // classifier keys off cause.code / code, never the message.
+    const connErr = new Error("fetch failed");
+    (connErr as { cause?: { code?: string } }).cause = { code: "ECONNREFUSED" };
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(connErr));
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    const storage = results.find((r) => r.name === "storage");
+    // The device-bridge only runs on single-box installs; on a multi-box
+    // reference shape (ADR-018) or a dev stack nothing listens there. A
+    // permanent connection refusal must NOT flip the global pill.
+    expect(storage?.status).toBe("ok");
+    expect(classifyAggregate(results)).toBe("ok");
+  });
+
+  it("marks storage down when the bridge is REACHABLE but errors (present-but-broken is still a real fault, WARP-1146 review)", async () => {
+    // A non-ok HTTP reply is a reachable-but-misbehaving bridge — unlike a
+    // connection refusal it is not an expected deployment shape, so it stays
+    // down (mirrors GET /api/storage/pools returning 502, not bridge_unavailable).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      }),
+    );
     const prisma = {
       $queryRaw: vi.fn().mockResolvedValue([]),
     } as unknown as PrismaClient;
@@ -225,6 +256,8 @@ describe("runAllProbes (WARP-43)", () => {
     const results = await runAllProbes(prisma);
     const storage = results.find((r) => r.name === "storage");
     expect(storage?.status).toBe("down");
+    expect(storage?.error).toMatch(/bridge returned 500/i);
+    // Storage is SOFT — a down storage component is degraded, never down.
     expect(classifyAggregate(results)).toBe("degraded");
   });
 
