@@ -233,10 +233,15 @@ export function AddressStep({
   // (release-then-claim) for a rename. Shared save/advance/error handling.
   async function submitName(persist: (slug: string) => Promise<unknown>) {
     if (!isAvailable) return;
+    // The slug this submit is claiming. The name <input> stays editable while
+    // `saving` (StepShell only disables the primary button), so by the time this
+    // claim resolves the owner may have typed on to a different name — capture
+    // what we submitted so a late rejection can tell whether it's still current.
+    const submittedSlug = slug;
     setSaveError(null);
     setSaving(true);
     try {
-      await persist(slug);
+      await persist(submittedSlug);
       onComplete();
     } catch (e) {
       const code = (e as { code?: unknown })?.code;
@@ -256,6 +261,13 @@ export function AddressStep({
         // Continue disabled) instead of leaving a stale green "…is available"
         // beside a detached red "already taken" banner — the check and the claim
         // must agree. Editing the name re-runs the live check and clears this.
+        //
+        // Staleness guard (same idiom as runCheck / the debounced check): only
+        // apply this if the slug we submitted is STILL the one the owner is on.
+        // The field is editable while saving, so a late rejection for an OLD
+        // name must NOT stomp a fresher "available" for a name typed since —
+        // that would re-open the very check/claim disagreement this fixes.
+        if (wantSlugRef.current !== submittedSlug) return;
         wantSlugRef.current = null;
         abortRef.current?.abort();
         setStatus({

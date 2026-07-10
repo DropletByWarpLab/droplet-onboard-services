@@ -195,6 +195,60 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("does NOT let a stale claim rejection overwrite a fresher available status (edit-during-in-flight submit, WARP-1104)", async () => {
+    // The name <input> stays editable during `saving` (StepShell only disables
+    // the primary button; child fields are still live). If the owner edits to a
+    // new, available name WHILE the claim for the OLD name is in flight, a late
+    // BOX_NAME_TAKEN rejection for the OLD name must NOT stomp the fresher
+    // "available" status for the name now shown — that would reintroduce the
+    // check/claim-disagree bug this ticket fixes.
+    let rejectClaim: (e: unknown) => void = () => {};
+    setBoxName.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectClaim = reject;
+        }),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+
+    // Type "studio" (available) and submit — the claim for "studio" is now
+    // in flight (its promise deliberately left pending).
+    fireEvent.change(nameInput(), { target: { value: "studio" } });
+    await waitFor(() => expect(continueCta()).toBeEnabled());
+    fireEvent.click(continueCta());
+    await waitFor(() => expect(setBoxName).toHaveBeenCalledWith("studio"));
+
+    // While the "studio" claim is still pending, the owner edits to "market".
+    // The live check reports it available — this is the CURRENT, correct status.
+    fireEvent.change(nameInput(), { target: { value: "market" } });
+    const statusRegion = screen.getByRole("status");
+    await waitFor(() =>
+      expect(statusRegion).toHaveTextContent(
+        /market\.droplet-us\.com is available/i,
+      ),
+    );
+
+    // NOW the stale "studio" claim rejects BOX_NAME_TAKEN. It is for the OLD
+    // slug, so its result must be dropped — the fresher "market is available"
+    // must stand (no red "taken" stomp, no detached error banner).
+    rejectClaim(
+      Object.assign(new Error("That name is already taken — pick another."), {
+        code: "BOX_NAME_TAKEN",
+      }),
+    );
+    // Give React a tick to (not) apply the stale rejection.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(statusRegion).toHaveTextContent(
+      /market\.droplet-us\.com is available/i,
+    );
+    expect(statusRegion).not.toHaveTextContent(/already taken|pick another/i);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(continueCta()).toBeEnabled();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("clears a stale save-error banner when the owner edits the name (WARP-1104)", async () => {
     // A failed claim leaves a red error banner. Typing a new name must clear it
     // so the owner never sees a fresh green "available" beside the previous
