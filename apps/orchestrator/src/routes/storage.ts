@@ -4,7 +4,7 @@ import type { PrismaClient, $Enums } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, recordAccessDenied } from "../middleware/auth.js";
 import {
   evaluateStorageCommand,
   confirmStorageCommand,
@@ -553,6 +553,11 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    */
   router.post("/storage/drives/rescan", async (req, res) => {
     if (!isAdmin(req)) {
+      // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
+      // local isAdmin() denials must not be silent (requireRole parity).
+      // (The two label PATCHes move to requireRole outright in PR #929 /
+      // WARP-1141 — those call sites are deliberately not touched here.)
+      recordAccessDenied(req, "role-not-permitted");
       return res.status(403).json({ error: "Admin access required" });
     }
     try {
@@ -602,6 +607,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    */
   router.post("/storage/drives/:uuid/eject", async (req, res) => {
     if (!isAdmin(req)) {
+      // WARP-1062 (audit item B): requireRole-parity policy-violation row.
+      recordAccessDenied(req, "role-not-permitted");
       return res.status(403).json({ error: "Admin access required" });
     }
     const { uuid } = req.params;

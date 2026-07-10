@@ -27,6 +27,7 @@ import {
   type AvailabilityConfig,
 } from "../modules/module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
+import { recordAccessDenied } from "../middleware/auth.js";
 
 const logger = createLogger("modules-route");
 
@@ -68,6 +69,9 @@ export function createModulesRouter(
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
       if (!isAdmin(req)) {
+        // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
+        // local isAdmin() denials must not be silent (requireRole parity).
+        recordAccessDenied(req, "role-not-permitted");
         res.status(403).json({ error: "admin_required", message: "Only an owner or admin can toggle modules." });
         return;
       }
@@ -105,6 +109,8 @@ export function createModulesRouter(
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
       if (!isAdmin(req)) {
+        // WARP-1062 (audit item B): requireRole-parity policy-violation row.
+        recordAccessDenied(req, "role-not-permitted");
         res.status(403).json({ error: "admin_required", message: "Only an owner or admin can apply a business type." });
         return;
       }
