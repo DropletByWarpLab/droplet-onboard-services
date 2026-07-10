@@ -185,6 +185,53 @@ export function VoiceStep({
     skip: { label: "Skip for now", onClick: onSkip },
   };
 
+  // WARP-1105 — one honest "voice assistant isn't responding" panel, shared by
+  // the two reachable-but-unhealthy shapes below so they read the same and
+  // both offer a real retry:
+  //   (a) the check itself failed — a relayed upstream fault / non-2xx (voice-io
+  //       reachable but the pipeline faulted; a genuinely-unreachable container
+  //       is the DISTINCT 503 voice_unavailable that auto-skips above, not this);
+  //   (b) /voice/status answered 200 with a latched `state: "error"` — the
+  //       boot-race STT/TTS/LLM reachability failure (WARP-1092), which used to
+  //       fall through to the "say Hey Droplet" hero and tell the customer to
+  //       talk to an assistant that can't hear them.
+  // Continue stays reachable (voice never blocks setup); the 1 s poll flips
+  // straight back to the try-it hero the moment voice-io recovers, no restart.
+  // This replaces the vaguer "couldn't check" copy, which read as a transient
+  // blip rather than a service that's actually down.
+  const retryVoiceCheck = () => {
+    setLoading(true);
+    setLoadError(false);
+    void load();
+  };
+  const renderNotResponding = () => (
+    <StepShell
+      {...shellProps}
+      primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
+    >
+      <div className="dp-card !py-6 flex flex-col items-center gap-2 text-center">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-system-orange/10">
+          <AlertTriangle size={20} className="text-system-orange" />
+        </div>
+        <p className="type-subheadline text-label-primary">
+          The voice assistant isn&rsquo;t responding right now
+        </p>
+        <p className="type-caption-1 text-label-tertiary max-w-xs">
+          Your Droplet keeps trying on its own — this page updates the moment
+          it&rsquo;s working again. You can also continue and finish setting it
+          up later in Settings.
+        </p>
+        <button
+          type="button"
+          onClick={retryVoiceCheck}
+          className="dp-btn-secondary type-footnote mt-1"
+        >
+          Try again
+        </button>
+      </div>
+    </StepShell>
+  );
+
   // Initial probe still in flight — calm skeleton, Skip always reachable.
   if (loading && status === null && !loadError) {
     return (
@@ -200,34 +247,11 @@ export function VoiceStep({
     );
   }
 
-  // Generic failure (voice-io deployed but the check errored) — surface it,
-  // keep Continue + Skip available, offer a retry. Never a silent skip.
+  // Generic check failure (voice-io deployed but the check errored — a relayed
+  // non-2xx or a transport failure short of the voice_unavailable auto-skip).
+  // Surface it honestly with a real retry; never a silent skip (WARP-933).
   if (loadError && status === null) {
-    return (
-      <StepShell
-        {...shellProps}
-        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
-      >
-        <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-          <span>
-            Couldn&rsquo;t check the voice assistant right now. You can retry,
-            or continue and find it later in Settings.
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            setLoading(true);
-            setLoadError(false);
-            void load();
-          }}
-          className="dp-btn-secondary type-footnote mt-3"
-        >
-          Try again
-        </button>
-      </StepShell>
-    );
+    return renderNotResponding();
   }
 
   // No microphone — voice is ready to arm the moment one appears.
@@ -281,6 +305,17 @@ export function VoiceStep({
         </div>
       </StepShell>
     );
+  }
+
+  // WARP-1105 — reachable but unhealthy: /voice/status answered 200 with the
+  // pipeline latched in `error` (a boot-race STT/TTS/LLM reachability failure —
+  // WARP-1092). It's not no_mic and not flatlined, so before this branch it
+  // fell through to the try-it hero below and told the customer to say "Hey
+  // Droplet" to an assistant that can't hear them ("still not working"). Render
+  // the honest not-responding panel instead; the poll flips back to the hero
+  // the moment the pipeline leaves `error`.
+  if (status?.state === "error") {
+    return renderNotResponding();
   }
 
   // Happy path — mic present, pipeline armed (or mid-utterance).
