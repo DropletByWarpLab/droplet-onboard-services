@@ -19,7 +19,7 @@ Integrations are a **framework**, not a one-off. Eaglesoft is provider #1 behind
 
 ## 2. Architecture & call path
 
-The call path is **one-directional and never inverted** (ADR-011 call-path rules):
+The call path is **one-directional and never inverted** (see `CLAUDE.md` — "Ollama call path" and "LLM tool calling"):
 
 ```
 ┌──────────────── Dashboard (apps/web-dashboard) ─────────────────────────────┐
@@ -52,7 +52,7 @@ The call path is **one-directional and never inverted** (ADR-011 call-path rules
 Rules baked into this shape:
 
 - **The dashboard talks to the orchestrator, never to the external system directly.**
-- **Tool dispatch lives in the orchestrator** (ADR-011). The assistant reaches an integration **only** through named `tools-core/handlers/erp/*` commands — it **never emits SQL**.
+- **Tool dispatch lives in the orchestrator** (`CLAUDE.md` — "LLM tool calling"). The assistant reaches an integration **only** through named `tools-core/handlers/erp/*` commands — it **never emits SQL**.
 - **The connector sidecar owns the driver.** The provider-specific dependency (e.g. the SQL Anywhere client) is isolated in the sidecar so the orchestrator stays language-agnostic behind the sidecar's internal REST contract.
 - **Everything stays on the LAN.** No egress from the connector; PHI never leaves the box.
 
