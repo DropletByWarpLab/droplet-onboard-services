@@ -97,7 +97,8 @@ export function SceneScheduleEditor({
 
   return (
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="lg">
-      <div className="p-5">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div>
         <div className="flex items-start gap-3 mb-1">
           <span
             className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-accent-subtle text-accent"

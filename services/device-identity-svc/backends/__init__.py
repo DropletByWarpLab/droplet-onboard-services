@@ -46,6 +46,9 @@ class Backend(Protocol):
         ...
 
 
+import os
+
+
 def make_backend(backend_name: str, *, storage_root: Path) -> Backend:
     """Factory — DROPLET_TPM_BACKEND env value selects the implementation."""
     if backend_name == "mock":
@@ -53,5 +56,17 @@ def make_backend(backend_name: str, *, storage_root: Path) -> Backend:
         return MockBackend(storage_root=storage_root)
     if backend_name == "real":
         from .real import RealBackend
+        # IDX-002: RealBackend is an unfinished scaffold — its crypto methods
+        # return PLACEHOLDER bytes (empty signatures, a literal "placeholder"
+        # cert) with no error, so selecting it in production yields a
+        # cryptographically void device identity with no boot signal. Refuse to
+        # construct it unless the operator explicitly opts into the scaffold,
+        # until the tss2 path is wired. NEEDS SECURITY SIGN-OFF on the posture.
+        if os.environ.get("DROPLET_TPM_ALLOW_SCAFFOLD", "").lower() not in ("1", "true", "yes", "on"):
+            raise RuntimeError(
+                "DROPLET_TPM_BACKEND=real selects an unimplemented scaffold "
+                "(placeholder signatures/certs). Set DROPLET_TPM_ALLOW_SCAFFOLD=1 "
+                "to run it knowingly, or use the mock backend until the TPM path lands."
+            )
         return RealBackend(storage_root=storage_root)
     raise ValueError(f"Unknown DROPLET_TPM_BACKEND: {backend_name!r}")

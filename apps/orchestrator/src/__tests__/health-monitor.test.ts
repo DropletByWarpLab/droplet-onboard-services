@@ -140,9 +140,27 @@ describe("classifyAggregate (WARP-43)", () => {
   });
 });
 
+/** WARP-1146: the storage probe reads the device-bridge /pools over fetch —
+ *  stub it healthy by default so the pre-existing probe tests stay hermetic. */
+function stubBridgePools(pools: Array<{ device: string; status: string }>) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ pools, count: pools.length }),
+    }),
+  );
+}
+
 describe("runAllProbes (WARP-43)", () => {
+  beforeEach(() => {
+    stubBridgePools([{ device: "md127", status: "active" }]);
+  });
+
   afterEach(() => {
     stopHealthMonitor();
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -158,6 +176,8 @@ describe("runAllProbes (WARP-43)", () => {
     // it's degraded-class only (auto-falls back to a sim backend when
     // /dev/ttyACM* is absent) and never trips the aggregate to down.
     // WARP-598 added `file-indexer` (also degraded-class / SOFT).
+    // WARP-1146 added `storage` (SOFT) — a degraded/failed md pool must
+    // flip the global pill instead of hiding behind a green "operational".
     expect(names).toEqual([
       "ai-gateway",
       "display",
@@ -166,8 +186,79 @@ describe("runAllProbes (WARP-43)", () => {
       "postgres",
       "redis",
       "routing",
+      "storage",
     ]);
     expect(results.every((r) => r.status === "ok")).toBe(true);
+  });
+
+  it("marks storage down when the bridge reports a degraded pool — aggregate degraded, never down (WARP-1146)", async () => {
+    stubBridgePools([{ device: "md127", status: "degraded" }]);
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    const storage = results.find((r) => r.name === "storage");
+
+    expect(storage?.status).toBe("down");
+    expect(storage?.error).toMatch(/md127.*degraded/i);
+    // Storage is SOFT: the box still serves; the pill goes to warning.
+    expect(classifyAggregate(results)).toBe("degraded");
+  });
+
+  it("keeps storage ok while a pool is resyncing (repair in progress is not a warning)", async () => {
+    stubBridgePools([{ device: "md127", status: "resyncing" }]);
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    expect(results.find((r) => r.name === "storage")?.status).toBe("ok");
+  });
+
+  it("keeps storage ok when the bridge isn't listening — single-box-only device-bridge, so a connection refusal is an expected shape not a fault (WARP-1146 review)", async () => {
+    // undici wraps the socket error in `cause` ("fetch failed" + cause.code);
+    // isBridgeConnectionError classifies that as an expected-absence, not a
+    // fault. A bare Error("ECONNREFUSED") message would NOT be recognised — the
+    // classifier keys off cause.code / code, never the message.
+    const connErr = new Error("fetch failed");
+    (connErr as { cause?: { code?: string } }).cause = { code: "ECONNREFUSED" };
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(connErr));
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    const storage = results.find((r) => r.name === "storage");
+    // The device-bridge only runs on single-box installs; on a multi-box
+    // reference shape (ADR-018) or a dev stack nothing listens there. A
+    // permanent connection refusal must NOT flip the global pill.
+    expect(storage?.status).toBe("ok");
+    expect(classifyAggregate(results)).toBe("ok");
+  });
+
+  it("marks storage down when the bridge is REACHABLE but errors (present-but-broken is still a real fault, WARP-1146 review)", async () => {
+    // A non-ok HTTP reply is a reachable-but-misbehaving bridge — unlike a
+    // connection refusal it is not an expected deployment shape, so it stays
+    // down (mirrors GET /api/storage/pools returning 502, not bridge_unavailable).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      }),
+    );
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    const storage = results.find((r) => r.name === "storage");
+    expect(storage?.status).toBe("down");
+    expect(storage?.error).toMatch(/bridge returned 500/i);
+    // Storage is SOFT — a down storage component is degraded, never down.
+    expect(classifyAggregate(results)).toBe("degraded");
   });
 
   it("marks postgres down when the SELECT 1 query throws", async () => {
@@ -245,6 +336,9 @@ describe("GET /api/orchestrator/health", () => {
 
   beforeEach(() => {
     stopHealthMonitor();
+    // WARP-1146: the storage probe fetches the device-bridge — keep these
+    // route tests hermetic (no real network) and healthy by default.
+    stubBridgePools([{ device: "md127", status: "active" }]);
     const prisma = {
       $queryRaw: vi.fn().mockResolvedValue([]),
       // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
@@ -257,6 +351,7 @@ describe("GET /api/orchestrator/health", () => {
 
   afterEach(() => {
     stopHealthMonitor();
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -272,7 +367,7 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(7);
+    expect(res.body.components.length).toBe(8);
     expect(res.body.version).toBe("0.1.0");
     expect(typeof res.body.uptime).toBe("number");
   });

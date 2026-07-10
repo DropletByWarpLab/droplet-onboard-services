@@ -130,17 +130,30 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
   // matters (the Droplet does the pairing; the user's own device only
   // needs to reach the dashboard), naming the real AP SSID.
   it("names the Droplet AP in the pre-flight copy when Wi-Fi provisioning works", async () => {
-    capabilitiesSpy.mockResolvedValue({
-      bleCommissioning: true,
-      wifiProvisioning: true,
-      apSsid: "Droplet-AP7",
-    });
+    // Resolve on a real tick, not an instant microtask — the page paints
+    // the generic copy first, so the test must genuinely wait for the
+    // post-fetch render (this test flaked on CI when it didn't).
+    capabilitiesSpy.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                bleCommissioning: true,
+                wifiProvisioning: true,
+                apSsid: "Droplet-AP7",
+              }),
+            0,
+          ),
+        ),
+    );
     render(<AddMatterDevicePage />);
 
-    const preflight = await screen.findByText(
-      /the droplet does the pairing/i,
-    );
-    expect(preflight).toHaveTextContent(/droplet's own wi-?fi/i);
+    // Anchor on copy that only exists AFTER the capabilities fetch lands —
+    // "the droplet does the pairing" is also in the pre-fetch generic copy,
+    // so awaiting it races the fetch (the WARP-851 CI flake).
+    const preflight = await screen.findByText(/droplet's own wi-?fi/i);
+    expect(preflight).toHaveTextContent(/the droplet does the pairing/i);
     expect(preflight).toHaveTextContent("Droplet-AP7");
     expect(preflight).toHaveTextContent(/already on your wi-?fi are added in place/i);
   });
@@ -153,6 +166,10 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
     });
     render(<AddMatterDevicePage />);
 
+    // The honest copy is identical before and after the fetch, so wait for
+    // the fetch to land — otherwise the negative assertion runs against the
+    // pre-fetch render and proves nothing.
+    await waitFor(() => expect(capabilitiesSpy).toHaveBeenCalled());
     const preflight = await screen.findByText(
       /the droplet does the pairing/i,
     );

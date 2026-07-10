@@ -48,6 +48,7 @@ import type {
   DriveLabel,
   WirelessScanResult,
   AuthUser,
+  RosterUser,
   InviteCreateRequest,
   CreateUserRole,
   InviteCreateResponse,
@@ -76,6 +77,7 @@ import type {
   VoiceCalibrationApply,
   VoiceMeasureResult,
   VoiceEchoCheckResult,
+  VoiceCalibrationModeResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -493,7 +495,7 @@ export async function fetchMe(): Promise<AuthUser> {
   return res.json();
 }
 
-export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
+export async function fetchUsers(): Promise<{ users: RosterUser[] }> {
   const res = await authFetch(`${BASE}/api/auth/users`);
   if (!res.ok) throw new Error(`Failed to fetch users: ${res.status}`);
   return res.json();
@@ -1082,6 +1084,15 @@ export async function updateDriveLabel(
     notes?: string | null;
   },
 ): Promise<DriveLabel> {
+  // WARP-1141: the bridge reports uuid:"" when the filesystem has no
+  // /dev/disk/by-uuid link (degraded / auto-read-only pools). An empty uuid
+  // builds PATCH /api/storage/drives/ — a different route — so fail loudly
+  // here instead of letting the label vanish into a mis-routed request.
+  if (!uuid) {
+    throw new Error(
+      "This drive doesn't have a stable identifier right now, so it can't be renamed.",
+    );
+  }
   const res = await authFetch(
     `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
     {
@@ -1092,9 +1103,29 @@ export async function updateDriveLabel(
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update drive: ${res.status}`);
+    throw storageWriteError(body, res.status, "Failed to update drive");
   }
   return res.json();
+}
+
+/**
+ * WARP-1141: rename failures must translate to actionable copy, not the
+ * generic files-domain fallback ("We couldn't load those files…") that made a
+ * blocked rename read as a load hiccup. Carry the HTTP status (+ the server's
+ * typed `code` when present) on the thrown error so `translateError`'s
+ * status/code dispatch can fire. Mirrors `throwNetworkWriteError`'s shape.
+ */
+function storageWriteError(
+  body: { error?: unknown; code?: unknown },
+  status: number,
+  fallback: string,
+): Error {
+  const err = new Error(
+    (typeof body.error === "string" && body.error) || `${fallback}: ${status}`,
+  ) as Error & { status?: number; code?: string };
+  err.status = status;
+  if (typeof body.code === "string") err.code = body.code;
+  return err;
 }
 
 /**
@@ -1120,7 +1151,7 @@ export async function updatePoolLabel(
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update pool: ${res.status}`);
+    throw storageWriteError(body, res.status, "Failed to update pool");
   }
   return res.json();
 }
@@ -3464,7 +3495,7 @@ export async function setMessageFeedback(
  *  base prompt and managed via /api/memory/facts. */
 export interface MemoryFact {
   id: string;
-  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other";
+  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other" | "Business";
   fact: string;
   addedBy: string;
   evidenceChatId: string | null;
@@ -3770,6 +3801,161 @@ export async function saveEmailChannel(
   }
   return res.json();
 }
+
+// --- WARP-1121: business profile + onboarding interview ---
+
+export type BusinessOnboardingState =
+  | "not_started"
+  | "in_progress"
+  | "completed"
+  | "skipped"
+  | "re_running";
+
+/** GET /api/business-profile is role-split server-side: owner/admin get every
+ *  field; family gets `summary` only; guest/service get `{}`. Everything is
+ *  optional here so one type serves all roles. */
+export interface BusinessProfileView {
+  onboardingState?: BusinessOnboardingState;
+  interviewChatId?: string | null;
+  summary?: string;
+  whatWeDo?: string;
+  customers?: string;
+  teamShape?: string;
+  toolsUsed?: string;
+  typicalDay?: string;
+  goals?: string;
+  lastSource?: "onboarding" | "settings" | null;
+  reviewNudgeState?: "none" | "due" | "dismissed";
+  updatedAt?: string;
+}
+
+export async function fetchBusinessProfile(): Promise<BusinessProfileView> {
+  const res = await authFetch(`${BASE}/api/business-profile`);
+  if (!res.ok) throw new Error(`Failed to load business profile: ${res.status}`);
+  return res.json();
+}
+
+export async function patchBusinessProfile(
+  update: Partial<Record<
+    "summary" | "whatWeDo" | "customers" | "teamShape" | "toolsUsed" | "typicalDay" | "goals",
+    string
+  >>,
+): Promise<BusinessProfileView> {
+  const res = await authFetch(`${BASE}/api/business-profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) throw new Error(`Failed to save business profile: ${res.status}`);
+  return res.json();
+}
+
+export interface OnboardingStartResult {
+  conversationId: string;
+  state: BusinessOnboardingState;
+  created: boolean;
+}
+
+/** 409 = another admin moved the state first (finished-elsewhere banner). */
+export async function startBusinessOnboarding(): Promise<OnboardingStartResult> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/start`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`onboarding_start_${res.status}`);
+  return res.json();
+}
+
+export async function skipBusinessOnboarding(): Promise<{
+  from: BusinessOnboardingState;
+  state: BusinessOnboardingState;
+}> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/skip`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`onboarding_skip_${res.status}`);
+  return res.json();
+}
+
+export interface OnboardingCommitPayload {
+  profile?: Partial<Record<
+    "whatWeDo" | "customers" | "teamShape" | "toolsUsed" | "typicalDay" | "goals",
+    string
+  >>;
+  summary?: string;
+  facts?: Array<{ category: string; fact: string; audience: string }>;
+}
+
+export async function commitBusinessOnboarding(
+  payload: OnboardingCommitPayload,
+): Promise<{ state: BusinessOnboardingState; factsSaved: number }> {
+  const res = await authFetch(`${BASE}/api/business-onboarding/commit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`onboarding_commit_${res.status}`);
+  return res.json();
+}
+
+export async function dismissReviewNudge(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/business-profile/review-dismiss`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`review_dismiss_${res.status}`);
+}
+
+// --- AI personality (WARP-1119, Settings → Workspace → AI personality) ---
+
+export type PersonaPreset =
+  | "warm_friendly"
+  | "professional_precise"
+  | "founder"
+  | "direct_technical";
+export type PersonaVerbosity = "concise" | "balanced" | "detailed";
+
+/**
+ * GET /api/persona is role-split server-side (WARP-1118 §7.3): owner/admin
+ * receive every field; family/guest receive `preset` + `verbosity` only.
+ * Everything beyond those two is therefore optional here — the card gates
+ * its edit surface on the caller's role, not on field presence.
+ */
+export interface PersonaSettings {
+  preset: PersonaPreset;
+  verbosity: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+  updatedBy?: string | null;
+  updatedAt?: string;
+}
+
+export interface PersonaUpdate {
+  preset?: PersonaPreset;
+  verbosity?: PersonaVerbosity;
+  useFirstNames?: boolean;
+  customInstructions?: string;
+}
+
+export async function fetchPersona(): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`);
+  if (!res.ok) throw new Error(`Failed to load personality settings: ${res.status}`);
+  return res.json();
+}
+
+/** PATCH only the changed fields (the route requires at least one). A 400 —
+ *  e.g. customInstructions over the 1200-char cap — throws; the card keeps
+ *  the user's edits and shows the failed state (reject, never truncate). */
+export async function patchPersona(update: PersonaUpdate): Promise<PersonaSettings> {
+  const res = await authFetch(`${BASE}/api/persona`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to save personality settings: ${res.status}`);
+  }
+  return res.json();
+}
+
 
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
 // listSessions, getSession, updateSessionTitle, deleteSession,
@@ -4241,6 +4427,31 @@ export function getThumbnailUrl(path: string, x = 256, y = 256): string {
   return `${BASE}/api/files/thumbnail?path=${encodeURIComponent(path)}&x=${x}&y=${y}`;
 }
 
+/**
+ * WARP-1148/1149 — error thrown by the share mutation helpers on a non-2xx
+ * response. Carries the HTTP status plus the wire `error` string as `code` so
+ * `translateError(err, "share")` can dispatch on stable codes (e.g.
+ * `module_disabled` from a module-gated build) and on the Nextcloud OCS
+ * policy-message shapes, instead of flattening every failure into a plain
+ * Error whose message the translator must discard.
+ */
+export class ShareRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ShareRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwShareError(res: Response, fallback: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+  const wire = typeof body.error === "string" ? body.error : undefined;
+  throw new ShareRequestError(wire || `${fallback}: ${res.status}`, res.status, wire);
+}
+
 export async function createShare(
   path: string,
   opts: ShareCreateOptions = { shareType: 3 }
@@ -4250,10 +4461,7 @@ export async function createShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, ...opts }),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share failed");
   return res.json();
 }
 
@@ -4266,17 +4474,14 @@ export async function updateShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share update failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share update failed");
 }
 
 export async function deleteShare(shareId: number): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw new Error(`Share delete failed: ${res.status}`);
+  if (!res.ok) await throwShareError(res, "Share delete failed");
 }
 
 export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
@@ -4360,7 +4565,14 @@ export async function searchFileContent(
   });
   const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
   if (!res.ok) {
-    if (res.status === 503) return []; // AI gateway down — graceful degrade
+    // WARP-1139: a 503 (AI gateway / pgvector down) used to return [] here,
+    // which rendered as "No content matches" — a dishonest empty state that
+    // masked a broken search stack. Surface it as an error instead.
+    if (res.status === 503) {
+      throw new Error(
+        "Content search is unavailable right now — the AI search stack may still be starting."
+      );
+    }
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Semantic search failed: ${res.status}`);
   }
@@ -4382,6 +4594,14 @@ export interface SearchReadinessStatus {
   pgvectorReady: boolean;
   indexedCount: number;
   lastIndexedAt: string | null;
+  /**
+   * WARP-1139/WARP-1140 — explicit per-file indexer state (FileIndexStatus):
+   * files the indexer has seen but not finished (`pendingCount`) or given up
+   * on (`failedCount`). Optional: an orchestrator predating the migration
+   * omits them. Drives the honest "still indexing" empty state.
+   */
+  pendingCount?: number;
+  failedCount?: number;
 }
 
 export async function fetchSearchStatus(): Promise<SearchReadinessStatus> {
@@ -4413,8 +4633,19 @@ export async function createPairingCode(data: {
     body: JSON.stringify(data),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to generate pairing code: ${res.status}`);
+    const body = await res.json().catch(() => ({} as { error?: unknown }));
+    // WARP-1150: keep the HTTP status and any machine-readable error token on
+    // the thrown error so the dialog can map it to step-appropriate copy via
+    // translateError (which never renders err.message verbatim). Without
+    // these, every create failure flattened to the domain fallback.
+    const message =
+      typeof body.error === "string"
+        ? body.error
+        : `Failed to generate pairing code: ${res.status}`;
+    const err = new Error(message) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.error === "string") err.code = body.error;
+    throw err;
   }
   return res.json();
 }
@@ -4694,6 +4925,39 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
     body: JSON.stringify({}),
   });
   if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
+// --- WARP-1059: calibration mode (wizard-scoped wake suppression) ---
+
+/**
+ * Enter (or renew) calibration mode on the box: wakes keep counting
+ * (the wizard's step-3 ticker rides `last_wake_at`) but are not
+ * handled — no STT capture, no LLM call, no reply spoken through the
+ * speaker mid-measurement. Auto-expires after `ttlS` (voice-io default
+ * when omitted), so callers renew while the wizard stays open.
+ */
+export async function enterVoiceCalibrationMode(
+  ttlS?: number,
+): Promise<VoiceCalibrationModeResult> {
+  const body: { ttl_s?: number } = {};
+  if (ttlS !== undefined) body.ttl_s = ttlS;
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to enter calibration mode");
+  return res.json();
+}
+
+/** Exit calibration mode. Idempotent — safe to fire from any wizard
+ *  close path; the TTL expiry is the fail-safe when this never runs. */
+export async function exitVoiceCalibrationMode(): Promise<VoiceCalibrationModeResult> {
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to exit calibration mode");
   return res.json();
 }
 

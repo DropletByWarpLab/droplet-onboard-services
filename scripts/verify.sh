@@ -153,14 +153,17 @@ check_warn "MQTT broker (mTLS)" \
     -t "droplet/verify" -m "verify" -q 0
 
 # --- Nginx reverse proxy (single entry point — services are not exposed to host) ---
+# Probe the TLS listener, NOT port 80: nginx 301-redirects all :80 traffic to
+# https and `curl -sf` exits 0 on a 3xx, so an :80 probe PASSes even when the
+# backend is dead. -k accepts the self-signed bootstrap cert.
 check "Nginx → Orchestrator API" \
-  curl -sf --max-time 10 http://localhost/api/health || true
+  curl -skf --max-time 10 https://localhost/api/health || true
 
 check "Nginx → Web Dashboard" \
-  curl -sf --max-time 10 -o /dev/null http://localhost/ || true
+  curl -skf --max-time 10 -o /dev/null https://localhost/ || true
 
 check "Nginx → AI Gateway" \
-  curl -sf --max-time 10 http://localhost/ai/health || true
+  curl -skf --max-time 10 https://localhost/ai/health || true
 
 # --- Voice orchestrator (WARP-154) ---
 # Internal-only (port 8086 not host-exposed) so the check runs via

@@ -3,8 +3,8 @@
  *
  * Searches the per-workspace `MemoryFact` table for facts whose `fact`
  * text contains the query substring (case-insensitive). Optional
- * `category` filter narrows to one of the five `MemoryFactCategory`
- * values (`Tone | Workflow | Scope | Schedule | Other`).
+ * `category` filter narrows to one of the six `MemoryFactCategory`
+ * values (`Tone | Workflow | Scope | Schedule | Other | Business`).
  *
  * Only `active=true` facts are returned. Soft-disabled facts stay in
  * the DB for the evidence chain but don't influence the model.
@@ -47,7 +47,7 @@ const inputSchema = {
     },
     category: {
       type: "string",
-      enum: ["Tone", "Workflow", "Scope", "Schedule", "Other"],
+      enum: ["Tone", "Workflow", "Scope", "Schedule", "Other", "Business"],
       description: "Optional category filter.",
     },
     limit: {
@@ -75,8 +75,14 @@ async function handler(
   }
   const category =
     typeof args.category === "string" &&
-    ["Tone", "Workflow", "Scope", "Schedule", "Other"].includes(args.category)
-      ? (args.category as "Tone" | "Workflow" | "Scope" | "Schedule" | "Other")
+    ["Tone", "Workflow", "Scope", "Schedule", "Other", "Business"].includes(args.category)
+      ? (args.category as
+          | "Tone"
+          | "Workflow"
+          | "Scope"
+          | "Schedule"
+          | "Other"
+          | "Business")
       : undefined;
   const limit =
     typeof args.limit === "number" && args.limit > 0
@@ -112,7 +118,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_recall",
   description:
-    "Recall durable memory facts about the user or workspace. Returns facts whose text contains the query substring (case-insensitive). Optional category filter (Tone, Workflow, Scope, Schedule, Other). Tier-1 read; safe to call without operator confirmation. Use BEFORE answering questions about user preferences, recurring workflows, scope assumptions, or schedule.",
+    "Recall durable memory facts about the user or workspace. Returns facts whose text contains the query substring (case-insensitive). Optional category filter (Tone, Workflow, Scope, Schedule, Other, Business). Tier-1 read; safe to call without operator confirmation. Use BEFORE answering questions about user preferences, recurring workflows, scope assumptions, schedule, or business knowledge.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

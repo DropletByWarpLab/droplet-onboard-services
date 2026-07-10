@@ -31,7 +31,10 @@ type AuthedRequest = {
   user?: { id?: string; username?: string; role?: string };
 };
 
-const categoryEnum = z.enum(["Tone", "Workflow", "Scope", "Schedule", "Other"]);
+// WARP-1120 (D-9) — `Business` joins the memory-fact vocabulary (the enum
+// value shipped in Phase 0's migration; Phase 2 threads it through every
+// hardcoded site).
+const categoryEnum = z.enum(["Tone", "Workflow", "Scope", "Schedule", "Other", "Business"]);
 // WARP-845 — who the fact is distributed to (minimum-role ladder).
 const audienceEnum = z.enum(["owner", "admin", "family", "guest"]);
 

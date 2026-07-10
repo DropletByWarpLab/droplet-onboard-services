@@ -25,6 +25,15 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncGetUserQuota: vi.fn(),
 }));
 
+// WARP-1062 (audit item B): the local isAdmin() denials now emit the WARP-237
+// policy-violation row — capture the singleton to assert it.
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
 import { createStorageRouter } from "../routes/storage.js";
 
 // Bridge response fixture — three drives, one with a friendly name in
@@ -102,20 +111,20 @@ function createPrismaMock() {
   };
 }
 
-function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
+function buildApp(prisma: ReturnType<typeof createPrismaMock>, role = "owner") {
   const app = express();
   app.use(express.json());
   // WARP-171: PATCH /api/storage/drives/:uuid now sits behind a
   // requireRole("owner", "admin") guard. The real authMiddleware isn't
-  // in this test's pipeline; inject a synthetic owner so the guard
-  // lets the request reach the handler. Same shape the rbac matrix
-  // and the vpn test use.
+  // in this test's pipeline; inject a synthetic user so the guard sees a
+  // role (owner by default; WARP-1141's role-denied cases pass "family").
+  // Same shape the rbac matrix and the vpn test use.
   app.use((req, _res, next) => {
     (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
       id: "stefan",
       username: "stefan",
       displayName: "Stefan",
-      role: "owner",
+      role,
     };
     next();
   });
@@ -281,6 +290,47 @@ describe("storage routes (WARP-174)", () => {
         .send({ displayName: "X" });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Invalid drive UUID/i);
+    });
+
+    // WARP-1141 — rename gating + validation. Owner IS allowed (covered by
+    // the success cases above, which run as owner); family is refused by the
+    // canonical requireRole guard and the row is never written.
+    it("refuses a family user (403) and never writes the row", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "family");
+      const res = await request(app)
+        .patch("/api/storage/drives/UUID-MAIN-DRIVE")
+        .send({ displayName: "Sneaky Rename" });
+      expect(res.status).toBe(403);
+      expect(prisma.drive.upsert).not.toHaveBeenCalled();
+      expect(prisma.rows.get("UUID-MAIN-DRIVE")).toBeUndefined();
+    });
+
+    it("rejects a displayName over 64 characters (400, no write)", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      const res = await request(app)
+        .patch("/api/storage/drives/UUID-MAIN-DRIVE")
+        .send({ displayName: "x".repeat(65) });
+      expect(res.status).toBe(400);
+      expect(prisma.drive.upsert).not.toHaveBeenCalled();
+    });
+
+    it("rejects the literal 'undefined'/'null' uuid instead of upserting a junk row (WARP-1141)", async () => {
+      // A client that stringifies a missing uuid produces
+      // PATCH /storage/drives/undefined — which passes the charset regex,
+      // upserts a Drive row keyed "undefined", answers 200, and the rename
+      // silently never joins back to any real drive.
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      for (const junk of ["undefined", "null"]) {
+        const res = await request(app)
+          .patch(`/api/storage/drives/${junk}`)
+          .send({ displayName: "Burrito" });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/Invalid drive UUID/i);
+        expect(prisma.rows.has(junk)).toBe(false);
+      }
     });
   });
 });
@@ -773,6 +823,19 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       app.use("/api", createStorageRouter(createPrismaMock() as any));
       const res = await request(app).post("/api/storage/drives/rescan");
       expect(res.status).toBe(403);
+      // WARP-1062 (audit item B): the local isAdmin() deny emits the same
+      // WARP-237 "Access denied" row as the central requireRole.
+      expect(recordActivityMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "auth",
+          severity: "warn",
+          what: "Access denied",
+          refs: expect.objectContaining({
+            role: "family",
+            reason: "role-not-permitted",
+          }),
+        }),
+      );
     });
 
     it("fails closed when no authenticated user is present", async () => {

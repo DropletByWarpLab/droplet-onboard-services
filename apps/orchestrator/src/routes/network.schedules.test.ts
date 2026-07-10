@@ -24,6 +24,9 @@ vi.mock("../config.js", () => ({
     NODE_ENV: "test",
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
+    // Makes the `network` module available so the module gate lets /api/network
+    // through (network.available = isSet(ROUTING_SERVICE_URL)).
+    ROUTING_SERVICE_URL: "http://routing.test",
     AUTH_ENABLED: false,
     // camera-retention-purge.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
@@ -372,6 +375,9 @@ vi.mock("@prisma/client", () => {
   });
 
   const mockPrisma = {
+    // Module gate reads moduleSetting.findMany() on every gated request
+    // (/api/network here); [] = no overrides => registry defaults, gate passes.
+    moduleSetting: { findMany: vi.fn().mockResolvedValue([]) },
     // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
     // every request; null = no directory row = fail-open.
     user: {

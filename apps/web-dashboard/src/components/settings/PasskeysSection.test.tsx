@@ -67,4 +67,75 @@ describe("PasskeysSection", () => {
     expect(screen.queryByRole("button", { name: /add a passkey/i })).not.toBeInTheDocument();
     expect(screen.getByText(/doesn't support passkeys|not supported/i)).toBeInTheDocument();
   });
+
+  // =====================================================================
+  // WARP-1156 — the live failure: on plain-HTTP droplet.local the browser
+  // refuses navigator.credentials.create() outright, and the old section
+  // showed a doomed button whose every attempt died as the same generic
+  // "Try again." The section must pre-empt the insecure context, and map
+  // the distinguishable ceremony failures to honest copy.
+  // =====================================================================
+
+  it("replaces the button with an honest secure-address note when the context is not secure (WARP-1156)", () => {
+    Object.defineProperty(window, "isSecureContext", {
+      value: false,
+      configurable: true,
+    });
+    try {
+      render(<PasskeysSection />);
+      // No doomed button — the browser would reject every attempt.
+      expect(
+        screen.queryByRole("button", { name: /add a passkey/i }),
+      ).not.toBeInTheDocument();
+      // Honest, actionable copy: this needs the secure (https) address.
+      expect(screen.getByText(/secure .*(address|connection)/i)).toBeInTheDocument();
+      expect(screen.getByText(/https/i)).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "isSecureContext", {
+        value: true,
+        configurable: true,
+      });
+    }
+  });
+
+  it("says the prompt was closed or timed out on NotAllowedError — and keeps the retry (WARP-1156)", async () => {
+    registerPasskey.mockRejectedValueOnce(
+      new DOMException("The operation either timed out or was not allowed.", "NotAllowedError"),
+    );
+    render(<PasskeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/closed or timed out/i)).toBeInTheDocument();
+    });
+    // Retry stays available — this failure is the user's to redo.
+    expect(screen.getByRole("button", { name: /add a passkey/i })).toBeEnabled();
+  });
+
+  it("says this device already has a passkey on InvalidStateError (WARP-1156)", async () => {
+    registerPasskey.mockRejectedValueOnce(
+      new DOMException("The authenticator was previously registered", "InvalidStateError"),
+    );
+    render(<PasskeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/already has a passkey/i)).toBeInTheDocument();
+    });
+  });
+
+  it("points at the secure address on SecurityError (origin/RP mismatch) (WARP-1156)", async () => {
+    registerPasskey.mockRejectedValueOnce(
+      new DOMException("The relying party ID is not a registrable domain suffix", "SecurityError"),
+    );
+    render(<PasskeysSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/secure .*address/i)).toBeInTheDocument();
+    });
+  });
 });

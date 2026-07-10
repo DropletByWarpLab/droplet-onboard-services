@@ -21,3 +21,13 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 # Chunking params
 CHUNK_SIZE_TOKENS = int(os.environ.get("CHUNK_SIZE_TOKENS", "512"))
 CHUNK_OVERLAP_RATIO = float(os.environ.get("CHUNK_OVERLAP_RATIO", "0.2"))
+
+# WARP-1140: shared "Household" groupfolder support. Groupfolder content
+# physically lives under {NEXTCLOUD_DATA_ROOT}/__groupfolders/<id>/..., never
+# under a user home, so the watcher indexes it under the HOUSEHOLD_USER_ID
+# sentinel with a "/<SHARED_FOLDER_NAME>/..." display path — the path each
+# household member sees in their own WebDAV home. Both values must match the
+# orchestrator (DROPLET_SHARED_FOLDER_NAME in config.ts; HOUSEHOLD_INDEX_USER
+# in routes/files.ts).
+SHARED_FOLDER_NAME = os.environ.get("DROPLET_SHARED_FOLDER_NAME", "Household")
+HOUSEHOLD_USER_ID = "__household__"

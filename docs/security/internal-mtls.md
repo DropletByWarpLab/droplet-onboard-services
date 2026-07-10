@@ -12,11 +12,15 @@ A file-based internal CA lives at `data/secrets/internal-ca/` (minted once by
 into `data/secrets/service-tls/<service>/{cert.pem,key.pem,ca.pem}`. Each
 container bind-mounts only its own bundle read-only at `/data/service-tls`.
 
-- **Servers** (orchestrator HTTPS :3000, FastAPI/uvicorn services, ai-gateway
-  gRPC :50051, Mosquitto :8883, matter-controller :8083) require and verify a
-  CA-signed client cert on every connection.
+- **Servers** — the design target is that every first-party listener
+  (orchestrator HTTPS :3000, FastAPI/uvicorn services, ai-gateway gRPC :50051,
+  Mosquitto :8883, matter-controller :8083) requires and verifies a CA-signed
+  client cert on every connection. **Wired today:** the orchestrator :3000
+  listener (flag-gated) and Mosquitto :8883 (live) only — see "Wiring status"
+  below.
 - **Clients** (undici fetch, httpx, paho, mqtt.js, grpc, nginx `proxy_ssl_*`)
-  present their own bundle and pin trust to the internal CA.
+  present their own bundle and pin trust to the internal CA. Most HTTP clients
+  are wired (flag-gated); the gaps are listed under "Wiring status".
 - **Mosquitto** maps the peer CN to the MQTT username
   (`use_identity_as_username true`) and a static ACL file scopes each CN to
   exactly the topics it uses.
@@ -63,9 +67,9 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (first-party hops secured)
+## Enforcement matrix (design target)
 
-| # | Client → Server | Transport | Was | Now (DROPLET_INTERNAL_TLS=1) |
+| # | Client → Server | Transport | Was | Design (DROPLET_INTERNAL_TLS=1) |
 |---|---|---|---|---|
 | 1 | nginx gateway → orchestrator :3000 | `proxy_pass` | plain | mTLS (gateway client cert) |
 | 2 | nginx gateway → ai-gateway :8000 | `proxy_pass` | plain | mTLS (gateway client cert) |
@@ -88,6 +92,40 @@ device-identity-svc issuance. Rationale:
 (third-party servers); orchestrator → device-identity-svc (Unix socket,
 filesystem-scoped); ai-gateway → ollama, voice-io → wyoming (third-party, no/raw
 TLS). `ORCHESTRATOR_URL` on the ai-gateway container is dead config (no reader).
+
+### Wiring status (verified against main, 2026-07-09 — WARP-1062 doc-truth)
+
+The table above is the **design target**, not the shipped posture. What has
+actually landed from WARP-236:
+
+- **Live everywhere:** the internal CA + per-service bundle issuance/rotation,
+  and the certs' non-mesh consumers — Postgres TLS (WARP-233), Redis TLS
+  (WARP-234), and MQTT mTLS :8883 (WARP-235, scheme-gated, always on).
+- **Wired but dormant (flag-gated, and nothing sets `DROPLET_INTERNAL_TLS=1`
+  today — neither `scripts/setup.sh` nor compose):** the orchestrator :3000
+  HTTPS+client-cert listener (`index.ts` / `lib/internal-tls.ts`) and the
+  HTTP client sides of hops 4–7, 9–12, 14–15 (undici/httpx helpers).
+- **Not wired at all (code gap, not just a flag):**
+  - nginx `proxy_ssl_*` client certs for hops 1–2 (`docker/nginx/nginx.conf`
+    has no `proxy_ssl` directives);
+  - every FastAPI/uvicorn **server** listener (ai-gateway :8000, routing,
+    switch, voice-io, ops-console, camera-discovery, email-indexer, rag-eval —
+    all launch plain `uvicorn` with no ssl args; `uvicorn_ssl_kwargs()` in
+    `services/_shared/internal_tls.py` has no callers);
+  - ai-gateway gRPC :50051 (`grpc_server.py` uses `add_insecure_port`) and the
+    file-indexer gRPC client (`embedder.py` uses `insecure_channel`) — hop 16;
+  - matter-controller :8083 server (plain `node:http`);
+  - rag-eval → orchestrator client (hop 8) and switch/camera-discovery →
+    routing clients (hop 13) — no `internal_tls` usage;
+  - the compose orchestrator healthcheck (inline plain-HTTP fetch, not
+    `dist/healthcheck.js`).
+
+Enabling the flag on a box today would therefore break hops 1–2 (nginx speaks
+plain to an HTTPS orchestrator) and 4/9–13/15–16 (TLS clients or plain clients
+against mismatched servers). Completing the server-side wiring + on-box
+enablement is a separate follow-up ticket; the harness check
+`transit.mesh.plain-http-refused` (WARP-966) tracks the observable posture and
+FAILs until that lands.
 
 ## Env contract
 

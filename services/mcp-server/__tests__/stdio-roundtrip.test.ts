@@ -15,6 +15,47 @@ const MOCK_STATUS_PAYLOAD = {
   router: { uptime_s: 12345 },
 };
 
+// WARP-1144: the shapes /api/storage/drives and /api/storage/pools serve
+// (apps/orchestrator/src/routes/storage.ts) — the same source of truth the
+// dashboard's Drives page reads. list_drives / list_storage_pools must reach
+// THESE orchestrator routes, not the file-indexer (which has no such routes;
+// that mis-routing was the "fetch failed" bug in Ask AI chat).
+const MOCK_DRIVES_PAYLOAD = {
+  drives: [
+    {
+      device: "/dev/nvme0n1p1",
+      mount: "/mnt/droplet/media-1a2b",
+      label: "media",
+      uuid: "1a2b-3c4d",
+      size_bytes: 1_000_000_000_000,
+      used_bytes: 750_000_000_000,
+      free_bytes: 250_000_000_000,
+      mounted: true,
+      bus: "nvme",
+      displayName: "Media drive",
+      icon: null,
+      notes: null,
+    },
+  ],
+  count: 1,
+  snapshot_at: "2026-07-08T12:00:00Z",
+};
+
+const MOCK_POOLS_PAYLOAD = {
+  pools: [
+    {
+      device: "md0",
+      level: "raid1",
+      status: "active",
+      members: ["/dev/sda", "/dev/sdb"],
+      displayName: "Backups",
+      notes: null,
+    },
+  ],
+  count: 1,
+  snapshot_at: "2026-07-08T12:00:00Z",
+};
+
 describe("stdio roundtrip", () => {
   let client: Client;
   let transport: StdioClientTransport;
@@ -33,6 +74,20 @@ describe("stdio roundtrip", () => {
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(MOCK_STATUS_PAYLOAD));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/api/storage/drives") {
+        orchestratorHits++;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(MOCK_DRIVES_PAYLOAD));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/api/storage/pools") {
+        orchestratorHits++;
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(MOCK_POOLS_PAYLOAD));
         return;
       }
       res.statusCode = 404;
@@ -118,5 +173,30 @@ describe("stdio roundtrip", () => {
     const parsed = JSON.parse(blocks[0].text);
     expect(parsed).toEqual(MOCK_STATUS_PAYLOAD);
     expect(orchestratorHits).toBeGreaterThan(0);
+  });
+
+  // WARP-1144 regression guard: list_drives / list_storage_pools dispatch
+  // through the orchestrator target (same /api/storage/* routes the Drives
+  // page uses). Before the fix they hit the file-indexer's default URL
+  // (file-indexer:8000 — wrong port, no /drives route) and every chat call
+  // died as a raw "fetch failed".
+  it("tools/call list_drives proxies to the orchestrator /api/storage/drives and returns a summarizable drives + usage shape", async () => {
+    const res = await client.callTool({ name: "list_drives", arguments: {} });
+    expect(res.isError).toBe(false);
+    const blocks = res.content as { type: string; text: string }[];
+    const parsed = JSON.parse(blocks[0].text) as typeof MOCK_DRIVES_PAYLOAD;
+    expect(parsed).toEqual(MOCK_DRIVES_PAYLOAD);
+    // The agent answers "what's using the most storage?" from these fields.
+    expect(parsed.drives[0].used_bytes).toBeGreaterThan(0);
+    expect(parsed.drives[0].free_bytes).toBeGreaterThan(0);
+  });
+
+  it("tools/call list_storage_pools proxies to the orchestrator /api/storage/pools and returns the pools shape", async () => {
+    const res = await client.callTool({ name: "list_storage_pools", arguments: {} });
+    expect(res.isError).toBe(false);
+    const blocks = res.content as { type: string; text: string }[];
+    const parsed = JSON.parse(blocks[0].text) as typeof MOCK_POOLS_PAYLOAD;
+    expect(parsed).toEqual(MOCK_POOLS_PAYLOAD);
+    expect(parsed.pools[0].status).toBe("active");
   });
 });

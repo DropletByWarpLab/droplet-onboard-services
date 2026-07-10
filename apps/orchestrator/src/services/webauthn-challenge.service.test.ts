@@ -27,6 +27,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   createChallenge,
   consumeChallenge,
+  pruneExpiredChallenges,
   WEBAUTHN_CHALLENGE_TTL_MS,
 } from "./webauthn-challenge.service.js";
 
@@ -37,6 +38,28 @@ interface ChallengeRow {
   userId: string | null;
   expiresAt: Date;
   createdAt: Date;
+}
+
+/**
+ * Minimal recursive evaluator for the Prisma `where` shapes the service
+ * emits: `{ id: { in } }` (batched prune delete) and `{ expiresAt: { lt } }`
+ * (prune find). Mirrors audit-retention-purge.service.test's in-memory sim.
+ */
+function rowMatches(row: any, where: any): boolean {
+  for (const [key, cond] of Object.entries(where)) {
+    if (cond === null) {
+      if (row[key] !== null) return false;
+    } else if (typeof cond === "object") {
+      const c = cond as any;
+      const v = row[key];
+      if ("in" in c && !c.in.includes(v)) return false;
+      if ("lt" in c && !(v !== null && v < c.lt)) return false;
+      if ("gt" in c && !(v !== null && v > c.gt)) return false;
+    } else if (row[key] !== cond) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function createPrismaMock(seed: ChallengeRow[] = []) {
@@ -66,13 +89,22 @@ function createPrismaMock(seed: ChallengeRow[] = []) {
       const [removed] = rows.splice(idx, 1);
       return removed;
     }),
-    deleteMany: vi.fn(async ({ where }: { where?: { expiresAt?: { lt: Date } } }) => {
+    // Batched-prune surface: oldest-first id batch matching the predicate,
+    // bounded by take, then delete by id set.
+    findMany: vi.fn(async ({ where, orderBy, take, select }: any) => {
+      let matched = rows.filter((r) => rowMatches(r, where));
+      if (orderBy?.createdAt === "asc") {
+        matched = [...matched].sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        );
+      }
+      if (typeof take === "number") matched = matched.slice(0, take);
+      return matched.map((r) => (select?.id ? { id: r.id } : r));
+    }),
+    deleteMany: vi.fn(async ({ where }: { where: any }) => {
       const before = rows.length;
-      if (where?.expiresAt?.lt) {
-        const cutoff = where.expiresAt.lt;
-        for (let i = rows.length - 1; i >= 0; i--) {
-          if (rows[i]!.expiresAt < cutoff) rows.splice(i, 1);
-        }
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rowMatches(rows[i]!, where)) rows.splice(i, 1);
       }
       return { count: before - rows.length };
     }),
@@ -166,5 +198,88 @@ describe("WebAuthn challenge store — single-use, time-bound replay defence", (
     expect(consumed).toBeNull();
     // wrong-ceremony attempt must not delete the still-valid registration row
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("pruneExpiredChallenges — bounded batched sweep", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  function challengeRow(id: string, over: Partial<ChallengeRow> = {}): ChallengeRow {
+    return {
+      id,
+      challenge: `chal-${id}`,
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + HOUR),
+      createdAt: new Date(),
+      ...over,
+    };
+  }
+
+  it("deletes expired rows and keeps live ones", async () => {
+    const now = new Date();
+    const { prisma, rows } = createPrismaMock([
+      challengeRow("expired-1", { expiresAt: new Date(now.getTime() - HOUR) }),
+      challengeRow("expired-2", { expiresAt: new Date(now.getTime() - 1000) }),
+      challengeRow("live", { expiresAt: new Date(now.getTime() + HOUR) }),
+    ]);
+
+    const deleted = await pruneExpiredChallenges(prisma, { now });
+
+    expect(deleted).toBe(2);
+    expect(rows.map((r) => r.id)).toEqual(["live"]);
+  });
+
+  it("drains a backlog larger than one batch via multiple bounded deletes", async () => {
+    const now = new Date();
+    const seed = Array.from({ length: 25 }, (_, i) =>
+      challengeRow(`old-${i}`, {
+        challenge: `chal-old-${i}`,
+        expiresAt: new Date(now.getTime() - HOUR),
+        createdAt: new Date(now.getTime() - (25 - i) * 1000),
+      }),
+    );
+    const { prisma, rows, delegate } = createPrismaMock(seed);
+
+    const deleted = await pruneExpiredChallenges(prisma, { now, batchSize: 10 });
+
+    expect(deleted).toBe(25);
+    expect(rows).toHaveLength(0);
+    // 25 / 10 → 3 bounded deletes, never one unbounded 25-row statement that
+    // could exceed the 60 s advisory-lock transaction on a big backlog.
+    expect(delegate.deleteMany).toHaveBeenCalledTimes(3);
+    for (const call of delegate.deleteMany.mock.calls) {
+      expect(call[0].where.id.in.length).toBeLessThanOrEqual(10);
+    }
+  });
+
+  it("caps total rows per run so a huge first-run backlog can't wedge the 60 s transaction", async () => {
+    const now = new Date();
+    const seed = Array.from({ length: 100 }, (_, i) =>
+      challengeRow(`old-${i}`, {
+        challenge: `chal-old-${i}`,
+        expiresAt: new Date(now.getTime() - HOUR),
+        createdAt: new Date(now.getTime() - (100 - i) * 1000),
+      }),
+    );
+    const { prisma, rows, delegate } = createPrismaMock(seed);
+
+    const deleted = await pruneExpiredChallenges(prisma, {
+      now,
+      batchSize: 10,
+      maxRowsPerRun: 30,
+    });
+
+    expect(deleted).toBe(30);
+    // 70 remain for subsequent nightly ticks → the backlog drains over nights.
+    expect(rows).toHaveLength(70);
+    expect(delegate.deleteMany).toHaveBeenCalledTimes(3);
+  });
+
+  it("no-ops on an empty table", async () => {
+    const { prisma, delegate } = createPrismaMock();
+    const deleted = await pruneExpiredChallenges(prisma);
+    expect(deleted).toBe(0);
+    expect(delegate.deleteMany).not.toHaveBeenCalled();
   });
 });

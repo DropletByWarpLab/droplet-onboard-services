@@ -42,6 +42,7 @@ export type ToolDomain =
   | "memory"
   | "pm"
   | "erp"
+  | "business"
   | "system";
 
 export interface ToolCatalogEntry {
@@ -154,6 +155,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "erp_get_ar_summary",
     "erp_schedule_appointment",
   ],
+  business: ["business_profile_get"],
   system: ["get_system_health", "list_drives", "list_storage_pools"],
 };
 
@@ -274,6 +276,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Business (business-knowledge profile)
+  business_profile_get: "Look up what Droplet knows about your business",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

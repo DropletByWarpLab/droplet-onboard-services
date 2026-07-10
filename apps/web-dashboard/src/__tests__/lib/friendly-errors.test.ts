@@ -25,6 +25,7 @@ const SECRET = "SECRET_INTERNAL_DETAIL_DO_NOT_LEAK";
 const DOMAINS: ErrorDomain[] = [
   "auth",
   "files",
+  "share",
   "chat",
   "invite",
   "calendar",
@@ -290,6 +291,99 @@ describe("translateError — network / vpn / camera / device domains (WARP-646)"
     const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "network");
     expect(result.toLowerCase()).toMatch(/took too long/);
     expect(result).not.toBe(fallback);
+  });
+});
+
+// WARP-1148/1149 — the Share dialog's failures used to translate through the
+// "files" domain, so a failed share CREATE rendered the file-LOADING fallback
+// ("We couldn't load those files right now…"). The dedicated share domain must
+// (1) never produce the file-loading copy, (2) surface a module-gated 404
+// (`module_disabled`) honestly, and (3) map Nextcloud's deterministic policy
+// rejections (password / expiration / permissions) to actionable copy instead
+// of "try again".
+describe("translateError — share domain (WARP-1148/1149)", () => {
+  const FILE_LOADING_COPY = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "files");
+
+  it("never renders the file-loading copy for ANY share failure shape", () => {
+    const shapes: unknown[] = [
+      null,
+      {},
+      new Error("boom"),
+      { code: "module_disabled", status: 404 },
+      { status: 500, message: "Internal Server Error" },
+      { message: "OCS share create: Password is under the minimum length (400)" },
+    ];
+    for (const err of shapes) {
+      const result = translateError(err, "share");
+      expect(result, JSON.stringify(err)).not.toBe(FILE_LOADING_COPY);
+      expect(result.toLowerCase(), JSON.stringify(err)).not.toContain("load those files");
+    }
+  });
+
+  it("falls back to share-specific 'couldn't create that share link' copy for unknown errors", () => {
+    const result = translateError(new Error("boom"), "share");
+    expect(result.toLowerCase()).toContain("share link");
+    expect(result.toLowerCase()).toContain("try again");
+  });
+
+  it("surfaces a module-gated failure honestly (module_disabled → sharing is off, ask an admin)", () => {
+    // The module gate answers 404 {"error":"module_disabled","module":"files"};
+    // the api layer forwards the wire string as err.code. The copy must be
+    // honest about the module being off — not a loading error, not a retry.
+    const result = translateError({ code: "module_disabled", status: 404 }, "share");
+    expect(result.toLowerCase()).toMatch(/turned off|isn't enabled|disabled/);
+    expect(result.toLowerCase()).toMatch(/owner or admin/);
+    expect(result.toLowerCase()).not.toContain("try again");
+    expect(result).not.toContain("module_disabled");
+  });
+
+  it("maps the Nextcloud password-policy rejection to password copy (not the retry fallback)", () => {
+    // Real OCS message shape from Nextcloud's password_policy app, surfaced by
+    // the orchestrator as { error: "OCS share create: …" } with status 400.
+    const result = translateError(
+      {
+        status: 400,
+        message: "OCS share create: Password is present in compromised password list. (400)",
+      },
+      "share",
+    );
+    expect(result.toLowerCase()).toContain("password");
+    expect(result).not.toContain("OCS");
+    expect(result).not.toContain("compromised");
+  });
+
+  it("maps the expiration-policy rejection to expiration copy", () => {
+    const result = translateError(
+      {
+        status: 400,
+        message: "OCS share create: Cannot set expiration date more than 7 days in the future (400)",
+      },
+      "share",
+    );
+    expect(result.toLowerCase()).toContain("expiration");
+    expect(result).not.toContain("OCS");
+  });
+
+  it("maps the file-share permission rejection to access-level copy", () => {
+    // Nextcloud generalCreateChecks: a single-file share can't carry
+    // CREATE/DELETE bits ("Full access" on a file).
+    const result = translateError(
+      {
+        status: 400,
+        message: "OCS share create: File shares cannot have create or delete permissions (400)",
+      },
+      "share",
+    );
+    expect(result.toLowerCase()).toContain("access level");
+    expect(result).not.toContain("OCS");
+  });
+
+  it("maps a 404 without a stable code to gone-file/share copy", () => {
+    const result = translateError(
+      { status: 404, message: "OCS share create: Wrong path, file/folder does not exist (404)" },
+      "share",
+    );
+    expect(result.toLowerCase()).toMatch(/find that file|moved or deleted/);
   });
 });
 

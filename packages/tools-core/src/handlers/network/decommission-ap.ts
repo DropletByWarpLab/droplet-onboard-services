@@ -27,10 +27,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "INVALID_ARGS", message: "mac is required" },
     };
   }
-  // Colons in MAC are RFC 3986 §3.3 unreserved in path segments;
-  // no need to percent-encode.
+  // Percent-encode the mac: it originates from AP discovery — an
+  // untrusted, network-advertised value — so its shape can't be
+  // assumed; encoding prevents a crafted value from injecting extra
+  // path segments. Express decodes `:mac` once, so the orchestrator
+  // route still receives the original address.
   const res = await ctx.http.orchestrator.post(
-    `/api/aps/${mac}/decommission`,
+    `/api/aps/${encodeURIComponent(mac)}/decommission`,
     undefined,
   );
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);

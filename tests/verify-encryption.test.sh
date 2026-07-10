@@ -52,6 +52,21 @@ for t in WARP-232 WARP-233 WARP-234 WARP-235 WARP-236; do
   grep -q "$t" "$RUNNER" && pass "registry maps to $t" || fail "no check maps to $t"
 done
 
+# WARP-1062 (audit item A): the default mesh targets must be the hops WARP-236
+# mTLS actually protects — never the by-design-plain mcp-server:9090 /
+# web-dashboard:3001 (listing those made the check FAIL forever).
+grep -q 'DROPLET_VFY_MESH_TARGETS:-orchestrator:3000 ai-gateway:8000' "$RUNNER" \
+  && pass "mesh default targets orchestrator:3000 + ai-gateway:8000" \
+  || fail "mesh default targets wrong hops"
+grep -E 'DROPLET_VFY_MESH_TARGETS:-[^}]*(mcp-server|web-dashboard)' "$RUNNER" >/dev/null \
+  && fail "mesh default still lists a by-design-plain target" \
+  || pass "mesh default omits by-design-plain mcp-server/web-dashboard"
+# WARP-1062 (audit item A): data-path defaults are the WARP-232 canonical
+# surfaces (docs/security/at-rest-encryption.md), not the pre-232 layout.
+grep -q 'DROPLET_VFY_DATA_PATHS:-/data/droplet/env/.env /data/droplet/secrets /data/docker' "$RUNNER" \
+  && pass "data-path defaults are the WARP-232 surfaces" \
+  || fail "data-path defaults are stale (want /data/droplet/env/.env /data/droplet/secrets /data/docker)"
+
 # =============================================================================
 # Dynamic section: a per-run scratch dir shared by the lib + runner tests.
 # =============================================================================
@@ -309,6 +324,12 @@ PYEOF
   || fail "posture world verdicts wrong (see $WORK/run3.log)"
 grep -q 'sslmode=disable' "$WORK/stub-calls.log" && pass "pg probe really passes sslmode=disable" \
   || fail "pg probe never sent sslmode=disable"
+# WARP-1062 (audit item A): the mesh probe must hit the mTLS-protected hops.
+grep -q 'http://orchestrator:3000/' "$WORK/stub-calls.log" \
+  && pass "mesh probe fetches orchestrator:3000" || fail "mesh probe never hit orchestrator:3000"
+grep -qE 'mcp-server:9090|web-dashboard:3001' "$WORK/stub-calls.log" \
+  && fail "mesh probe still hits a by-design-plain target" \
+  || pass "mesh probe skips by-design-plain targets"
 { grep -q -- '-starttls postgres' "$WORK/stub-calls.log" || grep -q 's_client' "$WORK/stub-calls.log"; } \
   && pass "pg TLS probe uses openssl s_client" || fail "no s_client call recorded"
 # Evidence files must exist and be hashed into the report
@@ -318,6 +339,41 @@ r = json.load(open(sys.argv[1]))
 c = [x for x in r["checks"] if x["id"]=="transit.pg.plaintext-rejected"][0]
 assert c["evidence_sha256"], c
 ' "$b/report.json" && pass "evidence hashes embedded per check" || fail "evidence_sha256 missing"
+
+echo ""; echo "--- Runner: stopped stack reads SKIP, never PASS (WARP-1062) ---"
+# docker exists, but `compose ps --status running -q` returns nothing and every
+# exec fails the way compose does against a stopped service. Before the
+# running-container guards these probes read GREEN — exec rc!=0 looked exactly
+# like "plaintext refused".
+cat > "$WORK/bin/docker" <<EOF
+#!/bin/sh
+echo "docker \$*" >> "$WORK/stub-calls.log"
+case "\$*" in
+  *" ps --status running -q "*) exit 0;;   # no output = nothing running
+  *"exec"*) echo "service is not running" >&2; exit 1;;
+  *"network inspect"*) echo "cafe12345678"; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$WORK/bin/docker"
+STOPPED_CHECKS="transit.pg.plaintext-rejected,transit.pg.tls13,transit.pg.scram"
+STOPPED_CHECKS="$STOPPED_CHECKS,transit.redis.plaintext-refused,transit.redis.tls"
+STOPPED_CHECKS="$STOPPED_CHECKS,transit.mqtt.plaintext-closed,transit.mqtt.mtls-required"
+STOPPED_CHECKS="$STOPPED_CHECKS,transit.mesh.plain-http-refused"
+set +e; run_vfy DROPLET_VFY_CHECKS="$STOPPED_CHECKS" > "$WORK/run4.log" 2>&1; rc=$?; set -e
+[ "$rc" -eq 0 ] && pass "stopped stack exits 0 (SKIPs, no FAIL)" \
+  || fail "stopped stack rc=$rc (want 0); log: $(tail -3 "$WORK/run4.log")"
+b4="$(newest_bundle)"
+"$PYBIN" - "$b4/report.json" <<'PYEOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+bad = {c["id"]: (c["status"], c.get("detail", "")) for c in r["checks"]
+       if not (c["status"] == "SKIP" and "container-not-running" in c.get("detail", ""))}
+assert not bad, bad
+assert len(r["checks"]) == 8, [c["id"] for c in r["checks"]]
+PYEOF
+[ $? -eq 0 ] && pass "all 8 exec probes SKIP with container-not-running reason" \
+  || fail "stopped stack did not SKIP every exec probe (see $b4/report.json)"
 
 echo ""; echo "--- Signing + offline verification ---"
 # Real-crypto round trip: generate a P-256 key, stub the signer container call
