@@ -21,8 +21,37 @@ import { isPasskeySupported, registerPasskey } from "@/lib/webauthn";
  * a dp-card body. All copy is sentence case, no exclamation marks
  * (design copy rules). Motion comes from the dp-btn token (ease-smooth).
  */
+// WARP-1156 — shown when the page isn't a secure context (plain-HTTP
+// droplet.local) and on a SecurityError from the ceremony (origin/RP-ID
+// mismatch). Both mean: this address can never mint a passkey; the fix is
+// visiting the box's https address, not retrying here.
+const SECURE_ADDRESS_COPY =
+  "Passkeys need a secure connection, and this address doesn't have one. " +
+  "Open your Droplet at its secure https address from setup, then add the passkey there.";
+
+/** WARP-1156 — map the register failure to honest copy by the DOMException
+ *  NAME only (never echo raw messages — they can carry transport detail).
+ *  The old catch-all collapsed every cause into one dead-end "Try again",
+ *  which on an insecure origin was a lie: no retry could ever succeed. */
+function friendlyRegisterError(err: unknown): string {
+  switch ((err as { name?: unknown })?.name) {
+    case "NotAllowedError":
+      // The spec deliberately folds dismiss / timeout / no-match into one.
+      return "The passkey prompt was closed or timed out. Try again when you're ready.";
+    case "InvalidStateError":
+      return "This device already has a passkey for this Droplet. Try signing in with it instead.";
+    case "SecurityError":
+      return SECURE_ADDRESS_COPY;
+    default:
+      return "We couldn't add that passkey. Try again.";
+  }
+}
+
 export function PasskeysSection() {
   const [supported, setSupported] = useState(false);
+  // WARP-1156 — assume secure until mount proves otherwise so SSR markup
+  // doesn't flash the warning on https pages.
+  const [secure, setSecure] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState(false);
@@ -30,6 +59,11 @@ export function PasskeysSection() {
   // Client-side capability check after mount (window is undefined during SSR).
   useEffect(() => {
     setSupported(isPasskeySupported());
+    // WebAuthn only runs in a secure context; on plain HTTP the browser
+    // rejects credentials.create() outright, so a button here would be a
+    // dead-end (the WARP-1156 live report). isSecureContext is the same
+    // signal the browser gates on.
+    setSecure(window.isSecureContext !== false);
   }, []);
 
   async function handleAdd() {
@@ -39,9 +73,8 @@ export function PasskeysSection() {
     try {
       await registerPasskey();
       setAdded(true);
-    } catch {
-      // Never surface the raw ceremony error — it can carry transport detail.
-      setError("We couldn't add that passkey. Try again.");
+    } catch (err) {
+      setError(friendlyRegisterError(err));
     } finally {
       setBusy(false);
     }
@@ -59,7 +92,7 @@ export function PasskeysSection() {
           Droplet.
         </p>
 
-        {supported ? (
+        {supported && secure ? (
           <button
             type="button"
             onClick={handleAdd}
@@ -69,6 +102,12 @@ export function PasskeysSection() {
             <KeyRound size={16} strokeWidth={1.5} />
             {busy ? "Waiting for passkey..." : "Add a passkey"}
           </button>
+        ) : supported ? (
+          // WARP-1156 — insecure context: every create() would be refused by
+          // the browser, so render the way forward instead of a doomed button.
+          <p className="type-footnote text-label-secondary bg-system-orange/10 rounded-sm px-3 py-2">
+            {SECURE_ADDRESS_COPY}
+          </p>
         ) : (
           <p className="type-footnote text-label-tertiary">
             This browser doesn&apos;t support passkeys.
