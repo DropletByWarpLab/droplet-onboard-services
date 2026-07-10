@@ -38,6 +38,9 @@ vi.mock("../config.js", () => ({
     NODE_ENV: "test",
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
+    // Makes the `network` module available so the module gate lets /api/network
+    // through (network.available = isSet(ROUTING_SERVICE_URL)).
+    ROUTING_SERVICE_URL: "http://routing.test",
     AUTH_ENABLED: false,
     FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
@@ -250,6 +253,9 @@ vi.mock("@prisma/client", () => {
   });
 
   const mockPrisma = {
+    // Module gate reads moduleSetting.findMany() on every gated request
+    // (/api/network here); [] = no overrides => registry defaults, gate passes.
+    moduleSetting: { findMany: vi.fn().mockResolvedValue([]) },
     user: { findUnique: vi.fn().mockResolvedValue(null) },
     $connect: vi.fn().mockResolvedValue(undefined),
     $disconnect: vi.fn().mockResolvedValue(undefined),
