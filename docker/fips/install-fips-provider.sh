@@ -29,6 +29,10 @@
 #      module integrity MAC. A KAT failure fails the docker build. (The
 #      MAC is over the module file CONTENT, so the byte-identical copies
 #      from step 1 all validate against the same fipsmodule.cnf.)
+#      WARP-1209: the emitted `[fips_sect]` is the ONLY definition of that
+#      section (docker/openssl-fips.cnf no longer re-declares it), so this
+#      script verifies the section name and ensures `activate = 1` lives
+#      there, failing the build on any drift.
 #   3. Positive probe — under /etc/ssl/openssl-fips.cnf the FIPS provider
 #      reports active at version 3.0.9 and a FIPS-approved digest works.
 #   4. Negative probe — MD5 is not FIPS-approved; under the FIPS config it
@@ -80,6 +84,33 @@ done
 # /etc/ssl/openssl-fips.cnf `.include`s.
 OPENSSL_CONF="$BOOTSTRAP_CONF" openssl fipsinstall \
   -module "${MODULESDIR}/fips.so" -out /etc/ssl/fipsmodule.cnf
+
+# WARP-1209 — [fips_sect] is single-sourced: the shared config
+# (docker/openssl-fips.cnf) no longer re-declares it, so the section
+# fipsinstall just generated must be the ONE the provider entry
+# (`fips = fips_sect`) points at, and it must carry the activation flag.
+# Debian's fipsinstall (bookworm 3.0.x and trixie 3.5.x) emits
+# `activate = 1` itself; ensure it for any openssl that does not, and
+# fail the build loudly if the emitted section name or an explicit
+# non-1 activate value ever drifts — a silent drift would ship images
+# whose FIPS mode never activates.
+if ! grep -q '^\[fips_sect\]$' /etc/ssl/fipsmodule.cnf; then
+  echo "install-fips-provider: fipsmodule.cnf does not declare [fips_sect] — fipsinstall output drifted; reconcile docker/openssl-fips.cnf's provider entry" >&2
+  exit 1
+fi
+if [ "$(grep -c '^\[' /etc/ssl/fipsmodule.cnf)" != "1" ]; then
+  echo "install-fips-provider: fipsmodule.cnf declares more than one section — an appended activate flag could land in the wrong one; reconcile deliberately" >&2
+  exit 1
+fi
+if grep -q '^activate' /etc/ssl/fipsmodule.cnf; then
+  if ! grep -Eq '^activate[[:space:]]*=[[:space:]]*1$' /etc/ssl/fipsmodule.cnf; then
+    echo "install-fips-provider: fipsmodule.cnf carries an activate value other than 1 — refusing to ship a non-activating FIPS section" >&2
+    exit 1
+  fi
+else
+  printf 'activate = 1\n' >> /etc/ssl/fipsmodule.cnf
+  echo "install-fips-provider: appended activate = 1 to fipsmodule.cnf (this fipsinstall does not emit it)"
+fi
 
 # Step 3 — positive probes.
 providers="$(OPENSSL_CONF="$FIPS_CONF" openssl list -providers)"
