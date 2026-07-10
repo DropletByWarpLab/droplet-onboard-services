@@ -29,6 +29,19 @@ describe("memory_extract_fact", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("accepts the WARP-1120 Business category (D-9)", async () => {
+    const create = vi.fn();
+    const res = await memoryExtractFact.handler(
+      { category: "Business", fact: "We invoice clients on the 1st.", confirmed: false },
+      ctxWith(create),
+    );
+    // Business is a valid bucket now — the tool asks for confirmation (Tier-2
+    // two-phase), it does NOT reject as INVALID_ARGS.
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe("confirmation_required");
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("rejects empty fact", async () => {
     const create = vi.fn();
     const res = await memoryExtractFact.handler(

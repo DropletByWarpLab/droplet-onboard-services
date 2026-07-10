@@ -53,6 +53,8 @@ export {
   READ_QUERIES,
   getReadQuery,
   buildReadStatement,
+  scheduleDayBounds,
+  escapeLike,
   UnknownReadQueryError,
   type ReadQuery,
   type BuiltStatement,

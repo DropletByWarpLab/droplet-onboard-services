@@ -50,6 +50,10 @@ const MEASURE_KINDS = new Set(["noise_floor", "speech_peak"]);
 const MEASURE_SECONDS_MIN = 1;
 const MEASURE_SECONDS_MAX = 30;
 
+/** WARP-1059 — mirrors voice-io's CalibrationModeRequest ttl_s bounds. */
+const CALIBRATION_MODE_TTL_MIN_S = 5;
+const CALIBRATION_MODE_TTL_MAX_S = 300;
+
 function voiceIoBaseUrl(): string {
   // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
   const url = internalBaseUrl(process.env.VOICE_IO_URL ?? DEFAULT_VOICE_IO_URL);
@@ -63,7 +67,7 @@ function voiceIoBaseUrl(): string {
  */
 async function proxy(
   res: Response,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body?: unknown,
   timeoutMs: number = READ_TIMEOUT_MS,
@@ -168,6 +172,41 @@ export function createVoiceRouter(): Router {
     // Fully automatic on the box side (play a tone + listen for it) —
     // no client-controlled parameters to validate or forward.
     await proxy(res, "POST", "/audio/echo-check", {}, ECHO_CHECK_TIMEOUT_MS);
+  });
+
+  // ── WARP-1059: calibration mode (wizard-scoped wake suppression) ──
+  //
+  // The wizard enters/renews this around its measure/echo/wake-test
+  // windows so the spec phrase can't start a full assistant turn (STT
+  // pausing the detector, the reply spoken through the box speaker
+  // polluting a measurement). voice-io keeps wake DETECTION counting;
+  // the mode auto-expires (TTL) so an abandoned wizard can never leave
+  // the assistant deaf.
+
+  router.post("/voice/calibration-mode", guard, async (req, res) => {
+    const ttl: unknown = req.body?.ttl_s;
+    if (ttl !== undefined) {
+      if (
+        typeof ttl !== "number" ||
+        !Number.isFinite(ttl) ||
+        ttl < CALIBRATION_MODE_TTL_MIN_S ||
+        ttl > CALIBRATION_MODE_TTL_MAX_S
+      ) {
+        res.status(400).json({ error: "invalid_ttl" });
+        return;
+      }
+    }
+    // Only the validated field is forwarded; when `ttl_s` is absent
+    // voice-io applies its own default.
+    const body: { ttl_s?: number } = {};
+    if (typeof ttl === "number") body.ttl_s = ttl;
+    await proxy(res, "POST", "/voice/calibration-mode", body);
+  });
+
+  router.delete("/voice/calibration-mode", guard, async (_req, res) => {
+    // Idempotent exit — voice-io answers {active: false} even when the
+    // pipeline never started, so wizard close paths can fire it blind.
+    await proxy(res, "DELETE", "/voice/calibration-mode");
   });
 
   router.get("/voice/calibration", guard, async (_req, res) => {

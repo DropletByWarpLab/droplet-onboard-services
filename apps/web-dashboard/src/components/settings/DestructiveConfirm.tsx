@@ -148,7 +148,8 @@ export function DestructiveConfirm({
       maxWidth="sm"
       placement="center"
     >
-      <div className="p-5 space-y-4">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div className="space-y-4">
         <div className="flex items-start gap-3">
           <span
             className="flex-none mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-[rgba(239,68,68,0.1)] text-[#ef4444]"

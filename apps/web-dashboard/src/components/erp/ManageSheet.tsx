@@ -16,6 +16,7 @@ export function ManageSheet({
   open,
   onClose,
   connection,
+  canToggleWrites = true,
   onToggleWrites,
   onSyncNow,
   onDisconnect,
@@ -23,6 +24,9 @@ export function ManageSheet({
   open: boolean;
   onClose: () => void;
   connection: IntegrationConnection;
+  /** Only owner/admin may flip the write kill-switch (RBAC). When false the
+   *  toggle is hidden and the mode is shown read-only. */
+  canToggleWrites?: boolean;
   onToggleWrites: (next: boolean) => void;
   onSyncNow: () => void;
   onDisconnect: () => void;
@@ -48,16 +52,18 @@ export function ManageSheet({
               {writesOn ? <PlugZap size={15} className="text-system-orange" /> : <Lock size={15} className="text-label-tertiary" />}
               {writesOn ? "Writes enabled" : "Read-only"}
             </span>
-            <button
-              type="button"
-              className={`sw ${writesOn ? "on" : ""}`}
-              role="switch"
-              aria-checked={writesOn}
-              aria-label="Toggle writes"
-              onClick={() => onToggleWrites(!writesOn)}
-            >
-              <span className="ball" />
-            </button>
+            {canToggleWrites && (
+              <button
+                type="button"
+                className={`sw ${writesOn ? "on" : ""}`}
+                role="switch"
+                aria-checked={writesOn}
+                aria-label="Toggle writes"
+                onClick={() => onToggleWrites(!writesOn)}
+              >
+                <span className="ball" />
+              </button>
+            )}
           </div>
           <button type="button" className="dp-row w-full text-left" onClick={onSyncNow}>
             <span className="flex items-center gap-2 type-subheadline text-label-primary">

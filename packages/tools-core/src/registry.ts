@@ -120,6 +120,9 @@ import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 
+// business (WARP-1120) — read-only structured business-profile access
+import businessProfileGet from "./handlers/business/profile-get.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -224,6 +227,8 @@ const allTools: Tool[] = [
   erpFindPatient,
   erpGetArSummary,
   erpScheduleAppointment,
+  // WARP-1120: business-knowledge layer (read-only Tier 1)
+  businessProfileGet,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

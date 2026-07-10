@@ -7,8 +7,10 @@
 # startup (the Compose service runs with DROPLET_AUTO_PROVISION=1).
 #
 # Backend selection:
-#   DROPLET_TPM_BACKEND=real (default in production)  → tpm2-pytss + /dev/tpm0
-#   DROPLET_TPM_BACKEND=mock (default in dev/CI)      → pure-Python in-memory
+#   DROPLET_TPM_BACKEND=mock (default)  → pure-Python in-memory
+#   DROPLET_TPM_BACKEND=real            → tpm2-pytss + /dev/tpm0; currently an
+#       UNFINISHED scaffold (IDX-002) that device-identity-svc fails closed on
+#       unless DROPLET_TPM_ALLOW_SCAFFOLD is set, so it is never auto-selected.
 #
 # When DROPLET_TPM_BACKEND=mock + no storage dir exists, this script
 # exits 0 cleanly so dev workflows aren't blocked.
@@ -24,7 +26,7 @@ source "$SCRIPT_DIR/lib/logging.sh"
 source "$SCRIPT_DIR/lib/device-identity.sh"
 
 main() {
-  local backend="${DROPLET_TPM_BACKEND:-real}"
+  local backend="${DROPLET_TPM_BACKEND:-mock}"
   local storage
   storage=$(di_storage_path)
   log_info "Device-identity provisioning (backend=${backend}, storage=${storage})"

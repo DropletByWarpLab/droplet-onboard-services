@@ -143,24 +143,28 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // box can't be silently renamed by an anonymous LAN client; the GET is a
     // read-only, side-effect-free validity check.
     //
-    // These are matched by the startsWith() below (a PREFIX match, not exact),
-    // so "/api/setup/box-name" intentionally covers BOTH the persist route AND
-    // "/api/setup/box-name/check". That's safe here because those are the ONLY
-    // two routes mounted under this prefix: the POST self-re-gates (session OR
-    // appliance-not-ready) and the GET is side-effect-free — so a broader
-    // prefix can't accidentally de-auth some future sibling route (there is
-    // none). The explicit "/check" entry is kept for readability/intent.
-    "/api/setup/box-name/check",
-    "/api/setup/box-name",
+    // NOTE: the box-name routes need PREFIX semantics (/box-name covers
+    // /box-name/check AND /box-name/rename), so they live in PUBLIC_PREFIXES
+    // below — NOT this exact-match list. Their handlers re-gate themselves in
+    // routes/setup.ts (owner/admin once the box is claimed; see ORCH-002).
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",
     "/api/auth/refresh",
-    // WARP-217: invite-accept must be reachable by a fully logged-out
-    // invitee. The token in the URL is the auth.
-    "/api/auth/invites/accept/",
+    // WARP-217: invite-accept (token-in-path) also needs prefix semantics —
+    // see PUBLIC_PREFIXES below.
   ];
-  if (publicPaths.some((p) => req.path === p || req.path.startsWith(p))) {
+  // Exact-match the allowlist. Only two entries genuinely need PREFIX
+  // semantics: the box-name pair (/api/setup/box-name covers /box-name/check
+  // and /box-name/rename) and invite-accept (token-in-path). Everything else
+  // is matched exactly, so a future /api/setup/<x> sibling can never be
+  // silently de-authed by a stray prefix match (the latent fail-open ORCH-001
+  // caught — the old startsWith() applied to EVERY entry).
+  const PUBLIC_PREFIXES = ["/api/setup/box-name", "/api/auth/invites/accept/"];
+  const isPublic =
+    publicPaths.includes(req.path) ||
+    PUBLIC_PREFIXES.some((p) => req.path === p || req.path.startsWith(p));
+  if (isPublic) {
     next();
     return;
   }
@@ -593,6 +597,36 @@ function matchServiceToken(token: string): AuthUser | null {
 }
 
 /**
+ * WARP-237: ACL denials are mandatory-emit policy violations. Fire-and-forget
+ * (`void`) — the 403 must not wait on the append lock, and recordActivity is
+ * a no-op pre-init so this is safe in every test/boot ordering. Known
+ * trade-off: a misbehaving client can generate one row per denied request
+ * (same posture as the sign-in-throttle rows); dedup is a follow-up if it
+ * proves noisy.
+ *
+ * WARP-1062 (audit item B): exported so the LOCAL guards that mirror
+ * requireRole — the route-file `isAdmin()` helpers, audit-roots
+ * `requireOwnerOrAdmin`, the SCIM bearer guard — emit the same
+ * policy-violation row instead of denying silently.
+ */
+export function recordAccessDenied(req: Request, reason: string): void {
+  void recordActivity({
+    kind: "auth",
+    severity: "warn",
+    sourceIcon: "shield-off",
+    what: "Access denied",
+    sub: `${req.method} ${req.path}`,
+    refs: {
+      path: req.path,
+      method: req.method,
+      role: req.user?.role ?? null,
+      reason,
+    },
+    actor: actorFromRequest(req),
+  });
+}
+
+/**
  * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
  * `req.user.role` is populated by the upstream middleware (either from
  * a verified JWT, a matched service principal, or the Nextcloud OCS
@@ -628,30 +662,13 @@ export function requireRole(
   const allowedSet = new Set<string>(allowed);
   return (req: Request, res: Response, next: NextFunction): void => {
     const role = req.user?.role;
-    const deny = (reason: "no-role" | "role-not-permitted"): void => {
-      // WARP-237: ACL denials are mandatory-emit policy violations.
-      // Fire-and-forget (`void`) — the 403 must not wait on the append
-      // lock, and recordActivity is a no-op pre-init so this is safe in
-      // every test/boot ordering. Known trade-off: a misbehaving client
-      // can generate one row per denied request (same posture as the
-      // sign-in-throttle rows); dedup is a follow-up if it proves noisy.
-      void recordActivity({
-        kind: "auth",
-        severity: "warn",
-        sourceIcon: "shield-off",
-        what: "Access denied",
-        sub: `${req.method} ${req.path}`,
-        refs: { path: req.path, method: req.method, role: role ?? null, reason },
-        actor: actorFromRequest(req),
-      });
-    };
     if (typeof role !== "string" || role.length === 0) {
-      deny("no-role");
+      recordAccessDenied(req, "no-role");
       res.status(403).json({ error: "Forbidden: no role on session" });
       return;
     }
     if (!allowedSet.has(role)) {
-      deny("role-not-permitted");
+      recordAccessDenied(req, "role-not-permitted");
       res.status(403).json({ error: "Forbidden: role not permitted" });
       return;
     }

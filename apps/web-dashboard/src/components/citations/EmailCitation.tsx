@@ -74,7 +74,9 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
             <dl className="type-caption-1 text-label-secondary space-y-1 mb-3">
               <div className="flex gap-2">
                 <dt className="text-label-tertiary">Message-Id:</dt>
-                <dd className="font-mono truncate">{anchor.messageId}</dd>
+                {/* WARP-1153: min-w-0 so a long Message-Id truncates instead
+                    of widening the card past max-w-xl. */}
+                <dd className="font-mono truncate min-w-0">{anchor.messageId}</dd>
               </div>
               <div className="flex gap-2">
                 <dt className="text-label-tertiary">Part:</dt>

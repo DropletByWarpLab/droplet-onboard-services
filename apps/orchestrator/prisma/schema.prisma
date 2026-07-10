@@ -881,6 +881,40 @@ enum FileContentSource {
   brain
 }
 
+/// WARP-1139/WARP-1140 — explicit per-file indexing status for the
+/// file-indexer's Nextcloud watcher corpus. Per the CLAUDE.md "no guessing"
+/// rule (the WARP-218 convention): search surfaces must distinguish "not
+/// indexed yet / skipped / failed" from "no match", which is impossible when
+/// indexing state is derived from FileContentChunk row ABSENCE. Written by
+/// services/file-indexer at each pipeline stage (indexing → ready | skipped |
+/// failed); read by GET /api/files/search/status so the dashboard can render
+/// an honest "still indexing" empty state.
+///
+/// `userId` follows the FileContentChunk convention: the Nextcloud username,
+/// or the `__household__` sentinel for files in the shared groupfolder space.
+/// `path` is the home-relative display path (e.g. "/Docs/report.pdf" or
+/// "/Household/Trips/notes.txt") — same shape as FileContentChunk.path.
+/// `reason` is non-null only when status is `failed` or `skipped` (mirrors
+/// BrainMemoryItem.failureReason).
+model FileIndexStatus {
+  userId    String
+  path      String
+  ncFileId  Int?
+  status    FileIndexState
+  reason    String?
+  updatedAt DateTime       @default(now())
+
+  @@id([userId, path])
+  @@index([userId, status])
+}
+
+enum FileIndexState {
+  indexing
+  ready
+  skipped
+  failed
+}
+
 /// WARP-233 — explicit sensitivity tag (no guessing / no prefix-sniffing for
 /// policy; the dcv1: prefix is a FORMAT marker, this column is the POLICY).
 enum ChunkSensitivity {
@@ -1230,6 +1264,15 @@ model VpnPeer {
   // without CIDR mask (mask is implied by the subnet).
   assignedIp  String
   status      String    @default("active") // "active" | "revoked"
+  // How this peer reaches the box (hybrid remote-access P1). EXPLICIT enum-
+  // checked value, never inferred from another field's absence (rule 10):
+  //   "away" (default) — dials the box from OUTSIDE the home LAN via the public
+  //           FQDN / relay endpoint. The pre-hybrid behavior; every existing row
+  //           is "away", so the default keeps them correct without a backfill.
+  //   "home" — dials the box DIRECTLY at its home-facing LAN IP (split-tunnel to
+  //           the box, no public inbound). The .conf's Endpoint is the LAN IP.
+  // A CHECK constraint pins it to exactly these two values (see the migration).
+  mode        String    @default("away")
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?
 

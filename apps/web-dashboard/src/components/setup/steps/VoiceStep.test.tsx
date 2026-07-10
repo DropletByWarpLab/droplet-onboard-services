@@ -177,8 +177,11 @@ describe("VoiceStep — availability contract (WARP-933)", () => {
     render(
       <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={onAutoSkip} />,
     );
+    // WARP-1105 — the surfaced check-failure now reads honestly as "the voice
+    // assistant isn't responding" (a real fault the user can retry) rather
+    // than the vaguer "couldn't check" that read as a transient blip.
     expect(
-      await screen.findByText(/couldn.t check the voice assistant/i),
+      await screen.findByText(/isn.t responding/i),
     ).toBeInTheDocument();
     expect(onAutoSkip).not.toHaveBeenCalled();
     // Retry recovers to the happy path.
@@ -259,5 +262,63 @@ describe("VoiceStep — dead mic / flatline (WARP-1050)", () => {
     expect(
       screen.queryByText(/isn.t (picking up|receiving)/i),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("VoiceStep — voice service reachable but unhealthy (WARP-1105)", () => {
+  it("renders an honest 'not responding' state (not the try-it hero) when the pipeline latched state:'error'", async () => {
+    // voice-io answers /voice/status with 200 but a state the wizard can't
+    // teach against: the pipeline latched `error` (a boot-race STT/TTS/LLM
+    // reachability failure — WARP-1092). It is NOT no_mic and NOT flatlined,
+    // so the pre-WARP-1105 code fell through to the "say Hey Droplet" hero and
+    // told the customer to talk to an assistant that can't hear them.
+    fetchVoiceStatus.mockResolvedValue(
+      listeningStatus({
+        state: "error",
+        listening: false,
+        error_message: "stt unreachable",
+      }),
+    );
+    const onComplete = vi.fn();
+    render(
+      <VoiceStep onComplete={onComplete} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    // Honest headline: the voice assistant isn't responding.
+    expect(await screen.findByText(/isn.t responding/i)).toBeInTheDocument();
+    // It must NOT show the try-it hero (nothing would happen if they spoke).
+    expect(screen.queryByText(/say .?hey droplet/i)).not.toBeInTheDocument();
+    // A working retry is offered.
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
+    // Continue is always reachable — voice never blocks setup.
+    const cont = screen.getByRole("button", { name: /^continue$/i });
+    expect(cont).toBeEnabled();
+    fireEvent.click(cont);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers to the try-it hero when a later poll clears the error", async () => {
+    vi.useFakeTimers();
+    fetchVoiceStatus
+      // initial load — pipeline errored
+      .mockResolvedValueOnce(
+        listeningStatus({ state: "error", listening: false }),
+      )
+      // poll — the dependency recovered, pipeline is listening again
+      .mockResolvedValue(listeningStatus());
+
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    await act(async () => {});
+    expect(screen.getByText(/isn.t responding/i)).toBeInTheDocument();
+    expect(screen.queryByText(/say .?hey droplet/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(screen.getByText(/say .?hey droplet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/isn.t responding/i)).not.toBeInTheDocument();
   });
 });

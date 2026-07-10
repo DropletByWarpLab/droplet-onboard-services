@@ -15,6 +15,7 @@ import type {
   IntegrationConnection,
   PatientResult,
   PatientSummary,
+  ScheduleEntry,
   AppointmentWriteRequest,
 } from "./erp-types";
 
@@ -28,39 +29,54 @@ export function fetchEaglesoft(): Promise<EaglesoftDetail> {
   return apiFetch<EaglesoftDetail>("/api/integrations/eaglesoft");
 }
 
-export interface EaglesoftScheduleResponse {
+interface ScheduleEnvelope {
+  connected: boolean;
+  reason?: string;
   date: string;
-  entries: EaglesoftDetail["schedule"];
+  items: ScheduleEntry[];
 }
 
-export function fetchEaglesoftSchedule(
+export interface EaglesoftScheduleResponse {
+  date: string;
+  entries: ScheduleEntry[];
+}
+
+/** GET /api/erp/schedule → the backend's { connected, reason, date, items }
+ *  envelope, adapted to the { date, entries } the surface renders. */
+export async function fetchEaglesoftSchedule(
   date: string,
   init?: ApiFetchOptions,
 ): Promise<EaglesoftScheduleResponse> {
-  return apiFetch<EaglesoftScheduleResponse>(
+  const r = await apiFetch<ScheduleEnvelope>(
     `/api/erp/schedule?date=${encodeURIComponent(date)}`,
     init,
   );
+  return { date: r.date ?? date, entries: r.items ?? [] };
 }
 
-export function searchPatients(
+export async function searchPatients(
   query: string,
   init?: ApiFetchOptions,
 ): Promise<PatientResult[]> {
-  return apiFetch<PatientResult[]>(
+  // Backend returns { connected, reason, items } — unwrap to the list.
+  const r = await apiFetch<{ connected: boolean; reason?: string; items: PatientResult[] }>(
     `/api/erp/patients?query=${encodeURIComponent(query)}`,
     init,
   );
+  return r.items ?? [];
 }
 
-export function fetchPatientSummary(
+export async function fetchPatientSummary(
   id: string,
   init?: ApiFetchOptions,
-): Promise<PatientSummary> {
-  return apiFetch<PatientSummary>(
+): Promise<PatientSummary | null> {
+  // Backend returns { connected, reason, patient } — unwrap (null when
+  // not-connected / not-found).
+  const r = await apiFetch<{ connected: boolean; reason?: string; patient: PatientSummary | null }>(
     `/api/erp/patient/${encodeURIComponent(id)}`,
     init,
   );
+  return r.patient ?? null;
 }
 
 export interface ConnectionTestResult {
@@ -72,14 +88,19 @@ export interface ConnectionTestResult {
 }
 
 /** Non-destructive reachability probe against host:port. */
-export function testEaglesoftConnection(
+export async function testEaglesoftConnection(
   input: Pick<EaglesoftConnectInput, "host" | "port">,
 ): Promise<ConnectionTestResult> {
-  return apiFetch<ConnectionTestResult>("/api/integrations/eaglesoft/test", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  // Backend returns { ok, reason, message } — adapt to { reachable, message }.
+  const r = await apiFetch<{ ok: boolean; reason?: string; message?: string }>(
+    "/api/integrations/eaglesoft/test",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return { reachable: r.ok, message: r.message };
 }
 
 /** Runs provisioning + verification and lands the connection CONNECTED. */

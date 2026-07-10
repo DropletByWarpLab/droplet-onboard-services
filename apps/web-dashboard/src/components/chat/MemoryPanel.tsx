@@ -28,6 +28,8 @@ const CATEGORIES: MemoryFact["category"][] = [
   "Scope",
   "Schedule",
   "Other",
+  // WARP-1120 (D-9) — business-knowledge facts from the onboarding interview.
+  "Business",
 ];
 
 /** WARP-845 — distribution ladder, widest reach last. The label says who

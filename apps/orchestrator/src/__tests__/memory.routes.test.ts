@@ -204,6 +204,16 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
     expect(res.status).toBe(400);
   });
 
+  it("POST accepts the WARP-1120 Business category (D-9)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, mkUser("owner"));
+    const res = await request(app)
+      .post("/api/memory/facts")
+      .send({ category: "Business", fact: "We invoice clients on the 1st." });
+    expect(res.status).toBe(201);
+    expect(res.body.fact.category).toBe("Business");
+  });
+
   it("PATCH updates the fact text + active flag", async () => {
     const prisma = createPrismaMock([seedFact({ id: "mf-x" })]);
     const app = buildApp(prisma, mkUser("owner"));

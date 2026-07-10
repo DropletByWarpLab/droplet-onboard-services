@@ -170,7 +170,8 @@ export function SceneEditorModal({
 
   return (
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="lg">
-      <div className="p-5">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div>
         <h2 id={headingId} className="type-title-3 text-label-primary mb-1">
           {mode === "create" ? "New routine" : "Edit routine"}
         </h2>

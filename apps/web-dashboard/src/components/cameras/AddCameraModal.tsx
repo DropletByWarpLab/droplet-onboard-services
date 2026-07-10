@@ -40,7 +40,9 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    // WARP-1153: p-6 backdrop inset (matches the shared Dialog backdrop) so
+    // the card never sits flush against the screen edge on phones.
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
 

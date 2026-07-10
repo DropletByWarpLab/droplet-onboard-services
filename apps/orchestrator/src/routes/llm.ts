@@ -31,6 +31,16 @@ import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
+  getInterviewOverlay,
+  resetOnboardingForDeletedSession,
+  INTERVIEW_CONDUCTOR_BLOCK,
+} from "../services/business-onboarding.service.js";
+import {
+  getBusinessProfile,
+  composeBusinessBlock,
+  type WorkspaceTypeName,
+} from "../services/business-profile.service.js";
+import {
   degradeToFit,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
@@ -260,6 +270,24 @@ async function narrowAllowedToolsForRole(
   return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
 }
 
+/**
+ * WARP-1121 (§9.3/§15) — server-side write-tool strip for interview turns.
+ * The interview session must never carry write tools REGARDLESS of the
+ * caller's role or `allowed_tools`: the commit is a human-initiated REST
+ * write (D-5), so the model gets no write surface inside the interview even
+ * for the owner. `undefined` (privileged caller = full registry) resolves
+ * to the live tool list first so the subtraction is real, not symbolic.
+ */
+async function stripWriteToolsForInterview(
+  allowed: string[] | undefined,
+): Promise<string[]> {
+  if (allowed !== undefined) {
+    return allowed.filter((n) => !WRITE_TOOLS.has(n));
+  }
+  const tools = await mcpClient.listTools().catch(() => []);
+  return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
+}
+
 // Belt-and-braces: even if the agent loop itself enforces the narrowed
 // list, refuse at request-time if a client has planted tool-call entries
 // invoking a write tool inside replayed assistant history. /chat
@@ -322,6 +350,18 @@ function buildBaseSystemPrompt(
    * the fresh read failed (fail-open, same posture as the memory block).
    */
   personaBlock?: string,
+  /**
+   * WARP-1120 (§8/§10/§15) — the role-filtered business-context block
+   * (business-profile.service.ts). Spliced in RIGHT AFTER the persona block
+   * and BEFORE tool guidance (§10 composition order), rendered inside its own
+   * §15 data-framing delimiter so the model treats it as reference data, not
+   * directives. Already role-filtered by the composer (owner/admin → summary +
+   * fields, family → summary only, guest/service → ""), and empty entirely on
+   * a non-BUSINESS box. "" (or undefined) = no business block this turn — the
+   * estimator degraded it away (dropped 1st), the box is HOME-typed, or the
+   * fresh read failed (fail-open).
+   */
+  businessBlock?: string,
 ): string {
   const can = (name: string) => !allowed || allowed.includes(name);
   // Identity leads: the full "who you are / what this box does" block
@@ -332,6 +372,12 @@ function buildBaseSystemPrompt(
   // guidance — one injection owner for the persona block on this path.
   if (personaBlock && personaBlock.length > 0) {
     lines.push("", personaBlock);
+  }
+  // Business context follows persona, still before tool guidance. Summary-
+  // first + delimiter-framed by the composer; a truncation loses detail, not
+  // meaning.
+  if (businessBlock && businessBlock.length > 0) {
+    lines.push("", businessBlock);
   }
   const guidance: string[] = [];
   if (can("search_content")) {
@@ -614,10 +660,32 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(403).json({ error: "forbidden_tool_for_role" });
         return;
       }
-      const allowedForUser = await narrowAllowedToolsForRole(
+      let allowedForUser = await narrowAllowedToolsForRole(
         role,
         chatReq.allowed_tools,
       );
+
+      // WARP-1121 (§9.3) — is this turn part of the live onboarding
+      // interview? One indexed read; fail-open to "not an interview" so a
+      // profile-read hiccup can never take normal chat down. When active:
+      // write tools are stripped SERVER-SIDE regardless of role/allowed_tools
+      // (D-5/§15), and the conductor block is appended below.
+      let interviewActive = false;
+      if (chatReq.conversationId) {
+        try {
+          const overlay = await getInterviewOverlay(
+            prisma,
+            chatReq.conversationId,
+          );
+          interviewActive = overlay.active;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] interview-overlay probe failed:", err);
+        }
+      }
+      if (interviewActive) {
+        allowedForUser = await stripWriteToolsForInterview(allowedForUser);
+      }
 
       // Resolve the caller's Nextcloud session token so file-tool
       // handlers (`list_files`, `read_file`, `write_file`, etc.) can
@@ -1139,6 +1207,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           console.warn("[llm/chat] persona load failed:", err);
         }
 
+        // WARP-1120 §8/§9.1 — the role-filtered business block, composed fresh
+        // each request and ONLY while the workspace is a BUSINESS box. A box
+        // re-typed to HOME injects nothing even with a committed profile, so we
+        // short-circuit BEFORE reading (and create-on-read materialising) the
+        // profile. composeBusinessBlock role-filters and gates on type again
+        // (defense-in-depth). Fail-open to no block on any error.
+        let businessBlock = "";
+        try {
+          const workspace = await prisma.workspace.findUnique({
+            where: { id: 1 },
+          });
+          const workspaceType = (workspace?.type ?? "HOME") as WorkspaceTypeName;
+          if (workspaceType === "BUSINESS") {
+            businessBlock = composeBusinessBlock(
+              role,
+              await getBusinessProfile(prisma),
+              workspaceType,
+            );
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] business-profile load failed:", err);
+        }
+
         // WARP-1118 §10 — the context-budget gate. Estimate the WHOLE
         // assembled request (identity + persona + [business, Phase 2] +
         // tool guidance + memory facts + serialized tools[] + the pins /
@@ -1152,6 +1244,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
         const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
+        // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
+        // after the whole base prompt on interview turns only; folded into
+        // the NEVER-DROPPED identity part for sizing (it must survive
+        // degradation on interview sessions — dropping the conductor
+        // mid-interview would silently break the topic protocol).
+        const interviewBlock = interviewActive
+          ? INTERVIEW_CONDUCTOR_BLOCK
+          : "";
         // Serialize the effective tools[] the same way llm-agent.service.ts
         // does, so the estimate reflects what the model actually receives.
         const effectiveTools = allowedForUser
@@ -1175,9 +1275,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           .map((m) => contentToText(m.content))
           .join("\n");
         const sizeParts: RequestSizeParts = {
-          identityBlock: identityAndGuidance,
+          // Interview conductor rides in the never-dropped identity part
+          // (WARP-1121 §10 — interview sessions only; never dropped there).
+          identityBlock: identityAndGuidance + interviewBlock,
           personaBlock,
-          businessBlock: "", // Phase 2 — no business block wired yet.
+          businessBlock, // WARP-1120 — role-filtered, BUSINESS-only, dropped 1st.
           toolGuidance: "", // folded into identityBlock above.
           memoryFactsBlock: memoryBlock,
           toolSchemasJson,
@@ -1202,8 +1304,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const baseSystemMessage: ChatMessage = {
           role: "system",
           content:
-            buildBaseSystemPrompt(allowedForUser, degraded.personaBlock) +
-            memoryBlock,
+            buildBaseSystemPrompt(
+              allowedForUser,
+              degraded.personaBlock,
+              degraded.businessBlock,
+            ) +
+            memoryBlock +
+            // WARP-1121 (§9.3) — conductor appended AFTER the base prompt on
+            // interview turns; "" on every other turn.
+            (interviewBlock ? "\n\n" + interviewBlock : ""),
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
@@ -1474,6 +1583,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
+      // WARP-1121 (§9.2) — capture whether this is the live interview
+      // session BEFORE the delete: Prisma's onDelete SetNull wipes the
+      // link during the delete itself. Fail-open — a probe error must
+      // never block an ordinary conversation delete.
+      let wasInterviewSession = false;
+      try {
+        const profile = await prisma.businessProfile.findUnique({
+          where: { id: "singleton" },
+          select: { interviewChatId: true },
+        });
+        wasInterviewSession = profile?.interviewChatId === req.params.id;
+      } catch {
+        /* not an interview delete as far as we can tell */
+      }
       const deleted = await persistence.deleteConversationForUser(
         req.params.id,
         userId,
@@ -1481,6 +1604,24 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       if (!deleted) {
         res.status(404).json({ error: "conversation_not_found" });
         return;
+      }
+      // WARP-1121 (§9.2) — deleting the active interview resets the
+      // onboarding state (in_progress → not_started · re_running →
+      // completed restore). Conditional update = race-safe; audited so a
+      // vanished interview is never a silent mystery. No dead-end states.
+      if (wasInterviewSession) {
+        const reset = await resetOnboardingForDeletedSession(prisma);
+        if (reset) {
+          await recordActivity({
+            kind: "system",
+            severity: "info",
+            sourceIcon: "building-2",
+            what: "business_onboarding_reset",
+            sub: `interview deleted · ${reset.from} → ${reset.state}`,
+            refs: { conversationId: req.params.id, ...reset },
+            actor: actorFromRequest(req),
+          });
+        }
       }
       res.json({ deleted: true });
     } catch (err) {

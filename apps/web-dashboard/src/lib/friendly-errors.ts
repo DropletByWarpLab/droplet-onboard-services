@@ -36,6 +36,7 @@ export type FriendlyError = {
 export type ErrorDomain =
   | "auth"
   | "files"
+  | "share"
   | "chat"
   | "invite"
   | "calendar"
@@ -48,12 +49,15 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "device"
+  | "pairing"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
 const FALLBACK: Record<ErrorDomain, string> = {
   auth: "We couldn't sign you in. Check your username and password, then try again.",
   files: "We couldn't load those files right now. Try again in a moment.",
+  share:
+    "We couldn't create that share link right now. Try again in a moment.",
   chat:
     "Something went wrong on this turn. Try again, or simplify the request.",
   invite:
@@ -78,6 +82,13 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
   device:
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
+  // WARP-1150: the Generate-code step of Pair-a-new-device. At this step
+  // there is no device to reach yet — the failure is the appliance failing
+  // to CREATE a pairing session — so the copy must be create-session +
+  // retryable, never the "device" domain's reach-device fallback (that one
+  // is reserved for the post-code handshake).
+  pairing:
+    "The Droplet couldn't create a pairing code right now. Try again in a moment.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -152,6 +163,33 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NOT_FOUND: "We couldn't find that file. It may have been moved or deleted.",
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
+  },
+  // WARP-1148/1149 — the Share dialog's create / permission-change / revoke
+  // paths. These previously went through the "files" domain, so a failed share
+  // CREATE rendered the file-LOADING fallback ("We couldn't load those
+  // files…") — wrong action, and "try again" is wrong advice for the
+  // deterministic Nextcloud policy rejections below. `module_disabled` is the
+  // module gate's stable wire code (a sharing surface served by a build with
+  // the Files module toggled off must surface honestly, not as a loading
+  // error). The *_REJECTED codes are inferred from the OCS message shapes of
+  // Nextcloud's share-create checks (password policy, expiration policy,
+  // permission rules) in inferCodeFromMessage.
+  share: {
+    module_disabled:
+      "File sharing is turned off on this Droplet. An owner or admin can turn the Files module back on in Settings.",
+    PASSWORD_REJECTED:
+      "That password doesn't meet this Droplet's rules for share links. Try a longer, less common one.",
+    EXPIRATION_REJECTED:
+      "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
+    PERMISSIONS_REJECTED:
+      "That access level isn't available for this item. Pick a different access level and try again.",
+    NOT_FOUND:
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    "404":
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   chat: {
     UPLOAD_TOO_LARGE:
@@ -305,6 +343,27 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     "503":
       "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
   },
+  // WARP-1150/1151 — creating a pairing session (POST /api/devices/pair).
+  // Only the appliance is involved at this step, so every entry talks about
+  // creating a code, never about reaching a device.
+  pairing: {
+    // The create route's per-user rate limit (429). The fallback's plain
+    // "try again in a moment" undersells the hour-long window.
+    "429":
+      "Too many pairing codes were created recently. Wait a while, then try again.",
+    "400": "Check the device name and try again.",
+    // The pairing routes answer 404 when the appliance doesn't serve them —
+    // e.g. a runtime module toggle gating /api/devices (the WARP-1150 on-box
+    // cause: {"error":"module_disabled"}). Pairing being unavailable is an
+    // admin-configuration fact, not an unreachable device.
+    module_disabled:
+      "Device pairing is turned off on this Droplet. Ask an admin to enable it, then try again.",
+    "404":
+      "Device pairing isn't available on this Droplet right now. Ask an admin to check it's enabled, then try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
   generic: {
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
@@ -336,6 +395,21 @@ function inferCodeFromMessage(
   if (domain === "chat") {
     if (/image[_ ]only/.test(m)) return "IMAGE_ONLY";
     if (/empty[_ ]extraction|no[_ ]text/.test(m)) return "EMPTY_EXTRACTION";
+  }
+  // WARP-1148/1149: Nextcloud's share-create checks answer 400/403 with a
+  // human-readable OCS message, not a stable code ("Password is present in
+  // compromised password list", "Cannot set expiration date more than …",
+  // "File shares cannot have create or delete permissions", "Public upload
+  // disabled by the administrator"). Match the stable keywords so the dialog
+  // renders the actionable copy instead of the retry fallback — these are
+  // deterministic policy rejections where retrying can never help.
+  if (domain === "share") {
+    if (/password/.test(m)) return "PASSWORD_REJECTED";
+    if (/expir/.test(m)) return "EXPIRATION_REJECTED";
+    if (/permission|public upload/.test(m)) return "PERMISSIONS_REJECTED";
+    if (/not found|does not exist|wrong path|wrong share/.test(m)) {
+      return "NOT_FOUND";
+    }
   }
   if (domain === "push") {
     if (/not configured/.test(m)) return "NOT_CONFIGURED";

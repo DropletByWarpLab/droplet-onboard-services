@@ -239,4 +239,50 @@ describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
     // No local row → nothing to revoke, but the disable itself must succeed.
     expect(revokeAllSessions).not.toHaveBeenCalled();
   });
+
+  // WARP-1062 (audit item B): disablement revokes sessions like its
+  // revoke-sessions sibling, so it must emit the same mandatory-emit
+  // privileged-action row — it was the one unaudited account-lifecycle write.
+  it("emits the 'User disabled' audit row (WARP-1062)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "warn",
+        what: "User disabled",
+        sub: "alice",
+        refs: expect.objectContaining({
+          username: "alice",
+          targetUserId: "u-alice",
+          sessionsRevoked: 2,
+        }),
+        actor: { type: "user", id: "owner-id" },
+      }),
+    );
+  });
+
+  it("audits a legacy NC-only disable too (targetUserId null, 0 sessions)", async () => {
+    const prisma = createPrismaMock([]); // no local mirror
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/legacy/disable");
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User disabled",
+        sub: "legacy",
+        refs: expect.objectContaining({
+          username: "legacy",
+          targetUserId: null,
+          sessionsRevoked: 0,
+        }),
+      }),
+    );
+  });
 });

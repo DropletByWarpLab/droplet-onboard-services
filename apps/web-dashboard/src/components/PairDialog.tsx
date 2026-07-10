@@ -77,7 +77,11 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       setPairing(info);
       setStep("waiting");
     } catch (err) {
-      setError(translateError(err, "device"));
+      // WARP-1150: this is the CREATE-a-pairing-session step — no device is
+      // involved yet, so the "device" domain's "couldn't reach that device"
+      // copy is nonsense here. The "pairing" domain keeps every failure at
+      // this step phrased as "couldn't create a code, retry".
+      setError(translateError(err, "pairing"));
     } finally {
       setSubmitting(false);
     }
@@ -129,7 +133,9 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
     : 0;
 
   return (
-    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md">
+    // `flush`: sectioned layout — the full-width header divider + per-step
+    // bodies own their padding (WARP-1153).
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md" flush>
       {/* Header */}
       <div
         className="flex items-center justify-between px-4 py-3"

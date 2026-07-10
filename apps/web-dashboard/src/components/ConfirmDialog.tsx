@@ -118,7 +118,8 @@ export function ConfirmDialog({
       maxWidth="sm"
       placement="center"
     >
-      <div className="p-5 space-y-4">
+      {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
+      <div className="space-y-4">
         <div>
           <h2 id={headingId} className="type-headline" style={{ color: "var(--text)" }}>
             {title}

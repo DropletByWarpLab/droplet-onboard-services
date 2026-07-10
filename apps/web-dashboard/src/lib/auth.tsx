@@ -432,9 +432,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(userData);
         // Cache user profile for fast hydration on next visit
         localStorage.setItem(USER_KEY, JSON.stringify(userData));
-      } else {
-        // Cookie absent or expired — clear stale local cache
+      } else if (meRes.status === 401 || meRes.status === 403) {
+        // Definitive auth answer — cookie absent/expired. Clear stale cache.
         localStorage.removeItem(USER_KEY);
+      } else {
+        // DASH-005: a 5xx is the orchestrator erroring, NOT an auth verdict.
+        // Fall through to the cached profile (same as the catch below) so a
+        // transient orchestrator 500/503 doesn't bounce a validly-cookied user
+        // to /login.
+        const cached = localStorage.getItem(USER_KEY);
+        if (cached) {
+          try {
+            setUser(JSON.parse(cached));
+          } catch {
+            localStorage.removeItem(USER_KEY);
+          }
+        }
       }
     } catch {
       // API unreachable / timed out — try local cache for optimistic display.
