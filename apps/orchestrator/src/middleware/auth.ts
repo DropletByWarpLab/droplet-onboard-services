@@ -593,32 +593,6 @@ function matchServiceToken(token: string): AuthUser | null {
 }
 
 /**
- * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
- * `req.user.role` is populated by the upstream middleware (either from
- * a verified JWT, a matched service principal, or the Nextcloud OCS
- * fallback). Returns 403 — NOT 401 — when:
- *
- *   - `req.user` is absent (defense in depth; the upstream middleware
- *     should have already issued 401, but a misordered router would
- *     otherwise allow the request through silently),
- *   - `req.user.role` is missing or not a string,
- *   - the role is not in the `allowed` list (including the empty-list
- *     programmer-error case — no implicit allow-all).
- *
- * The 401-vs-403 distinction matters: 401 means "tell me who you are";
- * 403 means "I know who you are, just not allowed". Conflating them
- * leaks the auth-vs-authz ordering to clients and breaks the
- * dashboard's two-stage error rendering (toast vs redirect-to-login).
- *
- * Usage:
- *   router.post("/auth/users", requireRole("owner", "admin"), handler);
- *
- * See `docs/ADR-004-rbac-per-route-guards.md` §3 for the per-route
- * allowlist matrix. Each guarded route file derives its allowed roles
- * from that matrix; the matrix is mirrored in tests
- * (`src/__tests__/rbac.test.ts`) so additions stay in sync.
- */
-/**
  * WARP-237: ACL denials are mandatory-emit policy violations. Fire-and-forget
  * (`void`) — the 403 must not wait on the append lock, and recordActivity is
  * a no-op pre-init so this is safe in every test/boot ordering. Known
@@ -648,6 +622,32 @@ export function recordAccessDenied(req: Request, reason: string): void {
   });
 }
 
+/**
+ * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
+ * `req.user.role` is populated by the upstream middleware (either from
+ * a verified JWT, a matched service principal, or the Nextcloud OCS
+ * fallback). Returns 403 — NOT 401 — when:
+ *
+ *   - `req.user` is absent (defense in depth; the upstream middleware
+ *     should have already issued 401, but a misordered router would
+ *     otherwise allow the request through silently),
+ *   - `req.user.role` is missing or not a string,
+ *   - the role is not in the `allowed` list (including the empty-list
+ *     programmer-error case — no implicit allow-all).
+ *
+ * The 401-vs-403 distinction matters: 401 means "tell me who you are";
+ * 403 means "I know who you are, just not allowed". Conflating them
+ * leaks the auth-vs-authz ordering to clients and breaks the
+ * dashboard's two-stage error rendering (toast vs redirect-to-login).
+ *
+ * Usage:
+ *   router.post("/auth/users", requireRole("owner", "admin"), handler);
+ *
+ * See `docs/ADR-004-rbac-per-route-guards.md` §3 for the per-route
+ * allowlist matrix. Each guarded route file derives its allowed roles
+ * from that matrix; the matrix is mirrored in tests
+ * (`src/__tests__/rbac.test.ts`) so additions stay in sync.
+ */
 export function requireRole(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
