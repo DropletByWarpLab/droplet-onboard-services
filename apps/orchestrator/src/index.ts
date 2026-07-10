@@ -70,6 +70,7 @@ import {
 import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { pruneExpiredChallenges } from "./services/webauthn-challenge.service.js";
 import { pruneExpiredLoginStates } from "./services/sso-login-state.service.js";
+import { sweepPairingCodes } from "./services/pairing-code-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
 import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-tz-backfill.service.js";
@@ -545,6 +546,15 @@ async function main() {
       // backlog drains over nights.
       const challengesDeleted = await pruneExpiredChallenges(prisma);
       const loginStatesDeleted = await pruneExpiredLoginStates(prisma);
+      // WARP-1202/WARP-1203: PairingCode lifecycle sweep. First stamps overdue
+      // `active` codes with the explicit `expired` status (state stays truthful
+      // in the column, not re-derived from expiresAt), then purges terminal
+      // rows — claimed/expired/revoked — created more than 7 days ago, keyed
+      // on the explicit status. Keeps the code population flat so 6-char
+      // collision odds stop rising with table age (the P2002 retry in
+      // /devices/pair stays as the last-resort absorber). Batched + capped
+      // like the two prunes above.
+      const pairingSweep = await sweepPairingCodes(prisma);
       logger.info(
         {
           eventsDeleted,
@@ -560,6 +570,8 @@ async function main() {
           updateBackupsPurged: backupPurge.purged,
           challengesDeleted,
           loginStatesDeleted,
+          pairingCodesExpired: pairingSweep.expired,
+          pairingCodesPurged: pairingSweep.purged,
         },
         "daily purges complete",
       );
