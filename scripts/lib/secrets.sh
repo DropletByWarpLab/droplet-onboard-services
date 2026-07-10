@@ -779,6 +779,19 @@ migrate_env() {
   # silently. The token is operator-only (loopback bind + reverse tunnel
   # is the actual exposure surface — see docs/operator-surfaces.md).
   _migrate_ensure_key OPS_TOKEN "$(openssl rand -hex 32)"
+
+  # INFRA-003: these four service tokens + JWT_SECRET are ALWAYS written by
+  # generate_env's heredoc but were missing from migrate_env — so a pre-existing
+  # .env (predating WARP-465/468/268) interpolated them to empty. Consequences on
+  # an upgraded box: email-indexer ingest 401s and every delivered email is
+  # PERMANENTLY lost (no retry queue), ai-gateway 451s every cloud-LLM call, the
+  # routing egress/throughput samplers 401 (WARP-268 egress-anomaly feed dies),
+  # and an empty JWT_SECRET bricks the orchestrator at boot. Backfill on upgrade.
+  _migrate_ensure_key SERVICE_TOKEN_EMAIL "$(openssl rand -hex 32)"
+  _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
+  _migrate_ensure_key JWT_SECRET "$(openssl rand -hex 64)"
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
