@@ -44,7 +44,19 @@ export function WriteConfirmModal({
     setError(null);
     try {
       const created = await createAppointmentWriteRequest(request);
-      if (created.id) await confirmWriteRequest(created.id);
+      if (!created.id) {
+        throw new Error("Eaglesoft didn't return a write-request id — nothing was written.");
+      }
+      const applied = await confirmWriteRequest(created.id);
+      // Only report success when the write actually APPLIED. A blocked/failed
+      // apply (FAILED / DISCREPANCY) must surface honestly — never read as done.
+      if (applied.status && applied.status !== "APPLIED") {
+        throw new Error(
+          applied.status === "DISCREPANCY"
+            ? "Eaglesoft saved it but adjusted the details — open the schedule to review."
+            : "Eaglesoft didn't apply the change. Nothing was written.",
+        );
+      }
       onDone();
       onClose();
     } catch (err) {

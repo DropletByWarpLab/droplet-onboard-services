@@ -122,7 +122,7 @@ export default function EaglesoftPage() {
           <ScheduleList
             entries={entries}
             dateLabel={dateLabel}
-            writeEnabled={writesEnabled}
+            writeEnabled={writesEnabled && access.canConfirmWrites}
             onPrevDay={() => setDayOffset((d) => d - 1)}
             onNextDay={() => setDayOffset((d) => d + 1)}
             onSyncNow={refresh}
@@ -140,6 +140,7 @@ export default function EaglesoftPage() {
         open={manageOpen}
         onClose={() => setManageOpen(false)}
         connection={connection}
+        canToggleWrites={access.canEnableWrites}
         onToggleWrites={toggleWrites}
         onSyncNow={refresh}
         onDisconnect={disconnect}
