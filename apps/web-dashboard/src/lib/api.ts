@@ -3474,7 +3474,7 @@ export async function setMessageFeedback(
  *  base prompt and managed via /api/memory/facts. */
 export interface MemoryFact {
   id: string;
-  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other";
+  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other" | "Business";
   fact: string;
   addedBy: string;
   evidenceChatId: string | null;

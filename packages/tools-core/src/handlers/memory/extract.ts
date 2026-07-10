@@ -24,7 +24,7 @@ const inputSchema = {
   properties: {
     category: {
       type: "string",
-      enum: ["Tone", "Workflow", "Scope", "Schedule", "Other"],
+      enum: ["Tone", "Workflow", "Scope", "Schedule", "Other", "Business"],
       description: "Which bucket the fact belongs to.",
     },
     fact: {
@@ -56,12 +56,12 @@ async function handler(
   const category = args.category;
   if (
     typeof category !== "string" ||
-    !["Tone", "Workflow", "Scope", "Schedule", "Other"].includes(category)
+    !["Tone", "Workflow", "Scope", "Schedule", "Other", "Business"].includes(category)
   ) {
     return {
       ok: false,
       status: "error",
-      error: { code: "INVALID_ARGS", message: "category must be one of Tone|Workflow|Scope|Schedule|Other" },
+      error: { code: "INVALID_ARGS", message: "category must be one of Tone|Workflow|Scope|Schedule|Other|Business" },
     };
   }
   const fact = typeof args.fact === "string" ? args.fact.trim() : "";
@@ -91,7 +91,13 @@ async function handler(
 
   const created = await ctx.prisma.memoryFact.create({
     data: {
-      category: category as "Tone" | "Workflow" | "Scope" | "Schedule" | "Other",
+      category: category as
+        | "Tone"
+        | "Workflow"
+        | "Scope"
+        | "Schedule"
+        | "Other"
+        | "Business",
       fact,
       evidenceChatId,
       addedBy: ctx.userId ?? "agent",

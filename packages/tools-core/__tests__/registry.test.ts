@@ -100,6 +100,8 @@ const EXPECTED_TOOL_NAMES = [
   "erp_find_patient",
   "erp_get_ar_summary",
   "erp_schedule_appointment",
+  // WARP-1120 — business-knowledge layer (read-only Tier 1)
+  "business_profile_get",
 ];
 
 describe("TOOLS registry", () => {
@@ -138,6 +140,9 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("erp_get_ar_summary")?.requiresWrite).toBe(false);
     expect(TOOLS.get("erp_schedule_appointment")?.requiresWrite).toBe(true);
     expect(TOOLS.get("erp_schedule_appointment")?.requiresConfirmation).toBe(true);
+    // WARP-1120 — business_profile_get is a Tier-1 read (no write, no confirm).
+    expect(TOOLS.get("business_profile_get")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_profile_get")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

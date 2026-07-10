@@ -11,6 +11,7 @@
 
 import {
   Bell,
+  Building2,
   Calendar,
   Camera,
   FolderOpen,
@@ -42,6 +43,7 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   email: { label: "Email", icon: Mail },
   memory: { label: "Memory", icon: Brain },
   pm: { label: "Projects", icon: ListChecks },
+  business: { label: "Business", icon: Building2 },
   system: { label: "System", icon: HardDrive },
 };
 
