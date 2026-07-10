@@ -754,7 +754,10 @@ function DriveCard({
       onRenamed(); // refetch so the persisted name replaces the optimistic one
     } catch (err) {
       setOptimisticName(previous); // roll back
-      toast(translateError(err, "files"), "error");
+      // WARP-1141: storage domain, not files — a failed rename is a WRITE,
+      // and the files fallback ("couldn't load those files") read as a
+      // transient load blip, hiding the failure from the user.
+      toast(translateError(err, "storage"), "error");
     } finally {
       setSaving(false);
     }
@@ -816,7 +819,12 @@ function DriveCard({
               <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
                 {busLabel(d.bus)}
               </span>
-              {isAdmin && (
+              {/* WARP-1141: the label row is keyed by the drive's FS UUID —
+                  the bridge can report a drive without one (automount state
+                  gap, no /dev/disk/by-uuid symlink), and renaming such a
+                  drive can never persist. Don't offer a control that is
+                  guaranteed to fail. */}
+              {isAdmin && !!d.uuid && (
                 <button
                   ref={renameBtnRef}
                   onClick={beginEdit}
@@ -1033,7 +1041,8 @@ function PoolCard({
       onRenamed?.();
     } catch (err) {
       setOptimisticName(previous); // roll back
-      toast(translateError(err, "files"), "error");
+      // WARP-1141: storage domain — same rationale as the DriveCard rename.
+      toast(translateError(err, "storage"), "error");
     } finally {
       setSaving(false);
     }

@@ -111,20 +111,20 @@ function createPrismaMock() {
   };
 }
 
-function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
+function buildApp(prisma: ReturnType<typeof createPrismaMock>, role = "owner") {
   const app = express();
   app.use(express.json());
   // WARP-171: PATCH /api/storage/drives/:uuid now sits behind a
   // requireRole("owner", "admin") guard. The real authMiddleware isn't
-  // in this test's pipeline; inject a synthetic owner so the guard
-  // lets the request reach the handler. Same shape the rbac matrix
-  // and the vpn test use.
+  // in this test's pipeline; inject a synthetic user so the guard sees a
+  // role (owner by default; WARP-1141's role-denied cases pass "family").
+  // Same shape the rbac matrix and the vpn test use.
   app.use((req, _res, next) => {
     (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
       id: "stefan",
       username: "stefan",
       displayName: "Stefan",
-      role: "owner",
+      role,
     };
     next();
   });
@@ -290,6 +290,30 @@ describe("storage routes (WARP-174)", () => {
         .send({ displayName: "X" });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Invalid drive UUID/i);
+    });
+
+    // WARP-1141 — rename gating + validation. Owner IS allowed (covered by
+    // the success cases above, which run as owner); family is refused by the
+    // canonical requireRole guard and the row is never written.
+    it("refuses a family user (403) and never writes the row", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "family");
+      const res = await request(app)
+        .patch("/api/storage/drives/UUID-MAIN-DRIVE")
+        .send({ displayName: "Sneaky Rename" });
+      expect(res.status).toBe(403);
+      expect(prisma.drive.upsert).not.toHaveBeenCalled();
+      expect(prisma.rows.get("UUID-MAIN-DRIVE")).toBeUndefined();
+    });
+
+    it("rejects a displayName over 64 characters (400, no write)", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      const res = await request(app)
+        .patch("/api/storage/drives/UUID-MAIN-DRIVE")
+        .send({ displayName: "x".repeat(65) });
+      expect(res.status).toBe(400);
+      expect(prisma.drive.upsert).not.toHaveBeenCalled();
     });
 
     it("rejects the literal 'undefined'/'null' uuid instead of upserting a junk row (WARP-1141)", async () => {
