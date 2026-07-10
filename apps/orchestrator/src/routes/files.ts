@@ -276,6 +276,57 @@ function unionContentAndNameHits(
 }
 
 /**
+ * WARP-1140 — index owner of shared "Household" (groupfolder) chunks.
+ *
+ * The file-indexer physically watches `__groupfolders/<id>/…` (groupfolder
+ * content never lives under any user's home dir) and writes those chunks
+ * under this sentinel userId with a `/<SHARED_FOLDER_NAME>/…` display path —
+ * the same path each member sees in their own WebDAV home. Content search
+ * includes this corpus only for users who actually have the shared space
+ * mounted (see `householdSearchUserIds`). Must match the file-indexer's
+ * `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
+ */
+const HOUSEHOLD_INDEX_USER = "__household__";
+/** Cache TTL for the per-user shared-space membership probe (seconds). */
+const HOUSEHOLD_MEMBER_TTL = 300;
+
+/**
+ * WARP-1140 — resolve which FileContentChunk owners this request may search:
+ * always the user's own corpus, plus the shared Household corpus iff the
+ * shared groupfolder is mounted in THEIR home (same `ncDirExists` probe as
+ * GET /api/files/spaces, cached to keep type-ahead search off WebDAV).
+ *
+ * Best-effort by design: any failure (no NC session, Nextcloud down) means
+ * "personal only" — content search must keep its pre-WARP-1140 behaviour of
+ * never failing just because the membership probe can't run.
+ */
+async function householdSearchUserIds(
+  req: Request,
+  user: string,
+): Promise<string[]> {
+  const cacheKey = `filesearch:household-member:${user}`;
+  try {
+    const cached = await cacheGet<boolean>(cacheKey);
+    if (cached !== null && cached !== undefined) {
+      return cached ? [user, HOUSEHOLD_INDEX_USER] : [user];
+    }
+    const isMember = await ncDirExists(
+      await getToken(req),
+      user,
+      SHARED_FOLDER_PATH,
+    );
+    await cacheSet(cacheKey, isMember, HOUSEHOLD_MEMBER_TTL);
+    return isMember ? [user, HOUSEHOLD_INDEX_USER] : [user];
+  } catch (err) {
+    logger.debug(
+      { err },
+      "householdSearchUserIds: membership probe failed; personal corpus only",
+    );
+    return [user];
+  }
+}
+
+/**
  * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
  * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
  * 404 not found, 997 not allowed) so the frontend can render the real message.
@@ -1837,9 +1888,18 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // WARP-1140: which chunk corpora this user may search — their own,
+      // plus the shared Household corpus when the shared space is mounted
+      // for them. Best-effort (personal-only on any probe failure) so this
+      // never introduces a new failure mode into search.
+      const searchUserIds = await householdSearchUserIds(req, user);
+      const additionalUserIds = searchUserIds.slice(1);
+
       // Check Redis cache first (60s TTL on identical queries). The mode is
       // part of the key so keyword/semantic/hybrid results never collide.
-      const cacheKey = `filesearch:${mode}:${user}:${q}:${limit}`;
+      // WARP-1140: the corpus list is part of the key so a household
+      // membership change never serves the other scope's cached results.
+      const cacheKey = `filesearch:${mode}:${searchUserIds.join(",")}:${q}:${limit}`;
       const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
       if (cached) {
         res.json({ results: cached });
@@ -1862,6 +1922,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         // the Name-mode endpoint (same ncSearchFiles) finds it fine.
         const contentHits = await searchByLexical(prisma, {
           userId: user,
+          additionalUserIds,
           query: q,
           limit: limit * CHUNKS_PER_FILE_FACTOR,
           source: "nextcloud",
@@ -1958,6 +2019,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         );
         const hits = await searchHybrid(prisma, {
           userId: user,
+          additionalUserIds,
           vector: embedVec,
           query: q,
           limit: limit * CHUNKS_PER_FILE_FACTOR,
@@ -1972,7 +2034,18 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
       // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
       // best chunk), outer query sorts by score and applies the limit.
+      //
+      // WARP-1140: pin the corpus to source='nextcloud' so semantic searches
+      // the SAME corpus as keyword/hybrid. The unfiltered query also matched
+      // brain-memory chunks (chat attachments), whose paths aren't navigable
+      // from the Files page AND which all share ncFileId=0 — so DISTINCT ON
+      // ("ncFileId") collapsed every brain chunk into one bogus result row.
+      // The userId list mirrors the other modes (own + Household corpus).
       const vecLiteral = `[${embedVec.join(",")}]`;
+      const userIdPlaceholders = searchUserIds
+        .map((_, i) => `$${i + 2}`)
+        .join(", ");
+      const limitParam = searchUserIds.length + 2;
       const rows: Array<{ path: string; score: number; text: string }> =
         await prisma.$queryRawUnsafe(
           `
@@ -1982,14 +2055,15 @@ export function createFilesRouter(prisma: PrismaClient): Router {
               1 - ("embedding" <=> $1::vector) AS score,
               "text"
             FROM "FileContentChunk"
-            WHERE "userId" = $2
+            WHERE "userId" IN (${userIdPlaceholders})
+              AND "source" = 'nextcloud'
             ORDER BY "ncFileId", "embedding" <=> $1::vector
           ) ranked
           ORDER BY score DESC
-          LIMIT $3
+          LIMIT $${limitParam}
           `,
           vecLiteral,
-          user,
+          ...searchUserIds,
           limit
         );
 
@@ -2035,6 +2109,9 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   router.get("/files/search/status", async (req, res, next) => {
     try {
       const user = getUser(req);
+      // WARP-1140: same corpus rule as content search — own chunks plus the
+      // Household corpus when the shared space is mounted for this user.
+      const searchUserIds = await householdSearchUserIds(req, user);
 
       // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
       // which reflects the latest init attempt; a hot reload from "down"
@@ -2055,12 +2132,15 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       let pgvectorReady = false;
       let indexedCount = 0;
       let lastIndexedAt: string | null = null;
+      const userIdPlaceholders = searchUserIds
+        .map((_, i) => `$${i + 1}`)
+        .join(", ");
       try {
         const rows: Array<{ count: bigint; last: Date | null }> =
           await prisma.$queryRawUnsafe(
             'SELECT COUNT(*)::bigint AS count, MAX("indexedAt") AS last ' +
-              'FROM "FileContentChunk" WHERE "userId" = $1',
-            user,
+              `FROM "FileContentChunk" WHERE "userId" IN (${userIdPlaceholders})`,
+            ...searchUserIds,
           );
         pgvectorReady = true;
         if (rows[0]) {
@@ -2070,6 +2150,29 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       } catch (err) {
         logger.warn({ err }, "search/status: pgvector probe failed");
         pgvectorReady = false;
+      }
+
+      // WARP-1140: explicit per-file indexer state (FileIndexStatus, written
+      // by the file-indexer — the WARP-218 "no guessing" convention). The
+      // dashboard uses `pendingCount` to render an honest "still indexing"
+      // empty state instead of "no match". Own try/catch: a deployment where
+      // the migration hasn't run yet must not break the probe.
+      let pendingCount = 0;
+      let failedCount = 0;
+      try {
+        const statusRows: Array<{ status: string; count: bigint }> =
+          await prisma.$queryRawUnsafe(
+            'SELECT status::text AS status, COUNT(*)::bigint AS count ' +
+              `FROM "FileIndexStatus" WHERE "userId" IN (${userIdPlaceholders}) ` +
+              "GROUP BY status",
+            ...searchUserIds,
+          );
+        for (const row of statusRows) {
+          if (row.status === "indexing") pendingCount = Number(row.count);
+          if (row.status === "failed") failedCount = Number(row.count);
+        }
+      } catch (err) {
+        logger.warn({ err }, "search/status: FileIndexStatus probe failed");
       }
 
       const state: "ready" | "indexing" | "unavailable" =
@@ -2085,6 +2188,8 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         pgvectorReady,
         indexedCount,
         lastIndexedAt,
+        pendingCount,
+        failedCount,
       });
     } catch (err) {
       next(err);

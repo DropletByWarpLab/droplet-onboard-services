@@ -951,6 +951,10 @@ services:
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+      # WARP-1140: shared "Household" groupfolder — display-path prefix for
+      # chunks indexed from __groupfolders/. Must match the orchestrator's
+      # DROPLET_SHARED_FOLDER_NAME (same "Household" default).
+      - DROPLET_SHARED_FOLDER_NAME=${DROPLET_SHARED_FOLDER_NAME:-Household}
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/

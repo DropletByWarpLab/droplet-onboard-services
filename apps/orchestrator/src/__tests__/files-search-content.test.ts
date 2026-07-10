@@ -70,8 +70,12 @@ vi.mock("../services/file-search.service.js", () => ({
 // registered in createApp keeps its real client; override only ncSearchFiles
 // so we can observe the name-search arm without a live Nextcloud.
 // ─────────────────────────────────────────────────────────────────────────
-const { ncSearchFilesSpy } = vi.hoisted(() => ({
+const { ncSearchFilesSpy, ncDirExistsSpy } = vi.hoisted(() => ({
   ncSearchFilesSpy: vi.fn(),
+  // WARP-1140: the household-corpus membership probe (shared groupfolder
+  // mounted in this user's home?). Defaults false in beforeEach so the
+  // pre-WARP-1140 personal-only expectations hold unchanged.
+  ncDirExistsSpy: vi.fn(),
 }));
 
 vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
@@ -80,6 +84,7 @@ vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
   return {
     ...actual,
     ncSearchFiles: (...args: unknown[]) => ncSearchFilesSpy(...args),
+    ncDirExists: (...args: unknown[]) => ncDirExistsSpy(...args),
   };
 });
 
@@ -185,6 +190,10 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     isGrpcAvailableSpy.mockReturnValue(true);
     // Default: no name matches — keep existing content-only specs unchanged.
     ncSearchFilesSpy.mockResolvedValue([]);
+    // Default: NOT a household member → personal corpus only (the
+    // pre-WARP-1140 behaviour every older spec was written against).
+    ncDirExistsSpy.mockReset();
+    ncDirExistsSpy.mockResolvedValue(false);
     resolveNcTokenSpy.mockReset();
     // Default: a valid NC session token is present (mirrors dev-mode).
     resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
@@ -315,14 +324,24 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     await request(app).get("/api/files/search/content?q=same&mode=keyword&limit=20");
     await request(app).get("/api/files/search/content?q=same&mode=semantic&limit=20");
 
-    const keywordGetKey = cacheGetSpy.mock.calls[0][0] as string;
-    const semanticGetKey = cacheGetSpy.mock.calls[1][0] as string;
+    // WARP-1140: the household membership probe adds its own cache traffic
+    // (`filesearch:household-member:…`), so filter down to the RESULT keys.
+    const resultGetKeys = cacheGetSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((k) => !k.includes("household-member"));
+    const keywordGetKey = resultGetKeys.find((k) => k.includes(":keyword:"));
+    const semanticGetKey = resultGetKeys.find((k) => k.includes(":semantic:"));
+    expect(keywordGetKey).toBeDefined();
+    expect(semanticGetKey).toBeDefined();
     expect(keywordGetKey).not.toBe(semanticGetKey);
-    expect(keywordGetKey).toContain("keyword");
-    expect(semanticGetKey).toContain("semantic");
     // cacheSet keys must also differ
-    const keywordSetKey = cacheSetSpy.mock.calls[0][0] as string;
-    const semanticSetKey = cacheSetSpy.mock.calls[1][0] as string;
+    const resultSetKeys = cacheSetSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((k) => !k.includes("household-member"));
+    const keywordSetKey = resultSetKeys.find((k) => k.includes(":keyword:"));
+    const semanticSetKey = resultSetKeys.find((k) => k.includes(":semantic:"));
+    expect(keywordSetKey).toBeDefined();
+    expect(semanticSetKey).toBeDefined();
     expect(keywordSetKey).not.toBe(semanticSetKey);
   });
 
@@ -448,16 +467,23 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     );
     // … but the degraded, content-only union must NOT be written to the 60s
     // cache, or it would serve stale results after Nextcloud recovers.
-    expect(cacheSetSpy).not.toHaveBeenCalled();
+    // (WARP-1140: ignore the household membership probe's own cache write.)
+    const resultSetKeys = cacheSetSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((k) => !k.includes("household-member"));
+    expect(resultSetKeys).toHaveLength(0);
   });
 
   it("re-throws a missing Nextcloud session as 401 (auth failure ≠ degrade)", async () => {
     searchByLexicalSpy.mockResolvedValueOnce([
       { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
     ]);
-    // No NC token → getToken throws MissingNcTokenError. This is an auth
-    // failure, not an outage: it must propagate (401), not silently degrade.
-    resolveNcTokenSpy.mockResolvedValueOnce(null);
+    // No NC token AT ALL for this session → getToken throws
+    // MissingNcTokenError. This is an auth failure, not an outage: it must
+    // propagate (401), not silently degrade. (mockResolvedValue, not Once:
+    // the WARP-1140 household probe also resolves the token — swallowing its
+    // own failure — before the name arm re-resolves it and 401s.)
+    resolveNcTokenSpy.mockResolvedValue(null);
 
     const res = await request(app).get(
       "/api/files/search/content?q=alpha&mode=keyword&limit=20",
@@ -509,5 +535,177 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     queryRawUnsafeMock.mockResolvedValueOnce([{ path: "/Docs/s.txt", score: 0.9, text: "s" }]);
     await request(app).get("/api/files/search/content?q=same&mode=semantic");
     expect(ncSearchFilesSpy).not.toHaveBeenCalled();
+  });
+
+  // ── WARP-1139/WARP-1140: semantic corpus + household inclusion ──────────
+
+  it("semantic pins the corpus to source=nextcloud (brain chunks excluded)", async () => {
+    // The unfiltered SQL also matched brain-memory chunks (chat attachments),
+    // whose paths aren't navigable from the Files page AND which all share
+    // ncFileId=0, so DISTINCT ON ("ncFileId") collapsed them into one bogus
+    // result. The corpus must match keyword/hybrid (source: nextcloud).
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=corpus&mode=semantic",
+    );
+
+    expect(res.status).toBe(200);
+    const sql = queryRawUnsafeMock.mock.calls[0][0] as string;
+    expect(sql).toContain(`"source" = 'nextcloud'`);
+  });
+
+  it("includes the __household__ corpus in semantic search when the shared space is mounted", async () => {
+    ncDirExistsSpy.mockResolvedValue(true);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([
+      { path: "/Household/Trips/burrito.txt", score: 0.9, text: "burrito notes" },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=burrito&mode=semantic",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].path).toBe("/Household/Trips/burrito.txt");
+    // Bind args: $1 vector literal, then the corpus owner list, then limit.
+    const args = queryRawUnsafeMock.mock.calls[0].slice(1);
+    expect(args).toContain("dev");
+    expect(args).toContain("__household__");
+  });
+
+  it("includes the __household__ corpus in keyword search when the shared space is mounted", async () => {
+    ncDirExistsSpy.mockResolvedValue(true);
+    searchByLexicalSpy.mockResolvedValueOnce([]);
+
+    await request(app).get("/api/files/search/content?q=burrito&mode=keyword");
+
+    const params = searchByLexicalSpy.mock.calls[0][1];
+    expect(params.userId).toBe("dev");
+    expect(params.additionalUserIds).toEqual(["__household__"]);
+  });
+
+  it("includes the __household__ corpus in hybrid search when the shared space is mounted", async () => {
+    ncDirExistsSpy.mockResolvedValue(true);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    searchHybridSpy.mockResolvedValueOnce([]);
+
+    await request(app).get("/api/files/search/content?q=burrito&mode=hybrid");
+
+    const params = searchHybridSpy.mock.calls[0][1];
+    expect(params.userId).toBe("dev");
+    expect(params.additionalUserIds).toEqual(["__household__"]);
+  });
+
+  it("degrades to the personal corpus when the membership probe fails (never a new failure mode)", async () => {
+    ncDirExistsSpy.mockRejectedValue(new Error("nextcloud down"));
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/a.txt", score: 0.9, snippet: "a", source: "nextcloud", chunkIdx: 0 },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword",
+    );
+
+    expect(res.status).toBe(200);
+    const params = searchByLexicalSpy.mock.calls[0][1];
+    expect(params.additionalUserIds).toEqual([]);
+  });
+});
+
+// ── WARP-1139/WARP-1140: GET /api/files/search/status honesty fields ──────
+describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", () => {
+  let app: ReturnType<typeof createApp>;
+
+  beforeAll(() => {
+    const prisma = new PrismaClient();
+    app = createApp(prisma);
+  });
+
+  beforeEach(() => {
+    isGrpcAvailableSpy.mockReset();
+    queryRawUnsafeMock.mockReset();
+    cacheGetSpy.mockReset();
+    cacheSetSpy.mockReset();
+    ncDirExistsSpy.mockReset();
+    resolveNcTokenSpy.mockReset();
+    cacheGetSpy.mockResolvedValue(null);
+    cacheSetSpy.mockResolvedValue(undefined);
+    isGrpcAvailableSpy.mockReturnValue(true);
+    ncDirExistsSpy.mockResolvedValue(false);
+    resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
+  });
+
+  it("reports pendingCount/failedCount from FileIndexStatus", async () => {
+    // 1st query: chunk count probe; 2nd: FileIndexStatus GROUP BY.
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(12), last: new Date("2026-07-09T00:00:00Z") }])
+      .mockResolvedValueOnce([
+        { status: "indexing", count: BigInt(3) },
+        { status: "failed", count: BigInt(1) },
+        { status: "ready", count: BigInt(40) },
+      ]);
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      state: "ready",
+      gatewayHealthy: true,
+      pgvectorReady: true,
+      indexedCount: 12,
+      pendingCount: 3,
+      failedCount: 1,
+    });
+    const statusSql = queryRawUnsafeMock.mock.calls[1][0] as string;
+    expect(statusSql).toContain('"FileIndexStatus"');
+  });
+
+  it("degrades to zero counts when the FileIndexStatus table is missing (pre-migration deploy)", async () => {
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(5), last: null }])
+      .mockRejectedValueOnce(new Error('relation "FileIndexStatus" does not exist'));
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      state: "ready",
+      indexedCount: 5,
+      pendingCount: 0,
+      failedCount: 0,
+    });
+  });
+
+  it("state=indexing when zero chunks — the honest 'still indexing' signal", async () => {
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(0), last: null }])
+      .mockResolvedValueOnce([{ status: "indexing", count: BigInt(7) }]);
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ state: "indexing", pendingCount: 7 });
+  });
+
+  it("counts the household corpus too when the shared space is mounted", async () => {
+    ncDirExistsSpy.mockResolvedValue(true);
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(2), last: null }])
+      .mockResolvedValueOnce([]);
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    // Both probes bind the personal + household owners.
+    expect(queryRawUnsafeMock.mock.calls[0].slice(1)).toEqual([
+      "dev",
+      "__household__",
+    ]);
+    expect(queryRawUnsafeMock.mock.calls[1].slice(1)).toEqual([
+      "dev",
+      "__household__",
+    ]);
   });
 });

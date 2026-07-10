@@ -4360,7 +4360,14 @@ export async function searchFileContent(
   });
   const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
   if (!res.ok) {
-    if (res.status === 503) return []; // AI gateway down — graceful degrade
+    // WARP-1139: a 503 (AI gateway / pgvector down) used to return [] here,
+    // which rendered as "No content matches" — a dishonest empty state that
+    // masked a broken search stack. Surface it as an error instead.
+    if (res.status === 503) {
+      throw new Error(
+        "Content search is unavailable right now — the AI search stack may still be starting."
+      );
+    }
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Semantic search failed: ${res.status}`);
   }
@@ -4382,6 +4389,14 @@ export interface SearchReadinessStatus {
   pgvectorReady: boolean;
   indexedCount: number;
   lastIndexedAt: string | null;
+  /**
+   * WARP-1139/WARP-1140 — explicit per-file indexer state (FileIndexStatus):
+   * files the indexer has seen but not finished (`pendingCount`) or given up
+   * on (`failedCount`). Optional: an orchestrator predating the migration
+   * omits them. Drives the honest "still indexing" empty state.
+   */
+  pendingCount?: number;
+  failedCount?: number;
 }
 
 export async function fetchSearchStatus(): Promise<SearchReadinessStatus> {
