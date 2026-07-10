@@ -17,6 +17,10 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
+import { createBusinessProfileRouter } from "./routes/business-profile.js";
+import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
+import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import { createFilesRouter } from "./routes/files.js";
@@ -64,6 +68,9 @@ import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
+import { createModulesRouter } from "./routes/modules.routes.js";
+import { createModuleGate } from "./middleware/module-gate.js";
+import { MODULES } from "./modules/module-registry.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -223,6 +230,22 @@ export function createApp(
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
 
+  // Module toggles (runtime enablement, per business type). Data-driven from the
+  // registry: 404 a DISABLED module's `/api/*` routes before they reach the
+  // module's router (a disabled module reads as absent, not forbidden). Core
+  // modules (chat) are never gated. Registered here — after auth, before the
+  // module routers below — so the gate precedes what it guards. The `/api/modules`
+  // + `/api/business-types` control-plane mounts alongside.
+  // Spec: docs/superpowers/specs/2026-07-07-module-toggles-design.md.
+  const moduleGate = createModuleGate(prisma, config);
+  for (const def of MODULES) {
+    if (def.core) continue;
+    for (const prefix of def.routePrefixes) {
+      app.use(prefix, moduleGate.requireModuleEnabled(def.id));
+    }
+  }
+  app.use("/api", createModulesRouter(prisma, config, moduleGate));
+
   // PR #377 — passkey REGISTRATION. You enrol a passkey for the signed-in
   // user, so register/options + register/verify require an authenticated
   // session and mount AFTER authMiddleware.
@@ -233,6 +256,17 @@ export function createApp(
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
   app.use("/api", createPersonaRouter(prisma));
+  // WARP-1120 — business-knowledge API (GET role-split read + PATCH owner/admin;
+  // manual fill transitions onboarding state → completed).
+  app.use("/api", createBusinessProfileRouter(prisma));
+  // WARP-1121 — onboarding-interview lifecycle (start/skip/commit, owner/admin;
+  // atomic conditional transitions, 409 on race).
+  app.use("/api", createBusinessOnboardingRouter(prisma));
+  // WARP-1137 — Eaglesoft ERP integration control plane + data API. Reads
+  // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
+  // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
+  app.use("/api", createIntegrationsRouter(prisma));
+  app.use("/api", createErpRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());

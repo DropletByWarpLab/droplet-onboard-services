@@ -256,6 +256,23 @@
   border-radius: 7px;
   transition: background 150ms var(--ease);
 }
+/* WARP-1131 — in-month day cells are real <button>s (deep-link to /calendar).
+   Reset the UA button chrome so the grid renders pixel-identical to the old
+   divs (the cell's own font/color/padding rules above still apply). The
+   focus ring keeps the cell's 7px radius — the surface's global
+   :focus-visible rule would round it to 6px. Existing tokens only. */
+.droplet-home button.w-cal-cell {
+  appearance: none;
+  background: transparent;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.droplet-home button.w-cal-cell:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 7px;
+}
 .droplet-home .w-cal-cell.out {
   color: var(--text-muted);
   opacity: 0.5;
@@ -667,6 +684,22 @@
   gap: 12px;
   padding: 9px 2px;
   min-height: 38px;
+}
+/* WARP-1143 — Recent-files rows are real <button>s (deep-link into /files).
+   Reset the UA button chrome so rows render pixel-identical to the old divs;
+   focus-visible comes from the Home surface's existing global ring. The
+   `border: none` reset also clears the `.w-list > * + *` divider, so it is
+   restated for button rows below. */
+.droplet-home button.w-row {
+  appearance: none;
+  background: transparent;
+  border: none;
+  margin: 0;
+  width: 100%;
+  text-align: left;
+}
+.droplet-home .w-list > * + button.w-row {
+  border-top: 1px solid var(--card-bd);
 }
 .droplet-home .w-row .grow {
   flex: 1;

@@ -41,6 +41,11 @@ class PairingCodeAlreadyClaimedError extends Error {
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const PAIRING_CODE_LENGTH = 6;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+// WARP-1151: `PairingCode.code` is unique and consumed/expired rows are never
+// purged, so a fresh random 6-char code can (rarely) collide with a historical
+// row. A collision is a retryable allocation miss, not a request failure —
+// regenerate up to this many times before giving up.
+const PAIRING_CODE_CREATE_ATTEMPTS = 5;
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
 const MAX_PAIR_CLAIM_PER_IP_PER_HOUR = 20;
@@ -104,6 +109,19 @@ async function rateLimit(
   } catch {
     return { allowed: true, remaining: limit };
   }
+}
+
+/**
+ * WARP-1138: caller IP for per-IP rate-limit bucket keys. Mirrors auth.ts
+ * callerIpFromReq (WARP-579 standard) — uses Express's proxy-aware `req.ip`
+ * (`trust proxy` is set in app.ts, so behind the nginx hop this resolves the
+ * real client). NEVER the leftmost `X-Forwarded-For` entry: that value is
+ * client-controlled, so keying the bucket on it lets an attacker mint a
+ * fresh bucket per request by rotating the header (and an empty header
+ * collapses everyone into one shared bucket).
+ */
+function callerIp(req: Request): string {
+  return req.ip ?? req.socket?.remoteAddress ?? "unknown";
 }
 
 /**
@@ -195,12 +213,35 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const code = generatePairingCode();
       const expiresAt = new Date(Date.now() + PAIRING_CODE_TTL_MS);
 
-      await prisma.pairingCode.create({
-        data: { code, userId: user, expiresAt },
-      });
+      // WARP-1150/1151: allocate the code with a collision retry. Without it a
+      // P2002 clash with any historical code 500s the whole Generate-code step.
+      let code: string | null = null;
+      for (let attempt = 0; attempt < PAIRING_CODE_CREATE_ATTEMPTS; attempt++) {
+        const candidate = generatePairingCode();
+        try {
+          await prisma.pairingCode.create({
+            data: { code: candidate, userId: user, expiresAt },
+          });
+          code = candidate;
+          break;
+        } catch (err) {
+          if ((err as { code?: string })?.code !== "P2002") throw err;
+          logger.warn(
+            { attempt },
+            "pairing code collided with an existing row; regenerating"
+          );
+        }
+      }
+      if (!code) {
+        // Astronomically unlikely (5 independent collisions), but answer with
+        // retryable copy rather than a 500.
+        res.status(503).json({
+          error: "Couldn't allocate a pairing code. Try again.",
+        });
+        return;
+      }
 
       const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
       const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
@@ -266,7 +307,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // already validated the caller's token via getUser/getToken.
   router.post("/devices/pair/claim", async (req, res, next) => {
     try {
-      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ?? req.ip ?? "unknown";
+      const ip = callerIp(req);
       const rl = await rateLimit(`pair:claim:${ip}`, MAX_PAIR_CLAIM_PER_IP_PER_HOUR);
       if (!rl.allowed) {
         res.status(429).json({ error: "Too many claim attempts from this IP" });
@@ -646,10 +687,7 @@ export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
       // BOTH buckets, success or failure: per-IP catches one host
       // spraying targets, per-target catches a rotating-IP attacker
       // hammering one device id. Same IP derivation as /pair/claim.
-      const ip =
-        (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ??
-        req.ip ??
-        "unknown";
+      const ip = callerIp(req);
       const byIp = await rateLimit(
         `revoke:ip:${ip}`,
         MAX_SELF_REVOKE_PER_IP_PER_HOUR,

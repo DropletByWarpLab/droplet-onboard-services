@@ -14,7 +14,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
-const mockConfig: Record<string, unknown> = { DROPLET_SCIM_BEARER_TOKEN: "scim-secret-token" };
+// vi.hoisted so the object exists before the hoisted vi.mock factory runs —
+// middleware/auth.ts (pulled in by scim-auth.ts for the WARP-1062 deny-row
+// helper) reads config keys at module-evaluation time, which would otherwise
+// hit the TDZ on a plain `const`.
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: { DROPLET_SCIM_BEARER_TOKEN: "scim-secret-token" } as Record<string, unknown>,
+}));
 vi.mock("../config.js", () => ({
   get config() {
     return mockConfig;

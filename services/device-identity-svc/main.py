@@ -73,7 +73,9 @@ def main() -> int:
     logger.info("Loaded backend=%s storage=%s", backend.name, storage_root)
     if backend.name == "mock" and os.environ.get("DROPLET_ENV") == "production":
         logger.warning(
-            "Mock backend in production — operator must set DROPLET_TPM_BACKEND=real"
+            "Mock device-identity backend in production. The 'real' TPM backend "
+            "is an unimplemented scaffold (IDX-002) — do NOT set "
+            "DROPLET_TPM_BACKEND=real until it lands (it fails closed by default)."
         )
 
     # Auto-provision on first start. Idempotent — backend.provision() is a

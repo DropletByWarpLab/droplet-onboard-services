@@ -49,7 +49,12 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   MQTT_BROKER: z.string().default("mqtt://localhost:1883"),
   // WARP-236 — internal service-to-service mTLS. Defaults keep dev/CI on plain
-  // HTTP; scripts/setup.sh writes DROPLET_INTERNAL_TLS=1 into a box's .env.
+  // HTTP. NOTE (WARP-1062 doc-truth): nothing sets this to "1" today — neither
+  // scripts/setup.sh nor compose — so the mesh mTLS code below (index.ts HTTPS
+  // listener, lib/internal-tls.ts clients) is dormant on every box. On-box
+  // enablement plus the still-unwired server hops (nginx proxy_ssl, the
+  // FastAPI/uvicorn listeners, ai-gateway gRPC) is a separate follow-up
+  // ticket; see docs/security/internal-mtls.md "Wiring status".
   DROPLET_INTERNAL_TLS: z.string().default("0"),
   DROPLET_TLS_CERT: z.string().default("/data/service-tls/cert.pem"),
   DROPLET_TLS_KEY: z.string().default("/data/service-tls/key.pem"),
@@ -65,6 +70,21 @@ const envSchema = z.object({
   // doesn't degrade blocks the model could actually carry. This configures the
   // window only — it is NOT a model swap and does not touch the One-Model Rule.
   OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
+  // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
+  // is an EXPLICIT boolean, never derived from the days var's emptiness.
+  BUSINESS_PROFILE_REVIEW_ENABLED: z
+    .string()
+    .default("true")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  // `.nonnegative()` (not `.positive()`): 0 is a VALID interval meaning
+  // "review on every daily check / immediate" — the reviewer-notes DoD boots
+  // with BUSINESS_PROFILE_REVIEW_DAYS=0 to verify the nudge, and config.ts
+  // `.parse()`s (not safeParse), so rejecting 0 would crash boot. The consumer
+  // (business-review-nudge.service) uses this as a subtraction offset for the
+  // staleness cutoff, so 0 → cutoff===now → any past `updatedAt` fires; there
+  // is no division, so 0 needs no extra guard. Negatives stay rejected (a
+  // negative interval would push the cutoff into the future and never fire).
+  BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().nonnegative().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
@@ -282,6 +302,32 @@ const envSchema = z.object({
   // Defaults match the OpenWrt LAN. Override if the LAN is reconfigured.
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
+  // --- Home-mode remote access (hybrid P1) ---
+  // A HOME-mode peer dials the box DIRECTLY at its home-network-facing LAN IP
+  // (no server, no public inbound — the foundation-clean path). Over that
+  // tunnel the client resolves the per-device FQDN through the box's own
+  // split-horizon dnsmasq so the padlock works, exactly as ADR-023 §3.4
+  // describes (the box answers the FQDN with 192.168.20.1 for tunnel clients).
+  // These values shape the home-mode .conf; the away-mode path is untouched.
+  //
+  // WIREGUARD_HOME_DNS — the split-horizon resolver the home-mode client points
+  //   at over the tunnel. Single-box: the WireGuard gateway 192.168.20.1, the
+  //   SAME address DROPLET_PUBLIC_FQDN_IP defaults to (they must agree so the
+  //   FQDN resolves). Override on a LAN whose gateway differs.
+  WIREGUARD_HOME_DNS: z.string().default("192.168.20.1"),
+  // WIREGUARD_HOME_ALLOWED_IPS — the box subnet(s) a home-mode client routes
+  //   over the tunnel. HOME mode is SPLIT-tunnel to the box (never 0.0.0.0/0):
+  //   only the box services subnet (single-box br-lan 192.168.20.0/24) plus the
+  //   VPN tunnel subnet, which is appended automatically from
+  //   WIREGUARD_VPN_SUBNET. Comma-separated; override for a multi-box LAN.
+  WIREGUARD_HOME_ALLOWED_IPS: z.string().default("192.168.20.0/24"),
+  // WIREGUARD_HOME_ENDPOINT_HOST — explicit fallback for the box's home-facing
+  //   LAN IP when live discovery (routing-service network summary) can't supply
+  //   it. Empty (default) means "no fallback": a home-mode mint with no
+  //   discovered IP fails with a clear 503 rather than emitting a conf pointed
+  //   at a wrong guess. The box IP is DHCP, so there is intentionally no
+  //   host-specific default here.
+  WIREGUARD_HOME_ENDPOINT_HOST: z.string().default(""),
   // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
   // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
   // /api/vpn/status so the dashboard never promises "from anywhere" it can't

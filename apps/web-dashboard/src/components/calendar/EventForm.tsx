@@ -173,7 +173,8 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
 
   return (
     <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="md">
-      <div className="p-5 max-h-[90vh] overflow-y-auto">
+      {/* Body padding + scroll come from the <Dialog> primitive (WARP-1153). */}
+      <div>
         <div className="flex items-center justify-between mb-4">
           <h2 id={headingId} className="type-title-3 text-label-primary">
             {editing ? "Edit event" : "New event"}

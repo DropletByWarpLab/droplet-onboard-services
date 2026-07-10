@@ -17,6 +17,7 @@
 
 import { Router, Request, Response } from "express";
 import { config } from "../config.js";
+import { recordAccessDenied } from "../middleware/auth.js";
 
 function isAdmin(req: Request): boolean {
   const role = req.user?.role;
@@ -50,6 +51,9 @@ export function createAdminCapabilitiesRouter(): Router {
 
   router.get("/admin/capabilities", (req: Request, res: Response) => {
     if (!isAdmin(req)) {
+      // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
+      // local isAdmin() denials must not be silent (requireRole parity).
+      recordAccessDenied(req, "role-not-permitted");
       res.status(403).json({ error: "admin required" });
       return;
     }

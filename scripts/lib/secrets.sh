@@ -566,9 +566,15 @@ MAX_UPLOAD_SIZE_MB=100
 
 # --- WARP-230 device identity ---
 # Selects the device-identity-svc backend.
-#   real = use /dev/tpm0 via tpm2-pytss (when a TPM 2.0 chip is present).
 #   mock = pure-Python in-memory mock (dev / CI / hosts without a TPM).
-DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
+#   real = /dev/tpm0 via tpm2-pytss — currently an UNFINISHED scaffold
+#          (IDX-002): its crypto returns placeholder bytes, so the sidecar
+#          FAILS CLOSED on it unless DROPLET_TPM_ALLOW_SCAFFOLD is also set.
+# Default to 'mock' even on TPM-equipped hosts until the tss2 path lands —
+# auto-selecting 'real' would crash-loop device-identity-svc. An operator
+# knowingly running the scaffold sets DROPLET_TPM_BACKEND=real +
+# DROPLET_TPM_ALLOW_SCAFFOLD=1 by hand.
+DROPLET_TPM_BACKEND=mock
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Public-CA per-device TLS (ADR-023) ---
@@ -580,13 +586,15 @@ DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 #   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
 #   entry once known.
 DROPLET_PUBLIC_FQDN=
-# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API. PRESERVED from the
-#   provisioning environment / manifest (${HQ_ISSUANCE_URL:-}) so a fresh or
-#   reflashed box that was handed the HQ URL keeps live issuance. Without this,
-#   factory-reset wipes .env and the box permanently loses its droplet-us.com
-#   cert + FQDN → remote access dead-ends (WARP-978). Empty disables live
-#   issuance (dev / pre-fleet). Plain outbound HTTPS; no WG tunnel required.
-HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
+# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API. Defaults to the PUBLIC
+#   (non-secret) fleet-HQ Cloudflare Worker so a plain reflash / --single-box
+#   self-provisions its trusted droplet-us.com cert zero-touch — no SSH-in to
+#   hand-set this. Still overridable from the provisioning environment / manifest
+#   (${HQ_ISSUANCE_URL:-<default>}). Without a value, factory-reset wiped .env and
+#   the box permanently lost its droplet-us.com cert + FQDN → remote access
+#   dead-ends (WARP-978), which is exactly the reflash-self-signed regression the
+#   baked default fixes. Plain outbound HTTPS; no WG tunnel required.
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
 #   relay OFF — single-box.sh only activates the `relay` compose profile
@@ -730,12 +738,14 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
-  # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run,
-  # seeded from the provisioning environment (empty = live issuance / relay off).
-  # Pairs with the seed-block `${HQ_ISSUANCE_URL:-}` / `${TUNNEL_TOKEN:-}` above so
-  # a reflashed box keeps its droplet-us.com cert + relay when provisioning hands
-  # these in, instead of silently regressing to the self-signed bootstrap cert.
-  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
+  # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run.
+  # HQ_ISSUANCE_URL is seeded from the provisioning environment or the baked
+  # PUBLIC fleet-HQ Worker default (non-secret) so a reflashed box self-provisions
+  # its droplet-us.com cert zero-touch; TUNNEL_TOKEN stays a secret (empty = relay
+  # off). Pairs with the seed-block defaults above. `_migrate_ensure_key` only
+  # appends when the key is ABSENT, so an existing (even intentionally-empty)
+  # value is never clobbered on re-run.
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs
@@ -775,6 +785,19 @@ migrate_env() {
   # silently. The token is operator-only (loopback bind + reverse tunnel
   # is the actual exposure surface — see docs/operator-surfaces.md).
   _migrate_ensure_key OPS_TOKEN "$(openssl rand -hex 32)"
+
+  # INFRA-003: these four service tokens + JWT_SECRET are ALWAYS written by
+  # generate_env's heredoc but were missing from migrate_env — so a pre-existing
+  # .env (predating WARP-465/468/268) interpolated them to empty. Consequences on
+  # an upgraded box: email-indexer ingest 401s and every delivered email is
+  # PERMANENTLY lost (no retry queue), ai-gateway 451s every cloud-LLM call, the
+  # routing egress/throughput samplers 401 (WARP-268 egress-anomaly feed dies),
+  # and an empty JWT_SECRET bricks the orchestrator at boot. Backfill on upgrade.
+  _migrate_ensure_key SERVICE_TOKEN_EMAIL "$(openssl rand -hex 32)"
+  _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
+  _migrate_ensure_key JWT_SECRET "$(openssl rand -hex 64)"
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
@@ -793,12 +816,23 @@ migrate_env() {
   # NOT start the engine (that needs DOCS_ENABLED=1 + \`docs\` in COMPOSE_PROFILES).
   _migrate_ensure_key ONLYOFFICE_JWT_SECRET "$(openssl rand -hex 32)"
 
-  # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
-  # on the host — hosts with a TPM hit 'real', everything else hits
-  # 'mock'. Operator can override either by editing .env.
-  local di_backend_default="mock"
-  [ -e /dev/tpm0 ] && di_backend_default="real"
-  _migrate_ensure_key DROPLET_TPM_BACKEND "$di_backend_default"
+  # WARP-230 device-identity backend. The 'real' (tpm2-pytss) backend is an
+  # UNFINISHED scaffold (IDX-002) — device-identity-svc fails closed on it
+  # unless DROPLET_TPM_ALLOW_SCAFFOLD is set, so auto-selecting it on a TPM
+  # host would crash-loop the sidecar. Backfill 'mock' when the key is absent;
+  # operators knowingly running the scaffold set real + the opt-in by hand.
+  _migrate_ensure_key DROPLET_TPM_BACKEND "mock"
+  # Reconcile pre-existing installs whose .env auto-selected 'real' (older
+  # setup, before the fail-closed guard) but never opted into the scaffold:
+  # left as-is they crash-loop the sidecar on upgrade. Flip them back to
+  # 'mock'. A deliberate opt-in (DROPLET_TPM_BACKEND=real together with a
+  # truthy DROPLET_TPM_ALLOW_SCAFFOLD) is preserved untouched.
+  if grep -qE '^DROPLET_TPM_BACKEND=real[[:space:]]*$' "$stage" \
+     && ! grep -qiE '^DROPLET_TPM_ALLOW_SCAFFOLD=(1|true|yes|on)[[:space:]]*$' "$stage"; then
+    sed -i.bak -E 's|^DROPLET_TPM_BACKEND=real[[:space:]]*$|DROPLET_TPM_BACKEND=mock|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: DROPLET_TPM_BACKEND real→mock (IDX-002 scaffold fails closed; no DROPLET_TPM_ALLOW_SCAFFOLD opt-in)"
+  fi
   _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
 
   # WARP-234: per-service Redis ACL identities for pre-existing installs.

@@ -14,6 +14,14 @@
  *                        preset in refs — D-10). Effective on the next turn;
  *                        no restart, no cache invalidation (§7.2).
  *
+ *   GET /api/persona/prompt   WARP-1119 (§12, §14). The COMPOSED persona
+ *                        block as plain text — consumed by voice-io's
+ *                        greeting path at session start with its service
+ *                        credential. owner/admin may read it too (debugging).
+ *                        family/guest are 403: the composed block embeds the
+ *                        raw customInstructions text the role-split GET
+ *                        deliberately withholds from them.
+ *
  * PRIVACY: persona rows are LOCAL box state, never sent off the box (§5-12).
  * RBAC via the shared requireRole middleware — never bypassed (§5-8).
  */
@@ -21,7 +29,12 @@ import { Router } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
-import { getPersona, updatePersona, type PersonaRow } from "../services/persona.service.js";
+import {
+  composePersonaBlock,
+  getPersona,
+  updatePersona,
+  type PersonaRow,
+} from "../services/persona.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -86,6 +99,23 @@ export function createPersonaRouter(prisma: PrismaClient): Router {
         const persona = await getPersona(prisma);
         const role = (req as AuthedRequest).user?.role;
         res.json(readView(persona, role));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-1119 — voice threading (§14). Plain text (not JSON) so voice-io can
+  // prepend the body to its greeting prompt verbatim, no parsing to drift.
+  // The block is composed fresh per request (single-row read, §7.2), so a
+  // persona change is live on the next voice session without a restart.
+  router.get(
+    "/persona/prompt",
+    requireRole("owner", "admin", "service"),
+    async (_req, res, next) => {
+      try {
+        const persona = await getPersona(prisma);
+        res.type("text/plain").send(composePersonaBlock(persona));
       } catch (err) {
         next(err);
       }

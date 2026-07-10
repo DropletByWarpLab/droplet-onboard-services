@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  Blocks,
   BookOpen,
   Calendar as CalendarIcon,
   Cpu,
@@ -28,6 +29,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Stethoscope,
   Trash2,
   Star,
   Clock,
@@ -169,6 +171,17 @@ const NAV_GROUPS: NavGroup[] = [
       // (design brief §2). Ordered Cameras · Network · Devices · Voice.
       { href: "/voice", label: "Voice", icon: Mic },
       { href: "/remote-access", label: "Remote Access", icon: Globe },
+      // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
+      // provider #1 (the Patterson dental PMS Droplet reads directly over its
+      // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
+      {
+        href: "/integrations",
+        label: "Integrations",
+        icon: Blocks,
+        children: [
+          { href: "/integrations/eaglesoft", label: "Eaglesoft", icon: Stethoscope },
+        ],
+      },
     ],
   },
   {
@@ -524,6 +537,9 @@ export function Sidebar() {
         triggerRef={moreTriggerRef}
         labelledBy={moreHeadingId}
         placement="right"
+        // Sectioned full-height drawer — sections own their padding
+        // (WARP-1153).
+        flush
       >
         <div className="flex flex-col h-full">
           <div className="flex items-center justify-between px-5 h-16 border-b border-separator">

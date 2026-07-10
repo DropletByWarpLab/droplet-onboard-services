@@ -23,6 +23,9 @@ vi.mock("@/lib/api", () => ({
   measureVoiceLevel: vi.fn(),
   runVoiceEchoCheck: vi.fn(),
   applyVoiceCalibration: vi.fn(),
+  // WARP-1059 — the wizard brackets its session in calibration mode.
+  enterVoiceCalibrationMode: vi.fn(async () => ({ active: true })),
+  exitVoiceCalibrationMode: vi.fn(async () => ({ active: false })),
 }));
 
 import { CalibrationWizard } from "@/components/voice/CalibrationWizard";
@@ -30,6 +33,8 @@ import {
   measureVoiceLevel,
   runVoiceEchoCheck,
   applyVoiceCalibration,
+  enterVoiceCalibrationMode,
+  exitVoiceCalibrationMode,
 } from "@/lib/api";
 import type { VoiceStatusInfo } from "@/lib/types";
 
@@ -51,6 +56,8 @@ function status(overrides: Partial<VoiceStatusInfo> = {}): VoiceStatusInfo {
 const measureMock = vi.mocked(measureVoiceLevel);
 const echoMock = vi.mocked(runVoiceEchoCheck);
 const applyMock = vi.mocked(applyVoiceCalibration);
+const enterModeMock = vi.mocked(enterVoiceCalibrationMode);
+const exitModeMock = vi.mocked(exitVoiceCalibrationMode);
 
 /** Quiet room + good speech peak defaults. */
 function mockHealthyMeasurements() {
@@ -283,6 +290,56 @@ describe("CalibrationWizard (WARP-1055)", () => {
     const payload = applyMock.mock.calls[0][0];
     expect(payload.echo_ok).toBe(true);
     expect(payload.flags).toEqual([]);
+  });
+
+  it("brackets the session in calibration mode: enter on open, exit on close (WARP-1059)", async () => {
+    mockHealthyMeasurements();
+    const { onClose, unmount } = renderWizard();
+    // Entered as soon as the wizard opens — before any measurement can
+    // trip a wake — with the renewable TTL.
+    expect(enterModeMock).toHaveBeenCalledWith(90);
+    expect(exitModeMock).not.toHaveBeenCalled();
+
+    // ANY close path exits the mode (the effect cleanup owns it) —
+    // here the X mid-flow…
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledWith({ applied: false });
+    unmount();
+    expect(exitModeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renews calibration mode on the interval while open (WARP-1059)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Keep step 1 pending forever so only the renew interval ticks.
+      measureMock.mockImplementation(() => new Promise(() => {}) as never);
+      render(
+        <CalibrationWizard open status={status()} nowS={NOW} onClose={vi.fn()} />,
+      );
+      expect(enterModeMock).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(30_000);
+      expect(enterModeMock).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(30_000);
+      expect(enterModeMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a box that can't enter calibration mode doesn't block the wizard (WARP-1059)", async () => {
+    // Best-effort contract: enter/exit failures are swallowed — the
+    // measurement flow still runs (the TTL fail-safe covers the box side).
+    enterModeMock.mockRejectedValue(new Error("voice_unavailable"));
+    exitModeMock.mockRejectedValue(new Error("voice_unavailable"));
+    mockHealthyMeasurements();
+    renderWizard();
+    expect(
+      await screen.findByText(
+        "Say this from where you'd normally talk to Droplet.",
+        undefined,
+        { timeout: 3000 },
+      ),
+    ).toBeInTheDocument();
   });
 
   it("closing while the apply is in flight is ignored — the write lands (review F3)", async () => {
