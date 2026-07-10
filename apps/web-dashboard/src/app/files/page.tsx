@@ -25,6 +25,7 @@ import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
 import {
   resolveSearchResultTarget,
+  toHomeRelativePath,
   toSpaceRelativePath,
 } from "@/components/FileManager/search-target";
 import { StarButton } from "@/components/FileManager/StarButton";
@@ -73,6 +74,19 @@ export default function FilesPage() {
   const sharedRoot = useMemo(
     () => spaces.find((s) => s.id === "shared")?.root ?? null,
     [spaces]
+  );
+  // WARP-1200: the write APIs (upload / mkdir / paste destination) take
+  // HOME-relative paths — the same shape the listing entries carry — but
+  // `currentPath` is relative to the ACTIVE space's root. Passing it verbatim
+  // while the Household tab was active silently landed uploads and new
+  // folders in the personal space ("/Trips" instead of "/Household/Trips").
+  // Every write destination below must use this resolved form.
+  const homeRelativeCurrentPath = useMemo(
+    () =>
+      space === "shared"
+        ? toHomeRelativePath(currentPath, sharedRoot)
+        : currentPath,
+    [space, currentPath, sharedRoot]
   );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -164,7 +178,7 @@ export default function FilesPage() {
       const count = fileList.length;
       setUploadProgress(`Uploading ${count} file${count > 1 ? "s" : ""}...`);
       try {
-        await uploadFiles(currentPath, fileList, (percent) => {
+        await uploadFiles(homeRelativeCurrentPath, fileList, (percent) => {
           setUploadPercent(percent);
         });
         await refresh();
@@ -177,7 +191,7 @@ export default function FilesPage() {
         setUploadPercent(0);
       }
     },
-    [currentPath, refresh, toast]
+    [homeRelativeCurrentPath, refresh, toast]
   );
 
   // ── Download ──
@@ -258,9 +272,9 @@ export default function FilesPage() {
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     const folderPath =
-      currentPath === "/"
+      homeRelativeCurrentPath === "/"
         ? `/${newFolderName.trim()}`
-        : `${currentPath}/${newFolderName.trim()}`;
+        : `${homeRelativeCurrentPath}/${newFolderName.trim()}`;
     try {
       await createDirectory(folderPath);
       setNewFolderName("");
@@ -269,7 +283,7 @@ export default function FilesPage() {
     } catch (err) {
       toast(translateError(err, "files"));
     }
-  }, [currentPath, newFolderName, refresh, toast]);
+  }, [homeRelativeCurrentPath, newFolderName, refresh, toast]);
 
   // ── Share (opens full dialog) ──
   const handleShare = useCallback((file: FileEntryInfo) => {
@@ -345,12 +359,21 @@ export default function FilesPage() {
   const handlePasteClipboard = useCallback(async () => {
     if (!fm.clipboard) return;
     try {
+      // WARP-1200: clipboard paths are home-relative entry paths, so the
+      // paste DESTINATION must be home-relative too — same defect class as
+      // the upload/mkdir targets.
       if (fm.clipboard.mode === "cut") {
-        const results = await bulkMoveFiles(fm.clipboard.paths, currentPath);
+        const results = await bulkMoveFiles(
+          fm.clipboard.paths,
+          homeRelativeCurrentPath
+        );
         const failed = results.filter((r) => !r.ok);
         if (failed.length > 0) toast(`${failed.length} move(s) failed`);
       } else {
-        const results = await bulkCopyFiles(fm.clipboard.paths, currentPath);
+        const results = await bulkCopyFiles(
+          fm.clipboard.paths,
+          homeRelativeCurrentPath
+        );
         const failed = results.filter((r) => !r.ok);
         if (failed.length > 0) toast(`${failed.length} copy(s) failed`);
       }
@@ -360,7 +383,7 @@ export default function FilesPage() {
     } catch (err) {
       toast(translateError(err, "files"));
     }
-  }, [fm, currentPath, refresh, toast]);
+  }, [fm, homeRelativeCurrentPath, refresh, toast]);
 
   // ── Row click / open ──
   const handleRowSelect = useCallback(

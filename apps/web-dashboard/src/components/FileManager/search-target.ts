@@ -40,6 +40,27 @@ export function toSpaceRelativePath(
 }
 
 /**
+ * WARP-1200 — inverse of `toSpaceRelativePath`: resolve a space-root-relative
+ * path (the shape `currentPath` holds while the Household tab is active) back
+ * to the HOME-relative form the write APIs expect ("/Trips" →
+ * "/Household/Trips", "/" → "/Household"). The write routes take
+ * home-relative paths — the same shape the listing entries carry — so a
+ * Household-tab upload / mkdir / paste destination must be resolved through
+ * this or the write silently lands in the personal space. With no shared
+ * root (personal space, or shared unavailable) the path passes through
+ * verbatim.
+ */
+export function toHomeRelativePath(
+  path: string,
+  sharedRoot: string | null | undefined,
+): string {
+  if (!sharedRoot || sharedRoot === "/") return path;
+  const prefix = sharedRoot.endsWith("/") ? sharedRoot.slice(0, -1) : sharedRoot;
+  if (path === "/" || path === "") return prefix;
+  return path.startsWith("/") ? `${prefix}${path}` : `${prefix}/${path}`;
+}
+
+/**
  * Map a search-result path to the (space, in-space path) pair the Files
  * page should navigate to. Results under the shared root open in the
  * Household space (prefix stripped); everything else opens in My Files.
