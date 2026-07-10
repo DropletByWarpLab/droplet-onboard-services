@@ -48,6 +48,7 @@ import type {
   DriveLabel,
   WirelessScanResult,
   AuthUser,
+  RosterUser,
   InviteCreateRequest,
   CreateUserRole,
   InviteCreateResponse,
@@ -493,7 +494,7 @@ export async function fetchMe(): Promise<AuthUser> {
   return res.json();
 }
 
-export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
+export async function fetchUsers(): Promise<{ users: RosterUser[] }> {
   const res = await authFetch(`${BASE}/api/auth/users`);
   if (!res.ok) throw new Error(`Failed to fetch users: ${res.status}`);
   return res.json();
