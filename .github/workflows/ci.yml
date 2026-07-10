@@ -119,6 +119,13 @@ jobs:
         if: matrix.suite == 'orchestrator' || matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/mcp-server build
 
+      # WARP-1137: the orchestrator's erp.service imports @droplet/erp-connector,
+      # whose types resolve from dist/ — build it before the orchestrator
+      # typecheck or tsc fails with TS2307.
+      - name: Build @droplet/erp-connector
+        if: matrix.suite == 'orchestrator'
+        run: npm run -w @droplet/erp-connector build
+
       - name: Test @droplet/tools-core
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/tools-core test

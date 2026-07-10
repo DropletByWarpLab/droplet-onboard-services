@@ -29,6 +29,7 @@ __pycache__/
 !.claude/agents/
 !.claude/skills/
 !.claude/commands/
+!.claude/hooks/
 !.claude/settings.json
 .claude/session-state.json
 *.tsbuildinfo

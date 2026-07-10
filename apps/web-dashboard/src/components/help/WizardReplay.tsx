@@ -53,6 +53,9 @@ export function WizardReplay({
       labelledBy="how-droplet-works"
       maxWidth="md"
       initialFocusRef={closeButtonRef}
+      // Sectioned layout (full-width header divider) — sections own their
+      // padding (WARP-1153).
+      flush
     >
       <div>
         <div className="flex items-center justify-between px-5 py-4 border-b border-separator">

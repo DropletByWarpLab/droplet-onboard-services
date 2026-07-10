@@ -53,7 +53,7 @@ describe("approve_ap (WARP-446)", () => {
       ctxWith(post),
     );
     expect(post).toHaveBeenCalledWith(
-      "/api/aps/B8:27:EB:00:00:01/approve",
+      "/api/aps/B8%3A27%3AEB%3A00%3A00%3A01/approve",
       { ssid: "Droplet", encryptionKey: "longenoughpw" },
     );
     expect(r.ok).toBe(true);

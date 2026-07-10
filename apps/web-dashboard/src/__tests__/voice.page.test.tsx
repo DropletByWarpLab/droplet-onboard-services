@@ -38,6 +38,9 @@ vi.mock("@/lib/api", () => ({
   fetchVoiceCalibration: vi.fn(),
   fetchVoiceStatus: vi.fn(),
   restartVoiceProcessor: vi.fn(),
+  // WARP-1059 — the wizard brackets its session in calibration mode.
+  enterVoiceCalibrationMode: vi.fn(async () => ({ active: true })),
+  exitVoiceCalibrationMode: vi.fn(async () => ({ active: false })),
 }));
 
 import { VoiceSurface } from "@/components/voice/VoiceSurface";

@@ -29,10 +29,15 @@ export function formatApptTime(iso: string): string {
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-/** ISO → "Mar 3, 1985" (DOB, visit dates). */
+/** ISO → "Mar 3, 1985" (DOB, visit dates). A date-only ISO string is parsed as
+ *  LOCAL time (not UTC midnight), so a DOB / visit date never renders one day
+ *  early for a box in a timezone behind UTC (all of the US). */
 export function formatDate(iso?: string): string {
   if (!iso) return "—";
-  const d = new Date(iso);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const d = m
+    ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    : new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", {
     month: "short",

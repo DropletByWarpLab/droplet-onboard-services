@@ -32,6 +32,7 @@ import {
   type ComplianceSnapshot,
 } from "../services/claude-activity/compliance-parser.js";
 import { createLogger } from "../lib/logger.js";
+import { recordAccessDenied } from "../middleware/auth.js";
 
 const logger = createLogger("admin-claude-activity");
 
@@ -60,6 +61,9 @@ export function createAdminClaudeActivityRouter(): Router {
     "/admin/claude-activity",
     async (req: Request, res: Response, next: NextFunction) => {
       if (!isAdmin(req)) {
+        // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
+        // local isAdmin() denials must not be silent (requireRole parity).
+        recordAccessDenied(req, "role-not-permitted");
         res.status(403).json({ error: "admin required" });
         return;
       }

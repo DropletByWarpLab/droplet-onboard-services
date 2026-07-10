@@ -94,6 +94,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | erp_find_patient | erp | Search patients in the ERP (Eaglesoft) by name, minimum-necessary fields. Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
 | erp_get_ar_summary | erp | Accounts-receivable summary (aggregated in SQL) from the ERP (Eaglesoft). Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
 | erp_schedule_appointment | erp | Schedule/reschedule an appointment (Eaglesoft). Write tier + confirmation; stages a write request, never writes directly. Returns ERP_NOT_CONNECTED until WARP-1095+. | true | true | orchestrator → erp-connector |
+| business_profile_get | business | Read the structured business profile (what-we-do, customers, team, tools, typical day, goals + summary). Read-only; role-filtered (family sees the summary only). WARP-1120. | false | false | orchestrator |
 
 ## Deferred (not ported in WARP-102)
 
@@ -104,6 +105,6 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 ## Counts
 
-- Registered: 84 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 previous PRs [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] + 1 WARP-864 [`restart_router`] + 4 WARP-1094 [ERP-connector: 3 Read-tier + 1 Write-tier `erp_schedule_appointment`] = 84.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
+- Registered: 86 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 15 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×2 other] + 9 previous PRs [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] + 1 WARP-864 [`restart_router`] + 4 WARP-1094 [ERP-connector: 3 Read-tier + 1 Write-tier `erp_schedule_appointment`] + 1 WARP-1120 [business-knowledge: `business_profile_get`] = 86.) The prior "84" here undercounted the live registry by one (the fuzzy `other` bucket); WARP-1120 corrects it and adds the business tool. This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
 - Deferred: 2 tools.
 - Reconciled / collapsed: 4 (`block_device`, `unblock_device`, `get_cameras`, `get_camera_events`/`list_recent_camera_events`, `get_wifi_info`, `list_devices`/`get_connected_devices`) — all merged into the canonical names listed above.

@@ -416,9 +416,88 @@ describe("POST /api/voice/restart-processor (WARP-1057)", () => {
   });
 });
 
+describe("POST/DELETE /api/voice/calibration-mode (WARP-1059)", () => {
+  it("POST forwards {ttl_s} to voice-io and relays the mode payload", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, { active: true, expires_at: 1_800_000_060 }),
+    );
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/calibration-mode")
+      .send({ ttl_s: 60 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ active: true, expires_at: 1_800_000_060 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/calibration-mode",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ ttl_s: 60 }),
+      }),
+    );
+  });
+
+  it("POST omits ttl_s from the upstream body when not supplied (voice-io default)", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { active: true }));
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/calibration-mode")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/calibration-mode",
+      expect.objectContaining({ body: JSON.stringify({}) }),
+    );
+  });
+
+  it("POST rejects an out-of-bounds ttl_s with 400 and never calls upstream", async () => {
+    const app = buildApp(mkUser("owner"));
+    for (const ttl_s of [0, 4, 301, "sixty", NaN]) {
+      const res = await request(app)
+        .post("/api/voice/calibration-mode")
+        .send({ ttl_s });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_ttl");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("DELETE proxies the idempotent exit", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, { active: false, expires_at: null }),
+    );
+    const res = await request(buildApp(mkUser("owner"))).delete(
+      "/api/voice/calibration-mode",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ active: false, expires_at: null });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/calibration-mode",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    // DELETE carries no body upstream.
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    expect(init.body).toBeUndefined();
+  });
+
+  it("answers 503 voice_unavailable when unreachable (both verbs)", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const app = buildApp(mkUser("owner"));
+    const post = await request(app)
+      .post("/api/voice/calibration-mode")
+      .send({ ttl_s: 60 });
+    expect(post.status).toBe(503);
+    expect(post.body.error).toBe("voice_unavailable");
+    const del = await request(app).delete("/api/voice/calibration-mode");
+    expect(del.status).toBe(503);
+    expect(del.body.error).toBe("voice_unavailable");
+  });
+});
+
 describe("voice routes RBAC (owner/admin only — service principals denied)", () => {
   const DENIED: (Role | null)[] = ["family", "guest", "service", null];
-  const ROUTES: { method: "get" | "post"; path: string; body?: unknown }[] = [
+  const ROUTES: {
+    method: "get" | "post" | "delete";
+    path: string;
+    body?: unknown;
+  }[] = [
     { method: "get", path: "/api/voice/status" },
     { method: "get", path: "/api/voice/devices" },
     { method: "post", path: "/api/voice/say", body: { text: "hello" } },
@@ -439,6 +518,13 @@ describe("voice routes RBAC (owner/admin only — service principals denied)", (
     },
     // WARP-1057 — DSP restart rides the same guard.
     { method: "post", path: "/api/voice/restart-processor", body: {} },
+    // WARP-1059 — calibration mode rides the same guard.
+    {
+      method: "post",
+      path: "/api/voice/calibration-mode",
+      body: { ttl_s: 60 },
+    },
+    { method: "delete", path: "/api/voice/calibration-mode" },
   ];
 
   for (const route of ROUTES) {

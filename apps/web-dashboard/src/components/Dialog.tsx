@@ -44,18 +44,25 @@ import "@/components/shell/droplet-shell.css";
  *     transition when the user has reduce-motion preference on. The
  *     dialog still mounts/unmounts; only the animation is gated.
  *
- * Padding contract (WARP-945 / WARP-949): the dialog CONTAINER is
- * intentionally padding-free for BOTH placements. Centered modals get the
- * indigo card chrome (card surface/border/radius + lift shadow) and side
- * panels get an edge-to-edge surface — neither insets the content. This is deliberate so consumers can
- * render full-width headers / footers with `border-b` / `border-t` dividers
- * that span the whole surface. The flip side: every consumer MUST pad its
- * own body — wrap children in a div with the dashboard spacing tokens
- * (`p-5` ≈ 20px for centered bodies, `p-5` / `px-4 py-3` per section for side
- * panels; the Projects surface uses its scoped `.pm-dialog-body`). A bare,
- * unpadded child renders flush against the edge — the exact regression
- * WARP-945 fixed on the Projects surfaces. Do NOT add padding to the
- * container here: it would double-pad the ~18 consumers that already self-pad.
+ * Padding + overflow contract (WARP-1152/WARP-1153, supersedes the
+ * WARP-945/949 "every consumer self-pads" contract): the PRIMITIVE owns the
+ * body inset and the horizontal-overflow policy, so a dialog can't opt out
+ * silently.
+ *
+ *   - By default children render inside the standard body region: `p-5`
+ *     (20px, spacing scale) with, for centered modals, vertical-only
+ *     scrolling (`max-h-[90vh] overflow-y-auto`). Horizontal overflow is
+ *     clipped (`overflow-x-hidden`) so a too-wide row can neither sit flush
+ *     against the card edge nor grow an internal horizontal scrollbar — the
+ *     exact WARP-1152 regression on the calendar's New-event dialog.
+ *   - Sectioned layouts (full-width headers / footers with `border-b` /
+ *     `border-t` dividers spanning the surface, e.g. PairDialog and the
+ *     right-edge detail panels) opt out EXPLICITLY with `flush` and then own
+ *     per-section padding on the spacing scale (`p-5` / `px-4 py-3`; the
+ *     Projects surfaces use their scoped `.pm-dialog-body`). `flush` is a
+ *     padding opt-out only — centered modals keep the vertical-scroll +
+ *     horizontal-clip body region either way, and side panels keep
+ *     horizontal clipping on the panel itself.
  */
 export interface DialogProps {
   /** Whether the dialog is open. */
@@ -100,6 +107,13 @@ export interface DialogProps {
    * descendant of the dialog gets focus on open.
    */
   initialFocusRef?: RefObject<HTMLElement | null>;
+  /**
+   * Opt out of the default `p-5` body inset for sectioned layouts that
+   * render full-width `border-b` / `border-t` dividers and own per-section
+   * padding (see the padding + overflow contract above). Never an overflow
+   * opt-out: horizontal clipping and the centered scroll region stay on.
+   */
+  flush?: boolean;
   /** Dialog body. The heading element referenced by `labelledBy` must be inside. */
   children: ReactNode;
 }
@@ -132,6 +146,7 @@ export function Dialog({
   placement = "center",
   closeOnBackdrop = true,
   initialFocusRef,
+  flush = false,
   children,
 }: DialogProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -291,8 +306,28 @@ export function Dialog({
   };
 
   const containerClass = isSide
-    ? "relative w-full max-w-md h-full overflow-y-auto"
+    ? "relative w-full max-w-md h-full overflow-y-auto overflow-x-hidden"
     : `${widthClass} w-full overflow-hidden`;
+
+  // Body region (padding + overflow contract, see the component doc):
+  //   - centered: ALWAYS a vertical-only scroll region that clips horizontal
+  //     overflow; `flush` only drops the `p-5` inset.
+  //   - side: the container above is already the (horizontally clipped)
+  //     scroll region; `flush` renders children directly so full-height
+  //     `h-full` section layouts keep working, the default adds the `p-5`
+  //     inset.
+  const centeredBodyClass = flush
+    ? "max-h-[90vh] overflow-y-auto overflow-x-hidden"
+    : "max-h-[90vh] overflow-y-auto overflow-x-hidden p-5";
+  const body = isSide ? (
+    flush ? (
+      children
+    ) : (
+      <div className="p-5">{children}</div>
+    )
+  ) : (
+    <div className={centeredBodyClass}>{children}</div>
+  );
 
   // Indigo card chrome (WARP-1066 modal idiom: card surface + card border
   // + card radius + `--lift` shadow). Side panels swap the full border for
@@ -351,7 +386,7 @@ export function Dialog({
             onKeyDown={handleContainerKeyDown}
             {...panelMotion}
           >
-            {children}
+            {body}
           </motion.div>
         </motion.div>
       )}

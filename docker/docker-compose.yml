@@ -444,10 +444,14 @@ services:
       # the literal OFF posture (identical to the pre-WARP-318 render).
       DROPLET_FIPS_REQUIRED: "false"
       OPENSSL_CONF: /etc/ssl/openssl.cnf
-      # Backend selection — defaults to 'real' in production. Override
-      # to 'mock' on hosts without /dev/tpm0 (Mac dev, CI runners).
+      # Backend selection. The 'real' (tpm2-pytss) backend is an unfinished
+      # scaffold (IDX-002) that device-identity-svc fails closed on unless
+      # DROPLET_TPM_ALLOW_SCAFFOLD is set, so the default is 'mock' — a box
+      # whose .env omits the key must NOT auto-land on the crash-looping
+      # scaffold. secrets.sh writes DROPLET_TPM_BACKEND=mock into .env; an
+      # operator knowingly running the scaffold sets real + the opt-in by hand.
       # docker-compose.test.override.yml forces 'mock' for the test lane.
-      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-real}
+      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-mock}
       DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
       # Auto-provision on first start: if /var/lib/droplet/tpm/ has no
       # provisioned.json, generate the EK / SRK / device-id key and
@@ -951,6 +955,10 @@ services:
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+      # WARP-1140: shared "Household" groupfolder — display-path prefix for
+      # chunks indexed from __groupfolders/. Must match the orchestrator's
+      # DROPLET_SHARED_FOLDER_NAME (same "Household" default).
+      - DROPLET_SHARED_FOLDER_NAME=${DROPLET_SHARED_FOLDER_NAME:-Household}
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/

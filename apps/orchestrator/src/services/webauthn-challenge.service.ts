@@ -97,15 +97,76 @@ export async function consumeChallenge(
 }
 
 /**
+ * Rows removed per `deleteMany` statement. Keeps each delete short and
+ * index-bounded (on the `expiresAt` filter). Mirrors the sizing in
+ * audit-retention-purge.service.ts. */
+const DEFAULT_PRUNE_BATCH_SIZE = 5000;
+/**
+ * Hard upper bound on rows removed PER RUN. See pruneExpiredChallenges for
+ * why this cap exists; matches the audit-retention purge default. */
+const DEFAULT_PRUNE_MAX_ROWS = 100_000;
+
+export interface PruneOptions {
+  /** Rows deleted per `deleteMany` statement. Default 5000. */
+  batchSize?: number;
+  /**
+   * Hard upper bound on rows removed per run. Bounds the wall-clock of the
+   * run so the shared 60 s advisory-lock `$transaction` in the daily-purge
+   * cron can't time out on a huge first-run backlog; the remainder drains on
+   * subsequent nights. Default 100_000.
+   */
+  maxRowsPerRun?: number;
+  /** Injectable clock for deterministic tests. Default `new Date()`. */
+  now?: Date;
+}
+
+/**
  * Prune abandoned (expired) challenges. Ceremonies the user walked away from
- * leave rows that consumeChallenge never reaches; this keeps the table from
- * growing unbounded. Wired to the cron runtime (NOT a `while True`), called
- * opportunistically — losing a tick is harmless because consumeChallenge
- * independently rejects anything past `expiresAt`.
+ * leave rows that consumeChallenge never reaches, and the mint endpoint
+ * (POST /auth/webauthn/authenticate/options) is public + unthrottled, so this
+ * keeps the table from growing unbounded. Wired to the 03:00 daily purge in
+ * index.ts (NOT a `while True`) — losing a tick is harmless because
+ * consumeChallenge independently rejects anything past `expiresAt`.
+ *
+ * Bounded + capped (same precedent as audit-retention-purge.service.ts,
+ * "Finding 2 / PR #623"): the daily-purge cron handler runs INSIDE a single
+ * 60 s advisory-lock `prisma.$transaction` (cron-runtime `withAdvisoryLock`).
+ * This table grew unbounded since inception (public unauth mint endpoint), so
+ * a first-run / long-idle box can hold a months-deep backlog. One unbounded
+ * `deleteMany` scanning that whole backlog could push the handler past 60 s →
+ * P2028 → the transaction rolls back EVERY purge in the tick and retries the
+ * same oversized set every night forever. Instead we delete in bounded batches
+ * (each `deleteMany` short and index-bounded) capped per run, so the run is
+ * provably short and the backlog drains over nights.
  */
-export async function pruneExpiredChallenges(prisma: PrismaClient): Promise<number> {
-  const { count } = await prisma.webAuthnChallenge.deleteMany({
-    where: { expiresAt: { lt: new Date() } },
-  });
-  return count;
+export async function pruneExpiredChallenges(
+  prisma: PrismaClient,
+  options: PruneOptions = {},
+): Promise<number> {
+  const batchSize = Math.max(1, options.batchSize ?? DEFAULT_PRUNE_BATCH_SIZE);
+  const maxRowsPerRun = Math.max(
+    1,
+    options.maxRowsPerRun ?? DEFAULT_PRUNE_MAX_ROWS,
+  );
+  const now = options.now ?? new Date();
+
+  let deleted = 0;
+  while (deleted < maxRowsPerRun) {
+    const take = Math.min(batchSize, maxRowsPerRun - deleted);
+    const batch = await prisma.webAuthnChallenge.findMany({
+      where: { expiresAt: { lt: now } },
+      orderBy: { createdAt: "asc" },
+      take,
+      select: { id: true },
+    });
+    if (batch.length === 0) break;
+    const ids = batch.map((r) => r.id);
+    const { count } = await prisma.webAuthnChallenge.deleteMany({
+      where: { id: { in: ids } },
+    });
+    deleted += count;
+    // Short batch means we've drained everything currently expired — done.
+    if (batch.length < take) break;
+  }
+  return deleted;
 }

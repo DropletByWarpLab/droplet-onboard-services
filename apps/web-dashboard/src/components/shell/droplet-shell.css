@@ -276,7 +276,12 @@
 .ds-ios-line { display: flex; align-items: center; gap: 14px; padding: 16px 20px; min-height: 56px; }
 .ds-ios-line + .ds-ios-line { border-top: 1px solid var(--border); }
 .ds-ios-line .il-ic { width: 24px; flex-shrink: 0; color: var(--brand); display: flex; }
-.ds-ios-line .il-l { font-size: 16px; color: var(--text); white-space: nowrap; }
+/* WARP-1153: the schedule-report rows put free-text event titles in `.il-l`
+   (calendar page), so it must be able to shrink + ellipsize instead of being
+   clipped by `.ds-ios-group { overflow: hidden }` and shoving the trailing
+   `.il-v` time out of the row. Harmless for the detail sheet's short fixed
+   labels. */
+.ds-ios-line .il-l { font-size: 16px; color: var(--text); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ds-ios-line .il-v { margin-left: auto; font-size: 16px; color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 12px; }
 .ds-ios-note { padding: 17px 20px; font-size: 15px; line-height: 1.55; color: var(--text); }
 .ds-ios-note textarea { width: 100%; min-height: 84px; resize: none; border: 0; outline: 0; background: transparent; font: inherit; font-size: 15px; line-height: 1.55; color: var(--text); }
