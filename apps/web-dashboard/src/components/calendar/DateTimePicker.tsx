@@ -75,7 +75,12 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
   }
 
   return (
-    <div className="flex gap-2">
+    // WARP-1152: flex-wrap lets the time dropdown fall onto its own line when
+    // the available column is narrower than date-floor + gap + time-intrinsic
+    // (~250px — e.g. one half of EventForm's sm:grid-cols-2 split inside the
+    // max-w-md dialog). Without it the row's min-content width overflowed the
+    // dialog's content box and grew an internal horizontal scrollbar.
+    <div className="flex flex-wrap gap-2">
       <input
         id={dateId}
         type="date"

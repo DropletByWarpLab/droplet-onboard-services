@@ -19,6 +19,7 @@ import {
 } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
+import { recordAccessDenied } from "../middleware/auth.js";
 
 function requireOwnerOrAdmin(
   req: Request,
@@ -30,6 +31,9 @@ function requireOwnerOrAdmin(
     next();
     return;
   }
+  // WARP-1062 (audit item B): local guards emit the same WARP-237
+  // policy-violation row as the central requireRole — never deny silently.
+  recordAccessDenied(req, "role-not-permitted");
   res.status(403).json({ error: "owner or admin role required" });
 }
 

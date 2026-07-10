@@ -69,7 +69,9 @@ export function SwitchPortDrawer({
 
   return (
     <Dialog open onClose={onClose} labelledBy={headingId} placement="right">
-      <div className="p-[18px]">
+      {/* Body inset comes from the <Dialog> primitive's default `p-5`
+          (WARP-1153 — replaces the off-scale p-[18px]). */}
+      <div>
         {/* Header */}
         <div className="flex items-center gap-3 pb-3.5 border-b border-separator mb-3.5">
           <span className="w-[38px] h-[38px] rounded-[10px] bg-accent-subtle text-accent flex items-center justify-center flex-none">

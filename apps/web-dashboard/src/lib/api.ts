@@ -77,6 +77,7 @@ import type {
   VoiceCalibrationApply,
   VoiceMeasureResult,
   VoiceEchoCheckResult,
+  VoiceCalibrationModeResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -4406,6 +4407,31 @@ export function getThumbnailUrl(path: string, x = 256, y = 256): string {
   return `${BASE}/api/files/thumbnail?path=${encodeURIComponent(path)}&x=${x}&y=${y}`;
 }
 
+/**
+ * WARP-1148/1149 — error thrown by the share mutation helpers on a non-2xx
+ * response. Carries the HTTP status plus the wire `error` string as `code` so
+ * `translateError(err, "share")` can dispatch on stable codes (e.g.
+ * `module_disabled` from a module-gated build) and on the Nextcloud OCS
+ * policy-message shapes, instead of flattening every failure into a plain
+ * Error whose message the translator must discard.
+ */
+export class ShareRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ShareRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwShareError(res: Response, fallback: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+  const wire = typeof body.error === "string" ? body.error : undefined;
+  throw new ShareRequestError(wire || `${fallback}: ${res.status}`, res.status, wire);
+}
+
 export async function createShare(
   path: string,
   opts: ShareCreateOptions = { shareType: 3 }
@@ -4415,10 +4441,7 @@ export async function createShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, ...opts }),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share failed");
   return res.json();
 }
 
@@ -4431,17 +4454,14 @@ export async function updateShare(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Share update failed: ${res.status}`);
-  }
+  if (!res.ok) await throwShareError(res, "Share update failed");
 }
 
 export async function deleteShare(shareId: number): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw new Error(`Share delete failed: ${res.status}`);
+  if (!res.ok) await throwShareError(res, "Share delete failed");
 }
 
 export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
@@ -4525,7 +4545,14 @@ export async function searchFileContent(
   });
   const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
   if (!res.ok) {
-    if (res.status === 503) return []; // AI gateway down — graceful degrade
+    // WARP-1139: a 503 (AI gateway / pgvector down) used to return [] here,
+    // which rendered as "No content matches" — a dishonest empty state that
+    // masked a broken search stack. Surface it as an error instead.
+    if (res.status === 503) {
+      throw new Error(
+        "Content search is unavailable right now — the AI search stack may still be starting."
+      );
+    }
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Semantic search failed: ${res.status}`);
   }
@@ -4547,6 +4574,14 @@ export interface SearchReadinessStatus {
   pgvectorReady: boolean;
   indexedCount: number;
   lastIndexedAt: string | null;
+  /**
+   * WARP-1139/WARP-1140 — explicit per-file indexer state (FileIndexStatus):
+   * files the indexer has seen but not finished (`pendingCount`) or given up
+   * on (`failedCount`). Optional: an orchestrator predating the migration
+   * omits them. Drives the honest "still indexing" empty state.
+   */
+  pendingCount?: number;
+  failedCount?: number;
 }
 
 export async function fetchSearchStatus(): Promise<SearchReadinessStatus> {
@@ -4578,8 +4613,19 @@ export async function createPairingCode(data: {
     body: JSON.stringify(data),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to generate pairing code: ${res.status}`);
+    const body = await res.json().catch(() => ({} as { error?: unknown }));
+    // WARP-1150: keep the HTTP status and any machine-readable error token on
+    // the thrown error so the dialog can map it to step-appropriate copy via
+    // translateError (which never renders err.message verbatim). Without
+    // these, every create failure flattened to the domain fallback.
+    const message =
+      typeof body.error === "string"
+        ? body.error
+        : `Failed to generate pairing code: ${res.status}`;
+    const err = new Error(message) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.error === "string") err.code = body.error;
+    throw err;
   }
   return res.json();
 }
@@ -4859,6 +4905,39 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
     body: JSON.stringify({}),
   });
   if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
+// --- WARP-1059: calibration mode (wizard-scoped wake suppression) ---
+
+/**
+ * Enter (or renew) calibration mode on the box: wakes keep counting
+ * (the wizard's step-3 ticker rides `last_wake_at`) but are not
+ * handled — no STT capture, no LLM call, no reply spoken through the
+ * speaker mid-measurement. Auto-expires after `ttlS` (voice-io default
+ * when omitted), so callers renew while the wizard stays open.
+ */
+export async function enterVoiceCalibrationMode(
+  ttlS?: number,
+): Promise<VoiceCalibrationModeResult> {
+  const body: { ttl_s?: number } = {};
+  if (ttlS !== undefined) body.ttl_s = ttlS;
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to enter calibration mode");
+  return res.json();
+}
+
+/** Exit calibration mode. Idempotent — safe to fire from any wizard
+ *  close path; the TTL expiry is the fail-safe when this never runs. */
+export async function exitVoiceCalibrationMode(): Promise<VoiceCalibrationModeResult> {
+  const res = await authFetch(`${BASE}/api/voice/calibration-mode`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to exit calibration mode");
   return res.json();
 }
 

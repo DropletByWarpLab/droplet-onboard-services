@@ -57,8 +57,10 @@ export function GroupManagerDialog({ open, onClose }: Props) {
   const groups = data?.groups ?? [];
 
   return (
-    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="lg">
-      <div className="max-h-[80vh] overflow-y-auto">
+    // `flush`: sectioned layout — the full-width header divider + sections
+    // own their padding; scroll comes from the primitive body (WARP-1153).
+    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="lg" flush>
+      <div>
         <div className="p-4 border-b border-separator flex items-center justify-between">
           <h2 id={headingId} className="type-title-3 text-label-primary">
             Manage groups

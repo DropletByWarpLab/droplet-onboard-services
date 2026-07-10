@@ -25,6 +25,15 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncGetUserQuota: vi.fn(),
 }));
 
+// WARP-1062 (audit item B): the local isAdmin() denials now emit the WARP-237
+// policy-violation row — capture the singleton to assert it.
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
 import { createStorageRouter } from "../routes/storage.js";
 
 // Bridge response fixture — three drives, one with a friendly name in
@@ -790,6 +799,19 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       app.use("/api", createStorageRouter(createPrismaMock() as any));
       const res = await request(app).post("/api/storage/drives/rescan");
       expect(res.status).toBe(403);
+      // WARP-1062 (audit item B): the local isAdmin() deny emits the same
+      // WARP-237 "Access denied" row as the central requireRole.
+      expect(recordActivityMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "auth",
+          severity: "warn",
+          what: "Access denied",
+          refs: expect.objectContaining({
+            role: "family",
+            reason: "role-not-permitted",
+          }),
+        }),
+      );
     });
 
     it("fails closed when no authenticated user is present", async () => {
