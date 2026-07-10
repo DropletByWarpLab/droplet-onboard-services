@@ -18,7 +18,8 @@ import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
 
 import { PmIcon } from "@/components/projects/icons";
-import { PeopleContext, EmptyBlock } from "@/components/projects/bits";
+import { PeopleContext } from "@/components/projects/bits";
+import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
 import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
@@ -53,28 +54,6 @@ function applySavedView(items: PmWorkItem[], view: SavedView, uid: string | unde
     default:
       return items;
   }
-}
-
-/** Honest "module off" state (WARP-1154/1155). Rendered when the orchestrator
- *  explicitly reports the Projects module disabled — a PERMANENT condition, so
- *  there is deliberately no Retry affordance and no PM request ever fires.
- *  Exported for the capability-gating unit test. */
-export function ProjectsDisabled(): JSX.Element {
-  return (
-    <ShellPage icon={<FolderKanban size={15} />} label="Projects" title="Projects">
-      <div className="pm-scope">
-        <div className="pm-page">
-          <div className="pm-surface" style={{ padding: 8 }}>
-            <EmptyBlock
-              icon="board"
-              heading="Projects isn't enabled on this Droplet."
-              body="An owner or admin can turn it on."
-            />
-          </div>
-        </div>
-      </div>
-    </ShellPage>
-  );
 }
 
 export default function ProjectsPage(): JSX.Element {
