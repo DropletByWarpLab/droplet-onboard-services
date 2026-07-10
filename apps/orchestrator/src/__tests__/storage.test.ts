@@ -282,6 +282,23 @@ describe("storage routes (WARP-174)", () => {
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Invalid drive UUID/i);
     });
+
+    it("rejects the literal 'undefined'/'null' uuid instead of upserting a junk row (WARP-1141)", async () => {
+      // A client that stringifies a missing uuid produces
+      // PATCH /storage/drives/undefined — which passes the charset regex,
+      // upserts a Drive row keyed "undefined", answers 200, and the rename
+      // silently never joins back to any real drive.
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      for (const junk of ["undefined", "null"]) {
+        const res = await request(app)
+          .patch(`/api/storage/drives/${junk}`)
+          .send({ displayName: "Burrito" });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/Invalid drive UUID/i);
+        expect(prisma.rows.has(junk)).toBe(false);
+      }
+    });
   });
 });
 
