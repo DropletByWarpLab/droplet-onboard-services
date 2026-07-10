@@ -31,6 +31,11 @@ import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
+  getBusinessProfile,
+  composeBusinessBlock,
+  type WorkspaceTypeName,
+} from "../services/business-profile.service.js";
+import {
   degradeToFit,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
@@ -322,6 +327,18 @@ function buildBaseSystemPrompt(
    * the fresh read failed (fail-open, same posture as the memory block).
    */
   personaBlock?: string,
+  /**
+   * WARP-1120 (§8/§10/§15) — the role-filtered business-context block
+   * (business-profile.service.ts). Spliced in RIGHT AFTER the persona block
+   * and BEFORE tool guidance (§10 composition order), rendered inside its own
+   * §15 data-framing delimiter so the model treats it as reference data, not
+   * directives. Already role-filtered by the composer (owner/admin → summary +
+   * fields, family → summary only, guest/service → ""), and empty entirely on
+   * a non-BUSINESS box. "" (or undefined) = no business block this turn — the
+   * estimator degraded it away (dropped 1st), the box is HOME-typed, or the
+   * fresh read failed (fail-open).
+   */
+  businessBlock?: string,
 ): string {
   const can = (name: string) => !allowed || allowed.includes(name);
   // Identity leads: the full "who you are / what this box does" block
@@ -332,6 +349,12 @@ function buildBaseSystemPrompt(
   // guidance — one injection owner for the persona block on this path.
   if (personaBlock && personaBlock.length > 0) {
     lines.push("", personaBlock);
+  }
+  // Business context follows persona, still before tool guidance. Summary-
+  // first + delimiter-framed by the composer; a truncation loses detail, not
+  // meaning.
+  if (businessBlock && businessBlock.length > 0) {
+    lines.push("", businessBlock);
   }
   const guidance: string[] = [];
   if (can("search_content")) {
@@ -1139,6 +1162,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           console.warn("[llm/chat] persona load failed:", err);
         }
 
+        // WARP-1120 §8/§9.1 — the role-filtered business block, composed fresh
+        // each request and ONLY while the workspace is a BUSINESS box. A box
+        // re-typed to HOME injects nothing even with a committed profile, so we
+        // short-circuit BEFORE reading (and create-on-read materialising) the
+        // profile. composeBusinessBlock role-filters and gates on type again
+        // (defense-in-depth). Fail-open to no block on any error.
+        let businessBlock = "";
+        try {
+          const workspace = await prisma.workspace.findUnique({
+            where: { id: 1 },
+          });
+          const workspaceType = (workspace?.type ?? "HOME") as WorkspaceTypeName;
+          if (workspaceType === "BUSINESS") {
+            businessBlock = composeBusinessBlock(
+              role,
+              await getBusinessProfile(prisma),
+              workspaceType,
+            );
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] business-profile load failed:", err);
+        }
+
         // WARP-1118 §10 — the context-budget gate. Estimate the WHOLE
         // assembled request (identity + persona + [business, Phase 2] +
         // tool guidance + memory facts + serialized tools[] + the pins /
@@ -1177,7 +1224,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const sizeParts: RequestSizeParts = {
           identityBlock: identityAndGuidance,
           personaBlock,
-          businessBlock: "", // Phase 2 — no business block wired yet.
+          businessBlock, // WARP-1120 — role-filtered, BUSINESS-only, dropped 1st.
           toolGuidance: "", // folded into identityBlock above.
           memoryFactsBlock: memoryBlock,
           toolSchemasJson,
@@ -1202,8 +1249,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const baseSystemMessage: ChatMessage = {
           role: "system",
           content:
-            buildBaseSystemPrompt(allowedForUser, degraded.personaBlock) +
-            memoryBlock,
+            buildBaseSystemPrompt(
+              allowedForUser,
+              degraded.personaBlock,
+              degraded.businessBlock,
+            ) + memoryBlock,
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
