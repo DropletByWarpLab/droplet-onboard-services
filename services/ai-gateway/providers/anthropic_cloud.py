@@ -67,6 +67,12 @@ class AnthropicCloudProvider(BaseProvider):
 
         rid = get_request_id()
         extra_headers = {"x-request-id": rid} if rid else None
+        # GWV-008: forward tools on the streaming path too — without this a
+        # streaming cloud chat with tools got a model that couldn't emit
+        # tool_calls, silently degrading the agent loop to a tool-less answer.
+        extra = {}
+        if kwargs.get("tools"):
+            extra["tools"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in kwargs["tools"]]
         response = await litellm.acompletion(
             model=model,
             messages=messages,
@@ -75,6 +81,7 @@ class AnthropicCloudProvider(BaseProvider):
             max_tokens=kwargs.get("max_tokens", 4096),
             extra_headers=extra_headers,
             stream=True,
+            **extra,
         )
         async for chunk in response:
             data = chunk.model_dump_json()
