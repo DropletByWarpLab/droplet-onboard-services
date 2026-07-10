@@ -15,7 +15,7 @@
  *   - lesser roles render nothing — Settings is an admin surface (§6.3).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const fetchPersona = vi.fn();
 const patchPersona = vi.fn();
@@ -128,6 +128,48 @@ describe("PersonalityCard", () => {
     expect(field).toHaveValue("Always give the numbers first.");
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
     expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("preserves edits typed while a save is in flight (never lose edits)", async () => {
+    // Hold the PATCH open so we can type more into the field mid-flight.
+    let resolvePatch: ((v: typeof BASE) => void) | undefined;
+    patchPersona.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolvePatch = res;
+        }),
+    );
+    render(<PersonalityCard />);
+
+    const field = await screen.findByLabelText(/custom instructions/i);
+    // Edit "A extended thought" and Save.
+    fireEvent.change(field, { target: { value: "A extended thought" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patchPersona).toHaveBeenCalledTimes(1));
+    expect(patchPersona).toHaveBeenCalledWith({
+      customInstructions: "A extended thought",
+    });
+
+    // Keep typing WHILE the PATCH is still pending.
+    fireEvent.change(field, {
+      target: { value: "A extended thought and more" },
+    });
+
+    // Server acknowledges the SUBMITTED value (the older text).
+    await act(async () => {
+      resolvePatch?.({ ...BASE, customInstructions: "A extended thought" });
+    });
+
+    // The in-flight edits survive — applyServerState must not clobber the
+    // textarea back to the acknowledged (older) value.
+    await waitFor(() =>
+      expect(field).toHaveValue("A extended thought and more"),
+    );
+    // And the card is dirty again — the newer edit differs from the freshly
+    // saved baseline, so Save re-enables for a follow-up write.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" })).toBeEnabled(),
+    );
   });
 
   it("re-renders the live preview as controls change, and the first-names toggle drops the name", async () => {

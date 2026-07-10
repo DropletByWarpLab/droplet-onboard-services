@@ -120,11 +120,28 @@ export function PersonalityCard() {
     if (custom !== (saved.customInstructions ?? "")) {
       changes.customInstructions = custom;
     }
+    // Snapshot exactly what we submitted. When the PATCH resolves we adopt
+    // the server echo ONLY for fields the user hasn't touched since — edits
+    // typed during the in-flight request are never clobbered (§7.9: never
+    // lose edits, on the success path too, not just on failure).
+    const submitted = { preset, verbosity, useFirstNames, custom };
     setSaveError(null);
     setSaving(true);
     try {
       const updated = await patchPersona(changes);
-      applyServerState(updated);
+      // Baseline always advances to the acknowledged row so `dirty` stays
+      // honest (a field edited mid-flight now reads dirty against it).
+      setSaved(updated);
+      setPreset((cur) => (cur === submitted.preset ? updated.preset : cur));
+      setVerbosity((cur) =>
+        cur === submitted.verbosity ? updated.verbosity : cur,
+      );
+      setUseFirstNames((cur) =>
+        cur === submitted.useFirstNames ? updated.useFirstNames ?? true : cur,
+      );
+      setCustom((cur) =>
+        cur === submitted.custom ? updated.customInstructions ?? "" : cur,
+      );
       toast("Personality updated", "success");
     } catch {
       setSaveError(SAVE_ERROR_LINE);
