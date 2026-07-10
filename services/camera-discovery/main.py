@@ -193,6 +193,13 @@ known_cameras: dict[str, dict] = {}
 pending_cameras: dict[str, dict] = {}
 # Rejected camera MACs (won't re-discover)
 rejected_macs: set[str] = set()
+# PYNET-017: MACs whose accept is mid-flight (claimed between the pending peek
+# and the Frigate commit). accept_camera peeks rather than pops (PYNET-014), so
+# the record stays in `pending_cameras` during the long verify_stream/add_camera
+# await window; this set is the mutual-exclusion guard that stops a concurrent
+# reject (or a second accept) from acting on a MAC that is being committed —
+# preserving the invariant that a MAC is never both accepted AND rejected.
+accepting_macs: set[str] = set()
 
 # --- MQTT ---
 
@@ -840,38 +847,52 @@ async def accept_camera(mac: str, request: Request):
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")
 
-    rtsp_url = camera.get("rtsp_url")
-    if not rtsp_url:
-        raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
+    # PYNET-017: claim the MAC *synchronously* (no await between this check and
+    # the .add) before entering the long verify_stream/add_camera await window.
+    # The peek above leaves the record in `pending_cameras` for the whole window,
+    # so without this guard a concurrent reject_camera could pop it and mark it
+    # rejected while this coroutine still commits it to Frigate — a "rejected"
+    # camera ending up live. reject_camera (and a second accept) check this set
+    # and 409 while the accept is in flight. The finally releases the claim on
+    # every exit path (success, HTTP error, or unexpected exception).
+    if mac in accepting_macs:
+        raise HTTPException(status_code=409, detail="Camera accept already in progress")
+    accepting_macs.add(mac)
+    try:
+        rtsp_url = camera.get("rtsp_url")
+        if not rtsp_url:
+            raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
 
-    # Verify the stream actually answers before committing it to Frigate, so a
-    # manual accept of a port-open guess can't install a permanently-0-fps
-    # camera. A camera that doesn't verify needs credentials / a corrected URL
-    # first — stays pending so the operator can supply them, rather than
-    # silently landing a dead feed.
-    if not await verify_stream(rtsp_url):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Camera stream did not verify — the RTSP path or credentials "
-                "are likely wrong. Many cameras (e.g. Hikvision/Dahua) gate "
-                "their real stream behind a vendor-specific path that the "
-                "discovery placeholder can't guess, so a corrected RTSP "
-                "URL/path (or credentials) is needed before it can be added."
-            ),
-        )
+        # Verify the stream actually answers before committing it to Frigate, so a
+        # manual accept of a port-open guess can't install a permanently-0-fps
+        # camera. A camera that doesn't verify needs credentials / a corrected URL
+        # first — stays pending so the operator can supply them, rather than
+        # silently landing a dead feed.
+        if not await verify_stream(rtsp_url):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Camera stream did not verify — the RTSP path or credentials "
+                    "are likely wrong. Many cameras (e.g. Hikvision/Dahua) gate "
+                    "their real stream behind a vendor-specific path that the "
+                    "discovery placeholder can't guess, so a corrected RTSP "
+                    "URL/path (or credentials) is needed before it can be added."
+                ),
+            )
 
-    name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
-    success = await frigate.add_camera(name, rtsp_url)
-    if success:
-        pending_cameras.pop(mac, None)  # committed — remove from pending now
-        camera["status"] = "active"
-        known_cameras[mac] = camera
-        publish_discovery({"event": "camera_accepted", "camera": camera})
-        return {"status": "accepted", "camera": camera}
+        name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
+        success = await frigate.add_camera(name, rtsp_url)
+        if success:
+            pending_cameras.pop(mac, None)  # committed — remove from pending now
+            camera["status"] = "active"
+            known_cameras[mac] = camera
+            publish_discovery({"event": "camera_accepted", "camera": camera})
+            return {"status": "accepted", "camera": camera}
 
-    # Still in pending (peeked, not popped) — just surface the failure.
-    raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
+        # Still in pending (peeked, not popped) — just surface the failure.
+        raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
+    finally:
+        accepting_macs.discard(mac)
 
 
 @app.post("/cameras/discovered/{mac}/reject")
@@ -882,6 +903,16 @@ async def reject_camera(mac: str, request: Request):
     privileged write.
     """
     _require_auth(request)
+    # PYNET-017: refuse to reject a MAC whose accept is mid-flight. Otherwise the
+    # in-flight accept could still commit it to Frigate *after* we mark it
+    # rejected, leaving a "rejected" camera live. reject_camera has no awaits, so
+    # this check + the pop below run atomically relative to any accept's await
+    # points — a MAC can never be both accepted and rejected.
+    if mac in accepting_macs:
+        raise HTTPException(
+            status_code=409,
+            detail="Camera accept in progress; cannot reject until it completes.",
+        )
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
