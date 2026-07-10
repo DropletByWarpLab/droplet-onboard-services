@@ -90,12 +90,11 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
-      const existing = await prisma.reminder.findUnique({ where: { id: req.params.id } });
-      if (!existing) return void res.status(404).json({ error: "reminder_not_found" });
-      if (existing.userId !== getUser(req)) return void res.status(403).json({ error: "forbidden" });
-
-      const reminder = await prisma.reminder.update({
-        where: { id: req.params.id },
+      // ORCH-008: ownership-scoped conditional write — 404 (not 403) on a
+      // foreign/unknown id so an authed user can't enumerate which reminder
+      // ids exist, and no findUnique→update TOCTOU.
+      const upd = await prisma.reminder.updateMany({
+        where: { id: req.params.id, userId: getUser(req) },
         data: {
           ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
           ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),
@@ -112,6 +111,8 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
             : {}),
         },
       });
+      if (upd.count === 0) return void res.status(404).json({ error: "reminder_not_found" });
+      const reminder = await prisma.reminder.findUniqueOrThrow({ where: { id: req.params.id } });
       res.json({ reminder });
     } catch (err) {
       next(err);
@@ -120,10 +121,11 @@ export function createRemindersRouter(prisma: PrismaClient): Router {
 
   router.delete("/reminders/:id", async (req, res, next) => {
     try {
-      const existing = await prisma.reminder.findUnique({ where: { id: req.params.id } });
-      if (!existing) return void res.status(404).json({ error: "reminder_not_found" });
-      if (existing.userId !== getUser(req)) return void res.status(403).json({ error: "forbidden" });
-      await prisma.reminder.delete({ where: { id: req.params.id } });
+      // ORCH-008: ownership-scoped delete — 404 on a foreign/unknown id, no TOCTOU.
+      const del = await prisma.reminder.deleteMany({
+        where: { id: req.params.id, userId: getUser(req) },
+      });
+      if (del.count === 0) return void res.status(404).json({ error: "reminder_not_found" });
       res.json({ deleted: req.params.id });
     } catch (err) {
       next(err);
