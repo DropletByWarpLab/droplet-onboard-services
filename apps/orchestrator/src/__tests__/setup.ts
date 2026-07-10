@@ -99,6 +99,17 @@ vi.mock("@prisma/client", () => {
       // findFirst (pre-backfill plaintext fallback) — same "no row" default.
       findFirst: vi.fn().mockResolvedValue(null),
     },
+    // Module toggles: app.ts installs the module gate on every non-core
+    // module router; requireModuleEnabled() reads ModuleSetting overrides via
+    // `moduleSetting.findMany()` on the first gated request per TTL. A mock
+    // without this model throws, the gate fails closed to 404, and every
+    // gated route (devices, network, files, cameras, …) 404s across ~10
+    // suites. `[]` means "no overrides" → the registry's defaultEnabled wins,
+    // matching a fresh box with no toggles applied.
+    moduleSetting: {
+      findMany: vi.fn().mockResolvedValue([]),
+      upsert: vi.fn().mockResolvedValue({}),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),

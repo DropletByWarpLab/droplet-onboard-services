@@ -492,7 +492,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // FAT/exFAT UUIDs sometimes include `:` (rare on Linux blkid output,
       // common on macOS/Windows-formatted disks); accept it alongside the
       // hyphenated EXT/NTFS-style UUIDs the original regex covered.
-      if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
+      // WARP-1141: the literal "undefined"/"null" pass the charset regex but
+      // are a client stringifying a MISSING uuid — upserting them creates a
+      // junk row no real drive ever joins, and the rename "succeeds" silently.
+      if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid) || uuid === "undefined" || uuid === "null") {
         return res
           .status(400)
           .json({ error: "Invalid drive UUID" });

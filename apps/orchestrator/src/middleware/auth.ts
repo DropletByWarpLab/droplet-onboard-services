@@ -143,24 +143,28 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // box can't be silently renamed by an anonymous LAN client; the GET is a
     // read-only, side-effect-free validity check.
     //
-    // These are matched by the startsWith() below (a PREFIX match, not exact),
-    // so "/api/setup/box-name" intentionally covers BOTH the persist route AND
-    // "/api/setup/box-name/check". That's safe here because those are the ONLY
-    // two routes mounted under this prefix: the POST self-re-gates (session OR
-    // appliance-not-ready) and the GET is side-effect-free — so a broader
-    // prefix can't accidentally de-auth some future sibling route (there is
-    // none). The explicit "/check" entry is kept for readability/intent.
-    "/api/setup/box-name/check",
-    "/api/setup/box-name",
+    // NOTE: the box-name routes need PREFIX semantics (/box-name covers
+    // /box-name/check AND /box-name/rename), so they live in PUBLIC_PREFIXES
+    // below — NOT this exact-match list. Their handlers re-gate themselves in
+    // routes/setup.ts (owner/admin once the box is claimed; see ORCH-002).
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",
     "/api/auth/refresh",
-    // WARP-217: invite-accept must be reachable by a fully logged-out
-    // invitee. The token in the URL is the auth.
-    "/api/auth/invites/accept/",
+    // WARP-217: invite-accept (token-in-path) also needs prefix semantics —
+    // see PUBLIC_PREFIXES below.
   ];
-  if (publicPaths.some((p) => req.path === p || req.path.startsWith(p))) {
+  // Exact-match the allowlist. Only two entries genuinely need PREFIX
+  // semantics: the box-name pair (/api/setup/box-name covers /box-name/check
+  // and /box-name/rename) and invite-accept (token-in-path). Everything else
+  // is matched exactly, so a future /api/setup/<x> sibling can never be
+  // silently de-authed by a stray prefix match (the latent fail-open ORCH-001
+  // caught — the old startsWith() applied to EVERY entry).
+  const PUBLIC_PREFIXES = ["/api/setup/box-name", "/api/auth/invites/accept/"];
+  const isPublic =
+    publicPaths.includes(req.path) ||
+    PUBLIC_PREFIXES.some((p) => req.path === p || req.path.startsWith(p));
+  if (isPublic) {
     next();
     return;
   }

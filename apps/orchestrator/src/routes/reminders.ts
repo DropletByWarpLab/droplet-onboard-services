@@ -11,7 +11,11 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 
 function getUser(req: Request): string {
-  return req.user?.username || "admin";
+  const username = req.user?.username;
+  // authMiddleware guarantees req.user on these routes; an absent username is
+  // an invariant break, not a legitimate "admin" default (ORCH-007 fail-open).
+  if (!username) throw new Error("authenticated user required");
+  return username;
 }
 
 const reminderCreateSchema = z.object({
