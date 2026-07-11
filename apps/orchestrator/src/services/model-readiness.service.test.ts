@@ -37,6 +37,7 @@ import {
   ensureDefaultModelPulled,
   warmDefaultModel,
   resetWarmStateForTests,
+  probeColdModel,
 } from "./model-readiness.service.js";
 
 /**
@@ -444,5 +445,155 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(warmRequests(fetchMock)).toEqual([]);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-903 — probeColdModel: one-shot "is this model cold?" check
+// backing the /api/llm/chat `model_loading` SSE event. Reads Ollama's
+// documented lifecycle endpoints directly (GET /api/ps = loaded-in-
+// memory, GET /api/tags = installed-on-disk + size); chat traffic
+// itself never routes through here. Contract: NEVER throws — every
+// failure mode degrades to null (= "don't claim anything").
+// ──────────────────────────────────────────────────────────────────
+
+describe("model-readiness probeColdModel (WARP-903)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerDebug.mockReset();
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  /**
+   * Fetch router for the two probe endpoints. `loaded` feeds /api/ps,
+   * `installed` feeds /api/tags; pass an Error to make that endpoint
+   * reject, or `{ status }` to answer non-2xx.
+   */
+  function probeFetch(opts: {
+    loaded?: unknown[] | Error | { status: number };
+    installed?: unknown[] | Error | { status: number };
+  }) {
+    const respond = (
+      v: unknown[] | Error | { status: number } | undefined,
+    ): Promise<Response> => {
+      if (v instanceof Error) return Promise.reject(v);
+      if (v && !Array.isArray(v) && typeof v === "object" && "status" in v) {
+        return Promise.resolve({
+          ok: false,
+          status: v.status,
+          json: () => Promise.resolve({}),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ models: v ?? [] }),
+      } as unknown as Response);
+    };
+    return vi.fn((url: string, _init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/ps")) return respond(opts.loaded);
+      if (u.endsWith("/api/tags")) return respond(opts.installed);
+      return Promise.reject(new Error(`unexpected probe fetch: ${u}`));
+    });
+  }
+
+  it("reports a model that is installed but not loaded as cold, with its size in GB", async () => {
+    global.fetch = probeFetch({
+      loaded: [],
+      installed: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+    }) as unknown as typeof fetch;
+
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toEqual({
+      model: "gpt-oss:20b",
+      sizeGb: 13.8,
+    });
+  });
+
+  it("returns null when the model is already loaded (warm)", async () => {
+    global.fetch = probeFetch({
+      loaded: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+      installed: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+    }) as unknown as typeof fetch;
+
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toBeNull();
+  });
+
+  it("returns null for a model Ollama does not host (cloud model / not yet pulled)", async () => {
+    global.fetch = probeFetch({
+      loaded: [],
+      installed: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+    }) as unknown as typeof fetch;
+
+    // A cloud-provider id (or a model mid-pull) must not produce a
+    // "loading" claim the stream can never clear honestly.
+    await expect(probeColdModel("claude-sonnet-4")).resolves.toBeNull();
+  });
+
+  it("treats a bare name and its :latest tag as the same model", async () => {
+    global.fetch = probeFetch({
+      loaded: [],
+      installed: [{ name: "qwen3:latest", size: 5_200_000_000 }],
+    }) as unknown as typeof fetch;
+
+    // Ollama canonicalises "qwen3" → "qwen3:latest"; the probe must too.
+    await expect(probeColdModel("qwen3")).resolves.toEqual({
+      model: "qwen3",
+      sizeGb: 5.2,
+    });
+  });
+
+  it("reports sizeGb null when /api/tags carries no size for the model", async () => {
+    global.fetch = probeFetch({
+      loaded: [],
+      installed: [{ name: "gpt-oss:20b" }],
+    }) as unknown as typeof fetch;
+
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toEqual({
+      model: "gpt-oss:20b",
+      sizeGb: null,
+    });
+  });
+
+  it("returns null (never throws) when Ollama is unreachable", async () => {
+    global.fetch = probeFetch({
+      loaded: new Error("connect ECONNREFUSED"),
+      installed: new Error("connect ECONNREFUSED"),
+    }) as unknown as typeof fetch;
+
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toBeNull();
+  });
+
+  it("returns null when either endpoint answers non-2xx", async () => {
+    global.fetch = probeFetch({
+      loaded: { status: 500 },
+      installed: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+    }) as unknown as typeof fetch;
+
+    // /api/ps failed — we cannot know loadedness, so claim nothing.
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toBeNull();
+  });
+
+  it("passes an abort signal to both probe requests (time-budgeted, non-blocking)", async () => {
+    const fetchMock = probeFetch({
+      loaded: [],
+      installed: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await probeColdModel("gpt-oss:20b");
+
+    // Both requests ride a shared timeout signal so a hung Ollama can
+    // only ever cost the probe budget, never the chat turn.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const init = call[1] as RequestInit | undefined;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
   });
 });
