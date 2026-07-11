@@ -102,6 +102,10 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // WARP-901 — misc dev utilities (data domain, all Tier-1)
+  "timestamp_convert",
+  "uuid_generate",
+  "regex_test",
 ];
 
 describe("TOOLS registry", () => {
@@ -143,6 +147,13 @@ describe("TOOLS registry", () => {
     // WARP-1120 — business_profile_get is a Tier-1 read (no write, no confirm).
     expect(TOOLS.get("business_profile_get")?.requiresWrite).toBe(false);
     expect(TOOLS.get("business_profile_get")?.requiresConfirmation).toBe(false);
+    // WARP-901 — misc dev utilities are all Tier-1 (no write, no confirm).
+    expect(TOOLS.get("timestamp_convert")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("timestamp_convert")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("uuid_generate")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("uuid_generate")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("regex_test")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("regex_test")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
