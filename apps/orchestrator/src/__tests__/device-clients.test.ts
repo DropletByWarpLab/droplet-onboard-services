@@ -69,7 +69,8 @@ vi.mock("@prisma/client", () => {
           code: data.code,
           userId: data.userId,
           expiresAt: data.expiresAt,
-          used: false,
+          // WARP-1202: explicit lifecycle status (schema default `active`).
+          status: "active",
           claimedBy: null,
           createdAt: new Date(),
         };
@@ -95,13 +96,13 @@ vi.mock("@prisma/client", () => {
         throw new Error("not found");
       }),
       // The claim route consumes the code atomically via
-      // `updateMany({ where: { id, used: false, expiresAt: { gt } } })`
+      // `updateMany({ where: { id, status: "active", expiresAt: { gt } } })`
       // and checks `count` to detect replays — honor those predicates.
       updateMany: vi.fn(async ({ where, data }: any) => {
         let count = 0;
         for (const r of pairingStore.values()) {
           if (where?.id && r.id !== where.id) continue;
-          if (where?.used !== undefined && r.used !== where.used) continue;
+          if (where?.status !== undefined && r.status !== where.status) continue;
           if (
             where?.expiresAt?.gt &&
             !(new Date(r.expiresAt) > new Date(where.expiresAt.gt))

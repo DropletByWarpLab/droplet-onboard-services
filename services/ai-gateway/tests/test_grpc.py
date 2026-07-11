@@ -236,6 +236,199 @@ class TestChatErrorHandling:
         scheduler.release.assert_awaited_once()
 
 
+def _make_pending_scheduler():
+    """Mock scheduler whose enqueue returns a PENDING future the test controls.
+
+    Lets a test park a handler task on `await future`, then deliver the grant
+    and/or a cancellation in a chosen order to hit the GWV-003 race windows.
+    """
+    scheduler = MagicMock()
+    futures: list[asyncio.Future] = []
+
+    async def _enqueue(*args, **kwargs):
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        futures.append(fut)
+        return fut
+
+    scheduler.enqueue = AsyncMock(side_effect=_enqueue)
+    scheduler.release = AsyncMock()
+    return scheduler, futures
+
+
+async def _park_on_grant(futures) -> None:
+    """Yield to the loop until the handler task has enqueued and is parked
+    on `await future`."""
+    for _ in range(20):
+        if futures:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("handler never reached the scheduler")
+
+
+class TestSlotReleaseOnCancel:
+    """GWV-003 / WARP-1178: a handler task cancelled while parked on the
+    scheduler grant (`await future`) must release the slot iff the grant
+    already landed — the scheduler incremented _active_count when it resolved
+    the future, so dropping the CancelledError on the floor leaks the slot
+    and, at max_concurrent=1, deadlocks every subsequent chat until restart.
+    Cancellation BEFORE the grant must NOT release (nothing was counted)."""
+
+    @pytest.mark.asyncio
+    async def test_chat_cancelled_after_grant_releases_slot(self):
+        """Client cancels the RPC in the window between the grant landing and
+        the handler task resuming — Chat must release the counted slot."""
+        from grpc_server import InferenceServicer
+
+        scheduler, futures = _make_pending_scheduler()
+        servicer = InferenceServicer(_make_mock_router(), scheduler)
+        request = MagicMock(priority=0)
+        context = _make_mock_context()
+
+        task = asyncio.create_task(servicer.Chat(request, context))
+        await _park_on_grant(futures)
+
+        # Grant the slot and cancel the handler in the same loop step: the
+        # task is still parked on `await future`, so the CancelledError is
+        # delivered before it can resume with the granted slot.
+        futures[0].set_result(request)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        scheduler.release.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_chat_cancelled_before_grant_does_not_release(self):
+        """Cancellation while still queued (future pending) cancels the future
+        itself — no slot was counted, so Chat must NOT release (a release here
+        would double-free once the real active request completes)."""
+        from grpc_server import InferenceServicer
+
+        scheduler, futures = _make_pending_scheduler()
+        servicer = InferenceServicer(_make_mock_router(), scheduler)
+        request = MagicMock(priority=0)
+        context = _make_mock_context()
+
+        task = asyncio.create_task(servicer.Chat(request, context))
+        await _park_on_grant(futures)
+
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert futures[0].cancelled()
+        scheduler.release.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_cancelled_after_grant_releases_slot(self):
+        """Same granted-but-cancelled window for the streaming handler."""
+        from grpc_server import InferenceServicer
+
+        scheduler, futures = _make_pending_scheduler()
+        servicer = InferenceServicer(_make_mock_router(), scheduler)
+        request = MagicMock(priority=0)
+        context = _make_mock_context()
+
+        agen = servicer.StreamChat(request, context)
+        task = asyncio.create_task(agen.__anext__())
+        await _park_on_grant(futures)
+
+        futures[0].set_result(request)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        scheduler.release.assert_awaited_once()
+        await agen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_cancelled_before_grant_does_not_release(self):
+        """Streaming handler cancelled while still queued must not release."""
+        from grpc_server import InferenceServicer
+
+        scheduler, futures = _make_pending_scheduler()
+        servicer = InferenceServicer(_make_mock_router(), scheduler)
+        request = MagicMock(priority=0)
+        context = _make_mock_context()
+
+        agen = servicer.StreamChat(request, context)
+        task = asyncio.create_task(agen.__anext__())
+        await _park_on_grant(futures)
+
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert futures[0].cancelled()
+        scheduler.release.assert_not_awaited()
+        await agen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_chat_cancel_after_grant_frees_slot_real_scheduler(self):
+        """End-to-end against the real InferenceScheduler at max_concurrent=1:
+        a queued Chat whose task is cancelled right as the processor grants it
+        must hand the slot back — a follow-up request acquires it instead of
+        deadlocking (pre-fix, active_requests stayed pinned at 1 forever)."""
+        from grpc_server import InferenceServicer
+        from scheduler import InferenceScheduler, Priority
+
+        scheduler = InferenceScheduler(max_concurrent=1)
+        await scheduler.start()
+        try:
+            captured: dict = {}
+            real_enqueue = scheduler.enqueue
+
+            async def capturing_enqueue(priority, request):
+                fut = await real_enqueue(priority, request)
+                captured["future"] = fut
+                return fut
+
+            servicer = InferenceServicer(_make_mock_router(), scheduler)
+            request = MagicMock(priority=0)
+            context = _make_mock_context()
+
+            # Occupy the only slot so the handler's request stays queued.
+            blocker = await scheduler.enqueue(Priority.USER, "blocker")
+            await asyncio.wait_for(blocker, timeout=1.0)
+
+            # Patch AFTER the blocker so only the handler's future is captured.
+            scheduler.enqueue = capturing_enqueue  # type: ignore[method-assign]
+
+            task = asyncio.create_task(servicer.Chat(request, context))
+            for _ in range(20):
+                if "future" in captured:
+                    break
+                await asyncio.sleep(0)
+            assert "future" in captured, "handler never reached the scheduler"
+
+            # Free the blocker: the processor grants the handler's future on
+            # the next loop step. This test task's wakeup was scheduled ahead
+            # of the handler's, so the cancel below lands in the
+            # granted-but-not-resumed window.
+            await scheduler.release()
+            for _ in range(50):
+                if captured["future"].done():
+                    break
+                await asyncio.sleep(0)
+            assert captured["future"].done() and not captured["future"].cancelled()
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # Pre-fix this deadlocks: the leaked slot keeps active_requests at
+            # max_concurrent forever, so no later request is ever granted.
+            follow_up = await scheduler.enqueue(Priority.USER, "after-cancel")
+            await asyncio.wait_for(follow_up, timeout=1.0)
+            assert scheduler.active_requests == 1
+        finally:
+            await scheduler.stop()
+
+
 class TestListModelsErrorHandling:
     """Verify ListModels handles errors gracefully."""
 

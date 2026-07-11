@@ -11,6 +11,7 @@ import { PRIORITY_ORDER, PRIORITY } from "./config";
 import { pmActions, useProjectStates } from "./usePm";
 import type { PmProject, Priority } from "./types";
 import { escapeHtml } from "@/lib/escape-html";
+import { translateError } from "@/lib/friendly-errors";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -96,7 +97,7 @@ export function NewItemModal({
       onCreated();
       onClose();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Couldn't create the item", "error");
+      toast(translateError(e, "projects"), "error");
     } finally {
       setBusy(false);
     }
@@ -175,7 +176,7 @@ export function NewProjectModal({ onClose, onCreated }: { onClose: () => void; o
       onCreated();
       onClose();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Couldn't create the project", "error");
+      toast(translateError(e, "projects"), "error");
     } finally {
       setBusy(false);
     }
@@ -253,7 +254,7 @@ export function ConfirmDeleteProject({
       onDeleted();
       onClose();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Couldn't delete the project", "error");
+      toast(translateError(e, "projects"), "error");
     } finally {
       setBusy(false);
     }

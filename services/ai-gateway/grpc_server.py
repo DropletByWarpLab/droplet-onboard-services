@@ -61,6 +61,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     async def Chat(self, request, context):
         """Unary chat completion."""
         set_request_id(new_request_id())
+        future = None
         try:
             # Enqueue with priority
             future = await self._scheduler.enqueue(
@@ -74,6 +75,17 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_details(str(e))
             context.set_trailing_metadata([("retry-after", str(e.retry_after))])
             return inference_pb2.ChatResponse()
+        except asyncio.CancelledError:
+            # GWV-003: the caller cancelled the RPC while this request was
+            # queued. If the scheduler already GRANTED the slot (resolved the
+            # future + incremented _active_count) before we were cancelled,
+            # that slot would leak — one leaked slot at max_concurrent=1
+            # permanently deadlocks every subsequent chat. Release it iff the
+            # grant actually landed, then re-raise the cancel. Mirrors the
+            # /ai/chat HTTP path in main.py.
+            if future is not None and future.done() and not future.cancelled():
+                await self._scheduler.release()
+            raise
 
         try:
             # Build ChatRequest from proto
@@ -117,6 +129,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     async def StreamChat(self, request, context):
         """Server-side streaming chat completion."""
         set_request_id(new_request_id())
+        future = None
         try:
             future = await self._scheduler.enqueue(
                 priority=request.priority,
@@ -127,6 +140,12 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
             context.set_details(str(e))
             return
+        except asyncio.CancelledError:
+            # GWV-003: same granted-but-cancelled window as Chat above —
+            # release the slot iff the grant actually landed, then re-raise.
+            if future is not None and future.done() and not future.cancelled():
+                await self._scheduler.release()
+            raise
 
         try:
             messages = [

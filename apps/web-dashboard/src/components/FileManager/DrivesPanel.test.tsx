@@ -203,9 +203,49 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
-    // After the rejected save the original name is restored and an error toast fires.
-    await waitFor(() => expect(toastMock).toHaveBeenCalled());
+    // After the rejected save the original name is restored and an error toast
+    // fires — with SAVE copy (WARP-1141), not the files-domain "couldn't load
+    // those files" fallback that made a failed rename read as a load hiccup.
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        expect.stringMatching(/couldn.t save/i),
+        "error",
+      ),
+    );
     expect(screen.getByText("Photos")).toBeInTheDocument();
+    expect(screen.queryByText("Wedding Photos")).not.toBeInTheDocument();
+  });
+
+  // WARP-1141 — a role-blocked rename (403: the session's token role isn't
+  // owner/admin even though the pencil rendered) must name the permission
+  // problem, never fail silently or as a generic blip.
+  it("surfaces the permission copy when the save is refused with 403", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockRejectedValue(
+      Object.assign(new Error("Forbidden: role not permitted"), { status: 403 }),
+    );
+    setup({ role: "owner", drives: [makeDrive({ displayName: "Photos" })] });
+
+    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
+      target: { value: "Wedding Photos" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        expect.stringMatching(/owner or an admin/i),
+        "error",
+      ),
+    );
+    expect(screen.getByText("Photos")).toBeInTheDocument();
+  });
+
+  // WARP-1141 — the rename PATCH is keyed by FS UUID; the bridge can report a
+  // drive without one, and renaming it can never persist. The pencil must not
+  // offer a save that is guaranteed to fail.
+  it("shows no rename affordance for a drive the bridge reports without a UUID", () => {
+    setup({ role: "owner", drives: [makeDrive({ uuid: "" })] });
+    expect(screen.queryByRole("button", { name: /rename|edit name/i })).not.toBeInTheDocument();
   });
 });
 

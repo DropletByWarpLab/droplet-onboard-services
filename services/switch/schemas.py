@@ -100,6 +100,12 @@ class CameraSetupResult(BaseModel):
     camera_ports: list[int]
     uplink_ports: list[int]
     message: str
+    # WARP-1176 (PYNET-001): machine-readable plan-only signal. status
+    # ("planned" vs "ok") and the message already say it in prose, but every
+    # other switch write response carries an explicit dry_run boolean —
+    # consumers (orchestrator, dashboard, the setup_camera_ports LLM tool)
+    # must never have to parse the message to learn nothing was written.
+    dry_run: bool = False
 
 
 # --- Bring-up provisioning (ADR-018 item 9) ---

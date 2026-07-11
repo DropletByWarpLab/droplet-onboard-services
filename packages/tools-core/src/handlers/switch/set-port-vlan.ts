@@ -1,5 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { isConfirmationResponse, passThroughConfirmation } from "../../confirmation.js";
+import { annotateDryRun } from "./dry-run.js";
 
 const inputSchema = {
   type: "object",
@@ -51,7 +52,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
   const data = await res.json();
-  return { ok: true, data };
+  // WARP-1176: a plan-only (dry-run) write is NOT an applied change — make
+  // that unmissable to the model instead of letting `ok: true` read as done.
+  return { ok: true, data: annotateDryRun(data) };
 }
 
 const tool: Tool = {

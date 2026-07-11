@@ -45,6 +45,8 @@ import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
+import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
+import type { AppCapabilities } from "@/lib/api";
 
 type NavItem = {
   href: string;
@@ -64,6 +66,14 @@ type NavItem = {
    * integration may be unconfigured. Default: no capability gate.
    */
   requiresCapability?: "claudeActivity" | "ragEval";
+  /**
+   * Hide unless the named user-facing module is enabled on this Droplet (GET
+   * /api/capabilities — readable by every authenticated role, unlike the
+   * admin-only probe above). WARP-1154/1155: the Projects entry is driven by
+   * this explicit flag, never by catching request errors. The hook fails
+   * open, so the entry only disappears on an explicit `false`.
+   */
+  requiresModule?: keyof AppCapabilities;
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -133,7 +143,9 @@ const NAV_GROUPS: NavGroup[] = [
       // time/workflow-oriented) and ahead of Knowledge (the read-only search
       // index). Page at /projects renders natively off /api/pm/* under the
       // dashboard session — no embedded stack, no second login.
-      { href: "/projects", label: "Projects", icon: FolderKanban },
+      // WARP-1154/1155: hidden when the orchestrator says the Projects module
+      // is off, so the nav never advertises a surface the box won't serve.
+      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
       { href: "/knowledge", label: "Knowledge", icon: BookOpen },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
@@ -260,12 +272,14 @@ function visibleItems(
   workspace: "home" | "business",
   role: AuthRole | undefined,
   capabilities: { claudeActivity: boolean; ragEval: boolean },
+  modules: AppCapabilities,
 ): NavItem[] {
   return items.filter((item) => {
     if (item.workspace && item.workspace !== workspace) return false;
     if (item.roles && (!role || !item.roles.includes(role))) return false;
     if (item.requiresCapability && !capabilities[item.requiresCapability])
       return false;
+    if (item.requiresModule && !modules[item.requiresModule]) return false;
     return true;
   });
 }
@@ -276,6 +290,7 @@ export function Sidebar() {
   const { user, logout } = useAuth();
   const { workspaceType, isBusiness } = useWorkspace();
   const capabilities = useCapabilities();
+  const modules = useAppCapabilities();
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -325,6 +340,7 @@ export function Sidebar() {
       workspaceType,
       user?.role as AuthRole | undefined,
       capabilities,
+      modules,
     ),
   })).filter((g) => g.items.length > 0);
 

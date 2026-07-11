@@ -48,7 +48,9 @@ export type ErrorDomain =
   | "network"
   | "vpn"
   | "camera"
+  | "projects"
   | "device"
+  | "storage"
   | "pairing"
   | "generic";
 
@@ -82,6 +84,15 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
   device:
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
+  projects:
+    "We couldn't save that change right now. Try again in a moment.",
+  // WARP-1141 — drive/pool rename + other storage settings writes. The files
+  // fallback ("couldn't load those files") misdescribed a failed WRITE as a
+  // load hiccup, which is exactly how the Drives-page rename bug went
+  // unreported-in-place: the save failed, the name reverted, and the toast
+  // talked about loading files.
+  storage:
+    "We couldn't save that change to your storage. Try again in a moment.",
   // WARP-1150: the Generate-code step of Pair-a-new-device. At this step
   // there is no device to reach yet — the failure is the appliance failing
   // to CREATE a pairing session — so the copy must be create-session +
@@ -342,6 +353,52 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
       "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
+  },
+  // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
+  // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in
+  // pm.service.ts) plus the module gate's `module_disabled`. Anything unmapped
+  // falls through to the domain fallback — the raw code NEVER reaches a toast.
+  projects: {
+    module_disabled:
+      "Projects isn't enabled on this Droplet. An owner or admin can turn it on.",
+    project_not_found:
+      "We couldn't find that project anymore. It may have been deleted.",
+    work_item_not_found:
+      "We couldn't find that item anymore. It may have been deleted.",
+    state_not_found:
+      "That column isn't available anymore. Refresh the board and try again.",
+    invalid_state:
+      "That column isn't available anymore. Refresh the board and try again.",
+    label_not_found:
+      "That label isn't available anymore. Refresh and try again.",
+    invalid_label:
+      "That label isn't available anymore. Refresh and try again.",
+    invalid_parent:
+      "That parent item isn't available anymore. Refresh and try again.",
+    identifier_taken:
+      "That project ID is already in use. Pick a different one.",
+    invalid_request:
+      "Some of those details weren't valid. Check the form and try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  // WARP-1141 — drive/pool rename from the Drives page (and future storage
+  // settings writes). Status-keyed: `updateDriveLabel` / `updatePoolLabel`
+  // attach `err.status`, so a role-blocked or not-found rename gets
+  // actionable copy instead of the fallback.
+  storage: {
+    "400":
+      "That name can't be saved. Use 1–64 characters and try again.",
+    "403":
+      "Only the Droplet's owner or an admin can rename drives and pools. Sign out and back in, or ask the owner to do it.",
+    "404":
+      "That drive or pool isn't visible to the Droplet right now. Rescan drives, then try renaming it again.",
+    "503":
+      "The storage service isn't reachable right now. Try again in a moment.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   // WARP-1150/1151 — creating a pairing session (POST /api/devices/pair).
   // Only the appliance is involved at this step, so every entry talks about
