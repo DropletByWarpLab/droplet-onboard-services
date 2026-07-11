@@ -45,6 +45,7 @@ import {
 } from "./services/update-agent/apply.js";
 import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
+import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
@@ -533,6 +534,19 @@ async function main() {
       const backupPurge = await purgeUpdateBackups(prisma, {
         updatesDir: config.DROPLET_OTA_UPDATES_DIR,
       });
+      // WARP-1044: GC the exited droplet-ota-self-swap-<id> helper containers
+      // the self-swap deliberately leaves behind (no --rm — their logs are
+      // the rollback forensic trail). Helpers exited longer than the same
+      // 7-day backup-retention window are removed AFTER their logs are
+      // captured to <updatesDir>/<id>/self-swap-helper.log; running helpers
+      // and in-flight update ids are never touched. Gated like the apply
+      // window: no apply script provisioned → no docker surface → no-op.
+      const helperPurge = config.DROPLET_OTA_APPLY_SCRIPT
+        ? await purgeSelfSwapHelpers(prisma, {
+            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
+            updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          })
+        : { removed: 0, logsCaptured: 0 };
       // Bounded-growth sweeps for two auth tables whose mint endpoints run
       // before authMiddleware: WebAuthnChallenge (every /login/passkey page
       // load inserts one via the public authenticate/options route) and
@@ -568,6 +582,7 @@ async function main() {
           notificationDeleted: auditPurge.notificationDeleted,
           auditRetentionSkipped: auditPurge.skipped,
           updateBackupsPurged: backupPurge.purged,
+          otaHelpersRemoved: helperPurge.removed,
           challengesDeleted,
           loginStatesDeleted,
           pairingCodesExpired: pairingSweep.expired,
