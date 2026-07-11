@@ -78,15 +78,15 @@ async function performRemove() {
   }
 
   return (
-    <div className="dp-card p-4">
+    <div className="card">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <Bell size={16} className="text-label-secondary" />
-          <h2 className="type-headline text-label-primary">Reminders</h2>
+          <Bell size={16} style={{ color: "var(--text-muted)" }} />
+          <h2 className="type-headline" style={{ color: "var(--text)" }}>Reminders</h2>
         </div>
         <button
           onClick={() => setShowNew((v) => !v)}
-          className="text-label-secondary hover:text-label-primary"
+          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
           title={showNew ? "Cancel" : "New reminder"}
         >
           {showNew ? <X size={16} /> : <Plus size={16} />}
@@ -94,13 +94,20 @@ async function performRemove() {
       </div>
 
       {showNew && (
-        <div className="mb-3 flex flex-col gap-2 p-2 rounded bg-surface-secondary">
+        <div className="mb-3 flex flex-col gap-2 p-2 rounded" style={{ background: "var(--inset)" }}>
           <input
             type="text"
             placeholder="Reminder title"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
-            className="dp-input text-sm"
+            className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+              padding: "8px 10px",
+            }}
             maxLength={500}
           />
           {/* Calendar UX clarity (Samantha QA #bugs): date + 15-minute time
@@ -113,19 +120,19 @@ async function performRemove() {
           />
           {/* The Create button is gated on BOTH a title and a due time; without
               this hint the disabled state reads as "broken" (the QA report). */}
-          <p className="type-caption-2 text-label-tertiary">
+          <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
             Add a title and a due time to create a reminder.
           </p>
-          <button onClick={handleCreate} disabled={!newTitle.trim() || !newDueAt} className="dp-btn-primary text-sm">
+          <button onClick={handleCreate} disabled={!newTitle.trim() || !newDueAt} className="btn primary text-sm">
             Create
           </button>
         </div>
       )}
 
       {isLoading ? (
-        <div className="type-caption-1 text-label-tertiary">Loading…</div>
+        <div className="type-caption-1" style={{ color: "var(--text-muted)" }}>Loading…</div>
       ) : reminders.length === 0 ? (
-        <div className="type-caption-1 text-label-tertiary py-2">No active reminders.</div>
+        <div className="type-caption-1 py-2" style={{ color: "var(--text-muted)" }}>No active reminders.</div>
       ) : (
         <ul className="flex flex-col gap-1">
           {reminders.map((r) => {
@@ -135,7 +142,7 @@ async function performRemove() {
             // discoverable to screen readers (WARP-292).
             const label = r.title?.trim() ? r.title : r.id;
             return (
-              <li key={r.id} className="flex items-start gap-2 group">
+              <li key={r.id} className="lrow group">
                 {/*
                   WARP-301: bumped to a p-2.5 hit-target wrapper (≥ 32 px)
                   so the checkbox is reliably tappable on touch. The
@@ -144,24 +151,27 @@ async function performRemove() {
                 */}
                 <button
                   onClick={() => toggle(r.id, !completed)}
-                  className="p-2.5 -m-1.5 rounded-sm hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="p-2.5 -m-1.5 rounded-sm hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
                   aria-label={completed ? `Mark ${label} as not done` : `Mark ${label} as done`}
                 >
                   <span
                     className={`block w-4 h-4 rounded border flex items-center justify-center ${
                       completed
                         ? "bg-system-green border-system-green text-white"
-                        : "border-label-tertiary"
+                        : "border-[color:var(--card-bd)]"
                     }`}
                   >
                     {completed && <Check size={10} />}
                   </span>
                 </button>
-                <div className="flex-1 min-w-0">
-                  <div className={`type-subheadline truncate ${completed ? "line-through text-label-tertiary" : "text-label-primary"}`}>
+                <div className="rt">
+                  <span
+                    className={`nm truncate ${completed ? "line-through" : ""}`}
+                    style={completed ? { color: "var(--text-muted)" } : undefined}
+                  >
                     {r.title}
-                  </div>
-                  <div className="type-caption-1 text-label-tertiary">{formatRel(r.dueAt)}</div>
+                  </span>
+                  <span className="sub">{formatRel(r.dueAt)}</span>
                 </div>
                 {/*
                   Always rendered (no opacity-gate) so touch + keyboard
@@ -173,7 +183,7 @@ async function performRemove() {
                 <button
                   onClick={() => setRemoveTarget({ id: r.id, title: r.title ?? "" })}
                   aria-label={`Delete reminder ${label}`}
-                  className="p-2.5 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                  className="p-2.5 rounded-sm text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
                   title="Delete"
                 >
                   <Trash2 size={14} />
