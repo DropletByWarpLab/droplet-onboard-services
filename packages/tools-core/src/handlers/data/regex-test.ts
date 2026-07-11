@@ -25,6 +25,12 @@ const DEFAULT_MAX_MATCHES = 20;
  *  but small enough that a hung caller notices immediately. */
 const EXEC_TIMEOUT_MS = 1000;
 const ALLOWED_FLAGS = /^[gimsu]*$/;
+/** Each call spawns a worker thread that can peg a core for up to
+ *  EXEC_TIMEOUT_MS. The HTTP MCP transport lets any authenticated role
+ *  fire tools/call in parallel, so cap how many workers run at once —
+ *  above the cap we reject immediately (REGEX_BUSY) rather than spawn. */
+const MAX_CONCURRENT_WORKERS = 4;
+let inFlightWorkers = 0;
 
 const inputSchema = {
   type: "object",
@@ -71,10 +77,14 @@ try {
   if (mode === "extract") {
     const matches = [];
     if (flags.includes("g")) {
-      let m;
-      while (matches.length < maxMatches && (m = re.exec(input)) !== null) {
+      // Delegate iteration to String.prototype.matchAll: it is lazy and
+      // implements the spec's AdvanceStringIndex, so zero-width matches
+      // step forward by a full code point under the \`u\` flag instead of
+      // one UTF-16 unit. A hand-rolled \`lastIndex += 1\` loop re-reports
+      // index 0 forever over astral input (WARP-901 regression).
+      for (const m of input.matchAll(re)) {
         matches.push({ match: m[0], index: m.index, groups: m.slice(1) });
-        if (m[0].length === 0) re.lastIndex += 1;
+        if (matches.length >= maxMatches) break;
       }
     } else {
       const m = re.exec(input);
@@ -98,12 +108,13 @@ interface WorkerFailure {
   ok: false;
   error: string;
 }
-type WorkerOutcome = { timedOut: true } | WorkerSuccess | WorkerFailure;
+type WorkerOutcome = { timedOut: true } | { busy: true } | WorkerSuccess | WorkerFailure;
 
 /** Runs the regex in a fresh worker thread and races it against a hard
  *  deadline. On timeout the worker is `terminate()`d — the only way to
  *  genuinely bound a runaway backtracking regex, since it never returns
- *  control on its own. */
+ *  control on its own. Refuses to spawn (returns `{ busy: true }`) once
+ *  `MAX_CONCURRENT_WORKERS` are already in flight. */
 function runBoundedRegex(
   pattern: string,
   flags: string,
@@ -111,34 +122,48 @@ function runBoundedRegex(
   mode: string,
   maxMatches: number,
 ): Promise<WorkerOutcome> {
+  if (inFlightWorkers >= MAX_CONCURRENT_WORKERS) {
+    return Promise.resolve({ busy: true });
+  }
+  inFlightWorkers += 1;
+
   return new Promise((resolve) => {
     const worker = new Worker(WORKER_SOURCE, {
       eval: true,
+      // Pin worker startup to a clean argv — no inherited --inspect,
+      // --max-old-space-size, loader flags, etc. Deterministic behavior
+      // regardless of how the parent process was launched.
+      execArgv: [],
       workerData: { pattern, flags, input, mode, maxMatches },
     });
 
     let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      void worker.terminate();
-      resolve({ timedOut: true });
-    }, EXEC_TIMEOUT_MS);
-
-    worker.once("message", (msg: WorkerSuccess | WorkerFailure) => {
+    // Single settle path so the in-flight counter is decremented exactly
+    // once no matter which of message/error/exit/timeout fires first.
+    const finish = (outcome: WorkerOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      inFlightWorkers -= 1;
       void worker.terminate();
-      resolve(msg);
-    });
+      resolve(outcome);
+    };
 
-    worker.once("error", (err: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ ok: false, error: String(err?.message ?? err) });
-    });
+    const timer = setTimeout(() => finish({ timedOut: true }), EXEC_TIMEOUT_MS);
+
+    worker.once("message", (msg: WorkerSuccess | WorkerFailure) => finish(msg));
+
+    worker.once("error", (err: Error) =>
+      finish({ ok: false, error: String(err?.message ?? err) }),
+    );
+
+    // A worker that dies without posting (e.g. OOM-killed) would otherwise
+    // hang until the timeout and be mislabeled REGEX_TIMEOUT. Surface the
+    // real cause. On a normal run the `message` handler settles first, so
+    // the post-terminate exit is a no-op here.
+    worker.once("exit", (code: number) =>
+      finish({ ok: false, error: `worker exited (${code}) before posting a result` }),
+    );
   });
 }
 
@@ -193,6 +218,16 @@ async function handler(
 
   const result = await runBoundedRegex(pattern, flags, input, mode, maxMatches);
 
+  if ("busy" in result) {
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "REGEX_BUSY",
+        message: `regex evaluation is at capacity (max ${MAX_CONCURRENT_WORKERS} concurrent evaluations) — retry shortly`,
+      },
+    };
+  }
   if ("timedOut" in result) {
     return {
       ok: false,

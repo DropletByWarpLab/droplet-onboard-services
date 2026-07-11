@@ -76,6 +76,69 @@ describe("regex_test — extract mode", () => {
   });
 });
 
+describe("regex_test — extract mode is spec-correct for zero-width matches", () => {
+  it("matches String.prototype.matchAll for a zero-width pattern over astral input (u flag)", async () => {
+    // `x*` matches the empty string at every code-point boundary. Over
+    // astral input ("𝕏" is U+1D54F — a surrogate pair, UTF-16 length 2)
+    // with the `u` flag the engine must AdvanceStringIndex by a full code
+    // point (2 UTF-16 units), yielding matches at indices 0/2/4. A naive
+    // `lastIndex += 1` loop would re-report index 0 forever (bug this
+    // regression pins). The tool must be byte-for-byte identical to the
+    // language's own iterator.
+    const pattern = "x*";
+    const flags = "gu";
+    const input = "𝕏𝕏";
+    const res = await regexTest.handler(
+      { pattern, flags, input, mode: "extract", maxMatches: 10 },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as {
+        matched: boolean;
+        matches: Array<{ match: string; index: number; groups: unknown[] }>;
+      };
+      const expected = [...input.matchAll(new RegExp(pattern, flags))].map((m) => ({
+        match: m[0],
+        index: m.index,
+      }));
+      expect(data.matches.map((m) => ({ match: m.match, index: m.index }))).toEqual(expected);
+      expect(data.matches).toHaveLength(3);
+      expect(data.matches.map((m) => m.index)).toEqual([0, 2, 4]);
+    }
+  });
+});
+
+describe("regex_test — concurrency cap", () => {
+  it("returns REGEX_BUSY on the 5th of 5 concurrent calls (worker pool capped at 4)", async () => {
+    // Every call spawns a worker thread; without a cap the HTTP MCP
+    // transport lets any authenticated role peg N cores in parallel. Fire
+    // 5 synchronously — the in-flight counter increments in each async
+    // prefix before any worker settles, so exactly 4 spawn and the 5th is
+    // rejected immediately.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        regexTest.handler(
+          { pattern: "\\d+", input: "a1 b22 c333", flags: "g", mode: "extract" },
+          ctx,
+        ),
+      ),
+    );
+    const busy = results.filter((r) => !r.ok && r.error.code === "REGEX_BUSY");
+    const succeeded = results.filter((r) => r.ok);
+    expect(busy).toHaveLength(1);
+    expect(succeeded).toHaveLength(4);
+    // The 5th call specifically is the one turned away.
+    expect(results[4].ok).toBe(false);
+    if (!results[4].ok) expect(results[4].error.code).toBe("REGEX_BUSY");
+  });
+
+  it("frees pool slots after calls settle (a later single call succeeds)", async () => {
+    const res = await regexTest.handler({ pattern: "^a", input: "abc" }, ctx);
+    expect(res.ok).toBe(true);
+  });
+});
+
 describe("regex_test — bounds enforcement", () => {
   it("rejects a pattern over the length cap", async () => {
     const res = await regexTest.handler({ pattern: "a".repeat(500), input: "x" }, ctx);

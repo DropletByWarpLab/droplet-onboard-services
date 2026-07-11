@@ -40,6 +40,43 @@ describe("timestamp_convert — epoch -> ISO", () => {
   });
 });
 
+describe("timestamp_convert — unit auto-detection when omitted", () => {
+  it("treats a 10-digit epoch with no unit as seconds", async () => {
+    const res = await timestampConvert.handler({ value: "1700000000" }, ctx);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { iso: string; epochMillis: number };
+      expect(data.iso).toBe("2023-11-14T22:13:20.000Z");
+      expect(data.epochMillis).toBe(1700000000000);
+    }
+  });
+
+  it("treats a 13-digit epoch with no unit as milliseconds (no ×1000 blow-up)", async () => {
+    const res = await timestampConvert.handler({ value: "1700000000000" }, ctx);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { iso: string; epochSeconds: number; epochMillis: number };
+      // Without the magnitude guard this ×1000s to a year +55840 date.
+      expect(data.iso).toBe("2023-11-14T22:13:20.000Z");
+      expect(data.epochSeconds).toBe(1700000000);
+      expect(data.epochMillis).toBe(1700000000000);
+    }
+  });
+
+  it("still honors an explicit unit over the magnitude heuristic", async () => {
+    // 13 digits but caller explicitly says seconds → respect it.
+    const res = await timestampConvert.handler(
+      { value: "1000000000000", unit: "seconds" },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { epochMillis: number };
+      expect(data.epochMillis).toBe(1000000000000 * 1000);
+    }
+  });
+});
+
 describe("timestamp_convert — ISO -> epoch", () => {
   it("converts an ISO-8601 string to both epoch forms", async () => {
     const res = await timestampConvert.handler({ value: "2023-11-14T22:13:20.000Z" }, ctx);
@@ -68,6 +105,14 @@ describe("timestamp_convert — error handling", () => {
 
   it("rejects an epoch outside the safe integer range", async () => {
     const res = await timestampConvert.handler({ value: "99999999999999999999" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("INVALID_ARGS");
+  });
+
+  it("rejects an unrecognized unit instead of silently coercing to seconds", async () => {
+    // "ms" is a plausible-but-wrong unit; the old code fell through to
+    // seconds and ×1000'd the value. It must be an explicit error.
+    const res = await timestampConvert.handler({ value: "1700000000000", unit: "ms" }, ctx);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("INVALID_ARGS");
   });
