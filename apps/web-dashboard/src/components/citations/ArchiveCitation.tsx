@@ -29,22 +29,22 @@ export function ArchiveCitation({ hit, anchor }: ArchiveCitationProps): JSX.Elem
     anchor.innerAnchor != null && anchor.innerAnchor.kind !== "none";
   return (
     <div
-      className="dp-card p-3 space-y-2"
+      className="card p-3 space-y-2"
       data-testid="archive-card"
       data-citation-kind="archive-member"
     >
       <header className="flex items-center gap-2">
-        <Archive size={14} className="flex-shrink-0 text-label-tertiary" />
+        <Archive size={14} className="flex-shrink-0" style={{ color: "var(--text-muted)" }} />
         <div className="min-w-0 flex-1">
-          <p className="type-caption-1 text-label-primary truncate">
+          <p className="type-caption-1 truncate" style={{ color: "var(--text)" }}>
             {hit.filename}
           </p>
-          <p className="type-caption-2 text-label-tertiary truncate" title={anchor.member}>
+          <p className="type-caption-2 truncate" style={{ color: "var(--text-muted)" }} title={anchor.member}>
             {anchor.member}
           </p>
         </div>
         {typeof hit.score === "number" && (
-          <span className="type-caption-2 text-label-tertiary flex-shrink-0">
+          <span className="type-caption-2 flex-shrink-0" style={{ color: "var(--text-muted)" }}>
             {relevancePct(hit.score)}%
           </span>
         )}
@@ -53,7 +53,7 @@ export function ArchiveCitation({ hit, anchor }: ArchiveCitationProps): JSX.Elem
         // Project the inner anchor onto the same hit so the per-kind
         // viewer (PDF page, audio timestamp, ...) handles the actual
         // deep-link. The carrier just supplies the lineage breadcrumb.
-        <div className="pl-5 border-l border-separator">
+        <div className="pl-5" style={{ borderLeft: "1px solid var(--card-bd)" }}>
           <CitationCard
             hit={{ ...hit, anchor: anchor.innerAnchor ?? null }}
           />

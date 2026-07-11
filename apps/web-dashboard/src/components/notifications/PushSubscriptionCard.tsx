@@ -188,7 +188,7 @@ export function PushSubscriptionCard() {
   // Render
   if (status === "checking") {
     return (
-      <div className="dp-card p-4 mb-4 flex items-center gap-2 text-label-tertiary">
+      <div className="card p-4 mb-4 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
         <Loader2 size={14} className="animate-spin" />
         <span className="type-caption-1">Checking push status…</span>
       </div>
@@ -196,14 +196,14 @@ export function PushSubscriptionCard() {
   }
   if (status === "unsupported") {
     return (
-      <div className="dp-card p-4 mb-4">
+      <div className="card p-4 mb-4">
         <div className="flex items-center gap-2 mb-1">
           <AlertTriangle size={14} className="text-system-orange" />
-          <h3 className="type-subheadline text-label-primary font-medium">
+          <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
             Push not supported here
           </h3>
         </div>
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           This browser doesn&apos;t support the Web Push API. Open the
           dashboard in a recent Chrome, Firefox, Edge, or Safari (16.4+).
         </p>
@@ -212,14 +212,14 @@ export function PushSubscriptionCard() {
   }
   if (status === "configured-off") {
     return (
-      <div className="dp-card p-4 mb-4">
+      <div className="card p-4 mb-4">
         <div className="flex items-center gap-2 mb-1">
           <AlertTriangle size={14} className="text-system-orange" />
-          <h3 className="type-subheadline text-label-primary font-medium">
+          <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
             Push not configured
           </h3>
         </div>
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           The orchestrator has no VAPID keys. Restart it once and look for the
           generated keys in the orchestrator log, then pin them in{" "}
           <span className="font-mono">.env</span> as{" "}
@@ -231,14 +231,14 @@ export function PushSubscriptionCard() {
   }
   if (status === "denied") {
     return (
-      <div className="dp-card p-4 mb-4">
+      <div className="card p-4 mb-4">
         <div className="flex items-center gap-2 mb-1">
           <BellOff size={14} className="text-system-red" />
-          <h3 className="type-subheadline text-label-primary font-medium">
+          <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
             Notifications blocked
           </h3>
         </div>
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           You denied notification permission for this site. Re-enable it in
           your browser&apos;s site settings to receive push alerts.
         </p>
@@ -247,31 +247,30 @@ export function PushSubscriptionCard() {
   }
 
   return (
-    <div className="dp-card p-4 mb-4">
+    <div className="card p-4 mb-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">
             {status === "subscribed" ? (
-              <Check size={14} className="text-system-green" />
+              <Check size={14} style={{ color: "var(--success)" }} />
             ) : (
-              <Bell size={14} className="text-label-tertiary" />
+              <Bell size={14} style={{ color: "var(--text-muted)" }} />
             )}
-            <h3 className="type-subheadline text-label-primary font-medium">
+            <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
               {status === "subscribed"
                 ? "Push notifications on"
                 : "Push notifications off"}
             </h3>
           </div>
-          <p className="type-caption-1 text-label-tertiary">
+          <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
             {status === "subscribed"
               ? "This browser will get push alerts for any camera + label combination toggled below."
               : "Enable to receive OS-level push for the events toggled below — works even when the dashboard isn't focused."}
           </p>
           {msg && (
             <p
-              className={`type-caption-1 mt-2 ${
-                msg.tone === "error" ? "text-system-red" : "text-system-green"
-              }`}
+              className={`type-caption-1 mt-2 ${msg.tone === "error" ? "text-system-red" : ""}`}
+              style={msg.tone === "error" ? undefined : { color: "var(--success)" }}
             >
               {msg.text}
             </p>
@@ -283,7 +282,7 @@ export function PushSubscriptionCard() {
               <button
                 onClick={handleTest}
                 disabled={!!busy}
-                className="dp-btn-secondary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50 bg-[var(--brand-subtle)] text-[var(--brand)]"
               >
                 {busy === "test" ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -295,7 +294,7 @@ export function PushSubscriptionCard() {
               <button
                 onClick={handleUnsubscribe}
                 disabled={!!busy}
-                className="dp-btn-secondary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50 bg-[var(--brand-subtle)] text-[var(--brand)]"
               >
                 {busy === "unsubscribe" ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -309,7 +308,7 @@ export function PushSubscriptionCard() {
             <button
               onClick={handleSubscribe}
               disabled={!!busy}
-              className="dp-btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-subheadline disabled:opacity-50"
+              className="btn primary type-subheadline disabled:opacity-50"
             >
               {busy === "subscribe" ? (
                 <Loader2 size={14} className="animate-spin" />

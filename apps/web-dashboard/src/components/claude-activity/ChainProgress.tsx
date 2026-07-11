@@ -45,10 +45,10 @@ const CELL_COLOR: Record<string, string> = {
   done: "bg-system-green",
   in_progress: "bg-system-orange",
   blocked: "bg-system-red",
-  not_started: "bg-label-quaternary/30",
-  deferred: "bg-label-quaternary/30",
-  na: "bg-label-quaternary/15",
-  unknown: "bg-label-quaternary/15",
+  not_started: "bg-[var(--inset-strong)]",
+  deferred: "bg-[var(--inset-strong)]",
+  na: "bg-[var(--inset)]",
+  unknown: "bg-[var(--inset)]",
 };
 
 export function ChainProgress({ jira, fallbackQueue }: ChainProgressProps) {
@@ -69,31 +69,32 @@ export function ChainProgress({ jira, fallbackQueue }: ChainProgressProps) {
   const percent = total === 0 ? 0 : Math.round((done / total) * 100);
 
   return (
-    <section className="dp-card p-5" aria-labelledby="chain-progress-heading">
+    <section className="card p-5" aria-labelledby="chain-progress-heading">
       <div className="flex items-center justify-between mb-3">
         <h2
           id="chain-progress-heading"
-          className="type-footnote text-label-secondary uppercase tracking-wide flex items-center gap-2"
+          className="type-footnote uppercase tracking-wide flex items-center gap-2"
+          style={{ color: "var(--text-muted)" }}
         >
           <ListChecks size={14} aria-hidden="true" />
           WARP-228 chain
         </h2>
-        <span className="type-caption-1 text-label-tertiary">
+        <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           {useJira ? "Jira" : "compliance-progress.md"}
         </span>
       </div>
 
       {total === 0 ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           No chain data. Configure Jira or land docs/compliance-progress.md.
         </p>
       ) : (
         <>
           <div className="flex items-end justify-between mb-2">
-            <p className="type-title-2 text-label-primary">
+            <p className="type-title-2" style={{ color: "var(--text)" }}>
               {done} / {total}
             </p>
-            <p className="type-caption-1 text-label-tertiary">{percent}% done</p>
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>{percent}% done</p>
           </div>
 
           {/* 50-cell strip — one per ticket. Hover gives ticket + status. */}
@@ -125,12 +126,12 @@ export function ChainProgress({ jira, fallbackQueue }: ChainProgressProps) {
             })}
           </div>
 
-          <div className="flex flex-wrap gap-x-4 gap-y-1 type-caption-2 text-label-tertiary">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 type-caption-2" style={{ color: "var(--text-muted)" }}>
             <Legend tone="bg-system-green" label={`done ${done}`} />
             <Legend tone="bg-system-orange" label={`in progress ${inProgress}`} />
             <Legend tone="bg-system-red" label={`blocked ${blocked}`} />
             <Legend
-              tone="bg-label-quaternary/30"
+              tone="bg-[var(--inset-strong)]"
               label={`not started ${notStarted}`}
             />
           </div>

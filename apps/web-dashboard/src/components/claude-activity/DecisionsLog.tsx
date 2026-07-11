@@ -25,16 +25,17 @@ export function DecisionsLog({
     .slice(0, 10);
 
   return (
-    <section className="dp-card p-5" aria-labelledby="decisions-heading">
+    <section className="card p-5" aria-labelledby="decisions-heading">
       <h2
         id="decisions-heading"
-        className="type-footnote text-label-secondary uppercase tracking-wide flex items-center gap-2 mb-3"
+        className="type-footnote uppercase tracking-wide flex items-center gap-2 mb-3"
+        style={{ color: "var(--text-muted)" }}
       >
         <StickyNote size={14} aria-hidden="true" />
         Decisions log
       </h2>
       {recent.length === 0 ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           No decisions yet. Claude appends an entry to{" "}
           <code>session-state.json</code>'s <code>decisions</code> array
           whenever it picks a path with non-trivial trade-offs.
@@ -42,12 +43,16 @@ export function DecisionsLog({
       ) : (
         <ol className="space-y-3">
           {recent.map((d, i) => (
-            <li key={`${d.ts}-${i}`} className="border-l-2 border-accent/40 pl-3">
-              <p className="type-subheadline text-label-primary">{d.summary}</p>
-              <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <li
+              key={`${d.ts}-${i}`}
+              className="border-l-2 pl-3"
+              style={{ borderColor: "color-mix(in srgb, var(--brand) 40%, transparent)" }}
+            >
+              <p className="type-subheadline" style={{ color: "var(--text)" }}>{d.summary}</p>
+              <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
                 {d.rationale}
               </p>
-              <p className="type-caption-2 text-label-quaternary mt-0.5">
+              <p className="type-caption-2 mt-0.5" style={{ color: "var(--text-faint)" }}>
                 {relativeTime(d.ts)}
               </p>
             </li>

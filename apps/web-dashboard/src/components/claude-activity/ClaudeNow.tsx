@@ -19,13 +19,14 @@ export function ClaudeNow({ now }: { now: NowState }) {
 
   return (
     <section
-      className="dp-card p-5"
+      className="card p-5"
       aria-labelledby="claude-now-heading"
     >
       <div className="flex items-center justify-between mb-3">
         <h2
           id="claude-now-heading"
-          className="type-footnote text-label-secondary uppercase tracking-wide flex items-center gap-2"
+          className="type-footnote uppercase tracking-wide flex items-center gap-2"
+          style={{ color: "var(--text-muted)" }}
         >
           <Activity size={14} aria-hidden="true" />
           Claude now
@@ -39,21 +40,21 @@ export function ClaudeNow({ now }: { now: NowState }) {
             working
           </span>
         ) : (
-          <span className="type-caption-1 px-2 py-0.5 rounded-full bg-label-quaternary/15 text-label-tertiary">
+          <span className="type-caption-1 px-2 py-0.5 rounded-full bg-[var(--inset)] text-[var(--text-muted)]">
             idle
           </span>
         )}
       </div>
 
       {idle ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           No active task. Drop a <code>.claude/session-state.json</code> in the
           repo root to populate this panel.
         </p>
       ) : (
         <>
-          <p className="type-title-3 text-label-primary mb-2">{now.task}</p>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 type-caption-1 text-label-tertiary">
+          <p className="type-title-3 mb-2" style={{ color: "var(--text)" }}>{now.task}</p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 type-caption-1" style={{ color: "var(--text-muted)" }}>
             {now.ticket && (
               <span className="flex items-center gap-1">
                 <Ticket size={11} aria-hidden="true" />

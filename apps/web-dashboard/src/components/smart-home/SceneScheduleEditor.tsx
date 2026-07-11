@@ -101,25 +101,26 @@ export function SceneScheduleEditor({
       <div>
         <div className="flex items-start gap-3 mb-1">
           <span
-            className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-accent-subtle text-accent"
+            className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
             aria-hidden
           >
             <CalendarClock size={18} />
           </span>
           <div className="min-w-0">
-            <h2 id={headingId} className="type-title-3 text-label-primary">
+            <h2 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
               Schedule “{sceneName}”
             </h2>
-            <p className="type-subheadline text-label-tertiary">
+            <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
               Run this routine automatically on a repeating cadence.
             </p>
           </div>
         </div>
 
         {/* New-schedule form */}
-        <div className="mt-4 dp-card p-4 space-y-4">
+        <div className="mt-4 card p-4 space-y-4">
           <div>
-            <span className="type-subheadline text-label-secondary block mb-2">
+            <span className="type-subheadline block mb-2" style={{ color: "var(--text-muted)" }}>
               Repeat on
             </span>
             <div className="flex flex-wrap gap-1.5" role="group" aria-label="Days to repeat">
@@ -131,14 +132,7 @@ export function SceneScheduleEditor({
                     type="button"
                     aria-pressed={active}
                     onClick={() => toggleDay(d)}
-                    className={[
-                      "px-3 py-1.5 rounded-full type-footnote font-medium",
-                      "transition-colors duration-150 ease-smooth",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
-                      active
-                        ? "bg-accent text-accent-foreground"
-                        : "bg-surface-secondary text-label-secondary hover:text-label-primary",
-                    ].join(" ")}
+                    className={`chip ${active ? "on" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]`}
                   >
                     {dayLabel(d)}
                   </button>
@@ -146,7 +140,7 @@ export function SceneScheduleEditor({
               })}
             </div>
             {isDaily(days) && (
-              <p className="type-caption-1 text-label-tertiary mt-1.5">
+              <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
                 No day selected — runs <strong className="font-medium">every day</strong>.
               </p>
             )}
@@ -156,7 +150,8 @@ export function SceneScheduleEditor({
             <div>
               <label
                 htmlFor={timeId}
-                className="type-subheadline text-label-secondary block mb-1.5"
+                className="type-subheadline block mb-1.5"
+                style={{ color: "var(--text-muted)" }}
               >
                 Time
               </label>
@@ -165,14 +160,14 @@ export function SceneScheduleEditor({
                 type="time"
                 value={time}
                 onChange={(e) => setTime(e.target.value)}
-                className="dp-input w-36"
+                className="w-36 px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
               />
             </div>
             <button
               type="button"
               onClick={handleAdd}
               disabled={!canAdd}
-              className="dp-btn-primary flex items-center gap-2"
+              className="btn primary"
             >
               {saving ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
               Add schedule
@@ -183,13 +178,13 @@ export function SceneScheduleEditor({
               names the zone. KAN-6 stores the zone per row, so this fires at
               the chosen local time and stays correct across daylight-saving
               changes; no caveat needed. */}
-          <p className="flex items-start gap-2 type-caption-1 text-label-tertiary">
+          <p className="flex items-start gap-2 type-caption-1" style={{ color: "var(--text-muted)" }}>
             <Clock size={13} className="mt-0.5 flex-shrink-0" aria-hidden />
             <span>
-              <span className="text-label-secondary">
+              <span style={{ color: "var(--text-muted)" }}>
                 {built ? describeLocalSchedule(draft) : "Pick a valid time"}
               </span>{" "}
-              in <strong className="font-medium text-label-secondary">{tz}</strong> (your
+              in <strong className="font-medium" style={{ color: "var(--text-muted)" }}>{tz}</strong> (your
               local time).
             </span>
           </p>
@@ -207,12 +202,12 @@ export function SceneScheduleEditor({
 
         {/* Existing schedules */}
         <div className="mt-5">
-          <h3 className="type-subheadline text-label-secondary mb-2">
+          <h3 className="type-subheadline mb-2" style={{ color: "var(--text-muted)" }}>
             Active schedules
           </h3>
 
           {isLoading ? (
-            <div className="flex items-center gap-2 py-6 text-label-tertiary justify-center">
+            <div className="flex items-center gap-2 py-6 justify-center" style={{ color: "var(--text-muted)" }}>
               <Loader2 size={16} className="animate-spin" />
               <span className="type-subheadline">Loading…</span>
             </div>
@@ -221,9 +216,12 @@ export function SceneScheduleEditor({
               Couldn’t load schedules.
             </p>
           ) : schedules.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-label-quaternary/40 px-4 py-6 text-center">
-              <p className="type-subheadline text-label-secondary">No schedules yet</p>
-              <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <div
+              className="rounded-lg border border-dashed px-4 py-6 text-center"
+              style={{ borderColor: "var(--card-bd)" }}
+            >
+              <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>No schedules yet</p>
+              <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
                 Add one above to run this routine on a repeating cadence.
               </p>
             </div>
@@ -240,21 +238,20 @@ export function SceneScheduleEditor({
                 return (
                   <li
                     key={s.id}
-                    className="flex items-center gap-3 bg-surface-secondary/60 rounded-lg px-3 py-2.5"
+                    className="flex items-center gap-3 rounded-lg px-3 py-2.5"
+                    style={{ background: "var(--card-inner)" }}
                   >
-                    <span className="text-label-tertiary flex-shrink-0" aria-hidden>
+                    <span className="flex-shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden>
                       <Clock size={16} />
                     </span>
                     <div className="flex-1 min-w-0">
                       <p
-                        className={[
-                          "type-subheadline truncate",
-                          s.enabled ? "text-label-primary" : "text-label-tertiary",
-                        ].join(" ")}
+                        className="type-subheadline truncate"
+                        style={{ color: s.enabled ? "var(--text)" : "var(--text-muted)" }}
                       >
                         {summary}
                       </p>
-                      <p className="type-caption-2 text-label-tertiary">
+                      <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                         {s.enabled
                           ? `Next: ${new Date(s.nextFireAt).toLocaleString()}`
                           : "Paused"}
@@ -268,7 +265,7 @@ export function SceneScheduleEditor({
                       type="button"
                       onClick={() => void remove(s.id)}
                       aria-label="Remove schedule"
-                      className="text-label-tertiary hover:text-system-red transition-colors p-1"
+                      className="transition-colors p-1 text-[var(--text-muted)] hover:text-system-red"
                     >
                       <Trash2 size={16} />
                     </button>
