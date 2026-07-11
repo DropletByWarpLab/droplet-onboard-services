@@ -596,4 +596,36 @@ describe("model-readiness probeColdModel (WARP-903)", () => {
       expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
   });
+
+  it("drains the fulfilled body when the sibling probe fetch rejects (undici socket release)", async () => {
+    // Asymmetric failure: /api/ps socket-resets while /api/tags returns 200.
+    // Promise.all would reject on the /api/ps rejection and leave the
+    // already-resolved /api/tags body unconsumed — under undici an undrained
+    // body can pin the socket until GC. allSettled + an explicit drain of the
+    // fulfilled sibling releases it; the probe still claims nothing → null.
+    // Mirrors the warm-path drain regression above.
+    const tagsJson = vi.fn(() =>
+      Promise.resolve({
+        models: [{ name: "gpt-oss:20b", size: 13_780_000_000 }],
+      }),
+    );
+    const fetchMock = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.endsWith("/api/ps")) {
+        return Promise.reject(new Error("socket hang up"));
+      }
+      // /api/tags resolved 2xx — its body MUST be drained before we bail.
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: tagsJson,
+      } as unknown as Response);
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(probeColdModel("gpt-oss:20b")).resolves.toBeNull();
+
+    // The resolved /api/tags body was consumed exactly once — no leak.
+    expect(tagsJson).toHaveBeenCalledTimes(1);
+  });
 });

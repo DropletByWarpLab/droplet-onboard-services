@@ -197,20 +197,34 @@ export async function probeColdModel(
 ): Promise<ColdModelStatus | null> {
   try {
     const signal = AbortSignal.timeout(COLD_PROBE_BUDGET_MS);
-    const [psResp, tagsResp] = await Promise.all([
+    // allSettled, not all: if ONE fetch rejects (e.g. a socket reset on
+    // /api/ps) while the OTHER resolves 2xx, Promise.all would reject and we
+    // would return null WITHOUT ever consuming the resolved sibling's body —
+    // under undici an undrained body can pin the socket until GC. allSettled
+    // lets us reach and drain that fulfilled body below.
+    const [psSettled, tagsSettled] = await Promise.allSettled([
       fetch(`${OLLAMA_URL}/api/ps`, { signal }),
       fetch(`${OLLAMA_URL}/api/tags`, { signal }),
     ]);
-    if (!psResp.ok || !tagsResp.ok) {
-      // Drain both bodies (undici socket release), then claim nothing —
-      // without /api/ps we cannot know loadedness.
+    const psResp = psSettled.status === "fulfilled" ? psSettled.value : null;
+    const tagsResp =
+      tagsSettled.status === "fulfilled" ? tagsSettled.value : null;
+    if (!psResp?.ok || !tagsResp?.ok) {
+      // Not fully usable — a rejection (socket reset / unreachable) or a
+      // non-2xx on either endpoint. Drain every body that DID resolve (a
+      // rejected fetch has none), then claim nothing: without a good /api/ps
+      // we cannot know loadedness. Same drain as the happy path's .json().
       await Promise.all([
-        psResp.json().catch(() => undefined),
-        tagsResp.json().catch(() => undefined),
+        psResp?.json().catch(() => undefined),
+        tagsResp?.json().catch(() => undefined),
       ]);
       logger.debug(
-        { model, psStatus: psResp.status, tagsStatus: tagsResp.status },
-        "cold_probe_skipped (Ollama non-2xx)",
+        {
+          model,
+          psStatus: psResp?.status ?? "unreachable",
+          tagsStatus: tagsResp?.status ?? "unreachable",
+        },
+        "cold_probe_skipped (Ollama non-2xx or unreachable)",
       );
       return null;
     }
