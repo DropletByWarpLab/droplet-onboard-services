@@ -1,4 +1,4 @@
-# ADR-029: Signed, RBAC-gated app-catalog installer (design only — build deferred to post-GA)
+# ADR-030: Signed, RBAC-gated app-catalog installer (design only — build deferred to post-GA)
 
 - **Status:** Proposed
 - **Date:** 2026-07-11

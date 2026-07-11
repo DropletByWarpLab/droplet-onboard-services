@@ -194,9 +194,9 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.
 - **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `inference-engine` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
-- **Status:** `[ ]` Not started. ADR-020's signed-manifest substrate + ADR-004's RBAC guard are design-committed to reuse (WARP-908 / [ADR-029](ADR-029-signed-rbac-gated-app-catalog-installer.md) — a curated, signed, RBAC-gated catalog installer, explicitly NOT the free-form Docker-socket one-click install pattern some competitors ship). ADR-029 is a design ADR only; build is explicitly deferred to post-GA.
-- **Blockers:** Sandbox contract with `inference-engine`'s OpenClaw (ADR-029 does not resolve this half); signing/trust model (resolved by ADR-029, reusing ADR-020).
-- **Next action:** Post-GA, build against ADR-029 once the OpenClaw sandbox contract lands.
+- **Status:** `[ ]` Not started. ADR-020's signed-manifest substrate + ADR-004's RBAC guard are design-committed to reuse (WARP-908 / [ADR-030](ADR-030-signed-rbac-gated-app-catalog-installer.md) — a curated, signed, RBAC-gated catalog installer, explicitly NOT the free-form Docker-socket one-click install pattern some competitors ship). ADR-030 is a design ADR only; build is explicitly deferred to post-GA.
+- **Blockers:** Sandbox contract with `inference-engine`'s OpenClaw (ADR-030 does not resolve this half); signing/trust model (resolved by ADR-030, reusing ADR-020).
+- **Next action:** Post-GA, build against ADR-030 once the OpenClaw sandbox contract lands.
 
 ---
 
