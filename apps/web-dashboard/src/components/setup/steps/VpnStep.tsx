@@ -80,6 +80,14 @@ export function VpnStep({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
+  // WARP-1283 — the typed `code` off a failed status precheck (null when the
+  // failure carried none). fetchVpnStatus attaches the orchestrator's code so
+  // the error phase can be specific when the box's routing service is simply
+  // unavailable (ROUTING_UNAVAILABLE) instead of guessing "this usually
+  // clears on its own".
+  const [precheckErrorCode, setPrecheckErrorCode] = useState<string | null>(
+    null,
+  );
   const [noticeDestination, setNoticeDestination] = useState<string | null>(
     null,
   );
@@ -140,7 +148,12 @@ export function VpnStep({
       }
       // No peer yet → the one-tap toggle is the primary entry.
       setPhase("toggle");
-    } catch {
+    } catch (e) {
+      setPrecheckErrorCode(
+        e && typeof e === "object" && typeof (e as { code?: unknown }).code === "string"
+          ? (e as { code: string }).code
+          : null,
+      );
       setPhase("error");
     }
   }, []);
@@ -240,11 +253,21 @@ export function VpnStep({
   // error
   // ──────────────────────────────────────────────────────────────────
   if (phase === "error") {
+    // WARP-1283 — when the orchestrator says the routing sidecar is
+    // unavailable (a known, recoverable condition — it may simply still be
+    // coming up), be specific instead of the generic "something went wrong"
+    // guess. Title and the Try again / Skip affordances are identical in both
+    // variants.
+    const routingUnavailable = precheckErrorCode === "ROUTING_UNAVAILABLE";
     return (
       <StepShell
         current="vpn"
         title="Couldn't check remote access"
-        subtitle="Something went wrong reaching the box to check your remote-access setup."
+        subtitle={
+          routingUnavailable
+            ? "The box’s network service isn’t responding right now."
+            : "Something went wrong reaching the box to check your remote-access setup."
+        }
         primary={{ label: "Try again", onClick: () => load() }}
         skip={{ label: "Skip for now", onClick: onSkip }}
       >
@@ -255,9 +278,21 @@ export function VpnStep({
             aria-hidden="true"
           />
           <p className="type-footnote text-label-secondary">
-            This usually clears on its own. Try again, or skip for now — you can
-            finish remote access anytime from{" "}
-            <span className="font-mono">Remote Access</span> in the dashboard.
+            {routingUnavailable ? (
+              <>
+                Try again in a minute — this part of the box may still be
+                starting up. Or skip for now — you can finish remote access
+                anytime from <span className="font-mono">Remote Access</span> in
+                the dashboard.
+              </>
+            ) : (
+              <>
+                This usually clears on its own. Try again, or skip for now — you
+                can finish remote access anytime from{" "}
+                <span className="font-mono">Remote Access</span> in the
+                dashboard.
+              </>
+            )}
           </p>
         </div>
       </StepShell>

@@ -4788,7 +4788,28 @@ export async function decommissionApDevice(
 
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
-  if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    // WARP-1283: carry the orchestrator's typed `code` + the HTTP status on
+    // the thrown error (the storageWriteError / WARP-851 commissionMatterDevice
+    // precedent) so the wizard's VpnStep can render specific copy when the
+    // routing sidecar is unavailable (503 + code ROUTING_UNAVAILABLE) instead
+    // of the generic error page. `message` is preferred over `error` because
+    // the global error handler puts the detail there ({ error: <category>,
+    // message: <detail>, code }); the route's own typed 503 uses `error`.
+    const err = new Error(
+      (typeof body.message === "string" && body.message) ||
+        (typeof body.error === "string" && body.error) ||
+        `Failed to fetch Remote Access status: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
+  }
   return res.json();
 }
 
