@@ -60,7 +60,7 @@ function fmtRange(start: number, end: number | null): string {
  * operator can see at a glance which clusters they've already
  * triaged.
  *
- * The unreviewed state gets a subtle accent ring so it pops out of
+ * The unreviewed state gets a subtle brand ring so it pops out of
  * the grid — cuts down on hunt-and-peck triage.
  */
 export function ReviewCard({ review, onClick }: Props) {
@@ -71,11 +71,15 @@ export function ReviewCard({ review, onClick }: Props) {
   return (
     <button
       onClick={() => onClick(review)}
-      className={`dp-card overflow-hidden text-left w-full group transition-all hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-        !review.hasBeenReviewed ? "ring-2 ring-accent/40" : ""
-      }`}
+      className="card hover overflow-hidden text-left w-full group transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+      style={{
+        padding: 0,
+        boxShadow: !review.hasBeenReviewed
+          ? "0 0 0 2px color-mix(in srgb, var(--brand) 40%, transparent)"
+          : undefined,
+      }}
     >
-      <div className="relative aspect-video bg-surface-secondary overflow-hidden">
+      <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
         <img
           src={review.thumbnailUrl}
           alt={`${review.severity} on ${cameraDisplay}`}
@@ -119,34 +123,31 @@ export function ReviewCard({ review, onClick }: Props) {
 
       <div className="p-3">
         <div className="flex items-center justify-between gap-2">
-          <span className="type-subheadline text-label-primary font-medium truncate">
+          <span className="type-subheadline font-medium truncate text-[color:var(--text)]">
             {review.objects.length > 0
               ? review.objects.slice(0, 3).join(", ")
               : review.audio.length > 0
                 ? review.audio.slice(0, 3).join(", ")
                 : "Motion"}
           </span>
-          <span className="type-caption-1 text-label-tertiary flex-shrink-0">
+          <span className="type-caption-1 font-mono flex-shrink-0 text-[color:var(--text-muted)]">
             {fmtRel(review.startTime)}
           </span>
         </div>
         <div className="flex items-center justify-between mt-1">
-          <span className="type-caption-1 text-label-tertiary truncate">
+          <span className="type-caption-1 font-mono truncate text-[color:var(--text-muted)]">
             {cameraDisplay}
           </span>
         </div>
         {review.zones.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1.5">
             {review.zones.slice(0, 3).map((zone) => (
-              <span
-                key={zone}
-                className="type-caption-2 px-1.5 py-0.5 rounded bg-surface-secondary text-label-secondary"
-              >
+              <span key={zone} className="badge muted">
                 {zone}
               </span>
             ))}
             {review.zones.length > 3 && (
-              <span className="type-caption-2 text-label-tertiary">
+              <span className="type-caption-2 text-[color:var(--text-muted)]">
                 +{review.zones.length - 3}
               </span>
             )}
