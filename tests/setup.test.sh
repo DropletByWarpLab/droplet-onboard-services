@@ -838,20 +838,48 @@ else
   fail "expected >= 2 'exec -T -u 33 nextcloud' calls in compose.sh, found ${NC_UID33_COUNT} (occ owner check would trip)"
 fi
 
+# (6) WARP-1064: the auto-install recovery is present and wired into the
+# wait-failure path (a stuck volume reports installed:false forever — waiting
+# longer can never fix it, so the reconcile must attempt `occ
+# maintenance:install` before giving up).
+if grep -qF "# >>> recover_nextcloud_autoinstall (WARP-1064)" "$COMPOSE_LIB" \
+   && grep -qF "# <<< recover_nextcloud_autoinstall (WARP-1064)" "$COMPOSE_LIB"; then
+  pass "recover_nextcloud_autoinstall sentinel markers present in compose.sh"
+else
+  fail "recover_nextcloud_autoinstall sentinel markers missing from compose.sh"
+fi
+NC_RUNNER_BODY="$(awk '/^run_nextcloud_post_install_hook\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+if printf '%s' "$NC_RUNNER_BODY" | grep -q 'recover_nextcloud_autoinstall'; then
+  pass "run_nextcloud_post_install_hook attempts the WARP-1064 recovery when the wait expires"
+else
+  fail "run_nextcloud_post_install_hook does not invoke recover_nextcloud_autoinstall — a never-auto-installed box stays degraded forever"
+fi
+# The stale-DB recreate must stay scoped to the `nextcloud` database only —
+# a regression here could nuke the orchestrator's `droplet` database.
+if grep -qF 'DROP DATABASE IF EXISTS nextcloud WITH (FORCE)' "$COMPOSE_LIB" \
+   && ! grep -qF 'DROP DATABASE IF EXISTS droplet' "$COMPOSE_LIB"; then
+  pass "recovery's stale-DB recreate is scoped to the nextcloud database"
+else
+  fail "recovery's stale-DB recreate is missing or not scoped to the nextcloud database"
+fi
+
 # --- Behavioural: extract the shipping functions, stub run_docker_compose ----
 NC_WORK="$TMP_ROOT/nc-hook"
 mkdir -p "$NC_WORK"
 
 sed -n '/# >>> wait_for_nextcloud_installed (WARP-990)/,/# <<< wait_for_nextcloud_installed (WARP-990)/p' \
   "$COMPOSE_LIB" > "$NC_WORK/funcs.sh"
+sed -n '/# >>> recover_nextcloud_autoinstall (WARP-1064)/,/# <<< recover_nextcloud_autoinstall (WARP-1064)/p' \
+  "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 sed -n '/# >>> run_nextcloud_post_install_hook (WARP-990)/,/# <<< run_nextcloud_post_install_hook (WARP-990)/p' \
   "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 
 if grep -q 'wait_for_nextcloud_installed()' "$NC_WORK/funcs.sh" \
+   && grep -q 'recover_nextcloud_autoinstall()' "$NC_WORK/funcs.sh" \
    && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh"; then
-  pass "extracted both WARP-990 function bodies from compose.sh"
+  pass "extracted the WARP-990 + WARP-1064 function bodies from compose.sh"
 else
-  fail "could not extract the WARP-990 function bodies — skipping behavioural asserts"
+  fail "could not extract the WARP-990/WARP-1064 function bodies — skipping behavioural asserts"
 fi
 
 # Shims + a scriptable run_docker_compose. `php occ status` flips to installed
@@ -884,6 +912,37 @@ run_docker_compose() {
       echo "[droplet] stub hook transcript"
       return "$(cat "$sd/hook_rc" 2>/dev/null || echo 0)"
       ;;
+    # WARP-1064: the recovery's `occ maintenance:install` exec. On stub
+    # success (recovery_rc=0) the NEXT occ status probe reports installed —
+    # mirror that by lowering installed_after to the current call count.
+    *"maintenance:install"*)
+      n=$(( $(cat "$sd/recovery_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/recovery_calls"
+      printf '%s' "$*" > "$sd/recovery_argv"
+      if [ "$(cat "$sd/recovery_rc" 2>/dev/null || echo 1)" = "0" ]; then
+        cat "$sd/occ_calls" 2>/dev/null > "$sd/installed_after" || echo 0 > "$sd/installed_after"
+        return 0
+      fi
+      return 1
+      ;;
+    # WARP-1064: the recovery's stale-DB probe/recreate (psql in the db
+    # service). Report "no stale schema" (empty stdout, rc 0).
+    *" db psql"*|*"psql -U"*)
+      return 0
+      ;;
+    # WARP-1064: the entrypoint-initializing probe (apache2 /proc scan).
+    # Prints "initializing" until the call count reaches ep_serving_after,
+    # then "serving" (default 1 = serving on the first probe, no hold-off).
+    *"/proc/"*)
+      n=$(( $(cat "$sd/ep_probe_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/ep_probe_calls"
+      if [ "$n" -ge "$(cat "$sd/ep_serving_after" 2>/dev/null || echo 1)" ]; then
+        echo "serving"
+      else
+        echo "initializing"
+      fi
+      return 0
+      ;;
   esac
   return 0
 }
@@ -891,17 +950,25 @@ NCSTUB
 
 # Run one extracted entrypoint against the stub. State survives the call so
 # assertions can read $NC_WORK/state afterwards. Tunables: NC_TRIES (poll
-# budget, default 8); intervals are zeroed and sleep is shimmed, so the loop
-# never burns wall-clock time.
+# budget, default 8); NC_RECOVERY_RC (WARP-1064 recovery-install stub exit,
+# default 1 = recovery fails, preserving the pre-recovery semantics of the
+# never-installed cases); NC_EP_SERVING_AFTER (probe count at which the
+# entrypoint-initializing scan flips to "serving", default 1 = no hold-off);
+# intervals are zeroed and sleep is shimmed, so the loop never burns
+# wall-clock time.
 run_nc_case() {
   local installed_after="$1" hook_rc="$2" entry="$3"
   local sd="$NC_WORK/state"
   rm -rf "$sd"; mkdir -p "$sd"
   printf '%s' "$installed_after" > "$sd/installed_after"
   printf '%s' "$hook_rc" > "$sd/hook_rc"
+  printf '%s' "${NC_RECOVERY_RC:-1}" > "$sd/recovery_rc"
+  printf '%s' "${NC_EP_SERVING_AFTER:-1}" > "$sd/ep_serving_after"
   NC_STUB_STATE="$sd" \
   NEXTCLOUD_OCC_READY_TRIES="${NC_TRIES:-8}" \
   NEXTCLOUD_OCC_READY_INTERVAL=0 \
+  NEXTCLOUD_ENTRYPOINT_WAIT_TRIES=10 \
+  NEXTCLOUD_ENTRYPOINT_WAIT_INTERVAL=0 \
   COMPOSE_FILE=/dev/null \
   COMPOSE_ENV_FILE=/dev/null \
   LOG_FILE="$sd/setup.log" \
@@ -988,6 +1055,92 @@ if grep -q 'WARP-990' "$NC_ERR2"; then
   pass "skipped reconcile is loud (WARP-990 called out on stderr)"
 else
   fail "skipped reconcile is silent — must be loud on stderr"
+fi
+if [ "$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0)" = "1" ]; then
+  pass "WARP-1064 recovery install was attempted before declaring the box degraded"
+else
+  fail "WARP-1064 recovery install was not attempted on a never-installed Nextcloud"
+fi
+
+# (B7) WARP-1064: never installed by the wait, but the recovery install
+# SUCCEEDS → the reconcile converges: hook exec'd once, runner exits 0.
+# (Reproduces the stuck-volume state — installed:false forever — that the
+# recovery exists for; live-verified against a real stuck instance too.)
+if NC_TRIES=3 NC_RECOVERY_RC=0 run_nc_case 9999 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "recovered install keeps the runner green (exit 0)"
+else
+  fail "runner failed even though the WARP-1064 recovery succeeded"
+fi
+if [ "$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0)" = "1" ] \
+   && [ "$(cat "$NC_WORK/state/hook_calls" 2>/dev/null || echo 0)" = "1" ]; then
+  pass "successful recovery is followed by the WARP-990 hook reconcile (hook exec'd once)"
+else
+  fail "expected recovery x1 + hook x1 after a successful WARP-1064 recovery (got recovery=$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0), hook=$(cat "$NC_WORK/state/hook_calls" 2>/dev/null || echo 0))"
+fi
+NC_RECOVERY_ARGV="$(cat "$NC_WORK/state/recovery_argv" 2>/dev/null || echo '')"
+if printf '%s' "$NC_RECOVERY_ARGV" | grep -qF -- "-u 33" \
+   && printf '%s' "$NC_RECOVERY_ARGV" | grep -qF "maintenance:install"; then
+  pass "recovery install runs occ maintenance:install as uid 33 in the nextcloud service"
+else
+  fail "recovery install argv wrong (got: '${NC_RECOVERY_ARGV}')"
+fi
+
+# (B8) WARP-1064: slow-but-HEALTHY first boot — the wait expires while the
+# entrypoint is still initializing (apache2 not up: rsync/install/hooks in
+# flight). The recovery must HOLD, not race a second maintenance:install;
+# once the entrypoint finishes (probe flips to "serving" on call 2) the
+# verdict is installed:true and the hook reconciles with ZERO recovery
+# installs. installed_after=4: the 3 wait polls miss, the post-hold verdict
+# probe (occ call 4) sees installed.
+if NC_TRIES=3 NC_EP_SERVING_AFTER=2 run_nc_case 4 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "slow-healthy first boot converges through the entrypoint hold-off (runner exits 0)"
+else
+  fail "runner failed on a slow-but-healthy first boot (entrypoint hold-off broken)"
+fi
+if [ ! -f "$NC_WORK/state/recovery_calls" ] \
+   && [ "$(cat "$NC_WORK/state/hook_calls" 2>/dev/null || echo 0)" = "1" ] \
+   && [ "$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0)" = "2" ]; then
+  pass "hold-off waited out the in-flight install — no second maintenance:install was raced"
+else
+  fail "expected 0 recovery installs + 1 hook + 2 entrypoint probes (got recovery=$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0), hook=$(cat "$NC_WORK/state/hook_calls" 2>/dev/null || echo 0), probes=$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0))"
+fi
+
+# (B9) WARP-1064: genuinely stuck box behind a busy entrypoint window — the
+# probe reports initializing twice, then serving; the verdict is STILL
+# installed:false, so the recovery install must fire exactly once.
+if NC_TRIES=3 NC_RECOVERY_RC=0 NC_EP_SERVING_AFTER=3 run_nc_case 9999 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "stuck box is still recovered after the entrypoint hold-off (runner exits 0)"
+else
+  fail "runner failed on a stuck box behind the entrypoint hold-off"
+fi
+if [ "$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0)" = "3" ] \
+   && [ "$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0)" = "1" ]; then
+  pass "hold-off ended on 'serving' and the recovery install fired exactly once"
+else
+  fail "expected 3 entrypoint probes + 1 recovery install (got probes=$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0), recovery=$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0))"
+fi
+
+# (B10) WARP-1064: the hold-off budget expires while the entrypoint is STILL
+# initializing → the recovery must BAIL (no second install raced against the
+# in-flight one — observed live 2026-07-11: both installers fight over the
+# same DB), staying non-fatal + loud. The harness pins the hold budget to 10
+# probes; "serving" never arrives.
+NC_ERR3="$NC_WORK/still-initializing.stderr"
+if NC_TRIES=3 NC_RECOVERY_RC=0 NC_EP_SERVING_AFTER=999 run_nc_case 9999 0 run_nextcloud_post_install_hook >/dev/null 2>"$NC_ERR3"; then
+  pass "still-initializing entrypoint keeps the runner non-fatal (exits 0)"
+else
+  fail "still-initializing entrypoint aborted the runner — must be non-fatal to setup"
+fi
+if [ ! -f "$NC_WORK/state/recovery_calls" ] \
+   && [ "$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0)" = "10" ]; then
+  pass "budget-exhausted hold-off bails without racing a second maintenance:install"
+else
+  fail "expected 10 probes + 0 recovery installs on budget exhaustion (got probes=$(cat "$NC_WORK/state/ep_probe_calls" 2>/dev/null || echo 0), recovery=$(cat "$NC_WORK/state/recovery_calls" 2>/dev/null || echo 0))"
+fi
+if grep -q 'WARP-990' "$NC_ERR3"; then
+  pass "bailed hold-off still surfaces the loud degraded-path breadcrumb"
+else
+  fail "bailed hold-off is silent — the WARP-990 skip message must reach stderr"
 fi
 
 # =============================================================================
