@@ -28,10 +28,20 @@ FROM node:20-bookworm-slim AS builder
 # openssl + ca-certificates at build time so prisma can generate its
 # client engine binaries. `--no-install-recommends` keeps the layer
 # trim; the apt list teardown drops the package index.
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 WORKDIR /app
 
@@ -50,7 +60,11 @@ COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 # Targeted install: mcp-server + its in-repo deps (tools-core + fips-selftest),
 # plus the orchestrator workspace so its `prisma` devDep CLI is available
 # for client generation. Web-dashboard + ai-gateway are still excluded.
-RUN npm ci \
+# WARP-1065: persistent npm download cache — package tarballs survive
+# rebuilds (node_modules itself is still built fresh each time; see the
+# --no-cache note on the apt mount above).
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci \
     -w @droplet/orchestrator \
     -w @droplet/mcp-server \
     -w @droplet/tools-core \
@@ -87,10 +101,20 @@ FROM node:20-bookworm-slim
 
 # Runtime: openssl (FIPS provider) + ca-certificates + wget (healthcheck
 # client used by the Compose `healthcheck` block).
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates wget
 
 # WARP-229: activate OpenSSL 3 FIPS provider. Same rationale as
 # apps/orchestrator/Dockerfile. The boot self-test runs at the top of

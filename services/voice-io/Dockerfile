@@ -9,15 +9,25 @@ FROM python:3.12-slim AS base
 # sounddevice C extension's link step; libportaudio2 is the runtime
 # library sounddevice actually loads at import time. alsa-utils gives
 # `aplay`/`arecord` for in-container debug — small package, worth it.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
         libasound2 \
         libasound2-plugins \
         alsa-utils \
         ffmpeg \
         curl \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        ca-certificates
 
 WORKDIR /app
 
@@ -30,12 +40,15 @@ WORKDIR /app
 COPY services/voice-io/requirements.txt \
      services/voice-io/requirements-dev.txt \
      /app/
-RUN pip install --no-cache-dir -r /app/requirements-dev.txt && \
+# WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
+# cache lives in the mount, not the image).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /app/requirements-dev.txt && \
     # openWakeWord 0.6.0's setup.py pins `tflite-runtime` which has no
     # Python 3.12 wheel for x86_64. The ONNX-side deps are already pinned
     # in requirements.txt; here we install openwakeword itself with
     # --no-deps so pip doesn't try to resolve tflite-runtime.
-    pip install --no-cache-dir --no-deps openwakeword==0.6.0
+    pip install --no-deps openwakeword==0.6.0
 
 # Pre-warm the bundled model cache so the first /voice/status hit
 # doesn't pay the model-download tax. openWakeWord stashes models in
