@@ -61,7 +61,7 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
   const hasMeter = model.diskBarPct != null;
 
   return (
-    <div className="card p-4 flex flex-col gap-3.5">
+    <div className="card flex flex-col gap-3.5" style={{ padding: "16px" }}>
       {/* Header: glyph · name + family · status chip */}
       <div className="flex items-start gap-2.5">
         <span

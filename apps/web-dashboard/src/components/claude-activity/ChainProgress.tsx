@@ -69,7 +69,7 @@ export function ChainProgress({ jira, fallbackQueue }: ChainProgressProps) {
   const percent = total === 0 ? 0 : Math.round((done / total) * 100);
 
   return (
-    <section className="card p-5" aria-labelledby="chain-progress-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="chain-progress-heading">
       <div className="flex items-center justify-between mb-3">
         <h2
           id="chain-progress-heading"

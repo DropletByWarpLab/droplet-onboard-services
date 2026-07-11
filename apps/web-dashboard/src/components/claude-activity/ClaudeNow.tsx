@@ -19,7 +19,8 @@ export function ClaudeNow({ now }: { now: NowState }) {
 
   return (
     <section
-      className="card p-5"
+      className="card"
+      style={{ padding: "20px" }}
       aria-labelledby="claude-now-heading"
     >
       <div className="flex items-center justify-between mb-3">

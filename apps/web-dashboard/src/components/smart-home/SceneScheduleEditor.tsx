@@ -118,7 +118,7 @@ export function SceneScheduleEditor({
         </div>
 
         {/* New-schedule form */}
-        <div className="mt-4 card p-4 space-y-4">
+        <div className="mt-4 card space-y-4" style={{ padding: "16px" }}>
           <div>
             <span className="type-subheadline block mb-2" style={{ color: "var(--text-muted)" }}>
               Repeat on

@@ -43,7 +43,7 @@ const TONE_FG: Record<"ok" | "error" | "warning" | "neutral", string> = {
 
 export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
   return (
-    <section className="card p-5" aria-labelledby="ci-status-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="ci-status-heading">
       <h2
         id="ci-status-heading"
         className="type-footnote uppercase tracking-wide mb-3"

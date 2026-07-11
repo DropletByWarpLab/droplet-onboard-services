@@ -21,7 +21,7 @@ const BADGE_COPY: Record<CIBadge, { label: string; cls: string }> = {
 
 export function OpenPRs({ prs }: { prs: GitHubPR[] | null }) {
   return (
-    <section className="card p-5" aria-labelledby="open-prs-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="open-prs-heading">
       <div className="flex items-center justify-between mb-3">
         <h2
           id="open-prs-heading"

@@ -129,7 +129,7 @@ const ICONS = {
 export function ActivityFeed({ data }: { data: ClaudeActivityResponse }) {
   const items = buildFeed(data);
   return (
-    <section className="card p-5" aria-labelledby="activity-feed-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="activity-feed-heading">
       <h2
         id="activity-feed-heading"
         className="type-footnote uppercase tracking-wide mb-4"

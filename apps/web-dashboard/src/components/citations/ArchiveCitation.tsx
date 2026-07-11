@@ -29,7 +29,8 @@ export function ArchiveCitation({ hit, anchor }: ArchiveCitationProps): JSX.Elem
     anchor.innerAnchor != null && anchor.innerAnchor.kind !== "none";
   return (
     <div
-      className="card p-3 space-y-2"
+      className="card space-y-2"
+      style={{ padding: "12px" }}
       data-testid="archive-card"
       data-citation-kind="archive-member"
     >

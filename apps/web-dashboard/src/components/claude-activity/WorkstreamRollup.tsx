@@ -13,7 +13,7 @@ import type { WorkstreamRow } from "./types";
 
 export function WorkstreamRollup({ rows }: { rows: WorkstreamRow[] | undefined }) {
   return (
-    <section className="card p-5" aria-labelledby="workstream-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="workstream-heading">
       <h2
         id="workstream-heading"
         className="type-footnote uppercase tracking-wide flex items-center gap-2 mb-3"

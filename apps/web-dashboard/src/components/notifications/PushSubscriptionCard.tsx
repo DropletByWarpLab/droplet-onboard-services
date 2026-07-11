@@ -188,7 +188,7 @@ export function PushSubscriptionCard() {
   // Render
   if (status === "checking") {
     return (
-      <div className="card p-4 mb-4 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+      <div className="card mb-4 flex items-center gap-2" style={{ padding: "16px", color: "var(--text-muted)" }}>
         <Loader2 size={14} className="animate-spin" />
         <span className="type-caption-1">Checking push status…</span>
       </div>
@@ -196,7 +196,7 @@ export function PushSubscriptionCard() {
   }
   if (status === "unsupported") {
     return (
-      <div className="card p-4 mb-4">
+      <div className="card mb-4" style={{ padding: "16px" }}>
         <div className="flex items-center gap-2 mb-1">
           <AlertTriangle size={14} className="text-system-orange" />
           <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
@@ -212,7 +212,7 @@ export function PushSubscriptionCard() {
   }
   if (status === "configured-off") {
     return (
-      <div className="card p-4 mb-4">
+      <div className="card mb-4" style={{ padding: "16px" }}>
         <div className="flex items-center gap-2 mb-1">
           <AlertTriangle size={14} className="text-system-orange" />
           <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
@@ -231,7 +231,7 @@ export function PushSubscriptionCard() {
   }
   if (status === "denied") {
     return (
-      <div className="card p-4 mb-4">
+      <div className="card mb-4" style={{ padding: "16px" }}>
         <div className="flex items-center gap-2 mb-1">
           <BellOff size={14} className="text-system-red" />
           <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
@@ -247,7 +247,7 @@ export function PushSubscriptionCard() {
   }
 
   return (
-    <div className="card p-4 mb-4">
+    <div className="card mb-4" style={{ padding: "16px" }}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">

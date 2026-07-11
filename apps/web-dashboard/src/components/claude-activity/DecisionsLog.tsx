@@ -25,7 +25,7 @@ export function DecisionsLog({
     .slice(0, 10);
 
   return (
-    <section className="card p-5" aria-labelledby="decisions-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="decisions-heading">
       <h2
         id="decisions-heading"
         className="type-footnote uppercase tracking-wide flex items-center gap-2 mb-3"
