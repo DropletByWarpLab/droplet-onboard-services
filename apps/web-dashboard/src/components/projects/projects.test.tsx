@@ -219,13 +219,14 @@ describe("IndexView", () => {
     expect(screen.getByText("No projects yet.")).toBeInTheDocument();
   });
 
-  function err(status?: number): Error & { status?: number } {
-    const e = new Error("boom") as Error & { status?: number };
+  function err(status?: number, code?: string): Error & { status?: number; code?: string } {
+    const e = new Error(code ?? "boom") as Error & { status?: number; code?: string };
     if (status !== undefined) e.status = status;
+    if (code !== undefined) e.code = code;
     return e;
   }
 
-  function renderError(error: Error & { status?: number }, onRetry = noop) {
+  function renderError(error: Error & { status?: number; code?: string }, onRetry = noop) {
     render(
       <IndexView
         projects={undefined}
@@ -249,6 +250,41 @@ describe("IndexView", () => {
     expect(retry).toBeInTheDocument();
     fireEvent.click(retry);
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  // WARP-1154: the orchestrator's module gate answers 404 module_disabled — a
+  // PERMANENT condition. It must read as "not enabled" (honest copy, calm
+  // tone, no Retry), never "server error, try again in a moment".
+  it("module_disabled reads as 'not enabled' with NO retry affordance", () => {
+    const onRetry = vi.fn();
+    renderError(err(404, "module_disabled"), onRetry);
+    expect(
+      screen.getByText(/projects isn't enabled on this droplet/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/an owner or admin can turn it on/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+    expect(screen.queryByText(/server error/i)).toBeNull();
+    // The raw wire code never renders.
+    expect(screen.queryByText(/module_disabled/)).toBeNull();
+  });
+
+  it("module_disabled uses the calmer (non-error) tone", () => {
+    const { container } = render(
+      <IndexView
+        projects={undefined}
+        summary={undefined}
+        loading={false}
+        error={err(404, "module_disabled")}
+        readOnly={false}
+        showArchived={false}
+        onToggleArchived={noop}
+        onOpenProject={noop}
+        onNewProject={noop}
+        onRetry={noop}
+      />,
+    );
+    const glyph = container.querySelector(".pm-empty .glyph") as HTMLElement;
+    expect(glyph.style.color).not.toContain("--err");
   });
 
   it("auth error (401) shows sign-in-oriented copy", () => {

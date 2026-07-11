@@ -16,17 +16,23 @@ import type {
   Person,
 } from "./types";
 
-/** Error thrown by {@link getJson} on a non-2xx response. Carries the HTTP
- *  status so the UI can tell an auth failure (401/403) from a server/connection
- *  fault. A genuine network/timeout failure rejects inside `fetch` before we
- *  reach here, so the surfaced error has no `status` — that absence is itself
- *  the "couldn't reach the appliance" signal. */
+/** Error thrown by {@link getJson} / {@link send} on a non-2xx response.
+ *  Carries the HTTP status so the UI can tell an auth failure (401/403) from a
+ *  server/connection fault, and the wire `error` string as `code` so the
+ *  friendly-copy translator (`translateError(e, "projects")`) can dispatch on
+ *  the orchestrator's stable codes (`module_disabled`, `project_not_found`, …)
+ *  without any surface ever rendering the raw snake_case (WARP-1154). A
+ *  genuine network/timeout failure rejects inside `fetch` before we reach
+ *  here, so the surfaced error has no `status` — that absence is itself the
+ *  "couldn't reach the appliance" signal. */
 export class PmRequestError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "PmRequestError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -34,7 +40,11 @@ async function getJson<T>(url: string): Promise<T> {
   const res = await authFetch(url);
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new PmRequestError(body.error ?? `Request failed (${res.status})`, res.status);
+    throw new PmRequestError(
+      body.error ?? `Request failed (${res.status})`,
+      res.status,
+      body.error,
+    );
   }
   return res.json() as Promise<T>;
 }
@@ -47,7 +57,11 @@ async function send<T>(url: string, method: string, body?: unknown): Promise<T> 
   });
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(data.error ?? `Request failed (${res.status})`);
+    throw new PmRequestError(
+      data.error ?? `Request failed (${res.status})`,
+      res.status,
+      data.error,
+    );
   }
   return res.json().catch(() => ({})) as Promise<T>;
 }

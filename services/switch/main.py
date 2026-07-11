@@ -542,9 +542,26 @@ async def set_vlan_membership(vlan_id: int, req: SetVlanMembershipRequest):
             for p in req.ports
         ]
         drv = get_driver()
-        await drv.set_vlan_membership(vlan_id, membership)
-        dry = bool(getattr(drv, "plan_only", False))
-        return {"status": "planned" if dry else "ok", "vlan_id": vlan_id, "ports_updated": len(membership), "dry_run": dry}
+        result = await drv.set_vlan_membership(vlan_id, membership)
+        # WARP-1176 (PYNET-001): the driver returns {**plan, "dry_run": bool}
+        # (see _gated_write). Use that as the authoritative dry-run signal and
+        # propagate the plan payload instead of discarding the driver's return
+        # value — a plan-only "write" must never read as an applied change.
+        # getattr(plan_only) stays as the fallback for drivers whose write
+        # methods return None.
+        if isinstance(result, dict):
+            dry = bool(result.get("dry_run"))
+        else:
+            dry = bool(getattr(drv, "plan_only", False))
+        resp: dict = {
+            "status": "planned" if dry else "ok",
+            "vlan_id": vlan_id,
+            "ports_updated": len(membership),
+            "dry_run": dry,
+        }
+        if dry and isinstance(result, dict):
+            resp["plan"] = {k: v for k, v in result.items() if k != "dry_run"}
+        return resp
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -569,12 +586,35 @@ async def get_port_poe(port: int):
         handle_switch_error(exc)
 
 
+def _poe_write_response(result, drv, port: int, enabled: bool) -> dict:
+    """Build the /poe write response from the driver's returned plan dict.
+
+    WARP-1176 (PYNET-001): ``set_port_poe`` returns ``{**plan, "dry_run":
+    bool}`` (see _gated_write) — use it as the authoritative dry-run signal
+    and carry the plan through instead of discarding it. Falls back to the
+    driver's ``plan_only`` attribute for drivers that return None.
+    """
+    if isinstance(result, dict):
+        dry = bool(result.get("dry_run"))
+    else:
+        dry = bool(getattr(drv, "plan_only", False))
+    resp: dict = {
+        "status": "planned" if dry else "ok",
+        "port": port,
+        "poe_enabled": enabled,
+        "dry_run": dry,
+    }
+    if dry and isinstance(result, dict):
+        resp["plan"] = {k: v for k, v in result.items() if k != "dry_run"}
+    return resp
+
+
 @app.post("/poe/{port}/enable")
 async def enable_port_poe(port: int):
     try:
-        await get_driver().set_port_poe(port, True)
-        dry = bool(getattr(get_driver(), "plan_only", False))
-        return {"status": "planned" if dry else "ok", "port": port, "poe_enabled": True, "dry_run": dry}
+        drv = get_driver()
+        result = await drv.set_port_poe(port, True)
+        return _poe_write_response(result, drv, port, True)
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -582,9 +622,9 @@ async def enable_port_poe(port: int):
 @app.post("/poe/{port}/disable")
 async def disable_port_poe(port: int):
     try:
-        await get_driver().set_port_poe(port, False)
-        dry = bool(getattr(get_driver(), "plan_only", False))
-        return {"status": "planned" if dry else "ok", "port": port, "poe_enabled": False, "dry_run": dry}
+        drv = get_driver()
+        result = await drv.set_port_poe(port, False)
+        return _poe_write_response(result, drv, port, False)
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -641,7 +681,7 @@ async def setup_cameras(req: CameraSetupRequest):
         for port in req.uplink_ports:
             membership.append({"port": port, "tagged": True, "member": True})
 
-        await driver.set_vlan_membership(req.vlan_id, membership)
+        membership_result = await driver.set_vlan_membership(req.vlan_id, membership)
         logger.info(
             "Camera VLAN %d: %d camera ports + %d uplink ports",
             req.vlan_id,
@@ -649,7 +689,14 @@ async def setup_cameras(req: CameraSetupRequest):
             len(req.uplink_ports),
         )
 
-        dry = bool(getattr(driver, "plan_only", False))
+        # WARP-1176 (PYNET-001): prefer the driver's own returned dry_run
+        # signal ({**plan, "dry_run": bool} from _gated_write) over the
+        # plan_only attribute; fall back to the attribute for drivers whose
+        # write methods return None.
+        if isinstance(membership_result, dict):
+            dry = bool(membership_result.get("dry_run"))
+        else:
+            dry = bool(getattr(driver, "plan_only", False))
         if dry:
             # Plan-only: the driver never wrote, so say so — don't claim
             # "configured" (mirrors the "planned"/dry-run write responses above).
@@ -668,6 +715,7 @@ async def setup_cameras(req: CameraSetupRequest):
             camera_ports=req.camera_ports,
             uplink_ports=req.uplink_ports,
             message=message,
+            dry_run=dry,
         )
 
     except SwitchError as exc:

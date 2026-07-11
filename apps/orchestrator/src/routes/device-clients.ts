@@ -26,7 +26,7 @@ const logger = createLogger("device-clients-route");
 
 /**
  * Thrown inside the claim transaction when the atomic conditional consume
- * (`updateMany WHERE used=false`) flips zero rows — i.e. another request
+ * (`updateMany WHERE status='active'`) flips zero rows — i.e. another request
  * already claimed the code. Throwing rolls back the transaction and signals
  * the handler to respond 409 (and compensate the pre-minted app password).
  */
@@ -41,10 +41,12 @@ class PairingCodeAlreadyClaimedError extends Error {
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const PAIRING_CODE_LENGTH = 6;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
-// WARP-1151: `PairingCode.code` is unique and consumed/expired rows are never
-// purged, so a fresh random 6-char code can (rarely) collide with a historical
-// row. A collision is a retryable allocation miss, not a request failure —
-// regenerate up to this many times before giving up.
+// WARP-1151: `PairingCode.code` is unique, so a fresh random 6-char code can
+// (rarely) collide with a historical row. The WARP-1203 daily sweep purges
+// terminal rows past retention, which keeps the collision probability flat —
+// but rows inside the retention window can still clash. A collision is a
+// retryable allocation miss, not a request failure — regenerate up to this
+// many times before giving up.
 const PAIRING_CODE_CREATE_ATTEMPTS = 5;
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
@@ -283,10 +285,16 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         res.status(403).json({ error: "Pairing code belongs to another user" });
         return;
       }
-      const expired = record.expiresAt.getTime() < Date.now();
+      // WARP-1202: state keys on the explicit status enum. `expiresAt` stays
+      // authoritative for the deadline — an overdue row the daily sweep hasn't
+      // stamped `expired` yet must still poll as expired. Wire shape unchanged
+      // (the dashboard's pair page reads `used`/`expired` booleans).
+      const expired =
+        record.status === "expired" ||
+        record.expiresAt.getTime() < Date.now();
       res.json({
         code: record.code,
-        used: record.used,
+        used: record.status === "claimed",
         expired,
         expiresAt: record.expiresAt.toISOString(),
         claimedBy: record.claimedBy,
@@ -326,9 +334,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       // Cheap pre-validation only. The AUTHORITATIVE single-use gate is the
-      // conditional updateMany in the transaction below — a `used` read here is
-      // just a fast-path 409 to avoid minting a credential for an already-
-      // consumed code.
+      // conditional updateMany in the transaction below — a status read here is
+      // just a fast-path 409/410 to avoid minting a credential for a code that
+      // can no longer be claimed.
       const record = await prisma.pairingCode.findUnique({
         where: { code: parsed.data.code },
       });
@@ -336,12 +344,23 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         res.status(404).json({ error: "Unknown pairing code" });
         return;
       }
-      if (record.used) {
+      if (record.status === "claimed") {
         res.status(409).json({ error: "Pairing code already used" });
         return;
       }
-      if (record.expiresAt.getTime() < Date.now()) {
+      // Expiry: the explicit status (stamped by the daily sweep) OR the live
+      // expiresAt deadline the sweep hasn't caught up with yet.
+      if (
+        record.status === "expired" ||
+        record.expiresAt.getTime() < Date.now()
+      ) {
         res.status(410).json({ error: "Pairing code expired" });
+        return;
+      }
+      if (record.status !== "active") {
+        // `revoked` (reserved — no writer yet). Defensive: anything not
+        // active is not claimable.
+        res.status(410).json({ error: "Pairing code no longer valid" });
         return;
       }
 
@@ -390,9 +409,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       let client: { id: string };
       try {
         // Atomic single-use consume + create in ONE transaction. The
-        // conditional updateMany flips used=false→true for exactly one racer
-        // (Postgres row lock serializes concurrent claimers); the loser gets
-        // count===0 and we throw PairingCodeAlreadyClaimedError → 409. The
+        // conditional updateMany flips status active→claimed for exactly one
+        // racer (Postgres row lock serializes concurrent claimers); the loser
+        // gets count===0 and we throw PairingCodeAlreadyClaimedError → 409. The
         // `expiresAt: { gt: now }` predicate also makes expiry authoritative at
         // consume time, closing the sub-second window where a code unexpired at
         // the read above crosses expiresAt before this update runs. If the
@@ -402,8 +421,12 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         const consumeNow = new Date();
         client = await prisma.$transaction(async (tx) => {
           const consume = await tx.pairingCode.updateMany({
-            where: { id: record.id, used: false, expiresAt: { gt: consumeNow } },
-            data: { used: true },
+            where: {
+              id: record.id,
+              status: "active",
+              expiresAt: { gt: consumeNow },
+            },
+            data: { status: "claimed" },
           });
           if (consume.count === 0) {
             throw new PairingCodeAlreadyClaimedError();

@@ -88,53 +88,52 @@ export function VersionHistoryPanel({ filePath, onRestored }: VersionHistoryPane
   };
 
   return (
-    <div className="pt-4 border-t border-separator">
-      <div className="flex items-center gap-2 mb-3">
-        <History size={14} className="text-label-tertiary" />
-        <h4 className="type-footnote text-label-secondary font-medium">
-          Version history
-        </h4>
+    <div className="pt-4" style={{ borderTop: "1px solid var(--card-bd)" }}>
+      <div className="sect" style={{ margin: "0 0 12px" }}>
+        <History size={14} style={{ color: "var(--text-muted)" }} />
+        <h2>Version history</h2>
       </div>
 
       {error && (
-        <p className="type-caption-1 text-system-red mb-2">{error}</p>
+        <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+          {error}
+        </p>
       )}
 
       {notSupported && (
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           Versions require the Nextcloud backend.
         </p>
       )}
 
       {versions === null && !error && (
-        <p className="type-caption-1 text-label-tertiary">Loading…</p>
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+          Loading…
+        </p>
       )}
 
       {versions && versions.length === 0 && !error && (
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           No previous versions yet.
         </p>
       )}
 
       {versions && versions.length > 0 && (
-        <ul className="space-y-1">
+        <ul className="rows">
           {versions.map((v) => (
             <li
               key={v.versionId}
-              className="flex items-center gap-2 py-1.5 px-2 rounded-sm hover:bg-surface-secondary transition-colors"
+              className="lrow rounded-[var(--radius-input)] hover:bg-[var(--hover)] transition-colors"
+              style={{ padding: "8px" }}
             >
-              <div className="flex-1 min-w-0">
-                <p className="type-caption-1 text-label-primary truncate">
-                  {formatDate(v.modifiedAt)}
-                </p>
-                <p className="type-caption-2 text-label-tertiary">
-                  {formatSize(v.size)}
-                </p>
+              <div className="rt">
+                <span className="nm">{formatDate(v.modifiedAt)}</span>
+                <span className="sub mono">{formatSize(v.size)}</span>
               </div>
               <button
                 onClick={() => handleRestore(v.versionId)}
                 disabled={restoringId !== null}
-                className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors disabled:opacity-50"
+                className="btn ghost sm disabled:opacity-50"
                 title="Restore this version"
               >
                 <RotateCcw size={13} />

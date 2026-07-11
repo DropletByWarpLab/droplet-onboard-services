@@ -45,6 +45,7 @@ import {
 } from "./services/update-agent/apply.js";
 import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
+import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
@@ -70,6 +71,7 @@ import {
 import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { pruneExpiredChallenges } from "./services/webauthn-challenge.service.js";
 import { pruneExpiredLoginStates } from "./services/sso-login-state.service.js";
+import { sweepPairingCodes } from "./services/pairing-code-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
 import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-tz-backfill.service.js";
@@ -532,6 +534,19 @@ async function main() {
       const backupPurge = await purgeUpdateBackups(prisma, {
         updatesDir: config.DROPLET_OTA_UPDATES_DIR,
       });
+      // WARP-1044: GC the exited droplet-ota-self-swap-<id> helper containers
+      // the self-swap deliberately leaves behind (no --rm — their logs are
+      // the rollback forensic trail). Helpers exited longer than the same
+      // 7-day backup-retention window are removed AFTER their logs are
+      // captured to <updatesDir>/<id>/self-swap-helper.log; running helpers
+      // and in-flight update ids are never touched. Gated like the apply
+      // window: no apply script provisioned → no docker surface → no-op.
+      const helperPurge = config.DROPLET_OTA_APPLY_SCRIPT
+        ? await purgeSelfSwapHelpers(prisma, {
+            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
+            updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          })
+        : { removed: 0, logsCaptured: 0 };
       // Bounded-growth sweeps for two auth tables whose mint endpoints run
       // before authMiddleware: WebAuthnChallenge (every /login/passkey page
       // load inserts one via the public authenticate/options route) and
@@ -545,6 +560,15 @@ async function main() {
       // backlog drains over nights.
       const challengesDeleted = await pruneExpiredChallenges(prisma);
       const loginStatesDeleted = await pruneExpiredLoginStates(prisma);
+      // WARP-1202/WARP-1203: PairingCode lifecycle sweep. First stamps overdue
+      // `active` codes with the explicit `expired` status (state stays truthful
+      // in the column, not re-derived from expiresAt), then purges terminal
+      // rows — claimed/expired/revoked — created more than 7 days ago, keyed
+      // on the explicit status. Keeps the code population flat so 6-char
+      // collision odds stop rising with table age (the P2002 retry in
+      // /devices/pair stays as the last-resort absorber). Batched + capped
+      // like the two prunes above.
+      const pairingSweep = await sweepPairingCodes(prisma);
       logger.info(
         {
           eventsDeleted,
@@ -558,8 +582,11 @@ async function main() {
           notificationDeleted: auditPurge.notificationDeleted,
           auditRetentionSkipped: auditPurge.skipped,
           updateBackupsPurged: backupPurge.purged,
+          otaHelpersRemoved: helperPurge.removed,
           challengesDeleted,
           loginStatesDeleted,
+          pairingCodesExpired: pairingSweep.expired,
+          pairingCodesPurged: pairingSweep.purged,
         },
         "daily purges complete",
       );

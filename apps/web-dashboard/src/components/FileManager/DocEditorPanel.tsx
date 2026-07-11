@@ -71,16 +71,33 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
       onClick={onClose}
     >
       <div
-        className="bg-surface-primary rounded-lg w-full max-w-6xl h-[92vh] flex flex-col overflow-hidden shadow-2xl"
+        className="card w-full max-w-6xl h-[92vh] flex flex-col overflow-hidden shadow-2xl"
+        style={{ padding: 0, borderRadius: "var(--radius-card)" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-separator flex-shrink-0">
+        <div
+          className="flex items-center justify-between gap-3 px-4 py-3 flex-shrink-0"
+          style={{ borderBottom: "1px solid var(--card-bd)" }}
+        >
           <div className="flex items-center gap-2.5 min-w-0">
-            <FileText size={16} className="text-label-tertiary flex-shrink-0" />
-            <h3 className="type-headline text-label-primary truncate">{file.name}</h3>
+            <FileText
+              size={16}
+              className="flex-shrink-0"
+              style={{ color: "var(--text-muted)" }}
+            />
+            <h3 className="type-headline truncate" style={{ color: "var(--text)" }}>
+              {file.name}
+            </h3>
             {isView && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary type-caption-1 flex-shrink-0">
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 type-caption-1 flex-shrink-0"
+                style={{
+                  background: "var(--brand-subtle)",
+                  color: "var(--brand)",
+                  borderRadius: "var(--radius-pill)",
+                }}
+              >
                 <Eye size={11} />
                 View only
               </span>
@@ -88,7 +105,8 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
           </div>
           <button
             onClick={onClose}
-            className="p-2.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+            className="icon-btn"
+            style={{ width: 32, height: 32 }}
             aria-label="Close editor"
           >
             <X size={16} />
@@ -96,10 +114,19 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 relative bg-surface-secondary">
+        <div className="flex-1 relative" style={{ background: "var(--inset)" }}>
           {state.kind === "loading" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-label-tertiary">
-              <div className="w-6 h-6 border-2 border-accent/30 border-t-accent rounded-full animate-spin motion-reduce:animate-none" />
+            <div
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <div
+                className="w-6 h-6 border-2 rounded-full animate-spin motion-reduce:animate-none"
+                style={{
+                  borderColor: "var(--brand-subtle)",
+                  borderTopColor: "var(--brand)",
+                }}
+              />
               <p className="type-subheadline">Preparing the editor…</p>
             </div>
           )}
@@ -119,17 +146,29 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
 
           {state.kind === "ready" && !frameLoaded && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-6 h-6 border-2 border-accent/30 border-t-accent rounded-full animate-spin motion-reduce:animate-none" />
+              <div
+                className="w-6 h-6 border-2 rounded-full animate-spin motion-reduce:animate-none"
+                style={{
+                  borderColor: "var(--brand-subtle)",
+                  borderTopColor: "var(--brand)",
+                }}
+              />
             </div>
           )}
 
           {state.kind === "unavailable" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-8 text-center text-label-tertiary">
-              <FileWarning size={32} className="text-label-quaternary" />
-              <p className="type-subheadline text-label-secondary">
+            <div
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-8 text-center"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <FileWarning size={32} style={{ color: "var(--text-faint)" }} />
+              <p className="type-subheadline" style={{ color: "var(--text)" }}>
                 This document can&apos;t be edited right now
               </p>
-              <p className="type-footnote text-label-tertiary max-w-sm">
+              <p
+                className="type-footnote max-w-sm"
+                style={{ color: "var(--text-muted)" }}
+              >
                 The document editor isn&apos;t available on this Droplet. You can still
                 download the file to edit it on your computer.
               </p>
@@ -137,14 +176,17 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
           )}
 
           {state.kind === "error" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-8 text-center text-label-tertiary">
-              <FileWarning size={32} className="text-label-quaternary" />
-              <p className="type-subheadline text-label-secondary">
+            <div
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-8 text-center"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <FileWarning size={32} style={{ color: "var(--text-faint)" }} />
+              <p className="type-subheadline" style={{ color: "var(--text)" }}>
                 Couldn&apos;t open the editor
               </p>
               <button
                 onClick={() => void load()}
-                className="dp-btn-primary type-subheadline inline-flex items-center gap-1.5"
+                className="btn primary type-subheadline inline-flex items-center gap-1.5"
               >
                 <RefreshCw size={14} />
                 Try again

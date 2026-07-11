@@ -1104,9 +1104,29 @@ export async function updateDriveLabel(
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update drive: ${res.status}`);
+    throw storageWriteError(body, res.status, "Failed to update drive");
   }
   return res.json();
+}
+
+/**
+ * WARP-1141: rename failures must translate to actionable copy, not the
+ * generic files-domain fallback ("We couldn't load those files…") that made a
+ * blocked rename read as a load hiccup. Carry the HTTP status (+ the server's
+ * typed `code` when present) on the thrown error so `translateError`'s
+ * status/code dispatch can fire. Mirrors `throwNetworkWriteError`'s shape.
+ */
+function storageWriteError(
+  body: { error?: unknown; code?: unknown },
+  status: number,
+  fallback: string,
+): Error {
+  const err = new Error(
+    (typeof body.error === "string" && body.error) || `${fallback}: ${status}`,
+  ) as Error & { status?: number; code?: string };
+  err.status = status;
+  if (typeof body.code === "string") err.code = body.code;
+  return err;
 }
 
 /**
@@ -1132,7 +1152,7 @@ export async function updatePoolLabel(
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update pool: ${res.status}`);
+    throw storageWriteError(body, res.status, "Failed to update pool");
   }
   return res.json();
 }
@@ -5291,6 +5311,26 @@ export interface AdminCapabilities {
 export async function fetchCapabilities(): Promise<AdminCapabilities> {
   const res = await authFetch(`${BASE}/api/admin/capabilities`);
   if (!res.ok) throw new Error(`Failed to fetch capabilities: ${res.status}`);
+  return res.json();
+}
+
+// --- Module capabilities (nav-gating for user-facing modules) ---
+
+export interface AppCapabilities {
+  /** The Projects (native PM, ADR-026) surface is enabled on this Droplet. */
+  projects: boolean;
+}
+
+/**
+ * Probe which user-facing modules this Droplet is serving (WARP-1154/1155).
+ * Unlike `/api/admin/capabilities` this is readable by EVERY authenticated
+ * role — family/guest see the Projects nav entry too, so its gate can't live
+ * behind an admin-only probe. The consuming hook fails OPEN (module shown):
+ * a surface only hides when the orchestrator explicitly answers `false`.
+ */
+export async function fetchAppCapabilities(): Promise<AppCapabilities> {
+  const res = await authFetch(`${BASE}/api/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch app capabilities: ${res.status}`);
   return res.json();
 }
 

@@ -76,12 +76,12 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
     }
   }
 
-  const tone =
+  const toneColor =
     status === "error"
-      ? "text-system-red"
+      ? "var(--danger)"
       : status === "done"
-        ? "text-system-green"
-        : "text-label-tertiary";
+        ? "var(--success)"
+        : "var(--text-muted)";
 
   return (
     <div className="flex items-center gap-1.5">
@@ -89,7 +89,7 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
         type="button"
         onClick={onClick}
         disabled={status === "running"}
-        className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors disabled:opacity-40"
+        className="p-1.5 rounded-full text-[color:var(--text-muted)] hover:text-[color:var(--brand)] hover:bg-[var(--hover)] transition-colors disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
         title={status === "running" ? "Re-indexing…" : "Re-index"}
         aria-label="Re-index file"
         data-testid="reindex-button"
@@ -99,7 +99,7 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
       {message && (
         <span
           role={status === "error" ? "alert" : "status"}
-          className={`type-caption-1 ${tone}`}
+          style={{ color: toneColor, fontSize: "11.5px" }}
         >
           {message}
         </span>

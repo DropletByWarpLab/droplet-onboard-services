@@ -66,6 +66,7 @@ import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createAdminChatFeedbackRouter } from "./routes/admin-chat-feedback.js";
 import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
+import { createCapabilitiesRouter } from "./routes/capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
@@ -344,6 +345,11 @@ export function createApp(
   // Admin capabilities probe — drives nav-gating for optional admin surfaces
   // (Activity, RAG eval) so they hide when their integration is unconfigured.
   app.use("/api", createAdminCapabilitiesRouter());
+  // WARP-1154/WARP-1155 — module-capability probe for every authenticated
+  // principal. The dashboard drives the Projects nav entry + /projects route
+  // off this explicit flag (never off request errors). The module-toggles
+  // layer must wire its effective state through here when it lands.
+  app.use("/api", createCapabilitiesRouter());
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.

@@ -37,4 +37,44 @@ describe("setup_camera_ports", () => {
     const r = await setupCameraPorts.handler({}, ctxWithPost(post));
     if (!r.ok) expect(r.status).toBe("confirmation_required");
   });
+
+  // WARP-1176 (PYNET-001): plan-only camera-VLAN setup must never read as
+  // "the camera VLAN is configured" — that is the exact audit finding.
+  it("annotates a plan-only (dry-run) response as not applied", async () => {
+    const body = {
+      status: "planned",
+      vlan_id: 100,
+      camera_ports: [1, 2],
+      uplink_ports: [9, 10],
+      message: "VLAN 100 planned (dry-run): ...",
+      dry_run: true,
+    };
+    const post = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const r = await setupCameraPorts.handler({ vlan_id: 100 }, ctxWithPost(post));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as Record<string, unknown>;
+      expect(data.dry_run).toBe(true);
+      expect(data.applied).toBe(false);
+      expect(String(data.warning)).toContain("NOT applied to hardware");
+    }
+  });
+
+  it("leaves an applied (live-write) response untouched", async () => {
+    const body = {
+      status: "ok",
+      vlan_id: 100,
+      camera_ports: [1, 2],
+      uplink_ports: [9, 10],
+      message: "VLAN 100 configured: ...",
+      dry_run: false,
+    };
+    const post = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const r = await setupCameraPorts.handler({ vlan_id: 100 }, ctxWithPost(post));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.data).toEqual(body);
+      expect(r.data).not.toHaveProperty("warning");
+    }
+  });
 });

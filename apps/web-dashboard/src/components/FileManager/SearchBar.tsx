@@ -204,32 +204,33 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
 
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
-      <div className="relative flex items-center gap-1">
-        <div className="relative flex-1">
-          <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-label-tertiary">
+      <div className="relative flex items-center gap-2">
+        <label className="search flex-1" style={{ maxWidth: "none" }}>
+          <span
+            style={{ display: "flex", flexShrink: 0, color: "var(--text-muted)" }}
+          >
             {isLoading ? (
-              <Loader2 size={14} className="animate-spin" />
+              <Loader2 size={15} className="animate-spin" />
             ) : mode === "semantic" ? (
-              <Sparkles size={14} />
+              <Sparkles size={15} />
             ) : mode === "keyword" ? (
-              <Type size={14} />
+              <Type size={15} />
             ) : (
-              <Search size={14} />
+              <Search size={15} />
             )}
-          </div>
+          </span>
           <input
             ref={inputRef}
             type="search"
             value={query}
-          placeholder="Search files…"
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={handleKeyDown}
-          className="dp-input type-subheadline !pl-9 !pr-9 !py-2 !min-h-[36px]"
-        />
+            placeholder="Search files…"
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={handleKeyDown}
+          />
           {query && (
             <button
               onClick={() => {
@@ -237,23 +238,26 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
                 setOpen(false);
                 inputRef.current?.focus();
               }}
-              className="absolute inset-y-0 right-0 flex items-center pr-3 text-label-tertiary hover:text-label-primary"
+              className="icon-btn"
+              style={{
+                width: 26,
+                height: 26,
+                border: 0,
+                background: "transparent",
+                flexShrink: 0,
+              }}
               aria-label="Clear search"
             >
               <X size={14} />
             </button>
           )}
-        </div>
+        </label>
 
         {/* WARP-880 / WS-2 — 3-segment mode control. Filename matches by
             name; Keyword is lexical full-text (works gateway-down); Semantic
             is pgvector meaning-match. The active segment carries the indigo
             accent; the readiness pill only attaches to Semantic. */}
-        <div
-          role="radiogroup"
-          aria-label="Search mode"
-          className="flex items-center gap-0.5 p-0.5 rounded-sm bg-surface-secondary"
-        >
+        <div role="radiogroup" aria-label="Search mode" className="pills">
           {(
             [
               { id: "filename", label: "Name", icon: Search, title: "Match by file name" },
@@ -271,11 +275,13 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
                 aria-label={seg.label}
                 title={seg.title}
                 onClick={() => setMode(seg.id)}
-                className={`flex items-center gap-1 px-2 py-1.5 rounded-sm type-caption-1 whitespace-nowrap transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset ${
-                  active
-                    ? "bg-accent-subtle text-accent font-medium"
-                    : "text-label-tertiary hover:text-label-primary"
-                }`}
+                className={active ? "active" : undefined}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  whiteSpace: "nowrap",
+                }}
               >
                 <Icon size={12} />
                 {seg.label}
@@ -321,12 +327,24 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
       </div>
 
       {showPopover && (
-        <div className="absolute left-0 right-0 top-full mt-2 dp-card dp-material overflow-hidden z-40 max-h-96 overflow-y-auto">
+        <div
+          className="card absolute left-0 right-0 top-full mt-2 overflow-hidden z-40 max-h-96 overflow-y-auto"
+          style={{
+            padding: 0,
+            background: "var(--glass)",
+            backdropFilter: "blur(20px) saturate(150%)",
+            WebkitBackdropFilter: "blur(20px) saturate(150%)",
+            boxShadow: "var(--lift)",
+          }}
+        >
           {error && (
             <div className="px-3 py-2 type-footnote text-system-red">{error}</div>
           )}
           {!error && resultCount === 0 && !isLoading && !isContentMode && (
-            <div className="px-3 py-6 text-center type-footnote text-label-tertiary">
+            <div
+              className="px-3 py-6 text-center type-footnote"
+              style={{ color: "var(--text-muted)" }}
+            >
               No results for &ldquo;{query.trim()}&rdquo;
             </div>
           )}
@@ -336,22 +354,27 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
               key={file.path}
               onMouseEnter={() => setActiveIdx(idx)}
               onClick={() => pickResult(file)}
-              className={`w-full flex items-center gap-3 px-3 py-2 text-left transition-colors ${
-                idx === activeIdx
-                  ? "bg-accent-subtle"
-                  : "hover:bg-surface-secondary"
-              }`}
+              className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors"
+              style={{
+                background: idx === activeIdx ? "var(--brand-subtle)" : "transparent",
+              }}
             >
               <Thumbnail file={file} size={32} />
               <div className="flex-1 min-w-0">
-                <p className="type-footnote text-label-primary truncate">
+                <p className="type-footnote truncate" style={{ color: "var(--text)" }}>
                   {file.name}
                 </p>
-                <p className="type-caption-2 text-label-tertiary truncate">
+                <p
+                  className="type-caption-2 truncate"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   {file.path.replace(/\/[^/]*$/, "") || "/"}
                 </p>
               </div>
-              <span className="type-caption-2 text-label-tertiary">
+              <span
+                className="type-caption-2"
+                style={{ color: "var(--text-muted)" }}
+              >
                 {formatSize(file.size)}
               </span>
             </button>
@@ -365,12 +388,13 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
             <div
               data-testid="content-empty-state"
               data-variant={stillIndexing ? "still-indexing" : "no-match"}
-              className="px-3 py-6 text-center type-footnote text-label-tertiary"
+              className="px-3 py-6 text-center type-footnote"
+              style={{ color: "var(--text-muted)" }}
             >
               {mode === "keyword" ? (
-                <Type size={16} className="mx-auto mb-2 text-label-quaternary" />
+                <Type size={16} className="mx-auto mb-2" style={{ color: "var(--text-faint)" }} />
               ) : (
-                <Sparkles size={16} className="mx-auto mb-2 text-label-quaternary" />
+                <Sparkles size={16} className="mx-auto mb-2" style={{ color: "var(--text-faint)" }} />
               )}
               {stillIndexing ? (
                 <>
@@ -399,29 +423,37 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
                 key={`${result.path}-${idx}`}
                 onMouseEnter={() => setActiveIdx(idx)}
                 onClick={() => pickContentResult(result)}
-                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors ${
-                  idx === activeIdx
-                    ? "bg-accent-subtle"
-                    : "hover:bg-surface-secondary"
-                }`}
+                className="w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors"
+                style={{
+                  background: idx === activeIdx ? "var(--brand-subtle)" : "transparent",
+                }}
               >
                 {mode === "keyword" ? (
-                  <Type size={14} className="text-accent flex-shrink-0 mt-0.5" />
+                  <Type size={14} className="flex-shrink-0 mt-0.5" style={{ color: "var(--brand)" }} />
                 ) : (
-                  <Sparkles size={14} className="text-accent flex-shrink-0 mt-0.5" />
+                  <Sparkles size={14} className="flex-shrink-0 mt-0.5" style={{ color: "var(--brand)" }} />
                 )}
                 <div className="flex-1 min-w-0">
-                  <p className="type-footnote text-label-primary truncate">
+                  <p className="type-footnote truncate" style={{ color: "var(--text)" }}>
                     {fileName}
                   </p>
-                  <p className="type-caption-2 text-label-tertiary truncate mb-1">
+                  <p
+                    className="type-caption-2 truncate mb-1"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     {parentDir}
                   </p>
-                  <p className="type-caption-2 text-label-quaternary line-clamp-2">
+                  <p
+                    className="type-caption-2 line-clamp-2"
+                    style={{ color: "var(--text-faint)" }}
+                  >
                     {result.text.slice(0, 200)}
                   </p>
                 </div>
-                <span className="type-caption-2 text-accent flex-shrink-0">
+                <span
+                  className="type-caption-2 flex-shrink-0"
+                  style={{ color: "var(--brand)" }}
+                >
                   {Math.round(result.score * 100)}%
                 </span>
               </button>

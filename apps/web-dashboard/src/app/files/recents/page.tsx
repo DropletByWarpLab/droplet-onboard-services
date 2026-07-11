@@ -100,7 +100,10 @@ export default function RecentsPage() {
           )}
           {grouped.map((group) => (
             <section key={group.label}>
-              <h2 className="type-footnote text-label-secondary font-medium mb-2 px-1">
+              <h2
+                className="type-footnote font-medium mb-2 px-1"
+                style={{ color: "var(--text-muted)" }}
+              >
                 {group.label}
               </h2>
               <FileListSimple
