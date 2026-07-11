@@ -3148,8 +3148,13 @@ model PmWorkspace {
 
 /// A project (Plane "project"). `identifier` is the short key prefix (e.g.
 /// "INBOX") combined with a per-project work-item number to form INBOX-42.
-/// `seqCounter` is the monotonic source for that number — bumped in the same
-/// transaction as work-item creation so numbers never collide or reuse.
+/// `seqCounter` is the monotonic source for that number — bumped via an
+/// atomic `UPDATE ... SET "seqCounter" = "seqCounter" + 1 RETURNING` inside
+/// the same interactive transaction as work-item creation (pm.service.ts
+/// `createWorkItem`): Postgres takes the row lock at that UPDATE and holds it
+/// for the rest of the transaction, so a concurrent create blocks until the
+/// first commits and never observes/reuses the same number (WARP-885 —
+/// documents the existing enforcement; no schema change needed for this one).
 model PmProject {
   id          String      @id @default(uuid())
   workspaceId String
@@ -3162,6 +3167,11 @@ model PmProject {
   leadId      String?
   seqCounter  Int         @default(0)
   sortOrder   Int         @default(0)
+  /// Canonical "is archived" signal (WARP-884) — explicit column, not
+  /// derived from `archivedAt IS NOT NULL`. `archivedAt` remains the audit
+  /// timestamp of when it was archived (null when un-archived, mirroring the
+  /// prior derivation's semantics).
+  isArchived  Boolean     @default(false)
   archivedAt  DateTime?
   createdById String?
   createdAt   DateTime    @default(now())
@@ -3246,6 +3256,19 @@ enum PmPriority {
 /// between two cards without renumbering the column. Sub-issues via the
 /// self-relation; `state`/`cycle`/`parent` are SetNull so deleting one of those
 /// never cascades away the work itself.
+///
+/// `parentId ON DELETE SET NULL` (WARP-885): when a parent is deleted,
+/// pm.service.ts `deleteWorkItem` explicitly re-parents (`parentId = null`)
+/// and emits one `parent_removed` PmActivity row per orphaned child BEFORE
+/// the delete, in the same transaction — so the DB-level SET NULL is a
+/// defense-in-depth backstop, never the only record of the promotion.
+///
+/// `stateId ON DELETE SET NULL` (WARP-885): `deleteState` refuses to delete
+/// the last state or the project's sole default (STATE_IS_LAST /
+/// STATE_IS_DEFAULT), and — for any other state — reassigns its work items to
+/// the project's default state (with a completion-signal re-sync) before the
+/// delete, so a deleted state never strands items in an unbucketed
+/// NULL-state limbo.
 model PmWorkItem {
   id              String       @id @default(uuid())
   projectId       String
@@ -3265,7 +3288,14 @@ model PmWorkItem {
   startDate       DateTime?
   dueDate         DateTime?
   sortOrder       Float        @default(0)
+  /// Canonical "is done" signal (WARP-884) — explicit column, not derived
+  /// from `completedAt IS NOT NULL`. Kept in sync with the state's group by
+  /// every write path that can change it: createWorkItem, updateWorkItem,
+  /// updateState's group-change cascade, and deleteState's reassignment.
+  isCompleted     Boolean      @default(false)
   completedAt     DateTime?
+  /// Canonical "is archived" signal (WARP-884) — mirrors PmProject.isArchived.
+  isArchived      Boolean      @default(false)
   archivedAt      DateTime?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @default(now()) @updatedAt
@@ -3330,6 +3360,13 @@ enum PmCycleStatus {
   completed
 }
 
+/// INVARIANT: at most ONE active cycle per project. Enforced by a partial
+/// unique index — `UNIQUE ("projectId") WHERE "status" = 'active'` — in raw
+/// migration SQL (Prisma cannot express a WHERE-filtered unique index),
+/// mirroring `PmState_projectId_isDefault_key`. See the
+/// `PmCycle_projectId_active_key` index in the
+/// warp_884_885_pm_schema_hardening migration (WARP-885). No cycle write
+/// path exists yet (P2/P3) — this is DB-level hardening ahead of it.
 model PmCycle {
   id          String        @id @default(uuid())
   projectId   String
@@ -3422,6 +3459,11 @@ model PmWorkItemPropertyValue {
   propertyId String
   property   PmCustomProperty @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   value      Json
+  /// WARP-885: was the only PM model missing this — first-set time was lost
+  /// on overwrite (only `updatedAt` existed). Backfilled from `updatedAt` at
+  /// migration time since that's the best available approximation for rows
+  /// that predate this column.
+  createdAt  DateTime         @default(now())
   updatedAt  DateTime         @default(now()) @updatedAt
 
   @@unique([workItemId, propertyId])
@@ -3462,6 +3504,15 @@ enum PmActivityVerb {
   restored
   cycle_added
   cycle_removed
+  /// WARP-885: emitted on the orphaned child when a deleted work item takes
+  /// its sub-issues' parentId to null (the app-level companion to the DB's
+  /// `parentId ON DELETE SET NULL`) — see deleteWorkItem.
+  parent_removed
+  /// WARP-885: forward-declared for the PmModuleWorkItem write path (not yet
+  /// shipped — same precedent as the unused cycle_added/cycle_removed above)
+  /// so module assignments are audited from day one once that path lands.
+  module_added
+  module_removed
 }
 
 /// Append-only activity/history feed for a work item. `actorId` null = system /
