@@ -26,7 +26,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
-import type { MatterGrouped } from "@/lib/types";
+import type { MatterDiscoveredDevice, MatterGrouped } from "@/lib/types";
 
 const emptyGrouped: MatterGrouped = {
   lights: [],
@@ -44,10 +44,12 @@ const fetchMatterCapabilitiesMock = vi.fn(async () => ({
   bleCommissioning: true,
 }));
 const commissionMatterDeviceMock = vi.fn();
-const discoverMatterDevicesMock = vi.fn(async () => ({
-  devices: [],
-  count: 0,
-}));
+const discoverMatterDevicesMock = vi.fn(
+  async (): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> => ({
+    devices: [],
+    count: 0,
+  }),
+);
 
 vi.mock("@/lib/api", () => ({
   fetchMatterDevices: () => fetchMatterDevicesMock(),
@@ -235,12 +237,14 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     discoverMatterDevicesMock.mockImplementation(() => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      return new Promise<{ devices: never[]; count: number }>((resolve) => {
-        pending.push(() => {
-          inFlight -= 1;
-          resolve({ devices: [], count: 0 });
-        });
-      });
+      return new Promise<{ devices: MatterDiscoveredDevice[]; count: number }>(
+        (resolve) => {
+          pending.push(() => {
+            inFlight -= 1;
+            resolve({ devices: [], count: 0 });
+          });
+        },
+      );
     });
 
     render(<DiscoveryStep onContinue={() => {}} />);

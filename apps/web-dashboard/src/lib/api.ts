@@ -2848,7 +2848,18 @@ export async function confirmMatterCommand(
 
 export async function discoverMatterDevices(): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
   const res = await authFetch(`${BASE}/api/matter/discover`);
-  if (!res.ok) throw new Error(`Failed to discover devices: ${res.status}`);
+  if (!res.ok) {
+    // WARP-1281: carry the HTTP status (same pattern as
+    // commissionMatterDevice / WARP-851) so the setup wizard can tell
+    // "Matter controller not started" (503) apart from a transient
+    // transport failure and surface an honest service-down state
+    // instead of fake-scanning.
+    const err = new Error(
+      `Failed to discover devices: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 

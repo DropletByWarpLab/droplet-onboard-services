@@ -96,6 +96,12 @@ vi.mock("@/lib/api", () => ({
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
+  // WARP-1281: the discovery step now also runs the commissionable-device
+  // browse while scanning. Stub it healthy-and-empty — with the module
+  // mocked, a missing export would make every browse throw, which (by
+  // design) trips the service-unavailable state and hides the scanning
+  // caption + downshift hint these polling-bounds tests assert on.
+  discoverMatterDevices: vi.fn(async () => ({ devices: [], count: 0 })),
 }));
 
 import SetupPage from "@/app/setup/page";
