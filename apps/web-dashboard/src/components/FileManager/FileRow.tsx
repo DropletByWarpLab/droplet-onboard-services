@@ -90,7 +90,8 @@ export function FileRow({
 }: FileRowProps) {
   const isFavorited = favoritedPaths?.has(file.path) ?? false;
   const Icon = getFileIcon(file);
-  const iconColor = file.isDirectory ? "text-system-blue" : "text-label-secondary";
+  // Folders take the brand indigo (design .ri.brand); other files stay muted.
+  const iconColor = file.isDirectory ? "var(--brand)" : "var(--text-muted)";
   const [renameValue, setRenameValue] = useState(file.name);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -211,16 +212,18 @@ export function FileRow({
         e.preventDefault();
         onContextMenu(e.clientX, e.clientY);
       }}
-      className={`dp-row group transition-colors duration-200 ease-smooth cursor-pointer
-        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-        ${isSelected ? "bg-accent-subtle" : "hover:bg-surface-secondary/60"}`}
+      style={isSelected ? { backgroundColor: "var(--brand-subtle)" } : undefined}
+      className={`flex items-center justify-between px-4 py-3 min-h-[44px] group transition-colors duration-200 ease-smooth cursor-pointer
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--brand)]
+        ${isSelected ? "" : "hover:bg-[var(--hover)]"}`}
     >
       {/* Selection indicator */}
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <div className="relative flex-shrink-0">
           <Icon
             size={18}
-            className={`${iconColor} transition-opacity duration-150 ${
+            style={{ color: iconColor }}
+            className={`transition-opacity duration-150 ${
               isSelected ? "opacity-0" : "group-hover:opacity-0"
             }`}
           />
@@ -230,11 +233,12 @@ export function FileRow({
             }`}
           >
             <div
-              className={`w-[18px] h-[18px] rounded-full flex items-center justify-center border ${
+              className="w-[18px] h-[18px] rounded-full flex items-center justify-center border"
+              style={
                 isSelected
-                  ? "bg-accent border-accent text-white"
-                  : "border-label-tertiary"
-              }`}
+                  ? { background: "var(--brand)", borderColor: "var(--brand)", color: "#fff" }
+                  : { borderColor: "var(--text-faint)" }
+              }
             >
               {isSelected && <Check size={12} />}
             </div>
@@ -253,20 +257,37 @@ export function FileRow({
               if (e.key === "Escape") onCancelRename();
             }}
             onBlur={commitRename}
-            className="dp-input type-callout flex-1 !py-1 !px-2 !min-h-0"
+            className="flex-1 py-1 px-2 outline-none focus:border-[var(--brand)]"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+              fontSize: "13.5px",
+              fontWeight: 500,
+            }}
           />
         ) : (
-          <span className="type-callout text-label-primary truncate">
+          <span
+            className="truncate"
+            style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
+          >
             {file.name}
           </span>
         )}
       </div>
 
-      <span className="type-caption-1 text-label-tertiary w-20 text-right hidden sm:block flex-shrink-0">
+      <span
+        className="w-20 text-right hidden sm:block flex-shrink-0"
+        style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+      >
         {file.isDirectory ? "" : formatSize(file.size)}
       </span>
 
-      <span className="type-caption-1 text-label-tertiary w-32 text-right hidden md:block flex-shrink-0">
+      <span
+        className="w-32 text-right hidden md:block flex-shrink-0"
+        style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+      >
         {formatDate(file.modifiedAt)}
       </span>
 
@@ -301,7 +322,7 @@ export function FileRow({
               e.stopPropagation();
               onDownload();
             }}
-            className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
             aria-label={`Download ${file.name}`}
           >
             <Download size={14} />
@@ -312,7 +333,7 @@ export function FileRow({
             e.stopPropagation();
             onDelete();
           }}
-          className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+          className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
           aria-label={`Delete ${file.name}`}
         >
           <Trash2 size={14} />

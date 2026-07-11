@@ -1,9 +1,11 @@
 """Tests for FastAPI endpoint handlers."""
 
-import pytest
-from unittest.mock import patch, AsyncMock
+import asyncio
 
-from schemas import ModelInfo
+import pytest
+from unittest.mock import patch, AsyncMock, MagicMock
+
+from schemas import ChatRequest, ModelInfo
 
 
 class TestHealthEndpoint:
@@ -43,6 +45,91 @@ class TestChatEndpoint:
         )
         # 502 if no Ollama, 503 if globals not initialized in test, but NOT 422
         assert resp.status_code in (200, 502, 503)
+
+
+class TestChatSlotReleaseOnCancel:
+    """GWV-003 / WARP-1178: /ai/chat cancelled while parked on the scheduler
+    grant (`await future`) must release the slot iff the grant already landed —
+    a leaked slot at max_concurrent=1 deadlocks every subsequent /ai/chat until
+    restart. The fix shipped in #953 without a regression test; these pin it
+    (the gRPC handlers get the same coverage in test_grpc.py)."""
+
+    @staticmethod
+    def _pending_scheduler():
+        """Mock scheduler whose enqueue returns a PENDING future the test
+        controls, so the grant / cancel ordering can be chosen exactly."""
+        scheduler = MagicMock()
+        futures: list[asyncio.Future] = []
+
+        async def _enqueue(*args, **kwargs):
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            futures.append(fut)
+            return fut
+
+        scheduler.enqueue = AsyncMock(side_effect=_enqueue)
+        scheduler.release = AsyncMock()
+        return scheduler, futures
+
+    @staticmethod
+    def _start_chat(monkeypatch, scheduler) -> asyncio.Task:
+        """Call the endpoint handler directly with mocked globals."""
+        import main
+
+        monkeypatch.setattr(main, "inference_scheduler", scheduler)
+        monkeypatch.setattr(main, "provider_router", MagicMock())
+
+        http_request = MagicMock()
+        http_request.state.principal = None
+        http_request.headers = {}
+        request = ChatRequest(
+            model="llama3:8b",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        return asyncio.create_task(
+            main.chat(request, http_request, x_request_priority=0)
+        )
+
+    @staticmethod
+    async def _park_on_grant(futures) -> None:
+        for _ in range(20):
+            if futures:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("endpoint never reached the scheduler")
+
+    async def test_cancelled_after_grant_releases_slot(self, monkeypatch):
+        """Client disconnect landing between the grant and the task resuming:
+        the slot was already counted, so the handler must release it."""
+        scheduler, futures = self._pending_scheduler()
+        task = self._start_chat(monkeypatch, scheduler)
+        await self._park_on_grant(futures)
+
+        # Grant the slot and cancel the handler in the same loop step: the
+        # task is still parked on `await future`, so the CancelledError is
+        # delivered before it can resume with the granted slot.
+        futures[0].set_result(None)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        scheduler.release.assert_awaited_once()
+
+    async def test_cancelled_before_grant_does_not_release(self, monkeypatch):
+        """Cancellation while still queued (future pending) cancels the future
+        itself — no slot was counted, so nothing may be released (a release
+        here would double-free once the real active request completes)."""
+        scheduler, futures = self._pending_scheduler()
+        task = self._start_chat(monkeypatch, scheduler)
+        await self._park_on_grant(futures)
+
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert futures[0].cancelled()
+        scheduler.release.assert_not_awaited()
 
 
 class TestKeysEndpoints:

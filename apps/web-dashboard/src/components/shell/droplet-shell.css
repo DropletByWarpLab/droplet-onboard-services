@@ -24,6 +24,17 @@
   background: var(--bg);
 }
 
+/* The design paints `--bg` on <body> itself (see the handoff page loaders:
+   `body { background: var(--bg) }`), so the indigo background always fills
+   the viewport. In the port the shell only grows with its content —
+   `min-height: 100%` can't resolve inside AuthGate's `<main>` (min-h-dvh is
+   not a definite height) — so on short pages the old `bg-surface-secondary`
+   body color showed below the shell. Retheme the body whenever a shell page
+   is mounted. Values are `--bg` from `indigo-tokens.css`, kept in lockstep
+   by hand (tokens are scoped to `.droplet-shell`, unreadable from body). */
+body:has(.droplet-shell) { background: #f5f6fb; }
+.dark body:has(.droplet-shell) { background: #0f1117; }
+
 /* ── Slim page top bar (sticky) ────────────────────────── */
 .droplet-shell .page-top {
   position: sticky;
@@ -115,6 +126,13 @@
 
 .droplet-shell .card { background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: 16px; padding: 18px; position: relative;
   transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease), transform 200ms var(--ease); }
+/* `.droplet-shell .card` (0,2,0) out-specifies Tailwind's position utilities
+   (0,1,0), so `card fixed` (ContextMenu), `card absolute` (SearchBar results)
+   and `card sticky` (files detail column, cameras save bar) silently rendered
+   `position: relative`. Restore utility semantics at (0,3,0). */
+.droplet-shell .card.fixed { position: fixed; }
+.droplet-shell .card.absolute { position: absolute; }
+.droplet-shell .card.sticky { position: sticky; }
 .droplet-shell .card.hover { cursor: pointer; }
 .droplet-shell .card.hover:hover { border-color: color-mix(in srgb, var(--brand) 36%, var(--card-bd)); transform: translateY(-2px); box-shadow: var(--lift); }
 .droplet-shell .card-h { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }

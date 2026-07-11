@@ -82,8 +82,22 @@ case "${1:-}" in
     esac
     exit 0
     ;;
+  ps)
+    # WARP-1044 helper listing: scripted newline-joined container ids.
+    printf '%s\n' "${DOCKER_STUB_PS_ALL_IDS:-}"
+    exit 0
+    ;;
+  logs)
+    # WARP-1044 log capture: scripted helper log content + exit code.
+    printf '%s\n' "${DOCKER_STUB_LOGS:-stub helper logs}"
+    exit "${DOCKER_STUB_LOGS_EXIT:-0}"
+    ;;
   inspect)
     case "$*" in
+      *finishedAt*)
+        # WARP-1044 helper listing: scripted JSON lines (one per container).
+        printf '%s\n' "${DOCKER_STUB_HELPER_JSON:-}"
+        ;;
       *Mounts*)
         # Mounts listing: scripted "name|source|destination" lines.
         printf '%s\n' "${DOCKER_STUB_MOUNTS:-}"
@@ -140,6 +154,10 @@ run_apply() {
   DOCKER_STUB_FAIL_RECREATE="${DOCKER_STUB_FAIL_RECREATE:-}" \
   DOCKER_STUB_REPO_DIGESTS="${DOCKER_STUB_REPO_DIGESTS:-}" \
   DOCKER_STUB_IMAGE_ID="${DOCKER_STUB_IMAGE_ID:-}" \
+  DOCKER_STUB_PS_ALL_IDS="${DOCKER_STUB_PS_ALL_IDS:-}" \
+  DOCKER_STUB_LOGS="${DOCKER_STUB_LOGS:-}" \
+  DOCKER_STUB_LOGS_EXIT="${DOCKER_STUB_LOGS_EXIT:-0}" \
+  DOCKER_STUB_HELPER_JSON="${DOCKER_STUB_HELPER_JSON:-}" \
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   bash "$APPLY_SH" "$@"
@@ -638,6 +656,123 @@ if printf '%s\n' "$DRY_PULL_OUT" | grep -q "^DRY-RUN: cosign verify" \
   pass "dry-run prints verify + pull without executing either"
 else
   fail "dry-run output missing verify/pull commands (got: $DRY_PULL_OUT)"
+fi
+
+# =============================================================================
+echo ""
+echo "--- Phase 6: self-swap helper GC surface (WARP-1044) ---"
+
+# 6a. list-self-swap-helpers: filters on the helper name prefix, -a (exited
+#     containers are the whole point), and prints the inspect JSON verbatim.
+stub_reset
+HELPER_JSON_1='{"name":"/droplet-ota-self-swap-du-test-1","status":"exited","finishedAt":"2026-06-01T03:00:00Z"}'
+HELPER_JSON_2='{"name":"/droplet-ota-self-swap-du-test-2","status":"running","finishedAt":"0001-01-01T00:00:00Z"}'
+LIST_OUT="$(DOCKER_STUB_PS_ALL_IDS=$'cid1\ncid2' \
+  DOCKER_STUB_HELPER_JSON="$HELPER_JSON_1
+$HELPER_JSON_2" \
+  run_apply list-self-swap-helpers 2>/dev/null)"
+if [ "$LIST_OUT" = "$HELPER_JSON_1
+$HELPER_JSON_2" ]; then
+  pass "list-self-swap-helpers prints one JSON object per container"
+else
+  fail "list-self-swap-helpers output wrong (got: $LIST_OUT)"
+fi
+if grep -q "^ps -a --filter name=droplet-ota-self-swap-" "$STUB_DIR/calls.log"; then
+  pass "listing rides docker ps -a filtered on the helper name prefix"
+else
+  fail "listing missing the ps -a name filter (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+
+# 6b. No helpers on the box → empty output, exit 0, no inspect round-trip.
+stub_reset
+LIST_OUT="$(DOCKER_STUB_PS_ALL_IDS="" run_apply list-self-swap-helpers 2>/dev/null)"; LIST_RC=$?
+if [ "$LIST_RC" -eq 0 ] && [ -z "$LIST_OUT" ] && ! grep -q "^inspect" "$STUB_DIR/calls.log" 2>/dev/null; then
+  pass "list-self-swap-helpers is a clean no-op when no helpers exist"
+else
+  fail "empty listing misbehaved (rc=$LIST_RC out=$LIST_OUT)"
+fi
+
+# 6c. capture-self-swap-logs persists BOTH streams of the helper's docker
+#     logs into the update's state dir (the container is the only log store).
+stub_reset
+rm -f "$UDIR/self-swap-helper.log"
+if DOCKER_STUB_LOGS="[ota-self-swap] rollback: recreating routing" \
+    run_apply capture-self-swap-logs --update-id "$UPDATE_ID" >/dev/null 2>&1; then
+  pass "capture-self-swap-logs exits 0"
+else
+  fail "capture-self-swap-logs exited non-zero"
+fi
+if grep -qF "[ota-self-swap] rollback: recreating routing" "$UDIR/self-swap-helper.log" 2>/dev/null; then
+  pass "capture-self-swap-logs writes <updatesDir>/<id>/self-swap-helper.log"
+else
+  fail "self-swap-helper.log missing or wrong (got: $(cat "$UDIR/self-swap-helper.log" 2>/dev/null))"
+fi
+if grep -q "^logs droplet-ota-self-swap-$UPDATE_ID\$" "$STUB_DIR/calls.log"; then
+  pass "capture reads docker logs of the id-derived helper name"
+else
+  fail "capture did not docker-logs the helper (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+rm -f "$UDIR/self-swap-helper.log"
+
+# A failed docker logs must leave NOTHING behind: an existing
+# self-swap-helper.log tells the GC caller the capture is DONE, so a
+# poisoned partial file would skip the real capture forever.
+stub_reset
+if DOCKER_STUB_LOGS_EXIT=1 run_apply capture-self-swap-logs --update-id "$UPDATE_ID" >/dev/null 2>&1; then
+  fail "capture-self-swap-logs exited 0 despite docker logs failing"
+else
+  pass "capture-self-swap-logs propagates a docker logs failure"
+fi
+if [ -f "$UDIR/self-swap-helper.log" ] || [ -f "$UDIR/self-swap-helper.log.tmp" ]; then
+  fail "failed capture left a (partial) log file behind"
+  rm -f "$UDIR/self-swap-helper.log" "$UDIR/self-swap-helper.log.tmp"
+else
+  pass "failed capture leaves no partial log file behind"
+fi
+
+# 6d. rm-self-swap-helper removes by id-derived name and NEVER forces —
+#     the daemon's refusal to rm a running container is the last-line guard.
+stub_reset
+if run_apply rm-self-swap-helper --update-id "$UPDATE_ID" >/dev/null 2>&1; then
+  pass "rm-self-swap-helper exits 0"
+else
+  fail "rm-self-swap-helper exited non-zero"
+fi
+if grep -q "^rm droplet-ota-self-swap-$UPDATE_ID\$" "$STUB_DIR/calls.log"; then
+  pass "removal is a plain docker rm of the id-derived helper name"
+else
+  fail "removal invocation wrong (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+if grep -q "^rm -f" "$STUB_DIR/calls.log"; then
+  fail "GC removal used -f — a running helper could be killed mid-rollback"
+else
+  pass "GC removal never uses -f (a running helper survives the race)"
+fi
+
+# 6e. A hostile update id dies in validation before any docker call.
+stub_reset
+if run_apply rm-self-swap-helper --update-id 'du;evil' >/dev/null 2>&1; then
+  fail "rm-self-swap-helper accepted an invalid update id"
+else
+  pass "rm-self-swap-helper rejects an invalid update id"
+fi
+if [ -s "$STUB_DIR/calls.log" ]; then
+  fail "an invalid update id still reached docker"
+else
+  pass "no docker call for an invalid update id"
+fi
+
+# 6f. Dry-run stays side-effect-free for the whole GC surface.
+DRY_GC_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  bash "$APPLY_SH" capture-self-swap-logs --update-id "$UPDATE_ID" 2>/dev/null; \
+  DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  bash "$APPLY_SH" rm-self-swap-helper --update-id "$UPDATE_ID" 2>/dev/null)"
+if printf '%s\n' "$DRY_GC_OUT" | grep -q "^DRY-RUN: docker logs droplet-ota-self-swap-$UPDATE_ID" \
+   && printf '%s\n' "$DRY_GC_OUT" | grep -q "^DRY-RUN: docker rm droplet-ota-self-swap-$UPDATE_ID" \
+   && [ ! -f "$UDIR/self-swap-helper.log" ]; then
+  pass "dry-run prints the GC commands without touching anything"
+else
+  fail "dry-run GC output/side-effects wrong (got: $DRY_GC_OUT)"
 fi
 
 # =============================================================================

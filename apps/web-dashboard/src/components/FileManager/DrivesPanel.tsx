@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   HardDrive,
@@ -29,6 +29,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
+import { Meter, Badge, type BadgeKind } from "@/components/shell/primitives";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
 import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
@@ -97,24 +98,80 @@ function usagePct(d: DriveInfo): number {
   return Math.max(0, Math.min(100, (d.used_bytes / d.size_bytes) * 100));
 }
 
-function barColor(p: number): string {
-  if (p > 90) return "var(--color-system-red)";
-  if (p > 75) return "var(--color-system-orange)";
-  return "var(--color-accent)";
+// Design Storage meter: amber past 80%, red past 95% (matches VolumesPanel).
+function meterKind(p: number): "" | "warn" | "danger" {
+  if (p > 95) return "danger";
+  if (p > 80) return "warn";
+  return "";
 }
 
-type Status = { label: string; cls: string };
+type Status = { label: string; kind: BadgeKind };
 function statusOf(d: DriveInfo): Status {
-  if (!d.mounted) return { label: "Offline", cls: "bg-system-red/10 text-system-red" };
-  if (d.readonly) return { label: "Read-only", cls: "bg-surface-secondary text-label-secondary" };
-  if (usagePct(d) > 90) return { label: "Nearly full", cls: "bg-system-orange/10 text-system-orange" };
-  return { label: "Mounted", cls: "bg-system-green/10 text-system-green" };
+  if (!d.mounted) return { label: "Offline", kind: "danger" };
+  if (d.readonly) return { label: "Read-only", kind: "muted" };
+  if (usagePct(d) > 90) return { label: "Nearly full", kind: "warn" };
+  return { label: "Mounted", kind: "ok" };
+}
+
+// Map a pool's health to a design `.badge` variant. The plain-language label
+// still comes from `poolStatusBadge()`; only the colour idiom moves to the
+// indigo Badge (the shared pool-display helper's Tailwind `cls` is legacy).
+function poolBadgeKind(status: PoolInfo["status"]): BadgeKind {
+  switch (status) {
+    case "active":
+      return "ok";
+    case "resyncing":
+      return "info";
+    case "degraded":
+      return "warn";
+    case "failed":
+      return "danger";
+    default:
+      return "muted";
+  }
 }
 
 function BusIcon({ bus, className }: { bus?: string; className?: string }) {
   if (bus === "usb") return <Usb className={className} />;
   if (bus === "mmc") return <MemoryStick className={className} />;
   return <HardDrive className={className} />; // nvme + generic disk
+}
+
+// Small bordered hardware token (bus / filesystem / temperature). Mirrors the
+// indigo input chrome: 1px --border, --radius-input, muted mono-ish label.
+function HwTag({ children, upper = true }: { children: ReactNode; upper?: boolean }) {
+  return (
+    <span
+      className={`flex-none inline-flex items-center ${upper ? "uppercase tracking-wide" : ""} tabular-nums`}
+      style={{
+        fontSize: "10.5px",
+        fontWeight: 600,
+        padding: "1px 6px",
+        borderRadius: "var(--radius-input)",
+        border: "1px solid var(--card-bd)",
+        color: "var(--text-muted)",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// Icon tile for the leading square on drive / disk rows — the design's
+// `.lrow .ri` treatment (neutral inner surface, muted glyph).
+function IconTile({ children }: { children: ReactNode }) {
+  return (
+    <span
+      className="flex-none h-10 w-10 flex items-center justify-center"
+      style={{
+        borderRadius: "10px",
+        background: "var(--card-inner)",
+        color: "var(--text-muted)",
+      }}
+    >
+      {children}
+    </span>
+  );
 }
 
 function busLabel(bus?: string): string {
@@ -361,10 +418,17 @@ export function DrivesPanel() {
   if (isLoading) {
     return (
       <div className="flex flex-col gap-4">
-        <div className="dp-card h-28 animate-pulse bg-surface-secondary" />
+        <div
+          className="card h-28 animate-pulse"
+          style={{ background: "var(--inset)" }}
+        />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {Array.from({ length: 2 }).map((_, i) => (
-            <div key={i} className="dp-card h-44 animate-pulse bg-surface-secondary" />
+            <div
+              key={i}
+              className="card h-44 animate-pulse"
+              style={{ background: "var(--inset)" }}
+            />
           ))}
         </div>
       </div>
@@ -377,20 +441,25 @@ export function DrivesPanel() {
   // (the live md127 case) or present-but-unmounted disks to show below.
   if (bridgeError) {
     return (
-      <div className="dp-card p-8 text-center">
-        <HardDrive size={28} className="mx-auto text-label-tertiary mb-3" />
-        <h2 className="type-headline text-label-primary mb-1">Storage is unavailable</h2>
-        <p className="type-subheadline text-label-secondary mb-4">
-          The storage service isn&rsquo;t reachable right now.
-        </p>
-        <button
-          onClick={onRescan}
-          disabled={rescanning}
-          className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
-        >
-          <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
-          <span className="type-subheadline">Rescan</span>
-        </button>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <HardDrive size={24} />
+          </span>
+          <p className="eh">Storage is unavailable</p>
+          <p style={{ fontSize: "13px" }}>
+            The storage service isn&rsquo;t reachable right now.
+          </p>
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            className="btn"
+            style={{ marginTop: "6px" }}
+          >
+            <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
+            Rescan
+          </button>
+        </div>
       </div>
     );
   }
@@ -405,19 +474,22 @@ export function DrivesPanel() {
       {/* Header: section title + Rescan. */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h2 className="type-title-3 text-label-primary">Storage</h2>
-          <p className="type-caption-1 text-label-tertiary">
-            Mount base <span className="font-mono">/mnt/droplet/</span>
+          <h2 style={{ fontSize: "17px", fontWeight: 600, color: "var(--text)" }}>
+            Storage
+          </h2>
+          <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
+            Mount base{" "}
+            <span style={{ fontFamily: "var(--font-mono)" }}>/mnt/droplet/</span>
           </p>
         </div>
         <button
           onClick={onRescan}
           disabled={rescanning}
-          className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
+          className="btn ghost sm"
           aria-label="Rescan drives"
         >
           <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
-          <span className="type-subheadline">Rescan</span>
+          Rescan
         </button>
       </div>
 
@@ -425,13 +497,28 @@ export function DrivesPanel() {
           exists we say so honestly rather than fabricating a pooled sum. */}
       <section aria-label="Storage pools">
         {pools.length === 0 ? (
-          <div className="dp-card p-5 flex items-start gap-3">
-            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-tertiary flex items-center justify-center">
+          <div className="card flex items-start gap-3">
+            <span
+              className="flex-none h-10 w-10 flex items-center justify-center"
+              style={{
+                borderRadius: "10px",
+                background: "var(--card-inner)",
+                color: "var(--text-muted)",
+              }}
+            >
               <Layers className="h-5 w-5" />
             </span>
             <div>
-              <p className="type-headline text-label-primary">No storage pool configured</p>
-              <p className="type-subheadline text-label-secondary mt-0.5">
+              <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}>
+                No storage pool configured
+              </p>
+              <p
+                style={{
+                  fontSize: "13px",
+                  color: "var(--text-muted)",
+                  marginTop: "2px",
+                }}
+              >
                 Your drives work on their own. A pool combines drives for more
                 space or redundancy — optional, and you can set one up anytime.
               </p>
@@ -466,17 +553,35 @@ export function DrivesPanel() {
 
       {/* Per-drive cards */}
       <div>
-        <h3 className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-2">
+        <h3
+          className="uppercase tracking-wide mb-2"
+          style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-muted)" }}
+        >
           Drives
         </h3>
         {drives.length === 0 ? (
-          <div className="dp-card p-5 flex items-start gap-3">
-            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-tertiary flex items-center justify-center">
+          <div className="card flex items-start gap-3">
+            <span
+              className="flex-none h-10 w-10 flex items-center justify-center"
+              style={{
+                borderRadius: "10px",
+                background: "var(--card-inner)",
+                color: "var(--text-muted)",
+              }}
+            >
               <HardDrive className="h-5 w-5" />
             </span>
             <div>
-              <p className="type-headline text-label-primary">No drives yet</p>
-              <p className="type-subheadline text-label-secondary mt-0.5">
+              <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}>
+                No drives yet
+              </p>
+              <p
+                style={{
+                  fontSize: "13px",
+                  color: "var(--text-muted)",
+                  marginTop: "2px",
+                }}
+              >
                 Plug in a drive and it mounts automatically.
               </p>
             </div>
@@ -507,7 +612,10 @@ export function DrivesPanel() {
           confirm-token + blast-radius dialog. */}
       {availableDisks.length > 0 && (
         <div>
-          <h3 className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-2">
+          <h3
+            className="uppercase tracking-wide mb-2"
+            style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-muted)" }}
+          >
             Available drives
           </h3>
           <div
@@ -630,12 +738,12 @@ function AvailableDiskCard({
   // break it out of (the bridge names it). Without `md` we can't detach it, so
   // fall back to the read-only "manage from the pool" guidance.
   const reclaimable = disk.state === "pool_member" && !!disk.md;
-  const chip =
+  const chip: { label: string; kind: BadgeKind } =
     disk.state === "pool_member"
-      ? { label: "In a pool", cls: "bg-accent/10 text-accent" }
+      ? { label: "In a pool", kind: "info" }
       : disk.state === "foreign"
-        ? { label: "Has data", cls: "bg-system-orange/10 text-system-orange" }
-        : { label: "Empty", cls: "bg-surface-secondary text-label-secondary" };
+        ? { label: "Has data", kind: "warn" }
+        : { label: "Empty", kind: "muted" };
   const blurb =
     disk.state === "pool_member"
       ? reclaimable
@@ -645,38 +753,49 @@ function AvailableDiskCard({
         ? "Holds files from another system. Erase it to add its space to your Droplet."
         : "Empty and ready to be added to your Droplet.";
   return (
-    <div role="listitem" className="dp-card p-4">
+    <div role="listitem" className="card">
       <div className="flex items-start gap-3">
-        <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+        <IconTile>
           <BusIcon bus={disk.bus} className="h-5 w-5" />
-        </span>
+        </IconTile>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <h4 className="type-headline text-label-primary truncate" title={diskTitle(disk)}>
+            <h4
+              className="truncate"
+              style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+              title={diskTitle(disk)}
+            >
               {diskTitle(disk)}
             </h4>
-            <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-              {busLabel(disk.bus)}
-            </span>
+            <HwTag>{busLabel(disk.bus)}</HwTag>
           </div>
-          <p className="type-caption-1 text-label-tertiary tabular-nums">
+          <p
+            className="tabular-nums"
+            style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}
+          >
             {fmtBytes(disk.size_bytes)} ·{" "}
-            <span className="font-mono">{disk.name}</span>
+            <span style={{ fontFamily: "var(--font-mono)" }}>{disk.name}</span>
           </p>
         </div>
-        <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${chip.cls}`}>
-          {chip.label}
-        </span>
+        <Badge kind={chip.kind}>{chip.label}</Badge>
       </div>
 
-      <p className="mt-3 type-caption-1 text-label-secondary">{blurb}</p>
+      <p
+        className="mt-3"
+        style={{ fontSize: "12px", color: "var(--text-muted)" }}
+      >
+        {blurb}
+      </p>
 
       {isAdmin && (adoptable || reclaimable) && (
-        <div className="mt-4 pt-3 border-t border-separator flex justify-end">
+        <div
+          className="mt-4 pt-3 flex justify-end"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
           <button
             onClick={reclaimable ? onReclaim : onAdopt}
             disabled={busy}
-            className="flex-none whitespace-nowrap rounded-md bg-system-red hover:bg-system-red/90 text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+            className="btn danger sm flex-none whitespace-nowrap"
           >
             {busy ? "Working…" : reclaimable ? "Reclaim" : "Erase & adopt"}
           </button>
@@ -754,18 +873,21 @@ function DriveCard({
       onRenamed(); // refetch so the persisted name replaces the optimistic one
     } catch (err) {
       setOptimisticName(previous); // roll back
-      toast(translateError(err, "files"), "error");
+      // WARP-1141: storage domain, not files — a failed rename is a WRITE,
+      // and the files fallback ("couldn't load those files") read as a
+      // transient load blip, hiding the failure from the user.
+      toast(translateError(err, "storage"), "error");
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div role="listitem" className="dp-card p-4">
+    <div role="listitem" className="card">
       <div className="flex items-start gap-3">
-        <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+        <IconTile>
           <BusIcon bus={d.bus} className="h-5 w-5" />
-        </span>
+        </IconTile>
         <div className="min-w-0 flex-1">
           {editing ? (
             <div className="flex items-center gap-1.5">
@@ -779,21 +901,38 @@ function DriveCard({
                   if (e.key === "Enter") save();
                   if (e.key === "Escape") cancelEdit();
                 }}
-                className="dp-input !py-1.5 !px-2.5 type-subheadline min-w-0 flex-1"
+                className="min-w-0 flex-1 outline-none"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                  fontSize: "13.5px",
+                  fontWeight: 500,
+                  padding: "6px 10px",
+                }}
                 placeholder="Drive name"
               />
               <button
                 onClick={save}
                 disabled={!valid || saving}
                 aria-label="Save"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
+                style={{
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--brand)",
+                }}
               >
                 <Check className="h-4 w-4" />
               </button>
               <button
                 onClick={cancelEdit}
                 aria-label="Cancel"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
+                style={{
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text-muted)",
+                }}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -802,26 +941,38 @@ function DriveCard({
             <div className="flex items-center gap-2">
               <Link
                 href={driveContentsHref(d)}
-                className="min-w-0 inline-flex items-center gap-1 group rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
+                style={{ borderRadius: "var(--radius-input)" }}
                 aria-label={`Open ${name}`}
               >
                 <h3
-                  className="type-headline text-label-primary truncate group-hover:text-accent transition-colors duration-150"
+                  className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                  style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
                   title={name}
                 >
                   {name}
                 </h3>
-                <FolderOpen className="flex-none h-3.5 w-3.5 text-label-tertiary group-hover:text-accent transition-colors duration-150" />
+                <FolderOpen
+                  className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                  style={{ color: "var(--text-muted)" }}
+                />
               </Link>
-              <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-                {busLabel(d.bus)}
-              </span>
-              {isAdmin && (
+              <HwTag>{busLabel(d.bus)}</HwTag>
+              {/* WARP-1141: the label row is keyed by the drive's FS UUID —
+                  the bridge can report a drive without one (automount state
+                  gap, no /dev/disk/by-uuid symlink), and renaming such a
+                  drive can never persist. Don't offer a control that is
+                  guaranteed to fail. */}
+              {isAdmin && !!d.uuid && (
                 <button
                   ref={renameBtnRef}
                   onClick={beginEdit}
                   aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
+                  style={{
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text-muted)",
+                  }}
                 >
                   <Pencil className="h-4 w-4" />
                 </button>
@@ -829,66 +980,53 @@ function DriveCard({
             </div>
           )}
         </div>
-        {!editing && (
-          <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${st.cls}`}>
-            {st.label}
-          </span>
-        )}
+        {!editing && <Badge kind={st.kind}>{st.label}</Badge>}
       </div>
 
       <div className="mt-4">
-        <div className="flex items-baseline justify-between type-caption-1 tabular-nums mb-1.5">
-          <span className="text-label-secondary">
-            <span className="text-label-primary">{fmtBytes(d.used_bytes)}</span> of{" "}
+        <div
+          className="flex items-baseline justify-between tabular-nums mb-1.5"
+          style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}
+        >
+          <span>
+            <span style={{ color: "var(--text)" }}>{fmtBytes(d.used_bytes)}</span> of{" "}
             {fmtBytes(d.size_bytes)}
           </span>
-          <span className="text-label-tertiary">{fmtBytes(d.free_bytes)} free</span>
+          <span>{fmtBytes(d.free_bytes)} free</span>
         </div>
-        <div className="h-1.5 rounded-full overflow-hidden bg-surface-secondary">
-          <div
-            className="h-full rounded-full transition-all duration-700"
-            style={{ width: `${Math.max(2, p)}%`, background: barColor(p) }}
-          />
-        </div>
+        <Meter pct={p} kind={meterKind(p)} />
       </div>
 
       {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
           never surfaced (home-user persona, ADR-002); the bus label above is
           the only hardware identifier we show. */}
       {(d.fs || typeof d.temp_c === "number" || d.smart) && (
-        <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
-          {d.fs && (
-            <span className="uppercase px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-              {d.fs}
-            </span>
-          )}
-          {typeof d.temp_c === "number" && (
-            <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary tabular-nums">
-              {d.temp_c}°C
-            </span>
-          )}
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          {d.fs && <HwTag>{d.fs}</HwTag>}
+          {typeof d.temp_c === "number" && <HwTag upper={false}>{d.temp_c}°C</HwTag>}
           {d.smart && (
-            <span
-              className={`px-1.5 py-0.5 rounded ${
-                d.smart === "PASSED"
-                  ? "bg-system-green/10 text-system-green"
-                  : "bg-system-red/10 text-system-red"
-              }`}
-            >
+            <Badge kind={d.smart === "PASSED" ? "ok" : "danger"}>
               SMART {d.smart}
-            </span>
+            </Badge>
           )}
         </div>
       )}
 
-      {d.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{d.notes}</p>}
+      {d.notes && (
+        <p className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          {d.notes}
+        </p>
+      )}
 
       {d.removable && d.mounted && (
-        <div className="mt-4 pt-3 border-t border-separator flex justify-end">
+        <div
+          className="mt-4 pt-3 flex justify-end"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
           <button
             onClick={onEject}
             disabled={ejecting}
-            className="dp-btn-secondary type-subheadline px-4 rounded-md disabled:opacity-60"
+            className="btn ghost sm disabled:opacity-60"
           >
             {ejecting ? "Ejecting…" : "Eject"}
           </button>
@@ -922,12 +1060,22 @@ function PoolAlarmBanner({
     return (
       <div
         role="alert"
-        className="dp-card p-4 flex items-start gap-3 border border-system-blue/30 bg-system-blue/5"
+        className="card flex items-start gap-3"
+        style={{
+          border: "1px solid color-mix(in srgb, var(--brand) 30%, transparent)",
+          background: "var(--brand-subtle)",
+        }}
       >
-        <Loader2 size={18} className="mt-0.5 flex-none text-system-blue motion-safe:animate-spin" />
+        <Loader2
+          size={18}
+          className="mt-0.5 flex-none motion-safe:animate-spin"
+          style={{ color: "var(--brand)" }}
+        />
         <div>
-          <p className="type-subheadline text-label-primary">Rebuilding {affected}</p>
-          <p className="type-caption-1 text-label-secondary mt-0.5">
+          <p style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--text)" }}>
+            Rebuilding {affected}
+          </p>
+          <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
             A drive is being resynced. Your data stays available — leave the
             Droplet on until the rebuild finishes.
           </p>
@@ -937,24 +1085,22 @@ function PoolAlarmBanner({
   }
 
   const failed = alarm === "failed";
+  const tone = failed ? "#ef4444" : "#d9a35c";
   return (
     <div
       role="alert"
-      className={`dp-card p-4 flex items-start gap-3 border ${
-        failed
-          ? "border-system-red/30 bg-system-red/5"
-          : "border-system-orange/30 bg-system-orange/5"
-      }`}
+      className="card flex items-start gap-3"
+      style={{
+        border: `1px solid color-mix(in srgb, ${tone} 32%, transparent)`,
+        background: `color-mix(in srgb, ${tone} 8%, transparent)`,
+      }}
     >
-      <AlertTriangle
-        size={18}
-        className={`mt-0.5 flex-none ${failed ? "text-system-red" : "text-system-orange"}`}
-      />
+      <AlertTriangle size={18} className="mt-0.5 flex-none" style={{ color: tone }} />
       <div>
-        <p className="type-subheadline text-label-primary">
+        <p style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--text)" }}>
           {failed ? `${affected} has failed` : `${affected} is degraded`}
         </p>
-        <p className="type-caption-1 text-label-secondary mt-0.5">
+        <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
           {failed
             ? "This pool is offline and its data may be at risk. Check the drives and contact support before making changes."
             : "A drive has dropped out of this pool. Your data is still here, but replace the drive soon — another failure could lose it."}
@@ -1033,16 +1179,24 @@ function PoolCard({
       onRenamed?.();
     } catch (err) {
       setOptimisticName(previous); // roll back
-      toast(translateError(err, "files"), "error");
+      // WARP-1141: storage domain — same rationale as the DriveCard rename.
+      toast(translateError(err, "storage"), "error");
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div role="listitem" className="dp-card p-4">
+    <div role="listitem" className="card">
       <div className="flex items-start gap-3">
-        <span className="flex-none h-10 w-10 rounded-[10px] bg-accent/10 text-accent flex items-center justify-center">
+        <span
+          className="flex-none h-10 w-10 flex items-center justify-center"
+          style={{
+            borderRadius: "10px",
+            background: "var(--brand-subtle)",
+            color: "var(--brand)",
+          }}
+        >
           <Layers className="h-5 w-5" />
         </span>
         <div className="min-w-0 flex-1">
@@ -1058,39 +1212,53 @@ function PoolCard({
                   if (e.key === "Enter") save();
                   if (e.key === "Escape") cancelEdit();
                 }}
-                className="dp-input !py-1.5 !px-2.5 type-subheadline min-w-0 flex-1"
+                className="min-w-0 flex-1 outline-none"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                  fontSize: "13.5px",
+                  fontWeight: 500,
+                  padding: "6px 10px",
+                }}
                 placeholder="Pool name"
               />
               <button
                 onClick={save}
                 disabled={!valid || saving}
                 aria-label="Save"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
+                style={{ borderRadius: "var(--radius-input)", color: "var(--brand)" }}
               >
                 <Check className="h-4 w-4" />
               </button>
               <button
                 onClick={cancelEdit}
                 aria-label="Cancel"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
+                style={{ borderRadius: "var(--radius-input)", color: "var(--text-muted)" }}
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
           ) : (
             <div className="flex items-center gap-2 flex-wrap">
-              <h4 className="type-headline text-label-primary truncate" title={name}>
+              <h4
+                className="truncate"
+                style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                title={name}
+              >
                 {name}
               </h4>
-              <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-                {levelLabel(pool.level)}
-              </span>
+              <HwTag>{levelLabel(pool.level)}</HwTag>
               {isAdmin && (
                 <button
                   ref={renameBtnRef}
                   onClick={beginEdit}
                   aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
+                  style={{ borderRadius: "var(--radius-input)", color: "var(--text-muted)" }}
                 >
                   <Pencil className="h-4 w-4" />
                 </button>
@@ -1098,36 +1266,41 @@ function PoolCard({
             </div>
           )}
           {!editing && (
-            <p className="type-caption-1 text-label-tertiary">{levelBlurb(pool.level)}</p>
+            <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              {levelBlurb(pool.level)}
+            </p>
           )}
         </div>
-        {!editing && (
-          <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${badge.cls}`}>
-            {badge.label}
-          </span>
-        )}
+        {!editing && <Badge kind={poolBadgeKind(pool.status)}>{badge.label}</Badge>}
       </div>
 
-      <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
-        <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+      <div className="mt-3 flex items-center gap-2 flex-wrap">
+        <HwTag upper={false}>
           {memberCount} {memberCount === 1 ? "drive" : "drives"}
-        </span>
+        </HwTag>
       </div>
 
-      {pool.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{pool.notes}</p>}
+      {pool.notes && (
+        <p className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          {pool.notes}
+        </p>
+      )}
 
       {/* WARP-936: the way forward for a created-but-never-formatted pool.
           Destructive → tier-3 confirm-token + blast-radius dialog in the
           parent; this is just the entry point. */}
       {canFormat && (
-        <div className="mt-4 pt-3 border-t border-separator flex items-center justify-between gap-3 flex-wrap">
-          <p className="type-caption-1 text-label-secondary">
+        <div
+          className="mt-4 pt-3 flex items-center justify-between gap-3 flex-wrap"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
+          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
             This pool isn&rsquo;t set up as storage yet.
           </p>
           <button
             onClick={onFormat}
             disabled={formatting}
-            className="flex-none whitespace-nowrap rounded-md bg-system-red hover:bg-system-red/90 text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+            className="btn danger sm flex-none whitespace-nowrap"
           >
             {formatting ? "Working…" : "Format & mount"}
           </button>
