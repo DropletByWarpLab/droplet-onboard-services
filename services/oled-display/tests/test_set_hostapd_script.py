@@ -277,6 +277,172 @@ def test_rejects_missing_psk_field(tmp_path):
     assert not env_file.exists()
 
 
+# --- WARP-843: sandboxed (unprivileged) write path — restart is DEFERRED ------
+# Under droplet-device-bridge.service the script runs as the unprivileged
+# `droplet` user (ProtectSystem=strict + NoNewPrivileges + RestrictSUIDSGID):
+# it must WRITE the env file (droplet-owned 0600, reachable through the unit's
+# ReadWritePaths=/etc/default carve-out) and must NEVER run
+# `systemctl restart` itself — the root-owned droplet-openwrt-attach.path unit
+# watches the file and re-applies the change. The skip has two triggers:
+#   - EUID != 0            (production: the bridge user)
+#   - DROPLET_HOSTAPD_NO_RESTART=1  (explicit hook)
+# These tests exercise the REAL write path (no DRY_RUN): a fake `systemctl`
+# is prepended to PATH so the host is isolated AND any restart attempt is
+# recorded — proving the skip, not just assuming it.
+
+def _systemctl_stub(tmp_path: Path):
+    """A fake `systemctl` on PATH recording every invocation to a file.
+
+    Returns (path_prepend_dir, calls_file). The stub is a plain shebang shell
+    script so it resolves in Git-Bash on Windows as well as on Linux/CI.
+    """
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "systemctl-calls.log"
+    stub = stub_dir / "systemctl"
+    # Forward slashes so the baked-in path survives msys/Git-Bash on Windows.
+    stub.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{}"\nexit 0\n'.format(
+            str(calls).replace("\\", "/")),
+        encoding="utf-8", newline="\n")
+    stub.chmod(0o755)
+    return str(stub_dir), calls
+
+
+def _run_real(params: dict, env_file: Path, extra_env: dict | None = None):
+    """Run the script WITHOUT the dry-run stub — the real write path."""
+    env = dict(os.environ)
+    env.pop("DROPLET_HOSTAPD_DRY_RUN", None)
+    env["DROPLET_HOSTAPD_ENV_FILE"] = str(env_file)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [BASH, str(SCRIPT), json.dumps(params)],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_no_restart_flag_writes_env_but_never_calls_systemctl(tmp_path):
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run_real(
+        {"ssid": "HomeNet", "psk": "supersecret1"}, env_file,
+        {"DROPLET_HOSTAPD_NO_RESTART": "1",
+         "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    # The write happened...
+    body = env_file.read_text(encoding="utf-8")
+    assert "DROPLET_AP_SSID=HomeNet" in body
+    assert "DROPLET_AP_PSK=supersecret1" in body
+    # ...but the restart did NOT: the JSON says so and the stub was never hit.
+    assert out.get("restarted") is False
+    assert out.get("reapply") == "path-unit"
+    assert not calls.exists(), f"systemctl was invoked: {calls.read_text()}"
+    # The deferral is surfaced (for the bridge log), naming the path unit.
+    assert "droplet-openwrt-attach.path" in (proc.stdout + proc.stderr)
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="running as root — the unprivileged EUID branch can't be exercised")
+def test_unprivileged_euid_skips_systemctl_even_without_flag(tmp_path):
+    # Production shape: the bridge invokes the script with NO special env —
+    # EUID != 0 alone must defer the restart to the path unit.
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run_real(
+        {"ssid": "HomeNet", "psk": "supersecret1"}, env_file,
+        {"PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    assert out.get("restarted") is False
+    assert out.get("reapply") == "path-unit"
+    assert env_file.exists()
+    assert not calls.exists(), f"systemctl was invoked: {calls.read_text()}"
+
+
+def test_validation_still_rejects_before_write_on_the_real_path(tmp_path):
+    # AC3: the bounds are enforced on the REAL (non-dry-run) path too — a bad
+    # PSK exits non-zero BEFORE any write and BEFORE any restart attempt.
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run_real(
+        {"ssid": "HomeNet", "psk": "short"}, env_file,
+        {"DROPLET_HOSTAPD_NO_RESTART": "1",
+         "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode != 0
+    assert not env_file.exists()
+    assert not calls.exists()
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory permission bits — the sandbox shape can't be simulated")
+def test_in_place_rewrite_when_env_dir_is_read_only(tmp_path):
+    # THE box scenario (WARP-843): /etc/default is root-owned 0755, so the
+    # unprivileged bridge can never mktemp/rename in it (rename(2) needs write
+    # on the DIRECTORY) — but the env FILE itself is provisioned
+    # droplet:droplet 0600. The script must fall back to a locked IN-PLACE
+    # rewrite: same inode, no temp litter, content updated, 0600 kept.
+    if not _posix_perms_enforced(tmp_path):
+        pytest.skip("filesystem does not enforce POSIX permission bits (Windows)")
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    ro_dir = tmp_path / "etc-default"
+    ro_dir.mkdir()
+    env_file = ro_dir / "droplet-openwrt-attach"
+    env_file.write_text(
+        "DROPLET_AP_SSID=Old\nDROPLET_AP_PSK=oldsecret1\nDROPLET_AP_PHY=phy0\n",
+        encoding="utf-8")
+    os.chmod(env_file, 0o600)
+    os.chmod(ro_dir, 0o555)
+    try:
+        ino_before = env_file.stat().st_ino
+        secret = "brandnewpsk1"
+        proc = _run_real(
+            {"ssid": "NewHome", "psk": secret}, env_file,
+            {"DROPLET_HOSTAPD_NO_RESTART": "1",
+             "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+        assert proc.returncode == 0, proc.stderr
+        body = env_file.read_text(encoding="utf-8")
+        assert "DROPLET_AP_SSID=NewHome" in body
+        assert "DROPLET_AP_PSK=brandnewpsk1" in body
+        assert "DROPLET_AP_PHY=phy0" in body           # other keys preserved
+        assert env_file.stat().st_ino == ino_before, \
+            "expected an in-place rewrite (rename is impossible here)"
+        assert (env_file.stat().st_mode & 0o777) == 0o600
+        leftovers = [p.name for p in ro_dir.iterdir()
+                     if p.name != "droplet-openwrt-attach"]
+        assert leftovers == [], f"temp-file litter in the read-only dir: {leftovers}"
+        assert secret not in proc.stdout + proc.stderr   # PSK never printed
+        assert not calls.exists()
+        # Idempotent on this path too: identical re-submit → byte-identical file.
+        proc2 = _run_real(
+            {"ssid": "NewHome", "psk": secret}, env_file,
+            {"DROPLET_HOSTAPD_NO_RESTART": "1",
+             "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+        assert proc2.returncode == 0, proc2.stderr
+        assert env_file.read_text(encoding="utf-8") == body
+    finally:
+        os.chmod(ro_dir, 0o755)
+
+
+def test_dry_run_still_writes_and_reports_the_deferred_restart(tmp_path):
+    # DRY_RUN keeps its meaning on the unprivileged path: the env file is
+    # written, nothing restarts, and the report names what WOULD re-apply.
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run({"ssid": "HomeNet", "psk": "supersecret1"}, env_file,
+                {"DROPLET_HOSTAPD_NO_RESTART": "1"})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    assert out.get("dry_run") is True
+    assert out.get("restarted") is False
+    assert env_file.exists()
+
+
 def test_rejects_bad_json(tmp_path):
     env_file = tmp_path / "droplet-openwrt-attach"
     env = dict(os.environ)

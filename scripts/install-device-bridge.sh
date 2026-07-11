@@ -114,13 +114,14 @@ log "installed $POOL_APPLY_DST"
 # --- 1d) Install the single-box hostapd Wi-Fi-write host script (WARP-808) ---
 # The device-bridge's POST /openwrt/wifi/hostapd shells this to write the
 # customer's Wi-Fi SSID/PSK on the single-box shape — it upserts
-# DROPLET_AP_SSID/PSK in /etc/default/droplet-openwrt-attach and restarts
-# droplet-openwrt-attach.service (which regenerates /etc/hostapd.conf + respawns
-# hostapd). It lives on the host (writes a root-owned env file + runs systemctl,
-# can't run from a container) per architecture-guard rule 20; installed here
-# (never hand-placed) so factory-reset removes it cleanly. It validates
-# SSID 1-32 / PSK 8-63 before writing and never logs the PSK. Repo source is
-# scripts/host/.
+# DROPLET_AP_SSID/PSK in /etc/default/droplet-openwrt-attach (droplet-owned
+# 0600 since WARP-843, so the sandboxed bridge can rewrite it in place); the
+# root droplet-openwrt-attach.path unit then re-applies (regenerates
+# /etc/hostapd.conf + respawns hostapd). A root/operator invocation still
+# restarts the service directly. It lives on the host (not a container) per
+# architecture-guard rule 20; installed here (never hand-placed) so
+# factory-reset removes it cleanly. It validates SSID 1-32 / PSK 8-63 before
+# writing and never logs the PSK. Repo source is scripts/host/.
 HOSTAPD_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-hostapd.sh"
 HOSTAPD_SCRIPT_DST="/usr/local/sbin/droplet-set-hostapd.sh"
 if [[ ! -f "$HOSTAPD_SCRIPT_SRC" ]]; then
@@ -134,9 +135,9 @@ log "installed $HOSTAPD_SCRIPT_DST"
 # Sibling of droplet-set-hostapd.sh: the device-bridge's POST/DELETE
 # /openwrt/wifi/guest shells this to enable/disable the OPTIONAL second BSS on
 # the single-box shape — it upserts DROPLET_GUEST_SSID/PSK/ENABLED in the SAME
-# attach env file and restarts droplet-openwrt-attach.service (which stands up
-# the guest BSS + 192.168.30.0/24 subnet + isolated firewall zone). Reuses the
-# EXISTING polkit grant (it restarts the same one unit), so no new privilege.
+# attach env file; the droplet-openwrt-attach.path unit re-applies (stands up
+# the guest BSS + 192.168.30.0/24 subnet + isolated firewall zone). Same
+# WARP-843 privilege model as the home-AP writer: zero grants to the bridge.
 # Validates SSID 1-32 / PSK 8-63 before writing and never logs the PSK.
 GUEST_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-guest-wifi.sh"
 GUEST_SCRIPT_DST="/usr/local/sbin/droplet-set-guest-wifi.sh"
@@ -163,15 +164,14 @@ log "installed $WIFI_WD_DST"
 
 # --- 1d-bis) Polkit rules for the sandboxed bridge writes ---
 # The bridge unit runs as User=droplet inside ProtectSystem=strict +
-# NoNewPrivileges — it CANNOT write /etc/default or sudo (the shipping box
-# failed the wizard's Home Wi-Fi save with mktemp EROFS). The rules file
-# carries TWO narrowly-scoped grants for the droplet user, both D-Bus asks to
-# PID 1, no escalation:
-#   - restart/start droplet-openwrt-attach.service (WARP-808 Wi-Fi write —
-#     the env-file half targets the bridge's StateDirectory via
-#     DROPLET_HOSTAPD_ENV_FILE; the attach service layers that file last);
+# NoNewPrivileges. The rules file carries ONE narrowly-scoped grant for the
+# droplet user (a D-Bus ask to PID 1, no escalation):
 #   - start droplet-storage-pool-apply.service (ADR-019 follow-up — the root
 #     oneshot that consumes the spooled pool request; start verb only).
+# The former droplet-openwrt-attach.service restart grant (WARP-808 / PR #551)
+# is GONE: since WARP-843 the Wi-Fi write scripts never call systemctl when
+# unprivileged — the root droplet-openwrt-attach.path unit re-applies the
+# env-file change, so the bridge needs no restart privilege at all.
 POLKIT_RULE_SRC="$SRC_DIR/50-droplet-device-bridge.rules"
 POLKIT_RULE_DST="/etc/polkit-1/rules.d/50-droplet-device-bridge.rules"
 if [[ ! -f "$POLKIT_RULE_SRC" ]]; then
@@ -379,6 +379,48 @@ if ! grep -qE '^BRIDGE_AUTH_TOKEN=..+' "$ENV_FILE"; then
   log "generated random BRIDGE_AUTH_TOKEN"
 fi
 
+# --- 2a1) WARP-843: attach env file — migrate the shadow copy + hand to droplet ---
+# PR #551 pointed the sandboxed Wi-Fi write at a StateDirectory shadow copy
+# (/var/lib/droplet-bridge/openwrt-attach.env) because the bridge couldn't
+# touch root-owned /etc/default. WARP-843 retires that split brain: the
+# canonical /etc/default/droplet-openwrt-attach is now droplet-owned 0600 (the
+# bridge rewrites it in place through its ReadWritePaths=/etc/default
+# carve-out) and the root droplet-openwrt-attach.path unit re-applies changes.
+# On an upgraded box the shadow copy may still carry the customer's live
+# Wi-Fi creds — and the attach script's legacy customer_ap_creds fallback
+# would keep LAYERING them over any new /etc/default write, shadowing every
+# future wizard save. So: merge the customer keys into the canonical file
+# once, delete the shadow copy, and re-assert ownership. Idempotent — after
+# the first run the shadow copy is gone and only the chown/chmod re-assert.
+ATTACH_ENV_FILE=/etc/default/droplet-openwrt-attach
+STALE_ATTACH_ENV=/var/lib/droplet-bridge/openwrt-attach.env
+if [[ -f "$ATTACH_ENV_FILE" ]]; then
+  if [[ -f "$STALE_ATTACH_ENV" ]]; then
+    for key in DROPLET_AP_SSID DROPLET_AP_PSK \
+               DROPLET_GUEST_SSID DROPLET_GUEST_PSK DROPLET_GUEST_ENABLED; do
+      val=$(grep -E "^${key}=" "$STALE_ATTACH_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)
+      # Strip a stray CR; skip empty values and anything smelling of control
+      # chars — the attach script re-validates too, but never migrate garbage.
+      val="${val%$'\r'}"
+      [[ -z "$val" ]] && continue
+      case "$val" in *[$'\t\r\n']*) continue ;; esac
+      if grep -qE "^#?[[:space:]]*${key}=" "$ATTACH_ENV_FILE"; then
+        _set_env_kv "$ATTACH_ENV_FILE" "$key" "$val"
+      else
+        printf '%s=%s\n' "$key" "$val" >> "$ATTACH_ENV_FILE"
+      fi
+    done
+    rm -f "$STALE_ATTACH_ENV"
+    log "migrated wizard Wi-Fi creds from $STALE_ATTACH_ENV into $ATTACH_ENV_FILE (WARP-843)"
+  fi
+  if id -u droplet >/dev/null 2>&1; then
+    chown droplet:droplet "$ATTACH_ENV_FILE"
+  else
+    log "WARNING: user 'droplet' missing — $ATTACH_ENV_FILE stays root-owned and wizard Wi-Fi saves will fail (WARP-843)"
+  fi
+  chmod 0600 "$ATTACH_ENV_FILE"
+fi
+
 # --- 2a2) Pre-seed the OpenWrt SSH host key (multi-box uci AP path only) ---
 # device-bridge.py reaches the OpenWrt router over SSH ONLY on the multi-box
 # (uci) shape — the single-box drives its AP via hostapd and never SSHes. The
@@ -451,10 +493,16 @@ systemctl daemon-reload
 # `set -e` a transient start failure can't abort this script before the shutdown
 # screen below is wired up. The front-panel shutdown screen needs no deps and is
 # likewise always enabled.
-if systemctl enable --now droplet-device-bridge.service; then
-  log "device-bridge: enabled"
+# enable --now alone is a no-op start on an ALREADY-running bridge, which
+# would leave the old process serving with stale unit env (WARP-843 bit
+# exactly that: the previous DROPLET_HOSTAPD_ENV_FILE pin survived upgrades
+# until reboot). Restart explicitly so every install applies the current
+# unit + env file.
+if systemctl enable --now droplet-device-bridge.service \
+   && systemctl restart droplet-device-bridge.service; then
+  log "device-bridge: enabled + restarted (fresh unit env)"
 else
-  log "device-bridge: enable failed — inspect 'systemctl status droplet-device-bridge.service'"
+  log "device-bridge: enable/restart failed — inspect 'systemctl status droplet-device-bridge.service'"
 fi
 
 # Shutdown-screen oneshot. enable so it's wired into multi-user.target; --now

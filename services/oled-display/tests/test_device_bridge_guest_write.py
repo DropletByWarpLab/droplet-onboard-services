@@ -38,6 +38,23 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Guest env-file resolution (WARP-843)
+# ---------------------------------------------------------------------------
+
+def test_guest_env_file_defaults_to_etc_default_attach(monkeypatch):
+    """WARP-843: the wizard Wi-Fi writes land directly in the canonical
+    /etc/default/droplet-openwrt-attach (droplet-owned; the bridge unit pins
+    DROPLET_HOSTAPD_ENV_FILE there and carves ReadWritePaths=/etc/default).
+    The in-code fallback must agree with the scripts' own default so a dev run
+    without the unit env reads guest state from the same file the guest script
+    writes — not the retired StateDirectory shadow copy."""
+    for var in ("DROPLET_GUEST_ENV_FILE", "DROPLET_HOSTAPD_ENV_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    bridge = _load_bridge(monkeypatch)
+    assert bridge.GUEST_ENV_FILE == "/etc/default/droplet-openwrt-attach"
+
+
+# ---------------------------------------------------------------------------
 # run_set_guest_wifi() / run_remove_guest_wifi() shell the HOST SCRIPT
 # ---------------------------------------------------------------------------
 

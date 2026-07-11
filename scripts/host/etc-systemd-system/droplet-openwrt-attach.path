@@ -1,0 +1,41 @@
+[Unit]
+# WARP-843 — re-apply the single-box AP config whenever its env file changes.
+#
+# The setup wizard's Home Wi-Fi save runs droplet-set-hostapd.sh INSIDE the
+# device-bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges).
+# That unprivileged invocation writes /etc/default/droplet-openwrt-attach (the
+# file is provisioned droplet:droplet 0600 with a ReadWritePaths=/etc/default
+# carve-out) but can NEVER run the privileged
+# `systemctl restart droplet-openwrt-attach.service` itself — the previous
+# polkit-rule route (PR #551) depended on polkitd JS-rules support and still
+# left the write targeting a shadow copy in the bridge StateDirectory.
+#
+# THIS unit closes the loop with zero grants to the droplet user: root-owned
+# systemd watches the env file and starts the reapply relay on every change.
+# The relay restarts droplet-openwrt-attach.service, which regenerates
+# /etc/hostapd.conf from the env file and — via its HOSTAPD_CHANGED gate —
+# respawns hostapd ONLY when the conf actually changed. An identical re-submit
+# therefore still causes no AP reload (WARP-843 AC4).
+#
+# Why the relay (droplet-openwrt-attach-reapply.service) instead of pointing
+# Unit= straight at droplet-openwrt-attach.service: the attach service is a
+# Type=oneshot with RemainAfterExit=yes, so it sits "active" from boot onward —
+# a path-unit *start* of an already-active unit is a no-op and would never
+# re-run ExecStart. The relay is a plain oneshot (inactive between runs), so
+# every trigger really executes, and its ExecStart performs the *restart* the
+# attach service needs.
+#
+# Repo-tracked at scripts/host/etc-systemd-system/ and installed + enabled by
+# scripts/lib/single-box.sh (setup.sh --single-box) — never hand-placed on a
+# box (architecture-guard rule 20).
+Description=Watch the droplet-openwrt-attach env file and re-apply AP config on change (WARP-843)
+
+[Path]
+# PathModified fires on writes to the file as well as on an atomic
+# replace-by-rename in /etc/default (root/operator invocations still use
+# mktemp+mv), so both write strategies re-apply.
+PathModified=/etc/default/droplet-openwrt-attach
+Unit=droplet-openwrt-attach-reapply.service
+
+[Install]
+WantedBy=multi-user.target

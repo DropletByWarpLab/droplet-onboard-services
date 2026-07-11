@@ -223,6 +223,21 @@ EOF
     log_info "/etc/default/droplet-openwrt-attach exists — keeping rotated value"
   fi
 
+  # WARP-843: hand the env file to the bridge user. The setup wizard's Wi-Fi
+  # writes run droplet-set-hostapd.sh / droplet-set-guest-wifi.sh INSIDE the
+  # device-bridge sandbox (User=droplet + ProtectSystem=strict +
+  # NoNewPrivileges) — the file must be droplet-owned 0600 so that
+  # unprivileged process can rewrite it in place through the unit's
+  # ReadWritePaths=/etc/default carve-out. Asserted on BOTH branches above so
+  # an upgraded box (file pre-dates this change, root-owned) heals on the
+  # next setup.sh run. PSK secrecy is unchanged: 0600, owner-only.
+  if id -u droplet >/dev/null 2>&1; then
+    sudo chown droplet:droplet /etc/default/droplet-openwrt-attach
+    sudo chmod 0600 /etc/default/droplet-openwrt-attach
+  else
+    log_warn "user 'droplet' missing — /etc/default/droplet-openwrt-attach stays root-owned (wizard Wi-Fi saves will fail until setup runs on the appliance user model)"
+  fi
+
   # --- /etc/droplet/ (per-box secrets: ap-psk, device-bridge.env) ---------
   # WARP-1035: must exist BEFORE `compose up` — docker-compose bind-mounts
   # this DIRECTORY read-only into matter-controller so the sidecar can read
@@ -247,6 +262,16 @@ EOF
   sudo install -m 0644 \
     "$host_src/etc-systemd-system/droplet-openwrt-attach.service.d/override.conf" \
     /etc/systemd/system/droplet-openwrt-attach.service.d/override.conf
+  # WARP-843: env-file watcher + reapply relay. The sandboxed device-bridge
+  # writes /etc/default/droplet-openwrt-attach but holds NO restart privilege;
+  # this root-owned pair re-applies the AP config on every change (the relay
+  # exists because the attach service is RemainAfterExit=yes — a path-triggered
+  # START of it would be a no-op; the relay performs the restart).
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-openwrt-attach.path" \
+    /etc/systemd/system/droplet-openwrt-attach.path
+  sudo install -m 0644 \
+    "$host_src/etc-systemd-system/droplet-openwrt-attach-reapply.service" \
+    /etc/systemd/system/droplet-openwrt-attach-reapply.service
 
   # --- /etc/tmpfiles.d/ and /etc/avahi/services/ --------------------------
   sudo install -m 0644 "$host_src/etc-tmpfiles.d/droplet.conf" \
@@ -321,6 +346,10 @@ EOF
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
   sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
+  # WARP-843: --now so the watcher is live immediately (not only after the
+  # next reboot) — the wizard's first Wi-Fi save can happen minutes after
+  # setup.sh finishes. The relay itself is start-on-demand (no [Install]).
+  sudo systemctl enable --now droplet-openwrt-attach.path >/dev/null 2>&1
   sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.

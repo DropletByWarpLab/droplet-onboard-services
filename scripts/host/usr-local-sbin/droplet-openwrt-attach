@@ -44,21 +44,20 @@ GUEST_IFACE="${DROPLET_GUEST_IFACE:-}"
 # (192.168.10.0/24) so the zones never overlap.
 GUEST_GW="${DROPLET_GUEST_GW:-192.168.30.1}"
 
-# >>> customer_ap_creds (WARP-808 follow-up)
-# The setup wizard's Wi-Fi write lands in the device-bridge's StateDirectory
-# (droplet-set-hostapd.sh writes it there — the bridge sandbox can't touch
-# root-owned /etc/default). Parse ONLY the two AP keys out of that
-# droplet-owned file instead of EnvironmentFile-ing it into this root unit:
-#   - a file an unprivileged account can write must never inject arbitrary
-#     env into a root process (defense-in-depth — PR #551 review), and
-#   - systemd EnvironmentFile ordering is fragile under drop-ins (the
-#     pre-existing override.conf re-loads /etc/default LAST, which silently
-#     clobbered the customer's values — the PR #551 review blocker).
-# Customer creds, when present and valid, win over the /etc/default
-# provisioning defaults; resolve_ap_psk() then treats the customer PSK as an
-# explicit real value, keeps it, and mirrors it to the pairing QR. Re-validated
-# here with the same bounds droplet-set-hostapd.sh enforces (SSID 1-32,
-# PSK 8-63, no control characters) because root must not trust the file.
+# >>> customer_ap_creds (WARP-808 follow-up; legacy fallback since WARP-843)
+# PRE-MIGRATION FALLBACK ONLY. The setup wizard's Wi-Fi write used to land in
+# the device-bridge's StateDirectory (PR #551 — the bridge sandbox couldn't
+# touch root-owned /etc/default). Since WARP-843 the write goes DIRECTLY to
+# /etc/default/droplet-openwrt-attach (droplet-owned 0600; the path unit
+# re-applies), and install-device-bridge.sh migrates + DELETES the old
+# StateDirectory file — so on an up-to-date box this block finds no file and
+# is a no-op. It stays for the window where a new attach script runs before
+# the installer migration has (a setup.sh re-run finishes the retirement).
+# Customer creds, when present and valid, win over the env-provided values;
+# resolve_ap_psk() then treats the customer PSK as an explicit real value,
+# keeps it, and mirrors it to the pairing QR. Re-validated here with the same
+# bounds droplet-set-hostapd.sh enforces (SSID 1-32, PSK 8-63, no control
+# characters) because root must not trust the file.
 CUSTOMER_AP_ENV="${DROPLET_CUSTOMER_AP_ENV:-/var/lib/droplet-bridge/openwrt-attach.env}"
 if [ -f "$CUSTOMER_AP_ENV" ]; then
   c_ssid="$(grep -m1 '^DROPLET_AP_SSID=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"

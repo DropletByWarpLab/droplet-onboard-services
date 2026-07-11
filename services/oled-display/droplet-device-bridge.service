@@ -67,21 +67,26 @@ Environment=BRIDGE_PORT=9090
 # an operator can re-pin the bind via the env file below (loaded last).
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
-# WARP-808 follow-up: the hostapd Wi-Fi write (droplet-set-hostapd.sh, shelled
-# by POST /openwrt/wifi/hostapd) runs INSIDE this unit's sandbox — User=droplet
-# + ProtectSystem=strict make its default target /etc/default/droplet-openwrt-
-# attach unwritable (mktemp EROFS — the setup wizard's Home Wi-Fi save failed
-# with exactly that on the shipping box). Point the write at the bridge's own
-# StateDirectory instead; the attach script's customer_ap_creds block parses
-# ONLY DROPLET_AP_SSID/DROPLET_AP_PSK out of that file with hard validation
-# (NOT an EnvironmentFile — drop-in ordering would clobber it, and a
-# droplet-writable file must never inject arbitrary env into a root unit), so
-# a customer Wi-Fi write overrides provisioning defaults without root. A
-# factory reset wipes the StateDirectory AND /etc/droplet/ap-psk, so the AP
-# returns to the /etc/default SSID with a freshly generated per-box PSK.
-# The restart half of the write goes through polkit (50-droplet-device-
-# bridge.rules), not privilege escalation: NoNewPrivileges stays true.
-Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env
+# WARP-843: the hostapd Wi-Fi write (droplet-set-hostapd.sh, shelled by POST
+# /openwrt/wifi/hostapd — and its guest sibling droplet-set-guest-wifi.sh)
+# runs INSIDE this unit's sandbox and targets the CANONICAL attach env file
+# directly. Three pieces make that possible without weakening the sandbox:
+#   - /etc/default/droplet-openwrt-attach is provisioned droplet:droplet 0600
+#     (scripts/lib/single-box.sh + scripts/install-device-bridge.sh), so the
+#     bridge user owns the one file it must rewrite (in place — the directory
+#     stays root-owned, so no rename/mktemp is possible there);
+#   - ReadWritePaths=/etc/default below carves the path out of
+#     ProtectSystem=strict (DAC still protects every OTHER file in it);
+#   - the scripts SKIP the privileged systemctl restart when EUID != 0; the
+#     root-owned droplet-openwrt-attach.path unit watches the env file and
+#     re-applies via the reapply relay. NO polkit grant, NO privilege for the
+#     droplet user (this superseded the PR #551 polkit route, which also left
+#     writes in a StateDirectory shadow copy — install-device-bridge.sh
+#     migrates that back into /etc/default on upgrade).
+# A factory reset resets the customer keys inside /etc/default/droplet-
+# openwrt-attach AND wipes /etc/droplet/ap-psk, so the AP returns to the
+# out-of-box SSID with a freshly generated per-box PSK.
+Environment=DROPLET_HOSTAPD_ENV_FILE=/etc/default/droplet-openwrt-attach
 # Operator-managed runtime config, loaded LAST so it overrides the inline
 # defaults above (BRIDGE_BIND, OPENWRT_*, etc.). Created by `setup.sh` with
 # 0600 perms; holds the OpenWrt SSH password, BRIDGE_AUTH_TOKEN, Frigate URL.
@@ -122,6 +127,16 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # append:/var/log/... needs that path writable; StateDirectory above is
 # handled automatically.
 ReadWritePaths=/var/log/droplet-device-bridge.log
+# WARP-843: the single-box Wi-Fi writes (droplet-set-hostapd.sh /
+# droplet-set-guest-wifi.sh, exec'd by this unit's bridge process) rewrite
+# /etc/default/droplet-openwrt-attach in place. The DIRECTORY (not the file)
+# is carved out because a file-scoped ReadWritePaths bind-mounts one inode —
+# a later atomic replace by root (setup re-provision uses mktemp+mv) would
+# strand the bridge on the stale inode. DAC still rules inside the carve-out:
+# the bridge user owns ONLY droplet-openwrt-attach (0600), every other file
+# in /etc/default stays root-owned and the dir itself is root 0755, so the
+# bridge can neither create nor delete nor modify anything else there.
+ReadWritePaths=/etc/default
 # WARP-985: the FQDN + box-name write-backs must upsert <repo>/.env — POST
 # /host/public-fqdn execs droplet-set-public-fqdn.sh, which mktemp's a sibling
 # next to .env before the atomic mv, so the repo DIRECTORY (not just the file)

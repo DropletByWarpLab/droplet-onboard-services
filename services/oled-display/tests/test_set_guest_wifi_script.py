@@ -243,3 +243,129 @@ def test_written_env_file_is_mode_0600(tmp_path):
     assert proc.returncode == 0, proc.stderr
     mode = env_file.stat().st_mode & 0o777
     assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+
+# --- WARP-843: sandboxed (unprivileged) write path — restart is DEFERRED ------
+# The guest write shares the home-AP write's fate: since the pin change in
+# droplet-device-bridge.service both scripts write the SAME droplet-owned
+# /etc/default/droplet-openwrt-attach, so the guest script needs the identical
+# treatment — unprivileged (EUID != 0) or DROPLET_GUEST_NO_RESTART=1 skips the
+# privileged `systemctl restart`; the root droplet-openwrt-attach.path unit
+# re-applies. Mirrors test_set_hostapd_script.py's WARP-843 section.
+
+def _systemctl_stub(tmp_path: Path):
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "systemctl-calls.log"
+    stub = stub_dir / "systemctl"
+    stub.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{}"\nexit 0\n'.format(
+            str(calls).replace("\\", "/")),
+        encoding="utf-8", newline="\n")
+    stub.chmod(0o755)
+    return str(stub_dir), calls
+
+
+def _run_real(params: dict, env_file: Path, extra_env: dict | None = None):
+    """Run the script WITHOUT the dry-run stub — the real write path."""
+    env = dict(os.environ)
+    env.pop("DROPLET_GUEST_DRY_RUN", None)
+    env["DROPLET_GUEST_ENV_FILE"] = str(env_file)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [BASH, str(SCRIPT), json.dumps(params)],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_no_restart_flag_writes_env_but_never_calls_systemctl(tmp_path):
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run_real(
+        {"ssid": "Guests", "psk": "welcome123"}, env_file,
+        {"DROPLET_GUEST_NO_RESTART": "1",
+         "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    assert out.get("restarted") is False
+    assert out.get("reapply") == "path-unit"
+    body = env_file.read_text(encoding="utf-8")
+    assert "DROPLET_GUEST_SSID=Guests" in body
+    assert "DROPLET_GUEST_ENABLED=1" in body
+    assert not calls.exists(), f"systemctl was invoked: {calls.read_text()}"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="running as root — the unprivileged EUID branch can't be exercised")
+def test_unprivileged_euid_skips_systemctl_even_without_flag(tmp_path):
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run_real(
+        {"ssid": "Guests", "psk": "welcome123"}, env_file,
+        {"PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("restarted") is False
+    assert not calls.exists(), f"systemctl was invoked: {calls.read_text()}"
+
+
+def test_remove_path_also_skips_systemctl_unprivileged(tmp_path):
+    # The teardown path restarts too — it must defer identically.
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    env_file = tmp_path / "droplet-openwrt-attach"
+    _run_real({"ssid": "Guests", "psk": "welcome123"}, env_file,
+              {"DROPLET_GUEST_NO_RESTART": "1",
+               "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    proc = _run_real({"action": "remove"}, env_file,
+                     {"DROPLET_GUEST_NO_RESTART": "1",
+                      "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    assert out.get("restarted") is False
+    assert "DROPLET_GUEST_ENABLED=0" in env_file.read_text(encoding="utf-8")
+    assert not calls.exists(), f"systemctl was invoked: {calls.read_text()}"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory permission bits — the sandbox shape can't be simulated")
+def test_in_place_rewrite_when_env_dir_is_read_only(tmp_path):
+    # Same box scenario as the home-AP write: root-owned 0755 /etc/default,
+    # droplet-owned 0600 env file → locked in-place rewrite, same inode,
+    # home-AP keys preserved, no temp litter.
+    if not _posix_perms_enforced(tmp_path):
+        pytest.skip("filesystem does not enforce POSIX permission bits (Windows)")
+    stub_dir, calls = _systemctl_stub(tmp_path)
+    ro_dir = tmp_path / "etc-default"
+    ro_dir.mkdir()
+    env_file = ro_dir / "droplet-openwrt-attach"
+    env_file.write_text(
+        "DROPLET_AP_SSID=HomeNet\nDROPLET_AP_PSK=homesecret1\n",
+        encoding="utf-8")
+    os.chmod(env_file, 0o600)
+    os.chmod(ro_dir, 0o555)
+    try:
+        ino_before = env_file.stat().st_ino
+        proc = _run_real(
+            {"ssid": "Guests", "psk": "welcome123"}, env_file,
+            {"DROPLET_GUEST_NO_RESTART": "1",
+             "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
+        assert proc.returncode == 0, proc.stderr
+        body = env_file.read_text(encoding="utf-8")
+        assert "DROPLET_GUEST_SSID=Guests" in body
+        assert "DROPLET_GUEST_ENABLED=1" in body
+        assert "DROPLET_AP_SSID=HomeNet" in body       # home AP untouched
+        assert "DROPLET_AP_PSK=homesecret1" in body
+        assert env_file.stat().st_ino == ino_before, \
+            "expected an in-place rewrite (rename is impossible here)"
+        assert (env_file.stat().st_mode & 0o777) == 0o600
+        leftovers = [p.name for p in ro_dir.iterdir()
+                     if p.name != "droplet-openwrt-attach"]
+        assert leftovers == [], f"temp-file litter in the read-only dir: {leftovers}"
+        assert not calls.exists()
+    finally:
+        os.chmod(ro_dir, 0o755)
