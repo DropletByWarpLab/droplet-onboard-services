@@ -37,6 +37,7 @@ const DOMAINS: ErrorDomain[] = [
   "network",
   "vpn",
   "camera",
+  "projects",
   "device",
   "generic",
 ];
@@ -395,5 +396,49 @@ describe("translateError — auth domain two-factor codes (WARP-646)", () => {
   it("maps RECOVERY_INVALID to a recovery-code string", () => {
     const result = translateError({ code: "RECOVERY_INVALID" }, "auth");
     expect(result.toLowerCase()).toMatch(/recovery|code/);
+  });
+});
+
+describe("translateError — projects domain (WARP-1154/1155)", () => {
+  // The live bug: the orchestrator's module gate answered
+  // { error: "module_disabled" } and the raw snake_case code reached a toast
+  // verbatim. The projects domain must translate it to honest, permanent
+  // "not enabled" copy — never "server error, try again".
+  it("maps module_disabled to honest 'not enabled' copy", () => {
+    const result = translateError(
+      { code: "module_disabled", status: 404, message: "module_disabled" },
+      "projects",
+    );
+    expect(result).toContain("Projects isn't enabled on this Droplet");
+    expect(result).not.toContain("module_disabled");
+    expect(result.toLowerCase()).not.toMatch(/try again|server error/);
+  });
+
+  it("maps the PM wire codes the dashboard flows can hit", () => {
+    expect(
+      translateError({ code: "project_not_found" }, "projects").toLowerCase(),
+    ).toContain("couldn't find that project");
+    expect(
+      translateError({ code: "work_item_not_found" }, "projects").toLowerCase(),
+    ).toContain("couldn't find that item");
+    expect(
+      translateError({ code: "identifier_taken" }, "projects").toLowerCase(),
+    ).toContain("already in use");
+    expect(
+      translateError({ code: "invalid_state" }, "projects").toLowerCase(),
+    ).toContain("refresh");
+  });
+
+  // Home-user persona (ADR-002): snake_case internals must never render.
+  // An UNKNOWN code — one added to the orchestrator after this dashboard
+  // build shipped — must land on the domain fallback, and neither the code
+  // nor any snake_case may survive into the copy.
+  it("unknown snake_case codes NEVER render snake_case to users", () => {
+    for (const code of ["flux_capacitor_offline", "state_is_last", "comment_not_found"]) {
+      const result = translateError({ code, message: code, status: 409 }, "projects");
+      expect(result, code).not.toContain(code);
+      expect(result, code).not.toMatch(/[a-z]+_[a-z]+/);
+      expect(result.length, code).toBeGreaterThan(0);
+    }
   });
 });
