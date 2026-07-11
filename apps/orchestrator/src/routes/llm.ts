@@ -589,9 +589,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         if (!isUnreachable) throw err;
         // Do NOT cache the empty fallback — the next request retries the
         // gateway so the list self-heals once it is reachable again.
+        // WARP-1284: `degraded: true` tells the wizard this empty list means
+        // "can't reach the AI service", not "no model pulled yet".
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
-        const empty: ModelsResponse = { models: [] };
+        const empty: ModelsResponse = { models: [], degraded: true };
         res.json(empty);
+        return;
+      }
+      // WARP-1284: the gateway answered, but reported that its LOCAL Ollama
+      // provider raised during the listing fan-out (`degraded_providers`,
+      // additive since this ticket). The models list can't be trusted as
+      // complete, so stamp `degraded: true` on the forwarded response and —
+      // like the unreachable fallback above — never cache it: the next
+      // request re-queries so the signal clears the moment Ollama recovers.
+      // A cloud-only provider failure keeps today's behavior (cached,
+      // unflagged): only ollama drives the wizard's local-AI state.
+      if (models.degraded_providers?.includes("ollama")) {
+        console.warn(
+          "[llm/models] ai-gateway reports degraded providers; serving uncached:",
+          models.degraded_providers,
+        );
+        res.json({ ...models, degraded: true });
         return;
       }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
