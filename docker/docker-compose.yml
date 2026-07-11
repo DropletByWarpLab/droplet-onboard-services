@@ -585,7 +585,15 @@ services:
   # Direct host publish would collide with routing (host-net :8080) and
   # bypass auth/HTTPS the gateway enforces.
   nextcloud:
-    image: nextcloud:29-apache
+    # WARP-1254: digest-pinned so the appliance never silently drifts onto a
+    # newer Nextcloud/groupfolders point release across an image re-pull — the
+    # exact groupfolders version bundled server-side is otherwise not
+    # reproducible. Validated live against this digest in
+    # docs/spikes/WARP-1254-groupfolders-spike.md (Nextcloud 29.0.16.1,
+    # groupfolders 17.0.16). Bumping this pin (e.g. for an NC security patch)
+    # should be a deliberate, reviewed change — re-run that spike's curl
+    # checks against the new digest before rolling it out.
+    image: nextcloud:29-apache@sha256:a7fbfcd4759bdd19b8fb8b1044b47ee3a9471d2e2c8bc68d56a2e671f86cebd2
     # WARP-234: the zz-redis-tls.config.php file-mount makes Docker pre-create
     # config/ as root:root (www-data cannot write config.php -> install fails)
     # AND, under the TLS-only Postgres (WARP-233, PGSSLMODE=require), the
