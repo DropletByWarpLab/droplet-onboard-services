@@ -174,6 +174,12 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   models: ModelInfo[];
+  /** WARP-1284 (additive): true when the orchestrator can't vouch for the
+   *  list — the ai-gateway was unreachable, or the gateway reported its
+   *  local Ollama provider failed during listing. An empty list WITH
+   *  `degraded` means "can't reach the AI service right now", NOT "no
+   *  model pulled yet" — the setup wizard renders the two differently. */
+  degraded?: boolean;
 }
 
 // ── WARP-836: read-only Models surface (`/models`) ──
