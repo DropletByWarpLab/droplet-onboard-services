@@ -513,6 +513,86 @@ else
   fail "effective OPENWRT_USERNAME is '${OPENWRT_USER_EFFECTIVE}' (expected single-box root)"
 fi
 
+# --- WARP-444: single-box knobs block — surgical replace + dedupe ----------
+# configure_single_box_env's descriptive comment block used to be appended
+# blindly (then skipped-when-present), so setup retries left duplicate stale
+# blocks in .env forever — the live box accumulated three. The block is now
+# surgically REPLACED on every run: every existing copy (marker line + its
+# enclosing comment fences + one blank spacer) is stripped and exactly one
+# fresh copy appended. Only comment/blank lines are removed, so KEY=value
+# lines interleaved between stale blocks must survive.
+SB_BLOCK_MARKER='Single-box deployment knobs (managed by scripts/lib/single-box.sh'
+
+# (1) Two configure calls already ran above → exactly ONE block (the WARP-444
+# acceptance: running twice produces one block, not two).
+SB_BLOCK_COUNT=$(grep -cF "$SB_BLOCK_MARKER" "$TMP_ROOT/.env" || true)
+if [ "$SB_BLOCK_COUNT" = "1" ]; then
+  pass "knobs block appears exactly once after two configure calls (replace, not append)"
+else
+  fail "expected exactly one single-box knobs block marker in .env, found ${SB_BLOCK_COUNT}"
+fi
+
+# (2) Pre-existing duplicates — the live-host state this ticket came from —
+# must collapse to one on the next run. Seed two stale copies shaped like the
+# real block (fence + marker + prose + fence), with a KEY=value line BETWEEN
+# them so the strip is proven surgical (comments only, keys survive).
+{
+  printf '\n# ============================================================================\n'
+  printf '# Single-box deployment knobs (managed by scripts/lib/single-box.sh —\n'
+  printf '#   WARP-444 test seed: STALE COPY ONE, must be deduped on the next run.\n'
+  printf '# ============================================================================\n'
+  printf 'SB_DEDUPE_CANARY=survives\n'
+  printf '\n# ============================================================================\n'
+  printf '# Single-box deployment knobs (managed by scripts/lib/single-box.sh —\n'
+  printf '#   WARP-444 test seed: STALE COPY TWO, must be deduped on the next run.\n'
+  printf '# ============================================================================\n'
+} >> "$TMP_ROOT/.env"
+
+SB_BLOCK_COUNT_SEEDED=$(grep -cF "$SB_BLOCK_MARKER" "$TMP_ROOT/.env" || true)
+if [ "$SB_BLOCK_COUNT_SEEDED" = "3" ]; then
+  pass "duplicate-block seed applied (3 block markers in .env)"
+else
+  fail "duplicate-block seed wrong (expected 3 markers, found ${SB_BLOCK_COUNT_SEEDED})"
+fi
+
+SB_REPLACE_OUT=$(configure_single_box_env 2>&1 || true)
+
+SB_BLOCK_COUNT_AFTER=$(grep -cF "$SB_BLOCK_MARKER" "$TMP_ROOT/.env" || true)
+if [ "$SB_BLOCK_COUNT_AFTER" = "1" ]; then
+  pass "configure_single_box_env dedupes pre-existing duplicate blocks to exactly one"
+else
+  fail "expected exactly one block marker after dedupe run, found ${SB_BLOCK_COUNT_AFTER}"
+fi
+
+# The stale copies are gone in full (prose included), not just their markers.
+if grep -q 'STALE COPY' "$TMP_ROOT/.env"; then
+  fail "stale block prose still present after dedupe run (strip was not block-wide)"
+else
+  pass "stale block prose fully removed (marker + fences + comment lines)"
+fi
+
+# Surgical: the KEY=value line seeded BETWEEN the stale blocks survived.
+if grep -qE '^SB_DEDUPE_CANARY=survives$' "$TMP_ROOT/.env"; then
+  pass "KEY=value line between stale blocks survives the strip (comments-only removal)"
+else
+  fail "SB_DEDUPE_CANARY lost — block strip removed a non-comment line"
+fi
+
+# Live-stack secrets written by generate_env are untouched by the rewrite.
+if grep -qE '^POSTGRES_PASSWORD=.+' "$TMP_ROOT/.env"; then
+  pass "unrelated secrets (POSTGRES_PASSWORD) survive the block replace"
+else
+  fail "POSTGRES_PASSWORD missing after block replace — rewrite ate live keys"
+fi
+
+# The replace announces itself (the operator debugging a retry loop must see
+# that the block was refreshed, not silently skipped).
+if printf '%s' "$SB_REPLACE_OUT" | grep -qF 'Replaced existing single-box block in .env'; then
+  pass "replace run logs 'Replaced existing single-box block in .env'"
+else
+  fail "missing 'Replaced existing single-box block in .env' log line on a replace run"
+fi
+
 # Fail-loud guard: with NO droplet_default network resolvable, the function must
 # exit non-zero rather than silently leaving the unreachable host.docker.internal
 # default in place. Stub a docker that returns an empty gateway and confirm.
