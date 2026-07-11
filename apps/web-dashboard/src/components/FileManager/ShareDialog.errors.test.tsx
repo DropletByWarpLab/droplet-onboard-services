@@ -64,8 +64,12 @@ async function createLinkAndWaitForError(): Promise<HTMLElement> {
   fireEvent.click(screen.getByRole("button", { name: "Create link" }));
   await waitFor(() => expect(createShareMock).toHaveBeenCalled());
   // The error box renders inside the dialog body once the create settles.
+  // WARP-1066: the indigo conversion recolors this box with the branch's
+  // canonical inline destructive tint (`#ef4444` / `rgba(239,68,68,.1)`)
+  // instead of the old `text-system-red` utility class — select on the
+  // structural classes that survive the recolor.
   return waitFor(() => {
-    const el = document.querySelector("div.type-footnote.text-system-red");
+    const el = document.querySelector("div.p-2.type-footnote");
     if (!el) throw new Error("error box not rendered yet");
     return el as HTMLElement;
   });

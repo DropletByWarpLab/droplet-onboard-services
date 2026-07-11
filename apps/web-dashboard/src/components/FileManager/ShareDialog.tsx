@@ -244,25 +244,37 @@ export function ShareDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-6"
+      style={{ background: "var(--scrim)" }}
       onClick={onClose}
     >
       <div
-        className="bg-surface-primary rounded-lg max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden shadow-xl"
+        className="max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
+        style={{
+          background: "var(--card-bg)",
+          border: "1px solid var(--card-bd)",
+          borderRadius: "var(--radius-card)",
+          boxShadow: "var(--lift)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+        <div
+          className="flex items-center justify-between px-4 py-3"
+          style={{ borderBottom: "1px solid var(--card-bd)" }}
+        >
           <div className="flex-1 min-w-0">
-            <h3 className="type-headline text-label-primary">Share</h3>
-            <p className="type-caption-1 text-label-tertiary truncate">
+            <h3 className="type-headline" style={{ color: "var(--text)" }}>
+              Share
+            </h3>
+            <p
+              className="type-caption-1 truncate"
+              style={{ color: "var(--text-muted)" }}
+            >
               {fileName}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1 text-label-tertiary hover:text-label-primary"
-          >
+          <button onClick={onClose} className="icon-btn" aria-label="Close">
             <X size={18} />
           </button>
         </div>
@@ -271,24 +283,41 @@ export function ShareDialog({
           {/* Existing shares */}
           {shares.length > 0 && (
             <div>
-              <h4 className="type-footnote text-label-secondary font-medium mb-2">
+              <h4
+                className="type-footnote font-medium mb-2"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Shared with
               </h4>
               <div className="space-y-2">
                 {shares.map((share) =>
                   share.shareType === SHARE_TYPE_USER ? (
                     // ── Named-member share — recipient chip, no link to copy ──
-                    <div key={share.id} className="dp-card p-3 space-y-2">
+                    <div
+                      key={share.id}
+                      className="card space-y-2"
+                      style={{ padding: "12px", borderRadius: "var(--radius-card)" }}
+                    >
                       <div className="flex items-center gap-2">
-                        <span className="flex items-center justify-center w-6 h-6 rounded-full bg-accent-subtle text-accent flex-shrink-0">
+                        <span
+                          className="flex items-center justify-center w-6 h-6 rounded-full flex-shrink-0"
+                          style={{
+                            background: "var(--brand-subtle)",
+                            color: "var(--brand)",
+                          }}
+                        >
                           <User size={13} />
                         </span>
-                        <span className="type-footnote text-label-primary flex-1 min-w-0 truncate">
+                        <span
+                          className="type-footnote flex-1 min-w-0 truncate"
+                          style={{ color: "var(--text)" }}
+                        >
                           {share.shareWithDisplayName ?? share.shareWith}
                         </span>
                         <button
                           onClick={() => handleRevoke(share.id)}
-                          className="p-1.5 rounded-sm text-system-red hover:bg-system-red/10 transition-colors"
+                          className="p-1.5 rounded-[var(--radius-input)] transition-colors hover:bg-[rgba(239,68,68,0.1)]"
+                          style={{ color: "#ef4444" }}
                           title="Remove access"
                         >
                           <Trash2 size={14} />
@@ -300,7 +329,13 @@ export function ShareDialog({
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
-                          className="dp-input type-caption-1 !py-1 flex-1"
+                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:border-[var(--brand)]"
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-input)",
+                            color: "var(--text)",
+                          }}
                         >
                           {PRESETS.map((preset) => (
                             <option key={preset.label} value={preset.bits}>
@@ -312,28 +347,47 @@ export function ShareDialog({
                     </div>
                   ) : (
                     // ── Public link share — copy-link row (unchanged) ──
-                    <div key={share.id} className="dp-card p-3 space-y-2">
+                    <div
+                      key={share.id}
+                      className="card space-y-2"
+                      style={{ padding: "12px", borderRadius: "var(--radius-card)" }}
+                    >
                       <div className="flex items-center gap-2">
-                        <Globe size={14} className="text-accent flex-shrink-0" />
+                        <Globe
+                          size={14}
+                          className="flex-shrink-0"
+                          style={{ color: "var(--brand)" }}
+                        />
                         <input
                           readOnly
                           value={share.url ?? ""}
-                          className="dp-input type-caption-1 flex-1 !py-1.5"
+                          className="type-caption-1 px-3 flex-1 !py-1.5 outline-none focus:border-[var(--brand)]"
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-input)",
+                            color: "var(--text)",
+                          }}
                         />
                         <button
                           onClick={() => handleCopy(share)}
-                          className="p-1.5 rounded-sm bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+                          className="p-1.5 rounded-[var(--radius-input)] transition-colors hover:bg-[rgba(99,102,241,0.2)]"
+                          style={{
+                            background: "var(--brand-subtle)",
+                            color: "var(--brand)",
+                          }}
                           title="Copy link"
                         >
                           {copiedId === share.id ? (
-                            <Check size={14} />
+                            <Check size={14} style={{ color: "var(--success)" }} />
                           ) : (
                             <Copy size={14} />
                           )}
                         </button>
                         <button
                           onClick={() => handleRevoke(share.id)}
-                          className="p-1.5 rounded-sm text-system-red hover:bg-system-red/10 transition-colors"
+                          className="p-1.5 rounded-[var(--radius-input)] transition-colors hover:bg-[rgba(239,68,68,0.1)]"
+                          style={{ color: "#ef4444" }}
                           title="Revoke"
                         >
                           <Trash2 size={14} />
@@ -345,7 +399,13 @@ export function ShareDialog({
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
-                          className="dp-input type-caption-1 !py-1 flex-1"
+                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:border-[var(--brand)]"
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-input)",
+                            color: "var(--text)",
+                          }}
                         >
                           {PRESETS.map((preset) => (
                             <option key={preset.label} value={preset.bits}>
@@ -354,13 +414,16 @@ export function ShareDialog({
                           ))}
                         </select>
                         {share.expireDate && (
-                          <span className="type-caption-2 text-label-tertiary flex items-center gap-1">
+                          <span
+                            className="type-caption-2 flex items-center gap-1"
+                            style={{ color: "var(--text-muted)" }}
+                          >
                             <Calendar size={11} />
                             {share.expireDate}
                           </span>
                         )}
                         {share.hasPassword && (
-                          <Lock size={11} className="text-label-tertiary" />
+                          <Lock size={11} style={{ color: "var(--text-muted)" }} />
                         )}
                       </div>
                     </div>
@@ -371,25 +434,38 @@ export function ShareDialog({
           )}
 
           {/* Mode toggle */}
-          <div className="flex gap-2 p-1 bg-surface-secondary rounded-md">
+          <div
+            className="flex gap-2 p-1"
+            style={{ background: "var(--surface-2)", borderRadius: "10px" }}
+          >
             <button
               onClick={() => setMode("person")}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 type-caption-1 rounded-sm transition-colors ${
+              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                 mode === "person"
-                  ? "bg-surface-primary text-accent font-medium shadow-sm"
-                  : "text-label-secondary hover:text-label-primary"
+                  ? "font-medium shadow-sm"
+                  : "text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
               }`}
+              style={
+                mode === "person"
+                  ? { background: "var(--surface)", color: "var(--brand)" }
+                  : undefined
+              }
             >
               <Users size={14} />
               Person
             </button>
             <button
               onClick={() => setMode("link")}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 type-caption-1 rounded-sm transition-colors ${
+              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                 mode === "link"
-                  ? "bg-surface-primary text-accent font-medium shadow-sm"
-                  : "text-label-secondary hover:text-label-primary"
+                  ? "font-medium shadow-sm"
+                  : "text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
               }`}
+              style={
+                mode === "link"
+                  ? { background: "var(--surface)", color: "var(--brand)" }
+                  : undefined
+              }
             >
               <LinkIcon size={14} />
               Link
@@ -402,19 +478,31 @@ export function ShareDialog({
               <>
                 {/* Member picker */}
                 <div className="space-y-2 mb-3">
-                  <label className="type-caption-1 text-label-tertiary">
+                  <label
+                    className="type-caption-1"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     Household member
                   </label>
                   {recipientsLoading ? (
-                    <p className="type-footnote text-label-tertiary py-1">
+                    <p
+                      className="type-footnote py-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       Loading members…
                     </p>
                   ) : recipientsError ? (
-                    <p className="type-footnote text-system-red py-1">
+                    <p
+                      className="type-footnote py-1"
+                      style={{ color: "#ef4444" }}
+                    >
                       {recipientsError}
                     </p>
                   ) : recipients.length === 0 ? (
-                    <p className="type-footnote text-label-tertiary py-1">
+                    <p
+                      className="type-footnote py-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       No other household members yet
                     </p>
                   ) : (
@@ -425,39 +513,56 @@ export function ShareDialog({
                           <button
                             key={r.shareWith}
                             onClick={() => setSelectedRecipient(r.shareWith)}
-                            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-sm text-left transition-colors ${
-                              active
-                                ? "bg-accent-subtle"
-                                : "bg-surface-secondary hover:bg-surface-tertiary"
+                            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--radius-input)] text-left transition-colors ${
+                              active ? "" : "hover:bg-[var(--hover)]"
                             }`}
+                            style={{
+                              background: active
+                                ? "var(--brand-subtle)"
+                                : "var(--surface-2)",
+                            }}
                           >
                             <span
-                              className={`flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0 ${
+                              className="flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0"
+                              style={
                                 active
-                                  ? "bg-accent text-white"
-                                  : "bg-surface-tertiary text-label-secondary"
-                              }`}
+                                  ? { background: "var(--brand)", color: "#fff" }
+                                  : {
+                                      background: "var(--surface)",
+                                      color: "var(--text-muted)",
+                                    }
+                              }
                             >
                               <User size={14} />
                             </span>
                             <span className="flex-1 min-w-0">
                               <span
                                 className={`block type-footnote truncate ${
-                                  active
-                                    ? "text-accent font-medium"
-                                    : "text-label-primary"
+                                  active ? "font-medium" : ""
                                 }`}
+                                style={{
+                                  color: active
+                                    ? "var(--brand)"
+                                    : "var(--text)",
+                                }}
                               >
                                 {r.displayName}
                               </span>
                               {r.email && (
-                                <span className="block type-caption-2 text-label-tertiary truncate">
+                                <span
+                                  className="block type-caption-2 truncate"
+                                  style={{ color: "var(--text-muted)" }}
+                                >
                                   {r.email}
                                 </span>
                               )}
                             </span>
                             {active && (
-                              <Check size={15} className="text-accent flex-shrink-0" />
+                              <Check
+                                size={15}
+                                className="flex-shrink-0"
+                                style={{ color: "var(--brand)" }}
+                              />
                             )}
                           </button>
                         );
@@ -468,23 +573,38 @@ export function ShareDialog({
 
                 {/* Permissions */}
                 <div className="space-y-2 mb-3">
-                  <label className="type-caption-1 text-label-tertiary">
+                  <label
+                    className="type-caption-1"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => (
-                      <button
-                        key={preset.label}
-                        onClick={() => setPermissions(preset.bits)}
-                        className={`flex-1 px-3 py-2 type-caption-1 rounded-sm transition-colors ${
-                          permissions === preset.bits
-                            ? "bg-accent-subtle text-accent font-medium"
-                            : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
+                    {PRESETS.map((preset) => {
+                      const active = permissions === preset.bits;
+                      return (
+                        <button
+                          key={preset.label}
+                          onClick={() => setPermissions(preset.bits)}
+                          className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
+                            active ? "font-medium" : "hover:bg-[var(--hover)]"
+                          }`}
+                          style={
+                            active
+                              ? {
+                                  background: "var(--brand-subtle)",
+                                  color: "var(--brand)",
+                                }
+                              : {
+                                  background: "var(--surface-2)",
+                                  color: "var(--text-muted)",
+                                }
+                          }
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </>
@@ -492,29 +612,47 @@ export function ShareDialog({
               <>
                 {/* Permissions */}
                 <div className="space-y-2 mb-3">
-                  <label className="type-caption-1 text-label-tertiary">
+                  <label
+                    className="type-caption-1"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => (
-                      <button
-                        key={preset.label}
-                        onClick={() => setPermissions(preset.bits)}
-                        className={`flex-1 px-3 py-2 type-caption-1 rounded-sm transition-colors ${
-                          permissions === preset.bits
-                            ? "bg-accent-subtle text-accent font-medium"
-                            : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
+                    {PRESETS.map((preset) => {
+                      const active = permissions === preset.bits;
+                      return (
+                        <button
+                          key={preset.label}
+                          onClick={() => setPermissions(preset.bits)}
+                          className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
+                            active ? "font-medium" : "hover:bg-[var(--hover)]"
+                          }`}
+                          style={
+                            active
+                              ? {
+                                  background: "var(--brand-subtle)",
+                                  color: "var(--brand)",
+                                }
+                              : {
+                                  background: "var(--surface-2)",
+                                  color: "var(--text-muted)",
+                                }
+                          }
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
                 {/* Expiry */}
                 <div className="space-y-1 mb-3">
-                  <label className="type-caption-1 text-label-tertiary flex items-center gap-1.5">
+                  <label
+                    className="type-caption-1 flex items-center gap-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     <Calendar size={12} />
                     Expiration date (optional)
                   </label>
@@ -523,13 +661,22 @@ export function ShareDialog({
                     value={expireDate}
                     onChange={(e) => setExpireDate(e.target.value)}
                     min={new Date().toISOString().split("T")[0]}
-                    className="dp-input type-footnote !py-1.5"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)]"
+                    style={{
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-input)",
+                      color: "var(--text)",
+                    }}
                   />
                 </div>
 
                 {/* Password */}
                 <div className="space-y-1 mb-3">
-                  <label className="type-caption-1 text-label-tertiary flex items-center gap-1.5">
+                  <label
+                    className="type-caption-1 flex items-center gap-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     <Lock size={12} />
                     Password (optional)
                   </label>
@@ -538,13 +685,22 @@ export function ShareDialog({
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Leave blank for no password"
-                    className="dp-input type-footnote !py-1.5"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                    style={{
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-input)",
+                      color: "var(--text)",
+                    }}
                   />
                 </div>
 
                 {/* Note */}
                 <div className="space-y-1 mb-3">
-                  <label className="type-caption-1 text-label-tertiary flex items-center gap-1.5">
+                  <label
+                    className="type-caption-1 flex items-center gap-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     <MessageSquare size={12} />
                     Note (optional)
                   </label>
@@ -553,7 +709,13 @@ export function ShareDialog({
                     onChange={(e) => setNote(e.target.value)}
                     placeholder="What's this link for?"
                     rows={2}
-                    className="dp-input type-footnote !py-1.5"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                    style={{
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-input)",
+                      color: "var(--text)",
+                    }}
                   />
                 </div>
               </>
@@ -561,24 +723,32 @@ export function ShareDialog({
           </div>
 
           {error && (
-            <div className="p-2 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red">
+            <div
+              className="p-2 type-footnote"
+              style={{
+                color: "#ef4444",
+                background: "rgba(239,68,68,0.1)",
+                border: "1px solid rgba(239,68,68,0.2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
               {error}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
-          <button
-            onClick={onClose}
-            className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
-          >
+        <div
+          className="flex items-center justify-end gap-2 px-4 py-3"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
+          <button onClick={onClose} className="btn ghost">
             Close
           </button>
           <button
             onClick={handleCreate}
             disabled={createDisabled}
-            className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn primary"
           >
             {creating ? (
               mode === "person" ? (

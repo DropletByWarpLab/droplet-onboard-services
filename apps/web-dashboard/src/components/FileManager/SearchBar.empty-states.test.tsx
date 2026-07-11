@@ -173,7 +173,10 @@ describe("SearchBar empty-state honesty (WARP-1139)", () => {
     typeQuery("burrito");
 
     await screen.findByText(/burrito text/i, undefined, { timeout: 1500 });
-    const popover = screen.getByText(/burrito text/i).closest(".dp-card");
+    // WARP-1066: the popover chrome moved from the old `.dp-card` utility to
+    // the indigo shell's `.card` component class — the z-40 layering fix
+    // this test guards is unaffected by the rename.
+    const popover = screen.getByText(/burrito text/i).closest(".card");
     expect(popover?.className).toContain("z-40");
   });
 });

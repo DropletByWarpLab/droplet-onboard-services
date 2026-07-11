@@ -105,12 +105,16 @@ export function TrashView({
 
   if (!isLoading && items.length === 0) {
     return (
-      <div className="dp-card py-16 flex flex-col items-center justify-center text-label-tertiary">
-        <Trash2 size={32} className="mb-3 text-label-quaternary" />
-        <p className="type-subheadline">Trash is empty</p>
-        <p className="type-caption-1 mt-1 text-label-quaternary">
-          Deleted files will appear here before they&apos;re permanently removed
-        </p>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <Trash2 size={24} />
+          </span>
+          <p className="eh">Trash is empty</p>
+          <p style={{ fontSize: "13px" }}>
+            Deleted files will appear here before they&apos;re permanently removed
+          </p>
+        </div>
       </div>
     );
   }
@@ -120,13 +124,14 @@ export function TrashView({
       {/* Header row with Empty trash */}
       {items.length > 0 && (
         <div className="flex items-center justify-between mb-3">
-          <p className="type-footnote text-label-tertiary">
+          <p style={{ color: "var(--text-muted)", fontSize: "12.5px" }}>
             {items.length} {items.length === 1 ? "item" : "items"} in trash
           </p>
           <button
             onClick={() => setConfirmEmpty(true)}
             disabled={items.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn ghost sm disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ color: "var(--danger)" }}
           >
             <AlertTriangle size={14} />
             Empty trash
@@ -135,8 +140,11 @@ export function TrashView({
       )}
 
       {/* List */}
-      <div className="dp-group min-h-[200px]">
-        <div className="flex items-center gap-3 px-4 py-2 type-caption-1 text-label-tertiary uppercase tracking-wider">
+      <div className="card overflow-hidden min-h-[200px]" style={{ padding: 0 }}>
+        <div
+          className="flex items-center gap-3 px-4 py-2 uppercase tracking-wider"
+          style={{ color: "var(--text-faint)", fontSize: "11px", borderBottom: "1px solid var(--card-bd)" }}
+        >
           <span className="flex-1">Name</span>
           <span className="w-32 hidden md:block">Original location</span>
           <span className="w-20 text-right hidden sm:block">Size</span>
@@ -145,71 +153,88 @@ export function TrashView({
         </div>
 
         {isLoading && items.length === 0 && (
-          <div className="flex items-center justify-center h-40 text-label-tertiary type-subheadline">
+          <div
+            className="flex items-center justify-center h-40"
+            style={{ color: "var(--text-muted)", fontSize: "13.5px" }}
+          >
             Loading…
           </div>
         )}
 
-        {items.map((item) => {
-          const Icon = getIconForName(item.originalName, item.isDirectory);
-          return (
-            <div
-              key={item.name}
-              className="dp-row group hover:bg-surface-secondary/60 transition-colors"
-            >
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Icon
-                  size={18}
-                  className={item.isDirectory ? "text-system-blue" : "text-label-secondary"}
-                />
-                <span className="type-callout text-label-primary truncate">
-                  {item.originalName}
+        <div className="rows">
+          {items.map((item) => {
+            const Icon = getIconForName(item.originalName, item.isDirectory);
+            return (
+              <div
+                key={item.name}
+                className="flex items-center gap-3 px-4 py-3 min-h-[44px] group transition-colors duration-200 ease-smooth hover:bg-[var(--hover)]"
+              >
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <Icon
+                    size={18}
+                    style={{ color: item.isDirectory ? "var(--brand)" : "var(--text-muted)" }}
+                  />
+                  <span
+                    className="truncate"
+                    style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
+                  >
+                    {item.originalName}
+                  </span>
+                </div>
+
+                <span
+                  className="w-32 truncate hidden md:block"
+                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+                >
+                  {item.originalLocation}
                 </span>
-              </div>
 
-              <span className="type-caption-1 text-label-tertiary w-32 truncate hidden md:block">
-                {item.originalLocation}
-              </span>
-
-              <span className="type-caption-1 text-label-tertiary w-20 text-right hidden sm:block">
-                {item.isDirectory ? "" : formatSize(item.size)}
-              </span>
-
-              <span className="type-caption-1 text-label-tertiary w-28 text-right hidden lg:block">
-                {formatDate(item.deletedAt)}
-              </span>
-
-              {/*
-                WARP-300: row actions are always rendered (no opacity-0
-                hover gate) so touch + keyboard users can discover the
-                actions. p-2.5 → 34 px hit-target, clears the 32 px
-                ui-ux floor. aria-labels name the file so screen-reader
-                users hear which entry they're about to restore or
-                permanently delete.
-              */}
-              <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
-                <button
-                  onClick={() => handleRestore(item)}
-                  disabled={busy === item.name}
-                  className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
-                  aria-label={`Restore ${item.originalName}`}
-                  title="Restore"
+                <span
+                  className="w-20 text-right hidden sm:block"
+                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
                 >
-                  <RotateCcw size={14} />
-                </button>
-                <button
-                  onClick={() => handleDelete(item)}
-                  disabled={busy === item.name}
-                  className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
-                  aria-label={`Delete forever ${item.originalName}`}
-                  title="Delete forever"
+                  {item.isDirectory ? "" : formatSize(item.size)}
+                </span>
+
+                <span
+                  className="w-28 text-right hidden lg:block"
+                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
                 >
-                  <Trash2 size={14} />
-                </button>
+                  {formatDate(item.deletedAt)}
+                </span>
+
+                {/*
+                  WARP-300: row actions are always rendered (no opacity-0
+                  hover gate) so touch + keyboard users can discover the
+                  actions. p-2.5 → 34 px hit-target, clears the 32 px
+                  ui-ux floor. aria-labels name the file so screen-reader
+                  users hear which entry they're about to restore or
+                  permanently delete.
+                */}
+                <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
+                  <button
+                    onClick={() => handleRestore(item)}
+                    disabled={busy === item.name}
+                    className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors disabled:opacity-50"
+                    aria-label={`Restore ${item.originalName}`}
+                    title="Restore"
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                  <button
+                    onClick={() => handleDelete(item)}
+                    disabled={busy === item.name}
+                    className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors disabled:opacity-50"
+                    aria-label={`Delete forever ${item.originalName}`}
+                    title="Delete forever"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
 
       <ConfirmDialog

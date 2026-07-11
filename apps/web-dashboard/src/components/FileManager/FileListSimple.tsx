@@ -62,7 +62,10 @@ export function FileListSimple({
 }: FileListSimpleProps) {
   if (isLoading && files.length === 0) {
     return (
-      <div className="dp-group min-h-[240px] flex items-center justify-center text-label-tertiary type-subheadline">
+      <div
+        className="card flex items-center justify-center min-h-[240px]"
+        style={{ color: "var(--text-muted)", fontSize: "13.5px" }}
+      >
         Loading…
       </div>
     );
@@ -70,95 +73,113 @@ export function FileListSimple({
 
   if (files.length === 0) {
     return (
-      <div className="dp-card py-16 flex flex-col items-center justify-center text-label-tertiary">
-        {EmptyIcon && <EmptyIcon size={32} className="mb-3 text-label-quaternary" />}
-        <p className="type-subheadline">{emptyTitle}</p>
-        {emptyDescription && (
-          <p className="type-caption-1 mt-1 text-label-quaternary text-center max-w-xs">
-            {emptyDescription}
-          </p>
-        )}
+      <div className="card" style={{ padding: 0 }}>
+        <div className="empty">
+          {EmptyIcon && (
+            <span className="ei">
+              <EmptyIcon size={24} />
+            </span>
+          )}
+          <p className="eh">{emptyTitle}</p>
+          {emptyDescription && (
+            <p style={{ maxWidth: "22rem", fontSize: "13px" }}>{emptyDescription}</p>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="dp-group">
-      {files.map((file) => {
-        const parent = file.path.replace(/\/[^/]*$/, "") || "/";
-        return (
-          <div
-            key={file.path}
-            className="flex items-center gap-3 px-4 py-2.5 min-h-[52px] group hover:bg-surface-secondary/60 cursor-pointer transition-colors"
-            onClick={() => onOpen(file)}
-          >
-            <Thumbnail file={file} size={36} className="flex-shrink-0" />
-            <div className="flex-1 min-w-0">
-              <p className="type-callout text-label-primary truncate">
-                {file.name}
-              </p>
-              {showLocation && (
-                <p className="type-caption-2 text-label-tertiary truncate">
-                  {parent}
+    <div className="card overflow-hidden" style={{ padding: 0 }}>
+      <div className="rows">
+        {files.map((file) => {
+          const parent = file.path.replace(/\/[^/]*$/, "") || "/";
+          return (
+            <div
+              key={file.path}
+              className="flex items-center gap-3 px-4 py-2.5 min-h-[52px] group cursor-pointer transition-colors duration-200 ease-smooth hover:bg-[var(--hover)]"
+              onClick={() => onOpen(file)}
+            >
+              <Thumbnail file={file} size={36} className="flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p
+                  className="truncate"
+                  style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
+                >
+                  {file.name}
                 </p>
-              )}
-            </div>
-            <span className="type-caption-1 text-label-tertiary hidden sm:inline-block w-20 text-right flex-shrink-0">
-              {file.isDirectory ? "" : formatSize(file.size)}
-            </span>
-            <span className="type-caption-1 text-label-tertiary hidden md:inline-block w-28 text-right flex-shrink-0">
-              {formatDate(file.modifiedAt)}
-            </span>
-            {/*
-              WARP-300: row actions are always rendered (no opacity-0
-              hover gate) so touch + keyboard users can discover them.
-              p-2.5 → 34 px hit-target, clears the 32 px ui-ux floor.
-              aria-labels name the file the action targets so
-              screen-reader users hear which entry they're acting on
-              (Favorites, Recents, and Shared-with-me all share this
-              listing).
-            */}
-            <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
-              {showStar && (
-                <div onClick={(e) => e.stopPropagation()}>
-                  <StarButton
-                    path={file.path}
-                    favorited={true}
-                    onToggle={(next) => {
-                      if (!next) onStarChanged?.();
+                {showLocation && (
+                  <p
+                    className="truncate"
+                    style={{ color: "var(--text-muted)", fontSize: "12px", marginTop: "1px" }}
+                  >
+                    {parent}
+                  </p>
+                )}
+              </div>
+              <span
+                className="hidden sm:inline-block w-20 text-right flex-shrink-0"
+                style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+              >
+                {file.isDirectory ? "" : formatSize(file.size)}
+              </span>
+              <span
+                className="hidden md:inline-block w-28 text-right flex-shrink-0"
+                style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+              >
+                {formatDate(file.modifiedAt)}
+              </span>
+              {/*
+                WARP-300: row actions are always rendered (no opacity-0
+                hover gate) so touch + keyboard users can discover them.
+                p-2.5 → 34 px hit-target, clears the 32 px ui-ux floor.
+                aria-labels name the file the action targets so
+                screen-reader users hear which entry they're acting on
+                (Favorites, Recents, and Shared-with-me all share this
+                listing).
+              */}
+              <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
+                {showStar && (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <StarButton
+                      path={file.path}
+                      favorited={true}
+                      onToggle={(next) => {
+                        if (!next) onStarChanged?.();
+                      }}
+                    />
+                  </div>
+                )}
+                {onDownload && !file.isDirectory && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDownload(file);
                     }}
-                  />
-                </div>
-              )}
-              {onDownload && !file.isDirectory && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownload(file);
-                  }}
-                  className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                  aria-label={`Download ${file.name}`}
-                >
-                  <Download size={14} />
-                </button>
-              )}
-              {onRemove && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRemove(file);
-                  }}
-                  className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                  aria-label={`${removeTooltip || "Remove"} ${file.name}`}
-                  title={removeTooltip}
-                >
-                  <X size={14} />
-                </button>
-              )}
+                    className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
+                    aria-label={`Download ${file.name}`}
+                  >
+                    <Download size={14} />
+                  </button>
+                )}
+                {onRemove && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRemove(file);
+                    }}
+                    className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
+                    aria-label={`${removeTooltip || "Remove"} ${file.name}`}
+                    title={removeTooltip}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }

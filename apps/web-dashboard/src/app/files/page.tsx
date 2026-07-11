@@ -559,6 +559,7 @@ export default function FilesPage() {
       icon={<Folder size={15} />}
       label="Files"
       title="Files"
+      sub="Everything on your Droplet, indexed locally for instant, private search."
       actions={filesActions}
     >
       {/* Search bar.
@@ -625,7 +626,14 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="dp-input flex-1"
+            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)]"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+              fontSize: "13.5px",
+            }}
           />
           <button onClick={handleCreateFolder} className="btn primary" type="button">
             Create
@@ -661,21 +669,44 @@ export default function FilesPage() {
 
       {/* Status messages */}
       {uploadProgress && (
-        <div className="mb-4 p-3 bg-accent-subtle border border-accent/20 rounded type-footnote text-accent">
+        <div
+          className="mb-4 p-3 rounded type-footnote"
+          style={{
+            background: "var(--brand-subtle)",
+            border: "1px solid color-mix(in srgb, var(--brand) 20%, transparent)",
+            color: "var(--brand)",
+          }}
+        >
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+            <div
+              className="w-4 h-4 border-2 rounded-full animate-spin"
+              style={{
+                borderColor: "color-mix(in srgb, var(--brand) 30%, transparent)",
+                borderTopColor: "var(--brand)",
+              }}
+            />
             {uploadProgress} {uploadPercent > 0 && `${uploadPercent}%`}
           </div>
-          <div className="h-1.5 bg-accent/15 rounded-full overflow-hidden">
+          <div
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ background: "var(--inset)" }}
+          >
             <div
-              className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
-              style={{ width: `${uploadPercent}%` }}
+              className="h-full rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${uploadPercent}%`, background: "var(--brand)" }}
             />
           </div>
         </div>
       )}
       {error && (
-        <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
+        <div
+          className="mb-4 p-3 rounded type-footnote flex items-center justify-between"
+          style={{
+            background: "rgba(239,68,68,0.1)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            color: "#ef4444",
+          }}
+        >
           <span>{error}</span>
           <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">
             <X size={14} />
@@ -687,8 +718,14 @@ export default function FilesPage() {
         {/* File list */}
         <div className="flex-1 min-w-0">
           <UploadZone onUpload={handleUpload}>
-            <div className="dp-group min-h-[300px]">
-              <div className="flex items-center gap-3 px-4 py-2 type-caption-1 text-label-tertiary uppercase tracking-wider">
+            <div
+              className="card overflow-hidden min-h-[300px]"
+              style={{ padding: 0 }}
+            >
+              <div
+                className="flex items-center gap-3 px-4 py-2 type-caption-1 uppercase tracking-wider"
+                style={{ color: "var(--text-faint)", borderBottom: "1px solid var(--card-bd)" }}
+              >
                 <span className="flex-1">Name</span>
                 <span className="w-20 text-right hidden sm:block">Size</span>
                 <span className="w-32 text-right hidden md:block">Modified</span>
@@ -696,34 +733,42 @@ export default function FilesPage() {
               </div>
 
               {isLoading ? (
-                <div className="flex items-center justify-center h-48 text-label-tertiary type-subheadline">
+                <div
+                  className="flex items-center justify-center h-48 type-subheadline"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   Loading...
                 </div>
               ) : files.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-48 text-label-tertiary">
+                <div
+                  className="flex flex-col items-center justify-center h-48"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   <p className="type-subheadline mb-1">This folder is empty</p>
-                  <p className="type-caption-1 text-label-quaternary">
+                  <p className="type-caption-1" style={{ color: "var(--text-faint)" }}>
                     Drag &amp; drop files here, or click <strong>Upload</strong> above
                   </p>
                 </div>
               ) : (
-                files.map((file) => (
-                  <FileRow
-                    key={file.path}
-                    file={file}
-                    isSelected={fm.isSelected(file.path)}
-                    isRenaming={fm.renamingPath === file.path}
-                    favoritedPaths={favoritedPaths}
-                    onSelect={(e) => handleRowSelect(file, e)}
-                    onOpen={() => handleRowOpen(file)}
-                    onDownload={() => handleDownload(file.path)}
-                    onDelete={() => handleDelete(file.path)}
-                    onRename={(name) => handleRenameCommit(file, name)}
-                    onCancelRename={fm.endRename}
-                    onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
-                    onFavoriteChanged={refreshFavorites}
-                  />
-                ))
+                <div className="rows">
+                  {files.map((file) => (
+                    <FileRow
+                      key={file.path}
+                      file={file}
+                      isSelected={fm.isSelected(file.path)}
+                      isRenaming={fm.renamingPath === file.path}
+                      favoritedPaths={favoritedPaths}
+                      onSelect={(e) => handleRowSelect(file, e)}
+                      onOpen={() => handleRowOpen(file)}
+                      onDownload={() => handleDownload(file.path)}
+                      onDelete={() => handleDelete(file.path)}
+                      onRename={(name) => handleRenameCommit(file, name)}
+                      onCancelRename={fm.endRename}
+                      onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
+                      onFavoriteChanged={refreshFavorites}
+                    />
+                  ))}
+                </div>
               )}
             </div>
           </UploadZone>
@@ -734,7 +779,10 @@ export default function FilesPage() {
           <div className="hidden lg:block w-72 flex-shrink-0">
             <div className="card sticky top-6 space-y-4">
               <div className="flex items-center justify-between gap-2">
-                <h3 className="type-headline text-label-primary truncate flex-1">
+                <h3
+                  className="type-headline truncate flex-1"
+                  style={{ color: "var(--text)" }}
+                >
                   {selectedFile.name}
                 </h3>
                 <StarButton
@@ -747,7 +795,7 @@ export default function FilesPage() {
                 />
                 <button
                   onClick={() => setSelectedFile(null)}
-                  className="p-1 text-label-tertiary hover:text-label-primary"
+                  className="p-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
                 >
                   <X size={16} />
                 </button>
@@ -760,16 +808,16 @@ export default function FilesPage() {
 
               <div className="space-y-2">
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Size</span>
-                  <span className="text-label-primary">{formatBytes(selectedFile.size)}</span>
+                  <span style={{ color: "var(--text-muted)" }}>Size</span>
+                  <span style={{ color: "var(--text)" }}>{formatBytes(selectedFile.size)}</span>
                 </div>
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Type</span>
-                  <span className="text-label-primary">{selectedFile.mimeType || "Unknown"}</span>
+                  <span style={{ color: "var(--text-muted)" }}>Type</span>
+                  <span style={{ color: "var(--text)" }}>{selectedFile.mimeType || "Unknown"}</span>
                 </div>
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Modified</span>
-                  <span className="text-label-primary">
+                  <span style={{ color: "var(--text-muted)" }}>Modified</span>
+                  <span style={{ color: "var(--text)" }}>
                     {new Date(selectedFile.modifiedAt).toLocaleDateString()}
                   </span>
                 </div>

@@ -42,7 +42,8 @@ export function Thumbnail({ file, size = 48, className = "" }: ThumbnailProps) {
     return (
       <Folder
         size={size * 0.6}
-        className={`text-system-blue ${className}`}
+        style={{ color: "var(--brand)" }}
+        className={className}
       />
     );
   }
@@ -53,8 +54,8 @@ export function Thumbnail({ file, size = 48, className = "" }: ThumbnailProps) {
 
   return (
     <div
-      className={`relative overflow-hidden rounded bg-surface-secondary ${className}`}
-      style={{ width: size, height: size }}
+      className={`relative overflow-hidden rounded ${className}`}
+      style={{ width: size, height: size, background: "var(--inset)" }}
     >
       {!loaded && (
         <div className="absolute inset-0 animate-shimmer" />
@@ -86,20 +87,26 @@ function FallbackIcon({
   className: string;
 }) {
   let Icon: typeof File = File;
-  let color = "text-label-secondary";
+  // In-scope indigo tokens are applied via `style` (CSS vars can't live in a
+  // className); the other mime accents stay as class-based system colors.
+  let colorStyle: string | undefined = "var(--text-muted)";
+  let colorClass = "";
 
   if (mime.startsWith("image/")) {
     Icon = ImageIcon;
-    color = "text-system-blue";
+    colorStyle = "var(--brand)";
   } else if (mime.startsWith("video/")) {
     Icon = Film;
-    color = "text-system-red";
+    colorStyle = undefined;
+    colorClass = "text-system-red";
   } else if (mime.startsWith("audio/")) {
     Icon = Music;
-    color = "text-system-green";
+    colorStyle = undefined;
+    colorClass = "text-system-green";
   } else if (mime.startsWith("text/") || mime === "application/pdf") {
     Icon = FileText;
-    color = "text-system-orange";
+    colorStyle = undefined;
+    colorClass = "text-system-orange";
   } else if (
     mime.includes("zip") ||
     mime.includes("tar") ||
@@ -108,5 +115,11 @@ function FallbackIcon({
     Icon = Archive;
   }
 
-  return <Icon size={size} className={`${color} ${className}`} />;
+  return (
+    <Icon
+      size={size}
+      style={colorStyle ? { color: colorStyle } : undefined}
+      className={`${colorClass} ${className}`}
+    />
+  );
 }

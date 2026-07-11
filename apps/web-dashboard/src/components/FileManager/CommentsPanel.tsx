@@ -31,8 +31,8 @@ function formatWhen(iso: string): string {
 /**
  * WARP-881 / WS-3 — file comments section for the Files detail panel.
  *
- * Sibling style of VersionHistoryPanel: `pt-4 border-t border-separator`
- * header, `type-footnote` title, design tokens only. Reads are user-scoped
+ * Sibling style of VersionHistoryPanel: hairline-topped `.sect` header,
+ * indigo tokens only. Reads are user-scoped
  * server-side (family sees only its own; owner/admin see all). The delete
  * affordance is shown only when the comment is the viewer's own OR the
  * viewer is owner/admin — mirroring the server's author-or-privileged guard
@@ -77,35 +77,37 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
   };
 
   return (
-    <div className="pt-4 border-t border-separator">
-      <div className="flex items-center gap-2 mb-3">
-        <MessageSquare size={14} className="text-label-tertiary" />
-        <h4 className="type-footnote text-label-secondary font-medium">
-          Comments
-        </h4>
+    <div className="pt-4" style={{ borderTop: "1px solid var(--card-bd)" }}>
+      <div className="sect" style={{ margin: "0 0 12px" }}>
+        <MessageSquare size={14} style={{ color: "var(--text-muted)" }} />
+        <h2>Comments</h2>
       </div>
 
       {isGuest ? (
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           Comments aren&apos;t available for guests.
         </p>
       ) : (
         <>
           {error && (
-            <p className="type-caption-1 text-system-red mb-2">
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
               {translateError(error, "files")}
             </p>
           )}
           {actionError && (
-            <p className="type-caption-1 text-system-red mb-2">{actionError}</p>
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+              {actionError}
+            </p>
           )}
 
           {isLoading && comments.length === 0 && !error && (
-            <p className="type-caption-1 text-label-tertiary">Loading…</p>
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+              Loading…
+            </p>
           )}
 
           {!isLoading && comments.length === 0 && !error && (
-            <p className="type-caption-1 text-label-tertiary mb-3">
+            <p className="type-caption-1 mb-3" style={{ color: "var(--text-muted)" }}>
               No comments yet. Start the conversation about this file.
             </p>
           )}
@@ -115,17 +117,24 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
               {comments.map((c) => (
                 <li
                   key={c.id}
-                  className="group rounded-md bg-surface-secondary px-2.5 py-2"
+                  className="group px-2.5 py-2"
+                  style={{
+                    background: "var(--surface-2)",
+                    borderRadius: "var(--radius-input)",
+                  }}
                 >
                   <div className="flex items-start gap-2">
-                    <p className="flex-1 min-w-0 type-caption-1 text-label-primary whitespace-pre-wrap break-words">
+                    <p
+                      className="flex-1 min-w-0 type-caption-1 whitespace-pre-wrap break-words"
+                      style={{ color: "var(--text)" }}
+                    >
                       {c.body}
                     </p>
                     {canDelete(c) && (
                       <button
                         type="button"
                         onClick={() => onRemove(c.id)}
-                        className="shrink-0 p-1 rounded-full text-label-tertiary opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-system-red transition-all"
+                        className="shrink-0 p-1 rounded-full opacity-0 group-hover:opacity-100 focus:opacity-100 text-[color:var(--text-muted)] hover:text-[color:var(--danger)] transition-all"
                         title="Delete comment"
                         aria-label="Delete comment"
                       >
@@ -133,7 +142,13 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
                       </button>
                     )}
                   </div>
-                  <p className="type-caption-2 text-label-tertiary mt-1">
+                  <p
+                    className="type-caption-2 mt-1"
+                    style={{
+                      color: "var(--text-faint)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
                     {formatWhen(c.createdAt)}
                   </p>
                 </li>
@@ -154,7 +169,12 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
             }}
             rows={2}
             placeholder="Add a comment…"
-            className="w-full resize-none px-2.5 py-2 rounded-md bg-surface-secondary border border-separator type-caption-1 text-label-primary placeholder:text-label-tertiary focus:outline-none focus:border-accent transition-colors"
+            className="w-full resize-none px-2.5 py-2 type-caption-1 border border-[color:var(--border)] focus:border-[color:var(--brand)] focus:outline-none transition-colors"
+            style={{
+              background: "var(--surface)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
           />
           <div className="flex justify-end mt-2">
             <button

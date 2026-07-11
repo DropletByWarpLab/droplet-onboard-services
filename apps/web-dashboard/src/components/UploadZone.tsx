@@ -63,10 +63,23 @@ export function UploadZone({ onUpload, children }: UploadZoneProps) {
       />
 
       {isDragging && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-accent/5 border-2 border-dashed border-accent rounded-lg transition-all duration-200">
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-200"
+          style={{
+            background: "var(--brand-subtle)",
+            border: "2px dashed var(--brand)",
+            borderRadius: "var(--radius-card)",
+          }}
+        >
           <div className="text-center">
-            <Upload size={32} className="mx-auto text-accent mb-2" />
-            <p className="type-subheadline text-accent">Drop files to upload</p>
+            <Upload
+              size={32}
+              className="mx-auto mb-2"
+              style={{ color: "var(--brand)" }}
+            />
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
+              Drop files to upload
+            </p>
           </div>
         </div>
       )}
@@ -74,12 +87,11 @@ export function UploadZone({ onUpload, children }: UploadZoneProps) {
   );
 }
 
+// Rendered only inside ShellPage's `.phead-actions` slot on /files, so the
+// indigo `.btn` classes (scoped under `.droplet-shell`) always apply.
 export function UploadButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px]"
-    >
+    <button onClick={onClick} className="btn primary" type="button">
       <Upload size={14} />
       Upload
     </button>

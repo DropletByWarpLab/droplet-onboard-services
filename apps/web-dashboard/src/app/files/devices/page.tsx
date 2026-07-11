@@ -119,9 +119,9 @@ export default function SyncDevicesPage() {
 
             {/* Revoked devices */}
             {revokedItems.length > 0 && (
-              <section className="mt-8 pt-6 border-t border-separator">
+              <section className="mt-8 pt-6 border-t border-[color:var(--border)]">
                 <details>
-                  <summary className="type-caption-1 text-label-tertiary cursor-pointer hover:text-label-secondary">
+                  <summary className="type-caption-1 text-[color:var(--text-muted)] cursor-pointer hover:text-[color:var(--text)]">
                     {revokedItems.length} revoked device
                     {revokedItems.length !== 1 ? "s" : ""}
                   </summary>
