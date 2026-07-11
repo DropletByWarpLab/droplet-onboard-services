@@ -123,6 +123,14 @@ import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
 
+// data (WARP-899/WARP-900) — encode/decode, hashing, format conversion.
+// All Tier-1 read/pure-computation: no I/O, no app secrets, no network egress.
+import encodeText from "./handlers/data/encode-text.js";
+import decodeText from "./handlers/data/decode-text.js";
+import hashText from "./handlers/data/hash-text.js";
+import convertDataFormat from "./handlers/data/convert-format.js";
+import formatJson from "./handlers/data/format-json.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -229,6 +237,13 @@ const allTools: Tool[] = [
   erpScheduleAppointment,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
+  // WARP-899/WARP-900: data-utility domain (encode/decode, hashing, format
+  // conversion) — all Tier-1 read/pure-computation.
+  encodeText,
+  decodeText,
+  hashText,
+  convertDataFormat,
+  formatJson,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
