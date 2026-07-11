@@ -11,6 +11,13 @@
  * token has to land in design-and-style first (`npm run tokens:sync` refreshes
  * the lock).
  *
+ * The scanner is depth-aware and string-safe (ported from the canon repo's
+ * scripts/check-drift.mjs after adversarial review): contract blocks may live
+ * at top level or under @layer, and a locked property declared ANYWHERE else
+ * (@media, a compound like `:root.dark`, any other selector) fails as a
+ * cascade override — those win in the browser while the contract blocks still
+ * look clean.
+ *
  * Path resolution uses CommonJS `__dirname` (NOT `import.meta.url`), which is
  * the Windows-safe pattern other source-reading guards in this suite use.
  */
@@ -22,38 +29,88 @@ import { resolve } from "node:path";
 import lock from "@/lib/design-tokens.lock.json";
 
 const SRC_ROOT = resolve(__dirname, "..");
+const rawCss = readFileSync(resolve(SRC_ROOT, "app", "globals.css"), "utf8");
 
-const css = readFileSync(resolve(SRC_ROOT, "app", "globals.css"), "utf8")
-  // Strip comments so commented-out declarations never count.
-  .replace(/\/\*[\s\S]*?\*\//g, "");
+interface Decl {
+  prop: string;
+  value: string;
+  stack: string[];
+}
 
-/**
- * Collect custom properties from every top-level block whose selector list
- * contains `selector` as a standalone selector. Multiple blocks merge (last
- * declaration wins), matching the cascade.
- */
-function collectVars(selector: string): Record<string, string> {
-  const vars: Record<string, string> = {};
-  let idx = 0;
-  while (idx < css.length) {
-    const open = css.indexOf("{", idx);
-    if (open === -1) break;
-    const prevClose = css.lastIndexOf("}", open);
-    // Selector text = since the previous `}` (or start), minus any preceding
-    // `;`-terminated statements (@tailwind, @import, declarations).
-    const selText = (css.slice(prevClose + 1, open).split(";").pop() ?? "").trim();
-    const close = css.indexOf("}", open);
-    if (close === -1) break;
-    if (selText.split(",").some((s) => s.trim() === selector)) {
-      const body = css.slice(open + 1, close);
-      for (const m of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
-        vars[m[1]] = m[2].trim().replace(/\s+/g, " ");
+const S_SEMI = String.fromCharCode(1);
+const S_OPEN = String.fromCharCode(2);
+const S_CLOSE = String.fromCharCode(3);
+const unmask = (s: string): string =>
+  s.replaceAll(S_SEMI, ";").replaceAll(S_OPEN, "{").replaceAll(S_CLOSE, "}");
+
+/** Every custom-property declaration in the sheet, with its block ancestry. */
+function scanCss(source: string): Decl[] {
+  // Strip comments, then mask structural chars inside string literals so the
+  // block scanner can't be derailed by e.g. content: "}".
+  const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  let masked = "";
+  let quote: string | null = null;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (quote) {
+      if (ch === "\\") {
+        masked += ch + (css[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      masked += ch === ";" ? S_SEMI : ch === "{" ? S_OPEN : ch === "}" ? S_CLOSE : ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    masked += ch;
+  }
+
+  const decls: Decl[] = [];
+  const stack: string[] = [];
+  let buf = "";
+
+  const flushDecls = (text: string): void => {
+    for (const seg of text.split(";")) {
+      const m = /^\s*(--[\w-]+)\s*:\s*([\s\S]+?)\s*$/.exec(seg);
+      if (m) {
+        decls.push({
+          prop: m[1],
+          value: unmask(m[2]).trim().replace(/\s+/g, " "),
+          stack: [...stack],
+        });
       }
     }
-    idx = close + 1;
+  };
+
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === "{") {
+      const parts = buf.split(";");
+      const selector = (parts.pop() ?? "").trim();
+      flushDecls(parts.join(";")); // declarations preceding a nested block
+      stack.push(selector);
+      buf = "";
+    } else if (ch === "}") {
+      flushDecls(buf);
+      stack.pop();
+      buf = "";
+    } else {
+      buf += ch;
+    }
   }
-  return vars;
+  flushDecls(buf);
+  return decls;
 }
+
+const matchesSelector = (selectorList: string, target: string): boolean =>
+  selectorList.split(",").some((s) => s.trim() === target);
+
+/** Contract scope: the target selector, wrapped by nothing or only @layer. */
+const isContractStack = (stack: string[], target: string): boolean =>
+  stack.length >= 1 &&
+  matchesSelector(stack[stack.length - 1], target) &&
+  stack.slice(0, -1).every((s) => s.startsWith("@layer"));
 
 const scopes: ReadonlyArray<{ name: string; selector: string; expected: Record<string, string> }> = [
   { name: ":root", selector: ":root", expected: lock.root },
@@ -62,10 +119,16 @@ const scopes: ReadonlyArray<{ name: string; selector: string; expected: Record<s
   { name: '[data-density="roomy"]', selector: '[data-density="roomy"]', expected: lock.density.roomy },
 ];
 
+const allDecls = scanCss(rawCss);
+const lockedProps = new Set(scopes.flatMap(({ expected }) => Object.keys(expected)));
+
 describe("WARP-1277 design-token drift gate (globals.css ↔ design-and-style canon)", () => {
   for (const { name, selector, expected } of scopes) {
     it(`${name} custom properties match the canon exactly (both directions)`, () => {
-      const actual = collectVars(selector);
+      const actual: Record<string, string> = {};
+      for (const d of allDecls) {
+        if (isContractStack(d.stack, selector)) actual[d.prop] = d.value; // last wins, like the cascade
+      }
       // toEqual gives a readable per-property diff on failure. A missing,
       // drifted, OR extra property fails — extra means the token needs to
       // land in DropletByWarpLab/design-and-style tokens/ first, then
@@ -73,6 +136,14 @@ describe("WARP-1277 design-token drift gate (globals.css ↔ design-and-style ca
       expect(actual).toEqual(expected);
     });
   }
+
+  it("no locked property is re-declared outside the contract scopes (cascade override)", () => {
+    const overrides = allDecls
+      .filter((d) => lockedProps.has(d.prop))
+      .filter((d) => !scopes.some(({ selector }) => isContractStack(d.stack, selector)))
+      .map((d) => `${d.prop} at [${d.stack.join(" > ") || "(top level)"}] = ${d.value}`);
+    expect(overrides).toEqual([]);
+  });
 
   it("the lock itself is non-trivial (sanity: refuses an empty vendored file)", () => {
     expect(Object.keys(lock.root).length).toBeGreaterThan(30);
