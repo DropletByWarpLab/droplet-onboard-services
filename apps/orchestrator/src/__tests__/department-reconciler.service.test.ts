@@ -1,0 +1,488 @@
+/**
+ * WARP-1257 (T5) — department-reconciler.service unit tests.
+ *
+ * Mocks the NC client modules + activity.singleton, and a minimal
+ * in-memory Prisma stub covering Department / DepartmentMembership /
+ * User, mirroring the guest-expiry-sweep.test.ts pattern.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const {
+  ncEnsureGroupMock,
+  gfListFoldersMock,
+  gfCreateFolderMock,
+  gfDeleteFolderMock,
+  gfAddGroupMock,
+  gfRemoveGroupMock,
+  gfSetGroupPermissionsMock,
+  gfSetQuotaMock,
+  ncAddUserToGroupMock,
+  ncRemoveUserFromGroupMock,
+  recordActivityMock,
+} = vi.hoisted(() => ({
+  ncEnsureGroupMock: vi.fn().mockResolvedValue(undefined),
+  gfListFoldersMock: vi.fn().mockResolvedValue([]),
+  gfCreateFolderMock: vi.fn().mockResolvedValue(42),
+  gfDeleteFolderMock: vi.fn().mockResolvedValue(undefined),
+  gfAddGroupMock: vi.fn().mockResolvedValue(undefined),
+  gfRemoveGroupMock: vi.fn().mockResolvedValue(undefined),
+  gfSetGroupPermissionsMock: vi.fn().mockResolvedValue(undefined),
+  gfSetQuotaMock: vi.fn().mockResolvedValue(undefined),
+  ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
+  ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncEnsureGroup: ncEnsureGroupMock,
+}));
+
+vi.mock("../services/nextcloud-groups.client.js", () => ({
+  gfListFolders: gfListFoldersMock,
+  gfCreateFolder: gfCreateFolderMock,
+  gfDeleteFolder: gfDeleteFolderMock,
+  gfAddGroup: gfAddGroupMock,
+  gfRemoveGroup: gfRemoveGroupMock,
+  gfSetGroupPermissions: gfSetGroupPermissionsMock,
+  gfSetQuota: gfSetQuotaMock,
+  ncAddUserToGroup: ncAddUserToGroupMock,
+  ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
+}));
+
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
+import {
+  reconcileDepartments,
+  _resetReconcileKickForTests,
+} from "../services/department-reconciler.service.js";
+import { DROPLET_ADMINS_GROUP, MASK_ADMIN } from "../services/department-provisioner.service.js";
+
+interface FakeDepartment {
+  id: string;
+  name: string;
+  slug: string;
+  parentId: string | null;
+  kind: "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
+  state: string;
+  provisionError: string | null;
+  ncGroupRw: string | null;
+  ncGroupRo: string | null;
+  ncGroupfolderId: number | null;
+  quotaBytes: bigint | null;
+  archivedAt: Date | null;
+}
+
+interface FakeMembership {
+  id: string;
+  departmentId: string;
+  userId: string;
+  right: "reader" | "contributor" | "manager";
+  syncState: string;
+  syncError: string | null;
+  ncPermissionMask: number | null;
+}
+
+interface FakeUser {
+  id: string;
+  nextcloudUsername: string | null;
+}
+
+function dept(overrides: Partial<FakeDepartment>): FakeDepartment {
+  return {
+    id: "dept-1",
+    name: "Engineering",
+    slug: "engineering",
+    parentId: null,
+    kind: "DEPARTMENT",
+    state: "pending",
+    provisionError: null,
+    ncGroupRw: null,
+    ncGroupRo: null,
+    ncGroupfolderId: null,
+    quotaBytes: null,
+    archivedAt: null,
+    ...overrides,
+  };
+}
+
+function membership(overrides: Partial<FakeMembership>): FakeMembership {
+  return {
+    id: "mem-1",
+    departmentId: "dept-1",
+    userId: "user-1",
+    right: "contributor",
+    syncState: "pending",
+    syncError: null,
+    ncPermissionMask: null,
+    ...overrides,
+  };
+}
+
+function buildPrisma(
+  departments: FakeDepartment[],
+  memberships: FakeMembership[] = [],
+  users: FakeUser[] = [],
+) {
+  const deptRows = new Map<string, FakeDepartment>(departments.map((d) => [d.id, d]));
+  const memRows = new Map<string, FakeMembership>(memberships.map((m) => [m.id, m]));
+  const userRows = new Map<string, FakeUser>(users.map((u) => [u.id, u]));
+
+  return {
+    deptRows,
+    memRows,
+    userRows,
+    department: {
+      findUnique: vi.fn(
+        async ({
+          where: { id },
+          select,
+        }: {
+          where: { id: string };
+          select?: Record<string, boolean>;
+        }) => {
+          const row = deptRows.get(id);
+          if (!row) return null;
+          if (!select) return { ...row };
+          const projected: Record<string, unknown> = {};
+          for (const key of Object.keys(select)) {
+            projected[key] = (row as any)[key];
+          }
+          return projected;
+        },
+      ),
+      findMany: vi.fn(
+        async ({
+          where,
+          select,
+        }: {
+          where: { state: { in: string[] } | string };
+          select?: Record<string, boolean>;
+        }) => {
+          const wantedStates =
+            typeof where.state === "string" ? [where.state] : where.state.in;
+          const matches = [...deptRows.values()].filter((d) =>
+            wantedStates.includes(d.state),
+          );
+          if (!select) return matches.map((d) => ({ ...d }));
+          return matches.map((d) => {
+            const projected: Record<string, unknown> = {};
+            for (const key of Object.keys(select)) {
+              projected[key] = (d as any)[key];
+            }
+            return projected;
+          });
+        },
+      ),
+      update: vi.fn(
+        async ({
+          where: { id },
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<FakeDepartment>;
+        }) => {
+          const row = deptRows.get(id);
+          if (!row) throw new Error(`no such department ${id}`);
+          Object.assign(row, data);
+          return { ...row };
+        },
+      ),
+    },
+    departmentMembership: {
+      findMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { syncState: { in: string[] } };
+        }) => {
+          return [...memRows.values()]
+            .filter((m) => where.syncState.in.includes(m.syncState))
+            .map((m) => ({ ...m }));
+        },
+      ),
+      update: vi.fn(
+        async ({
+          where: { id },
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<FakeMembership>;
+        }) => {
+          const row = memRows.get(id);
+          if (!row) throw new Error(`no such membership ${id}`);
+          Object.assign(row, data);
+          return { ...row };
+        },
+      ),
+      delete: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
+        const row = memRows.get(id);
+        memRows.delete(id);
+        return row;
+      }),
+    },
+    user: {
+      findUnique: vi.fn(
+        async ({
+          where: { id },
+        }: {
+          where: { id: string };
+        }) => {
+          const row = userRows.get(id);
+          return row ? { ...row } : null;
+        },
+      ),
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  _resetReconcileKickForTests();
+  ncEnsureGroupMock.mockResolvedValue(undefined);
+  gfListFoldersMock.mockResolvedValue([]);
+  gfCreateFolderMock.mockResolvedValue(42);
+  gfDeleteFolderMock.mockResolvedValue(undefined);
+  gfAddGroupMock.mockResolvedValue(undefined);
+  gfRemoveGroupMock.mockResolvedValue(undefined);
+  gfSetGroupPermissionsMock.mockResolvedValue(undefined);
+  gfSetQuotaMock.mockResolvedValue(undefined);
+  ncAddUserToGroupMock.mockResolvedValue(undefined);
+  ncRemoveUserFromGroupMock.mockResolvedValue(undefined);
+});
+
+describe("reconcileDepartments — membership convergence", () => {
+  it("converges a failed membership back to synced against an active department", async () => {
+    const d = dept({
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 42,
+    });
+    const m = membership({ syncState: "failed", syncError: "boom", right: "reader" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering-ro",
+    );
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering",
+    );
+
+    const row = prisma.memRows.get(m.id)!;
+    expect(row.syncState).toBe("synced");
+    expect(row.syncError).toBeNull();
+    expect(result.membershipsSynced).toBe(1);
+  });
+
+  it("removes a membership from both groups then deletes the row when syncState=removing", async () => {
+    const d = dept({
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 42,
+    });
+    const m = membership({ syncState: "removing", right: "manager" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering",
+    );
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering-ro",
+    );
+    expect(prisma.memRows.has(m.id)).toBe(false);
+    expect(result.membershipsRemoved).toBe(1);
+  });
+
+  it("skips HOUSEHOLD memberships entirely (D-5 deferred to post-GA)", async () => {
+    const d = dept({ kind: "HOUSEHOLD", state: "active", ncGroupfolderId: 1 });
+    const m = membership({ syncState: "pending" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+    // Row untouched.
+    expect(prisma.memRows.get(m.id)!.syncState).toBe("pending");
+  });
+});
+
+describe("reconcileDepartments — never-delete-outside-archiving", () => {
+  it("never calls gfDeleteFolder for a pending/failed/active department", async () => {
+    const pending = dept({ id: "d-pending", state: "pending" });
+    const active = dept({
+      id: "d-active",
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 7,
+    });
+    gfListFoldersMock.mockResolvedValue([
+      { id: 7, mountPoint: "Engineering", groups: {}, quota: -3, size: 0, acl: false, manage: [] },
+    ]);
+    const prisma = buildPrisma([pending, active]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfDeleteFolderMock).not.toHaveBeenCalled();
+  });
+
+  it("calls gfDeleteFolder exactly for a row in archiving state", async () => {
+    const archiving = dept({
+      id: "d-archiving",
+      state: "archiving",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 7,
+    });
+    const prisma = buildPrisma([archiving]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfDeleteFolderMock).toHaveBeenCalledTimes(1);
+    expect(gfDeleteFolderMock).toHaveBeenCalledWith(expect.any(String), 7);
+    expect(prisma.deptRows.get("d-archiving")!.state).toBe("archived");
+  });
+});
+
+describe("reconcileDepartments — droplet-admins invariant", () => {
+  it("re-attaches droplet-admins at MASK_ADMIN on every active DEPARTMENT/TEAM folder", async () => {
+    const active = dept({
+      id: "d-active",
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 7,
+    });
+    gfListFoldersMock.mockResolvedValue([
+      { id: 7, mountPoint: "Engineering", groups: {}, quota: -3, size: 0, acl: false, manage: [] },
+    ]);
+    const prisma = buildPrisma([active]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfAddGroupMock).toHaveBeenCalledWith(expect.any(String), 7, DROPLET_ADMINS_GROUP);
+    expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
+      expect.any(String),
+      7,
+      DROPLET_ADMINS_GROUP,
+      MASK_ADMIN,
+    );
+  });
+
+  it("re-attaches droplet-admins on an active HOUSEHOLD folder when a folder id is known", async () => {
+    const household = dept({
+      id: "d-household",
+      kind: "HOUSEHOLD",
+      state: "active",
+      ncGroupfolderId: 3,
+    });
+    const prisma = buildPrisma([household]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfAddGroupMock).toHaveBeenCalledWith(expect.any(String), 3, DROPLET_ADMINS_GROUP);
+    expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
+      expect.any(String),
+      3,
+      DROPLET_ADMINS_GROUP,
+      MASK_ADMIN,
+    );
+  });
+
+  it("is a clean no-op for an active HOUSEHOLD row with no folder id yet", async () => {
+    const household = dept({
+      id: "d-household",
+      kind: "HOUSEHOLD",
+      state: "active",
+      ncGroupfolderId: null,
+    });
+    const prisma = buildPrisma([household]);
+
+    await expect(reconcileDepartments(prisma as any)).resolves.toBeDefined();
+    expect(gfAddGroupMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconcileDepartments — flat team mount name", () => {
+  it("re-discovers a TEAM's groupfolder id by its FLAT 'Parent — Team' mount point", async () => {
+    const parent = dept({
+      id: "d-parent",
+      name: "Engineering",
+      slug: "engineering",
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 1,
+    });
+    const team = dept({
+      id: "d-team",
+      name: "Platform",
+      slug: "platform",
+      parentId: "d-parent",
+      kind: "TEAM",
+      state: "pending",
+    });
+    gfListFoldersMock.mockResolvedValue([
+      {
+        id: 1,
+        mountPoint: "Engineering",
+        groups: {},
+        quota: -3,
+        size: 0,
+        acl: false,
+        manage: [],
+      },
+      {
+        id: 55,
+        mountPoint: "Engineering — Platform",
+        groups: {},
+        quota: -3,
+        size: 0,
+        acl: false,
+        manage: [],
+      },
+    ]);
+    const prisma = buildPrisma([parent, team]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfCreateFolderMock).not.toHaveBeenCalled();
+    const row = prisma.deptRows.get("d-team")!;
+    expect(row.state).toBe("active");
+    expect(row.ncGroupfolderId).toBe(55);
+    expect(row.ncGroupRw).toBe("dept-engineering-platform");
+  });
+});
+
+describe("reconcileDepartments — stuck-failed alert", () => {
+  it("emits an alert ActivityRow when a row entering the sweep already failed is still failed after retry", async () => {
+    gfCreateFolderMock.mockRejectedValue(new Error("nc unreachable"));
+    const d = dept({ state: "failed", provisionError: "previous failure" });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Department stuck in failed state", severity: "err" }),
+    );
+  });
+});
