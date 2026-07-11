@@ -143,7 +143,13 @@ describe("CalibrationWizard (WARP-1055)", () => {
     expect(
       screen.getByText("“Hey Droplet, what's the weather like tomorrow?”"),
     ).toBeInTheDocument();
-    expect(measureMock).toHaveBeenCalledWith("speech_peak", 6);
+    // The step-2 talk-test measurement fires from a post-commit effect, so it
+    // can land a tick after the heading renders. Poll for it rather than
+    // asserting synchronously the instant `findByText` resolves — a bare
+    // expect here races React's passive-effect flush and flakes (WARP-1162).
+    await waitFor(() =>
+      expect(measureMock).toHaveBeenCalledWith("speech_peak", 6),
+    );
   });
 
   it("loud room: §4.1 failure copy verbatim; Continue anyway flags and advances", async () => {
