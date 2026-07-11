@@ -2426,7 +2426,11 @@ export function createProtectedAuthRouter(
   });
 
   // ── List users (admin only) ──
-  router.get("/auth/users", async (req, res, next) => {
+  // WARP-449: migrated off OCS error-message sniffing (matching err.message
+  // for "403"/"997") onto the same `requireRole("owner","admin")` guard as
+  // the sibling GET /auth/invites — this was the specific finding from the
+  // PR #258 review (a "admin only" comment with no enforcing guard).
+  router.get("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
