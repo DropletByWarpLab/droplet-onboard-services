@@ -286,7 +286,7 @@ export function SubscriptionsPanel() {
                     // error here (HTTP code, CalDAV parser message).
                     // Translate before rendering so users see plain
                     // copy instead of "401 Unauthorized" / "ETIMEDOUT".
-                    <span className="ml-1 inline-flex items-center gap-1" style={{ color: "#ef4444" }}>
+                    <span className="ml-1 inline-flex items-center gap-1" style={{ color: "var(--danger)" }}>
                       <AlertCircle size={10} />{" "}
                       {translateError({ message: s.lastSyncError }, "subscription")}
                     </span>
@@ -303,7 +303,7 @@ export function SubscriptionsPanel() {
               </button>
               <button
                 onClick={() => handleDelete(s.id, s.name)}
-                className="text-[color:var(--text-muted)] hover:text-[#ef4444]"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--danger)]"
               >
                 <Trash2 size={14} />
               </button>

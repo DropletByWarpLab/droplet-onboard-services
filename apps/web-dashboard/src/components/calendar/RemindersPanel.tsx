@@ -183,7 +183,7 @@ async function performRemove() {
                 <button
                   onClick={() => setRemoveTarget({ id: r.id, title: r.title ?? "" })}
                   aria-label={`Delete reminder ${label}`}
-                  className="p-2.5 rounded-sm text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
+                  className="p-2.5 rounded-sm text-[color:var(--text-muted)] hover:text-[color:var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_12%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
                   title="Delete"
                 >
                   <Trash2 size={14} />

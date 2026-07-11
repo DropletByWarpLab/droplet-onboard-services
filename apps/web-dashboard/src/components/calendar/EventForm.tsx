@@ -291,7 +291,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               onClick={handleDelete}
               disabled={saving}
               className="btn ghost"
-              style={{ color: "#ef4444" }}
+              style={{ color: "var(--danger)" }}
             >
               Delete
             </button>
