@@ -372,3 +372,22 @@ describe("ChatInput attachments", () => {
     expect(onRemoveAttachment).toHaveBeenCalledWith("a1");
   });
 });
+
+// ── WARP-904: per-turn model quick-switch affordance ──
+
+describe("ChatInput modelSelector slot", () => {
+  it("renders nothing extra in the icon row when modelSelector is omitted (back-compat)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    expect(screen.queryByText("switch-model-marker")).not.toBeInTheDocument();
+  });
+
+  it("renders the caller-supplied modelSelector next to the composer", () => {
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        modelSelector={<span>switch-model-marker</span>}
+      />,
+    );
+    expect(screen.getByText("switch-model-marker")).toBeInTheDocument();
+  });
+});

@@ -28,6 +28,10 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // departments.ts (registered by createApp) derefs this at module scope to
+    // build RESERVED_NAMES; the real config zod-defaults it, so the mock must
+    // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     // The module gate reads FILE_INDEXER_URL to decide the `knowledge` module's
     // availability; this suite hits the (now correctly-gated)
     // `/api/files/knowledge/*` mount, so knowledge must read as available or

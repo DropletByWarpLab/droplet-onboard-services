@@ -184,6 +184,50 @@ describe("destructive pool routes — no execution without a valid confirm token
   });
 
   // WARP-662 — drive_adopt goes through the SAME gated flow as the pool ops.
+  // WARP-857 item 3 — pool_create members are tightened to WHOLE disks and must
+  // be distinct physical disks (defense in depth). A partition member, an
+  // md/injection token, or a repeated disk is rejected at the edge before it can
+  // reach the destructive host script.
+  it("rejects a partition / md / injection member (whole-disk only)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    for (const bad of [
+      ["/dev/sda1", "/dev/sdb"],
+      ["/dev/md0", "/dev/sdb"],
+      ["/dev/sda; rm -rf /", "/dev/sdb"],
+      ["/dev/mapper/vg-root", "/dev/sdb"],
+    ]) {
+      const res = await request(app)
+        .post("/api/storage/pools")
+        .send({ device: "md0", level: "raid1", members: bad, confirmPhrase: "ERASE go" });
+      expect(res.status).toBe(400);
+    }
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  it("rejects two members on the same physical disk (unique parent disks)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sda"],
+        confirmPhrase: "ERASE sda sda",
+      });
+    expect(res.status).toBe(400);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
   it("drive adopt returns 202 + a confirm token, and does NOT touch the bridge yet", async () => {
     const prisma = createPrismaMock();
     const bridge = bridgePoolsResponse([]);

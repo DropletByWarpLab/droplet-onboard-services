@@ -44,6 +44,11 @@ vi.mock("@/lib/api", () => ({
   // WARP-851: the step probes capabilities at mount; stub it so the
   // fail-soft catch isn't silently masking a missing mock.
   fetchMatterCapabilities: vi.fn().mockResolvedValue({ bleCommissioning: true }),
+  // WARP-1281: the step also runs the commissionable-device browse while
+  // scanning; stub it healthy-and-empty for the same reason — a missing
+  // export makes every browse throw and (by design) trips the
+  // service-unavailable state under enough fake-timer advancement.
+  discoverMatterDevices: vi.fn().mockResolvedValue({ devices: [], count: 0 }),
 }));
 
 import { DiscoveryStep } from "./DiscoveryStep";
@@ -66,7 +71,11 @@ describe("DiscoveryStep device list in ScrollRegion (WARP-820)", () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
 
-    const region = screen.getByRole("region", { name: /discovered devices/i });
+    // WARP-1281: the region label widened to cover the commissionable
+    // "ready to pair" cards it now also holds.
+    const region = screen.getByRole("region", {
+      name: /discovered and nearby devices/i,
+    });
     expect(within(region).getByText("Living room lamp")).toBeInTheDocument();
     expect(region.className).toContain("overflow-y-auto");
     expect(region.className).toContain("overscroll-contain");

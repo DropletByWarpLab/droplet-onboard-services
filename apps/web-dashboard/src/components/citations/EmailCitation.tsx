@@ -30,18 +30,12 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
         data-testid="email-card"
         data-citation-kind="email-part"
         title={hit.chunkText}
-        className="
-          inline-flex items-center gap-2 px-3 py-2 rounded-md
-          type-caption-1 border text-left transition-colors duration-150
-          max-w-full
-          bg-surface-secondary text-label-primary border-separator
-          hover:bg-surface-tertiary
-        "
+        className="inline-flex items-center gap-2 px-3 py-2 rounded-md type-caption-1 border text-left transition-colors duration-150 max-w-full bg-[var(--card-inner)] text-[var(--text)] border-[var(--card-bd)] hover:bg-[var(--hover)]"
       >
-        <Mail size={14} className="flex-shrink-0 text-label-tertiary" />
+        <Mail size={14} className="flex-shrink-0 text-[var(--brand-soft)]" />
         <span className="flex flex-col min-w-0">
           <span className="truncate">{hit.filename}</span>
-          <span className="type-caption-2 text-label-tertiary truncate">
+          <span className="type-caption-2 truncate" style={{ color: "var(--text-muted)" }}>
             part #{anchor.partIndex} · {anchor.messageId}
           </span>
         </span>
@@ -51,39 +45,46 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
           role="dialog"
           aria-modal="true"
           aria-label="Email citation"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "var(--scrim)" }}
           onClick={() => setOpen(false)}
         >
           <div
-            className="dp-card max-w-xl w-full m-4 p-4"
+            className="max-w-xl w-full m-4 p-4"
+            style={{
+              background: "var(--card-bg)",
+              border: "1px solid var(--card-bd)",
+              borderRadius: "var(--radius-card)",
+              boxShadow: "var(--lift)",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <header className="flex items-center justify-between mb-2">
-              <h2 className="type-subheadline text-label-primary truncate">
+              <h2 className="type-subheadline truncate" style={{ color: "var(--text)" }}>
                 {hit.filename}
               </h2>
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                className="type-caption-1 text-label-secondary hover:text-label-primary"
+                className="type-caption-1 text-[var(--text-muted)] hover:text-[var(--text)]"
                 aria-label="Close"
               >
                 ✕
               </button>
             </header>
-            <dl className="type-caption-1 text-label-secondary space-y-1 mb-3">
+            <dl className="type-caption-1 space-y-1 mb-3" style={{ color: "var(--text-muted)" }}>
               <div className="flex gap-2">
-                <dt className="text-label-tertiary">Message-Id:</dt>
+                <dt style={{ color: "var(--text-muted)" }}>Message-Id:</dt>
                 {/* WARP-1153: min-w-0 so a long Message-Id truncates instead
                     of widening the card past max-w-xl. */}
                 <dd className="font-mono truncate min-w-0">{anchor.messageId}</dd>
               </div>
               <div className="flex gap-2">
-                <dt className="text-label-tertiary">Part:</dt>
+                <dt style={{ color: "var(--text-muted)" }}>Part:</dt>
                 <dd>#{anchor.partIndex}</dd>
               </div>
             </dl>
-            <p className="type-body text-label-primary whitespace-pre-wrap">
+            <p className="type-body whitespace-pre-wrap" style={{ color: "var(--text)" }}>
               {hit.chunkText}
             </p>
           </div>

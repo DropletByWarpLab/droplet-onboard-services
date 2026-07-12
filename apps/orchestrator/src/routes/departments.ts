@@ -32,7 +32,6 @@ import type { PrismaClient, Department, DepartmentKind } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
-import { validateDepartmentHierarchy } from "../services/department-validation.js";
 import { kickReconcile } from "../services/department-reconciler.service.js";
 import { bumpAclVersion } from "../services/department-tx.js";
 import {
@@ -56,14 +55,6 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("departments-route");
 
-// Reserved names that cannot be used as department/team names or slugs
-const RESERVED_NAMES = new Set([
-  config.DROPLET_SHARED_FOLDER_NAME,
-  "household",
-  "admin",
-  "system",
-]);
-
 /**
  * Normalize a display name to a slug: lowercase, dash-separated, alphanumeric + dash only.
  * Examples: "My Department" → "my-department"; "Sales & Marketing" → "sales--marketing"
@@ -79,6 +70,34 @@ function nameToSlug(name: string): string {
       .replace(/^-+|-+$/g, "")
   );
 }
+
+// Reserved names that cannot be used as department/team names or slugs.
+//
+// The reserved-name check (in the POST handlers) compares BOTH
+// `name.toLowerCase()` and the lowercase-dash `slug` against this set, so the
+// configured shared-folder name must be inserted in the SAME normalized forms —
+// its lowercased display name AND its slug — not the raw verbatim string.
+// Otherwise a non-default, mixed-case/multi-word DROPLET_SHARED_FOLDER_NAME
+// (e.g. "Family Drive") would be stored verbatim while the check produces
+// "family drive"/"family-drive", never match, and let a department collide with
+// the real shared folder's Nextcloud groupfolder/mount point.
+//
+// Read the value once, defensively. In production zod defaults
+// DROPLET_SHARED_FOLDER_NAME to "Household" (config.ts) so it is always a
+// non-empty string; this `?? "Household"` only guards the case where a partial
+// config object omits the field entirely (e.g. a test's `vi.mock("../config.js")`
+// that transitively loads this router) so module evaluation can't crash on
+// `undefined.toLowerCase()`. For the real, always-defined production value the
+// behavior is identical to WARP-1258 — the configured name's lowercased display
+// form and its slug are both reserved. (WARP-1292)
+const sharedFolderName = config.DROPLET_SHARED_FOLDER_NAME ?? "Household";
+const RESERVED_NAMES = new Set([
+  sharedFolderName.toLowerCase(),
+  nameToSlug(sharedFolderName),
+  "household",
+  "admin",
+  "system",
+]);
 
 interface CreateDepartmentBody {
   name: string;
@@ -862,6 +881,12 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           }
           if (err instanceof MembershipNotFoundError) {
             return res.status(404).json({ error: err.message, code: "MEMBERSHIP_NOT_FOUND" });
+          }
+          if (err instanceof LastManagerError) {
+            return res.status(409).json({
+              error: err.message,
+              code: "LAST_MANAGER_INVARIANT",
+            });
           }
           throw err;
         }

@@ -31,27 +31,25 @@ export function CloudProviderRow({ provider }: { provider: CloudProviderRowData 
   return (
     <div className="flex items-center gap-3 px-4 py-3.5">
       <span
-        className="
-          w-8 h-8 rounded-md bg-system-blue/15 text-system-blue
-          flex items-center justify-center flex-shrink-0
-        "
+        className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
+        style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
         aria-hidden
       >
         <Cloud size={16} strokeWidth={2} />
       </span>
 
       <div className="flex-1 min-w-0">
-        <p className="type-subheadline text-label-primary font-medium truncate">
+        <p className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
           {meta.name}
         </p>
-        <p className="type-caption-1 text-label-tertiary truncate">
+        <p className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
           {meta.family} · opt-in, off by default
         </p>
       </div>
 
       {/* Plain-text state next to the switch so the (disabled) control isn't the
           only signal of on/off — and so colour isn't load-bearing. */}
-      <span className="type-caption-1 text-label-tertiary tabular-nums">
+      <span className="type-caption-1 tabular-nums" style={{ color: "var(--text-muted)" }}>
         {stateLabel}
       </span>
 
@@ -65,9 +63,8 @@ export function CloudProviderRow({ provider }: { provider: CloudProviderRowData 
         title="Enable cloud models in Settings"
         className={`
           relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full
-          border border-separator
-          cursor-not-allowed opacity-60
-          ${provider.enabled ? "bg-accent" : "bg-surface-tertiary"}
+          border cursor-not-allowed opacity-60
+          ${provider.enabled ? "bg-[var(--brand)] border-[var(--brand)]" : "bg-[var(--inset)] border-[var(--card-bd)]"}
         `}
       >
         <span

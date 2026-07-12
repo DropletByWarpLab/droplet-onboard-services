@@ -25,6 +25,7 @@
 import type { PrismaClient, Role, DepartmentRight } from "@prisma/client";
 import { gfListFolders } from "./nextcloud-groups.client.js";
 import { adminBasicToken } from "./department-provisioner.service.js";
+import { householdGroupName } from "../routes/auth-groups.js";
 import { config } from "../config.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
@@ -105,7 +106,14 @@ export async function seedHouseholdDepartment(
           kind: "HOUSEHOLD",
           state: "active", // Already exists in NC, state is active.
           description: "Legacy household storage",
-          ncGroupRw: config.DROPLET_SHARED_FOLDER_NAME, // WS-5 group name (e.g., "household")
+          // WS-5 group name — MUST be the canonical householdGroupName() slug
+          // (lowercased, non-alphanumerics collapsed to dashes), NOT the raw
+          // shared-folder display name. This is the exact group docker/
+          // nextcloud-init.sh creates/assigns to the groupfolder, and the same
+          // derivation used at every provisioning call site (auth-groups.ts).
+          // Storing the raw name (e.g. "Household") would not match the real NC
+          // group ("household"), silently breaking household membership sync.
+          ncGroupRw: householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
           ncGroupRo: null, // No ro-only group for HOUSEHOLD per WS-5
           ncGroupfolderId: householdFolder.id, // Discovered from NC
           createdBy: "system",

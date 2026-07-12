@@ -129,15 +129,16 @@ const ICONS = {
 export function ActivityFeed({ data }: { data: ClaudeActivityResponse }) {
   const items = buildFeed(data);
   return (
-    <section className="dp-card p-5" aria-labelledby="activity-feed-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="activity-feed-heading">
       <h2
         id="activity-feed-heading"
-        className="type-footnote text-label-secondary uppercase tracking-wide mb-4"
+        className="type-footnote uppercase tracking-wide mb-4"
+        style={{ color: "var(--text-muted)" }}
       >
         Recent activity
       </h2>
       {items.length === 0 ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           No activity yet. New commits, PR updates, CI runs, ticket transitions,
           and Claude's recorded actions all appear here.
         </p>
@@ -149,21 +150,22 @@ export function ActivityFeed({ data }: { data: ClaudeActivityResponse }) {
               <>
                 <Icon
                   size={14}
-                  className="mt-0.5 flex-shrink-0 text-label-tertiary"
+                  className="mt-0.5 flex-shrink-0"
+                  style={{ color: "var(--text-muted)" }}
                   aria-hidden="true"
                 />
                 <div className="flex-1 min-w-0">
-                  <p className="type-subheadline text-label-primary truncate">
+                  <p className="type-subheadline truncate" style={{ color: "var(--text)" }}>
                     {item.title}
                   </p>
                   {item.subtitle && (
-                    <p className="type-caption-1 text-label-tertiary truncate">
+                    <p className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
                       {item.subtitle}
                     </p>
                   )}
                 </div>
                 <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                  <span className="type-caption-2 text-label-quaternary whitespace-nowrap">
+                  <span className="type-caption-2 whitespace-nowrap" style={{ color: "var(--text-faint)" }}>
                     {relativeTime(item.ts)}
                   </span>
                   {item.badge && (
@@ -179,7 +181,7 @@ export function ActivityFeed({ data }: { data: ClaudeActivityResponse }) {
                 {item.url && (
                   <ArrowUpRight
                     size={12}
-                    className="text-label-quaternary group-hover:text-accent flex-shrink-0"
+                    className="flex-shrink-0 text-[var(--text-faint)] group-hover:text-[var(--brand)]"
                     aria-hidden="true"
                   />
                 )}
@@ -217,8 +219,8 @@ function badgeClasses(tone: FeedItem["badge_tone"]): string {
     case "error":
       return "bg-system-red/15 text-system-red";
     case "info":
-      return "bg-accent/15 text-accent";
+      return "bg-[var(--brand-subtle)] text-[var(--brand)]";
     default:
-      return "bg-label-quaternary/15 text-label-tertiary";
+      return "bg-[var(--inset)] text-[var(--text-muted)]";
   }
 }

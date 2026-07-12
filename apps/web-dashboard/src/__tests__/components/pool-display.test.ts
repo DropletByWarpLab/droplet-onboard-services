@@ -23,15 +23,11 @@ describe("pool-display helpers (BUG-3)", () => {
     expect(levelBlurb("raid0")).toMatch(/no redundancy/i);
   });
 
-  it("maps status to a token-only badge + alarm flag", () => {
+  it("maps status to a label + alarm flag", () => {
     expect(poolStatusBadge("active").alarm).toBe("none");
     expect(poolStatusBadge("degraded").alarm).toBe("degraded");
     expect(poolStatusBadge("resyncing").alarm).toBe("resyncing");
     expect(poolStatusBadge("failed").alarm).toBe("failed");
-    // No hardcoded hex anywhere — only Tailwind token classes.
-    for (const s of ["active", "degraded", "resyncing", "failed", "none"] as const) {
-      expect(poolStatusBadge(s).cls).not.toMatch(/#[0-9a-f]{3,6}/i);
-    }
   });
 
   it("worstPoolAlarm picks the most severe state across pools", () => {

@@ -70,10 +70,13 @@ pane and for debugging schemas.
 ### `POST /api/llm/chat`
 
 Drives the orchestrator agent loop with the authenticated user's context.
-When `stream=true`, the response is SSE with the four event types defined
+When `stream=true`, the response is SSE with the event types defined
 in `apps/orchestrator/src/types/sse-events.ts`
-(`content_delta`, `tool_call`, `tool_result`, `done`). Non-streaming
-returns the legacy `AgentResult` shape.
+(`content_delta`, `tool_call`, `tool_result`, `done`, plus WARP-458's
+`reasoning_step` when `captureReasoning=true` and WARP-903's
+`model_loading` — emitted first, at most once, when the selected model
+is installed in Ollama but needs a cold load). Non-streaming returns
+the legacy `AgentResult` shape.
 
 Request:
 ```json

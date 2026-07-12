@@ -24,6 +24,7 @@ import {
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { probeColdModel } from "../services/model-readiness.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -589,9 +590,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         if (!isUnreachable) throw err;
         // Do NOT cache the empty fallback — the next request retries the
         // gateway so the list self-heals once it is reachable again.
+        // WARP-1284: `degraded: true` tells the wizard this empty list means
+        // "can't reach the AI service", not "no model pulled yet".
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
-        const empty: ModelsResponse = { models: [] };
+        const empty: ModelsResponse = { models: [], degraded: true };
         res.json(empty);
+        return;
+      }
+      // WARP-1284: the gateway answered, but reported that its LOCAL Ollama
+      // provider raised during the listing fan-out (`degraded_providers`,
+      // additive since this ticket). The models list can't be trusted as
+      // complete, so stamp `degraded: true` on the forwarded response and —
+      // like the unreachable fallback above — never cache it: the next
+      // request re-queries so the signal clears the moment Ollama recovers.
+      // A cloud-only provider failure keeps today's behavior (cached,
+      // unflagged): only ollama drives the wizard's local-AI state.
+      if (models.degraded_providers?.includes("ollama")) {
+        console.warn(
+          "[llm/models] ai-gateway reports degraded providers; serving uncached:",
+          models.degraded_providers,
+        );
+        res.json({ ...models, degraded: true });
         return;
       }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
@@ -605,7 +624,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // When stream=true the client receives the SSE event types defined
   // in spec §8.2 (content_delta, tool_call, tool_result, done) plus
   // WARP-458's `reasoning_step` (when the per-request
-  // `captureReasoning` flag is true). Non-streaming returns the
+  // `captureReasoning` flag is true) and WARP-903's `model_loading`
+  // (emitted FIRST, at most once, when the selected model is installed
+  // in Ollama but needs a cold load). Non-streaming returns the
   // AgentResult shape (assistant message + trace + iterations +
   // stop_reason). The persisted assistant `ChatMessage.reasoning`
   // column is written REGARDLESS of `captureReasoning` so the
@@ -741,6 +762,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // text. `agentModel` may be overridden per-turn by vision auto-routing.
       let agentMessages: ChatMessage[] = [...chatReq.messages];
       let agentModel = chatReq.model;
+      // WARP-904: the provider that actually served this turn — tracks
+      // `agentModel`. Vision auto-routing (below) can swap the user's selected
+      // model for a local VISION_MODEL whose provider differs from the one the
+      // caller forwarded, so the per-turn audit row must record THIS value, not
+      // `chatReq.provider`, or the persisted model/provider pair goes
+      // internally inconsistent (e.g. model:"llava:7b" + provider:"openai").
+      let agentProvider: string | null = chatReq.provider ?? null;
 
       let conversationId: string | null = null;
       let assistantMessageId: string | null = null;
@@ -788,6 +816,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               conversationId,
               userContent: persistedUserContent,
               turnId: chatReq.turnId ?? null,
+              // WARP-904: stamp the model/provider the user had selected
+              // for this turn onto both rows (audit trail for a
+              // mid-conversation quick-switch).
+              model: chatReq.model,
+              provider: chatReq.provider ?? null,
             })
             .catch((err: unknown) => {
               // eslint-disable-next-line no-console
@@ -974,6 +1007,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCalls: liveToolCalls,
             status,
             reasoning: liveReasoning,
+            // WARP-904: `agentModel`/`agentProvider` may differ from the
+            // caller's `chatReq.model`/`chatReq.provider` when vision
+            // auto-routing overrode the user's selection — persist what
+            // actually ran (model AND its provider, kept in lockstep above),
+            // not what was requested, so the audit row is a consistent pair.
+            model: agentModel,
+            provider: agentProvider,
           });
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -1074,6 +1114,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             });
             if (route.mode === "image") {
               attachImageBlocksToLastUserMessage(agentMessages, blocks);
+              // WARP-904: when we auto-route to the local VISION_MODEL (a
+              // DIFFERENT model than the user picked), resolve ITS provider so
+              // the persisted audit pair stays consistent. The model list is
+              // already warm from the capability lookups above, so this is a
+              // cache hit. Unknown → null (honest "unknown") rather than the
+              // stale cloud provider, which would be a wrong, mismatched pair.
+              // The selected-model image case (route.model === chatReq.model)
+              // keeps the caller's forwarded provider untouched.
+              if (route.model !== chatReq.model) {
+                agentProvider =
+                  (await aiGateway.getModelProvider(route.model)) ?? null;
+              }
               agentModel = route.model;
               // Don't also inline a "no text could be extracted" note for an
               // image we're sending visually — OCR only over the rest.
@@ -1395,6 +1447,34 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             abortController.abort();
           }
         });
+
+        // ── WARP-903 — cold-model loading signal ─────────────────────
+        // One budgeted lifecycle probe (Ollama /api/ps + /api/tags via
+        // model-readiness.service — chat completions stay DIRECT to
+        // Ollama; never ollama-manager's /proxy) BEFORE the agent loop.
+        // When the selected model is installed but not resident, tell
+        // the client now so the 30-60 s cold load renders as an explicit
+        // loading state instead of a silent hang. Probes `agentModel`
+        // (post vision auto-route) — the model this turn actually runs
+        // on. Non-fatal by contract: the probe itself never throws, and
+        // the belt-and-braces catch here means even a future regression
+        // degrades to "no event" — the turn must never block or fail on
+        // this. Streaming-only: the non-streaming path has no channel to
+        // deliver the event on.
+        try {
+          const cold = await probeColdModel(agentModel);
+          if (cold) {
+            onEvent({
+              type: "model_loading",
+              model: cold.model,
+              sizeGb: cold.sizeGb,
+            });
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] cold-model probe failed (non-fatal):", err);
+        }
+
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
             // Per-turn vision auto-route may override the user's selected model.

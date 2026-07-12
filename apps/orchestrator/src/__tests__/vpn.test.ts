@@ -339,6 +339,56 @@ describe("GET /api/vpn/status", () => {
   });
 });
 
+describe("GET /api/vpn/status — routing service unavailable (WARP-1283)", () => {
+  // Every other input to the status handler already degrades gracefully, but
+  // vpnStatus() throws a typed RouterError when the routing sidecar can't be
+  // reached. The wizard's Remote Access precheck needs to tell that soft,
+  // recoverable condition ("the box's network service is still coming up —
+  // try again in a minute") apart from a genuine orchestrator fault, so the
+  // route answers 503 + a stable code with customer-safe copy instead of
+  // falling through to next(err). UNREACHABLE / TIMEOUT / DISABLED are the
+  // WARP-807 unavailability codes (mirrors the dashboard's
+  // ROUTER_UNREACHABLE_CODES).
+  it.each([
+    ["UNREACHABLE", openwrt.RouterError.unreachable("VPN status: fetch failed")],
+    ["TIMEOUT", openwrt.RouterError.timeout("VPN status: timed out")],
+    ["DISABLED", openwrt.RouterError.disabled("VPN status")],
+  ])(
+    "returns 503 + code ROUTING_UNAVAILABLE when vpnStatus throws %s",
+    async (_code, thrown) => {
+      (openwrt.vpnStatus as any).mockRejectedValue(thrown);
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("ROUTING_UNAVAILABLE");
+      // Customer-safe copy (ADR-002): calm, no transport internals.
+      expect(res.body.error).toMatch(/isn't responding right now/i);
+      expect(res.body.error).not.toMatch(/fetch failed|timed out|RouterError/i);
+    },
+  );
+
+  it("still forwards a genuinely unexpected error to next(err) (500 path unchanged)", async () => {
+    (openwrt.vpnStatus as any).mockRejectedValue(new Error("kaboom"));
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/vpn/status");
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.error).toBe("kaboom");
+  });
+
+  it("does not swallow a non-availability RouterError (AUTH) into ROUTING_UNAVAILABLE", async () => {
+    (openwrt.vpnStatus as any).mockRejectedValue(
+      openwrt.RouterError.auth("VPN status: 401 Unauthorized", { status: 401 }),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/vpn/status");
+    // buildApp's error handler echoes err.status — the route must have passed
+    // the AUTH error through to next(err) untouched.
+    expect(res.status).toBe(401);
+    expect(res.body.code).not.toBe("ROUTING_UNAVAILABLE");
+  });
+});
+
 describe("GET /api/vpn/peers", () => {
   it("scopes to the calling user's peers by default", async () => {
     // WARP-171: explicit family-tier caller — the per-user scoping

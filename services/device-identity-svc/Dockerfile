@@ -13,15 +13,28 @@ WORKDIR /app
 #  - openssl + ca-certificates: WARP-229 FIPS provider activation
 #  - gcc + python3-dev + pkg-config: tpm2-pytss native build
 #  - libtss2-dev + tpm2-tools: TPM 2.0 userspace stack (real backend)
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       openssl ca-certificates \
       gcc python3-dev pkg-config \
-      libtss2-dev tpm2-tools && \
-    rm -rf /var/lib/apt/lists/*
+      libtss2-dev tpm2-tools
 
 COPY services/device-identity-svc/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
+# cache lives in the mount, not the image).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 # Copy proto + generate gRPC stubs at build time so the image stays in
 # sync with proto/ even if the in-tree generated files drift.

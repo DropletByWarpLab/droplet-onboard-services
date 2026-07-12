@@ -46,6 +46,14 @@ export interface ChatMessage {
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
   feedback?: "up" | "down" | null;
   /**
+   * WARP-904 — the model/provider this specific turn actually ran on.
+   * Populated from the persisted row via `loadConversation`; absent on a
+   * live-streaming message (the composer already knows its own
+   * selection) and on rows persisted before this column existed.
+   */
+  model?: string | null;
+  provider?: string | null;
+  /**
    * Set on an assistant message when the turn failed (network error,
    * ai-gateway down, MCP child crashed, model returned `stop_reason:
    * "error"`). The UI renders a friendly message + retry button rather
@@ -87,6 +95,18 @@ export interface ChatMessage {
    * the conversation-scoped list drives SessionHeader instead).
    */
   attachments?: ChatAttachment[];
+  /**
+   * WARP-903 — set on the streaming assistant placeholder while the
+   * orchestrator cold-loads the selected model (from the `model_loading`
+   * SSE event, emitted before the agent loop); cleared by the NEXT event
+   * on the stream — once the model produces anything it is resident.
+   * Drives the "Loading <model> (<size> GB)…" copy on the pre-first-token
+   * thinking indicator so a 30-60 s cold load is never a silent gap.
+   * `sizeGb` is decimal gigabytes (one decimal) or null when the
+   * orchestrator couldn't report a size. Live-streaming only — never
+   * persisted, never set by loadConversation.
+   */
+  modelLoading?: { model: string; sizeGb: number | null };
 }
 
 /**
@@ -174,6 +194,12 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   models: ModelInfo[];
+  /** WARP-1284 (additive): true when the orchestrator can't vouch for the
+   *  list — the ai-gateway was unreachable, or the gateway reported its
+   *  local Ollama provider failed during listing. An empty list WITH
+   *  `degraded` means "can't reach the AI service right now", NOT "no
+   *  model pulled yet" — the setup wizard renders the two differently. */
+  degraded?: boolean;
 }
 
 // ── WARP-836: read-only Models surface (`/models`) ──
@@ -528,6 +554,17 @@ export interface VoiceEchoCheckResult {
   heard: boolean;
   tone_dbfs: number;
   floor_dbfs: number;
+}
+
+/**
+ * WARP-1057 — DSP reboot issued (`POST /api/voice/restart-processor`).
+ * `restarted_at` anchors the health card's "wait for audio to return"
+ * window (~10 s while the XVF3800 re-enumerates).
+ */
+export interface VoiceRestartResult {
+  ok: boolean;
+  method: string;
+  restarted_at: number;
 }
 
 /**
@@ -1595,7 +1632,13 @@ export interface EnrichedNetworkDevice {
   lastIp: string | null;
   firstSeen: string;
   lastSeen: string;
+  // WARP-106: `isBlocked` is a COMPUTED display flag from the API —
+  // `lastAppliedBlocked ?? manualBlock`. `manualBlock` (user intent) and
+  // `lastAppliedBlocked` (ticker-authored source of truth) are the authored
+  // fields the API now also returns.
   isBlocked: boolean;
+  manualBlock: boolean;
+  lastAppliedBlocked?: boolean | null;
   online: boolean;
   signal?: number;
   groups: DeviceGroupRef[];

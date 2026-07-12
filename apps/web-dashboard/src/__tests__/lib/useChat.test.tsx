@@ -91,6 +91,44 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     expect(call.messages.at(-1)).toEqual({ role: "user", content: "hello" });
   });
 
+  // ── WARP-904: per-turn provider/model quick-switch ──
+
+  it("forwards an explicit provider when the caller supplies one", async () => {
+    mockSendChat.mockResolvedValueOnce(
+      sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "ok" })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
+      ]),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "claude-sonnet-4-20250514", undefined, "anthropic");
+    });
+
+    const call = mockSendChat.mock.calls[0][0] as { provider?: string };
+    expect(call.provider).toBe("anthropic");
+  });
+
+  it("omits the provider field entirely when the caller doesn't supply one (back-compat)", async () => {
+    mockSendChat.mockResolvedValueOnce(
+      sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "ok" })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
+      ]),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3:8b");
+    });
+
+    const call = mockSendChat.mock.calls[0][0] as Record<string, unknown>;
+    expect("provider" in call).toBe(false);
+  });
+
   it("accumulates content_delta events into the streaming assistant message", async () => {
     mockSendChat.mockResolvedValueOnce(
       sseResponse([
