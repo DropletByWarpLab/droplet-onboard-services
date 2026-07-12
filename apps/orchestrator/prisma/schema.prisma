@@ -555,6 +555,10 @@ model UserInvite {
   sendError    String? // last SMTP error (operator-facing; never the token)
   sendAttempts Int              @default(0)
 
+  // WARP-1255: department rights granted by this invite (user will have these
+  // rights in each listed department once the invite is accepted).
+  departmentGrants UserInviteDepartment[]
+
   @@index([token])
   @@index([expiresAt])
   @@index([sendStatus])
@@ -1606,6 +1610,11 @@ model User {
   // explicit `usedAt` so a replay matches nothing.
   recoveryCodes  RecoveryCode[]
 
+  // WARP-1255: department membership (per-user rights per department).
+  departmentMemberships DepartmentMembership[]
+  // WARP-1255: per-user storage/usage policy (quota, upload cap, LLM cap).
+  usagePolicy UserUsagePolicy?
+
   @@index([role])
 }
 
@@ -1750,6 +1759,7 @@ model ScimGroup {
 
 // User-curated grouping (households, family branches, work cohorts).
 // Many-to-many to User via GroupMembership.
+/// @deprecated dead code — dropped post-GA (WARP-1273)
 model Group {
   id          String            @id @default(uuid())
   name        String            @unique
@@ -1759,9 +1769,10 @@ model Group {
   memberships GroupMembership[]
 }
 
-// Explicit join table — `(userId, groupId)` unique so a user can't be
-// listed twice in the same group. `joinedAt` lets the dashboard show
-// "added X days ago" without a separate audit query.
+/// @deprecated dead code — dropped post-GA (WARP-1273)
+/// Explicit join table — `(userId, groupId)` unique so a user can't be
+/// listed twice in the same group. `joinedAt` lets the dashboard show
+/// "added X days ago" without a separate audit query.
 model GroupMembership {
   id       String   @id @default(uuid())
   userId   String
@@ -1802,6 +1813,43 @@ enum Scope {
   engineering
   ops
   private
+}
+
+/// WARP-1255: per-department member access rights. One level: a user has one
+/// right level per department, and that right determines what operations they
+/// can perform on the department's files and shared resources.
+enum DepartmentRight {
+  reader        // list/download/search/read metadata
+  contributor   // + upload/mkdir/rename/move/copy/delete/trash/versions/favorite
+  manager       // + create shares on dept content, manage dept membership (absorbs WARP-1245)
+}
+
+/// WARP-1255: department hierarchy kind. Departments are top-level; teams nest
+/// one level deep inside them. Household is the legacy WS-5 system department.
+enum DepartmentKind {
+  HOUSEHOLD     // the seeded WS-5 system department — legacy NC group adopted verbatim (zero NC mutation)
+  DEPARTMENT
+  TEAM          // 2026-07-11 amendment: nested one level under a DEPARTMENT parent
+}
+
+/// WARP-1255: department provisioning lifecycle. Departments move through this
+/// state machine from creation (pending) → syncing (provisioning) → active (or failed).
+enum ProvisionState {
+  pending
+  provisioning
+  active
+  failed
+  archiving
+  archived
+}
+
+/// WARP-1255: Nextcloud sync state for memberships and usage policies. Tracks
+/// whether the local Prisma row has been synced to NC (groups, permissions, quotas).
+enum NcSyncState {
+  pending
+  synced
+  failed
+  removing
 }
 
 // User ↔ Scope many-to-many. A user can be bound to any subset of the
@@ -1973,18 +2021,20 @@ enum WebAuthnChallengeType {
 // this column; the scope-filter pass narrows the join result by the
 // caller's ScopeBinding set.
 model File {
-  id          String   @id @default(uuid())
-  ncFileId    Int      @unique
-  ownerUserId String
-  scope       Scope    @default(team)
+  id             String   @id @default(uuid())
+  ncFileId       Int      @unique
+  ownerUserId    String
+  departmentId   String?                                // WARP-1255: department this file belongs to (null = personal/household)
+  scope          Scope    @default(team)
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
-  path        String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  path           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
+  @@index([departmentId])
 }
 
 // ── WARP-456: signed append-only activity log ──
@@ -3760,6 +3810,97 @@ model ErpWriteRequest {
   updatedAt    DateTime    @updatedAt
 
   @@index([connectionId, status])
+}
+
+/// WARP-1255: department (or team) — a shared space with files, members, and
+/// explicit access rights per member. Top-level departments have no parent;
+/// teams are nested one level under a department parent. Household is the
+/// legacy system department adopted from WS-5.
+model Department {
+  id              String            @id @default(uuid())
+  name            String            @unique              // display + groupfolder mount_point
+  slug            String            @unique              // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
+  parentId        String?                                // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
+  parent          Department?       @relation("DeptHierarchy", fields: [parentId], references: [id])
+  teams           Department[]      @relation("DeptHierarchy")
+  description     String?
+  kind            DepartmentKind    @default(DEPARTMENT)
+  state           ProvisionState    @default(pending)
+  provisionError  String?
+  ncGroupRw       String?           @unique              // "dept-<slug>"; household: legacy householdGroupName()
+  ncGroupRo       String?           @unique              // "dept-<slug>-ro"; null for kind=HOUSEHOLD
+  ncGroupfolderId Int?              @unique              // discovered via gfListFolders; NEVER a sentinel key
+  quotaBytes      BigInt?                                // null = unlimited; pushed via gfSetQuota
+  aclVersion      Int               @default(0)          // bumped in-tx on EVERY membership/state mutation
+  createdBy       String                                 // local User.id
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  archivedAt      DateTime?
+  memberships     DepartmentMembership[]
+  shares          DepartmentShare[]
+  inviteGrants    UserInviteDepartment[]
+  @@index([state])
+}
+
+/// WARP-1255: department membership — explicit access rights for a user in a
+/// department. The sync state tracks whether NC group membership has converged.
+model DepartmentMembership {
+  id               String           @id @default(uuid())
+  departmentId     String
+  userId           String                                // local User.id UUID
+  right            DepartmentRight  @default(contributor)
+  syncState        NcSyncState      @default(pending)
+  syncError        String?
+  ncPermissionMask Int?                                  // last mask confirmed pushed (15 | 1) — drift forensics
+  grantedBy        String
+  grantedAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId],       references: [id], onDelete: Cascade)
+  @@unique([departmentId, userId])
+  @@index([userId])
+  @@index([syncState])
+}
+
+/// WARP-1255: shares on department content are minted by the NC admin credential
+/// (members' masks withhold the share bit), so NC's uidOwner is the admin account —
+/// this table holds the TRUE creator for authz.
+model DepartmentShare {
+  id            String   @id @default(uuid())
+  departmentId  String
+  ncShareId     Int      @unique
+  createdById   String                        // local User.id of the manager who minted it
+  shareType     Int                           // 0=user, 1=group (phase 2), 3=link
+  path          String                        // dept-root-relative, display/audit only
+  createdAt     DateTime @default(now())
+  revokedAt     DateTime?
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  @@index([createdById])
+}
+
+/// WARP-1255: department rights granted to a user via an invite. When the invite
+/// is accepted, these rights become a DepartmentMembership row in each department.
+model UserInviteDepartment {
+  id           String          @id @default(uuid())
+  inviteId     String
+  departmentId String
+  right        DepartmentRight @default(contributor)
+  invite     UserInvite @relation(fields: [inviteId],     references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  @@unique([inviteId, departmentId])
+}
+
+/// WARP-1255: per-user storage and usage policy. Controls storage quota,
+/// upload size limit, and optional LLM daily message cap.
+model UserUsagePolicy {
+  userId              String      @id                    // FK User, onDelete Cascade
+  storageQuotaBytes   BigInt?                            // local desired state → ncUpdateUser(...,'quota',...)
+  quotaSyncState      NcSyncState @default(pending)
+  maxUploadSizeMb     Int?                               // per-user override of config.MAX_UPLOAD_SIZE_MB
+  llmDailyMessageCap  Int?                               // optional (decision D-7)
+  updatedBy           String
+  updatedAt           DateTime    @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 /// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of
