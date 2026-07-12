@@ -19,57 +19,70 @@ export function CameraDiscoveryBanner({
   if (cameras.length === 0) return null;
 
   return (
-    <div className="dp-card bg-accent-subtle border-accent/20 mb-6">
-      <div className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Scan size={18} className="text-accent" />
-            <span className="type-subheadline text-label-primary font-medium">
-              {cameras.length} new camera{cameras.length !== 1 ? "s" : ""} detected
-            </span>
-          </div>
-          <button
-            onClick={onAcceptAll}
-            className="dp-btn-primary px-3 py-1.5 rounded-lg type-caption-1"
+    <div
+      className="card mb-6"
+      style={{
+        background: "var(--brand-subtle)",
+        borderColor: "color-mix(in srgb, var(--brand) 20%, transparent)",
+      }}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Scan size={18} style={{ color: "var(--brand)" }} />
+          <span
+            className="type-subheadline font-medium"
+            style={{ color: "var(--text)" }}
           >
-            Accept All
-          </button>
+            {cameras.length} new camera{cameras.length !== 1 ? "s" : ""} detected
+          </span>
         </div>
+        <button onClick={onAcceptAll} className="btn primary sm type-caption-1">
+          Accept All
+        </button>
+      </div>
 
-        <div className="space-y-2">
-          {cameras.map((cam) => (
-            <div
-              key={cam.id}
-              className="flex items-center justify-between bg-surface-primary rounded-lg px-3 py-2"
-            >
-              <div className="min-w-0">
-                <p className="type-footnote text-label-primary font-medium truncate">
-                  {cam.name.replace(/_/g, " ")}
-                </p>
-                <p className="type-caption-2 text-label-tertiary">
-                  {cam.ip}
-                  {cam.manufacturer ? ` \u00B7 ${cam.manufacturer}` : ""}
-                </p>
-              </div>
-              <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                <button
-                  onClick={() => onAccept(cam.id)}
-                  className="p-1.5 rounded-sm text-system-green hover:bg-system-green/10 transition-colors"
-                  title="Accept"
-                >
-                  <Check size={16} />
-                </button>
-                <button
-                  onClick={() => onReject(cam.id)}
-                  className="p-1.5 rounded-sm text-system-red hover:bg-system-red/10 transition-colors"
-                  title="Reject"
-                >
-                  <X size={16} />
-                </button>
-              </div>
+      <div className="space-y-2">
+        {cameras.map((cam) => (
+          <div
+            key={cam.id}
+            className="flex items-center justify-between rounded-lg px-3 py-2"
+            style={{ background: "var(--surface)" }}
+          >
+            <div className="min-w-0">
+              <p
+                className="type-footnote font-medium truncate"
+                style={{ color: "var(--text)" }}
+              >
+                {cam.name.replace(/_/g, " ")}
+              </p>
+              <p
+                className="type-caption-2"
+                style={{ color: "var(--text-muted)" }}
+              >
+                {cam.ip}
+                {cam.manufacturer ? ` \u00B7 ${cam.manufacturer}` : ""}
+              </p>
             </div>
-          ))}
-        </div>
+            <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+              <button
+                onClick={() => onAccept(cam.id)}
+                className="p-1.5 rounded-sm hover:bg-[rgba(34,197,94,0.1)] transition-colors"
+                style={{ color: "var(--success)" }}
+                title="Accept"
+              >
+                <Check size={16} />
+              </button>
+              <button
+                onClick={() => onReject(cam.id)}
+                className="p-1.5 rounded-sm hover:bg-[rgba(239,68,68,0.1)] transition-colors"
+                style={{ color: "var(--danger)" }}
+                title="Reject"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

@@ -68,7 +68,9 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncCreateShareV2: vi.fn(),
   ncUpdateShare: vi.fn(),
   ncDeleteShare: vi.fn(),
-  ncListSharedWithMe: vi.fn(),
+  // The editor-session route calls `.find()` on this — default to an empty
+  // inbound-share list so the gate-passes path reaches minting.
+  ncListSharedWithMe: vi.fn(async () => []),
   ncDirExists: vi.fn(),
   NextcloudOcsError: class NextcloudOcsError extends Error {
     ocsStatus: number;
@@ -78,6 +80,26 @@ vi.mock("../services/nextcloud.client.js", () => ({
     }
   },
 }));
+// The editor-session route mints a doc-server session AFTER the gate passes;
+// mock it so the gate-passes path returns 200 rather than dialing a real
+// Document Server. The DENIED / fail-closed paths never reach minting.
+vi.mock("../services/docserver.client.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/docserver.client.js")>(
+    "../services/docserver.client.js",
+  );
+  return {
+    DocServerUnavailableError: actual.DocServerUnavailableError,
+    docServerHealthy: vi.fn().mockResolvedValue(true),
+    ncMintEditorSession: vi.fn(async () => ({
+      editorUrl: "http://docserver.test/edit/9001",
+      accessToken: "signed.jwt.token",
+      accessTokenTtl: 1800,
+      ncFileId: 9001,
+      mode: "edit",
+      documentKey: "doc-key-9001",
+    })),
+  };
+});
 
 import request from "supertest";
 import express, { Request as ExpressRequest, Response as ExpressResponse, NextFunction as ExpressNextFunction } from "express";
@@ -716,6 +738,17 @@ function createGateFilesPrismaMock() {
     fileComment: {
       findMany: vi.fn().mockResolvedValue([]),
     },
+    // Reached only AFTER the editor-session gate passes (member path).
+    fileEditSession: {
+      upsert: vi.fn().mockResolvedValue({}),
+    },
+    // Reached only AFTER the citations gate passes (member path).
+    fileCitation: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    chatSession: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
 }
 
@@ -765,5 +798,89 @@ describe("metadata-gate integration — GET /files/:filePath(*)/comments", () =>
     const res = await request(app).get("/api/files/Documents/personal-file.pdf/comments");
     expect(res.status).toBe(200);
     expect(prisma.department.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+// ── Metadata-gate integration — editor-session + citations routes ─────
+//
+// WARP-1260 fix-up (CR blocker on files.ts:530/664): these two routes used
+// to wire `checkSpaceAccess` INSIDE the best-effort NC/file-id resolution
+// try/catch, so an exception from the AUTHORIZATION decision itself (e.g. a
+// transient `departmentMembership.findUnique` failure) was swallowed and the
+// request fell through UNGATED — the exact cross-department fail-open ADR-029
+// §3.2 says this ticket closes. The gate now runs the authorization decision
+// OUTSIDE that swallow: a clean denial returns 403 and an internal check error
+// fails CLOSED (never a fall-through 200). NC/file-id RESOLUTION stays
+// best-effort (that swallow was intentional). Mirrors the comments/tags
+// routes' `gateFileSpaceAccess` posture.
+
+describe("metadata-gate integration — GET /files/:filePath(*)/editor-session", () => {
+  it("403s a non-member on a file registered to a department", async () => {
+    const prisma = createGateFilesPrismaMock();
+    const app = buildGateApp(prisma, mkGateUser("family", "not-a-member"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/editor-session",
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("passes a member through to minting (200)", async () => {
+    const prisma = createGateFilesPrismaMock();
+    const app = buildGateApp(prisma, mkGateUser("family", "member-1"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/editor-session",
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("fails CLOSED (not a fall-through 200) when the authorization membership lookup throws", async () => {
+    const prisma = createGateFilesPrismaMock();
+    // resolveFileDepartment succeeds (file 9001 → DEPT_UUID) and the dept
+    // resolves active, but the membership lookup INSIDE checkSpaceAccess
+    // throws (transient DB error). Pre-fix this was swallowed and the editor
+    // session minted anyway (fail-open 200); the fix propagates it to the
+    // route's outer catch (500) so a departmental file is never leaked.
+    prisma.departmentMembership.findUnique = vi
+      .fn()
+      .mockRejectedValue(new Error("db timeout"));
+    const app = buildGateApp(prisma, mkGateUser("family", "member-1"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/editor-session",
+    );
+    expect(res.status).not.toBe(200);
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("metadata-gate integration — GET /files/:filePath(*)/citations", () => {
+  it("403s a non-member on a file registered to a department", async () => {
+    const prisma = createGateFilesPrismaMock();
+    const app = buildGateApp(prisma, mkGateUser("family", "not-a-member"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/citations",
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("passes a member through (200)", async () => {
+    const prisma = createGateFilesPrismaMock();
+    const app = buildGateApp(prisma, mkGateUser("family", "member-1"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/citations",
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("fails CLOSED (not a fall-through 200) when the authorization membership lookup throws", async () => {
+    const prisma = createGateFilesPrismaMock();
+    prisma.departmentMembership.findUnique = vi
+      .fn()
+      .mockRejectedValue(new Error("db timeout"));
+    const app = buildGateApp(prisma, mkGateUser("family", "member-1"));
+    const res = await request(app).get(
+      "/api/files/Documents/dept-file.pdf/citations",
+    );
+    expect(res.status).not.toBe(200);
+    expect(res.status).toBe(500);
   });
 });

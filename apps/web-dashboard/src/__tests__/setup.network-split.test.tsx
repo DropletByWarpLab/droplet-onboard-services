@@ -99,6 +99,11 @@ vi.mock("@/lib/api", () => ({
   setWifiPassword: vi.fn(async () => ({ status: "ok", tier: 1 })),
   confirmNetworkCommand: vi.fn(async () => ({ operationId: "op" })),
   fetchNetworkOperation: vi.fn(async () => ({ id: "op", state: "applied" })),
+  // WARP-817 — WifiStep reads the host topology on mount to decide its
+  // default disclosure state. null (best-effort "couldn't tell") leaves the
+  // collapsed default in place; these integration tests never open the
+  // disclosure, so the resolved value doesn't otherwise matter here.
+  getNetworkTopology: vi.fn(async () => null),
   // Storage auto-skips on an empty drive list — let it pass straight through
   // so "advancing past address reaches storage→discovery" is observable.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),

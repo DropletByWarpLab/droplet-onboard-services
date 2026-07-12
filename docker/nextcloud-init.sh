@@ -37,7 +37,36 @@ HOUSEHOLD_GROUP="$(printf '%s' "$SHARED_FOLDER_NAME" \
 echo "[droplet] WARP-883: provisioning shared space '${SHARED_FOLDER_NAME}' (group '${HOUSEHOLD_GROUP}')"
 
 # 1. Enable the groupfolders app (idempotent — occ no-ops if already enabled).
-$OCC app:enable groupfolders
+#
+#    WARP-1064: groupfolders is NOT bundled with nextcloud:29 — `app:enable`
+#    fetches it from the Nextcloud appstore, and on a real first boot the
+#    appstore/DNS is not yet settled (the exact failure mode the OnlyOffice
+#    block below was already hardened against in WARP-990). This used to be
+#    a single un-retried attempt under `set -euo pipefail`, so an unsettled
+#    appstore aborted the WHOLE hook right here — before the household group
+#    was ever created — leaving the bare-Nextcloud state that 500'd the
+#    setup wizard (WARP-989). Worse, the entrypoint's run_path treats a hook
+#    failure as fatal, so the first-boot container exited and restarted
+#    mid-provision. Same treatment as OnlyOffice: bounded retry, never
+#    fatal. On exhaustion we still create the household group (independent
+#    of the app) and skip only the folder steps; the WARP-990 reconcile
+#    re-runs this idempotent hook on the next bring-up and converges them.
+groupfolders_ready=0
+gf_tries="${GROUPFOLDERS_INSTALL_TRIES:-10}"
+gf_interval="${GROUPFOLDERS_INSTALL_INTERVAL:-6}"
+gf_i=0
+while [ "$gf_i" -lt "$gf_tries" ]; do
+  gf_i=$((gf_i + 1))
+  if $OCC app:enable groupfolders; then
+    groupfolders_ready=1
+    break
+  fi
+  echo "[droplet] WARP-883: groupfolders enable attempt ${gf_i}/${gf_tries} failed (appstore not ready?) — retrying in ${gf_interval}s" >&2
+  sleep "$gf_interval"
+done
+if [ "$groupfolders_ready" != 1 ]; then
+  echo "[droplet] WARP-883: groupfolders did NOT enable after ${gf_tries} attempts (appstore unreachable?) — provisioning the household group only; the next boot's idempotent re-run will reconcile the shared folder" >&2
+fi
 
 # 2. Ensure the household group exists (idempotent — group:add is a no-op /
 #    harmless error if it already exists, so don't let it abort the script).
@@ -50,6 +79,9 @@ fi
 # 3. Create the group folder only if one with this mount name doesn't exist.
 #    `groupfolders:list` prints existing folders; we match the mount_point
 #    column so a re-run never creates a duplicate "Household (2)".
+#    Skipped entirely (steps 3–5) when groupfolders never enabled — the occ
+#    commands don't exist without the app; the next re-run reconciles.
+if [ "$groupfolders_ready" = 1 ]; then
 FOLDER_ID="$($OCC groupfolders:list --output=json 2>/dev/null \
   | php -r '
       $j = json_decode(stream_get_contents(STDIN), true) ?: [];
@@ -76,6 +108,7 @@ $OCC groupfolders:permissions "$FOLDER_ID" "$HOUSEHOLD_GROUP" 31 || true
 
 # 5. Set the quota (idempotent — re-applying the same quota is a no-op).
 $OCC groupfolders:quota "$FOLDER_ID" "$SHARED_FOLDER_QUOTA" || true
+fi # groupfolders_ready
 
 # 6. Add the first owner/admin to the household group so the shared folder
 #    mounts for them too. The admin user is created by the Nextcloud installer

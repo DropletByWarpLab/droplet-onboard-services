@@ -121,6 +121,7 @@ function makeFake(hooks: Hooks = {}) {
           id: uid("proj"),
           seqCounter: 0,
           sortOrder: 0,
+          isArchived: false,
           archivedAt: null,
           description: null,
           icon: null,
@@ -168,8 +169,16 @@ function makeFake(hooks: Hooks = {}) {
           return true;
         }).length,
       findUnique: async ({ where }: { where: Row }) => db.states.find((s) => s.id === where.id) ?? null,
+      // Same filter shape as `count` above (projectId / isDefault / id.not) —
+      // deleteState's fallback-default lookup is the only caller.
       findFirst: async ({ where }: { where: Row }) =>
-        db.states.find((s) => s.id === where.id && (!where.projectId || s.projectId === where.projectId)) ?? null,
+        db.states.find((s) => {
+          if (where.projectId && s.projectId !== where.projectId) return false;
+          if (where.isDefault !== undefined && s.isDefault !== where.isDefault) return false;
+          const not = (where.id as { not?: string } | undefined)?.not;
+          if (not && s.id === not) return false;
+          return true;
+        }) ?? null,
       create: async ({ data }: { data: Row }) => {
         const s = { id: uid("st"), color: null, sortOrder: 0, isDefault: false, ...data };
         db.states.push(s);
@@ -217,8 +226,10 @@ function makeFake(hooks: Hooks = {}) {
           (i) => i.id === where.id && (!where.projectId || i.projectId === where.projectId),
         ) ?? null,
       findMany: async ({ where, include }: { where: Row; include?: Row }) => {
-        let rows = db.items.filter((i) => i.projectId === where.projectId);
-        if (where.stateId) rows = rows.filter((i) => i.stateId === where.stateId);
+        let rows = db.items;
+        if (where.projectId !== undefined) rows = rows.filter((i) => i.projectId === where.projectId);
+        if (where.stateId !== undefined) rows = rows.filter((i) => i.stateId === where.stateId);
+        if (where.parentId !== undefined) rows = rows.filter((i) => i.parentId === where.parentId);
         return rows.map((i) => resolveItem(i, include));
       },
       create: async ({ data }: { data: Row }) => {
@@ -233,7 +244,9 @@ function makeFake(hooks: Hooks = {}) {
           createdById: null,
           startDate: null,
           dueDate: null,
+          isCompleted: false,
           completedAt: null,
+          isArchived: false,
           archivedAt: null,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -267,6 +280,16 @@ function makeFake(hooks: Hooks = {}) {
         fire("pmWorkItem.delete");
         db.items = db.items.filter((i) => i.id !== where.id);
         return {};
+      },
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => {
+        const matches = db.items.filter((i) => {
+          if (where.parentId !== undefined && i.parentId !== where.parentId) return false;
+          if (where.stateId !== undefined && i.stateId !== where.stateId) return false;
+          if (where.isCompleted !== undefined && i.isCompleted !== where.isCompleted) return false;
+          return true;
+        });
+        for (const it of matches) Object.assign(it, data);
+        return { count: matches.length };
       },
     },
 
@@ -578,6 +601,28 @@ describe("native PM routes — deleteState last/default guards", () => {
     const nonDefault = states.body.states.find((s: { isDefault: boolean }) => !s.isDefault);
     const res = await request(makeApp(prisma, OWNER)).delete(`/api/pm/states/${nonDefault.id}`);
     expect(res.status).toBe(200);
+  });
+
+  it("reassigns work items parked in a deleted state to the project's default state (WARP-885)", async () => {
+    const app = makeApp(prisma, OWNER);
+    const states = await request(app).get(`/api/pm/projects/${pid}/states`);
+    const done = states.body.states.find((s: { group: string }) => s.group === "completed");
+    const dflt = states.body.states.find((s: { isDefault: boolean }) => s.isDefault);
+
+    const wi = await request(app)
+      .post(`/api/pm/projects/${pid}/work-items`)
+      .send({ name: "Ship it", state_id: done.id });
+    expect(wi.body.work_item.stateId).toBe(done.id);
+    expect(wi.body.work_item.completedAt).not.toBeNull();
+
+    const del = await request(app).delete(`/api/pm/states/${done.id}`);
+    expect(del.status).toBe(200);
+
+    const after = await request(app).get(`/api/pm/work-items/${wi.body.work_item.id}`);
+    // Reassigned to the default landing state (not left NULL) and the
+    // completion signal re-synced since Todo (default) isn't terminal.
+    expect(after.body.work_item.stateId).toBe(dflt.id);
+    expect(after.body.work_item.completedAt).toBeNull();
   });
 
   it("refuses to delete the last remaining state (409)", async () => {

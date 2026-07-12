@@ -30,7 +30,10 @@ import {
   gfSetQuota,
   type GroupfolderInfo,
 } from "../services/nextcloud-groups.client.js";
-import { NextcloudOcsError } from "../services/nextcloud.client.js";
+import {
+  NextcloudOcsError,
+  NextcloudGroupNotFoundError,
+} from "../services/nextcloud.client.js";
 
 /**
  * Mock Response helper — returns a Response-like object
@@ -80,12 +83,14 @@ describe("nextcloud-groups.client", () => {
       expect(init.headers.Authorization).toBe("Bearer adminToken");
     });
 
-    it("resolves OK when user already in group (statuscode 102)", async () => {
+    it("is idempotent when the user is already a member (statuscode 100)", async () => {
+      // Nextcloud reports 100 (success) when re-adding an existing member for
+      // POST /cloud/users/{uid}/groups — there is no "already a member" code.
       const fetchMock = vi.fn().mockResolvedValue(
         mockResponse({
           ok: true,
           status: 200,
-          json: { ocs: { meta: { statuscode: 102, status: "ok" }, data: {} } },
+          json: { ocs: { meta: { statuscode: 100, status: "ok" }, data: {} } },
         })
       );
       global.fetch = fetchMock as unknown as typeof fetch;
@@ -93,6 +98,59 @@ describe("nextcloud-groups.client", () => {
       await expect(
         ncAddUserToGroup("token", "bob", "dept-finance")
       ).resolves.toBeUndefined();
+    });
+
+    it("throws NextcloudGroupNotFoundError when the group does not exist (statuscode 102)", async () => {
+      // For POST /cloud/users/{uid}/groups, OCS statuscode 102 means the target
+      // group does not exist — NOT "already a member". It must surface as a typed
+      // not-found error, not be swallowed as an idempotent no-op.
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: {
+                statuscode: 102,
+                status: "failure",
+                message: "The group does not exist",
+              },
+              data: {},
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        ncAddUserToGroup("token", "bob", "dept-finance")
+      ).rejects.toBeInstanceOf(NextcloudGroupNotFoundError);
+    });
+
+    it("does not swallow a non-success OCS statuscode on a 2xx response (statuscode 105)", async () => {
+      // statuscode 105 = "failed to add user to group". Even though the HTTP
+      // status is 2xx, the OCS body signals failure and must not resolve OK.
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: {
+                statuscode: 105,
+                status: "failure",
+                message: "failed to add user to group",
+              },
+              data: {},
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        ncAddUserToGroup("token", "bob", "dept-eng")
+      ).rejects.toThrow(NextcloudOcsError);
     });
 
     it("throws NextcloudOcsError on HTTP error", async () => {
@@ -152,12 +210,14 @@ describe("nextcloud-groups.client", () => {
       expect(init.headers["OCS-APIRequest"]).toBe("true");
     });
 
-    it("resolves OK when user not in group (statuscode 102)", async () => {
+    it("is idempotent when the user is not a member (statuscode 100)", async () => {
+      // Removing a non-member of an existing group returns 100 (success);
+      // idempotency is preserved without misreading 102.
       const fetchMock = vi.fn().mockResolvedValue(
         mockResponse({
           ok: true,
           status: 200,
-          json: { ocs: { meta: { statuscode: 102 }, data: {} } },
+          json: { ocs: { meta: { statuscode: 100 }, data: {} } },
         })
       );
       global.fetch = fetchMock as unknown as typeof fetch;
@@ -165,6 +225,56 @@ describe("nextcloud-groups.client", () => {
       await expect(
         ncRemoveUserFromGroup("token", "bob", "dept-finance")
       ).resolves.toBeUndefined();
+    });
+
+    it("throws NextcloudGroupNotFoundError when the group does not exist (statuscode 102)", async () => {
+      // For DELETE /cloud/users/{uid}/groups, OCS statuscode 102 means the group
+      // does not exist — NOT "user not in group".
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: {
+                statuscode: 102,
+                status: "failure",
+                message: "The group does not exist",
+              },
+              data: {},
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        ncRemoveUserFromGroup("token", "bob", "dept-finance")
+      ).rejects.toBeInstanceOf(NextcloudGroupNotFoundError);
+    });
+
+    it("does not swallow a non-success OCS statuscode on a 2xx response (statuscode 105)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: {
+                statuscode: 105,
+                status: "failure",
+                message: "failed to remove user from group",
+              },
+              data: {},
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        ncRemoveUserFromGroup("token", "bob", "dept-eng")
+      ).rejects.toThrow(NextcloudOcsError);
     });
 
     it("throws NextcloudOcsError on HTTP error", async () => {

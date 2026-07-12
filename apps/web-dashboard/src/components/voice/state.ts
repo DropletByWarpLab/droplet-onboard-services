@@ -104,7 +104,7 @@ export type VoiceCheckAction =
   | "test-level"
   | "find-noise"
   | "test-wake"
-  | "test-dsp";
+  | "restart-dsp";
 
 export interface VoiceCheckModel {
   id: "level" | "noise" | "wake" | "dsp";
@@ -156,6 +156,9 @@ export function deriveHealthChecks(args: {
 
   // §7.3 — wedged processor: the DSP card carries the fault, the other
   // three explicitly wait rather than showing stale-greens as current.
+  // The inline action is the WARP-1057 restart (xvf_host DSP reboot via
+  // POST /api/voice/restart-processor); after two failed restarts the
+  // surface escalates to the power-cycle copy (HealthStrip dspEscalated).
   if (surface.kind === "broken" && surface.brokenCause === "flatlined") {
     const waiting = (id: VoiceCheckModel["id"]): VoiceCheckModel => ({
       id,
@@ -174,8 +177,8 @@ export function deriveHealthChecks(args: {
         status: "err",
         result: "Not responding.",
         stamp: `Checked ${relTime(nowS, nowS)}`,
-        action: "test-dsp",
-        actionLabel: "Test again",
+        action: "restart-dsp",
+        actionLabel: "Restart processor",
       },
     ];
   }

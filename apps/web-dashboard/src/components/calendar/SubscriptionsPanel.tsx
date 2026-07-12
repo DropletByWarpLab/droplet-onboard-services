@@ -124,15 +124,15 @@ export function SubscriptionsPanel() {
   }
 
   return (
-    <div className="dp-card p-4">
+    <div className="card">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <Globe size={16} className="text-label-secondary" />
-          <h2 className="type-headline text-label-primary">External calendars</h2>
+          <Globe size={16} style={{ color: "var(--text-muted)" }} />
+          <h2 className="type-headline" style={{ color: "var(--text)" }}>External calendars</h2>
         </div>
         <button
           onClick={() => setShowNew((v) => !v)}
-          className="text-label-secondary hover:text-label-primary"
+          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
         >
           <Plus size={16} />
         </button>
@@ -142,7 +142,7 @@ export function SubscriptionsPanel() {
           framing used to live only inside the hidden add-form, so the section's
           purpose was invisible until you expanded it. This one-line intro sits
           directly under the header so the user understands it at a glance. */}
-      <p className="type-caption-1 text-label-tertiary mb-3">
+      <p className="type-caption-1 mb-3" style={{ color: "var(--text-muted)" }}>
         Show your Google, iCloud, or Outlook calendar here — paste its share
         link below.
       </p>
@@ -156,9 +156,9 @@ export function SubscriptionsPanel() {
         // protocol via a PROPFIND fallback, so the user doesn't need to
         // declare it. We just need to know: does this feed require
         // sign-in?
-        <div className="mb-3 flex flex-col gap-2 p-2 rounded bg-surface-secondary">
+        <div className="mb-3 flex flex-col gap-2 p-2 rounded" style={{ background: "var(--inset)" }}>
           <label className="flex flex-col gap-1">
-            <span className="type-caption-1 text-label-secondary">
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               Display name
             </span>
             <input
@@ -166,12 +166,19 @@ export function SubscriptionsPanel() {
               placeholder="e.g. Personal iCloud"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="dp-input text-sm"
+              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+                padding: "8px 10px",
+              }}
               maxLength={200}
             />
           </label>
           <label className="flex flex-col gap-1">
-            <span className="type-caption-1 text-label-secondary">
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               Calendar URL
             </span>
             <input
@@ -179,17 +186,25 @@ export function SubscriptionsPanel() {
               placeholder="https://…"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              className="dp-input text-sm"
+              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+                padding: "8px 10px",
+              }}
               maxLength={2048}
             />
-            <span className="type-caption-2 text-label-tertiary">
+            <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
               Paste an ICS / iCal share link or a CalDAV server URL — we&rsquo;ll
               auto-detect.
             </span>
           </label>
           <label
             data-testid="auth-toggle"
-            className="flex items-center gap-2 type-caption-1 text-label-secondary mt-1"
+            className="flex items-center gap-2 type-caption-1 mt-1"
+            style={{ color: "var(--text-muted)" }}
           >
             <input
               type="checkbox"
@@ -206,7 +221,14 @@ export function SubscriptionsPanel() {
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="dp-input text-sm"
+                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                  padding: "8px 10px",
+                }}
               />
               <input
                 type="password"
@@ -214,18 +236,25 @@ export function SubscriptionsPanel() {
                 placeholder="Password or app password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="dp-input text-sm"
+                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                  padding: "8px 10px",
+                }}
               />
             </div>
           )}
-          <p className="type-caption-2 text-label-tertiary mt-1">
+          <p className="type-caption-2 mt-1" style={{ color: "var(--text-muted)" }}>
             Most share links from Google, iCloud, or Outlook don&rsquo;t need
             sign-in. CalDAV servers and private feeds usually do.
           </p>
           <button
             onClick={handleAdd}
             disabled={busy === "add"}
-            className="dp-btn-primary text-sm"
+            className="btn primary text-sm"
           >
             {busy === "add" ? "Adding…" : "Add subscription"}
           </button>
@@ -233,20 +262,20 @@ export function SubscriptionsPanel() {
       )}
 
       {isLoading ? (
-        <div className="type-caption-1 text-label-tertiary">Loading…</div>
+        <div className="type-caption-1" style={{ color: "var(--text-muted)" }}>Loading…</div>
       ) : sources.length === 0 ? (
-        <div className="type-caption-1 text-label-tertiary py-2">
+        <div className="type-caption-1 py-2" style={{ color: "var(--text-muted)" }}>
           No external calendars subscribed yet. Use the &ldquo;+&rdquo; button
           above to pull in events from another calendar.
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
           {sources.map((s) => (
-            <li key={s.id} className="flex items-start gap-2 p-2 rounded bg-surface-secondary">
+            <li key={s.id} className="flex items-start gap-2 p-2 rounded" style={{ background: "var(--inset)" }}>
               <div className="flex-1 min-w-0">
-                <div className="type-subheadline text-label-primary truncate">{s.name}</div>
-                <div className="type-caption-1 text-label-tertiary truncate">{s.url}</div>
-                <div className="type-caption-1 text-label-tertiary mt-0.5">
+                <div className="type-subheadline truncate" style={{ color: "var(--text)" }}>{s.name}</div>
+                <div className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>{s.url}</div>
+                <div className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
                   {s.lastSyncAt ? (
                     <>Last synced {new Date(s.lastSyncAt).toLocaleString()}</>
                   ) : (
@@ -257,7 +286,7 @@ export function SubscriptionsPanel() {
                     // error here (HTTP code, CalDAV parser message).
                     // Translate before rendering so users see plain
                     // copy instead of "401 Unauthorized" / "ETIMEDOUT".
-                    <span className="text-system-red ml-1 inline-flex items-center gap-1">
+                    <span className="ml-1 inline-flex items-center gap-1" style={{ color: "var(--danger)" }}>
                       <AlertCircle size={10} />{" "}
                       {translateError({ message: s.lastSyncError }, "subscription")}
                     </span>
@@ -267,14 +296,14 @@ export function SubscriptionsPanel() {
               <button
                 onClick={() => handleSync(s.id)}
                 disabled={busy === s.id}
-                className="text-label-secondary hover:text-label-primary"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
                 title="Sync now"
               >
                 <RefreshCw size={14} className={busy === s.id ? "animate-spin" : ""} />
               </button>
               <button
                 onClick={() => handleDelete(s.id, s.name)}
-                className="text-label-tertiary hover:text-system-red"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--danger)]"
               >
                 <Trash2 size={14} />
               </button>
@@ -283,27 +312,27 @@ export function SubscriptionsPanel() {
         </ul>
       )}
 
-      <div className="mt-4 pt-3 border-t border-separator">
-        <h3 className="type-subheadline text-label-secondary mb-2">
+      <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+        <h3 className="type-subheadline mb-2" style={{ color: "var(--text-muted)" }}>
           Subscribe phones / other calendar apps
         </h3>
         {publishUrl ? (
-          <div className="flex items-center gap-2 p-2 rounded bg-surface-secondary">
-            <code className="type-caption-1 flex-1 truncate text-label-secondary">{publishUrl}</code>
+          <div className="flex items-center gap-2 p-2 rounded" style={{ background: "var(--inset)" }}>
+            <code className="type-caption-1 flex-1 truncate" style={{ color: "var(--text-muted)" }}>{publishUrl}</code>
             <button
               onClick={copyPublish}
-              className="text-label-secondary hover:text-label-primary"
+              className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
               title="Copy"
             >
-              {copied ? <Check size={14} className="text-system-green" /> : <Copy size={14} />}
+              {copied ? <Check size={14} style={{ color: "var(--success)" }} /> : <Copy size={14} />}
             </button>
           </div>
         ) : (
-          <button onClick={loadPublishUrl} className="dp-btn-secondary text-sm">
+          <button onClick={loadPublishUrl} className="btn ghost text-sm">
             Reveal publish URL
           </button>
         )}
-        <p className="type-caption-1 text-label-tertiary mt-2">
+        <p className="type-caption-1 mt-2" style={{ color: "var(--text-muted)" }}>
           This goes the other direction — paste this URL into your phone's
           "Subscribe to calendar" flow and your Droplet events show up there
           automatically.

@@ -50,14 +50,25 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("department-reconciler");
 
+// WARP-1257: `failed` and `archive_failed` are BOTH swept, but they carry
+// different original intent — `failed` retries down the provision path,
+// `archive_failed` down the archive path (see reconcileDepartmentRow routing).
 const DEPARTMENT_SWEEP_STATES = [
   "pending",
   "provisioning",
   "failed",
   "archiving",
+  "archive_failed",
 ] as const;
 
-const MEMBERSHIP_SWEEP_STATES = ["pending", "failed", "removing"] as const;
+// WARP-1257: `failed` and `remove_failed` are BOTH swept — `failed` retries
+// down the sync path, `remove_failed` down the removal path.
+const MEMBERSHIP_SWEEP_STATES = [
+  "pending",
+  "failed",
+  "removing",
+  "remove_failed",
+] as const;
 
 export interface ReconcileResult {
   departmentsSwept: number;
@@ -242,11 +253,14 @@ async function sweepDepartments(
   let stillFailed = 0;
 
   for (const row of rows) {
-    if (row.state === "archiving") {
+    // WARP-1257: route on ORIGINAL intent. `archiving` and its failure state
+    // `archive_failed` retry down the archive path; `pending`/`provisioning`/
+    // `failed` funnel through the idempotent provision path. Never re-provision
+    // a row whose operator intent was archival just because a transient NC error
+    // parked it in a failure state — that silently un-archives the department.
+    if (row.state === "archiving" || row.state === "archive_failed") {
       await archiveDepartment(prisma, row.id);
     } else {
-      // pending / provisioning / failed all funnel through the same
-      // idempotent provision path.
       await provisionDepartment(prisma, row.id);
     }
 
@@ -266,13 +280,13 @@ async function sweepDepartments(
         refs: { departmentId: row.id, fromState: row.state, toState: after.state },
         actor: { type: "system" },
       });
-    } else if (after?.state === "failed") {
+    } else if (after?.state === "failed" || after?.state === "archive_failed") {
       stillFailed += 1;
-      // A row that entered this sweep already `failed` and is STILL
-      // `failed` after a retry attempt is "stuck" — surface an alert
-      // ActivityRow distinct from the per-attempt failure row that
-      // provisionDepartment/archiveDepartment already emitted.
-      if (row.state === "failed") {
+      // A row that entered this sweep already in a failure state (provision
+      // `failed` or archive `archive_failed`) and is STILL failed after a retry
+      // attempt is "stuck" — surface an alert ActivityRow distinct from the
+      // per-attempt failure row provisionDepartment/archiveDepartment emitted.
+      if (row.state === "failed" || row.state === "archive_failed") {
         await recordActivity({
           kind: "system",
           severity: "err",
@@ -346,6 +360,14 @@ async function sweepMemberships(
   let removed = 0;
 
   for (const row of rows) {
+    // WARP-1257: capture the ORIGINAL intent from the row's syncState BEFORE
+    // any NC call, so the per-row catch below can re-mark a failure down the
+    // path it actually came from. `removing` and its failure state
+    // `remove_failed` are BOTH removal intent; `pending`/`failed` are sync
+    // intent. A partial removal failure must never be re-synced (which would
+    // silently re-grant the revoked access) — intent lives in the state.
+    const isRemoval =
+      row.syncState === "removing" || row.syncState === "remove_failed";
     try {
       const dept = (await prisma.department.findUnique({
         where: { id: row.departmentId },
@@ -362,7 +384,7 @@ async function sweepMemberships(
       // post-GA — leave household memberships exactly as they are.
       if (dept.kind === "HOUSEHOLD") continue;
 
-      if (row.syncState === "removing") {
+      if (isRemoval) {
         if (dept.ncGroupRw || dept.ncGroupRo) {
           const user = await prisma.user.findUnique({
             where: { id: row.userId },
@@ -383,7 +405,8 @@ async function sweepMemberships(
         continue;
       }
 
-      // pending / failed → push toward the target group for `right`.
+      // Sync intent (pending / failed) → push toward the target group for
+      // `right`. (Removal intent already returned above.)
       if (dept.state !== "active" || !dept.ncGroupRw || !dept.ncGroupRo) {
         // Department itself isn't converged yet — retry next tick, once
         // the department sweep above (or a future tick) lands it active.
@@ -453,7 +476,14 @@ async function sweepMemberships(
       try {
         await prisma.departmentMembership.update({
           where: { id: row.id },
-          data: { syncState: "failed", syncError: message.slice(0, 1024) },
+          // WARP-1257: preserve intent across the failure. A removal that
+          // failed partway is parked in `remove_failed` (retried down the
+          // removal path next tick), NOT the generic `failed` the sync path
+          // would pick up and re-add the user with.
+          data: {
+            syncState: isRemoval ? "remove_failed" : "failed",
+            syncError: message.slice(0, 1024),
+          },
         });
       } catch (updateErr) {
         // Row may have been deleted concurrently (e.g. cascaded delete

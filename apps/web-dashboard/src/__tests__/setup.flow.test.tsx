@@ -56,6 +56,9 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-817 — WifiStep reads the host topology on mount to decide its
+  // default disclosure state; null (best-effort) leaves the collapsed default.
+  getNetworkTopology: vi.fn(async () => null),
   // WARP-979 — the reworked AddressStep imports these (this flow skips the step).
   checkBoxName: vi.fn(async () => ({
     available: true,

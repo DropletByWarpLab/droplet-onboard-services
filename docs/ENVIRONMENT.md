@@ -29,7 +29,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `VISION_MODEL` | Preferred LOCAL vision model for chat image attachments. When the selected chat model can't see an attached image, the orchestrator auto-routes that turn to this model and model-readiness pulls it at startup (like `LLM_MODEL`). Unset → no local vision; cloud vision (gpt-4o / Claude) still works by selecting a cloud vision model explicitly. |
 | `VISION_MAX_IMAGES` | Max images re-sent per chat request (most-recent-first), bounding token cost on a small local context window (default `3`, range 1–8). |
 | `EMAIL_SENDING_STALE_MS` | Grace window (ms) before an outbound email draft stuck in `sending` is reconciled to `failed` (WARP-890). A draft is claimed `queued→sending` before the SMTP send; if its terminal status callback never lands (email-indexer crash / lost PATCH) it would strand in `sending`. Both the orchestrator's stale-sending cron (every 5 min) and the email-indexer's outbound tick sweep `sending` rows whose `claimedAt` is older than this window to `failed` (never re-queued — the send may have completed). Default `600000` (10 min). An explicit `0` is honored (reconcile immediately — useful in tests). |
-| `DROPLET_FIPS_MODE` | Per-customer FIPS 140-3 activation (WARP-318). **Default `0` (OFF)** — modern crypto, identical to a non-FIPS install. `1` boots all five services FIPS-enforcing against the in-image validated provider (CMVP #4282, WARP-967); **no rebuild**. Flip via `setup.sh --fips` / `--no-fips` (explicit boolean, never derived). setup.sh derives `OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`, `OPENSSL_MODULES`, `NODE_OPTIONS`, `PG_SSLMODE`, `PG_HBA` (+ the `DATABASE_URL` `sslmode` param) from it — do not hand-edit those. FIPS RESTRICTS algorithms; it does not add strength. Full guide: [`docs/fips.md`](fips.md) |
+| `DROPLET_FIPS_MODE` | Per-customer FIPS 140-3 activation (WARP-318). **Default `0` (OFF)** — modern crypto, identical to a non-FIPS install. `1` boots all five services FIPS-enforcing against the in-image validated provider (CMVP #4282, WARP-967); **no rebuild**. Flip via `setup.sh --fips` / `--no-fips` (explicit boolean, never derived). setup.sh derives `OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`, `NODE_OPTIONS`, `PG_SSLMODE`, `PG_HBA` (+ the `DATABASE_URL` `sslmode` param) from it — do not hand-edit those (`OPENSSL_MODULES` is actively removed: WARP-1063, see `docs/fips.md`). FIPS RESTRICTS algorithms; it does not add strength. Full guide: [`docs/fips.md`](fips.md) |
 | `DROPLET_SSO_{GOOGLE,ENTRA,OKTA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` | Optional OIDC SSO provider config (commented out by default in `.env.example`) |
 | `DROPLET_TELEMETRY_ENABLED` | Master opt-in for the fleet-agent's portal telemetry (WARP-963). **Default OFF**; only `1`/`true` enables. Even when the `telemetry` compose profile starts the container, the process idles with ZERO egress unless this is set AND credentials exist (`DROPLET_TELEMETRY_PROVISIONING_CODE`, or the identity persisted on the `fleet-agent-state` volume by a prior registration). Full var list + egress-audit table: [`services/fleet-agent/README.md`](../services/fleet-agent/README.md) |
 | `DROPLET_TELEMETRY_PROVISIONING_CODE` | One-time register code minted in the analytics portal's `/settings/tokens`. Consumed on first successful `/agents/register`; the returned ingest token is stored ONLY on the fleet-agent's runtime state volume — never in `.env`, never tracked |
@@ -119,9 +119,11 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 
 - **Single knob.** `DROPLET_FIPS_MODE` (`0`/`1`) is the only thing an operator
   sets. Everything else (`OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`,
-  `OPENSSL_MODULES`, `NODE_OPTIONS`, and — since WARP-233 — `PG_SSLMODE`,
+  `NODE_OPTIONS`, and — since WARP-233 — `PG_SSLMODE`,
   `PG_HBA` plus the `sslmode` param of `DATABASE_URL`) is **derived** by
-  `setup.sh` — do not hand-edit those. The flag is an **explicit boolean**,
+  `setup.sh` — do not hand-edit those, and never add `OPENSSL_MODULES`
+  (removed by WARP-1063: a process-wide module path breaks multi-libcrypto
+  processes; see `docs/fips.md`). The flag is an **explicit boolean**,
   never inferred from ambient state (mirrors `DOCS_ENABLED` /
   `SINGLE_BOX_MODE`).
 - **Default posture is unchanged.** With `DROPLET_FIPS_MODE=0` (the default) the
@@ -142,15 +144,14 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
   `PG_HBA=pg_hba.fips.conf`, `DATABASE_URL` `sslmode` rewritten), and `--no-fips`
   restores TLS-only. App-layer PHI/PII column encryption applies in both
   postures; decision (A) sign-off is tracked on the WARP-233 PR. (2)
-  **Separately, FIPS-on app boot is currently blocked (WARP-317 finding).**
-  Turning FIPS on activates + enforces the validated provider (self-tests pass,
-  MD5 refused, edge TLS restricted), but the shared FIPS OpenSSL config leaves a
-  default TLS client context with no ciphers, so services that construct a TLS
-  client at startup — orchestrator (Prisma `$connect` → `P1011` "library has no
-  ciphers") and ai-gateway (httpx) — can't finish booting. Root cause is the
-  config (`docker/openssl-fips.cnf`), not the db hop; the fix is
-  WARP-967/WARP-318, surfaced + asserted by WARP-317's full-stack smoke test.
-  Until (2) lands, FIPS-on boot is blocked regardless of (1). See
+  **Separately, the WARP-317-surfaced FIPS boot block is FIXED (WARP-1063).**
+  The `P1011` / `LIBRARY_HAS_NO_CIPHERS` crashes were the validated provider
+  failing to activate in the second libcrypto instance of multi-OpenSSL
+  processes (Node + Prisma, pyca cryptography + system libssl — the FIPS
+  module cannot be initialized twice from one file, openssl#25553). Each image
+  now ships a per-runtime `fips.so` copy, `OPENSSL_MODULES` is gone from the
+  derived env, and the boot self-tests positively probe an approved digest, so
+  FIPS-on boots end-to-end (asserted by WARP-317's full-stack smoke test). See
   [`docs/fips.md`](fips.md).
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.

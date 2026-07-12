@@ -75,10 +75,14 @@ CREATE INDEX IF NOT EXISTS "Department_state_idx" ON "Department"("state");
 CREATE INDEX IF NOT EXISTS "Department_parentId_idx" ON "Department"("parentId");
 
 -- Foreign key for self-relation (parent department)
-ALTER TABLE "Department"
-    ADD CONSTRAINT "Department_parentId_fkey"
-    FOREIGN KEY ("parentId")
-    REFERENCES "Department"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+DO $$ BEGIN
+    ALTER TABLE "Department"
+        ADD CONSTRAINT "Department_parentId_fkey"
+        FOREIGN KEY ("parentId")
+        REFERENCES "Department"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 -- ── DepartmentMembership model ──
 

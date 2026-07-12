@@ -29,10 +29,13 @@ the first at-rest PHI/PII column. Verification evidence:
 
 ## 2. FIPS-mode interaction (P1011, decision A)
 
-Under `DROPLET_FIPS_MODE=1` the FIPS openssl config breaks Prisma/libpq's TLS
-handshake entirely (`P1011: library has no ciphers`). `setup.sh --fips`
-therefore flips the **intra-compose hop only** to plaintext+SCRAM, all derived
-from the one knob by `apply_fips_mode`:
+Decision (A) scopes the **intra-compose hop only** to plaintext+SCRAM under
+`DROPLET_FIPS_MODE=1`, all derived from the one knob by `apply_fips_mode`.
+(Historical note: the `P1011: library has no ciphers` crash that originally
+motivated urgency here turned out to be the WARP-1063 multi-libcrypto
+provider-activation defect, now fixed — Prisma constructs TLS clients fine
+under FIPS. Whether the db hop can move back to `sslmode=require` under FIPS
+is WARP-233's re-evaluation to own; decision (A) stands until then.)
 
 | Key | default (`--no-fips`) | FIPS (`--fips`) |
 |---|---|---|

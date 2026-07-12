@@ -18,8 +18,8 @@ import { isPasskeySupported, registerPasskey } from "@/lib/webauthn";
  * GET/DELETE credential endpoints not built in this PR.
  *
  * Matches the surrounding settings sections: uppercase type-footnote header +
- * a dp-card body. All copy is sentence case, no exclamation marks
- * (design copy rules). Motion comes from the dp-btn token (ease-smooth).
+ * a .card body. All copy is sentence case, no exclamation marks
+ * (design copy rules). Motion comes from the .btn token (ease-smooth).
  */
 // WARP-1156 — shown when the page isn't a secure context (plain-HTTP
 // droplet.local) and on a SecurityError from the ceremony (origin/RP-ID
@@ -82,11 +82,14 @@ export function PasskeysSection() {
 
   return (
     <section className="mb-10">
-      <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
+      <h2
+        className="type-footnote uppercase tracking-wider px-1 mb-2"
+        style={{ color: "var(--text-muted)" }}
+      >
         Passkeys
       </h2>
-      <div className="dp-card p-4 space-y-3">
-        <p className="type-subheadline text-label-secondary">
+      <div className="card space-y-3">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           Sign in without a password using your device&apos;s fingerprint, face,
           or a security key. Passkeys stay on your devices and never leave your
           Droplet.
@@ -97,7 +100,7 @@ export function PasskeysSection() {
             type="button"
             onClick={handleAdd}
             disabled={busy}
-            className="dp-btn-secondary"
+            className="btn"
           >
             <KeyRound size={16} strokeWidth={1.5} />
             {busy ? "Waiting for passkey..." : "Add a passkey"}
@@ -105,11 +108,14 @@ export function PasskeysSection() {
         ) : supported ? (
           // WARP-1156 — insecure context: every create() would be refused by
           // the browser, so render the way forward instead of a doomed button.
-          <p className="type-footnote text-label-secondary bg-system-orange/10 rounded-sm px-3 py-2">
+          <p
+            className="type-footnote bg-system-orange/10 rounded-sm px-3 py-2"
+            style={{ color: "var(--text-muted)" }}
+          >
             {SECURE_ADDRESS_COPY}
           </p>
         ) : (
-          <p className="type-footnote text-label-tertiary">
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
             This browser doesn&apos;t support passkeys.
           </p>
         )}

@@ -29,7 +29,13 @@ vi.mock("next/navigation", () => ({
 
 // ── Data hooks ──
 const PERSONAL: FileSpace = { id: "personal", name: "My Files", root: "/" };
-const SHARED: FileSpace = { id: "shared", name: "Household", root: "/Household", kind: "household", state: "active" };
+const SHARED: FileSpace = {
+  id: "shared",
+  name: "Household",
+  root: "/Household",
+  kind: "household",
+  state: "active",
+};
 
 const FILES: FileEntryInfo[] = [
   {

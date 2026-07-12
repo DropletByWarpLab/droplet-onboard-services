@@ -47,6 +47,23 @@ function quotaFieldValue(storageQuotaBytes: bigint | null): string {
 }
 
 /**
+ * Read the target user's CURRENT Nextcloud storage quota (bytes) so a
+ * first-ever policy row created by a NON-quota PUT (e.g. maxUploadSizeMb
+ * only) can seed its desired state to the system/global default the account
+ * already carries — instead of `null`, which means "unlimited" and would be
+ * silently pushed by the reconciler. Returns `null` when the user has no NC
+ * account yet, NC is unreachable, or the account is genuinely unlimited
+ * (`ncGetUserQuotaAdmin` never throws — it returns `null` on any failure and
+ * reports an unlimited quota as `quota: null`). A `null` here is safe: the
+ * create path marks such a row `synced`, so the reconciler never pushes it.
+ */
+async function snapshotCurrentQuota(ncUsername: string | null): Promise<bigint | null> {
+  if (!ncUsername) return null;
+  const quota = await ncGetUserQuotaAdmin(adminBasicToken(), ncUsername);
+  return quota && quota.quota !== null ? BigInt(Math.trunc(quota.quota)) : null;
+}
+
+/**
  * Push the target's CURRENT desired quota to Nextcloud and flip
  * `quotaSyncState` accordingly. Never throws — pushdown failure is
  * recorded on the row for the reconciler to retry; the caller (the route)
@@ -104,13 +121,38 @@ export async function upsertUsagePolicy(
 
   const quotaChanged = input.storageQuotaBytes !== undefined;
 
+  // CREATE defaults. When the caller supplies a quota we seed the value and
+  // leave it `pending` to be pushed below. When the caller does NOT touch
+  // the quota on a first-ever write (a maxUploadSizeMb-only PUT), we must
+  // neither push an unrequested quota nor leave the new row
+  // {storageQuotaBytes: null, quotaSyncState: "pending"} — the 5-minute
+  // reconciler would then silently push "none" (unlimited) to the user's
+  // real Nextcloud account (WARP-1271 review finding). Instead we seed the
+  // row with the system/global default the account already carries (its
+  // current NC quota) and mark it `synced`, so the reconciler leaves NC
+  // untouched. This snapshot is a CREATE-ONLY default: the `update` branch
+  // below keeps strict "only the provided fields change" semantics, so a
+  // partial PUT on an existing row never re-reads or overwrites the quota.
+  let createStorageQuotaBytes: bigint | null = input.storageQuotaBytes ?? null;
+  let createQuotaSyncState: "pending" | "synced" = "pending";
+  if (!quotaChanged) {
+    const existing = await prisma.userUsagePolicy.findUnique({
+      where: { userId: targetUserId },
+      select: { userId: true },
+    });
+    if (!existing) {
+      createStorageQuotaBytes = await snapshotCurrentQuota(user.nextcloudUsername);
+      createQuotaSyncState = "synced";
+    }
+  }
+
   const policy = await prisma.userUsagePolicy.upsert({
     where: { userId: targetUserId },
     create: {
       userId: targetUserId,
-      storageQuotaBytes: input.storageQuotaBytes ?? null,
+      storageQuotaBytes: createStorageQuotaBytes,
       maxUploadSizeMb: input.maxUploadSizeMb ?? null,
-      quotaSyncState: "pending",
+      quotaSyncState: createQuotaSyncState,
       updatedBy,
     },
     update: {

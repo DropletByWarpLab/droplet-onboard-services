@@ -38,7 +38,11 @@ COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 # Targeted install: only the web-dashboard workspace and its in-repo
 # dependencies (shared-types is type-only; auth-policy ships runtime code
 # that next.config transpiles — see transpilePackages).
-RUN npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
+# WARP-1065: persistent npm download cache — package tarballs survive
+# rebuilds (node_modules itself is still built fresh each time; see the
+# --no-cache note on the apt mount above).
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
 
 # Sources for the workspaces this image builds. auth-policy's source is
 # required (not just its package.json): next build transpiles it from .ts
@@ -68,10 +72,20 @@ FROM node:20-bookworm-slim
 # fipsinstall + build-time FIPS self-test below against the validated
 # fips.so that now ships in this image, and provides the system
 # MODULESDIR the module installs into.
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 # WARP-229/WARP-967: the shared FIPS-provider OpenSSL config, COPY'd
 # from the canonical docker/openssl-fips.cnf. The dashboard builds from
@@ -92,32 +106,38 @@ ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
 # Runtime posture note: the ENV above stays baked (re-baking it is
 # WARP-315's scope), and shipping the module does NOT flip this
 # container into FIPS mode — `node` statically links its own bundled
-# OpenSSL, whose baked-in MODULESDIR is not Debian's AND which reads
-# the config under its own `nodejs_conf` appname (absent from the
-# shared config), so startup behaves exactly as before this change
-# (verified: getFips()=0, MD5 available, clean boot). Activation
-# (WARP-318) = NODE_OPTIONS=--openssl-shared-config + OPENSSL_MODULES +
+# OpenSSL, which reads the config under its own `nodejs_conf` appname
+# (absent from the shared config), so startup behaves exactly as before
+# this change (verified: getFips()=0, MD5 available, clean boot).
+# Activation (WARP-318) = NODE_OPTIONS=--openssl-shared-config +
 # DROPLET_FIPS_REQUIRED=true alongside the config.
+#
+# WARP-1063: node resolves fips.so from its OWN baked MODULESDIR (a
+# dedicated copy installed below) rather than a process-wide
+# OPENSSL_MODULES — the FIPS module cannot be initialized by two
+# libcrypto instances resolving the same .so file (openssl#25553; see
+# apps/orchestrator/Dockerfile for the full story).
 COPY --from=fips-builder /out/fips.so /tmp/fips.so
 COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
-RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+RUN node_moddir="$(grep -a -o -m1 'MODULESDIR: "[^"]*"' "$(command -v node)" | sed 's/^MODULESDIR: "//; s/"$//')" && \
+    { [ -n "$node_moddir" ] || { echo "FIPS: could not extract node's baked MODULESDIR" >&2; exit 1; }; } && \
+    sh /tmp/install-fips-provider.sh /tmp/fips.so "$node_moddir" && \
     rm -f /tmp/fips.so /tmp/install-fips-provider.sh
 
-# WARP-967: probe the exact combination WARP-318 will activate at
-# runtime — Node's BUNDLED OpenSSL loading the validated module. See
-# apps/orchestrator/Dockerfile for the full rationale (OPENSSL_MODULES
-# because node's baked-in MODULESDIR is not Debian's;
-# `--openssl-shared-config` because node reads the config under its own
-# `nodejs_conf` appname). Flag + env vars are scoped to this RUN;
-# runtime posture is unchanged.
+# WARP-967: probe the exact combination WARP-318 activates at runtime —
+# Node's BUNDLED OpenSSL loading the validated module from its own baked
+# MODULESDIR copy (WARP-1063 — deliberately NO OPENSSL_MODULES; see
+# apps/orchestrator/Dockerfile). `--openssl-shared-config` because node
+# reads the config under its own `nodejs_conf` appname. Flag + env var
+# are scoped to this RUN; runtime posture is unchanged.
 RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf \
-    OPENSSL_MODULES="$(openssl version -m | sed -n 's/^MODULESDIR: "\(.*\)"$/\1/p')" \
     node --openssl-shared-config -e 'const c = require("node:crypto"); \
       if (c.getFips() !== 1) { console.error("FIPS node self-test FAILED: bundled OpenSSL did not enter FIPS mode"); process.exit(1); } \
+      try { c.createHash("sha256").update("probe").digest("hex"); } catch (e) { console.error("FIPS node self-test FAILED: approved digest unavailable — node did not activate its fips.so copy: " + e.message); process.exit(1); } \
       let md5ok = false; \
       try { c.createHash("md5").update("probe").digest("hex"); md5ok = true; } catch {} \
       if (md5ok) { console.error("FIPS node self-test FAILED: MD5 succeeded under the FIPS config"); process.exit(1); } \
-      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active, MD5 rejected");'
+      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active from node MODULESDIR copy, SHA-256 works, MD5 rejected");'
 
 WORKDIR /app
 

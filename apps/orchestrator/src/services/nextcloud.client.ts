@@ -1250,6 +1250,23 @@ export class NextcloudUserExistsError extends NextcloudOcsError {
   }
 }
 
+/**
+ * Thrown by the group-membership endpoints (`ncAddUserToGroup` /
+ * `ncRemoveUserFromGroup`) when Nextcloud reports OCS statuscode 102 for
+ * `POST`/`DELETE /cloud/users/{userid}/groups`. For those endpoints statuscode
+ * 102 means "group does not exist" — a genuine failure that must not be
+ * swallowed as an idempotent membership no-op. Note this is the *opposite* of
+ * the `POST /cloud/groups` / `POST /cloud/users` create endpoints, where 102
+ * means "already exists" (see `NextcloudUserExistsError`). Callers can
+ * `instanceof`-check this without string-matching the OCS message.
+ */
+export class NextcloudGroupNotFoundError extends NextcloudOcsError {
+  constructor(message = "Group does not exist") {
+    super(message, 102);
+    this.name = "NextcloudGroupNotFoundError";
+  }
+}
+
 
 export interface ShareCreateOptions {
   /** 0 = user, 1 = group, 3 = public link */
@@ -1425,6 +1442,32 @@ export async function ncListSharedWithMe(
   return Array.isArray(records)
     ? records.map((r) => ({ ...mapShareRecord(r), path: r.file_target ?? r.path ?? "" }))
     : [];
+}
+
+/**
+ * List the shares the current user has CREATED (outbound), across their whole
+ * tree — the reverse of {@link ncListSharedWithMe}. Backs the dashboard's
+ * "Shared by me" tab (WARP-941).
+ *
+ * Same OCS endpoint as {@link ncListShares} but WITHOUT a `path` filter, so
+ * Nextcloud scopes the listing to the shares the authenticated user
+ * INITIATED — getSharesBy defaults to `uid_initiator = me`, i.e. exactly the
+ * shares this user created. We deliberately DON'T pass `reshares=true`: that
+ * broadens getSharesBy to `uid_owner = me OR uid_initiator = me`, folding in
+ * reshares of files the user merely OWNS but did not personally create, which
+ * misrepresents a tab labeled "Shared by me". `subfiles=true` is likewise
+ * omitted — it only enumerates children of a Folder node identified by `path`,
+ * so with no `path` the node is null and the flag is a no-op.
+ */
+export async function ncListOutboundShares(token: string): Promise<ShareDetail[]> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS list outbound shares failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map((r) => mapShareRecord(r)) : [];
 }
 
 /**

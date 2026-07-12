@@ -72,6 +72,14 @@ jobs:
       - name: Build @droplet/mcp-server
         run: npm run -w @droplet/mcp-server build
 
+      # WARP-1137: erp.service imports @droplet/erp-connector; its types
+      # resolve from dist/, so build before the orchestrator suite runs
+      # (mirrors orchestrator-tests.yml — this job was crashing on
+      # unresolved @droplet/erp-connector imports without this step,
+      # WARP-1249).
+      - name: Build @droplet/erp-connector
+        run: npm run -w @droplet/erp-connector build
+
       - name: Test @droplet/tools-core
         run: npm run -w @droplet/tools-core test
 

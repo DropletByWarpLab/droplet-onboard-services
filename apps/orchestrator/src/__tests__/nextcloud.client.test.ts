@@ -35,6 +35,7 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncListOutboundShares,
   ncEnsureGroup,
 } from "../services/nextcloud.client.js";
 
@@ -831,6 +832,79 @@ describe("nextcloud.client — shares v2", () => {
       ) as unknown as typeof fetch;
 
       expect(await ncListSharedWithMe("t")).toEqual([]);
+    });
+  });
+
+  // WARP-941 — outbound listing for the dashboard's "Shared by me" tab.
+  describe("ncListOutboundShares", () => {
+    it("GETs the OCS shares endpoint WITHOUT a path filter, initiator-only (no reshares/subfiles)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: { status: "ok" },
+              data: [
+                {
+                  ...shareRecord,
+                  id: "21",
+                  share_type: 0,
+                  share_with: "romain",
+                  share_with_displayname: "Romain",
+                },
+                { ...shareRecord, id: "22" },
+              ],
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const shares = await ncListOutboundShares("token");
+
+      expect(shares).toHaveLength(2);
+      expect(shares[0].id).toBe(21);
+      expect(shares[0].shareType).toBe(0);
+      expect(shares[0].shareWith).toBe("romain");
+      expect(shares[0].shareWithDisplayName).toBe("Romain");
+      expect(shares[1].shareType).toBe(3);
+
+      const [url] = fetchMock.mock.calls[0];
+      // Initiator-only: NO path filter (Nextcloud then scopes to shares this
+      // user CREATED — uid_initiator), and none of the broadening/inbound
+      // params. `reshares` would widen getSharesBy to files the user merely
+      // OWNS but did not create; `subfiles` is a no-op without a folder `path`.
+      // Both are dropped so the "Shared by me" tab means "shares I created".
+      expect(url).toBe(
+        "http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares"
+      );
+      expect(url).not.toContain("path=");
+      expect(url).not.toContain("shared_with_me");
+      expect(url).not.toContain("reshares");
+      expect(url).not.toContain("subfiles");
+    });
+
+    it("returns [] when OCS returns empty array", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "ok" }, data: [] } },
+        })
+      ) as unknown as typeof fetch;
+
+      expect(await ncListOutboundShares("t")).toEqual([]);
+    });
+
+    it("throws with the status on a non-ok HTTP response", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({ ok: false, status: 503 })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListOutboundShares("t")).rejects.toThrow(
+        /OCS list outbound shares failed: 503/
+      );
     });
   });
 });

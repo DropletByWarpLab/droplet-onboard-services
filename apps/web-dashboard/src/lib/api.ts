@@ -77,6 +77,7 @@ import type {
   VoiceCalibrationApply,
   VoiceMeasureResult,
   VoiceEchoCheckResult,
+  VoiceRestartResult,
   VoiceCalibrationModeResult,
   BoxNameCheckResult,
   BoxNameSetResult,
@@ -2854,9 +2855,29 @@ export async function confirmMatterCommand(
   return res.json();
 }
 
-export async function discoverMatterDevices(): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
-  const res = await authFetch(`${BASE}/api/matter/discover`);
-  if (!res.ok) throw new Error(`Failed to discover devices: ${res.status}`);
+export async function discoverMatterDevices(
+  signal?: AbortSignal,
+): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
+  // WARP-1281 (review follow-up on #996): callers may bound the browse —
+  // the wizard aborts at 25s so a stalled transport can't wedge its serial
+  // chain. Guarded with instanceof because useSmartHome uses this function
+  // directly as an SWR fetcher, and SWR invokes fetchers with the string
+  // KEY as the first argument — that must not reach fetch() as `signal`.
+  const res = await authFetch(`${BASE}/api/matter/discover`, {
+    signal: signal instanceof AbortSignal ? signal : undefined,
+  });
+  if (!res.ok) {
+    // WARP-1281: carry the HTTP status (same pattern as
+    // commissionMatterDevice / WARP-851) so the setup wizard can tell
+    // "Matter controller not started" (503) apart from a transient
+    // transport failure and surface an honest service-down state
+    // instead of fake-scanning.
+    const err = new Error(
+      `Failed to discover devices: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -3261,6 +3282,12 @@ export interface PersistedConversation {
     /** WARP-844 — thumbs rating, or null when unrated. */
     feedback?: "up" | "down" | null;
     /**
+     * WARP-904 — the model/provider this specific turn actually ran on,
+     * or null/absent on rows persisted before this column existed.
+     */
+    model?: string | null;
+    provider?: string | null;
+    /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
      * older orchestrator builds didn't return it; treat missing as
@@ -3373,6 +3400,10 @@ export interface BrainUploadResponse {
   /** WARP-864: true when identical bytes were already uploaded and the
    * existing item was reused instead of ingesting a duplicate. */
   deduplicated?: boolean;
+  /** WARP-905: the applied ingest policy. 'await_approval' means the upload
+   * is HELD (not embedded) until it is approved. Absent on partial-deploy
+   * windows before WARP-905 lands → treat as 'auto_embed'. */
+  ingestPolicy?: BrainIngestPolicy;
 }
 
 /**
@@ -3385,14 +3416,20 @@ export interface BrainUploadResponse {
  * `chatId` is optional — if set, the orchestrator stamps it onto the
  * BrainMemoryItem row's `originatingChatId` so a future "scope to this
  * conversation" filter (Phase 2) can do the join.
+ *
+ * WARP-905: `ingestPolicy` is optional — pass 'await_approval' to HOLD the
+ * upload for human approval instead of embedding it immediately. Omitted /
+ * 'auto_embed' preserves the historical embed-on-upload behaviour.
  */
 export async function uploadBrainFile(
   file: File,
   chatId?: string,
+  ingestPolicy?: BrainIngestPolicy,
 ): Promise<BrainUploadResponse> {
   const form = new FormData();
   form.append("file", file);
   if (chatId) form.append("chatId", chatId);
+  if (ingestPolicy) form.append("ingestPolicy", ingestPolicy);
   const res = await authFetch(`${BASE}/api/files/brain/upload`, {
     method: "POST",
     body: form,
@@ -3416,6 +3453,27 @@ export async function uploadBrainFile(
       );
     }
     throw new Error(body.error || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-905 — release a brain-memory item that was HELD under
+ * ingestPolicy='await_approval'. Flips the policy to 'auto_embed' and
+ * re-drives ingestion (the file-indexer, now unblocked, extracts + embeds;
+ * audio/video go through the transcription worker). The subsequent status
+ * flips arrive over the WS bridge like any other upload.
+ */
+export async function approveBrainItem(
+  itemId: string,
+): Promise<{ itemId: string; status: BrainMemoryItemStatus; ingestPolicy: BrainIngestPolicy }> {
+  const res = await authFetch(
+    `${BASE}/api/files/brain/${encodeURIComponent(itemId)}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Approve failed: ${res.status}`);
   }
   return res.json();
 }
@@ -4570,6 +4628,18 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
 }
 
 /**
+ * WARP-941 — outbound shares: everything the current user has shared to
+ * people, groups, or links. Backs the "Shared by me" tab (the outbound
+ * sibling of fetchSharedWithMe).
+ */
+export async function fetchSharedByMe(): Promise<ShareDetail[]> {
+  const res = await authFetch(`${BASE}/api/files/shares-by-me`);
+  if (!res.ok) throw new Error(`Failed to fetch shares-by-me: ${res.status}`);
+  const data = await res.json();
+  return data.shares ?? [];
+}
+
+/**
  * WARP-879 / WS-1 — household members the internal-sharing picker can target.
  * The orchestrator reads the local directory (ADR-013), so this is reachable
  * by every household role, not just admins.
@@ -5072,7 +5142,28 @@ export async function decommissionApDevice(
 
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
-  if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    // WARP-1283: carry the orchestrator's typed `code` + the HTTP status on
+    // the thrown error (the storageWriteError / WARP-851 commissionMatterDevice
+    // precedent) so the wizard's VpnStep can render specific copy when the
+    // routing sidecar is unavailable (503 + code ROUTING_UNAVAILABLE) instead
+    // of the generic error page. `message` is preferred over `error` because
+    // the global error handler puts the detail there ({ error: <category>,
+    // message: <detail>, code }); the route's own typed 503 uses `error`.
+    const err = new Error(
+      (typeof body.message === "string" && body.message) ||
+        (typeof body.error === "string" && body.error) ||
+        `Failed to fetch Remote Access status: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
+  }
   return res.json();
 }
 
@@ -5209,6 +5300,23 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
     body: JSON.stringify({}),
   });
   if (!res.ok) await throwVoiceError(res, "Echo check failed");
+  return res.json();
+}
+
+// --- WARP-1057: mic-processor (XVF3800 DSP) restart ---
+
+/**
+ * Reboot the wedged mic processor (`xvf_host REBOOT 1` on the box).
+ * The mic goes quiet for ~10 s while the DSP re-enumerates; callers
+ * re-poll `/api/voice/status` until `input_flatlined` clears.
+ */
+export async function restartVoiceProcessor(): Promise<VoiceRestartResult> {
+  const res = await authFetch(`${BASE}/api/voice/restart-processor`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) await throwVoiceError(res, "Processor restart failed");
   return res.json();
 }
 
@@ -5354,6 +5462,15 @@ export type BrainMemoryItemStatus =
   | "ready"
   | "failed";
 
+/**
+ * WARP-905 — per-item ingest policy. Orthogonal to `status`: this is the gate
+ * the file-indexer consults before embedding a chat-attached upload.
+ *   - auto_embed     → embed on upload (the default; historical behaviour).
+ *   - await_approval → hold the upload until a human approves it (the
+ *                      "pending decision" state surfaced in the files/brain UI).
+ */
+export type BrainIngestPolicy = "auto_embed" | "await_approval";
+
 /** A row from FileContentChunk shaped for the dashboard. */
 export interface KnowledgeChunkItem {
   id: string;
@@ -5424,6 +5541,10 @@ export interface BrainMemoryItemInfo {
   // WARP-214: status drives the StatusChip; failureReason surfaces in tooltip.
   status?: BrainMemoryItemStatus;
   failureReason?: string | null;
+  // WARP-905: 'await_approval' means the item is HELD — surfaced as an
+  // "Awaiting approval" affordance instead of the status pill. Absent on
+  // legacy rows / partial-deploy windows → treated as 'auto_embed'.
+  ingestPolicy?: BrainIngestPolicy;
 }
 
 /**

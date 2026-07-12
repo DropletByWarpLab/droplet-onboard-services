@@ -9,7 +9,8 @@
 #
 # The knob is the single per-customer FIPS activation point (default OFF).
 # `apply_fips_mode` translates it into the derived per-service activation env
-# (OPENSSL_CONF / DROPLET_FIPS_REQUIRED / OPENSSL_MODULES / NODE_OPTIONS),
+# (OPENSSL_CONF / DROPLET_FIPS_REQUIRED / NODE_OPTIONS; OPENSSL_MODULES is
+# actively removed — WARP-1063),
 # reusing the WARP-595 atomic staged-rename upsert so flips are idempotent,
 # interruption-safe, and reversible in both directions.
 # =============================================================================
@@ -83,7 +84,7 @@ else
 fi
 
 # =============================================================================
-echo "--- Case 2: apply_fips_mode on writes all 4 derived activation vars ---"
+echo "--- Case 2: apply_fips_mode on writes the derived activation vars ---"
 # =============================================================================
 apply_fips_mode on >/dev/null 2>&1
 [ "$(kv DROPLET_FIPS_MODE)" = "1" ] \
@@ -98,17 +99,22 @@ apply_fips_mode on >/dev/null 2>&1
 [ "$(kv NODE_OPTIONS)" = "--openssl-shared-config" ] \
   && pass "on writes NODE_OPTIONS=--openssl-shared-config" \
   || fail "on NODE_OPTIONS expected --openssl-shared-config, got '$(kv NODE_OPTIONS)'"
-case "$(kv OPENSSL_MODULES)" in
-  */ossl-modules) pass "on writes non-empty OPENSSL_MODULES ($(kv OPENSSL_MODULES))" ;;
-  *)              fail "on OPENSSL_MODULES expected a *ossl-modules path, got '$(kv OPENSSL_MODULES)'" ;;
-esac
+# WARP-1063: OPENSSL_MODULES must be ABSENT, not merely empty — a present-but-
+# empty value is a real (empty) provider search path, and a process-wide value
+# forces every libcrypto instance in a multi-OpenSSL process (Node + Prisma,
+# pyca + system libssl) onto ONE fips.so file, which the second initializer
+# cannot activate (openssl#25553). Each runtime resolves its own baked
+# MODULESDIR copy instead.
+[ "$(kcount OPENSSL_MODULES)" = "0" ] \
+  && pass "on leaves NO OPENSSL_MODULES row (per-libcrypto baked copies, WARP-1063)" \
+  || fail "on wrote OPENSSL_MODULES ('$(kv OPENSSL_MODULES)') — must be absent"
 
 # =============================================================================
 echo "--- Case 3: on is idempotent (single row per key) ---"
 # =============================================================================
 apply_fips_mode on >/dev/null 2>&1   # second run
 dup_ok=true
-for k in DROPLET_FIPS_MODE OPENSSL_CONF DROPLET_FIPS_REQUIRED OPENSSL_MODULES NODE_OPTIONS; do
+for k in DROPLET_FIPS_MODE OPENSSL_CONF DROPLET_FIPS_REQUIRED NODE_OPTIONS; do
   [ "$(kcount "$k")" = "1" ] || { dup_ok=false; break; }
 done
 $dup_ok \
@@ -123,7 +129,7 @@ conv_ok=true
 [ "$(kv DROPLET_FIPS_MODE)" = "0" ]      || conv_ok=false
 [ "$(kv DROPLET_FIPS_REQUIRED)" = "false" ] || conv_ok=false
 [ -z "$(kv OPENSSL_CONF)" ]              || conv_ok=false
-[ -z "$(kv OPENSSL_MODULES)" ]           || conv_ok=false
+[ "$(kcount OPENSSL_MODULES)" = "0" ]    || conv_ok=false
 [ -z "$(kv NODE_OPTIONS)" ]              || conv_ok=false
 $conv_ok \
   && pass "on→off restores all derived vars to OFF values (deactivation-safe)" \
@@ -170,9 +176,9 @@ after="$(cat "$ENV_FILE")"
 # =============================================================================
 echo "--- Case 7: WARP-233 reconciliation — Postgres DB-hop posture flips with the knob ---"
 # =============================================================================
-# Under FIPS the validated provider's cipher policy breaks Prisma/libpq's TLS
-# handshake to `db` (P1011 "library has no ciphers"). Decision (A), scoped to
-# the knob: FIPS-on flips the intra-compose DB hop to plaintext+SCRAM
+# Decision (A), scoped to the knob (WARP-233; kept after the WARP-1063 fix
+# removed the original P1011 urgency): FIPS-on flips the intra-compose DB hop
+# to plaintext+SCRAM
 # (PG_SSLMODE=disable, PG_HBA=pg_hba.fips.conf, DATABASE_URL sslmode
 # rewritten); FIPS-off restores full TLS-only enforcement.
 : > "$ENV_FILE"
