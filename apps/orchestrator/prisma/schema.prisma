@@ -1189,6 +1189,13 @@ model ScheduleOverride {
 
 // Append-only audit log of every block/unblock transition the ticker
 // causes. Powers the "why is this blocked?" UI and historical reports.
+//
+// WARP-113: append-only immutability is enforced at the DB level — Prisma
+// can't model triggers, so this is "managed at DB level only" (do not rely
+// on the ORM). Migration 20260711000001 installs a BEFORE INSERT OR UPDATE
+// trigger that (1) blocks every UPDATE and (2) rejects future-dated inserts
+// (occurredAt > now() + 5min skew grace). DELETE is intentionally allowed —
+// schedule-purge.ts prunes old rows for retention.
 model ScheduleEvent {
   id          String   @id @default(cuid())
   scheduleId  String?
