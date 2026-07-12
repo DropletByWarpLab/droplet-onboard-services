@@ -81,9 +81,19 @@ function nameToSlug(name: string): string {
 // (e.g. "Family Drive") would be stored verbatim while the check produces
 // "family drive"/"family-drive", never match, and let a department collide with
 // the real shared folder's Nextcloud groupfolder/mount point.
+//
+// Read the value once, defensively. In production zod defaults
+// DROPLET_SHARED_FOLDER_NAME to "Household" (config.ts) so it is always a
+// non-empty string; this `?? "Household"` only guards the case where a partial
+// config object omits the field entirely (e.g. a test's `vi.mock("../config.js")`
+// that transitively loads this router) so module evaluation can't crash on
+// `undefined.toLowerCase()`. For the real, always-defined production value the
+// behavior is identical to WARP-1258 — the configured name's lowercased display
+// form and its slug are both reserved. (WARP-1292)
+const sharedFolderName = config.DROPLET_SHARED_FOLDER_NAME ?? "Household";
 const RESERVED_NAMES = new Set([
-  config.DROPLET_SHARED_FOLDER_NAME.toLowerCase(),
-  nameToSlug(config.DROPLET_SHARED_FOLDER_NAME),
+  sharedFolderName.toLowerCase(),
+  nameToSlug(sharedFolderName),
   "household",
   "admin",
   "system",
