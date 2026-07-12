@@ -38,7 +38,11 @@ COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 # Targeted install: only the web-dashboard workspace and its in-repo
 # dependencies (shared-types is type-only; auth-policy ships runtime code
 # that next.config transpiles — see transpilePackages).
-RUN npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
+# WARP-1065: persistent npm download cache — package tarballs survive
+# rebuilds (node_modules itself is still built fresh each time; see the
+# --no-cache note on the apt mount above).
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
 
 # Sources for the workspaces this image builds. auth-policy's source is
 # required (not just its package.json): next build transpiles it from .ts
@@ -68,10 +72,20 @@ FROM node:20-bookworm-slim
 # fipsinstall + build-time FIPS self-test below against the validated
 # fips.so that now ships in this image, and provides the system
 # MODULESDIR the module installs into.
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 # WARP-229/WARP-967: the shared FIPS-provider OpenSSL config, COPY'd
 # from the canonical docker/openssl-fips.cnf. The dashboard builds from

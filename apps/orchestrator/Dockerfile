@@ -27,12 +27,21 @@ RUN sh /tmp/build-openssl-fips.sh /out
 FROM node:20-bookworm-slim AS builder
 
 # Install build-time openssl + ca-certificates. `--no-install-recommends`
-# keeps the image trim; `rm -rf /var/lib/apt/lists/*` drops the package
-# index after install.
-RUN apt-get update && \
+# keeps the image trim.
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 WORKDIR /app
 
@@ -57,7 +66,11 @@ COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 # Targeted install: only the orchestrator workspace and its in-repo
 # dependencies (tools-core + mcp-server + fips-selftest + shared-types).
 # Excludes web-dashboard's Next.js + React stack from the orchestrator image.
-RUN npm ci \
+# WARP-1065: persistent npm download cache — package tarballs survive
+# rebuilds (node_modules itself is still built fresh each time; see the
+# --no-cache note on the apt mount above).
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci \
     -w @droplet/orchestrator \
     -w @droplet/tools-core \
     -w @droplet/erp-connector \
@@ -128,7 +141,18 @@ FROM node:20-bookworm-slim
 ARG COSIGN_VERSION=2.6.3
 ARG COSIGN_SHA256_AMD64=7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4
 ARG COSIGN_SHA256_ARM64=b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       openssl ca-certificates curl && \
     install -d /usr/share/postgresql-common/pgdg && \
@@ -149,8 +173,7 @@ RUN apt-get update && \
     echo "${cosign_sha}  /usr/local/bin/cosign" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/cosign && \
     /usr/local/bin/cosign version && \
-    apt-get purge -y --auto-remove curl && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get purge -y --auto-remove curl
 
 # WARP-229: activate the OpenSSL 3 FIPS provider. Both the Node process
 # (via its bundled OpenSSL) and any child processes inherit OPENSSL_CONF
