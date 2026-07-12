@@ -209,6 +209,14 @@ function createPrismaMock(seed: { comments?: CommentRow[]; tags?: TagRow[] } = {
         return { count };
       }),
     },
+    // WARP-1260 (T8): the metadata-route department gate resolves
+    // `ncFileId -> File.departmentId` on every call. No file in this
+    // suite is registered to a department, so `findUnique` always
+    // resolves null — the gate is a no-op and existing personal-space
+    // behavior (asserted throughout this file) is unaffected.
+    file: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
   };
 }
 

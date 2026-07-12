@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type DepartmentRight } from "@prisma/client";
 import pino from "pino";
 import {
   ncListFiles,
@@ -49,6 +49,15 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import {
+  checkSpaceAccess,
+  resolveDepartmentIdForSpaceReadOnly,
+  type SpaceAccessCaller,
+} from "../middleware/space.js";
+import {
+  resolveFileDepartment,
+  upsertFileRegistryEntry,
+} from "../services/file-registry.service.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -469,6 +478,39 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         const token = await getToken(req);
         const user = getUser(req);
 
+        // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
+        // the doc-server session so a non-member never reaches the WOPI
+        // handshake for a dept file. Best-effort: resolution failure falls
+        // through to the existing (mint-time) behavior rather than 500ing.
+        try {
+          const gateFileId = await ncGetFileId(token, user, filePath);
+          if (gateFileId !== null) {
+            const departmentId = await resolveFileDepartment(prisma, gateFileId);
+            if (departmentId) {
+              const gateCaller: SpaceAccessCaller = {
+                id: requesterId(req),
+                role: (req as { user?: { role?: string } }).user?.role ?? "",
+              };
+              const access = await checkSpaceAccess(
+                prisma,
+                req,
+                gateCaller,
+                departmentId,
+                "reader",
+              );
+              if (!access.allowed) {
+                res.status(access.status).json({ error: access.error });
+                return;
+              }
+            }
+          }
+        } catch (gateErr) {
+          logger.debug(
+            { err: gateErr, filePath },
+            "editor-session: department gate resolution failed (best-effort, falling through)",
+          );
+        }
+
         // Edit-vs-view: default to the owner's edit capability, then DOWNGRADE
         // to the share's permission if this is a shared-with-me item. We never
         // UPGRADE based on client input. `ncListSharedWithMe` returns the
@@ -567,6 +609,44 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           res.status(400).json({ error: "filePath path-param is required" });
           return;
         }
+
+        // WARP-1260 (T8): department metadata gate. FileCitation is keyed
+        // by `filePath`, not `ncFileId`, so resolve the NC file id first —
+        // best-effort: any resolution failure (missing NC session,
+        // Nextcloud unreachable, path no longer exists) falls through to
+        // the existing personal-space semantics below rather than 500ing
+        // or 401ing a route that historically never depended on NC.
+        try {
+          const gateToken = await getToken(req);
+          const gateNcUser = getUser(req);
+          const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
+          if (gateFileId !== null) {
+            const departmentId = await resolveFileDepartment(prisma, gateFileId);
+            if (departmentId) {
+              const gateCaller: SpaceAccessCaller = {
+                id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
+                role: (req as { user?: { role?: string } }).user?.role ?? "",
+              };
+              const access = await checkSpaceAccess(
+                prisma,
+                req,
+                gateCaller,
+                departmentId,
+                "reader",
+              );
+              if (!access.allowed) {
+                res.status(access.status).json({ error: access.error });
+                return;
+              }
+            }
+          }
+        } catch (gateErr) {
+          logger.debug(
+            { err: gateErr, filePath },
+            "citations: department gate resolution failed (best-effort, falling through)",
+          );
+        }
+
         const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
         const limit = Math.max(
           1,
@@ -695,6 +775,40 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     return fileId;
   }
 
+  // ── WARP-1260 (T8) — metadata-route department gate ──
+  //
+  // comments/tags/citations/editor-session resolve a file's `ncFileId`
+  // (via `resolveFileIdOr404` above, or their own `ncGetFileId` call) and
+  // then call this: `resolveFileDepartment` → if the file IS registered
+  // to a department, run the SAME `requireSpaceAccess('reader')` truth
+  // table `middleware/space.ts` uses, inline, against that department.
+  // Files absent from the registry (`departmentId === null`) fall back to
+  // the existing personal-space semantics (per-user IDOR filters already
+  // on every route below) — no gate applied. Ships in the same release as
+  // dept spaces per the brief: fail-open here is a cross-department
+  // metadata leak. On denial this writes the 403 response itself (via
+  // `checkSpaceAccess`'s result) and returns `false`; the caller must
+  // `return` immediately without writing anything further.
+  async function gateFileSpaceAccess(
+    req: Request,
+    res: Response,
+    ncFileId: number,
+    minRight: DepartmentRight,
+  ): Promise<boolean> {
+    const departmentId = await resolveFileDepartment(prisma, ncFileId);
+    if (!departmentId) return true;
+    const caller: SpaceAccessCaller = {
+      id: requesterId(req),
+      role: (req as { user?: { role?: string } }).user?.role ?? "",
+    };
+    const access = await checkSpaceAccess(prisma, req, caller, departmentId, minRight);
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return false;
+    }
+    return true;
+  }
+
   // ── Comment delete (DELETE /api/files/comments/:id) ──
   // REGISTERED BEFORE the `/files/:filePath(*)/...` routes so the wildcard
   // doesn't shadow this literal path (`comments` would otherwise be captured
@@ -711,6 +825,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           res.status(404).json({ error: "Comment not found" });
           return;
         }
+        if (!(await gateFileSpaceAccess(req, res, row.ncFileId, "reader"))) return;
         // Author check uses the UUID owner column, never the username.
         const isAuthor = row.authorUserId === requesterId(req);
         if (!isAuthor && !isPrivilegedReq(req)) {
@@ -747,6 +862,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const where = isPrivilegedReq(req)
           ? { ncFileId: fileId }
           : { ncFileId: fileId, authorUserId: requesterId(req) };
@@ -775,6 +891,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const comment = await prisma.fileComment.create({
           data: {
             ncFileId: fileId,
@@ -806,6 +923,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const tags = await prisma.fileTag.findMany({
           where: { ncFileId: fileId },
           orderBy: { createdAt: "asc" },
@@ -833,6 +951,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const tag = await prisma.fileTag.upsert({
           where: { ncFileId_label: { ncFileId: fileId, label: parsed.data.label } },
           create: {
@@ -863,6 +982,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const label = req.params.label;
         await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
         safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
@@ -1042,16 +1162,48 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       const user = getUser(req);
       const results: { name: string; path: string; size: number }[] = [];
 
+      // WARP-1260 (T8): file-registry writer. Resolved ONCE per request
+      // (one target space per upload call) — read-only, no gating (write-
+      // route space enforcement is WARP-1262/T10); null for personal or
+      // any space that doesn't resolve to an ACTIVE department.
+      const uploadDepartmentId = await resolveDepartmentIdForSpaceReadOnly(
+        prisma,
+        req.query.space,
+      );
+      const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+
       for (const file of files) {
         await ncUploadFile(token, user, targetPath, file.originalname, file.buffer);
+        const uploadedPath =
+          targetPath === "/"
+            ? `/${file.originalname}`
+            : `${targetPath}/${file.originalname}`;
         results.push({
           name: file.originalname,
-          path:
-            targetPath === "/"
-              ? `/${file.originalname}`
-              : `${targetPath}/${file.originalname}`,
+          path: uploadedPath,
           size: file.size,
         });
+
+        // Best-effort, non-blocking: a registry-write failure must never
+        // fail the upload the user is actively waiting on.
+        if (ownerUserId) {
+          try {
+            const ncFileId = await ncGetFileId(token, user, uploadedPath);
+            if (ncFileId !== null) {
+              await upsertFileRegistryEntry(prisma, {
+                ncFileId,
+                ownerUserId,
+                path: uploadedPath,
+                departmentId: uploadDepartmentId,
+              });
+            }
+          } catch (registryErr) {
+            logger.warn(
+              { err: registryErr, path: uploadedPath },
+              "upload: file-registry upsert failed (non-fatal)",
+            );
+          }
+        }
       }
 
       await cacheDel(CACHE_PREFIX + user + ":" + targetPath);
