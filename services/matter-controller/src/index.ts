@@ -15,12 +15,14 @@
  */
 
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import pino from "pino";
 import { Environment } from "@matter/main";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { config } from "./config.js";
 import { registerBleAtProcessStart } from "./ble.js";
 import { createMatterControllerCore } from "./controller.js";
+import { httpsServerOptions, internalTlsEnabled } from "./internal-tls.js";
 import { createApp } from "./server.js";
 
 const logger = pino({ name: "matter-controller" });
@@ -88,7 +90,13 @@ async function main() {
       wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
     },
   });
-  const server = createServer(app);
+  // WARP-1061: with internal mTLS on, the SAME port serves HTTPS and every
+  // caller (the orchestrator's matter.service.ts) must present a CA-signed
+  // client cert. Flag off (default) keeps plain HTTP — mirrors the
+  // orchestrator's WARP-236 listener switch in apps/orchestrator/src/index.ts.
+  const server = internalTlsEnabled()
+    ? createTlsServer(httpsServerOptions(), app)
+    : createServer(app);
   server.listen(config.PORT, () => {
     logger.info("matter-controller listening on port %d", config.PORT);
   });
