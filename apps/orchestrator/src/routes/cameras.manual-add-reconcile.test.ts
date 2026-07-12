@@ -71,6 +71,7 @@ vi.mock("../services/frigate.client.js", () => ({
 
 vi.mock("../services/camera.service.js", () => ({
   getCameras: vi.fn(),
+  invalidateCamerasCache: vi.fn(),
   getEventsFiltered: vi.fn(),
   getRecentEvents: vi.fn(),
   getRecordings: vi.fn(),

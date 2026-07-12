@@ -28,6 +28,7 @@ import {
   setReviewViewed,
   subscribeCameraEvents,
   isInitialized,
+  invalidateCamerasCache,
 } from "../services/camera.service.js";
 import {
   fetchSnapshot,
@@ -1597,6 +1598,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           }
           await deleteCamera(name);
           await prisma.camera.deleteMany({ where: { name } });
+          // WARP-1286: this confirm handler is the production delete path for the
+          // Tier-2 delete_camera op — drop the 5s cameras:list cache so the removed
+          // camera can't resurrect on a refetch inside the TTL.
+          await invalidateCamerasCache();
           await reconcileFrigateCameras();
           break;
         }
@@ -1816,6 +1821,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       await deleteCamera(req.params.name);
       await prisma.camera.deleteMany({ where: { name: req.params.name } });
+      // WARP-1286: drop the 5s cameras:list cache so the removed camera can't
+      // resurrect on a refetch inside the TTL. delete_camera is Tier-2, so in
+      // production the delete runs through the /cameras/command/confirm handler
+      // (also patched); this direct branch only executes if the op is ever
+      // allowed without confirmation — invalidate here too so every delete path
+      // is covered.
+      await invalidateCamerasCache();
       await reconcileFrigateCameras();
       res.json({ status: "deleted", camera: req.params.name });
     } catch (err) {

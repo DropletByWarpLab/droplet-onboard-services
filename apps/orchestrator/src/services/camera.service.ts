@@ -380,6 +380,17 @@ export async function getCameras(
   return cameras;
 }
 
+/**
+ * WARP-1286: drop the cached `cameras:list` so the next getCameras() rebuilds
+ * from Frigate + DB instead of serving a stale snapshot for up to CACHE_TTL.
+ * The discovery-upsert path invalidates inline; camera mutations that don't go
+ * through it (notably DELETE /cameras/:name) must call this, or a removed
+ * camera can resurrect on any refetch inside the TTL window.
+ */
+export async function invalidateCamerasCache(): Promise<void> {
+  await cacheDel(CACHE_KEY_CAMERAS);
+}
+
 // --- Events ---
 
 export async function getRecentEvents(
