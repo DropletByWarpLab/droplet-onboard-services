@@ -788,6 +788,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               conversationId,
               userContent: persistedUserContent,
               turnId: chatReq.turnId ?? null,
+              // WARP-904: stamp the model/provider the user had selected
+              // for this turn onto both rows (audit trail for a
+              // mid-conversation quick-switch).
+              model: chatReq.model,
+              provider: chatReq.provider ?? null,
             })
             .catch((err: unknown) => {
               // eslint-disable-next-line no-console
@@ -974,6 +979,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCalls: liveToolCalls,
             status,
             reasoning: liveReasoning,
+            // WARP-904: `agentModel` may differ from `chatReq.model` when
+            // vision auto-routing overrode the user's selection — persist
+            // what actually ran, not what was requested. `provider` still
+            // reflects the user's pick (the vision-only reroute doesn't
+            // change provider in practice today).
+            model: agentModel,
+            provider: chatReq.provider ?? null,
           });
         } catch (err) {
           // eslint-disable-next-line no-console

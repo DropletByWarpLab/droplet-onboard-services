@@ -46,6 +46,14 @@ export interface ChatMessage {
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
   feedback?: "up" | "down" | null;
   /**
+   * WARP-904 — the model/provider this specific turn actually ran on.
+   * Populated from the persisted row via `loadConversation`; absent on a
+   * live-streaming message (the composer already knows its own
+   * selection) and on rows persisted before this column existed.
+   */
+  model?: string | null;
+  provider?: string | null;
+  /**
    * Set on an assistant message when the turn failed (network error,
    * ai-gateway down, MCP child crashed, model returned `stop_reason:
    * "error"`). The UI renders a friendly message + retry button rather

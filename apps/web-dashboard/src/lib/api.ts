@@ -3253,6 +3253,12 @@ export interface PersistedConversation {
     /** WARP-844 — thumbs rating, or null when unrated. */
     feedback?: "up" | "down" | null;
     /**
+     * WARP-904 — the model/provider this specific turn actually ran on,
+     * or null/absent on rows persisted before this column existed.
+     */
+    model?: string | null;
+    provider?: string | null;
+    /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
      * older orchestrator builds didn't return it; treat missing as

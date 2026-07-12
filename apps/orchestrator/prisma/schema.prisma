@@ -449,6 +449,13 @@ model ChatMessage {
   status      ChatMessageStatus    @default(completed)
   completedAt DateTime?
   reasoning   String?
+  /// WARP-904 — the model/provider actually used for THIS turn, distinct
+  /// from `ChatSession.model`/`provider` (the conversation's original
+  /// selection). A mid-conversation quick-switch changes these per turn
+  /// going forward without touching earlier rows, giving each message its
+  /// own audit trail. NULL on rows persisted before this column existed.
+  model       String?
+  provider    String?
   /// WARP-844 — user rating on an assistant turn (explicit column per the
   /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
   feedback    ChatMessageFeedback?

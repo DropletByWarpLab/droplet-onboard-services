@@ -100,6 +100,9 @@ describe("DASH-02 hero pendingPrompt gating", () => {
         "summarize my notes",
         "m1",
         undefined,
+        // WARP-904 — the page now forwards the selected model's provider
+        // (looked up from the mocked useModels() list above) on every send.
+        "ollama",
       ),
     );
     // Consumed one-shot: removed from storage.
