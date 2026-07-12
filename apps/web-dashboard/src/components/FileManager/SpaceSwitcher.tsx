@@ -14,6 +14,11 @@ const SPACE_ICON: Record<FileSpaceId, typeof FolderLock> = {
   shared: Users,
 };
 
+/** Departments/teams and other future spaces fall back to the group glyph. */
+function iconForSpace(id: FileSpaceId): typeof FolderLock {
+  return SPACE_ICON[id] ?? Users;
+}
+
 /**
  * WARP-883 (ADR-027 WS-5) — segmented control to switch between the user's
  * private "My Files" space and the shared "Household" space.
@@ -27,14 +32,16 @@ const SPACE_ICON: Record<FileSpaceId, typeof FolderLock> = {
  * purposeful, not playful.
  */
 export function SpaceSwitcher({ spaces, active, onChange }: SpaceSwitcherProps) {
-  const visible = spaces.filter((s) => s.available);
+  // The server only lists spaces the caller can access; non-active
+  // departments (provisioning/failed/archived) are not browsable yet.
+  const visible = spaces.filter((s) => !s.state || s.state === "active");
   // Nothing to switch between → don't show a lone control.
   if (visible.length < 2) return null;
 
   return (
     <div role="tablist" aria-label="File space" className="pills">
       {visible.map((space) => {
-        const Icon = SPACE_ICON[space.id];
+        const Icon = iconForSpace(space.id);
         const isActive = space.id === active;
         return (
           <button

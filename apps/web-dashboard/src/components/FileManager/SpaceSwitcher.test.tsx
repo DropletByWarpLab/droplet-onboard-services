@@ -14,14 +14,14 @@ import type { FileSpace } from "@/lib/types";
 const PERSONAL: FileSpace = {
   id: "personal",
   name: "My Files",
-  available: true,
   root: "/",
 };
 const SHARED: FileSpace = {
   id: "shared",
   name: "Household",
-  available: true,
   root: "/Household",
+  kind: "household",
+  state: "active",
 };
 
 describe("SpaceSwitcher", () => {
@@ -68,10 +68,10 @@ describe("SpaceSwitcher", () => {
     expect(onChange).toHaveBeenCalledWith("shared");
   });
 
-  it("renders nothing when the shared space is unavailable", () => {
+  it("renders nothing when the shared space is not active yet", () => {
     const { container } = render(
       <SpaceSwitcher
-        spaces={[PERSONAL, { ...SHARED, available: false }]}
+        spaces={[PERSONAL, { ...SHARED, state: "pending" }]}
         active="personal"
         onChange={() => {}}
       />
