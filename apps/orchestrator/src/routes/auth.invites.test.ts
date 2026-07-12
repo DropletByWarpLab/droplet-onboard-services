@@ -107,11 +107,15 @@ function createPrismaMock() {
   // user.findFirst to check username uniqueness — return null so the
   // first base candidate is always available.
   const userRows: any[] = [];
+  const departmentRows: any[] = [];
+  const inviteDepartmentRows: any[] = [];
   let userCounter = 0;
   let counter = 0;
   return {
     rows,
     userRows,
+    departmentRows,
+    inviteDepartmentRows,
     user: {
       upsert: vi.fn(async ({ where, create, update }: any) => {
         const idx = userRows.findIndex((u) => {
@@ -188,6 +192,16 @@ function createPrismaMock() {
           ...data,
         };
         rows.push(row);
+        // WARP-1265: handle nested departmentGrants createMany
+        if (data.departmentGrants?.createMany?.data) {
+          for (const grant of data.departmentGrants.createMany.data) {
+            inviteDepartmentRows.push({
+              id: `grant-${inviteDepartmentRows.length}`,
+              inviteId: row.id,
+              ...grant,
+            });
+          }
+        }
         return row;
       }),
       findUnique: vi.fn(async ({ where }: any) => {
@@ -211,6 +225,27 @@ function createPrismaMock() {
         }
         rows[idx] = { ...rows[idx], ...data };
         return rows[idx];
+      }),
+    },
+    // WARP-1265: mock for userInviteDepartment queries (invite create + accept)
+    userInviteDepartment: {
+      findMany: vi.fn(async ({ where }: any = {}) => {
+        const filtered = inviteDepartmentRows.filter((r) => {
+          if (where?.inviteId) return r.inviteId === where.inviteId;
+          return true;
+        });
+        // Include department data for each grant
+        return filtered.map((grant) => {
+          const dept = departmentRows.find((d) => d.id === grant.departmentId);
+          return { ...grant, department: dept };
+        });
+      }),
+    },
+    // WARP-1265: mock for department queries (invite create validation)
+    department: {
+      findUnique: vi.fn(async ({ where }: any) => {
+        if (where?.id) return departmentRows.find((d) => d.id === where.id) ?? null;
+        return null;
       }),
     },
   };
@@ -764,5 +799,164 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
     // The normalized email is also written to the local row (the login key).
     // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
     expect(readUserEmail(prisma.userRows[0].email)).toBe("alice@example.com");
+  });
+});
+
+describe("POST /api/auth/invites — department grants (WARP-1265)", () => {
+  const deptEngId = "550e8400-e29b-41d4-a716-446655440001";
+  const deptSalesId = "550e8400-e29b-41d4-a716-446655440002";
+  const householdDeptId = "550e8400-e29b-41d4-a716-446655440003";
+
+  it("admin can create invite with department grants", async () => {
+    const prisma = createPrismaMock();
+    // Set up a mock active department
+    prisma.departmentRows.push({
+      id: deptEngId,
+      name: "Engineering",
+      state: "active",
+      kind: "DEPARTMENT",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        displayName: "Alice",
+        role: "family",
+        departments: [
+          { departmentId: deptEngId, right: "contributor" },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(prisma.inviteDepartmentRows).toHaveLength(1);
+    expect(prisma.inviteDepartmentRows[0]).toMatchObject({
+      departmentId: deptEngId,
+      right: "contributor",
+    });
+  });
+
+  it("rejects invite with non-existent department (400)", async () => {
+    const prisma = createPrismaMock();
+    const badDeptId = "550e8400-e29b-41d4-a716-446655440099";
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        departments: [
+          { departmentId: badDeptId, right: "contributor" },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("DEPARTMENT_NOT_FOUND");
+  });
+
+  it("rejects invite with archived department (400)", async () => {
+    const prisma = createPrismaMock();
+    const archivedDeptId = "550e8400-e29b-41d4-a716-446655440004";
+    prisma.departmentRows.push({
+      id: archivedDeptId,
+      name: "Old Dept",
+      state: "archived",
+      kind: "DEPARTMENT",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        departments: [
+          { departmentId: archivedDeptId, right: "contributor" },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("DEPARTMENT_NOT_ACTIVE");
+  });
+
+  it("rejects invite with household department (400)", async () => {
+    const prisma = createPrismaMock();
+    prisma.departmentRows.push({
+      id: householdDeptId,
+      name: "Household",
+      state: "active",
+      kind: "HOUSEHOLD",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        departments: [
+          { departmentId: householdDeptId, right: "contributor" },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("HOUSEHOLD_NOT_INVITABLE");
+  });
+
+  it("defaults department right to contributor when not specified", async () => {
+    const prisma = createPrismaMock();
+    prisma.departmentRows.push({
+      id: deptEngId,
+      name: "Engineering",
+      state: "active",
+      kind: "DEPARTMENT",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        departments: [
+          { departmentId: deptEngId }, // no right specified
+        ],
+      });
+
+    if (res.status !== 200) {
+      console.log("Response body:", res.body);
+    }
+    expect(res.status).toBe(200);
+    expect(prisma.inviteDepartmentRows[0].right).toBe("contributor");
+  });
+
+  it("can create invite with multiple department grants", async () => {
+    const prisma = createPrismaMock();
+    prisma.departmentRows.push(
+      { id: deptEngId, name: "Engineering", state: "active", kind: "DEPARTMENT" },
+      { id: deptSalesId, name: "Sales", state: "active", kind: "DEPARTMENT" },
+    );
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({
+        email: "alice@warp.test",
+        departments: [
+          { departmentId: deptEngId, right: "contributor" },
+          { departmentId: deptSalesId, right: "reader" },
+        ],
+      });
+
+    if (res.status !== 200) {
+      console.log("Multiple grants response body:", res.body);
+    }
+    expect(res.status).toBe(200);
+    expect(prisma.inviteDepartmentRows).toHaveLength(2);
+    expect(prisma.inviteDepartmentRows[0]).toMatchObject({
+      departmentId: deptEngId,
+      right: "contributor",
+    });
+    expect(prisma.inviteDepartmentRows[1]).toMatchObject({
+      departmentId: deptSalesId,
+      right: "reader",
+    });
   });
 });

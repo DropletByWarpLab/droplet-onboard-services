@@ -8,6 +8,7 @@ import {
   isUsed,
   isRevoked,
 } from "../services/invite.service.js";
+import { convertInviteDepartmentGrants } from "../services/provisioning-invite.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
@@ -243,6 +244,16 @@ const createInviteSchema = z.object({
   role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
+  // WARP-1265: optional department grants. Each entry specifies a department
+  // the invitee should join with a specific right (reader/contributor/manager).
+  // Validated at create time (must exist, must be active, must not be household).
+  // Converted to DepartmentMembership rows at accept time.
+  departments: z.array(
+    z.object({
+      departmentId: z.string().uuid(),
+      right: z.enum(["reader", "contributor", "manager"]).optional(),
+    })
+  ).optional(),
 });
 
 const acceptInviteSchema = z.object({
@@ -1809,6 +1820,28 @@ export function createPublicAuthRouter(
       });
       const userId = userRow.id; // local UUID — fed into JWT.sub
 
+      // WARP-1265: convert pending UserInviteDepartment rows to active
+      // DepartmentMembership rows. Must run AFTER the User + Nextcloud account
+      // are created so addMembership can resolve the NC username for group joins.
+      // Best-effort: department provisioning failures are logged but don't
+      // rollback the accept (the user is created; they can join departments later
+      // via the reconciler or manual admin action).
+      try {
+        await convertInviteDepartmentGrants(
+          prisma,
+          userId,
+          invite.id,
+          invite.createdBy, // username of the invite creator
+        );
+      } catch (deptErr) {
+        // Log the failure but continue — the user is provisioned,
+        // department sync is a separate concern for the reconciler.
+        logger.warn(
+          { err: deptErr, userId, inviteId: invite.id },
+          "invite-accept: department membership provisioning failed (may retry via reconciler)",
+        );
+      }
+
       // WARP-247 — the invite-accept auto-login is a session mint like any
       // other: record first, sid into both tokens.
       const { sid: inviteSid } = await createSession({ id: userId, role });
@@ -2981,6 +3014,10 @@ export function createProtectedAuthRouter(
           res.status(400).json({ error: "Enter a valid email address.", code: "INVALID_EMAIL" });
           return;
         }
+        logger.warn(
+          { errors: parsed.error.flatten(), requestBody: req.body },
+          "invite-create: schema validation failed",
+        );
         res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
@@ -3012,6 +3049,47 @@ export function createProtectedAuthRouter(
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
       const token = generateInviteToken();
 
+      // WARP-1265: validate department grants upfront. Each department must
+      // exist, be active (state=active), and NOT be the household (kind != HOUSEHOLD).
+      // Household membership is auto-provisioned at accept time via T11 seed backfill.
+      const deptGrants = parsed.data.departments ?? [];
+      const validatedGrants: Array<{ departmentId: string; right: any }> = [];
+
+      for (const grant of deptGrants) {
+        const dept = await prisma.department.findUnique({
+          where: { id: grant.departmentId },
+          select: { id: true, state: true, kind: true },
+        });
+
+        if (!dept) {
+          res.status(400).json({
+            error: `Department not found: ${grant.departmentId}`,
+            code: "DEPARTMENT_NOT_FOUND",
+          });
+          return;
+        }
+
+        if (dept.state !== "active") {
+          res.status(400).json({
+            error: `Department is not active: ${dept.id}`,
+            code: "DEPARTMENT_NOT_ACTIVE",
+          });
+          return;
+        }
+
+        if (dept.kind === "HOUSEHOLD") {
+          res.status(400).json({
+            error: "Cannot invite to household department (provisioned automatically at accept)",
+            code: "HOUSEHOLD_NOT_INVITABLE",
+          });
+          return;
+        }
+
+        // WARP-1265: default right to "contributor" if not specified
+        const right = grant.right ?? "contributor";
+        validatedGrants.push({ departmentId: grant.departmentId, right });
+      }
+
       const created = await prisma.userInvite.create({
         data: {
           token,
@@ -3021,6 +3099,15 @@ export function createProtectedAuthRouter(
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
           expiresAt,
+          // WARP-1265: write UserInviteDepartment rows in the same tx as the invite.
+          departmentGrants: {
+            createMany: {
+              data: validatedGrants.map((g) => ({
+                departmentId: g.departmentId,
+                right: g.right,
+              })),
+            },
+          },
         },
       });
 
