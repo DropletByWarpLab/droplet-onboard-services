@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import sys
+import ssl
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -119,6 +120,27 @@ def load_queries_and_goldens(repo_root: Path) -> list[dict[str, Any]]:
     return merged
 
 
+def _internal_tls_context() -> ssl.SSLContext | None:
+    """WARP-1061 — internal-mTLS client context for the orchestrator call.
+
+    This script runs as a SUBPROCESS of the rag-eval service (runner.py),
+    where the `_shared.internal_tls` package is not importable (sys.path[0]
+    is this script's dir), so it reads the same env contract directly:
+    DROPLET_INTERNAL_TLS=1 → present the /data/service-tls bundle and pin
+    trust to the internal CA; unset/0 → None (plain HTTP, unchanged).
+    """
+    if os.environ.get("DROPLET_INTERNAL_TLS", "0") != "1":
+        return None
+    ctx = ssl.create_default_context(
+        cafile=os.environ.get("DROPLET_TLS_CA", "/data/service-tls/ca.pem")
+    )
+    ctx.load_cert_chain(
+        certfile=os.environ.get("DROPLET_TLS_CERT", "/data/service-tls/cert.pem"),
+        keyfile=os.environ.get("DROPLET_TLS_KEY", "/data/service-tls/key.pem"),
+    )
+    return ctx
+
+
 def call_search(
     api_url: str, variant: str, query: str, limit: int
 ) -> list[SearchHit]:
@@ -127,7 +149,9 @@ def call_search(
     )
     url = f"{api_url}/api/admin/retrieval-eval/search?{qs}"
     try:
-        with urllib.request.urlopen(url, timeout=SEARCH_TIMEOUT_SEC) as resp:
+        with urllib.request.urlopen(
+            url, timeout=SEARCH_TIMEOUT_SEC, context=_internal_tls_context()
+        ) as resp:
             body = json.loads(resp.read())
     except Exception as e:
         raise RuntimeError(

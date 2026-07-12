@@ -33,6 +33,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# WARP-1061 — internal mTLS (hop 13): the routing cross-check presents this
+# service's client cert + dials https:// when DROPLET_INTERNAL_TLS=1
+# (identity when off). Same helper family as routing's samplers.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 from drivers import create_driver
 from drivers.base import (
     SwitchDriver,
@@ -223,7 +228,7 @@ class RoutingCamerasCrossCheck:
     double-gate isolation. Read-only; never mutates the router."""
 
     def __init__(self, base_url: str):
-        self._base_url = base_url.rstrip("/")
+        self._base_url = _internal_base_url(base_url.rstrip("/"))
 
     async def cameras_present(self) -> Optional[bool]:
         """Return cameras.present from /network/interfaces, or None if it can't
@@ -236,7 +241,7 @@ class RoutingCamerasCrossCheck:
         headers = {}
         if ROUTING_SERVICE_TOKEN:
             headers["Authorization"] = f"Bearer {ROUTING_SERVICE_TOKEN}"
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, **httpx_client_kwargs()) as client:
             resp = await client.get(
                 f"{self._base_url}/network/interfaces", headers=headers
             )

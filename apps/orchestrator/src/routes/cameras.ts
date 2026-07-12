@@ -896,7 +896,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (deviceSecret) {
         headers["Authorization"] = `Bearer ${deviceSecret}`;
       }
-      const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/scan`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/scan`, {
         method: "POST",
         headers,
         signal: AbortSignal.timeout(30_000),
@@ -1411,7 +1411,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (deviceSecret) {
         headers["Authorization"] = `Bearer ${deviceSecret}`;
       }
-      const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/drivers`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/drivers`, {
         headers,
         signal: AbortSignal.timeout(5000),
       });
@@ -1444,7 +1444,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         headers["Authorization"] = `Bearer ${deviceSecret}`;
       }
 
-      const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/drivers/fix`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/drivers/fix`, {
         method: "POST",
         headers,
         signal: AbortSignal.timeout(15000),

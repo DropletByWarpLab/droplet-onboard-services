@@ -12,6 +12,11 @@ from httpx import ASGITransport, AsyncClient
 
 # Ensure the ai-gateway root is on sys.path so imports work
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# WARP-1061 — middleware/off_lan_gating.py imports `_shared.internal_tls`.
+# In-container the helper is COPY'd to /app/_shared (sibling of the source);
+# in the repo it lives at services/_shared, so add services/ to the path
+# (same pattern as voice-io's conftest).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Override KEYS_DIR to a temp directory for tests
 os.environ["KEYS_DIR"] = tempfile.mkdtemp(prefix="droplet-test-keys-")

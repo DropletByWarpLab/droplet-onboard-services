@@ -41,6 +41,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+# WARP-1061 — internal mTLS (hop 13): the routing client presents this
+# service's client cert + dials https:// when DROPLET_INTERNAL_TLS=1
+# (identity when off). MQTT stays scheme-gated via paho_configure below.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
@@ -53,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-ROUTING_SERVICE_URL = os.getenv("ROUTING_SERVICE_URL", "http://localhost:8080")
+ROUTING_SERVICE_URL = _internal_base_url(
+    os.getenv("ROUTING_SERVICE_URL", "http://localhost:8080")
+)
 ROUTING_SERVICE_TOKEN = os.getenv("ROUTING_SERVICE_TOKEN", "").strip()
 FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt://localhost:1883")
@@ -261,6 +268,7 @@ routing_client = httpx.AsyncClient(
     base_url=ROUTING_SERVICE_URL,
     timeout=10.0,
     headers=_routing_headers,
+    **httpx_client_kwargs(),
 )
 
 
