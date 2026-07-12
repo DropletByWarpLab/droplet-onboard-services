@@ -306,6 +306,54 @@ async function rootForSpace(prisma: PrismaClient, space: Space, requestedPath: s
 }
 
 /**
+ * WARP-1267 — active department/team mount names visible to this caller,
+ * used ONLY to extend the personal-root hide-filter below: Nextcloud mounts
+ * every groupfolder (Household, and now each dept/team) as a top-level entry
+ * inside the caller's own home, the same reason Household has always been
+ * hidden there (WARP-883) — without this, a dept/team library would show up
+ * TWICE in My Files once departments exist. Mirrors the visibility rule in
+ * GET /api/files/spaces (member OR owner/admin see-all).
+ */
+async function activeDeptMountNames(
+  prisma: PrismaClient,
+  userId: string,
+  isOwnerOrAdmin: boolean
+): Promise<string[]> {
+  // Best-effort: a Department lookup failure must never break the primary
+  // "list my files" request — fail open (nothing extra hidden) rather than
+  // 500, same posture as the sharedAvailable probe above.
+  try {
+    const depts = await prisma.department.findMany({
+      where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
+      select: {
+        name: true,
+        kind: true,
+        parentId: true,
+        memberships: { where: { userId }, select: { id: true } },
+      },
+    });
+
+    const names: string[] = [];
+    for (const dept of depts) {
+      if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
+      if (dept.kind === "TEAM" && dept.parentId) {
+        const parent = await prisma.department.findUnique({
+          where: { id: dept.parentId },
+          select: { name: true },
+        });
+        names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
+      } else {
+        names.push(dept.name);
+      }
+    }
+    return names;
+  } catch (err) {
+    logger.warn({ err, userId }, "activeDeptMountNames: department lookup failed; not hiding any dept mounts");
+    return [];
+  }
+}
+
+/**
  * WARP-938 (security): true iff `requested` is a home-relative path with no
  * `..` traversal segment.
  *
@@ -1400,12 +1448,22 @@ export function createFilesRouter(
       }
 
       const raw = await ncListFiles(await getToken(req), user, filePath);
-      // Hide the shared-folder mount from the personal home root only — a
-      // subfolder elsewhere (or inside the shared space) that happens to share
-      // the name must NOT be filtered.
-      const entries = isPersonalRoot
-        ? raw.filter((e) => e.name !== SHARED_FOLDER_NAME)
-        : raw;
+      // Hide the shared-folder AND any active dept/team groupfolder mount
+      // from the personal home root only (WARP-1267) — a subfolder elsewhere
+      // (or inside the shared/dept space itself) that happens to share the
+      // name must NOT be filtered.
+      let entries = raw;
+      if (isPersonalRoot) {
+        const userId = req.user?.id;
+        const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
+        const hideNames = new Set([SHARED_FOLDER_NAME]);
+        if (userId) {
+          for (const name of await activeDeptMountNames(prisma, userId, isOwnerOrAdmin)) {
+            hideNames.add(name);
+          }
+        }
+        entries = raw.filter((e) => !hideNames.has(e.name));
+      }
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
@@ -1472,7 +1530,12 @@ export function createFilesRouter(
       // state=active AND caller is owner/admin OR has membership.
       const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
 
-      let deptQuery = prisma.department.findMany({
+      // WARP-1267: memberships are ALWAYS selected (not gated on role) so the
+      // response can tell an admin-see-all visit ("I can see this because
+      // I'm an admin") apart from an actual membership ("I'm a member here")
+      // — the `isMember` flag the Files UI needs to drive the admin
+      // foreign-library banner (brief §2).
+      const deptQuery = prisma.department.findMany({
         where: {
           kind: { in: ["DEPARTMENT", "TEAM"] },
           state: "active",
@@ -1482,12 +1545,10 @@ export function createFilesRouter(
           name: true,
           parentId: true,
           kind: true,
-          memberships: isOwnerOrAdmin
-            ? false
-            : {
-                where: { userId },
-                select: { right: true },
-              },
+          memberships: {
+            where: { userId },
+            select: { right: true },
+          },
         },
         orderBy: { createdAt: "asc" },
       });
@@ -1495,14 +1556,19 @@ export function createFilesRouter(
       const depts = await deptQuery;
 
       for (const dept of depts) {
-        // Check membership: skip if not owner/admin and not a member.
-        if (!isOwnerOrAdmin) {
-          const membershipArray = (dept.memberships as any) || [];
-          if (membershipArray.length === 0) continue; // Not a member, skip.
-        }
+        const membershipArray = dept.memberships;
+        const isMember = membershipArray.length > 0;
+
+        // Not owner/admin and not a member → not visible, skip entirely.
+        if (!isOwnerOrAdmin && !isMember) continue;
 
         // Resolve the mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+        // parentName is also threaded through for kind=TEAM so the dashboard
+        // can render the "<Department> / <Team>" breadcrumb crumb without a
+        // second lookup — the UI owns this hierarchy illusion since NC mounts
+        // team libraries flat (2026-07-11 amendment, ADR-029 §D-3).
         let mountName = dept.name;
+        let parentName: string | undefined;
         if (dept.kind === "TEAM" && dept.parentId) {
           const parent = await prisma.department.findUnique({
             where: { id: dept.parentId },
@@ -1510,11 +1576,16 @@ export function createFilesRouter(
           });
           if (parent) {
             mountName = `${parent.name} — ${dept.name}`;
+            parentName = parent.name;
           }
         }
 
-        const membershipArray = (dept.memberships as any) || [];
         const membershipRight = membershipArray[0]?.right;
+        // A member's own right always wins; an owner/admin visiting a
+        // library they're not a member of gets the implicit see-all right
+        // (they already short-circuit-pass `requireSpaceAccess` at manager
+        // level — §3.1) so the switcher can still show a rights chip.
+        const right = isMember ? membershipRight : isOwnerOrAdmin ? "manager" : undefined;
 
         spaces.push({
           id: `dept:${dept.id}`,
@@ -1522,7 +1593,9 @@ export function createFilesRouter(
           root: `/${mountName}`,
           kind: dept.kind === "TEAM" ? "team" : "department",
           state: "active",
-          right: isOwnerOrAdmin ? undefined : membershipRight,
+          right,
+          isMember,
+          ...(parentName ? { parentName } : {}),
         });
       }
 

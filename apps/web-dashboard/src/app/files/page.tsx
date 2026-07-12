@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Folder, FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
+import {
+  Folder,
+  FolderPlus,
+  Link as LinkIcon,
+  X,
+  Eye,
+  Star,
+  ShieldCheck,
+} from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
@@ -47,9 +55,15 @@ import {
   bulkCopyFiles,
   fetchShares,
 } from "@/lib/api";
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
+
+// WARP-1267 — verbatim copy (design brief §2).
+const READER_TOOLBAR_TOOLTIP =
+  "You can view and download here. Ask a manager for edit access.";
+const ADMIN_FOREIGN_LIBRARY_COPY =
+  "You're viewing this library as an administrator. This visit is logged.";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -67,6 +81,33 @@ export default function FilesPage() {
   // resets the path to that space's root and re-lists.
   const [space, setSpace] = useState<FileSpaceId>("personal");
   const { spaces, sharedAvailable } = useSpaces();
+  const { user } = useAuth();
+  const isOwnerOrAdmin = user?.role === "owner" || user?.role === "admin";
+  // WARP-1267 — the active space's full record (rights, kind, membership,
+  // parent name) drives reader posture, the admin foreign-library banner,
+  // and the team breadcrumb prefix below.
+  const activeSpace = useMemo(
+    () => spaces.find((s) => s.id === space),
+    [spaces, space]
+  );
+  const isReaderSpace = activeSpace?.right === "reader";
+  const isTeamSpace = activeSpace?.kind === "team";
+
+  // WARP-1267 — admin-in-foreign-library banner (design brief §2): shown
+  // only to an owner/admin who is NOT a member of the active department/
+  // team, dismissible per visit. `space` in the dep array means switching
+  // away and back resets the dismissal — "returns on space re-entry".
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  useEffect(() => {
+    setBannerDismissed(false);
+  }, [space]);
+  const showAdminForeignBanner =
+    isOwnerOrAdmin &&
+    !!activeSpace &&
+    (activeSpace.kind === "department" || activeSpace.kind === "team") &&
+    activeSpace.isMember === false &&
+    !bannerDismissed;
+
   // WARP-1140: the shared space's home-relative root (e.g. "/Household") —
   // needed to translate between home-relative entry/search-result paths and
   // the space-root-relative `currentPath`.
@@ -110,6 +151,11 @@ export default function FilesPage() {
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+  // Reader posture (WARP-1267): close a still-open new-folder composer if
+  // the active space becomes read-only out from under it (space switch).
+  useEffect(() => {
+    if (isReaderSpace) setShowNewFolder(false);
+  }, [isReaderSpace]);
   const [selectedFile, setSelectedFile] = useState<FileEntryInfo | null>(null);
   const [previewFile, setPreviewFile] = useState<FileEntryInfo | null>(null);
   // WARP-882: the file currently open in the in-browser editor.
@@ -480,14 +526,20 @@ export default function FilesPage() {
       },
       { separator: true },
       {
+        // WARP-1267 — reader posture (design brief §2): rename/move/delete
+        // are visible-but-disabled inside a `reader`-right space, tooltip
+        // copy carried via the item label's title isn't available on this
+        // menu, so the disabled state alone communicates it (ContextMenu
+        // has no per-item tooltip slot; the toolbar/row equivalents do).
         label: "Rename",
         icon: contextMenuIcons.Rename,
-        disabled: !isSingle,
+        disabled: !isSingle || isReaderSpace,
         onClick: () => fm.beginRename(file.path),
       },
       {
         label: `Cut${isSingle ? "" : ` (${selectedCount})`}`,
         icon: contextMenuIcons.Cut,
+        disabled: isReaderSpace,
         onClick: () => fm.cut(),
       },
       {
@@ -498,6 +550,7 @@ export default function FilesPage() {
       {
         label: `Move to…`,
         icon: contextMenuIcons.Cut,
+        disabled: isReaderSpace,
         onClick: () =>
           setMoveDialog({
             mode: "move",
@@ -524,6 +577,7 @@ export default function FilesPage() {
         label: "Delete",
         icon: contextMenuIcons.Delete,
         destructive: true,
+        disabled: isReaderSpace,
         onClick: () => {
           if (fm.selectedCount > 1) {
             void handleBulkDelete();
@@ -536,6 +590,7 @@ export default function FilesPage() {
   }, [
     contextMenu,
     fm,
+    isReaderSpace,
     handleRowOpen,
     handlePreview,
     handleDownload,
@@ -565,21 +620,28 @@ export default function FilesPage() {
   const filesActions = (
     <>
       <button
-        onClick={() => setShowNewFolder(true)}
+        onClick={() => !isReaderSpace && setShowNewFolder(true)}
+        disabled={isReaderSpace}
+        aria-disabled={isReaderSpace || undefined}
+        title={isReaderSpace ? READER_TOOLBAR_TOOLTIP : undefined}
         className="btn ghost"
         type="button"
       >
         <FolderPlus size={14} />
         <span className="hidden sm:inline">New folder</span>
       </button>
-      <UploadButton onClick={() => fileInputRef.current?.click()} />
+      <UploadButton
+        onClick={() => fileInputRef.current?.click()}
+        disabled={isReaderSpace}
+        title={isReaderSpace ? READER_TOOLBAR_TOOLTIP : undefined}
+      />
       <input
         ref={fileInputRef}
         type="file"
         multiple
         className="hidden"
         onChange={(e) => {
-          if (e.target.files) handleUpload(e.target.files);
+          if (e.target.files && !isReaderSpace) handleUpload(e.target.files);
           e.target.value = "";
         }}
       />
@@ -629,25 +691,63 @@ export default function FilesPage() {
         />
       </div>
 
-      {/* Space switcher (My Files / Household) — only when a shared space
-          exists, otherwise there's nothing to switch between. */}
-      {sharedAvailable && (
-        <div className="mb-4">
-          <SpaceSwitcher spaces={spaces} active={space} onChange={handleSpaceChange} />
+      {/* Space switcher (My Files / Household / N department+team spaces,
+          WARP-1267). The switcher itself renders nothing when there's only
+          one space to be in — no lone control. */}
+      <div className="mb-4">
+        <SpaceSwitcher
+          spaces={spaces}
+          active={space}
+          onChange={handleSpaceChange}
+          isOwnerOrAdmin={isOwnerOrAdmin}
+        />
+      </div>
+
+      {/* Breadcrumbs — team spaces get a non-navigating parent-department
+          prefix crumb (WARP-1267, design brief §2). */}
+      <div className="mb-4">
+        <BreadcrumbNav
+          path={currentPath}
+          onNavigate={setCurrentPath}
+          prefixCrumb={isTeamSpace ? activeSpace?.parentName : undefined}
+        />
+      </div>
+
+      {/* Admin-in-foreign-library banner (WARP-1267, design brief §2) —
+          owner/admin visiting a department/team library they're not a
+          member of. Dismissible per visit; returns on space re-entry. */}
+      {showAdminForeignBanner && (
+        <div
+          role="status"
+          className="mb-4 flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg border type-footnote text-label-primary"
+          style={{
+            borderColor: "color-mix(in srgb, var(--color-accent) 26%, var(--color-separator))",
+            background: "color-mix(in srgb, var(--color-accent) 7%, var(--color-surface-primary))",
+          }}
+        >
+          <ShieldCheck
+            size={16}
+            aria-hidden="true"
+            className="flex-none text-accent"
+          />
+          <span className="flex-1 min-w-0">{ADMIN_FOREIGN_LIBRARY_COPY}</span>
+          <button
+            type="button"
+            onClick={() => setBannerDismissed(true)}
+            aria-label="Dismiss"
+            className="flex-none p-1 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-accent-subtle transition-colors"
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
         </div>
       )}
-
-      {/* Breadcrumbs */}
-      <div className="mb-4">
-        <BreadcrumbNav path={currentPath} onNavigate={setCurrentPath} />
-      </div>
 
       {/* Volumes — only on the personal root so it doesn't dominate deep
           folder views or the shared space. */}
       {space === "personal" && currentPath === "/" && <VolumesPanel />}
 
       {/* New folder dialog */}
-      {showNewFolder && (
+      {showNewFolder && !isReaderSpace && (
         <div className="card flex items-center gap-2 mb-4" style={{ padding: 12 }}>
           <input
             autoFocus
@@ -697,6 +797,7 @@ export default function FilesPage() {
         onCopyTo={() => setMoveDialog({ mode: "copy", paths: fm.selectedPaths })}
         onDelete={handleBulkDelete}
         onDownload={handleBulkDownload}
+        readOnly={isReaderSpace}
       />
 
       {/* Status messages */}
@@ -749,7 +850,7 @@ export default function FilesPage() {
       <div className="flex gap-6">
         {/* File list */}
         <div className="flex-1 min-w-0">
-          <UploadZone onUpload={handleUpload}>
+          <UploadZone onUpload={handleUpload} disabled={isReaderSpace}>
             <div
               className="card overflow-hidden min-h-[300px]"
               style={{ padding: 0 }}
@@ -798,6 +899,7 @@ export default function FilesPage() {
                       onCancelRename={fm.endRename}
                       onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
                       onFavoriteChanged={refreshFavorites}
+                      canWrite={!isReaderSpace}
                     />
                   ))}
                 </div>
