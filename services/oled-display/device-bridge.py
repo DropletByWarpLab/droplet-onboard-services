@@ -111,6 +111,31 @@ GUEST_ENV_FILE = (
 
 FRIGATE_URL       = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000")
 ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
+
+
+# WARP-1061 — internal mTLS for the ONE orchestrator call this bridge makes
+# (the /api/health sync-state read in files_snapshot). Host-side stdlib-only
+# process, so it reads the standard env contract directly; install-device-
+# bridge.sh mirrors DROPLET_INTERNAL_TLS + the host-issued `device-bridge`
+# bundle paths into /etc/droplet/device-bridge.env. Flag on → https:// +
+# client cert; unset/0 → plain HTTP, byte-identical to before. FRIGATE_URL
+# stays plaintext (documented exemption — third-party loopback listener).
+def _orchestrator_tls_context():
+    if os.environ.get("DROPLET_INTERNAL_TLS", "0") != "1":
+        return None
+    import ssl
+    ctx = ssl.create_default_context(cafile=os.environ.get("DROPLET_TLS_CA", ""))
+    ctx.load_cert_chain(
+        certfile=os.environ.get("DROPLET_TLS_CERT", ""),
+        keyfile=os.environ.get("DROPLET_TLS_KEY", ""),
+    )
+    return ctx
+
+
+def _orchestrator_base_url():
+    if ORCHESTRATOR_URL.startswith("http://")             and os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1":
+        return "https://" + ORCHESTRATOR_URL[len("http://"):]
+    return ORCHESTRATOR_URL
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
@@ -1007,7 +1032,8 @@ def files_snapshot():
     sync_state = None
     try:
         with urlrequest.urlopen(
-                ORCHESTRATOR_URL + "/api/health", timeout=3) as r:
+                _orchestrator_base_url() + "/api/health", timeout=3,
+                context=_orchestrator_tls_context()) as r:
             body = json.loads(r.read().decode())
             sync_state = {
                 "orchestrator": body.get("status"),
