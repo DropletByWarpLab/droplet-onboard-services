@@ -138,6 +138,28 @@ describe("convert_data_format — JSON <-> CSV (lossless for flat string records
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("ROW_LENGTH_MISMATCH");
   });
+
+  it("rejects a CSV whose header has duplicate column names instead of silently dropping data", async () => {
+    // Duplicate headers would map two columns onto the same object key, so the
+    // later value silently overwrites the earlier one and a cell is lost with
+    // no error. That contradicts the tool's "reject ambiguous input rather than
+    // coerce/lose data" contract (same class as ROW_LENGTH_MISMATCH). WARP-900.
+    const res = await convertDataFormat.handler(
+      { input: "a,a\n1,2", from: "csv", to: "json" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("DUPLICATE_HEADER");
+  });
+
+  it("rejects duplicate CSV headers when converting to YAML too (data-loss guard is format-agnostic)", async () => {
+    const res = await convertDataFormat.handler(
+      { input: "id,name,id\n1,Ada,2", from: "csv", to: "yaml" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("DUPLICATE_HEADER");
+  });
 });
 
 describe("convert_data_format — error handling", () => {

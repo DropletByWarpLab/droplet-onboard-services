@@ -71,7 +71,11 @@ function jsonArrayToCsv(value: unknown): { ok: true; csv: string } | Failure {
 
 /** CSV text -> JSON value. First row is the header; every data row must
  *  have the same column count as the header (ragged rows are rejected
- *  rather than silently zero-padded/truncated — "no guessing, ever"). */
+ *  rather than silently zero-padded/truncated — "no guessing, ever").
+ *  Duplicate header names are rejected for the same reason: two columns
+ *  sharing a name would collapse onto one object key, silently discarding
+ *  every value but the last (a real data-loss path for spreadsheet exports
+ *  with repeated column titles). WARP-900. */
 function csvToJsonArray(csvText: string): { ok: true; value: unknown } | Failure {
   let rows: string[][];
   try {
@@ -83,6 +87,17 @@ function csvToJsonArray(csvText: string): { ok: true; value: unknown } | Failure
     return { ok: true, value: [] };
   }
   const [header, ...dataRows] = rows;
+  const seen = new Set<string>();
+  for (const name of header) {
+    if (seen.has(name)) {
+      return {
+        ok: false,
+        code: "DUPLICATE_HEADER",
+        message: `duplicate column header "${name}" — CSV headers must be unique (a repeated name would silently overwrite earlier values)`,
+      };
+    }
+    seen.add(name);
+  }
   const out: Array<Record<string, string>> = [];
   for (let i = 0; i < dataRows.length; i++) {
     const row = dataRows[i];
@@ -224,8 +239,9 @@ const tool: Tool = {
     `Convert data between JSON, CSV, and YAML (from must differ from to). Input capped at ${MAX_INPUT_CHARS} chars. ` +
     "JSON<->YAML round-trips exactly. JSON<->CSV requires a flat array of objects; every value is stringified on " +
     "the way to CSV and returned as a string on the way back (no type-guessing) — lossless for string-only records, " +
-    "documented type-widening for numbers/booleans/nested values. Malformed or non-tabular input is rejected with a " +
-    "specific error code rather than silently coerced. Tier-1 read; pure computation, no network egress.",
+    "documented type-widening for numbers/booleans/nested values. Malformed, non-tabular, ragged, or duplicate-header " +
+    "input is rejected with a specific error code rather than silently coerced or dropped. Tier-1 read; pure " +
+    "computation, no network egress.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
