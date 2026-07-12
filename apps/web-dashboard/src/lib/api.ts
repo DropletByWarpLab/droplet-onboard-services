@@ -2846,8 +2846,17 @@ export async function confirmMatterCommand(
   return res.json();
 }
 
-export async function discoverMatterDevices(): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
-  const res = await authFetch(`${BASE}/api/matter/discover`);
+export async function discoverMatterDevices(
+  signal?: AbortSignal,
+): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
+  // WARP-1281 (review follow-up on #996): callers may bound the browse —
+  // the wizard aborts at 25s so a stalled transport can't wedge its serial
+  // chain. Guarded with instanceof because useSmartHome uses this function
+  // directly as an SWR fetcher, and SWR invokes fetchers with the string
+  // KEY as the first argument — that must not reach fetch() as `signal`.
+  const res = await authFetch(`${BASE}/api/matter/discover`, {
+    signal: signal instanceof AbortSignal ? signal : undefined,
+  });
   if (!res.ok) {
     // WARP-1281: carry the HTTP status (same pattern as
     // commissionMatterDevice / WARP-851) so the setup wizard can tell

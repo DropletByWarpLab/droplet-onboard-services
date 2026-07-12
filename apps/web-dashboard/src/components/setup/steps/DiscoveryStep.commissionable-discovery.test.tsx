@@ -25,7 +25,7 @@
  * serial browse scheduling is observable.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import type { MatterDiscoveredDevice, MatterGrouped } from "@/lib/types";
 
 const emptyGrouped: MatterGrouped = {
@@ -126,17 +126,35 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("falls back to a generic device name when mDNS doesn't advertise one", async () => {
-    discoverMatterDevicesMock.mockImplementation(async () => ({
-      devices: [{ ...smartBulb, deviceName: undefined }],
-      count: 1,
-    }));
+  it("falls back to a generic device name when mDNS doesn't advertise one, then picks up the real name from a later browse", async () => {
+    let browses = 0;
+    discoverMatterDevicesMock.mockImplementation(async () => {
+      browses += 1;
+      return {
+        devices: [
+          // Same device set; the first browse hasn't resolved the DN
+          // record yet, a later one has (review follow-up on #996: the
+          // same-set render bail must compare deviceName too, or the
+          // enrichment is dropped and the card sticks on the fallback
+          // forever).
+          browses === 1 ? { ...smartBulb, deviceName: undefined } : smartBulb,
+        ],
+        count: 1,
+      };
+    });
     render(<DiscoveryStep onContinue={() => {}} />);
     await flush();
 
     expect(screen.getByTestId("discovery-ready-to-pair")).toHaveTextContent(
       /matter device/i,
     );
+
+    // Next serial browse (3s gap) resolves the real name — the card
+    // must update.
+    await advance(3_500);
+    const readyList = screen.getByTestId("discovery-ready-to-pair");
+    expect(readyList).toHaveTextContent("Smart Bulb");
+    expect(readyList).not.toHaveTextContent(/matter device/i);
   });
 
   it("replaces the scanning skeletons with the unavailable state when discovery answers 503", async () => {
@@ -294,9 +312,10 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     expect(discoverMatterDevicesMock).toHaveBeenCalledTimes(1);
 
     // A browse is a slow (~15s) server-side operation. While one is in
-    // flight NO second request may be issued, no matter how much time
-    // passes.
-    await advance(30_000);
+    // flight NO second request may be issued for as long as it stays
+    // within the 25s transport bound (past that the chain deliberately
+    // times the browse out — covered by its own test below).
+    await advance(20_000);
     expect(discoverMatterDevicesMock).toHaveBeenCalledTimes(1);
     expect(maxInFlight).toBe(1);
 
@@ -326,5 +345,90 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     unmount();
     await advance(30_000);
     expect(discoverMatterDevicesMock.mock.calls.length).toBe(callsAtStop);
+  });
+
+  it("times out a never-settling browse at the 25s transport bound and keeps the chain going", async () => {
+    // Review follow-up on #996 (finding 1): a transport hang (not a slow
+    // browse — the server bounds the browse itself at ~15s) must not
+    // wedge discoverBusyRef forever. Without the bound the chain issues
+    // no further browses and even "Scan again" re-arms a scan that can
+    // never browse.
+    let calls = 0;
+    discoverMatterDevicesMock.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<
+          { devices: MatterDiscoveredDevice[]; count: number }
+        >(() => {});
+      }
+      return Promise.resolve({ devices: [], count: 0 });
+    });
+    render(<DiscoveryStep onContinue={() => {}} />);
+    await flush();
+    expect(discoverMatterDevicesMock).toHaveBeenCalledTimes(1);
+
+    // Within the bound: still strictly serial — no second browse.
+    await advance(20_000);
+    expect(discoverMatterDevicesMock).toHaveBeenCalledTimes(1);
+
+    // Past the bound (timeout at 25s) plus the 3s retry gap: the stalled
+    // browse was abandoned and the chain issued the next one.
+    await advance(9_000);
+    expect(
+      discoverMatterDevicesMock.mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("drops a commissioned-poll settle from a previous scan generation ('Scan again' fully resets the failure streak)", async () => {
+    // Review follow-up on #996 (finding 2): a poll in flight across a
+    // "Scan again" re-arm must not leak into the new scan's state — a
+    // phantom stale failure would trip the unavailable verdict after
+    // only TWO real failures.
+    let stalePollReject: ((e: Error) => void) | undefined;
+    let polls = 0;
+    fetchMatterDevicesMock.mockImplementation(() => {
+      polls += 1;
+      // Two real failures (streak 2 — one short of the verdict) …
+      if (polls <= 2) return Promise.reject(new Error("orchestrator flake"));
+      // … then a poll that STALLS until after the re-arm …
+      if (polls === 3) {
+        return new Promise<MatterGrouped>((_, reject) => {
+          stalePollReject = reject;
+        });
+      }
+      // … then healthy polls for the rest of the first scan.
+      return Promise.resolve(emptyGrouped);
+    });
+
+    render(<DiscoveryStep onContinue={() => {}} />);
+    // Drive to the stopped state so "Scan again" is on screen.
+    await advance(305_000);
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+
+    // Re-arm a fresh scan, THEN settle the pre-re-arm poll: the stale
+    // failure must be dropped, not counted against the new generation.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stalePollReject?.(new Error("stale settle from the old scan"));
+      await Promise.resolve();
+    });
+
+    // Two REAL failures in the new scan: with a phantom stale +1 the
+    // streak would read 3 here and wrongly trip the verdict.
+    fetchMatterDevicesMock.mockImplementation(async () => {
+      throw new Error("orchestrator flake");
+    });
+    await advance(6_500);
+    expect(
+      screen.queryByTestId("discovery-unavailable"),
+    ).not.toBeInTheDocument();
+
+    // Third real failure — the verdict trips now, proving the streak
+    // was live and the assertion above wasn't vacuous.
+    await advance(3_500);
+    expect(screen.getByTestId("discovery-unavailable")).toBeInTheDocument();
   });
 });

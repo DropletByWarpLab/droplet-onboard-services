@@ -48,6 +48,15 @@ const STOP_AFTER_TOTAL_SEC = 300;
 // this pause in between. The chain is bounded by the WARP-298 scan lifecycle
 // (it stops at phase "stopped" / on unmount), never by a free-running loop.
 const DISCOVER_RETRY_GAP_MS = 3_000;
+// Review follow-up on #996 (finding 1): transport bound on a single browse.
+// The orchestrator caps the server-side mDNS browse at ~15s, so a fetch that
+// hasn't settled by 25s is a stalled transport, not a slow browse. Without
+// this bound a never-settling fetch wedges discoverBusyRef forever — the
+// chain issues no further browses and "Scan again" re-arms a scan that can
+// never browse. Implemented as AbortController + setTimeout (the repo's
+// jsdom-safe equivalent of AbortSignal.timeout — see timeoutSignal() in
+// lib/auth.tsx) so fake-timer tests can drive it deterministically.
+const DISCOVER_FETCH_TIMEOUT_MS = 25_000;
 // WARP-1281: how many consecutive discovery/poll failures we tolerate before
 // swapping the scanning skeletons for the explicit "smart home isn't
 // available" state. A single failure is not a verdict (the controller may be
@@ -115,10 +124,13 @@ export function DiscoveryStep({
   const [serviceUnavailable, setServiceUnavailable] = useState(false);
   const discoverBusyRef = useRef(false);
   const discoverEnabledRef = useRef(false);
-  // Generation counter: bumped by every startDiscovery so a browse that was
-  // in flight across a "Scan again" click can't apply stale results or
-  // stale failure counts to the new scan.
-  const discoverGenRef = useRef(0);
+  // Scan-generation counter: bumped by every startDiscovery so a browse OR
+  // commissioned poll that was in flight across a "Scan again" click can't
+  // apply stale results or stale failure counts to the new scan (review
+  // follow-up on #996: pollOnce needs the same guard as discoverTick — a
+  // phantom stale poll failure would trip the unavailable verdict one real
+  // failure early, and a phantom success would pre-seed the fresh list).
+  const scanGenRef = useRef(0);
   const discoverTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const discoverFailsRef = useRef(0);
   // Sticky "the controller told us it isn't started" flag — only an actual
@@ -185,8 +197,14 @@ export function DiscoveryStep({
   // intervals. Captures *new* devices, advances lastFoundAtSec when one
   // arrives.
   const pollOnce = useCallback(async () => {
+    // Review follow-up on #996 (finding 2): pin the settle to the scan
+    // generation that issued it, same pattern as discoverTick. A poll in
+    // flight across a "Scan again" re-arm must not leak into the new
+    // scan's state.
+    const gen = scanGenRef.current;
     try {
       const grouped = await fetchMatterDevices();
+      if (gen !== scanGenRef.current) return;
       const allDevices = flattenGrouped(grouped);
       const newDevices: MatterDevice[] = [];
       for (const d of allDevices) {
@@ -208,6 +226,7 @@ export function DiscoveryStep({
       pollFailsRef.current = 0;
       refreshAvailability();
     } catch {
+      if (gen !== scanGenRef.current) return;
       // Matter controller may still be booting — keep polling (WARP-298
       // machine untouched), but count the streak so the wizard stops
       // fake-scanning if the subsystem is actually broken (WARP-1281).
@@ -225,10 +244,33 @@ export function DiscoveryStep({
   const discoverTick = useCallback(async () => {
     if (discoverBusyRef.current || !discoverEnabledRef.current) return;
     discoverBusyRef.current = true;
-    const gen = discoverGenRef.current;
+    const gen = scanGenRef.current;
+    // Transport bound (review follow-up on #996): abort the fetch at
+    // DISCOVER_FETCH_TIMEOUT_MS AND race the promise against the abort —
+    // the race guarantees this tick settles (freeing the serial chain)
+    // even if the underlying promise ignores the signal.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort(
+        new DOMException("Matter browse timed out", "TimeoutError"),
+      );
+    }, DISCOVER_FETCH_TIMEOUT_MS);
     try {
-      const { devices } = await discoverMatterDevices();
-      if (gen === discoverGenRef.current && discoverEnabledRef.current) {
+      const browse = discoverMatterDevices(controller.signal);
+      // A timed-out browse becomes an orphan the race no longer observes;
+      // swallow its late rejection so it can't surface as unhandled.
+      browse.catch(() => {});
+      const { devices } = await Promise.race([
+        browse,
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener(
+            "abort",
+            () => reject(controller.signal.reason),
+            { once: true },
+          );
+        }),
+      ]);
+      if (gen === scanGenRef.current && discoverEnabledRef.current) {
         discoverFailsRef.current = 0;
         discover503Ref.current = false;
         refreshAvailability();
@@ -241,7 +283,7 @@ export function DiscoveryStep({
         );
       }
     } catch (e) {
-      if (gen === discoverGenRef.current && discoverEnabledRef.current) {
+      if (gen === scanGenRef.current && discoverEnabledRef.current) {
         discoverFailsRef.current += 1;
         if ((e as { status?: number }).status === 503) {
           // Definitive: the controller told us it isn't started.
@@ -250,6 +292,7 @@ export function DiscoveryStep({
         refreshAvailability();
       }
     } finally {
+      clearTimeout(timeoutId);
       discoverBusyRef.current = false;
       if (discoverEnabledRef.current) {
         discoverTimerRef.current = setTimeout(() => {
@@ -279,7 +322,7 @@ export function DiscoveryStep({
     // 3s gap — the serial guarantee is worth that latency; overlapping
     // active mDNS browses would be worse for the controller.
     if (discoverTimerRef.current) clearTimeout(discoverTimerRef.current);
-    discoverGenRef.current += 1;
+    scanGenRef.current += 1;
     discoverEnabledRef.current = true;
     discoverFailsRef.current = 0;
     discover503Ref.current = false;
@@ -773,14 +816,21 @@ export function DiscoveryStep({
 
 // WARP-1281: cheap same-set check so repeated identical browse snapshots
 // (the steady state: an empty result every ~18s) keep the previous array
-// reference and don't force a re-render.
+// reference and don't force a re-render. Compares every field the cards
+// render (review follow-up on #996: identifier alone dropped a later browse
+// that resolved the real deviceName for the same device set, leaving a card
+// stuck on the "Matter device" fallback).
 function sameCommissionables(
   prev: MatterDiscoveredDevice[],
   next: MatterDiscoveredDevice[],
 ): boolean {
   return (
     prev.length === next.length &&
-    prev.every((d, i) => d.deviceIdentifier === next[i].deviceIdentifier)
+    prev.every(
+      (d, i) =>
+        d.deviceIdentifier === next[i].deviceIdentifier &&
+        d.deviceName === next[i].deviceName,
+    )
   );
 }
 
