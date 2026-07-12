@@ -27,14 +27,14 @@ Droplet already ships a household-wide shared library (WS-5 from ADR-027: the Ne
 | Dynamic departments with own file libraries | WS-5: ONE "Household" Nextcloud groupfolder + space switcher | N dynamic department libraries with lifecycle (create/archive/delete) |
 | Individual/private files | Per-user private NC homes, per-user app-passwords (shipped) | Nothing — stays as-is |
 | Admins see all files | — (admins have NO see-all today) | `droplet-admins` NC group at full mask on every library + audited entry (D-1) |
-| Per-user rights | Role enum + raw OCS share proxy; **Scope axis is dead** (guards zero routes, WARP-481 To Do) | `reader / contributor / manager` per-department membership rights |
+| Per-user rights | Role enum + raw OCS share proxy; **Scope axis is live** (`requireScope` guards the 3 `exec_only` people-mutation routes, WARP-455) but is **not** yet applied to files routes (WARP-481 To Do) | `reader / contributor / manager` per-department membership rights |
 | Per-user usage settings | NC quota read/set proxy exists; **zero** local quota/usage columns | `UserUsagePolicy` (storage quota, upload cap, optional LLM cap) |
 | Seamless | Space switcher, member-picker sharing, comments/tags, FTS — all shipped (WS-1..5) | Departments surface in the same switcher; Home mode pixel-identical |
 
 Ground-truth audit confirmed:
 
 - **Role axis is live** — `Role` enum + `requireRole` guard 33 routes (WARP-171/ADR-004). No implicit owner short-circuit; every guarded route lists owner explicitly.
-- **Scope axis is shipped but dead** — `Scope` pgEnum + `ScopeBinding` + `requireScope` guard **zero production routes** (WARP-481 To Do). The `File` scope-registry model (WARP-455) has zero Prisma-client usage — schema-only dead code we now repurpose.
+- **Scope axis is shipped and LIVE** (corrected 2026-07-12) — `Scope` pgEnum + `ScopeBinding` + `requireScope` (WARP-455) are **not** dead: `requireScope("exec_only", loadUserScopes)` guards **three** live, mounted production routes — `PATCH /api/people/:id/role` (people.ts:345), `PATCH /api/people/:id/scope` (people.ts:464), and `DELETE /api/people/:id` (people.ts:552), all mounted via `app.use("/api", createPeopleRouter(...))` (app.ts:365). `ScopeBinding` is read by `loadUserEffectiveScopes` (scope-loader.service.ts:78) and written by the scope-PATCH route (people.ts:504/507). What is still **To Do (WARP-481)** is *extending* Scope enforcement to files routes — which this ADR explicitly declines (departments are the v1 grouping mechanism for files; see Non-goals). Separately, the `File` scope-registry model (also WARP-455) has zero Prisma-client usage — **that** is the schema-only dead code we now repurpose (§1).
 - **`Group`/`GroupMembership` are 100% dead code** — no CRUD, no reads anywhere. Deprecate now, drop post-GA.
 - **Enforcement base is not yet trustworthy** — WARP-449 (~22 unguarded routes) and WARP-1051 (invite-admin gets owner session) are **blocking prerequisites** before any dept route ships.
 - **Search corpus staleness** — `householdSearchUserIds` uses WebDAV probes + 300 s Redis cache: a revoked member keeps search hits for up to 5 min. This design kills the class structurally.
@@ -147,11 +147,11 @@ model UserUsagePolicy {
 }
 ```
 
-**Repurposed:** the dead WARP-455 `File` registry gains `departmentId String?` + index and finally gets writers (upload-route upsert + file-indexer backfill) — it becomes the O(1) `ncFileId → space` resolver that gates comments/tags/citations/editor-session against cross-department leakage.
+**Repurposed:** the dead WARP-455 `File` **registry model** (the schema-only, zero-client-usage table — *not* the live Scope axis) gains `departmentId String?` + index and finally gets writers (upload-route upsert + file-indexer backfill) — it becomes the O(1) `ncFileId → space` resolver that gates comments/tags/citations/editor-session against cross-department leakage.
 
 **Deprecated now, dropped post-GA:** `Group` + `GroupMembership`.
 
-**Untouched:** `Role` enum, `Scope`/`ScopeBinding`/`requireScope` (kept as info-classification defense-in-depth; WARP-481 proposed closed as superseded-for-files — decision for Stefan).
+**Untouched:** `Role` enum, and the **live** `Scope`/`ScopeBinding`/`requireScope` axis — its three `exec_only` people-mutation guards (people.ts:345/464/552, WARP-455) stay exactly as shipped and keep running as info-classification defense-in-depth. WARP-481 (extend Scope enforcement to *files* routes) is proposed closed as superseded-for-files; closing it removes nothing from those live guards — decision for Stefan.
 
 ### 2. Enforcement model — two independent layers
 
@@ -245,7 +245,7 @@ First local persistence for per-user limits (`UserUsagePolicy`):
 4. Spaces API v2 goes DB-driven; `shared` kept as an alias id for one release (mobile/MCP callers).
 5. Server-side `?space` threading on all write routes; dashboard deletes `toHomeRelativePath`.
 6. Search cutover: indexer maps `__groupfolders/<id>/` → Department-UUID sentinel via a Prisma-fed lookup; household keeps emitting `__household__` (**no reindex**); orchestrator tolerates both sentinel forms during rollout.
-7. Scope-axis disposition: WARP-481 proposed closed as superseded-for-files (decision for Stefan).
+7. Scope-axis disposition: WARP-481 (extend Scope enforcement to *files* routes) proposed closed as superseded-for-files. The **live** `requireScope("exec_only")` guards on the three people-mutation routes (people.ts:345/464/552, WARP-455) are untouched by this ADR — no code migration, no guard removal (decision for Stefan).
 8. Post-GA cleanup: drop `Group`/`GroupMembership`; retire `shared` alias.
 
 ### 7. Security review checklist
@@ -306,7 +306,7 @@ Prereqs: WARP-449 + WARP-1051 merged before any dept route ships · fail-closed 
 - Arbitrary-depth hierarchy (e.g., Department → Team → Subteam) — limits the mental model to one level; multi-level is a future decision.
 - Bulk member operations (e.g., "copy all members from Dept A to Dept B") — tooling; can be built post-GA via admin panel.
 - "Anyone" / anonymous department shares; external-sharing governance — privacy posture stays first-party only.
-- Scope-axis enforcement on files routes (WARP-481) — department rows are the only grouping mechanism in v1.
+- Scope-axis enforcement on *files* routes (WARP-481) — the live `exec_only` Scope guards on the people-mutation routes stay; department rows are the only grouping mechanism for **files** in v1.
 - Business-role vocabulary migration (household `owner/admin/family/guest/service` enum stays) — separate work, deferred (see ONBOARDING_TEAM_ROLES.md).
 
 ---
@@ -329,7 +329,7 @@ Prereqs: WARP-449 + WARP-1051 merged before any dept route ships · fail-closed 
 
 ## References
 
-(Line numbers and references are current as of `origin/main` HEAD `28ad8afb`, 2026-07-11, and the source brief cited in the body: `TEAMS-DEPARTMENTS-FILES-ARCHITECTURE-BRIEF.md` sections §2–8, §10–11.)
+(Line numbers and references were re-verified against `origin/main` HEAD `076101c7`, 2026-07-12, and the source brief cited in the body: `TEAMS-DEPARTMENTS-FILES-ARCHITECTURE-BRIEF.md` sections §2–8, §10–11. The earlier pin `28ad8afb` carried several off-by-region citations and a false "Scope axis is dead" premise; both are corrected here.)
 
 - **Brief source material:** `TEAMS-DEPARTMENTS-FILES-ARCHITECTURE-BRIEF.md` at brief filing date (2026-07-11); sections 2 (data model with Prisma + parentId/TEAM), 3 (enforcement + bypass-path table), 4 (provisioning lifecycle), 5 (usage settings), 7 (migration), 8 (security checklist), 10 (open decisions D-1..D-8 + founder resolutions), 11 (ticket breakdown).
 
@@ -337,19 +337,25 @@ Prereqs: WARP-449 + WARP-1051 merged before any dept route ships · fail-closed 
 
 - **Blocking prerequisites:** WARP-449 (unguarded routes audit + fixes), WARP-1051 (invite-admin gets owner session).
 
-- **Related ground-truth code (main @ `28ad8afb`):**
-  - `apps/orchestrator/src/middleware/auth.ts:532` — `requireRole` precedent
-  - `apps/orchestrator/src/routes/files.ts:95` — `getUser(req)` returns `req.user.username`; §2.1 enforces use of `req.user.id` for all FK/authz
-  - `apps/orchestrator/src/routes/files.ts:217-221` — FileCitation IDOR scope filter pattern (use `req.user.id`, not username)
-  - `apps/orchestrator/src/routes/files.ts:119-160` — space routing precedent (WS-5 households)
-  - `apps/orchestrator/src/services/nextcloud.client.ts:1207` — `ncCreateShareV2` (admin, shareType/shareWith wiring)
-  - `apps/orchestrator/prisma/schema.prisma:1948-1981` — `File` scope-registry (repurposed for `departmentId`, per §1)
-  - `apps/orchestrator/src/routes/files.ts:297-331` — `householdSearchUserIds` (staleness anti-pattern, replaced by `deptSearchCorpora`, per §2.2)
+- **Related ground-truth code (main @ `076101c7`):**
+  - `apps/orchestrator/src/middleware/auth.ts:655` — `requireRole` definition (per-route guard precedent, WARP-171)
+  - **Scope axis is LIVE (§Context correction):**
+    - `apps/orchestrator/src/middleware/scope.ts:86` — `requireScope(resource, loadUserScopes)` definition (WARP-455)
+    - `apps/orchestrator/src/routes/people.ts:345,464,552` — `requireScope("exec_only", loadUserScopes)` guarding `PATCH /api/people/:id/role`, `PATCH /api/people/:id/scope`, and `DELETE /api/people/:id`
+    - `apps/orchestrator/src/app.ts:365` — `app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes))` mounts those three routes (live production surface)
+    - `apps/orchestrator/src/services/scope-loader.service.ts:78` — `loadUserEffectiveScopes` reads `ScopeBinding` rows
+    - `apps/orchestrator/src/routes/people.ts:504,507` — `PATCH /api/people/:id/scope` writes `ScopeBinding` (`deleteMany` + `createMany` in-tx)
+  - `apps/orchestrator/src/routes/files.ts:109` — `getUser(req)` returns `req.user.username`; §2.1 enforces use of `req.user.id` for all FK/authz
+  - `apps/orchestrator/src/routes/files.ts:659-669` — FileCitation IDOR scope filter pattern (privileged → `{ filePath }`, else `{ filePath, userId: req.user.id }` — id, not username)
+  - `apps/orchestrator/src/routes/files.ts:125-165` — space routing precedent (WS-5 households: `resolveSpace`/`rootForSpace`)
+  - `apps/orchestrator/src/services/nextcloud.client.ts:1270` — `ncCreateShareV2` (admin, shareType/shareWith wiring)
+  - `apps/orchestrator/prisma/schema.prisma:1948-1981` — `File` scope-registry (zero Prisma-client usage; repurposed for `departmentId`, per §1)
+  - `apps/orchestrator/src/routes/files.ts:300-336` — `householdSearchUserIds` (WebDAV probe + 300 s Redis cache staleness anti-pattern, replaced by `deptSearchCorpora`, per §2.2)
   - `docker/nextcloud-init.sh:29-88` — Household groupfolder seeding (adopted zero-mutation, per §6)
   - `docs/ADR-013-builtin-directory-vs-nextcloud.md` — "write-only projection" model
   - `docs/ADR-021-container-resource-limits.md` — RAM budget (32 GB reference box per ADR-027 Amendment)
 
-- **Jira epic:** WARP-1251 (teams/departments/files); blocking prerequisites WARP-449, WARP-1051; relates to WARP-878 (Files epic), WARP-1245 (absorbed into `manager` right), WARP-481 (proposed closed as superseded), WARP-455 (File registry repurposed).
+- **Jira epic:** WARP-1251 (teams/departments/files); blocking prerequisites WARP-449, WARP-1051; relates to WARP-878 (Files epic), WARP-1245 (absorbed into `manager` right), WARP-481 (extend Scope enforcement to *files* routes; proposed closed as superseded-for-files — the live `exec_only` people-route Scope guards stay), WARP-455 (Scope axis + `File` registry; the `File` model is repurposed, the live `requireScope` guards are untouched).
 
 ---
 
