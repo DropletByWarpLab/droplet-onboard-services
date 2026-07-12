@@ -13,6 +13,11 @@
  *
  * Designed so future WARPs can append a new component by adding one entry
  * to COMPONENTS and the rest of the plumbing flows.
+ *
+ * WARP-618: each poll's results also fan out to generic snapshot observers
+ * (`onHealthSnapshot`). This module knows nothing about the consumers —
+ * the fleet-analytics bridge subscribes at boot (src/index.ts), keeping the
+ * monitor analytics-free by design.
  */
 
 import type { PrismaClient } from "@prisma/client";
@@ -66,6 +71,29 @@ const PROBE_TIMEOUT_MS = 5_000; // keep probes snappy so the 15s cadence isn't s
 const startTime = Date.now();
 const cache: Map<ComponentName, ComponentHealth> = new Map();
 let intervalHandle: NodeJS.Timeout | null = null;
+
+/**
+ * WARP-618: per-poll snapshot observers. Every completed probe cycle hands
+ * its fresh per-component results to each registered observer. Deliberately
+ * GENERIC — this module stays unaware of who is listening (the fleet-
+ * analytics bridge subscribes at boot in src/index.ts; anything else can
+ * too). An observer that throws is logged and skipped so no consumer can
+ * ever break health polling or the /health route it feeds. Subscription
+ * lifetime is independent of the poller's start/stop.
+ */
+export type HealthSnapshotObserver = (
+  components: ReadonlyArray<ComponentHealth>,
+) => void;
+
+const snapshotObservers = new Set<HealthSnapshotObserver>();
+
+/** Subscribe to every future poll's results. Returns an unsubscribe. */
+export function onHealthSnapshot(observer: HealthSnapshotObserver): () => void {
+  snapshotObservers.add(observer);
+  return () => {
+    snapshotObservers.delete(observer);
+  };
+}
 
 /** Run one probe with a latency measurement and a 5s ceiling. */
 async function runProbe(name: ComponentName, probe: Probe): Promise<ComponentHealth> {
@@ -188,6 +216,15 @@ export async function runAllProbes(prisma: PrismaClient): Promise<ComponentHealt
   const results = await Promise.all(probes.map(({ name, probe }) => runProbe(name, probe)));
   for (const result of results) {
     cache.set(result.name, result);
+  }
+  for (const observer of snapshotObservers) {
+    try {
+      observer(results);
+    } catch (err) {
+      // WARP-618: observers are best-effort consumers — a broken one must
+      // never take the poller (or the /health route) down with it.
+      logger.warn({ err }, "health snapshot observer threw — skipped");
+    }
   }
   return results;
 }
