@@ -176,6 +176,14 @@ const MATRIX: GuardedRoute[] = [
   { method: "patch", path: "/api/people/u1/scope", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/people/u1", allowed: ["owner", "admin"] },
 
+  // WARP-1258 (T6): departments/teams CRUD — same owner+admin posture as
+  // people mutations. GET /api/departments is open (not in this matrix as it's
+  // a read with no role restriction).
+  { method: "post", path: "/api/departments", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/departments/d1/teams", allowed: ["owner", "admin"] },
+  { method: "patch", path: "/api/departments/d1", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/departments/d1", allowed: ["owner", "admin"] },
+
   // ── service restart ── (owner only — destructive, may interrupt the box) ──
   { method: "post", path: "/api/network/system/reboot", allowed: ["owner"] },
 
