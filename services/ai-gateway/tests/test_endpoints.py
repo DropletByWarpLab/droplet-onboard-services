@@ -2,7 +2,9 @@
 
 import asyncio
 
+import httpx
 import pytest
+import respx
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from schemas import ChatRequest, ModelInfo
@@ -187,6 +189,35 @@ class TestModelsDegradedSignal:
         # Existing consumers that only read `models` are unaffected; the new
         # field is present-but-empty on a healthy listing.
         assert data.get("degraded_providers", []) == []
+
+    @respx.mock
+    async def test_dead_ollama_reports_degraded_end_to_end(
+        self, client, monkeypatch
+    ):
+        """WARP-1284 F1 regression — exercises the REAL provider failure
+        seam, not a mock on list_models. The provider used to swallow the
+        connect error into `return []`, which made the router's
+        degraded_providers classification dead code in production: the wire
+        below (respx raising on the actual /api/tags GET) is exactly what a
+        dead Ollama looks like, and it must surface through /ai/models."""
+        import main
+        from models.registry import ModelRegistry
+        from router import ProviderRouter
+
+        # conftest pins OLLAMA_URL to http://fake-ollama:11434; the ASGI test
+        # client is NOT intercepted by respx (explicit ASGITransport), so the
+        # only mocked wire is the provider's own outbound tags call.
+        respx.get("http://fake-ollama:11434/api/tags").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        with patch("router.get_api_key", new_callable=AsyncMock, return_value=None):
+            monkeypatch.setattr(main, "provider_router", ProviderRouter())
+            monkeypatch.setattr(main, "model_registry", ModelRegistry())
+            resp = await client.get("/ai/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == []
+        assert data["degraded_providers"] == ["ollama"]
 
 
 class TestKeysEndpoints:

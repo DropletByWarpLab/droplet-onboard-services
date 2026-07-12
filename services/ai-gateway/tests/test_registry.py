@@ -1,5 +1,7 @@
 """Tests for the model registry TTL cache."""
 
+import asyncio
+import logging
 import time
 from unittest.mock import AsyncMock
 
@@ -121,3 +123,75 @@ class TestModelRegistryDegradedSignal:
         fourth = await registry.get_models(mock_router)
         assert mock_router.list_all_models.call_count == 3  # healthy → cache hit
         assert fourth.models == third.models
+
+
+class TestModelRegistrySingleFlight:
+    """WARP-1284 F2 — once degraded listings stop arming the TTL, every
+    /ai/models request would otherwise run its own provider fan-out. With a
+    slow-not-down Ollama, the wizard's 8s poll + the dashboard's 30s SWR
+    would pile hung /api/tags calls onto the shared httpx pool that chat
+    also uses. Concurrent callers must share ONE in-flight fan-out."""
+
+    async def test_concurrent_get_models_share_one_fanout(self):
+        registry = ModelRegistry()
+        mock_router = AsyncMock()
+
+        async def slow_fanout():
+            await asyncio.sleep(0.05)
+            return ModelListResult(models=[], degraded_providers=["ollama"])
+
+        mock_router.list_all_models.side_effect = slow_fanout
+
+        results = await asyncio.gather(
+            *(registry.get_models(mock_router) for _ in range(5))
+        )
+        # One fan-out, shared by all five concurrent callers.
+        assert mock_router.list_all_models.call_count == 1
+        assert all(r.degraded_providers == ["ollama"] for r in results)
+
+        # A LATER (sequential) call still refetches — degraded never arms
+        # the TTL, and self-healing depends on the re-query.
+        await registry.get_models(mock_router)
+        assert mock_router.list_all_models.call_count == 2
+
+    async def test_concurrent_healthy_fetch_also_single_flight(self):
+        registry = ModelRegistry()
+        mock_router = AsyncMock()
+
+        async def slow_fanout():
+            await asyncio.sleep(0.05)
+            return ModelListResult(
+                models=[ModelInfo(id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b")],
+                degraded_providers=[],
+            )
+
+        mock_router.list_all_models.side_effect = slow_fanout
+
+        results = await asyncio.gather(
+            *(registry.get_models(mock_router) for _ in range(4))
+        )
+        assert mock_router.list_all_models.call_count == 1
+        assert all([m.id for m in r.models] == ["gpt-oss:20b"] for r in results)
+
+        # Healthy fetch armed the TTL — the next call is a cache hit.
+        await registry.get_models(mock_router)
+        assert mock_router.list_all_models.call_count == 1
+
+    async def test_degraded_warning_logged_on_state_change_not_per_request(
+        self, caplog
+    ):
+        """The registry re-queries on every poll while degraded; the WARNING
+        must not fire per request — only when the degraded set changes."""
+        registry = ModelRegistry()
+        mock_router = AsyncMock()
+        mock_router.list_all_models.return_value = ModelListResult(
+            models=[], degraded_providers=["ollama"]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="models.registry"):
+            await registry.get_models(mock_router)
+            await registry.get_models(mock_router)
+            await registry.get_models(mock_router)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
