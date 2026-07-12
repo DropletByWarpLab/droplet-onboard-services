@@ -195,6 +195,18 @@ describe("setup Cameras step — outage recovery (WARP-1282)", () => {
     expect(
       screen.queryByText(/couldn't check for cameras right now/i),
     ).not.toBeInTheDocument();
+
+    // One more tick: a successful full load DISARMS recovery — the poll is
+    // back on the light discovered-only refresh (fetchDiscoveredCameras
+    // advances, fetchCameras does NOT keep reloading every 10 s).
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchCamerasMock).toHaveBeenCalledTimes(2);
+    expect(fetchDiscoveredCamerasMock).toHaveBeenCalledTimes(3);
   });
 
   it("a poll tick during an in-flight accept-all triggers no fetch and doesn't clobber the cards (WARP-933 guard)", async () => {

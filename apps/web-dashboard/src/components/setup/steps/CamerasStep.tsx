@@ -81,6 +81,13 @@ export function CamerasStep({
   // (not state) so the interval callback (armed once) sees the current value;
   // the banner's "Try again" button gates on `error.kind` instead.
   const loadFailedRef = useRef(false);
+  // WARP-1282 review — load-generation counter. Each load() claims a
+  // generation at start and discards its results at apply time if a newer
+  // load started meanwhile (Try-again racing a poll tick: last-started wins,
+  // stale can't overwrite fresh) or if local state became authoritative
+  // (Remove / accept-all bump the counter, so an in-flight fetchCameras
+  // snapshot taken BEFORE the mutation can't resurrect a deleted row).
+  const loadGenRef = useRef(0);
   const [retrying, setRetrying] = useState(false);
   // WARP-933 review — `alive` guards async setState after the customer advances
   // (the step unmounts while a fetch is still in flight); `savingRef` lets the
@@ -96,20 +103,21 @@ export function CamerasStep({
   }, []);
 
   const load = useCallback(async () => {
+    const gen = ++loadGenRef.current;
     try {
       // The cameras list rides along but must not block the step —
-      // discovery is the primary signal. A cameras-list error surfaces to
-      // the user instead of silently hiding the "Already set up" section.
+      // discovery is the primary signal. A cameras-list failure stays silent
+      // here (just tracked): the banner decision is made ONCE per load, after
+      // both fetches settle, so the role="alert" region gets at most one
+      // content change per load and nothing fires ahead of the apply-time
+      // guards below (an early setError would announce twice per poll tick
+      // during a full outage, flicker every 10 s in the designed-silent
+      // partial mode, and could pop a load banner mid-accept-all).
       let all: CameraInfo[];
       let camerasListFailed = false;
       try {
         all = await fetchCameras();
       } catch {
-        setError({
-          kind: "load",
-          message:
-            "Couldn't load existing cameras. Check your connection and try again.",
-        });
         camerasListFailed = true;
         all = [];
       }
@@ -119,9 +127,12 @@ export function CamerasStep({
       const enabled = all.filter((c) => c.enabled);
       // WARP-1282 — same guard as the poll: never apply results after unmount
       // or under an in-flight accept-all (load() is now re-entered from the
-      // poll and the Try-again button, not just mount).
-      if (!alive.current || savingRef.current) return;
-      setError(null); // clear any fetchCameras blip now that discovery succeeded
+      // poll and the Try-again button, not just mount); a stale generation
+      // means a newer load or a local mutation superseded this snapshot.
+      if (!alive.current || savingRef.current || gen !== loadGenRef.current)
+        return;
+      // The one banner decision per load: discovery reachable → no banner.
+      setError(null);
       setCameras(list);
       if (camerasListFailed) {
         // WARP-1282 — the existing-cameras read failed: keep whatever we last
@@ -138,7 +149,8 @@ export function CamerasStep({
       // polling (below), so a camera plugged in DURING this step shows up live
       // instead of the page silently jumping past it.
     } catch {
-      if (!alive.current || savingRef.current) return;
+      if (!alive.current || savingRef.current || gen !== loadGenRef.current)
+        return;
       // Discovery service unreachable — surface it with a retry rather than
       // silently skipping, which read to customers as "the page doesn't work".
       // The button carries the "try again" verb, so the copy stays short.
@@ -228,8 +240,12 @@ export function CamerasStep({
       setSaving(false);
     } finally {
       // Resume the discovery poll regardless of outcome (success unmounts; the
-      // accepted===0 / catch paths stay on the step).
+      // accepted===0 / catch paths stay on the step). Any accepts that landed
+      // changed server rows out from under a load that was already in flight
+      // when the save began (its apply-time savingRef check runs AFTER this
+      // reset) — bump the generation so that snapshot discards.
       savingRef.current = false;
+      loadGenRef.current++;
     }
   }
 
@@ -239,7 +255,10 @@ export function CamerasStep({
     try {
       await removeCamera(cam.name);
       // getCameras is server-cached — trust the delete and update local
-      // state instead of refetching into a stale read.
+      // state instead of refetching into a stale read. Local state is now
+      // authoritative: invalidate any in-flight load whose fetchCameras
+      // snapshot predates the delete, or it would resurrect this row.
+      loadGenRef.current++;
       setExisting((prev) => prev.filter((c) => c.name !== cam.name));
     } catch {
       setError({
