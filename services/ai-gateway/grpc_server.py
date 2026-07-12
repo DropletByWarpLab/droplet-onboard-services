@@ -186,10 +186,16 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             await self._scheduler.release()
 
     async def ListModels(self, request, context):
-        """List available models from all providers."""
+        """List available models from all providers.
+
+        WARP-1284: list_all_models now returns a ModelListResult; the gRPC
+        surface keeps its existing ModelList shape (proto unchanged) and
+        only forwards the models — `degraded_providers` is consumed by the
+        HTTP /ai/models path.
+        """
         set_request_id(new_request_id())
         try:
-            models = await self._router.list_all_models()
+            result = await self._router.list_all_models()
             return inference_pb2.ModelList(
                 models=[
                     inference_pb2.ModelInfo(
@@ -198,7 +204,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                         name=m.name,
                         context_window=m.context_window,
                     )
-                    for m in models
+                    for m in result.models
                 ]
             )
         except Exception as e:
