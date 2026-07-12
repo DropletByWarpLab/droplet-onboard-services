@@ -1,0 +1,370 @@
+/**
+ * WARP-1260 (T8) — requireSpaceAccess space middleware.
+ *
+ * ADR-029 §3.1 route-guard truth table for the department/team enforcement
+ * model (see docs/TEAMS-DEPARTMENTS-FILES-ARCHITECTURE-BRIEF.md §3 in the
+ * handbook). Composed AFTER `authMiddleware` (needs `req.user`); the space
+ * a request targets is `personal` (default), the `household` alias, or
+ * `dept:<uuid>` — resolved from `req.query.space` / `req.body.space` by
+ * default, or from a caller-supplied resolver for routes that carry the
+ * space id somewhere else (path param, a pre-resolved value, …).
+ *
+ *   caller       | personal | dept/household (active)                | pending/failed/archiving/archived | unknown/malformed
+ *   ─────────────┼──────────┼─────────────────────────────────────────┼────────────────────────────────────┼───────────────────
+ *   owner/admin  | pass     | SHORT-CIRCUIT pass + ActivityRow when    | 403                                 | 403
+ *                |          | not a member (audited see-all)          |                                     |
+ *   family       | pass     | pass iff membership.right >= minRight   | 403                                 | 403
+ *   guest        | pass     | pass iff member AND minRight === reader | 403                                 | 403
+ *   `_service:mcp`| pass    | asserted user's (X-Nextcloud-User →     | 403                                 | 403
+ *                |          | local User) membership checked, same    |                                     |
+ *                |          | rule as family/guest above              |                                     |
+ *   other service| pass     | 403 (no asserted user to check)         | 403                                 | 403
+ *
+ * Membership lookup is ONE indexed `findUnique` — no Redis ACL cache, so
+ * revocation has zero staleness window (brief §3.1). EVERY denial emits a
+ * `recordAccessDenied` ActivityRow (mirrors `requireRole`); every admin
+ * non-member entry into an active dept space ALSO emits an (allowed)
+ * audited "admin-space-entry" row — see-all is loud by design.
+ *
+ * `checkSpaceAccess(prisma, req, caller, departmentId, minRight)` is the
+ * middleware's core check, extracted so routes that already have a
+ * resolved `departmentId` (the file-registry metadata gate:
+ * comments/tags/citations/editor-session resolve `ncFileId →
+ * File.departmentId` via `resolveFileDepartment`, see
+ * `services/file-registry.service.ts`) can invoke the SAME authz path
+ * inline, post-resolution, without re-deriving a `?space=` token.
+ * `requireSpaceAccess` is a thin wrapper: it resolves the raw space value
+ * to a `departmentId | null` (handling the `personal` / `household`-alias
+ * / `dept:<uuid>` / malformed cases) and then calls `checkSpaceAccess`.
+ */
+import type { Request, Response, NextFunction } from "express";
+import type { PrismaClient, DepartmentRight } from "@prisma/client";
+import { z } from "zod";
+import { recordAccessDenied } from "./auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("space-access");
+
+declare global {
+  namespace Express {
+    interface Request {
+      /**
+       * Set by `requireSpaceAccess` on an allowed request: the resolved
+       * department id (`null` for `personal`). Downstream handlers may
+       * read it instead of re-parsing `?space=`.
+       */
+      spaceDepartmentId?: string | null;
+    }
+  }
+}
+
+// ── Rights ranking ──────────────────────────────────────────────────
+
+/** `reader < contributor < manager` — must mirror the Prisma
+ * `DepartmentRight` enum ordering (brief §2). */
+export const RIGHT_RANK: Record<DepartmentRight, number> = {
+  reader: 0,
+  contributor: 1,
+  manager: 2,
+};
+
+/** True iff `actual` meets or exceeds `min` on the rights ladder. */
+export function rightMeets(actual: DepartmentRight, min: DepartmentRight): boolean {
+  return RIGHT_RANK[actual] >= RIGHT_RANK[min];
+}
+
+// ── Space-token parsing ─────────────────────────────────────────────
+
+const uuidSchema = z.string().uuid();
+
+type SpaceToken =
+  | { kind: "personal" }
+  | { kind: "household" }
+  | { kind: "dept"; id: string }
+  | { kind: "malformed" };
+
+/**
+ * Parse a raw `?space=` / body `space` value. Absent/empty/"personal" all
+ * mean personal (the default). "household" is the legacy WS-5 alias for
+ * the seeded `kind=HOUSEHOLD` department. `dept:<uuid>` addresses any
+ * other department/team row by id. Anything else — wrong type, an
+ * unrecognized literal, or a `dept:` prefix with a non-UUID suffix — is
+ * `malformed` and fails closed (never silently falls back to personal).
+ */
+export function parseSpaceValue(raw: unknown): SpaceToken {
+  if (raw === undefined || raw === null || raw === "" || raw === "personal") {
+    return { kind: "personal" };
+  }
+  if (typeof raw !== "string") return { kind: "malformed" };
+  if (raw === "household") return { kind: "household" };
+  if (raw.startsWith("dept:")) {
+    const id = raw.slice("dept:".length);
+    if (!uuidSchema.safeParse(id).success) return { kind: "malformed" };
+    return { kind: "dept", id };
+  }
+  return { kind: "malformed" };
+}
+
+async function resolveHouseholdDepartmentId(
+  prisma: PrismaClient,
+): Promise<string | null> {
+  const dept = await prisma.department.findFirst({
+    where: { kind: "HOUSEHOLD" },
+    select: { id: true },
+  });
+  return dept?.id ?? null;
+}
+
+/**
+ * Read-only resolution of `?space=` → `departmentId | null`, WITHOUT any
+ * authorization check. Used by the file-registry writer (upload route) to
+ * decide what `File.departmentId` to stamp on a newly-uploaded file — it
+ * needs to know the target space, not gate access to it (uploads to a
+ * dept space are gated by the write-route threading, WARP-1262/T10; this
+ * ticket only owns the registry write and the read-side metadata gate).
+ * Returns null for personal, malformed, or any space that doesn't resolve
+ * to an ACTIVE department (never registers a file against a
+ * pending/failed/archiving/archived/unknown space).
+ */
+export async function resolveDepartmentIdForSpaceReadOnly(
+  prisma: PrismaClient,
+  rawSpace: unknown,
+): Promise<string | null> {
+  const token = parseSpaceValue(rawSpace);
+  if (token.kind === "personal" || token.kind === "malformed") return null;
+
+  const departmentId =
+    token.kind === "household"
+      ? await resolveHouseholdDepartmentId(prisma)
+      : token.id;
+  if (!departmentId) return null;
+
+  const dept = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: { state: true },
+  });
+  return dept && dept.state === "active" ? departmentId : null;
+}
+
+// ── Core truth-table check ──────────────────────────────────────────
+
+export interface SpaceAccessCaller {
+  /** LOCAL `User.id` UUID — never an NC username or a service-principal
+   * string. Callers resolving a service-asserted user MUST swap this in
+   * before calling; `checkSpaceAccess` has no header awareness. */
+  id: string;
+  role: string;
+}
+
+export type SpaceCheckResult =
+  | { allowed: true; departmentId: string | null }
+  | { allowed: false; status: number; error: string };
+
+/**
+ * Core access check for a single already-resolved `departmentId`
+ * (`null` = personal, always allowed). See module doc for the truth
+ * table. Every denial and every admin non-member entry is audited here —
+ * callers (the middleware AND the metadata-gate call sites) never need to
+ * duplicate the ActivityRow emission.
+ */
+export async function checkSpaceAccess(
+  prisma: PrismaClient,
+  req: Request,
+  caller: SpaceAccessCaller,
+  departmentId: string | null,
+  minRight: DepartmentRight,
+): Promise<SpaceCheckResult> {
+  if (departmentId === null) {
+    return { allowed: true, departmentId: null };
+  }
+
+  const dept = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: { id: true, state: true },
+  });
+  if (!dept) {
+    recordAccessDenied(req, "space-unknown");
+    return { allowed: false, status: 403, error: "Forbidden: unknown space" };
+  }
+  if (dept.state !== "active") {
+    recordAccessDenied(req, `space-not-active:${dept.state}`);
+    return { allowed: false, status: 403, error: "Forbidden: space is not active" };
+  }
+
+  if (caller.role === "owner" || caller.role === "admin") {
+    const membership = await prisma.departmentMembership.findUnique({
+      where: { departmentId_userId: { departmentId: dept.id, userId: caller.id } },
+      select: { id: true },
+    });
+    if (!membership) {
+      // Audited see-all — an ALLOWED admin bypass, not a denial. Loud by
+      // design (brief §3.5 tier 1).
+      void recordActivity({
+        kind: "auth",
+        severity: "info",
+        sourceIcon: "eye",
+        what: "Admin space entry (non-member)",
+        sub: `${req.method} ${req.path}`,
+        refs: {
+          departmentId: dept.id,
+          path: req.path,
+          method: req.method,
+          role: caller.role,
+        },
+        actor: actorFromRequest({ user: { id: caller.id, role: caller.role } }),
+      });
+    }
+    return { allowed: true, departmentId: dept.id };
+  }
+
+  const membership = await prisma.departmentMembership.findUnique({
+    where: { departmentId_userId: { departmentId: dept.id, userId: caller.id } },
+    select: { right: true },
+  });
+  if (!membership) {
+    recordAccessDenied(req, "space-not-member");
+    return { allowed: false, status: 403, error: "Forbidden: not a member of this space" };
+  }
+
+  if (caller.role === "guest" && minRight !== "reader") {
+    recordAccessDenied(req, "space-guest-write");
+    return { allowed: false, status: 403, error: "Forbidden: guests have read-only access" };
+  }
+
+  if (!rightMeets(membership.right, minRight)) {
+    recordAccessDenied(req, "space-insufficient-right");
+    return {
+      allowed: false,
+      status: 403,
+      error: "Forbidden: insufficient rights for this space",
+    };
+  }
+
+  return { allowed: true, departmentId: dept.id };
+}
+
+// ── Express middleware ──────────────────────────────────────────────
+
+export type SpaceResolver = (req: Request) => unknown;
+
+export interface RequireSpaceAccessOptions {
+  /** How to pull the raw space token off the request. Defaults to
+   * `req.query.space ?? req.body?.space`. */
+  resolveSpace?: SpaceResolver;
+}
+
+function defaultSpaceResolver(req: Request): unknown {
+  const fromQuery = req.query?.space;
+  if (fromQuery !== undefined) return fromQuery;
+  const body = req.body as Record<string, unknown> | undefined;
+  return body?.space;
+}
+
+/**
+ * Build a middleware that gates a route by `minRight` on the request's
+ * resolved space. Mounts after `authMiddleware`. Fail-closed on every
+ * branch — see module doc for the truth table.
+ */
+export function requireSpaceAccess(
+  prisma: PrismaClient,
+  minRight: DepartmentRight,
+  opts: RequireSpaceAccessOptions = {},
+): (req: Request, res: Response, next: NextFunction) => Promise<void> {
+  const resolveSpace = opts.resolveSpace ?? defaultSpaceResolver;
+
+  return async function spaceAccessGuard(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const role = req.user?.role;
+    const userId = req.user?.id;
+    if (
+      typeof role !== "string" ||
+      role.length === 0 ||
+      typeof userId !== "string" ||
+      userId.length === 0
+    ) {
+      recordAccessDenied(req, "space-no-session");
+      res.status(403).json({ error: "Forbidden: no session" });
+      return;
+    }
+
+    try {
+      const rawSpace = resolveSpace(req);
+      const token = parseSpaceValue(rawSpace);
+      let caller: SpaceAccessCaller = { id: userId, role };
+
+      // Service principals: `requireRoleOrMcpService` semantics — only
+      // the MCP service, asserting a real user via X-Nextcloud-User, may
+      // reach a non-personal space; every other service principal is
+      // confined to personal (mirrors requireRoleOrMcpService's role
+      // gate, which this middleware does not replace).
+      if (role === "service") {
+        if (userId === "_service:mcp") {
+          if (token.kind !== "personal") {
+            const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
+            if (!assertedNcUser) {
+              recordAccessDenied(req, "space-mcp-no-asserted-user");
+              res
+                .status(403)
+                .json({ error: "Forbidden: no asserted user for space access" });
+              return;
+            }
+            const localUser = await prisma.user.findUnique({
+              where: { nextcloudUsername: assertedNcUser },
+              select: { id: true, role: true },
+            });
+            if (!localUser) {
+              recordAccessDenied(req, "space-mcp-unresolved-asserted-user");
+              res
+                .status(403)
+                .json({ error: "Forbidden: asserted user not provisioned" });
+              return;
+            }
+            caller = { id: localUser.id, role: localUser.role };
+          }
+        } else if (token.kind !== "personal") {
+          recordAccessDenied(req, "space-service-denied");
+          res
+            .status(403)
+            .json({ error: "Forbidden: service principal cannot access this space" });
+          return;
+        }
+      }
+
+      let departmentId: string | null;
+      if (token.kind === "personal") {
+        departmentId = null;
+      } else if (token.kind === "malformed") {
+        recordAccessDenied(req, "space-malformed");
+        res.status(403).json({ error: "Forbidden: malformed space id" });
+        return;
+      } else if (token.kind === "household") {
+        const id = await resolveHouseholdDepartmentId(prisma);
+        if (!id) {
+          recordAccessDenied(req, "space-unknown");
+          res.status(403).json({ error: "Forbidden: unknown space" });
+          return;
+        }
+        departmentId = id;
+      } else {
+        // dept:<uuid> — existence + active-state checked by checkSpaceAccess.
+        departmentId = token.id;
+      }
+
+      const result = await checkSpaceAccess(prisma, req, caller, departmentId, minRight);
+      if (!result.allowed) {
+        res.status(result.status).json({ error: result.error });
+        return;
+      }
+      req.spaceDepartmentId = result.departmentId;
+      next();
+    } catch (err) {
+      logger.error({ err }, "requireSpaceAccess: unexpected error");
+      res.status(500).json({ error: "Space access check failed; please retry" });
+    }
+  };
+}
