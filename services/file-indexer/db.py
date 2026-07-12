@@ -358,6 +358,13 @@ def select_queued_items(conn, *, limit: int = 50) -> list[dict]:
     """Return BrainMemoryItem rows with status='queued_for_transcription',
     oldest-first by uploadedAt. Each dict has id, userId, storagePath, mimeType.
 
+    WARP-905: the daily ASR pass must respect the per-item ingest policy —
+    audio/video uploaded with ingestPolicy='await_approval' are HELD, so they
+    are filtered out here and never auto-transcribed. The explicit approve
+    action (POST /files/brain/:id/approve → publishRunOne → run_one) is the
+    only path that drives a held item, and it flips the policy to auto_embed
+    first, so a later reconcile→retry through this query picks it up normally.
+
     IDX-01: the ``conn``-parameter helpers run against the same shared
     connection the worker obtains from ``get_conn()``, so they take ``_db_lock``
     too. For multi-statement helpers (``claim_attempt``, ``update_item_status``,
@@ -370,6 +377,7 @@ def select_queued_items(conn, *, limit: int = 50) -> list[dict]:
             SELECT "id", "userId", "storagePath", "mimeType"
               FROM "BrainMemoryItem"
              WHERE "status" = 'queued_for_transcription'
+               AND "ingestPolicy" = 'auto_embed'
              ORDER BY "uploadedAt" ASC
              LIMIT %s
             """,
