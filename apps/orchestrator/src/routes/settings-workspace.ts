@@ -46,9 +46,19 @@ function getUser(req: Request): AuthedUser | null {
   return ((req as Request & { user?: AuthedUser }).user) ?? null;
 }
 
-function getUserId(req: Request): string | null {
-  const u = getUser(req);
-  return u?.username ?? u?.id ?? null;
+/**
+ * WARP-1014 key-shape audit — `Workspace.setBy` stores the USERNAME.
+ *
+ * The schema documents the column as "Nextcloud username from the auth
+ * middleware", and every existing row was written that way: the
+ * pre-audit helper fell back `username ?? id`, but the auth middleware
+ * always sets `username`, so the fallback never fired. `setBy` is
+ * display/audit attribution, not a `User` FK — keep writing the
+ * username explicitly; switching to the `User.id` UUID would fork the
+ * shape of existing rows without a backfill.
+ */
+function getUsername(req: Request): string | null {
+  return getUser(req)?.username ?? null;
 }
 
 /** Wire-shape WorkspaceType — lowercase string for the dashboard's
@@ -74,7 +84,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
   // ── GET /api/settings/workspace ────────────────────────────────
   router.get("/settings/workspace", async (req, res, next) => {
     try {
-      if (!getUserId(req)) {
+      if (!getUsername(req)) {
         res.status(401).json({ error: "auth_required" });
         return;
       }
@@ -107,7 +117,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
   router.post("/settings/workspace", async (req, res, next) => {
     try {
       const user = getUser(req);
-      if (!user || !getUserId(req)) {
+      if (!user || !getUsername(req)) {
         res.status(401).json({ error: "auth_required" });
         return;
       }
@@ -136,7 +146,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const setBy = getUserId(req)!;
+      const setBy = getUsername(req)!;
       const row = await prisma.workspace.upsert({
         where: { id: 1 },
         update: {

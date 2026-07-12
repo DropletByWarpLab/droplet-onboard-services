@@ -13,6 +13,7 @@ import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
 import { searchHybrid } from "./file-search.service.js";
+import { resolveChunkOwnerIds } from "./chunk-owner.js";
 import { createMatterController } from "./matter.controller.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
@@ -264,6 +265,13 @@ async function main(): Promise<void> {
       if (!vector || vector.length === 0) {
         throw new Error("embedding_service_returned_no_vector");
       }
+      // WARP-1014: FileContentChunk rows carry two key shapes since the
+      // WARP-493 cutover (nextcloud → username, brain → User.id UUID),
+      // and the caller key here is single-shape (stdio `_meta.userId` =
+      // username, http `claims.sub` = UUID). Resolve the counterpart so
+      // search_content spans both corpora — dual-shape reads (see
+      // chunk-owner.ts for the decision record).
+      const ownerIds = await resolveChunkOwnerIds(prisma, userId);
       // WARP-437: thread orchestrator-injected enhancement into the
       // searchHybrid pipeline. `queryEnhancement` carries the precomputed
       // HyDE vector / paraphrase vectors / soft filename filter;
@@ -271,7 +279,9 @@ async function main(): Promise<void> {
       // overrides for adaptive routing (factual, analytical, conversational,
       // navigational presets — see llm-agent.service.ts:presetForClass).
       return searchHybrid(prisma, {
-        userId,
+        userId: ownerIds[0],
+        additionalUserIds:
+          ownerIds.length > 1 ? ownerIds.slice(1) : undefined,
         vector,
         query,
         limit,

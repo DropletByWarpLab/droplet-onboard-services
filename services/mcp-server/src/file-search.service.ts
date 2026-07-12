@@ -16,7 +16,9 @@
  *   4. rerank top-`candidates` via ai-gateway gRPC Rerank
  *   5. return top-K (caller-clamped, default `SEARCH_HYBRID_DEFAULT_LIMIT`)
  *
- * Per-user RBAC is enforced in the SQL itself (`WHERE "userId" = $1`).
+ * Per-user RBAC is enforced in the SQL itself (`WHERE "userId" = $1`,
+ * expanding to `"userId" IN (...)` when the caller passes extra owner
+ * keys — see `additionalUserIds`).
  */
 import { createHash } from "node:crypto";
 
@@ -70,8 +72,39 @@ interface RawSearchRow {
   metadata: Record<string, unknown> | null;
 }
 
+/**
+ * WARP-1014 — build the `"userId"` predicate for one-or-more chunk-owner
+ * keys. A single owner keeps the historical `"userId" = $1` shape;
+ * multiple owners expand to an `IN ($1, $2, …)` list with one bind
+ * parameter per id. Returns the SQL fragment and the next free parameter
+ * position. Mirrors the orchestrator's WARP-1140 helper
+ * (`apps/orchestrator/src/services/file-search.service.ts`).
+ */
+function buildUserIdPredicate(
+  userId: string,
+  additionalUserIds: string[] | undefined,
+  args: unknown[],
+): { predicate: string; nextParam: number } {
+  const ids = [userId, ...(additionalUserIds ?? [])];
+  const placeholders = ids.map((_, i) => `$${i + 1}`);
+  args.push(...ids);
+  const predicate =
+    ids.length === 1
+      ? `"userId" = $1`
+      : `"userId" IN (${placeholders.join(", ")})`;
+  return { predicate, nextParam: ids.length + 1 };
+}
+
 export interface SearchByVectorParams {
   userId: string;
+  /**
+   * WARP-1014: extra chunk-owner keys to search IN ADDITION to `userId`.
+   * The `search_content` shim passes the caller's other post-WARP-493
+   * key shape (username ⟷ User.id UUID — see `chunk-owner.ts`) so brain
+   * and nextcloud chunks stay visible side by side. Identity is resolved
+   * by the caller, never here.
+   */
+  additionalUserIds?: string[];
   vector: number[];
   limit: number;
   minSimilarity: number;
@@ -87,9 +120,14 @@ export async function searchByVector(
 ): Promise<SearchHit[]> {
   assertFiniteVector(params.vector);
   const vec = `[${params.vector.join(",")}]`;
-  const where: string[] = [`"userId" = $1`];
-  const args: unknown[] = [params.userId];
-  let p = 2;
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  const where: string[] = [predicate];
+  let p = nextParam;
   if (params.source !== undefined) {
     where.push(`source = $${p}::"FileContentSource"`);
     args.push(params.source);
@@ -144,6 +182,8 @@ export async function searchByVector(
 
 export interface SearchByLexicalParams {
   userId: string;
+  /** WARP-1014: extra chunk-owner keys (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
   query: string;
   limit: number;
   source?: FileContentSource;
@@ -156,12 +196,19 @@ export async function searchByLexical(
   prisma: PrismaClient,
   params: SearchByLexicalParams,
 ): Promise<SearchHit[]> {
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  const queryParam = nextParam;
   const where: string[] = [
-    `"userId" = $1`,
-    `"text_tsv" @@ websearch_to_tsquery('english', $2)`,
+    predicate,
+    `"text_tsv" @@ websearch_to_tsquery('english', $${queryParam})`,
   ];
-  const args: unknown[] = [params.userId, params.query];
-  let p = 3;
+  args.push(params.query);
+  let p = queryParam + 1;
   if (params.source !== undefined) {
     where.push(`source = $${p}::"FileContentSource"`);
     args.push(params.source);
@@ -183,7 +230,7 @@ export async function searchByLexical(
   const sql = `SELECT
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
        LEFT(text, 280) AS snippet,
-       ts_rank_cd("text_tsv", websearch_to_tsquery('english', $2), 32) AS score
+       ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
      FROM "FileContentChunk"
      WHERE ${where.join(" AND ")}
      ORDER BY score DESC
@@ -367,6 +414,8 @@ export interface QueryEnhancementOption {
 
 export interface SearchHybridParams {
   userId: string;
+  /** WARP-1014: extra chunk-owner keys (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
   vector: number[];
   query: string;
   limit?: number;
@@ -419,6 +468,7 @@ export async function searchHybrid(
       vectorQueries.map((vec) =>
         searchByVector(prisma, {
           userId: params.userId,
+          additionalUserIds: params.additionalUserIds,
           vector: vec,
           limit: perArmK,
           minSimilarity:
@@ -431,6 +481,7 @@ export async function searchHybrid(
     ),
     searchByLexical(prisma, {
       userId: params.userId,
+      additionalUserIds: params.additionalUserIds,
       query: params.query,
       limit: perArmK,
       source: params.source,
