@@ -9,6 +9,7 @@ The gateway itself does not execute tools — see router.py.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Literal
 
@@ -115,6 +116,72 @@ class ChatRequest(BaseModel):
             raise ValueError(
                 f"Total message content exceeds {_MAX_TOTAL_CONTENT_CHARS} characters"
             )
+        return self
+
+    # --- Tool-message integrity (WARP-176, prompt-injection hardening) ------
+    #
+    # The gateway replays conversation history back to the model, including the
+    # assistant `tool_calls[]` it emitted and the `role="tool"` results the
+    # orchestrator fed back. This validator enforces the *structural* contract
+    # of that tool-message exchange before anything reaches a provider, so a
+    # misbehaving tool — or a malicious client hand-crafting the request body —
+    # cannot smuggle fabricated or malformed tool results into the model's
+    # context:
+    #   * every tool result must reference an assistant tool_call that was
+    #     actually requested earlier in THIS request (no orphan / injected
+    #     results),
+    #   * tool_call ids must be unique (no id collision / spoofing),
+    #   * tool_call arguments must be valid JSON (the field is a JSON string),
+    #   * tool result content must be a plain string (reject None and reject
+    #     multimodal `list[ContentBlock]` smuggling),
+    #   * `tool_calls` / `tool_call_id` may only appear on their owning roles.
+    #
+    # This is deliberately GENERIC / boundary-level. Per-tool argument schemas
+    # (what fields a given tool accepts) are NOT validated here — tool dispatch
+    # and per-tool schemas live in the orchestrator/tools-core, and the gateway
+    # is a pure provider router (see router.py). Posture is fail-closed: any
+    # violation raises → FastAPI returns HTTP 422.
+    @model_validator(mode="after")
+    def _validate_tool_message_integrity(self) -> "ChatRequest":
+        emitted_ids: set[str] = set()
+        for msg in self.messages:
+            role = msg.role
+
+            # 1. Assistant-emitted tool_calls: unique ids + JSON-decodable args.
+            if role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if not tc.id or tc.id in emitted_ids:
+                        raise ValueError(f"duplicate tool_call id: {tc.id!r}")
+                    emitted_ids.add(tc.id)
+                    try:
+                        json.loads(tc.function.arguments)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            "tool_call arguments must be valid JSON"
+                        ) from exc
+
+            # 2. tool_calls only ever belong on assistant messages.
+            if msg.tool_calls is not None and role != "assistant":
+                raise ValueError("tool_calls is only valid on assistant messages")
+
+            # 3. Tool result messages: referential + type integrity.
+            if role == "tool":
+                tcid = msg.tool_call_id
+                if not isinstance(tcid, str) or not tcid:
+                    raise ValueError(
+                        f"tool result tool_call_id must be a non-empty string, got {tcid!r}"
+                    )
+                if tcid not in emitted_ids:
+                    raise ValueError(
+                        f"tool result references unknown tool_call_id: {tcid!r}"
+                    )
+                if not isinstance(msg.content, str):
+                    raise ValueError("tool result content must be a string")
+
+            # 4. tool_call_id only ever belongs on tool messages.
+            if msg.tool_call_id is not None and role != "tool":
+                raise ValueError("tool_call_id is only valid on tool messages")
+
         return self
 
 
