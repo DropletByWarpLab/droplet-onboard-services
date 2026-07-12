@@ -121,6 +121,31 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("re-derives the copy per attempt: typed failure then untyped failure swaps specific → generic", async () => {
+    // First precheck: routing sidecar down (typed 503). Retry: some other,
+    // untyped failure. The error phase must not keep rendering the stale
+    // "network service isn't responding" copy for a failure that carried no
+    // code — precheckErrorCode is cleared on every load() and re-derived from
+    // what THIS attempt threw.
+    fetchVpnStatus.mockRejectedValueOnce(routingUnavailableError());
+    fetchVpnStatus.mockRejectedValueOnce(new Error("network down"));
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await screen.findByText(/network service isn.t responding right now/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(
+      await screen.findByText(/something went wrong reaching the box/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/this usually clears on its own/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/network service isn.t responding/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps Skip working from the routing-unavailable error view", async () => {
     fetchVpnStatus.mockRejectedValue(routingUnavailableError());
     const onSkip = vi.fn();

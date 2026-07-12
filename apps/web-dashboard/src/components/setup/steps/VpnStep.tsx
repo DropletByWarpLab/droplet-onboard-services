@@ -111,6 +111,10 @@ export function VpnStep({
 
   const load = useCallback(async () => {
     setPhase("loading");
+    // WARP-1283 — clear the previous attempt's typed code up front so the
+    // error phase can never render stale copy; the catch below re-derives it
+    // from whatever this attempt actually threw.
+    setPrecheckErrorCode(null);
     try {
       const s = await fetchVpnStatus();
       setStatus(s);
