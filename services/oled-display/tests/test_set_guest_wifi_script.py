@@ -246,12 +246,13 @@ def test_written_env_file_is_mode_0600(tmp_path):
 
 
 # --- WARP-843: sandboxed (unprivileged) write path — restart is DEFERRED ------
-# The guest write shares the home-AP write's fate: since the pin change in
-# droplet-device-bridge.service both scripts write the SAME droplet-owned
-# /etc/default/droplet-openwrt-attach, so the guest script needs the identical
-# treatment — unprivileged (EUID != 0) or DROPLET_GUEST_NO_RESTART=1 skips the
-# privileged `systemctl restart`; the root droplet-openwrt-attach.path unit
-# re-applies. Mirrors test_set_hostapd_script.py's WARP-843 section.
+# The guest write shares the home-AP write's fate: both scripts write the SAME
+# droplet-owned creds file (the bridge's StateDirectory,
+# /var/lib/droplet-bridge/openwrt-attach.env — never root-owned /etc), so the
+# guest script needs the identical treatment — unprivileged (EUID != 0) or
+# DROPLET_GUEST_NO_RESTART=1 skips the privileged `systemctl restart`; the root
+# droplet-openwrt-attach.path unit re-applies. Mirrors
+# test_set_hostapd_script.py's WARP-843 section.
 
 def _systemctl_stub(tmp_path: Path):
     stub_dir = tmp_path / "stub-bin"

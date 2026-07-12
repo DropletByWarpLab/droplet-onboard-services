@@ -5,24 +5,30 @@
 # =============================================================================
 #
 # The setup wizard's single-box "Home Wi-Fi" save failed 422: the device-bridge
-# sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges) could neither
-# write root-owned /etc/default/droplet-openwrt-attach (mktemp EROFS) nor rely
-# on the polkit JS-rule restart route. The WARP-843 fix keeps the bridge fully
-# sandboxed:
+# sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges) could not
+# write root-owned /etc/default/droplet-openwrt-attach (mktemp EROFS), and the
+# PR #551 polkit JS-rule restart route never fired (no polkitd JS-rules on the
+# box). The WARP-843 fix keeps the bridge fully sandboxed AND restores the
+# PR #551 security split (customer creds never enter a root EnvironmentFile):
 #
-#   1. /etc/default/droplet-openwrt-attach is provisioned droplet:droplet 0600
-#      (scripts/lib/single-box.sh + scripts/install-device-bridge.sh).
-#   2. droplet-device-bridge.service adds ONLY ReadWritePaths=/etc/default and
-#      keeps ProtectSystem=strict / NoNewPrivileges / RestrictSUIDSGID.
+#   1. The bridge writes the customer SSID/PSK into its OWN StateDirectory
+#      (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned) — no
+#      root-owned /etc write, so no EROFS and no /etc carve-out is needed.
+#   2. /etc/default/droplet-openwrt-attach stays ROOT-owned operator/hardware
+#      config and is the attach service's EnvironmentFile; the droplet-writable
+#      creds file is DELIBERATELY NOT an EnvironmentFile (a droplet-writable
+#      file must never inject arbitrary env into a root unit — see
+#      tests/openwrt-attach-env-invariant.test.sh). Root consumes the creds via
+#      the validated customer_ap_creds / customer_guest_creds whitelist parse.
 #   3. droplet-set-hostapd.sh / droplet-set-guest-wifi.sh skip the privileged
 #      systemctl restart when unprivileged (EUID != 0 or *_NO_RESTART=1).
-#   4. Root-owned droplet-openwrt-attach.path watches the env file and starts
+#   4. Root-owned droplet-openwrt-attach.path watches THAT creds file and starts
 #      the droplet-openwrt-attach-reapply.service relay (a plain oneshot — the
 #      attach service itself is RemainAfterExit=yes, so a path-triggered START
 #      of it would be a no-op), which restarts the attach service.
 #
 # This test statically pins every piece of that wiring so no single part can
-# regress silently (the pieces live in five different files). Runtime: < 1s,
+# regress silently (the pieces live in several files). Runtime: < 1s,
 # no root/systemd/docker needed — pure static scan.
 # =============================================================================
 set -euo pipefail
@@ -75,7 +81,9 @@ if [ -f "$PATH_UNIT" ]; then
 else
   fail "droplet-openwrt-attach.path missing from scripts/host/etc-systemd-system/"
 fi
-check "path unit watches /etc/default/droplet-openwrt-attach (PathModified)" \
+check "path unit watches the droplet-writable StateDirectory creds file (PathModified)" \
+  "$PATH_UNIT" '^PathModified=/var/lib/droplet-bridge/openwrt-attach\.env$'
+check_absent "path unit does NOT watch root-owned /etc/default (creds live in StateDirectory)" \
   "$PATH_UNIT" '^PathModified=/etc/default/droplet-openwrt-attach$'
 check "path unit triggers the reapply relay (NOT the RemainAfterExit oneshot directly)" \
   "$PATH_UNIT" '^Unit=droplet-openwrt-attach-reapply\.service$'
@@ -104,12 +112,16 @@ check "bridge unit keeps NoNewPrivileges=true" \
   "$BRIDGE_UNIT" '^NoNewPrivileges=true$'
 check "bridge unit keeps RestrictSUIDSGID=true" \
   "$BRIDGE_UNIT" '^RestrictSUIDSGID=true$'
-check "bridge unit adds the /etc/default carve-out (ReadWritePaths=/etc/default)" \
+# SECURITY: the bridge must NOT carve root-owned /etc/default (customer creds
+# stay in its own StateDirectory, which systemd already makes writable), and it
+# must NOT point customer writes at the file the ROOT attach service loads as
+# its EnvironmentFile.
+check_absent "bridge unit does NOT carve /etc/default (no droplet write into root-owned /etc)" \
   "$BRIDGE_UNIT" '^ReadWritePaths=/etc/default$'
-check "bridge unit pins the write target to the canonical env file" \
+check "bridge unit pins the write target to its own droplet-writable StateDirectory" \
+  "$BRIDGE_UNIT" '^Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach\.env$'
+check_absent "bridge unit does NOT point customer writes at root-owned /etc/default" \
   "$BRIDGE_UNIT" '^Environment=DROPLET_HOSTAPD_ENV_FILE=/etc/default/droplet-openwrt-attach$'
-check_absent "bridge unit no longer points writes at the StateDirectory shadow copy" \
-  "$BRIDGE_UNIT" '^Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge'
 
 # --- 4) Host scripts defer the restart when unprivileged -----------------------
 check "droplet-set-hostapd.sh honors DROPLET_HOSTAPD_NO_RESTART" \
@@ -128,14 +140,16 @@ check "single-box.sh installs the reapply relay" \
   "$SINGLE_BOX" 'droplet-openwrt-attach-reapply\.service'
 check "single-box.sh enables the path unit" \
   "$SINGLE_BOX" 'systemctl enable --now droplet-openwrt-attach\.path'
-check "single-box.sh hands the env file to the bridge user (chown droplet:droplet)" \
-  "$SINGLE_BOX" 'chown droplet:droplet /etc/default/droplet-openwrt-attach'
-check "install-device-bridge.sh migrates the StateDirectory shadow copy (WARP-843)" \
-  "$BRIDGE_INSTALL" '/var/lib/droplet-bridge/openwrt-attach\.env'
-check "install-device-bridge.sh targets the canonical attach env file" \
-  "$BRIDGE_INSTALL" '^ATTACH_ENV_FILE=/etc/default/droplet-openwrt-attach$'
-check "install-device-bridge.sh re-asserts droplet ownership of the env file" \
-  "$BRIDGE_INSTALL" 'chown droplet:droplet "\$ATTACH_ENV_FILE"'
+# SECURITY (WARP-843): /etc/default/droplet-openwrt-attach stays ROOT-owned — the
+# provisioning must NOT chown it to the droplet user. It is a root
+# EnvironmentFile, and a droplet-writable EnvironmentFile is an LPE vector; the
+# customer creds live in the bridge StateDirectory instead.
+check_absent "single-box.sh does NOT chown the attach env file to droplet (stays root-owned)" \
+  "$SINGLE_BOX" 'chown[[:space:]]+droplet:droplet[[:space:]]+/etc/default/droplet-openwrt-attach'
+check_absent "install-device-bridge.sh does NOT chown the attach env file to droplet" \
+  "$BRIDGE_INSTALL" 'chown[[:space:]]+droplet:droplet[[:space:]]+"?\$ATTACH_ENV_FILE"?'
+check_absent "install-device-bridge.sh does NOT delete/migrate the StateDirectory creds file" \
+  "$BRIDGE_INSTALL" 'rm -f "\$STALE_ATTACH_ENV"'
 check "install-device-bridge.sh restarts the bridge so unit/env changes apply" \
   "$BRIDGE_INSTALL" 'systemctl restart droplet-device-bridge\.service'
 
@@ -147,12 +161,16 @@ check "polkit rules keep the storage-pool apply grant (unrelated to WARP-843)" \
   "$POLKIT_RULES" 'lookup\("unit"\) === "droplet-storage-pool-apply\.service"'
 
 # --- 7) Factory reset returns the AP to out-of-box ------------------------------
-check "factory-reset resets the customer SSID back to Droplet" \
-  "$FACTORY_RESET" 'DROPLET_AP_SSID=Droplet'
-check "factory-reset resets the customer PSK back to the placeholder" \
-  "$FACTORY_RESET" 'DROPLET_AP_PSK=CHANGE_ME_VIA_SETUP_WIZARD'
-check "factory-reset stops the path unit before touching the env file" \
+# Customer creds live in the StateDirectory; wiping it (NOT rewriting root-owned
+# /etc/default) returns the AP to the provisioning SSID + a fresh per-box PSK.
+check "factory-reset wipes the StateDirectory holding the customer creds file" \
+  "$FACTORY_RESET" 'rm -rf /var/lib/droplet-bridge'
+check "factory-reset removes the persisted per-box AP PSK (fresh PSK next attach)" \
+  "$FACTORY_RESET" 'rm -f /etc/droplet/ap-psk'
+check "factory-reset stops the path unit before the StateDirectory wipe" \
   "$FACTORY_RESET" 'systemctl stop droplet-openwrt-attach\.path'
+check_absent "factory-reset does NOT rewrite the root-owned /etc/default attach env in place" \
+  "$FACTORY_RESET" 'sed -i.*/etc/default/droplet-openwrt-attach'
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

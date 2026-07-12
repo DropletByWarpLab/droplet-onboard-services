@@ -41,17 +41,20 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
 # Guest env-file resolution (WARP-843)
 # ---------------------------------------------------------------------------
 
-def test_guest_env_file_defaults_to_etc_default_attach(monkeypatch):
-    """WARP-843: the wizard Wi-Fi writes land directly in the canonical
-    /etc/default/droplet-openwrt-attach (droplet-owned; the bridge unit pins
-    DROPLET_HOSTAPD_ENV_FILE there and carves ReadWritePaths=/etc/default).
-    The in-code fallback must agree with the scripts' own default so a dev run
-    without the unit env reads guest state from the same file the guest script
-    writes — not the retired StateDirectory shadow copy."""
+def test_guest_env_file_defaults_to_bridge_statedir(monkeypatch):
+    """WARP-843 (security): the wizard Wi-Fi writes land in the bridge's OWN
+    StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned),
+    NOT in root-owned /etc/default. That creds file is DELIBERATELY kept out of
+    the root attach service's EnvironmentFile — a droplet-writable file must
+    never inject arbitrary env into a root unit (an EnvironmentFile loads EVERY
+    key → LPE). Root reads it via a validated whitelist parse instead. The
+    in-code fallback must agree with the scripts' StateDirectory target so a dev
+    run without the unit env reads guest state from the same file the guest
+    script writes."""
     for var in ("DROPLET_GUEST_ENV_FILE", "DROPLET_HOSTAPD_ENV_FILE"):
         monkeypatch.delenv(var, raising=False)
     bridge = _load_bridge(monkeypatch)
-    assert bridge.GUEST_ENV_FILE == "/etc/default/droplet-openwrt-attach"
+    assert bridge.GUEST_ENV_FILE == "/var/lib/droplet-bridge/openwrt-attach.env"
 
 
 # ---------------------------------------------------------------------------

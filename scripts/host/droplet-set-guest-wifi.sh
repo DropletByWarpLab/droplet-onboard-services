@@ -10,16 +10,18 @@
 #
 # Sibling of droplet-set-hostapd.sh (WARP-808): that script writes the PRIMARY
 # (home) AP's SSID/PSK; this one writes the optional, isolated GUEST network.
-# Both upsert keys in the SAME droplet-openwrt-attach env file and re-apply via
-# that one service — droplet-openwrt-attach regenerates /etc/hostapd.conf (now
-# with a second `bss=` stanza for the guest SSID), stands up the guest L3
-# subnet (192.168.30.0/24) + a dedicated dnsmasq-guest + an isolated
-# `droplet_guest` firewall zone, and respawns hostapd. Privilege model
-# (WARP-843, identical to droplet-set-hostapd.sh): a root/operator invocation
-# restarts the attach service directly; inside the device-bridge sandbox
-# (User=droplet + NoNewPrivileges) the script only writes the droplet-owned
-# env file IN PLACE (rename in root-owned /etc/default is impossible for a
-# non-root writer) and the root droplet-openwrt-attach.path unit re-applies.
+# Both upsert keys in the SAME creds file and re-apply via that one service —
+# droplet-openwrt-attach regenerates /etc/hostapd.conf (now with a second
+# `bss=` stanza for the guest SSID), stands up the guest L3 subnet
+# (192.168.30.0/24) + a dedicated dnsmasq-guest + an isolated `droplet_guest`
+# firewall zone, and respawns hostapd. Privilege model (WARP-843, identical to
+# droplet-set-hostapd.sh): a root/operator invocation restarts the attach
+# service directly; inside the device-bridge sandbox (User=droplet +
+# NoNewPrivileges) the script writes the bridge's OWN droplet-owned
+# StateDirectory creds file (/var/lib/droplet-bridge/openwrt-attach.env — never
+# root-owned /etc) and the root droplet-openwrt-attach.path unit re-applies.
+# That creds file is droplet-writable, so root consumes it ONLY via the
+# whitelisted DROPLET_GUEST_* / DROPLET_AP_* parse, never as an EnvironmentFile.
 # The bridge holds NO restart grant of any kind.
 #
 # Invoked ONLY by the device-bridge's auth-gated POST/DELETE /openwrt/wifi/guest,
@@ -176,9 +178,10 @@ write_env() {
   # (mirrors droplet-set-hostapd.sh, WARP-843):
   #   - writable directory (root / tests): atomic mktemp + mv replace; the
   #     temp file is created 0600 so the PSK is never briefly world-readable.
-  #   - sandboxed bridge: /etc/default is root-owned so rename is impossible;
-  #     the droplet-owned env file is rewritten IN PLACE under an flock
-  #     (serializes with the sibling home-AP write to the SAME file).
+  #   - fallback in-place: only when the file is writable but its DIR is not.
+  #     The production sandbox does NOT hit this — the bridge owns its
+  #     StateDirectory, so the atomic mktemp+mv path above is used. flock
+  #     serializes with the sibling home-AP write to the SAME creds file.
   # The full new content is built BEFORE any write so a failure inside the
   # python rewrite can never leave a half-updated file.
   local enabled="$1" ssid="$2" psk="$3"

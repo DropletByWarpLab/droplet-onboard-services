@@ -280,10 +280,11 @@ def test_rejects_missing_psk_field(tmp_path):
 # --- WARP-843: sandboxed (unprivileged) write path — restart is DEFERRED ------
 # Under droplet-device-bridge.service the script runs as the unprivileged
 # `droplet` user (ProtectSystem=strict + NoNewPrivileges + RestrictSUIDSGID):
-# it must WRITE the env file (droplet-owned 0600, reachable through the unit's
-# ReadWritePaths=/etc/default carve-out) and must NEVER run
-# `systemctl restart` itself — the root-owned droplet-openwrt-attach.path unit
-# watches the file and re-applies the change. The skip has two triggers:
+# it must WRITE the creds file (the bridge's own droplet-owned StateDirectory,
+# /var/lib/droplet-bridge/openwrt-attach.env — no root-owned /etc write needed)
+# and must NEVER run `systemctl restart` itself — the root-owned
+# droplet-openwrt-attach.path unit watches that file and re-applies the change.
+# The skip has two triggers:
 #   - EUID != 0            (production: the bridge user)
 #   - DROPLET_HOSTAPD_NO_RESTART=1  (explicit hook)
 # These tests exercise the REAL write path (no DRY_RUN): a fake `systemctl`

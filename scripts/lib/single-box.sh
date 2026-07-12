@@ -223,20 +223,18 @@ EOF
     log_info "/etc/default/droplet-openwrt-attach exists — keeping rotated value"
   fi
 
-  # WARP-843: hand the env file to the bridge user. The setup wizard's Wi-Fi
-  # writes run droplet-set-hostapd.sh / droplet-set-guest-wifi.sh INSIDE the
-  # device-bridge sandbox (User=droplet + ProtectSystem=strict +
-  # NoNewPrivileges) — the file must be droplet-owned 0600 so that
-  # unprivileged process can rewrite it in place through the unit's
-  # ReadWritePaths=/etc/default carve-out. Asserted on BOTH branches above so
-  # an upgraded box (file pre-dates this change, root-owned) heals on the
-  # next setup.sh run. PSK secrecy is unchanged: 0600, owner-only.
-  if id -u droplet >/dev/null 2>&1; then
-    sudo chown droplet:droplet /etc/default/droplet-openwrt-attach
+  # WARP-843 (security): /etc/default/droplet-openwrt-attach stays ROOT-owned.
+  # It is the ROOT droplet-openwrt-attach.service's EnvironmentFile and carries
+  # operator/hardware config ONLY (the provisioning SSID default +
+  # DROPLET_AP_PHY/IFACE pins). It must NOT be droplet-writable — a
+  # droplet-writable file loaded via EnvironmentFile lets a compromised bridge
+  # inject arbitrary env into a root unit (LPE). The sandboxed wizard Wi-Fi
+  # writes instead land in the bridge's own StateDirectory
+  # (/var/lib/droplet-bridge/openwrt-attach.env), which root reads back through
+  # the validated customer_ap_creds / customer_guest_creds whitelist parse —
+  # never as env. So there is deliberately NO chown to the droplet user here.
+  [ -f /etc/default/droplet-openwrt-attach ] && \
     sudo chmod 0600 /etc/default/droplet-openwrt-attach
-  else
-    log_warn "user 'droplet' missing — /etc/default/droplet-openwrt-attach stays root-owned (wizard Wi-Fi saves will fail until setup runs on the appliance user model)"
-  fi
 
   # --- /etc/droplet/ (per-box secrets: ap-psk, device-bridge.env) ---------
   # WARP-1035: must exist BEFORE `compose up` — docker-compose bind-mounts

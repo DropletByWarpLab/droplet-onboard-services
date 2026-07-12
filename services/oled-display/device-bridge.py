@@ -94,16 +94,19 @@ AP_HOSTAPD_CONF_PATH = os.environ.get(
 # Where the guest Wi-Fi creds are persisted. droplet-set-guest-wifi.sh upserts
 # DROPLET_GUEST_SSID/PSK/ENABLED into the SAME droplet-openwrt-attach env file
 # the home-AP write uses; we read those keys back for GET /openwrt/wifi/guest.
-# WARP-843: the canonical file is /etc/default/droplet-openwrt-attach —
-# provisioned droplet:droplet 0600 so this sandboxed process can both rewrite
-# it (via the host scripts) and read it back here. The unit pins
-# DROPLET_HOSTAPD_ENV_FILE there too; the in-code fallback must agree so a dev
-# run reads the same file the scripts write (the old StateDirectory shadow
-# copy is migrated away by install-device-bridge.sh).
+# WARP-843: the customer Wi-Fi creds are persisted in the bridge's OWN
+# StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env), which is already
+# writable to this sandboxed process — so the host scripts write it and we read
+# it back here without ever touching root-owned /etc/default. The unit pins
+# DROPLET_HOSTAPD_ENV_FILE there too; the in-code fallback must AGREE so a dev
+# run reads the same file the scripts write. This file is DELIBERATELY NOT the
+# root attach service's EnvironmentFile — a droplet-writable file must never
+# inject arbitrary env into a root unit; root parses only the whitelisted
+# DROPLET_AP_*/DROPLET_GUEST_* keys out of it, with validation.
 GUEST_ENV_FILE = (
     os.environ.get("DROPLET_GUEST_ENV_FILE")
     or os.environ.get("DROPLET_HOSTAPD_ENV_FILE")
-    or "/etc/default/droplet-openwrt-attach"
+    or "/var/lib/droplet-bridge/openwrt-attach.env"
 ).strip()
 
 FRIGATE_URL       = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000")
@@ -2048,15 +2051,17 @@ def _run_pool_via_executor(operation, params):
 # The single-box AP is a raw `hostapd -B` in the droplet-openwrt container,
 # configured from /etc/hostapd.conf which droplet-openwrt-attach regenerates
 # from DROPLET_AP_SSID/DROPLET_AP_PSK. So writing the customer's Wi-Fi name +
-# key is a host action: upsert those two keys in the attach service's env file
-# (/etc/default/droplet-openwrt-attach, droplet-owned so this sandboxed
-# process can rewrite it — WARP-843). Exactly like the destructive pool ops,
-# the bridge NEVER writes /etc/hostapd.conf or restarts hostapd itself — it
-# shells the repo-tracked host script (scripts/host/droplet-set-hostapd.sh,
-# installed to /usr/local/sbin by setup.sh), whose hard validation (SSID 1-32
-# / PSK 8-63, reject-before-write) is the real gate. Because the bridge runs
-# unprivileged the script skips the systemctl restart; the root-owned
-# droplet-openwrt-attach.path unit watches the env file and re-applies the
+# key is a host action: upsert the customer keys in the bridge's StateDirectory
+# creds file (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned so this
+# sandboxed process can rewrite it — WARP-843; root then parses only the
+# whitelisted DROPLET_AP_*/DROPLET_GUEST_* keys out of it with validation, never
+# as an EnvironmentFile). Exactly like the destructive pool ops, the bridge
+# NEVER writes /etc/hostapd.conf or restarts hostapd itself — it shells the
+# repo-tracked host script (scripts/host/droplet-set-hostapd.sh, installed to
+# /usr/local/sbin by setup.sh), whose hard validation (SSID 1-32 / PSK 8-63,
+# reject-before-write) is the real gate. Because the bridge runs unprivileged
+# the script skips the systemctl restart; the root-owned
+# droplet-openwrt-attach.path unit watches that creds file and re-applies the
 # change (regenerate hostapd.conf + respawn via the HOSTAPD_CHANGED gate).
 # The PSK is a per-device secret and is NEVER logged here.
 

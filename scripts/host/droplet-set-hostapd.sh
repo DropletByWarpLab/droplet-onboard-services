@@ -45,20 +45,23 @@
 #                                 (what the sandboxed bridge gets from EUID!=0)
 #
 # Privilege model (WARP-843): this script runs in TWO shapes —
-#   - root / operator CLI: writes the env file atomically (mktemp + mv in
-#     /etc/default) and restarts droplet-openwrt-attach.service directly.
+#   - root / operator CLI: writes the default env file atomically (mktemp + mv
+#     in /etc/default) and restarts droplet-openwrt-attach.service directly.
 #   - INSIDE the device-bridge sandbox (User=droplet + ProtectSystem=strict +
-#     NoNewPrivileges): /etc/default is root-owned, so an unprivileged
-#     mktemp/rename in it is impossible (rename(2) needs write on the
-#     DIRECTORY) — but the env FILE itself is provisioned droplet:droplet 0600
-#     (scripts/lib/single-box.sh / scripts/install-device-bridge.sh) and the
-#     bridge unit carves ReadWritePaths=/etc/default, so the owner rewrites it
-#     IN PLACE under an flock. The privileged restart is SKIPPED (EUID != 0):
-#     the root-owned droplet-openwrt-attach.path unit watches the env file and
-#     runs the reapply relay, which restarts the attach service. Zero grants to
-#     the droplet user — this replaced the polkit-rule restart route (PR #551),
-#     which additionally left the write targeting a StateDirectory shadow copy
-#     that install-device-bridge.sh now migrates back into /etc/default.
+#     NoNewPrivileges): the bridge unit pins DROPLET_HOSTAPD_ENV_FILE at its OWN
+#     StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env), which the
+#     droplet user owns — so the write uses the SAME atomic mktemp+mv path and
+#     never touches root-owned /etc. This is deliberate and load-bearing: that
+#     creds file is droplet-writable, so it must NOT be the ROOT attach
+#     service's EnvironmentFile (an EnvironmentFile imports EVERY key → arbitrary
+#     env injection into a root unit / LPE). Root instead parses ONLY the
+#     whitelisted DROPLET_AP_*/DROPLET_GUEST_* keys out of it, with validation
+#     (customer_ap_creds in droplet-openwrt-attach). The privileged restart is
+#     SKIPPED (EUID != 0): the root-owned droplet-openwrt-attach.path unit
+#     watches that creds file and runs the reapply relay, which restarts the
+#     attach service. Zero grants to the droplet user — this replaced the
+#     PR #551 polkit-rule restart route (which never worked without polkitd
+#     JS-rules support), NOT the PR #551 file split, which stays intact.
 #
 # Output: a single JSON object on stdout on success; a human refusal on stderr
 # + a non-zero exit on any validation failure.
@@ -231,12 +234,15 @@ if TMP="$(mktemp "${ENV_DIR}/.droplet-openwrt-attach.XXXXXX" 2>/dev/null)"; then
   mv "$TMP" "$ENV_FILE"
   trap - EXIT
 elif [ -w "$ENV_FILE" ]; then
-  # Sandboxed bridge (WARP-843): /etc/default is root-owned 0755 so mktemp/
-  # rename is impossible here for the droplet user — but the env file itself
-  # is droplet-owned 0600, so the owner may rewrite it IN PLACE. flock
-  # serializes with the sibling guest write (droplet-set-guest-wifi.sh targets
-  # the SAME file); the droplet-openwrt-attach-reapply relay sleeps 1 s before
-  # the EnvironmentFile re-read, so systemd never loads a mid-rewrite file.
+  # Fallback in-place rewrite (WARP-843): used only when the env file is
+  # writable but its DIRECTORY is not (rename(2) needs write on the directory).
+  # The production sandbox path does NOT hit this — the bridge writes its own
+  # droplet-owned StateDirectory, whose dir it owns, so the atomic mktemp+mv
+  # branch above is taken. flock serializes with the sibling guest write
+  # (droplet-set-guest-wifi.sh targets the SAME creds file); the
+  # droplet-openwrt-attach-reapply relay sleeps 1 s before the attach script
+  # re-reads the creds via its validated whitelist parse, so no mid-rewrite
+  # file is ever consumed.
   exec 9<>"$ENV_FILE"
   if command -v flock >/dev/null 2>&1; then
     flock -w 10 -x 9 || die "timed out waiting for the env-file write lock"

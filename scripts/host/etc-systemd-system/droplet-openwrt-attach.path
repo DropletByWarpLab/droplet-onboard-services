@@ -3,15 +3,21 @@
 #
 # The setup wizard's Home Wi-Fi save runs droplet-set-hostapd.sh INSIDE the
 # device-bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges).
-# That unprivileged invocation writes /etc/default/droplet-openwrt-attach (the
-# file is provisioned droplet:droplet 0600 with a ReadWritePaths=/etc/default
-# carve-out) but can NEVER run the privileged
-# `systemctl restart droplet-openwrt-attach.service` itself — the previous
-# polkit-rule route (PR #551) depended on polkitd JS-rules support and still
-# left the write targeting a shadow copy in the bridge StateDirectory.
+# That unprivileged invocation writes the customer SSID/PSK into the bridge's
+# own StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned)
+# — which sidesteps the read-only /etc namespace entirely (the 422/EROFS the
+# save used to hit) — but can NEVER run the privileged
+# `systemctl restart droplet-openwrt-attach.service` itself. The previous
+# polkit-rule route (PR #551) depended on polkitd JS-rules support the box
+# lacks, so the re-apply never fired and the save appeared to do nothing.
 #
 # THIS unit closes the loop with zero grants to the droplet user: root-owned
-# systemd watches the env file and starts the reapply relay on every change.
+# systemd watches that droplet-writable creds file and starts the reapply relay
+# on every change. The creds file is DELIBERATELY the bridge StateDirectory and
+# NOT root-owned /etc/default: the root attach service EnvironmentFile-s
+# /etc/default (operator/hardware config only), and a droplet-writable file must
+# never be a root EnvironmentFile — root instead parses only the whitelisted
+# DROPLET_AP_*/DROPLET_GUEST_* keys out of the creds file, with validation.
 # The relay restarts droplet-openwrt-attach.service, which regenerates
 # /etc/hostapd.conf from the env file and — via its HOSTAPD_CHANGED gate —
 # respawns hostapd ONLY when the conf actually changed. An identical re-submit
@@ -31,10 +37,10 @@
 Description=Watch the droplet-openwrt-attach env file and re-apply AP config on change (WARP-843)
 
 [Path]
-# PathModified fires on writes to the file as well as on an atomic
-# replace-by-rename in /etc/default (root/operator invocations still use
-# mktemp+mv), so both write strategies re-apply.
-PathModified=/etc/default/droplet-openwrt-attach
+# PathModified fires on an in-place rewrite as well as on an atomic
+# replace-by-rename (the bridge owns its StateDirectory, so the host-script
+# write uses mktemp+mv there), so every customer Wi-Fi save re-applies.
+PathModified=/var/lib/droplet-bridge/openwrt-attach.env
 Unit=droplet-openwrt-attach-reapply.service
 
 [Install]
