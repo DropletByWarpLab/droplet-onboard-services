@@ -30,9 +30,14 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncListOutboundShares,
   ncDirExists,
   NextcloudOcsError,
 } from "../services/nextcloud.client.js";
+import {
+  sendShareNotificationEmail,
+  type SendOptions as EmailSendOptions,
+} from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
@@ -450,8 +455,86 @@ function handleFileError(
   next(err);
 }
 
-export function createFilesRouter(prisma: PrismaClient): Router {
+export function createFilesRouter(
+  prisma: PrismaClient,
+  // WARP-941: injectable transport seam for the person-share notification
+  // email — same seam createProtectedAuthRouter threads for invites, so
+  // tests never dial a real relay. Production callers pass nothing.
+  emailSendOptions: EmailSendOptions = {},
+): Router {
   const router = Router();
+
+  /**
+   * WARP-941 — best-effort notification email for person shares (shareType 0).
+   *
+   * Resolves the recipient's email from the LOCAL Prisma `User` directory by
+   * `nextcloudUsername`, case-insensitively — the same matching contract as
+   * GET /files/share-recipients, which is where the `shareWith` value the
+   * dashboard posts came from in the first place (ADR-013; the at-rest dcv1
+   * email blob is decrypted via readUserEmail). Delivery goes over the
+   * operator's SMTP channel via sendShareNotificationEmail, which no-ops
+   * unless the channel is configured AND enabled — identical gating to user
+   * invites.
+   *
+   * NEVER throws, and is invoked fire-and-forget: the share already exists in
+   * Nextcloud, so a directory gap, an unconfigured channel, or a relay outage
+   * must not fail or delay the share response.
+   */
+  async function notifyPersonShareByEmail(
+    req: Request,
+    shareWith: string,
+    filePath: string,
+  ): Promise<void> {
+    try {
+      // Full-directory scan is intentional at household scale (tens of rows):
+      // it resolves BOTH the recipient (exact-case then case-insensitive, in
+      // JS — no Postgres `mode:'insensitive'` query) and the caller's display
+      // name in a single round-trip. Narrow only if the directory grows large.
+      const rows = (await prisma.user.findMany({
+        select: { id: true, displayName: true, email: true, nextcloudUsername: true },
+      })) as Array<{
+        id: string;
+        displayName: string;
+        email: string | null;
+        nextcloudUsername: string | null;
+      }>;
+
+      const target = shareWith.toLowerCase();
+      // Prefer an exact-case match so two directory rows that differ only by
+      // case can't misdeliver this notification (it discloses the sharer +
+      // filename) to the wrong person; fall back to the case-insensitive
+      // contract for the normal single-variant case.
+      const recipient =
+        rows.find((u) => u.nextcloudUsername === shareWith) ??
+        rows.find((u) => u.nextcloudUsername?.toLowerCase() === target);
+      // WARP-233: decrypt the at-rest dcv1 blob. Null/empty → nothing to send to.
+      const to = recipient ? readUserEmail(recipient.email) : null;
+      if (!to) {
+        logger.info(
+          { shareWith, hasRecipientRow: Boolean(recipient) },
+          "share notification skipped — no directory email for recipient",
+        );
+        return;
+      }
+
+      const caller = rows.find((u) => u.id === req.user?.id);
+      const sharerDisplayName = caller?.displayName || req.user?.username || "Someone";
+
+      await sendShareNotificationEmail(
+        prisma,
+        {
+          to,
+          sharerDisplayName,
+          fileName: path.posix.basename(filePath) || filePath,
+        },
+        emailSendOptions,
+      );
+    } catch (err) {
+      // Directory lookup failed (or an unexpected throw): log and move on —
+      // the share itself already succeeded.
+      logger.warn({ err, shareWith }, "share notification email failed");
+    }
+  }
 
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
@@ -525,35 +608,47 @@ export function createFilesRouter(prisma: PrismaClient): Router {
 
         // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
         // the doc-server session so a non-member never reaches the WOPI
-        // handshake for a dept file. Best-effort: resolution failure falls
-        // through to the existing (mint-time) behavior rather than 500ing.
+        // handshake for a dept file. TWO phases with DIFFERENT failure
+        // postures:
+        //   1. NC/file-id RESOLUTION is best-effort — a resolution failure
+        //      (NC unreachable, path no longer resolves) falls through to the
+        //      existing mint-time behavior rather than 500ing.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed). If
+        //      it stayed inside the swallow, a thrown membership lookup would be
+        //      silently discarded and the session minted anyway — the exact
+        //      cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
         try {
           const gateFileId = await ncGetFileId(token, user, filePath);
           if (gateFileId !== null) {
-            const departmentId = await resolveFileDepartment(prisma, gateFileId);
-            if (departmentId) {
-              const gateCaller: SpaceAccessCaller = {
-                id: requesterId(req),
-                role: (req as { user?: { role?: string } }).user?.role ?? "",
-              };
-              const access = await checkSpaceAccess(
-                prisma,
-                req,
-                gateCaller,
-                departmentId,
-                "reader",
-              );
-              if (!access.allowed) {
-                res.status(access.status).json({ error: access.error });
-                return;
-              }
-            }
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
           }
         } catch (gateErr) {
           logger.debug(
             { err: gateErr, filePath },
             "editor-session: department gate resolution failed (best-effort, falling through)",
           );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: requesterId(req),
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
         }
 
         // Edit-vs-view: default to the owner's edit capability, then DOWNGRADE
@@ -656,40 +751,50 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
 
         // WARP-1260 (T8): department metadata gate. FileCitation is keyed
-        // by `filePath`, not `ncFileId`, so resolve the NC file id first —
-        // best-effort: any resolution failure (missing NC session,
-        // Nextcloud unreachable, path no longer exists) falls through to
-        // the existing personal-space semantics below rather than 500ing
-        // or 401ing a route that historically never depended on NC.
+        // by `filePath`, not `ncFileId`, so resolve the NC file id first.
+        // TWO phases with DIFFERENT failure postures:
+        //   1. NC/file-id RESOLUTION is best-effort — any resolution failure
+        //      (missing NC session, Nextcloud unreachable, path no longer
+        //      exists) falls through to the existing personal-space semantics
+        //      below rather than 500ing or 401ing a route that historically
+        //      never depended on NC.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed)
+        //      instead of being swallowed and falling through UNGATED — the
+        //      exact cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
         try {
           const gateToken = await getToken(req);
           const gateNcUser = getUser(req);
           const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
           if (gateFileId !== null) {
-            const departmentId = await resolveFileDepartment(prisma, gateFileId);
-            if (departmentId) {
-              const gateCaller: SpaceAccessCaller = {
-                id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
-                role: (req as { user?: { role?: string } }).user?.role ?? "",
-              };
-              const access = await checkSpaceAccess(
-                prisma,
-                req,
-                gateCaller,
-                departmentId,
-                "reader",
-              );
-              if (!access.allowed) {
-                res.status(access.status).json({ error: access.error });
-                return;
-              }
-            }
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
           }
         } catch (gateErr) {
           logger.debug(
             { err: gateErr, filePath },
             "citations: department gate resolution failed (best-effort, falling through)",
           );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
         }
 
         const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
@@ -1477,6 +1582,15 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         actor: actorFromRequest(req),
       });
 
+      // WARP-941 — person shares (shareType 0) notify the recipient by email,
+      // best-effort. Fire-and-forget: notifyPersonShareByEmail never throws,
+      // and nothing about mail may fail or delay this response — the share
+      // already exists in Nextcloud. Link shares (shareType 3) deliberately
+      // send nothing: no recipient, no lookup, no dial.
+      if (parsed.data.shareType === 0 && parsed.data.shareWith) {
+        void notifyPersonShareByEmail(req, parsed.data.shareWith, parsed.data.path);
+      }
+
       res.json(share);
     } catch (err) {
       handleFileError(err, res, next);
@@ -2078,6 +2192,24 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   router.get("/files/shared-with-me", async (req, res, next) => {
     try {
       const shares = await ncListSharedWithMe(await getToken(req));
+      res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next, { shares: [] });
+    }
+  });
+
+  // ── Shares I created (GET /api/files/shares-by-me) ── (WARP-941)
+  //
+  // Outbound counterpart of /files/shared-with-me, backing the dashboard's
+  // "Shared by me" tab (previously a hardcoded placeholder). Nextcloud scopes
+  // the un-filtered OCS shares listing to shares the authenticated user owns,
+  // so the caller's own NC token is the only scoping needed — same session
+  // gating as the sibling route. Same degrade contract too: an unreachable
+  // Nextcloud serves an empty list rather than a 500 so the Shared page
+  // still renders during an outage.
+  router.get("/files/shares-by-me", async (req, res, next) => {
+    try {
+      const shares = await ncListOutboundShares(await getToken(req));
       res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next, { shares: [] });

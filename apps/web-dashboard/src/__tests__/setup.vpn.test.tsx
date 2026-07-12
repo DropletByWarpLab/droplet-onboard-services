@@ -63,6 +63,11 @@ vi.mock("@/lib/api", () => ({
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // WARP-817 — WifiStep reads the host topology on mount to decide its
+  // default disclosure state; null (best-effort) leaves the collapsed default.
+  // These tests just wander to Home Wi-Fi via the rail and back, never
+  // interacting with its fields.
+  getNetworkTopology: vi.fn(async () => null),
   // WARP-979 — the reworked AddressStep imports these (the vpn tests skip the
   // Secured step, so they never actually fire).
   checkBoxName: vi.fn(async () => ({

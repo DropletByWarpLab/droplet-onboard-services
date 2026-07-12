@@ -30,18 +30,22 @@ export function PdfCitation({ hit, anchor }: PdfCitationProps): JSX.Element {
   const detailHref = `/files/${encodeURIComponent(hit.fileId)}`;
   return (
     <div
-      className="dp-card overflow-hidden"
+      className="overflow-hidden rounded-2xl"
+      style={{ background: "var(--card-bg)", border: "1px solid var(--card-bd)" }}
       data-citation-kind="pdf-page"
     >
-      <div className="flex items-center justify-between px-3 py-2 border-b border-separator">
+      <div
+        className="flex items-center justify-between px-3 py-2"
+        style={{ borderBottom: "1px solid var(--card-bd)" }}
+      >
         <Link
           href={detailHref}
-          className="type-caption-1 text-label-primary truncate hover:underline"
+          className="type-caption-1 truncate hover:underline text-[var(--text)]"
           title={hit.filename}
         >
           {hit.filename}
         </Link>
-        <span className="type-caption-2 text-label-tertiary flex-shrink-0">
+        <span className="type-caption-2 flex-shrink-0 text-[var(--text-muted)]">
           p.{anchor.page}
           {typeof hit.score === "number" && (
             <span className="ml-2">{relevancePct(hit.score)}%</span>
@@ -52,7 +56,7 @@ export function PdfCitation({ hit, anchor }: PdfCitationProps): JSX.Element {
         data-testid="pdf-iframe"
         src={src}
         title={`${hit.filename} — page ${anchor.page}`}
-        className="w-full h-80 bg-surface-primary"
+        className="w-full h-80 bg-[var(--surface)]"
       />
     </div>
   );

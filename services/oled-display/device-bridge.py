@@ -94,6 +94,15 @@ AP_HOSTAPD_CONF_PATH = os.environ.get(
 # Where the guest Wi-Fi creds are persisted. droplet-set-guest-wifi.sh upserts
 # DROPLET_GUEST_SSID/PSK/ENABLED into the SAME droplet-openwrt-attach env file
 # the home-AP write uses; we read those keys back for GET /openwrt/wifi/guest.
+# WARP-843: the customer Wi-Fi creds are persisted in the bridge's OWN
+# StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env), which is already
+# writable to this sandboxed process — so the host scripts write it and we read
+# it back here without ever touching root-owned /etc/default. The unit pins
+# DROPLET_HOSTAPD_ENV_FILE there too; the in-code fallback must AGREE so a dev
+# run reads the same file the scripts write. This file is DELIBERATELY NOT the
+# root attach service's EnvironmentFile — a droplet-writable file must never
+# inject arbitrary env into a root unit; root parses only the whitelisted
+# DROPLET_AP_*/DROPLET_GUEST_* keys out of it, with validation.
 GUEST_ENV_FILE = (
     os.environ.get("DROPLET_GUEST_ENV_FILE")
     or os.environ.get("DROPLET_HOSTAPD_ENV_FILE")
@@ -1863,6 +1872,101 @@ def uplink_ip_snapshot():
         return {"uplinkIp": None}
 
 
+# ---------------------------------------------------------------------------
+# Host uplink topology (WARP-817) — auto-collapse the onboarding Wi-Fi step
+# ---------------------------------------------------------------------------
+# The routing service's GET /network/topology (ADR-018,
+# droplet_openwrt_sdk.detect_deployment_topology) determines the deployment
+# posture by probing the CONTAINERISED OpenWrt's "wan" ubus interface. On
+# single-box that interface is never configured — WAN is HOST-owned — so the
+# routing-service probe always reports UNKNOWN, and the onboarding wizard can
+# never tell "downstream of an existing home router" (the common case) apart
+# from "this box IS the primary router".
+#
+# This bridge runs in the host's network namespace, so it can answer the SAME
+# question detect_deployment_topology() answers in the container, translated
+# to `ip route` terms — mirroring that function's posture semantics exactly:
+#
+#   * a default route with an upstream `via <gw>` next-hop -> DOWNSTREAM_ROUTER
+#     (something upstream — an existing home router — is routing for us).
+#   * a default route with NO next-hop (the box resolves the probe target
+#     directly, e.g. a point-to-point WAN)                 -> PRIMARY_ROUTER
+#     (the box owns the edge).
+#   * no default route resolvable at all                    -> UNKNOWN
+#     (never guessed).
+#
+# READ-ONLY: `ip route get` is a kernel FIB query (mirrors uplink_ip_snapshot
+# above) — no mutation, no packet actually sent to the probe target.
+
+_IP_ROUTE_VIA_RE = re.compile(r'\bvia\s+(\d{1,3}(?:\.\d{1,3}){3})\b')
+_IP_ROUTE_DEV_RE = re.compile(r'\bdev\s+(\S+)\b')
+
+
+def _parse_route_topology(output):
+    """Parse the uplink iface + optional upstream gateway out of `ip route get`
+    output. Accepts the same JSON / plain-text shapes _parse_uplink_ip() does.
+
+    Returns (iface, gateway) — either may be None. `iface` is None only when
+    the output carries no usable route at all (never raises)."""
+    if not output:
+        return None, None
+    text = output.strip()
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict):
+                    dev = entry.get("dev")
+                    if isinstance(dev, str) and dev:
+                        gw = entry.get("gateway")
+                        gw = gw.strip() if isinstance(gw, str) and gw.strip() else None
+                        return dev, gw
+            return None, None
+    # Plain-text fallback: "<target> [via <gw>] dev <iface> src <ip> ...".
+    dev_m = _IP_ROUTE_DEV_RE.search(text)
+    if not dev_m:
+        return None, None
+    via_m = _IP_ROUTE_VIA_RE.search(text)
+    return dev_m.group(1), (via_m.group(1) if via_m else None)
+
+
+def host_topology_snapshot():
+    """Return the host uplink posture — {"posture": ..., "evidence": {...}}.
+
+    Mirrors droplet_openwrt_sdk.detect_deployment_topology()'s posture
+    semantics (ADR-018), sourced from the HOST's own default route instead of
+    the containerised OpenWrt's ubus WAN status (which single-box never
+    populates). READ-ONLY; never raises — any probe failure degrades to
+    UNKNOWN with null evidence rather than a guessed posture."""
+    iface = gateway = None
+    try:
+        rc, out, _err = _run(["ip", "-j", "route", "get", _UPLINK_ROUTE_TARGET])
+        iface, gateway = _parse_route_topology(out) if rc == 0 else (None, None)
+        if iface is None:
+            # -j unsupported (older iproute2) or empty JSON — try plain text.
+            rc, out, _err = _run(["ip", "route", "get", _UPLINK_ROUTE_TARGET])
+            iface, gateway = _parse_route_topology(out) if rc == 0 else (None, None)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("host topology probe failed: %s", e)
+        iface, gateway = None, None
+
+    if iface is None:
+        posture = "UNKNOWN"
+    elif gateway is not None:
+        posture = "DOWNSTREAM_ROUTER"
+    else:
+        posture = "PRIMARY_ROUTER"
+    return {
+        "posture": posture,
+        "evidence": {"uplink_iface": iface, "upstream_gateway": gateway},
+    }
+
+
 # Destructive pool operations the bridge will forward to the host script.
 # This is an allow-list — anything else is refused before we shell out. These
 # are Tier-3-class (data-destroying); they are owner-only + confirm-token-gated
@@ -2042,13 +2146,19 @@ def _run_pool_via_executor(operation, params):
 # The single-box AP is a raw `hostapd -B` in the droplet-openwrt container,
 # configured from /etc/hostapd.conf which droplet-openwrt-attach regenerates
 # from DROPLET_AP_SSID/DROPLET_AP_PSK. So writing the customer's Wi-Fi name +
-# key is a host action: upsert those two keys in the attach service's env file
-# and restart the service. Exactly like the destructive pool ops, the bridge
+# key is a host action: upsert the customer keys in the bridge's StateDirectory
+# creds file (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned so this
+# sandboxed process can rewrite it — WARP-843; root then parses only the
+# whitelisted DROPLET_AP_*/DROPLET_GUEST_* keys out of it with validation, never
+# as an EnvironmentFile). Exactly like the destructive pool ops, the bridge
 # NEVER writes /etc/hostapd.conf or restarts hostapd itself — it shells the
 # repo-tracked host script (scripts/host/droplet-set-hostapd.sh, installed to
 # /usr/local/sbin by setup.sh), whose hard validation (SSID 1-32 / PSK 8-63,
-# reject-before-write) is the real gate. The PSK is a per-device secret and is
-# NEVER logged here.
+# reject-before-write) is the real gate. Because the bridge runs unprivileged
+# the script skips the systemctl restart; the root-owned
+# droplet-openwrt-attach.path unit watches that creds file and re-applies the
+# change (regenerate hostapd.conf + respawn via the HOSTAPD_CHANGED gate).
+# The PSK is a per-device secret and is NEVER logged here.
 
 HOSTAPD_SCRIPT = os.environ.get(
     "DROPLET_HOSTAPD_SCRIPT", "/usr/local/sbin/droplet-set-hostapd.sh").strip()
@@ -2059,8 +2169,10 @@ def run_set_hostapd(params):
 
     `params` is {"ssid": str, "psk": str}. The bridge does NOT touch hostapd /
     systemctl — it execs droplet-set-hostapd.sh with the params as a single JSON
-    argument; the script validates (SSID 1-32 / PSK 8-63) BEFORE writing,
-    upserts the attach env file, and restarts droplet-openwrt-attach.service.
+    argument; the script validates (SSID 1-32 / PSK 8-63) BEFORE writing and
+    upserts the attach env file. Running unprivileged here, the script defers
+    the re-apply to the root droplet-openwrt-attach.path unit (WARP-843) — its
+    success JSON reports restarted:false, reapply:"path-unit".
     Never raises — mirrors run_pool_command()/eject_drive().
 
     Returns a structured (ok, code, info) triple so the HTTP handler keys the
@@ -2801,6 +2913,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, uplink_ip_snapshot())
+            if path == "/host/topology":
+                # WARP-817: host uplink posture, for the onboarding wizard's
+                # auto-collapse decision. Same box-internal-network-detail
+                # rationale as /host/uplink-ip — auth-gated identically.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, host_topology_snapshot())
             if path == "/logs/bundle":
                 # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
                 # and /drives — the logs can carry box-internal (and, pre-host-

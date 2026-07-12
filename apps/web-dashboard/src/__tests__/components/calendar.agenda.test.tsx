@@ -211,7 +211,7 @@ describe("Calendar Agenda view (WARP-944)", () => {
     expect(scrollSpy).toHaveBeenCalledTimes(1); // the day pick scrolls once
 
     // Picking the day highlighted its section header (selected styling).
-    expect(document.querySelector("h3.text-accent")).not.toBeNull();
+    expect(document.querySelector('h3[aria-current="true"]')).not.toBeNull();
 
     // In Agenda view the toolbar nav is hidden, so the ONLY "Next month" button
     // is the mini-month chevron — which routes through `onMonthNav`.
@@ -220,7 +220,7 @@ describe("Calendar Agenda view (WARP-944)", () => {
     // Navigating the month must NOT count as a new day selection: no extra
     // scroll, and the day-1 / picked-day highlight is gone.
     expect(scrollSpy).toHaveBeenCalledTimes(1);
-    expect(document.querySelector("h3.text-accent")).toBeNull();
+    expect(document.querySelector('h3[aria-current="true"]')).toBeNull();
 
     // A background poll after the nav must not re-scroll either (selection cleared).
     useCalendarEventsMock.mockReturnValue({

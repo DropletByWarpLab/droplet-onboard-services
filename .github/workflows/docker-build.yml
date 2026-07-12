@@ -93,6 +93,21 @@ on:
       - "services/_shared/**"
       - "tests/retrieval-eval/**"
       - "apps/orchestrator/prisma/**"
+      # setup-e2e disk regression (2026-07-11): every image COPYs its app's
+      # full source tree, so a source-only merge invalidates the GHCR layer
+      # cache from the COPY step down — but the old push filter skipped
+      # exactly those merges, so buildcache:<image> silently went stale.
+      # setup-e2e.yml builds ALL images on one disk-constrained runner and
+      # only fits when the cache mostly hits: five source-only merges of
+      # drift (#961/#962/#963/#964/#933) made orchestrator, web-dashboard
+      # and ai-gateway rebuild cold and blew the disk ("no space left on
+      # device" importing ai-gateway). Refresh the cache on every merge
+      # that changes any image's build inputs — these three globs close the
+      # gap to the per-image filters the detect job already declares.
+      # (Post-merge rebuilds block nobody; PR paths deliberately unchanged.)
+      - "apps/orchestrator/**"
+      - "apps/web-dashboard/**"
+      - "services/**"
 
 concurrency:
   group: docker-build-${{ github.ref }}

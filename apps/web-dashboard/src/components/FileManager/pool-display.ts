@@ -51,8 +51,6 @@ export function levelBlurb(level: PoolInfo["level"]): string {
 
 export interface PoolStatusBadge {
   label: string;
-  /** Tailwind token classes (no hardcoded hex). */
-  cls: string;
   /** Whether this status warrants the page-level degraded/rebuild banner. */
   alarm: "none" | "degraded" | "resyncing" | "failed";
 }
@@ -60,16 +58,16 @@ export interface PoolStatusBadge {
 export function poolStatusBadge(status: PoolInfo["status"]): PoolStatusBadge {
   switch (status) {
     case "active":
-      return { label: "Healthy", cls: "bg-system-green/10 text-system-green", alarm: "none" };
+      return { label: "Healthy", alarm: "none" };
     case "resyncing":
-      return { label: "Rebuilding", cls: "bg-system-blue/10 text-system-blue", alarm: "resyncing" };
+      return { label: "Rebuilding", alarm: "resyncing" };
     case "degraded":
-      return { label: "Degraded", cls: "bg-system-orange/10 text-system-orange", alarm: "degraded" };
+      return { label: "Degraded", alarm: "degraded" };
     case "failed":
-      return { label: "Failed", cls: "bg-system-red/10 text-system-red", alarm: "failed" };
+      return { label: "Failed", alarm: "failed" };
     case "none":
     default:
-      return { label: "Not configured", cls: "bg-surface-secondary text-label-secondary", alarm: "none" };
+      return { label: "Not configured", alarm: "none" };
   }
 }
 

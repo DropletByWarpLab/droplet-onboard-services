@@ -47,6 +47,18 @@ export type SSEEvent =
    * suppresses these events on the wire. See WARP-458 AC §4.
    */
   | { type: "reasoning_step"; text: string }
+  /**
+   * WARP-903 — emitted at most once, BEFORE the agent loop begins, when
+   * the selected local model is installed in Ollama but not currently
+   * loaded in memory (cold). The dashboard swaps its pre-first-token
+   * thinking indicator to an explicit "Loading <model> (<sizeGb> GB)…"
+   * state so the 30-60 s cold load is never a silent gap. `sizeGb` is
+   * decimal gigabytes (one decimal) from Ollama's tags listing, or null
+   * when Ollama didn't report a size. Best-effort: the coldness probe
+   * is budgeted and non-fatal, so the ABSENCE of this event does not
+   * prove the model was warm.
+   */
+  | { type: "model_loading"; model: string; sizeGb: number | null }
   | {
       type: "done";
       iterations: number;

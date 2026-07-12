@@ -32,30 +32,31 @@ const TONE_BG: Record<"ok" | "error" | "warning" | "neutral", string> = {
   ok: "bg-system-green/10 border-system-green/30",
   error: "bg-system-red/10 border-system-red/30",
   warning: "bg-system-orange/10 border-system-orange/30",
-  neutral: "bg-label-quaternary/10 border-separator",
+  neutral: "bg-[var(--inset)] border-[var(--card-bd)]",
 };
 const TONE_FG: Record<"ok" | "error" | "warning" | "neutral", string> = {
   ok: "text-system-green",
   error: "text-system-red",
   warning: "text-system-orange",
-  neutral: "text-label-tertiary",
+  neutral: "text-[var(--text-muted)]",
 };
 
 export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
   return (
-    <section className="dp-card p-5" aria-labelledby="ci-status-heading">
+    <section className="card" style={{ padding: "20px" }} aria-labelledby="ci-status-heading">
       <h2
         id="ci-status-heading"
-        className="type-footnote text-label-secondary uppercase tracking-wide mb-3"
+        className="type-footnote uppercase tracking-wide mb-3"
+        style={{ color: "var(--text-muted)" }}
       >
         CI status
       </h2>
       {runs === null ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           GitHub unavailable.
         </p>
       ) : runs.length === 0 ? (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           No workflow runs yet.
         </p>
       ) : (
@@ -71,7 +72,7 @@ export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
                 className={`group flex flex-col gap-1 p-2.5 rounded-md border ${TONE_BG[tone]} hover:shadow-sm transition`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="type-subheadline text-label-primary truncate">
+                  <span className="type-subheadline truncate" style={{ color: "var(--text)" }}>
                     {run.workflow_name}
                   </span>
                   <Icon
@@ -80,7 +81,7 @@ export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
                     aria-hidden="true"
                   />
                 </div>
-                <div className="flex items-center justify-between type-caption-2 text-label-tertiary">
+                <div className="flex items-center justify-between type-caption-2" style={{ color: "var(--text-muted)" }}>
                   <span className={`${TONE_FG[tone]}`}>{label}</span>
                   {/*
                     WARP-300 audit: the opacity-0 group-hover:opacity-100
@@ -96,7 +97,7 @@ export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
                     progressive-enhancement affordance rather than the
                     sole discovery channel for a destructive action.
                   */}
-                  <span className="text-label-quaternary flex items-center gap-1">
+                  <span className="flex items-center gap-1" style={{ color: "var(--text-faint)" }}>
                     {relativeTime(run.updated_at)}
                     <ExternalLink
                       size={10}

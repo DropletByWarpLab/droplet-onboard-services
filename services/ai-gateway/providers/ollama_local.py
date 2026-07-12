@@ -96,6 +96,15 @@ _OLLAMA_TIMEOUT = httpx.Timeout(
 # once. Override for exotic deploys via OLLAMA_MAX_CONNECTIONS.
 _MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
 
+# WARP-1284 (F2): per-request timeout for the /api/tags METADATA call in
+# list_models. It must NOT ride the shared client's chat-sized read timeout
+# (300s, see _OLLAMA_TIMEOUT above): degraded listings are never TTL-cached,
+# so while Ollama is slow-not-down the wizard's 8s poll and the dashboard's
+# 30s SWR re-run the listing — a hung /api/tags would pile those requests
+# onto the shared connection pool that chat also uses. A healthy appliance
+# answers /api/tags in milliseconds.
+_TAGS_TIMEOUT_S = 5.0
+
 # We ALWAYS talk to Ollama's OpenAI-compatible chat endpoint, never the native
 # `/api/chat`. This keeps the request/response shape identical to the cloud
 # providers (one code path in router.py) and is the canonical direct-to-:11434
@@ -372,29 +381,38 @@ class OllamaLocalProvider(BaseProvider):
         return caps
 
     async def list_models(self) -> list[ModelInfo]:
-        try:
-            resp = await self.client.get("/api/tags")
-            resp.raise_for_status()
-            data = resp.json()
-            out: list[ModelInfo] = []
-            for m in data.get("models", []):
-                name = m["name"]
-                out.append(
-                    ModelInfo(
-                        id=name,
-                        provider="ollama",
-                        name=prettify_ollama_name(name),
-                        context_window=None,
-                        capabilities=await self._capabilities(name),
-                    )
+        """List the locally pulled models via /api/tags.
+
+        WARP-1284 (F1): transport/HTTP failures PROPAGATE instead of being
+        swallowed into `return []`. The router fan-out (list_all_models —
+        the only production caller) classifies the raise into
+        `degraded_providers` via asyncio.gather(return_exceptions=True), so
+        a dead Ollama is distinguishable from an empty registry. The old
+        swallow made that signal dead code: the wizard showed "model still
+        downloading" for an unreachable AI service. A REACHABLE Ollama with
+        no models pulled yet (first boot) still returns [] — that is the
+        one honest empty-list case.
+
+        The tags GET uses a short per-request timeout (_TAGS_TIMEOUT_S):
+        it's a metadata call and must not hold a shared-pool connection for
+        the chat-sized 300s read timeout while Ollama is slow-not-down.
+        """
+        resp = await self.client.get("/api/tags", timeout=_TAGS_TIMEOUT_S)
+        resp.raise_for_status()
+        data = resp.json()
+        out: list[ModelInfo] = []
+        for m in data.get("models", []):
+            name = m["name"]
+            out.append(
+                ModelInfo(
+                    id=name,
+                    provider="ollama",
+                    name=prettify_ollama_name(name),
+                    context_window=None,
+                    capabilities=await self._capabilities(name),
                 )
-            return out
-        except httpx.ConnectError:
-            logger.warning("Ollama unreachable at %s", self.base_url)
-            return []
-        except Exception as e:
-            logger.error("Error listing Ollama models: %s", e)
-            return []
+            )
+        return out
 
     async def chat(
         self, messages: list[ChatMessage], model: str, stream: bool = False, **kwargs

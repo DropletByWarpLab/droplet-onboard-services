@@ -44,21 +44,25 @@ GUEST_IFACE="${DROPLET_GUEST_IFACE:-}"
 # (192.168.10.0/24) so the zones never overlap.
 GUEST_GW="${DROPLET_GUEST_GW:-192.168.30.1}"
 
-# >>> customer_ap_creds (WARP-808 follow-up)
-# The setup wizard's Wi-Fi write lands in the device-bridge's StateDirectory
-# (droplet-set-hostapd.sh writes it there — the bridge sandbox can't touch
-# root-owned /etc/default). Parse ONLY the two AP keys out of that
-# droplet-owned file instead of EnvironmentFile-ing it into this root unit:
-#   - a file an unprivileged account can write must never inject arbitrary
-#     env into a root process (defense-in-depth — PR #551 review), and
-#   - systemd EnvironmentFile ordering is fragile under drop-ins (the
-#     pre-existing override.conf re-loads /etc/default LAST, which silently
-#     clobbered the customer's values — the PR #551 review blocker).
-# Customer creds, when present and valid, win over the /etc/default
-# provisioning defaults; resolve_ap_psk() then treats the customer PSK as an
-# explicit real value, keeps it, and mirrors it to the pairing QR. Re-validated
-# here with the same bounds droplet-set-hostapd.sh enforces (SSID 1-32,
-# PSK 8-63, no control characters) because root must not trust the file.
+# >>> customer_ap_creds (WARP-808 follow-up; WARP-843 canonical customer path)
+# The setup wizard's customer Wi-Fi write lands in the device-bridge's OWN
+# StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env) — droplet-owned,
+# so the sandboxed bridge writes it with no access to root-owned /etc (the
+# PR #551 split, kept intact; the root droplet-openwrt-attach.path unit watches
+# THIS file and re-applies via the reapply relay).
+#
+# SECURITY BOUNDARY (do NOT turn this into a `.`/`source` or an EnvironmentFile):
+# this file is DROPLET-WRITABLE, so it must NEVER be loaded as this ROOT
+# service's EnvironmentFile — an EnvironmentFile imports EVERY key, so a
+# compromised bridge could inject AP_PSK_FILE=/root/.ssh/authorized_keys (or
+# OPENWRT_PASSWORD_FILE=/etc/shadow, DROPLET_RPCD_ACL=/etc/cron.d/x, …) and have
+# root write attacker-controlled content (LPE). Root consumes it ONLY through
+# this WHITELIST parse: read ONLY DROPLET_AP_SSID/DROPLET_AP_PSK (+ the guest
+# keys below), re-validated with the same bounds droplet-set-hostapd.sh enforces
+# (SSID 1-32, PSK 8-63, no control characters), and IGNORE every other key.
+# Customer creds, when present and valid, win over the env-provided values;
+# resolve_ap_psk() then treats the customer PSK as an explicit real value,
+# keeps it, and mirrors it to the pairing QR.
 CUSTOMER_AP_ENV="${DROPLET_CUSTOMER_AP_ENV:-/var/lib/droplet-bridge/openwrt-attach.env}"
 if [ -f "$CUSTOMER_AP_ENV" ]; then
   c_ssid="$(grep -m1 '^DROPLET_AP_SSID=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"

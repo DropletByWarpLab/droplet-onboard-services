@@ -2846,9 +2846,29 @@ export async function confirmMatterCommand(
   return res.json();
 }
 
-export async function discoverMatterDevices(): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
-  const res = await authFetch(`${BASE}/api/matter/discover`);
-  if (!res.ok) throw new Error(`Failed to discover devices: ${res.status}`);
+export async function discoverMatterDevices(
+  signal?: AbortSignal,
+): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
+  // WARP-1281 (review follow-up on #996): callers may bound the browse —
+  // the wizard aborts at 25s so a stalled transport can't wedge its serial
+  // chain. Guarded with instanceof because useSmartHome uses this function
+  // directly as an SWR fetcher, and SWR invokes fetchers with the string
+  // KEY as the first argument — that must not reach fetch() as `signal`.
+  const res = await authFetch(`${BASE}/api/matter/discover`, {
+    signal: signal instanceof AbortSignal ? signal : undefined,
+  });
+  if (!res.ok) {
+    // WARP-1281: carry the HTTP status (same pattern as
+    // commissionMatterDevice / WARP-851) so the setup wizard can tell
+    // "Matter controller not started" (503) apart from a transient
+    // transport failure and surface an honest service-down state
+    // instead of fake-scanning.
+    const err = new Error(
+      `Failed to discover devices: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -3252,6 +3272,12 @@ export interface PersistedConversation {
     reasoning?: string | null;
     /** WARP-844 — thumbs rating, or null when unrated. */
     feedback?: "up" | "down" | null;
+    /**
+     * WARP-904 — the model/provider this specific turn actually ran on,
+     * or null/absent on rows persisted before this column existed.
+     */
+    model?: string | null;
+    provider?: string | null;
     /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
@@ -4492,6 +4518,18 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
 }
 
 /**
+ * WARP-941 — outbound shares: everything the current user has shared to
+ * people, groups, or links. Backs the "Shared by me" tab (the outbound
+ * sibling of fetchSharedWithMe).
+ */
+export async function fetchSharedByMe(): Promise<ShareDetail[]> {
+  const res = await authFetch(`${BASE}/api/files/shares-by-me`);
+  if (!res.ok) throw new Error(`Failed to fetch shares-by-me: ${res.status}`);
+  const data = await res.json();
+  return data.shares ?? [];
+}
+
+/**
  * WARP-879 / WS-1 — household members the internal-sharing picker can target.
  * The orchestrator reads the local directory (ADR-013), so this is reachable
  * by every household role, not just admins.
@@ -4788,7 +4826,28 @@ export async function decommissionApDevice(
 
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
-  if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    // WARP-1283: carry the orchestrator's typed `code` + the HTTP status on
+    // the thrown error (the storageWriteError / WARP-851 commissionMatterDevice
+    // precedent) so the wizard's VpnStep can render specific copy when the
+    // routing sidecar is unavailable (503 + code ROUTING_UNAVAILABLE) instead
+    // of the generic error page. `message` is preferred over `error` because
+    // the global error handler puts the detail there ({ error: <category>,
+    // message: <detail>, code }); the route's own typed 503 uses `error`.
+    const err = new Error(
+      (typeof body.message === "string" && body.message) ||
+        (typeof body.error === "string" && body.error) ||
+        `Failed to fetch Remote Access status: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
+  }
   return res.json();
 }
 
