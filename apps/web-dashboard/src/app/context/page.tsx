@@ -44,8 +44,8 @@ import { EmptyState } from "@/components/context/EmptyState";
 function SkeletonRow({ height }: { height: number }) {
   return (
     <div
-      className="dp-tile bg-surface-secondary/50 animate-pulse"
-      style={{ height }}
+      className="animate-pulse"
+      style={{ height, borderRadius: "var(--radius-card)", background: "var(--inset)" }}
     />
   );
 }

@@ -43,7 +43,8 @@ export type ToolDomain =
   | "pm"
   | "erp"
   | "business"
-  | "system";
+  | "system"
+  | "data";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -157,6 +158,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   business: ["business_profile_get"],
   system: ["get_system_health", "list_drives", "list_storage_pools"],
+  data: ["timestamp_convert", "uuid_generate", "regex_test"],
 };
 
 /** Ordered domain list — drives the filter-chip order in the dashboard. */
@@ -278,6 +280,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Business (business-knowledge profile)
   business_profile_get: "Look up what Droplet knows about your business",
+  // Data (misc dev utilities)
+  timestamp_convert: "Convert a timestamp between formats",
+  uuid_generate: "Generate a unique ID",
+  regex_test: "Test a pattern against some text",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

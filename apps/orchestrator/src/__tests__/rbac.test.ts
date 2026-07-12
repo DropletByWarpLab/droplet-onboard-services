@@ -246,6 +246,25 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/updates/apply-now", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/updates/skip", allowed: ["owner", "admin"] },
   { method: "put", path: "/api/updates/settings", allowed: ["owner", "admin"] },
+
+  // WARP-449: widen requireRole to unguarded admin/GET routes (epic prereq
+  // WARP-1253). Three additions from the audit:
+  //
+  //  - GET /api/auth/users (owner + admin): the specific PR #258 review
+  //    finding — this route claimed "admin only" in a comment but relied on
+  //    OCS error-message sniffing ("403"/"997" substrings) instead of an
+  //    enforcing guard. Migrated onto the same posture as the sibling
+  //    GET /auth/invites.
+  //  - POST /api/display/wifi/connect (owner + admin): had an equivalent
+  //    inline `req.user.role` check; migrated onto the canonical guard so
+  //    it's covered by this matrix instead of a route-local check.
+  //  - GET /api/admin/retrieval-eval/search (owner + admin): previously had
+  //    NO role check at all (any authenticated user), despite living under
+  //    the `/admin/*` mount alongside every other admin-* router, which all
+  //    already gate on owner/admin.
+  { method: "get", path: "/api/auth/users", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/display/wifi/connect", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/admin/retrieval-eval/search", allowed: ["owner", "admin"] },
 ];
 
 /**

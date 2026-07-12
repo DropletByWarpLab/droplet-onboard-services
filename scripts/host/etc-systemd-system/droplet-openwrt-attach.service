@@ -18,17 +18,28 @@ Wants=docker.service
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/default/droplet-openwrt-attach
-# WARP-808 follow-up: customer Wi-Fi writes from the sandboxed device-bridge
-# land in /var/lib/droplet-bridge/openwrt-attach.env (DROPLET_HOSTAPD_ENV_FILE
-# in droplet-device-bridge.service) — the bridge cannot write root-owned
-# /etc/default under ProtectSystem=strict/User=droplet. That file is
-# deliberately NOT an EnvironmentFile here: (a) drop-ins (override.conf)
+# WARP-843: customer Wi-Fi writes from the sandboxed device-bridge land in the
+# bridge's own StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env —
+# DROPLET_HOSTAPD_ENV_FILE in droplet-device-bridge.service), which is
+# droplet-owned, so the write succeeds without the bridge ever touching
+# root-owned /etc/default (this is what fixes the wizard's 422). That creds
+# file is DELIBERATELY NOT an EnvironmentFile here: (a) drop-ins (override.conf)
 # re-load /etc/default after the main unit, so EnvironmentFile ordering would
-# silently clobber the customer's values (PR #551 review blocker), and (b) a
-# droplet-writable file must never inject arbitrary env into a root unit.
-# Instead the attach script itself parses ONLY DROPLET_AP_SSID/DROPLET_AP_PSK
-# out of it, with hard validation — see the customer_ap_creds block in
-# /usr/local/sbin/droplet-openwrt-attach.
+# silently clobber the customer's values (PR #551 review blocker), and (b) — the
+# security invariant — a droplet-writable file must NEVER inject arbitrary env
+# into a root unit: an EnvironmentFile loads EVERY key, so a compromised bridge
+# could set e.g. AP_PSK_FILE=/root/.ssh/authorized_keys and have this ROOT
+# service write it (LPE). Instead the attach script parses ONLY
+# DROPLET_AP_SSID/DROPLET_AP_PSK (+ the DROPLET_GUEST_* keys) out of that file,
+# with hard validation — see the customer_ap_creds / customer_guest_creds
+# blocks in /usr/local/sbin/droplet-openwrt-attach.
+# The re-apply is closed with ZERO grants to the droplet user: the repo-tracked
+# droplet-openwrt-attach.path unit watches that StateDirectory creds file and
+# re-runs this service via the -reapply relay (this unit is RemainAfterExit, so
+# a path-triggered start alone would be a no-op). That replaced the PR #551
+# polkit-restart route, which never worked without polkitd JS-rules support.
+# The EnvironmentFile above therefore carries operator/hardware config ONLY (the
+# provisioning SSID default + DROPLET_AP_PHY/IFACE pins) and stays root-owned.
 ExecStart=/usr/local/sbin/droplet-openwrt-attach
 
 [Install]

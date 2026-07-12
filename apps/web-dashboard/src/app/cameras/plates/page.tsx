@@ -182,13 +182,20 @@ export default function PlatesPage() {
                         if (e.key === "Enter") void commitEdit();
                         if (e.key === "Escape") setEditing(null);
                       }}
-                      className="flex-1 h-7 px-2 rounded border border-separator bg-surface-secondary type-caption-1 text-label-primary focus:border-accent focus:outline-none"
+                      className="flex-1 h-7 px-2 type-caption-1 outline-none focus:border-[var(--brand)]"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                       placeholder="Alice's Civic"
                     />
                     <button
                       onClick={() => void commitEdit()}
                       disabled={busy === p.plate}
-                      className="p-1.5 rounded text-accent hover:bg-accent/10"
+                      className="p-1.5 rounded hover:bg-[var(--brand-subtle)]"
+                      style={{ color: "var(--brand)" }}
                       title="Save"
                     >
                       {busy === p.plate ? (
@@ -199,7 +206,8 @@ export default function PlatesPage() {
                     </button>
                     <button
                       onClick={() => setEditing(null)}
-                      className="p-1.5 rounded text-label-tertiary hover:bg-surface-secondary"
+                      className="p-1.5 rounded hover:bg-[var(--hover)]"
+                      style={{ color: "var(--text-muted)" }}
                       title="Cancel"
                     >
                       <X size={12} />
@@ -220,7 +228,7 @@ export default function PlatesPage() {
                 <>
                   <button
                     onClick={() => startEdit(p)}
-                    className="p-1.5 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+                    className="p-1.5 rounded hover:bg-[var(--hover)] text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
                     title="Name this plate"
                   >
                     <Pencil size={12} />
@@ -228,7 +236,7 @@ export default function PlatesPage() {
                   <button
                     onClick={() => handleDelete(p)}
                     disabled={busy === p.plate}
-                    className="p-1.5 rounded text-label-tertiary hover:text-system-red hover:bg-system-red/10"
+                    className="p-1.5 rounded hover:bg-[rgba(239,68,68,0.1)] text-[color:var(--text-muted)] hover:text-[color:var(--danger)]"
                     title="Forget plate"
                   >
                     <Trash2 size={12} />

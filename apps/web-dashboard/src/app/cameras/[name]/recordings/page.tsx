@@ -243,7 +243,13 @@ export default function RecordingsPage() {
             setHour(null);
           }}
           max={localDayString(new Date())}
-          className="flex-1 h-9 px-3 rounded-lg border border-separator bg-surface-secondary type-subheadline text-label-primary"
+          className="flex-1 h-9 px-3 type-subheadline outline-none focus:border-[var(--brand)]"
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
         />
         <button
           onClick={() => {
@@ -408,7 +414,7 @@ export default function RecordingsPage() {
                   return (
                     <li
                       key={s.id}
-                      className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-surface-secondary cursor-pointer"
+                      className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--hover)] cursor-pointer"
                       onClick={() => {
                         if (range.after === null) return;
                         const offset = s.startTime - range.after;
@@ -417,16 +423,19 @@ export default function RecordingsPage() {
                         }
                       }}
                     >
-                      <span className="type-caption-1 text-label-primary font-mono">
+                      <span className="type-caption-1 font-mono" style={{ color: "var(--text)" }}>
                         {String(start.getHours()).padStart(2, "0")}:
                         {String(start.getMinutes()).padStart(2, "0")}:
                         {String(start.getSeconds()).padStart(2, "0")}
                       </span>
-                      <span className="type-caption-2 text-label-tertiary">
+                      <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                         {Math.round(s.duration)}s
                       </span>
                       {s.objects > 0 && (
-                        <span className="type-caption-2 px-1.5 rounded bg-accent/15 text-accent">
+                        <span
+                          className="type-caption-2 px-1.5 rounded"
+                          style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
+                        >
                           {s.objects} obj
                         </span>
                       )}

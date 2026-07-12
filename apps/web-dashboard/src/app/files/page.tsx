@@ -907,7 +907,14 @@ export default function FilesPage() {
         <MoveCopyDialog
           mode={moveDialog.mode}
           selectionLabels={selectionLabels}
-          currentDir={currentPath}
+          // WARP-1247: this is the 4th write-destination path with the
+          // WARP-1200 defect — `currentPath` is SPACE-relative, but the
+          // dialog's tree + `handleMoveCopyConfirm` (bulkMoveFiles /
+          // bulkCopyFiles) are already home-relative. Seeding from the raw
+          // `currentPath` let the stale default (e.g. "/Trips" while the
+          // Household tab is active) get confirmed without re-picking a
+          // node, writing into the personal space instead of "/Household/Trips".
+          currentDir={homeRelativeCurrentPath}
           forbiddenPrefixes={forbiddenPrefixes}
           onCancel={() => setMoveDialog(null)}
           onConfirm={handleMoveCopyConfirm}
