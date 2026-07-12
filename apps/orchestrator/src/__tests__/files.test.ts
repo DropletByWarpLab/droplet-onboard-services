@@ -91,9 +91,15 @@ const ncMock = nc as unknown as {
 
 describe("File Operations (Nextcloud-backed routes)", () => {
   let app: ReturnType<typeof createApp>;
+  // The mocked @prisma/client (setup.ts) returns the SAME singleton object
+  // from every `new PrismaClient()` call — grabbing our own reference gives
+  // per-test control over model mocks (e.g. userUsagePolicy.findUnique) that
+  // the shared createApp() instance also reads from.
+  let prismaMock: any;
 
   beforeAll(() => {
     const prisma = new PrismaClient();
+    prismaMock = prisma;
     initDeviceService(prisma);
     app = createApp(prisma);
   });
@@ -351,6 +357,66 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     it("returns 400 when no files are attached", async () => {
       const res = await request(app).post("/api/files/upload?path=/");
       expect(res.status).toBe(400);
+    });
+
+    // WARP-1271 (T19a) — per-user upload cap (UserUsagePolicy.maxUploadSizeMb).
+    describe("per-user upload cap", () => {
+      afterAll(() => {
+        // Restore the setup.ts default (no policy) for every other suite.
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValue(null);
+      });
+
+      it("no policy row → falls back to config.MAX_UPLOAD_SIZE_MB (under-cap passes)", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce(null);
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(1024, 1), "small.bin");
+        expect(res.status).toBe(200);
+      });
+
+      it("under the policy cap passes", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          maxUploadSizeMb: 1, // 1 MB cap, tighter than the 10 MB config default
+        });
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(1024, 1), "small.bin");
+        expect(res.status).toBe(200);
+      });
+
+      it("over the policy cap → 413 with an honest message naming the actual limit", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          maxUploadSizeMb: 1, // 1 MB cap
+        });
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
+        expect(res.status).toBe(413);
+        expect(res.body.error).toMatch(/1MB/);
+        expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+      });
+
+      it("a policy cap LOOSER than config never widens the ceiling (min() wins)", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          maxUploadSizeMb: 500, // looser than the 10 MB config default
+        });
+        // 11 MB — over config's 10 MB default, even though the policy allows 500.
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(11 * 1024 * 1024, 1), "over-config.bin");
+        expect(res.status).toBe(413);
+        expect(res.body.error).toMatch(/10MB/);
+      });
+
+      it("a usage-policy lookup failure degrades to the config default (never blocks the upload)", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockRejectedValueOnce(
+          new Error("db unreachable"),
+        );
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(1024, 1), "small.bin");
+        expect(res.status).toBe(200);
+      });
     });
   });
 

@@ -647,7 +647,9 @@ async function main() {
         result.departmentsStillFailed > 0 ||
         result.membershipsSynced > 0 ||
         result.membershipsFailed > 0 ||
-        result.membershipsRemoved > 0
+        result.membershipsRemoved > 0 ||
+        result.usagePoliciesSynced > 0 ||
+        result.usagePoliciesFailed > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }

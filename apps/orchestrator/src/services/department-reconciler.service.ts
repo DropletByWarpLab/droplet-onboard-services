@@ -44,6 +44,7 @@ import {
   ncRemoveUserFromGroup,
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
+import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("department-reconciler");
@@ -65,6 +66,11 @@ export interface ReconcileResult {
   membershipsSynced: number;
   membershipsFailed: number;
   membershipsRemoved: number;
+  // WARP-1271 (T19a): per-user usage-policy quota pushdown, swept on the
+  // same tick — see usage-policy-reconciler.service.ts.
+  usagePoliciesSwept: number;
+  usagePoliciesSynced: number;
+  usagePoliciesFailed: number;
 }
 
 /**
@@ -380,6 +386,7 @@ export async function reconcileDepartments(
 
   const deptResult = await sweepDepartments(prisma, adminToken);
   const memberResult = await sweepMemberships(prisma, adminToken);
+  const usageResult = await sweepUsagePolicies(prisma, adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -389,6 +396,9 @@ export async function reconcileDepartments(
     membershipsSynced: memberResult.synced,
     membershipsFailed: memberResult.failed,
     membershipsRemoved: memberResult.removed,
+    usagePoliciesSwept: usageResult.usagePoliciesSwept,
+    usagePoliciesSynced: usageResult.usagePoliciesSynced,
+    usagePoliciesFailed: usageResult.usagePoliciesFailed,
   };
 
   logger.debug(result, "department-reconciler tick complete");

@@ -167,6 +167,16 @@ vi.mock("@prisma/client", () => {
       create: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
     },
+    // WARP-1271 (T19a): per-user usage settings. `null` = "no policy set
+    // yet" — the safe default (files.ts's multer path falls back to
+    // config.MAX_UPLOAD_SIZE_MB, GET /people/:id/usage reports policy:null)
+    // unless a test explicitly stubs a row.
+    userUsagePolicy: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      upsert: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),

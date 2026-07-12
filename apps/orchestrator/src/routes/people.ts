@@ -53,6 +53,13 @@ import {
   ncAddUserToGroup,
   ncRemoveUserFromGroup,
 } from "../services/nextcloud-groups.client.js";
+import {
+  upsertUsagePolicy,
+  getUsagePolicyWithUsage,
+  TargetUserNotFoundError,
+  type UsagePolicyInput,
+} from "../services/usage-policy.service.js";
+import type { UserUsagePolicy } from "@prisma/client";
 
 const logger = createLogger("people-route");
 
@@ -126,6 +133,27 @@ const inviteSchema = z.object({
   email: z.string().min(1).max(200),
   role: z.string().min(1).max(32),
 });
+
+// WARP-1271 (T19a): per-user usage settings. `null` explicitly clears the
+// limit (no cap); `undefined` (the key omitted) leaves it unchanged —
+// z.string().regex keeps BigInt off the wire (WARP-455 boundary rule),
+// parsed to a real bigint before it reaches usage-policy.service.
+const usageSchema = z.object({
+  storageQuotaBytes: z.string().regex(/^\d+$/).nullable().optional(),
+  maxUploadSizeMb: z.number().int().positive().max(1_000_000).nullable().optional(),
+});
+
+/** BigInt fields string-encoded per the ADR-029 §8 wire contract. */
+function formatUsagePolicy(policy: UserUsagePolicy) {
+  return {
+    userId: policy.userId,
+    storageQuotaBytes: policy.storageQuotaBytes?.toString() ?? null,
+    quotaSyncState: policy.quotaSyncState,
+    maxUploadSizeMb: policy.maxUploadSizeMb ?? null,
+    updatedBy: policy.updatedBy,
+    updatedAt: policy.updatedAt,
+  };
+}
 
 /**
  * Role × ability matrix. Read-only surface for the dashboard's
@@ -665,6 +693,88 @@ export function createPeopleRouter(
         // Prisma's P2025 (record not found) shouldn't reach here
         // because of the findUnique above, but stay defensive.
         logger.warn({ err, id: req.params.id }, "DELETE /people failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── PUT /api/people/:id/usage ───────────────────────────────
+  // WARP-1271 (T19a). owner + admin only. Upserts UserUsagePolicy and
+  // best-effort pushes the storage quota to Nextcloud
+  // (usage-policy.service.ts); `maxUploadSizeMb` is orchestrator-local
+  // (enforced in files.ts's multer path). No self-action guard here — an
+  // owner/admin editing THEIR OWN storage quota/upload cap is normal
+  // (unlike role/scope/delete, this can't lock anyone out of the box).
+  router.put(
+    "/people/:id/usage",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = usageSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+        if (
+          parsed.data.storageQuotaBytes === undefined &&
+          parsed.data.maxUploadSizeMb === undefined
+        ) {
+          return res.status(400).json({
+            error: "At least one of storageQuotaBytes / maxUploadSizeMb is required",
+          });
+        }
+
+        const input: UsagePolicyInput = {
+          storageQuotaBytes:
+            parsed.data.storageQuotaBytes === undefined
+              ? undefined
+              : parsed.data.storageQuotaBytes === null
+                ? null
+                : BigInt(parsed.data.storageQuotaBytes),
+          maxUploadSizeMb: parsed.data.maxUploadSizeMb,
+        };
+
+        const { policy } = await upsertUsagePolicy(
+          prisma,
+          req.params.id,
+          req.user?.id ?? "unknown",
+          input,
+        );
+        res.json({ policy: formatUsagePolicy(policy) });
+      } catch (err) {
+        if (err instanceof TargetUserNotFoundError) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        logger.warn({ err, id: req.params.id }, "PUT /people/:id/usage failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/people/:id/usage ───────────────────────────────
+  // WARP-1271 (T19a). owner + admin only. Returns the policy row (or null
+  // if never set) plus a live, display-only used-bytes read-back from
+  // Nextcloud — never policy truth (ADR-029 §5).
+  router.get(
+    "/people/:id/usage",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { policy, usedBytes } = await getUsagePolicyWithUsage(
+          prisma,
+          req.params.id,
+        );
+        res.json({
+          policy: policy ? formatUsagePolicy(policy) : null,
+          usedBytes: usedBytes !== null ? usedBytes.toString() : null,
+        });
+      } catch (err) {
+        if (err instanceof TargetUserNotFoundError) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        logger.warn({ err, id: req.params.id }, "GET /people/:id/usage failed");
         next(err);
       }
     },
