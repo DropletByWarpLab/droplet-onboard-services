@@ -43,11 +43,15 @@ export function useDeviceBlockMutation() {
       | { device: EnrichedNetworkDevice; presence?: unknown }
       | undefined;
 
-    // Optimistic write — flip both `isBlocked` (what the UI reads) and
-    // `manualBlock` (what the reconciler reads on its next tick). When
-    // the snapshot is missing we synthesize a minimal entry from the
-    // device argument so the immediate-revalidate paths still see the
-    // flipped flag.
+    // Optimistic write — WARP-106: the API computes
+    // `isBlocked = (lastAppliedBlocked ?? manualBlock)`, so to keep the
+    // optimistic object self-consistent we flip all three: `isBlocked`
+    // (what the UI reads), `manualBlock` (user intent the ticker reads on
+    // its next tick), and `lastAppliedBlocked` (the ticker-authored source
+    // of truth the computed flag derives from). The server round-trip
+    // reconciles once the ticker actually dispatches. When the snapshot is
+    // missing we synthesize a minimal entry from the device argument so the
+    // immediate-revalidate paths still see the flipped flag.
     const optimistic = snapshot
       ? {
           ...snapshot,
@@ -55,9 +59,17 @@ export function useDeviceBlockMutation() {
             ...snapshot.device,
             isBlocked: blocked,
             manualBlock: blocked,
+            lastAppliedBlocked: blocked,
           },
         }
-      : { device: { ...device, isBlocked: blocked, manualBlock: blocked } };
+      : {
+          device: {
+            ...device,
+            isBlocked: blocked,
+            manualBlock: blocked,
+            lastAppliedBlocked: blocked,
+          },
+        };
     await mutate(detailKey, optimistic, { revalidate: false });
 
     let body: { operationId?: string };

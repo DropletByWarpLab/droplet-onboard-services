@@ -93,7 +93,7 @@ describe("device-reconcile-poller", () => {
     expect(arg.firewallRules).toEqual([]); // empty fwRules → empty reject array
   });
 
-  it("firewall fetch failure passes RouterError through (preserves isBlocked)", async () => {
+  it("firewall fetch failure passes RouterError through (reconciler skips drift detection)", async () => {
     const registry = makeRegistry();
     const err = RouterError.unreachable("firewall unreachable");
     const openwrt = makeOpenwrt({
@@ -200,7 +200,8 @@ describe("device-reconcile-poller", () => {
 
   // AC #6(e): even when ALL three calls fail, the poller never throws and still
   // reconciles with degraded values (empty lists + RouterError passthrough for
-  // firewall so isBlocked is preserved). Behavior is unchanged by the log work.
+  // firewall so the reconciler skips drift detection). Behavior is unchanged by
+  // the log work.
   it("never throws and still reconciles when all three routing calls fail", async () => {
     const registry = makeRegistry();
     const openwrt = makeOpenwrt({
