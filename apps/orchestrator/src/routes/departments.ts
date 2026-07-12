@@ -822,6 +822,9 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
   // reader<->contributor/manager transitions push an ordered NC group
   // change (upgrade: add-then-remove; downgrade: remove-then-add);
   // contributor<->manager is policy-only (no NC call).
+  // WARP-1263 (T11): HOUSEHOLD departments reject right changes with 400
+  // (post-GA convergence D-5, membership rights on the household are
+  // immutable — role-driven at seed time and backfilled on membership add).
   router.patch(
     "/departments/:id/members/:userId",
     async (req: Request, res: Response, next: NextFunction) => {
@@ -842,6 +845,17 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           return res.status(403).json({
             error: "Forbidden: requires owner/admin or manager of this department",
             code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        // WARP-1263: HOUSEHOLD department right changes are immutable
+        const dept = await prisma.department.findUnique({
+          where: { id: departmentId },
+        });
+        if (dept?.kind === "HOUSEHOLD") {
+          return res.status(400).json({
+            error: "Cannot change member rights for the Household department (rights are role-driven)",
+            code: "HOUSEHOLD_RIGHTS_IMMUTABLE",
           });
         }
 

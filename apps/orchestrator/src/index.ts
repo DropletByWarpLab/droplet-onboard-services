@@ -39,6 +39,7 @@ import {
   reconcileDepartments,
   initReconcileKick,
 } from "./services/department-reconciler.service.js";
+import { seedHouseholdDepartment } from "./services/household-seed.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
@@ -638,6 +639,17 @@ async function main() {
     },
     { lockKey: "droplet:guest-expiry-sweep" },
   );
+
+  // WARP-1263: household absorption seed (T11). Boot-time idempotent seed
+  // that adopts the legacy WS-5 Household NC groupfolder verbatim into a
+  // Department row with kind=HOUSEHOLD. Zero NC mutations — only reads from
+  // gfListFolders() to discover the existing groupfolder id. Backfills User
+  // memberships on every call (additive only, never downgrades). Non-fatal:
+  // logs warnings and continues if the groupfolder is not found (will retry
+  // on next boot via the 5-min reconciler cadence).
+  await seedHouseholdDepartment(prisma).catch((err) => {
+    logger.warn({ err }, "household-seed: boot seed failed (retrying on next boot)");
+  });
 
   // WARP-1257: department/team NC provisioning reconciler (ADR-029 T5).
   // Binds the debounced kickReconcile() post-mutation trigger the future
