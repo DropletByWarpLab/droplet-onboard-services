@@ -9,7 +9,6 @@ The gateway itself does not execute tools — see router.py.
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Literal
 
@@ -131,7 +130,6 @@ class ChatRequest(BaseModel):
     #     actually requested earlier in THIS request (no orphan / injected
     #     results),
     #   * tool_call ids must be unique (no id collision / spoofing),
-    #   * tool_call arguments must be valid JSON (the field is a JSON string),
     #   * tool result content must be a plain string (reject None and reject
     #     multimodal `list[ContentBlock]` smuggling),
     #   * `tool_calls` / `tool_call_id` may only appear on their owning roles.
@@ -139,33 +137,33 @@ class ChatRequest(BaseModel):
     # This is deliberately GENERIC / boundary-level. Per-tool argument schemas
     # (what fields a given tool accepts) are NOT validated here — tool dispatch
     # and per-tool schemas live in the orchestrator/tools-core, and the gateway
-    # is a pure provider router (see router.py). Posture is fail-closed: any
-    # violation raises → FastAPI returns HTTP 422.
+    # is a pure provider router (see router.py). Nor is the JSON well-formedness
+    # of tool_call `arguments` validated: they are model output and the
+    # orchestrator tolerates malformed args, so a strict check would reject
+    # turns the orchestrator accepts (see rule 1). Posture is fail-closed for
+    # the tool-RESULT threat surface: any violation raises → FastAPI 422.
     @model_validator(mode="after")
     def _validate_tool_message_integrity(self) -> "ChatRequest":
         emitted_ids: set[str] = set()
         for msg in self.messages:
             role = msg.role
 
-            # 1. Assistant-emitted tool_calls: unique ids + JSON-decodable args.
+            # 1. Assistant-emitted tool_calls: unique, non-empty ids.
+            #
+            # `function.arguments` is intentionally NOT validated for JSON
+            # well-formedness here. arguments are the MODEL's output (not a
+            # tool's), so they sit outside this guard's threat surface
+            # (fabricated/malformed tool RESULTS). More importantly the
+            # orchestrator's own safeParseArgs is deliberately TOLERANT of
+            # malformed args — it falls back to {} and dispatches — and the
+            # assistant message is replayed verbatim on the next iteration, so a
+            # strict JSON check here would 422 a live multi-iteration turn the
+            # orchestrator itself accepted. Match its leniency.
             if role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
                     if not tc.id or tc.id in emitted_ids:
                         raise ValueError(f"duplicate tool_call id: {tc.id!r}")
                     emitted_ids.add(tc.id)
-                    # Empty/whitespace arguments == a zero-arg call. Some models
-                    # (notably local Ollama) emit "" rather than "{}" for
-                    # parameterless tools, and the orchestrator replays the
-                    # model's raw arguments verbatim — so treat "" as valid or
-                    # the guard would 422 a legitimate zero-arg agent turn. Only
-                    # NON-empty arguments are required to be valid JSON.
-                    if tc.function.arguments.strip():
-                        try:
-                            json.loads(tc.function.arguments)
-                        except json.JSONDecodeError as exc:
-                            raise ValueError(
-                                "tool_call arguments must be valid JSON"
-                            ) from exc
 
             # 2. tool_calls only ever belong on assistant messages.
             if msg.tool_calls is not None and role != "assistant":

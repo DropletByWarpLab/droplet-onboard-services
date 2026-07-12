@@ -42,16 +42,19 @@ def test_paired_tool_call_and_result_ok():
     assert req.messages[2].tool_call_id == "call_1"
 
 
-def test_zero_arg_tool_call_with_empty_arguments_ok():
-    # Zero-arg tool calls: some models (notably local Ollama) emit
-    # arguments="" instead of "{}". The orchestrator replays the model's raw
-    # arguments, so "" must be accepted or the guard would 422 a legitimate
-    # zero-arg agent turn. Only NON-empty arguments must be valid JSON.
+@pytest.mark.parametrize("args", ["", "   ", "{}", '{"a": 1}', "not json{{", "{'x': 1}"])
+def test_tool_call_arguments_not_json_validated(args):
+    # tool_call `arguments` are the MODEL's output and are NOT JSON-validated at
+    # the gateway: the orchestrator's safeParseArgs tolerates malformed args
+    # (falls back to {}), and the assistant message is replayed verbatim, so a
+    # strict check here would 422 a live turn the orchestrator accepted. Empty
+    # ("" — the local-Ollama zero-arg quirk), well-formed, AND malformed
+    # non-JSON args must all pass the integrity guard.
     req = ChatRequest(
         model="llama3:8b",
         messages=[
             ChatMessage(role="user", content="ping"),
-            _assistant_tool_call("call_1", args=""),
+            _assistant_tool_call("call_1", args=args),
             ChatMessage(role="tool", content="pong", tool_call_id="call_1"),
         ],
     )
@@ -166,17 +169,6 @@ def test_tool_result_with_none_content_rejected():
             messages=[
                 _assistant_tool_call("call_1"),
                 ChatMessage(role="tool", content=None, tool_call_id="call_1"),
-            ],
-        )
-
-
-def test_assistant_tool_call_with_non_json_arguments_rejected():
-    with pytest.raises(ValidationError):
-        ChatRequest(
-            model="gpt-4o",
-            messages=[
-                ChatMessage(role="user", content="hi"),
-                _assistant_tool_call("call_1", args="not json{{"),
             ],
         )
 
