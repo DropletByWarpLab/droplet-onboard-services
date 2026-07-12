@@ -83,17 +83,23 @@ export async function listModels(): Promise<ModelsResponse> {
   }
 }
 
-// Capability lookup for vision routing. The models list is small and changes
+// Model-info lookup for vision routing. The models list is small and changes
 // rarely, so a short TTL cache keeps per-turn routing off the gateway's hot
 // path. On a gateway error we degrade to "unknown" (undefined) rather than
 // blocking chat — the route then treats the model as non-vision (OCR fallback).
 let _modelsCache: { at: number; models: ModelInfo[] } | null = null;
 const MODELS_CACHE_TTL_MS = 30_000;
 
-export async function getModelCapabilities(
+/**
+ * Resolve one model's info from the TTL-cached model list, refreshing the
+ * cache when stale. Returns `undefined` when the model is unknown OR the
+ * gateway is unreachable and the cache was never populated — callers must
+ * treat that as "unknown" and degrade, never block the turn.
+ */
+async function findModelInfo(
   model: string,
-  now: number = Date.now(),
-): Promise<ModelCapabilities | undefined> {
+  now: number,
+): Promise<ModelInfo | undefined> {
   if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
     try {
       const res = await listModels();
@@ -103,7 +109,28 @@ export async function getModelCapabilities(
       // else: serve stale rather than failing the turn
     }
   }
-  return _modelsCache?.models.find((m) => m.id === model)?.capabilities;
+  return _modelsCache?.models.find((m) => m.id === model);
+}
+
+export async function getModelCapabilities(
+  model: string,
+  now: number = Date.now(),
+): Promise<ModelCapabilities | undefined> {
+  return (await findModelInfo(model, now))?.capabilities;
+}
+
+/**
+ * WARP-904: the provider that serves `model` (e.g. "ollama", "openai"), read
+ * from the same cached model list vision routing already uses. Needed so the
+ * per-turn audit trail records the provider of the model that ACTUALLY ran
+ * when vision auto-routing swaps the user's cloud pick for a local vision
+ * model. `undefined` when the model is unknown (never a guess).
+ */
+export async function getModelProvider(
+  model: string,
+  now: number = Date.now(),
+): Promise<string | undefined> {
+  return (await findModelInfo(model, now))?.provider;
 }
 
 export async function chat(

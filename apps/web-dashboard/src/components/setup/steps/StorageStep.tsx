@@ -215,7 +215,21 @@ export function StorageStep({
   // + pool flows act on whole disks, so two partitions of one disk (e.g. an
   // `nvr` + a `data` filesystem on `sda`) are ONE target — shown once, and
   // wiping it erases both. (WARP-662 / setup honesty.)
-  const physicalDisks = useMemo(() => groupPhysicalDisks(drives), [drives]);
+  //
+  // WARP-857: a pool is created on the WHOLE disk, so when the orchestrator
+  // provides the whole-disk inventory, size each disk from THAT (the true disk
+  // capacity, including unpartitioned space) instead of summing its filesystem
+  // sizes — which under-counts and mis-priced the RAID calculator (and
+  // disagreed with the reclaim list, which already uses the whole-disk size).
+  const physicalDisks = useMemo(() => {
+    const grouped = groupPhysicalDisks(drives);
+    if (bridgeDisks === null) return grouped;
+    const wholeDiskSize = new Map(bridgeDisks.map((d) => [d.name, d.size_bytes]));
+    return grouped.map((p) => {
+      const whole = wholeDiskSize.get(p.disk);
+      return whole && whole > 0 ? { ...p, sizeBytes: whole } : p;
+    });
+  }, [drives, bridgeDisks]);
 
   // WARP-936 — reclaim candidates. When the orchestrator provides the
   // whole-disk inventory we build the list from it (so a present-but-
@@ -253,7 +267,11 @@ export function StorageStep({
     () =>
       calculateRaidOptions(
         poolableDisks.map((p) => ({
-          device: `/dev/${p.disk}`,
+          // WARP-857: mirror handleStartCreate's guard — `p.disk` is normally a
+          // short kernel name ("sda"), but the groupPhysicalDisks fallback can
+          // carry a full /dev/ path for an unrecognized shape; only prefix when
+          // it's missing so we never build "/dev//dev/…".
+          device: p.disk.startsWith("/dev/") ? p.disk : `/dev/${p.disk}`,
           size_bytes: p.sizeBytes,
         })),
       ),

@@ -156,12 +156,14 @@ describe("LLM routes", () => {
     it("degrades to an empty list (not 500) when ai-gateway is unreachable", async () => {
       // Setup wizard / dashboard SWR must not get a 500 when the gateway is
       // down or disabled (dev: AI_GATEWAY_URL=ai-gateway-disabled → ENOTFOUND).
+      // WARP-1284: the fallback now carries `degraded: true` so the wizard
+      // can distinguish "gateway unreachable" from "no model pulled yet".
       mockListModels.mockRejectedValueOnce(
         new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled")
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [] });
+      expect(res.body).toEqual({ models: [], degraded: true });
     });
 
     it("degrades on a timeout (AbortSignal.timeout fired)", async () => {
@@ -170,7 +172,7 @@ describe("LLM routes", () => {
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [] });
+      expect(res.body).toEqual({ models: [], degraded: true });
     });
 
     it("does NOT cache the empty fallback (list self-heals next request)", async () => {
@@ -179,10 +181,72 @@ describe("LLM routes", () => {
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [] });
+      expect(res.body).toEqual({ models: [], degraded: true });
       // The degraded path must not poison the cache — otherwise the empty list
       // would be served for the full TTL even after the gateway recovers.
       expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("flags degraded (and skips the cache) when the gateway reports its ollama provider failed", async () => {
+      // WARP-1284 case 2: gateway reachable but its Ollama provider raised
+      // during listing — router.py used to swallow this into a bare empty
+      // list, indistinguishable from a genuine first-boot model pull.
+      mockListModels.mockResolvedValueOnce({
+        models: [],
+        degraded_providers: ["ollama"],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBe(true);
+      expect(res.body.models).toEqual([]);
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("forwards surviving models alongside the degraded flag (ollama down, cloud up)", async () => {
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "gpt-4o", provider: "openai", name: "GPT-4o", context_window: 128000 },
+        ],
+        degraded_providers: ["ollama"],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBe(true);
+      expect(res.body.models).toHaveLength(1);
+      expect(res.body.models[0].id).toBe("gpt-4o");
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("does not flag degraded for a cloud-only provider failure (response still cached)", async () => {
+      // Only the LOCAL ollama provider drives the wizard's degraded state; a
+      // cloud catalogue hiccup keeps today's behavior (cached, unflagged).
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "llama3:8b", provider: "ollama", name: "llama3:8b", context_window: null },
+        ],
+        degraded_providers: ["anthropic"],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBeUndefined();
+      expect(mockCacheSet).toHaveBeenCalled();
+    });
+
+    it("healthy response with an empty degraded_providers stays cached and unflagged", async () => {
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: null },
+        ],
+        degraded_providers: [],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBeUndefined();
+      expect(mockCacheSet).toHaveBeenCalledWith(
+        "llm:models",
+        expect.objectContaining({ models: expect.any(Array) }),
+        expect.any(Number)
+      );
     });
 
     it("re-throws (500) when a reachable gateway returns a 5xx", async () => {

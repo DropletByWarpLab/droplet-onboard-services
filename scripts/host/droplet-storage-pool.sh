@@ -179,24 +179,46 @@ has_data() {
   return 1
 }
 
+# ancestor_disks <node>: the physical disk(s) at the BOTTOM of <node>'s full
+# dependency chain — one short kernel name per line (every lsblk TYPE=disk leaf).
+# `lsblk -s` walks the WHOLE inverse-dependency tree (partition -> dm/LVM/crypt
+# -> md -> disk), so a root fs stacked on LVM/LUKS/md still resolves to its
+# backing spindle(s); `-r` strips the tree-drawing glyphs so NAME is the bare
+# kernel name. Empty output when lsblk can't resolve the node (caller falls back
+# to the basename). Never returns non-zero (keeps `set -e` callers safe).
+ancestor_disks() {
+  { lsblk -s -rn -o NAME,TYPE "$1" 2>/dev/null || true; } | while read -r _name _type; do
+    [ "$_type" = "disk" ] && printf '%s\n' "$_name"
+  done
+  return 0
+}
+
 is_os_disk() {
   local dev="$1"
   if [ -n "${DROPLET_POOL_TEST_OSDISK:-}" ]; then
     [ "$dev" = "$DROPLET_POOL_TEST_OSDISK" ] && return 0 || return 1
   fi
-  # Real: the disk (or a partition of it) that backs the root or /boot mount
-  # must never be a RAID member. Resolve the backing source of / and /boot and
-  # compare its parent disk to this device's parent disk.
-  local this_disk
-  this_disk="$(lsblk -ndo PKNAME "$dev" 2>/dev/null || true)"
-  [ -n "$this_disk" ] || this_disk="$(basename "$dev")"
+  # Real: refuse any candidate that shares a PHYSICAL disk with the / or /boot
+  # mount. Resolve BOTH the candidate and each OS mount's backing source all the
+  # way down to their TYPE=disk leaves (ancestor_disks walks dm/LVM/crypt/md — a
+  # bare `lsblk -ndo PKNAME` stops one level up at the dm node and silently
+  # missed an LVM/LUKS-stacked root), and refuse if any backing disk is shared.
+  # findmnt reports a btrfs/bind SOURCE as /dev/sdX[/subvol]; strip the [...] so
+  # lsblk can resolve it (WARP-857).
+  local this_disks os_disks d o src
+  this_disks="$(ancestor_disks "$dev")"
+  [ -n "$this_disks" ] || this_disks="$(basename "$dev")"
   for mp in / /boot /boot/efi; do
-    local src parent
     src="$(findmnt -rn -o SOURCE --target "$mp" 2>/dev/null || true)"
     [ -n "$src" ] || continue
-    parent="$(lsblk -ndo PKNAME "$src" 2>/dev/null || true)"
-    [ -n "$parent" ] || parent="$(basename "$src")"
-    [ "$parent" = "$this_disk" ] && return 0
+    src="${src%%[*}"
+    os_disks="$(ancestor_disks "$src")"
+    [ -n "$os_disks" ] || os_disks="$(basename "$src")"
+    for o in $os_disks; do
+      for d in $this_disks; do
+        [ "$o" = "$d" ] && return 0
+      done
+    done
   done
   return 1
 }
@@ -286,6 +308,14 @@ mounts_backed_by() {
   { host_findmnt -rn -o SOURCE,TARGET 2>/dev/null || true; } | {
     while read -r src tgt; do
       [ -n "$src" ] && [ -n "$tgt" ] || continue
+      # WARP-857: findmnt reports a btrfs-subvolume / bind-mount SOURCE as
+      # /dev/sdX1[/subvol]. Strip the [...] suffix so the node-equality and
+      # PKNAME-child comparisons (and the automount-state prune keyed on the bare
+      # device) match — otherwise the bracketed source matches neither the disk
+      # node nor a child and the mount evades teardown, so the wipe hits EBUSY.
+      # This covers BOTH the teardown enumeration and the post-teardown re-check,
+      # which both flow through this function.
+      src="${src%%[*}"
       if [ "$src" = "$node" ]; then
         grp=1
       else
@@ -317,8 +347,18 @@ prune_automount_state() {
     # absolute path and gets rewritten by the path-converting shims between
     # bash and a native python on dev hosts (Git-Bash/MSYS env conversion);
     # a JSON blob never does. Pure json.loads, no eval.
-    STATE_PATH="$AUTOMOUNT_STATE" PRUNE_JSON="{\"device\": \"$src\"}" \
-      python3 - <<'PY' || true
+    # PYNET-009 parity (WARP-857): the automount handler serialises every
+    # mounts.json read-modify-write under flock <STATE_DIR>/.lock
+    # (state_add / state_remove). This managed-teardown prune mutates the SAME
+    # file, so it takes the SAME lock — otherwise a concurrent automount@
+    # instance and this prune interleave and silently drop each other's edits.
+    # Guarded on flock's presence: the appliance (and CI) have util-linux flock
+    # and share the lock; a flock-less dev/test host has no concurrent automount
+    # to race, so it prunes unlocked (still best-effort, as noted above).
+    (
+      command -v flock >/dev/null 2>&1 && flock 9 || true
+      STATE_PATH="$AUTOMOUNT_STATE" PRUNE_JSON="{\"device\": \"$src\"}" \
+        python3 - <<'PY' || true
 import json, os, sys
 path = os.environ["STATE_PATH"]
 try:
@@ -341,6 +381,7 @@ if len(kept) != len(mounts):
         json.dump(state, f, indent=2)
     os.replace(tmp, path)
 PY
+    ) 9>"$(dirname "$AUTOMOUNT_STATE")/.lock"
   fi
   # The now-empty mountpoint dir (mirrors automount's remove handler). rmdir
   # refuses a non-empty dir, so this can never delete data.

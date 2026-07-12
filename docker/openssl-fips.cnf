@@ -11,9 +11,9 @@
 # provider (NIST CMVP cert #4282) is loaded and the FIPS property is the
 # default property string for cryptographic ops. The companion boot
 # self-test (`@droplet/fips-selftest` / `services/_shared/fips_selftest.py`)
-# negative-probes by attempting an MD5 digest at startup and asserts the
-# call raises a FIPS-disabled error; the container won't start if either
-# check fails. WARP-229.
+# probes both directions at startup — an approved digest (SHA-256) must
+# WORK and MD5 must be REFUSED — and the container won't start if either
+# check fails. WARP-229, hardened by WARP-1063.
 
 # OpenSSL config root.
 config_diagnostics = 1
@@ -29,18 +29,38 @@ openssl_conf = openssl_init
 [openssl_init]
 providers = provider_sect
 alg_section = algorithm_sect
+ssl_conf = ssl_configuration_sect
 
 # Activate the FIPS provider as default. The `base` provider stays
 # loaded so encoder/decoder routines (PEM, DER) keep working — these
 # are not cryptographic primitives themselves. The `default` provider
 # is intentionally NOT activated; any algorithm not available in
 # `fips`+`base` will fail rather than silently fall through to non-FIPS.
+#
+# WARP-1209 — [fips_sect] is defined in EXACTLY ONE place: the included
+# /etc/ssl/fipsmodule.cnf that `openssl fipsinstall` generates at image
+# build time. That single section carries the module integrity MAC AND
+# the `activate = 1` flag (emitted by fipsinstall on our Debian bases;
+# docker/fips/install-fips-provider.sh ensures it is present and fails
+# the image build if the section name or the activation flag ever
+# drifts). Do NOT re-declare [fips_sect] here — OpenSSL's NCONF happens
+# to merge duplicate sections today, but that behavior is undocumented,
+# fragile across OpenSSL versions, and confusing to auditors.
+#
+# Fail-closed consequence (WARP-1063): if the fips provider fails to
+# ACTIVATE in a process (unreadable fips.so, wrong OPENSSL_MODULES path,
+# module integrity MAC mismatch), no cipher/digest is fetchable under
+# the `fips=yes` default property — a default TLS client context then
+# comes up with ZERO ciphersuites and construction fails with
+# `LIBRARY_HAS_NO_CIPHERS` (0A0000A1; Prisma surfaces it as P1011).
+# That error therefore means "the validated provider is not active in
+# this process", not "the peer offered bad suites". The boot self-test's
+# positive probe (SHA-256 must work) catches this state at startup with
+# a fips_self_test fips:false line instead of an opaque TLS error.
+# Diagnosis guide: docs/fips.md.
 [provider_sect]
 fips = fips_sect
 base = base_sect
-
-[fips_sect]
-activate = 1
 
 [base_sect]
 activate = 1
@@ -50,3 +70,22 @@ activate = 1
 # means any operation that isn't FIPS-approved is unavailable.
 [algorithm_sect]
 default_properties = fips=yes
+
+# WARP-1063 — pin the TLS posture of every DEFAULT SSL context (libssl
+# applies `system_default` to each new SSL_CTX) to the FIPS-approved
+# suites, explicitly. With the provider active these are exactly the
+# suites the `fips=yes` property filter leaves usable; spelling them out
+# (a) keeps in-stack TLS clients (Prisma/libpq, httpx, redis-py, Node
+# TLS) on the same AES-GCM-only profile the nginx edge offers
+# (docker/nginx/cipher-profile.fips.conf — keep the two lists in
+# lockstep), and (b) makes the posture independent of each runtime's
+# baked-in default cipher list. TLS < 1.2 is out of the FIPS envelope
+# (scripts/test-fips.sh lints it out of source, too). @SECLEVEL=2
+# enforces >= 112-bit security on certs/key sizes (RSA >= 2048).
+[ssl_configuration_sect]
+system_default = tls_system_default_sect
+
+[tls_system_default_sect]
+MinProtocol = TLSv1.2
+CipherString = ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=2
+Ciphersuites = TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256

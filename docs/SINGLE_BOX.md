@@ -162,11 +162,13 @@ installs all three when single-box mode is active:
 | `/etc/avahi/services/droplet.service` | `scripts/host/etc-avahi/services/droplet.service` | mDNS advert (http + https) |
 | `/etc/systemd/system/droplet.service` | **Generated** by `lib/systemd.sh::install_systemd_service` | `docker compose up -d` on boot |
 
-> **Naming:** these host-net artifacts were renamed from the original
-> `droplet-poc-host-net` to `droplet-host-net` (de-`poc` lifecycle-naming
-> sweep — architecture-guard rule 17 / ADR-018), with the systemd unit,
-> `/etc/default/` env, `/etc/droplet-host-net/` config dir, bind paths,
-> and the dnsmasq leasefile all updated in lockstep.
+> **Migrating a pre-rename box (WARP-445):** a box provisioned before the
+> host-net artifacts were de-`poc` renamed (rule 17 / ADR-018) may still run
+> the old `droplet-poc-host-net` unit. A `setup.sh` re-run migrates it
+> automatically: `install_single_box_host_integration` disables + removes the
+> old unit/script/env/config dir, then enables **and starts**
+> `droplet-host-net.service` so br-lan DHCP doesn't stay down until the next
+> reboot. Idempotent — a second re-run is a no-op.
 
 ## Box-side verification checklist — router + AP bring-up (WARP-826)
 

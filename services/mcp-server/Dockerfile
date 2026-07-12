@@ -28,10 +28,20 @@ FROM node:20-bookworm-slim AS builder
 # openssl + ca-certificates at build time so prisma can generate its
 # client engine binaries. `--no-install-recommends` keeps the layer
 # trim; the apt list teardown drops the package index.
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 WORKDIR /app
 
@@ -50,7 +60,11 @@ COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 # Targeted install: mcp-server + its in-repo deps (tools-core + fips-selftest),
 # plus the orchestrator workspace so its `prisma` devDep CLI is available
 # for client generation. Web-dashboard + ai-gateway are still excluded.
-RUN npm ci \
+# WARP-1065: persistent npm download cache — package tarballs survive
+# rebuilds (node_modules itself is still built fresh each time; see the
+# --no-cache note on the apt mount above).
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci \
     -w @droplet/orchestrator \
     -w @droplet/mcp-server \
     -w @droplet/tools-core \
@@ -87,10 +101,20 @@ FROM node:20-bookworm-slim
 
 # Runtime: openssl (FIPS provider) + ca-certificates + wget (healthcheck
 # client used by the Compose `healthcheck` block).
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates wget
 
 # WARP-229: activate OpenSSL 3 FIPS provider. Same rationale as
 # apps/orchestrator/Dockerfile. The boot self-test runs at the top of
@@ -106,26 +130,32 @@ COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 # image build. Shipping the module does NOT activate FIPS at runtime —
 # activation stays opt-in via the container env (WARP-318); the compose
 # default keeps DROPLET_FIPS_REQUIRED=false.
+# WARP-1063: like the orchestrator, this process can host TWO libcrypto
+# instances (Node's bundled OpenSSL + Prisma's system libssl — the
+# mcp-server's Postgres use is lazy but real). Each instance gets its OWN
+# fips.so copy at its OWN baked MODULESDIR; no process-wide
+# OPENSSL_MODULES (see apps/orchestrator/Dockerfile + openssl#25553).
 COPY --from=fips-builder /out/fips.so /tmp/fips.so
 COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
-RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+RUN node_moddir="$(grep -a -o -m1 'MODULESDIR: "[^"]*"' "$(command -v node)" | sed 's/^MODULESDIR: "//; s/"$//')" && \
+    { [ -n "$node_moddir" ] || { echo "FIPS: could not extract node's baked MODULESDIR" >&2; exit 1; }; } && \
+    sh /tmp/install-fips-provider.sh /tmp/fips.so "$node_moddir" && \
     rm -f /tmp/fips.so /tmp/install-fips-provider.sh
 
-# WARP-967: probe the exact combination WARP-318 will activate at
-# runtime — Node's BUNDLED OpenSSL loading the validated module. See
-# apps/orchestrator/Dockerfile for the full rationale (OPENSSL_MODULES
-# because node's baked-in MODULESDIR is not Debian's;
-# `--openssl-shared-config` because node reads the config under its own
-# `nodejs_conf` appname). Flag + env vars are scoped to this RUN;
-# runtime posture is unchanged.
+# WARP-967: probe the exact combination WARP-318 activates at runtime —
+# Node's BUNDLED OpenSSL loading the validated module from its own baked
+# MODULESDIR copy (WARP-1063 — deliberately NO OPENSSL_MODULES; see
+# apps/orchestrator/Dockerfile). `--openssl-shared-config` because node
+# reads the config under its own `nodejs_conf` appname. Flag + env var
+# are scoped to this RUN; runtime posture is unchanged.
 RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf \
-    OPENSSL_MODULES="$(openssl version -m | sed -n 's/^MODULESDIR: "\(.*\)"$/\1/p')" \
     node --openssl-shared-config -e 'const c = require("node:crypto"); \
       if (c.getFips() !== 1) { console.error("FIPS node self-test FAILED: bundled OpenSSL did not enter FIPS mode"); process.exit(1); } \
+      try { c.createHash("sha256").update("probe").digest("hex"); } catch (e) { console.error("FIPS node self-test FAILED: approved digest unavailable — node did not activate its fips.so copy: " + e.message); process.exit(1); } \
       let md5ok = false; \
       try { c.createHash("md5").update("probe").digest("hex"); md5ok = true; } catch {} \
       if (md5ok) { console.error("FIPS node self-test FAILED: MD5 succeeded under the FIPS config"); process.exit(1); } \
-      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active, MD5 rejected");'
+      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active from node MODULESDIR copy, SHA-256 works, MD5 rejected");'
 
 WORKDIR /app
 

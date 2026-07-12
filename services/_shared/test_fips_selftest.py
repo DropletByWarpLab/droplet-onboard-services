@@ -2,9 +2,9 @@
 
 These tests don't assume a FIPS-enabled OpenSSL on the runner (developer
 laptops + GitHub runners don't have FIPS by default). They monkeypatch
-the two probe primitives (`is_fips_enabled`, `md5_should_fail`) so we
-can exercise both the success path and every failure mode against a
-non-FIPS interpreter.
+the probe primitives (`is_fips_enabled`, `sha256_should_work`,
+`md5_should_fail`) so we can exercise both the success path and every
+failure mode against a non-FIPS interpreter.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from fips_selftest import (  # noqa: E402
     assert_fips_at_boot,
     is_fips_enabled,
     md5_should_fail,
+    sha256_should_work,
 )
 
 
@@ -76,6 +77,25 @@ def test_assert_fips_at_boot_raises_when_md5_unexpectedly_works(monkeypatch):
         assert_fips_at_boot("camera-discovery", log=lambda _l: None)
     assert exc_info.value.service == "camera-discovery"
     assert "not enforcing" in exc_info.value.reason
+
+
+def test_assert_fips_at_boot_raises_when_provider_dead(monkeypatch):
+    """WARP-1063: fips=yes pinned but the provider never activated — every
+    digest (not just MD5) is unfetchable. The self-test must fail closed
+    with the provider-not-active diagnosis instead of reporting fips:true
+    and letting TLS clients die later with LIBRARY_HAS_NO_CIPHERS."""
+    monkeypatch.setattr(fips_selftest, "is_fips_enabled", lambda: True)
+    monkeypatch.setattr(
+        fips_selftest,
+        "sha256_should_work",
+        lambda: "[digital envelope routines] unsupported",
+    )
+    with pytest.raises(FipsSelfTestError) as exc_info:
+        assert_fips_at_boot("ai-gateway", log=lambda _l: None)
+    assert exc_info.value.service == "ai-gateway"
+    assert "SHA-256 unavailable" in exc_info.value.reason
+    assert "did not activate" in exc_info.value.reason
+    assert "LIBRARY_HAS_NO_CIPHERS" in exc_info.value.reason
 
 
 def test_assert_fips_at_boot_requires_service_name():
@@ -146,6 +166,35 @@ def test_md5_probe_fails_closed_when_openssl_hashlib_missing(monkeypatch):
     be demonstrated, so the probe must return None → caller fails closed."""
     monkeypatch.setitem(sys.modules, "_hashlib", None)
     assert md5_should_fail() is None
+
+
+# --- sha256_should_work probe (WARP-1063) ------------------------------------
+
+
+def test_sha256_probe_passes_on_working_openssl():
+    # Any healthy OpenSSL (FIPS or not) can do SHA-256.
+    assert sha256_should_work() is None
+
+
+def test_sha256_probe_reports_reason_when_approved_digest_dies(monkeypatch):
+    """Simulates the dead-provider state: under the fips=yes property pin a
+    failed provider activation makes even approved digests unfetchable."""
+    import _hashlib
+
+    def _reject(name, *args, **kwargs):
+        raise ValueError("[digital envelope routines] unsupported")
+
+    monkeypatch.setattr(_hashlib, "new", _reject)
+    err = sha256_should_work()
+    assert err is not None
+    assert "unsupported" in err
+
+
+def test_sha256_probe_fails_closed_when_openssl_hashlib_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "_hashlib", None)
+    err = sha256_should_work()
+    assert err is not None
+    assert "_hashlib" in err
 
 
 # --- gated_assert_fips_at_boot ---------------------------------------------

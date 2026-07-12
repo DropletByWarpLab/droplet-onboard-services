@@ -318,9 +318,14 @@ export async function archiveDepartment(
   } catch (err) {
     const message = truncateError(err);
     logger.error({ err, id }, "archiveDepartment failed");
+    // WARP-1257: `archive_failed` (NOT the generic `failed`) so the reconciler
+    // retries this row down the ARCHIVE path on its next sweep. A transient NC
+    // error partway through an archive must never be re-provisioned back to
+    // active — that would silently un-archive the department and restore its
+    // rw/ro group access. Intent is carried in the state, never re-derived.
     await prisma.department.update({
       where: { id },
-      data: { state: "failed", provisionError: message },
+      data: { state: "archive_failed", provisionError: message },
     });
     await recordActivity({
       kind: "system",

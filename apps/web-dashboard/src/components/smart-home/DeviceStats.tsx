@@ -70,13 +70,16 @@ export function DeviceStats({
         return (
           <div key={s.label} className="card">
             <div className="flex items-center gap-2 mb-2">
-              <Icon size={16} className="text-label-tertiary" />
-              <span className="type-footnote text-label-tertiary font-medium uppercase tracking-wider">
+              <Icon size={16} style={{ color: "var(--text-muted)" }} />
+              <span
+                className="type-footnote font-medium uppercase tracking-wider"
+                style={{ color: "var(--text-muted)" }}
+              >
                 {s.label}
               </span>
             </div>
-            <p className="type-title-2 text-label-primary">{s.value}</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">{s.sub}</p>
+            <p className="type-title-2" style={{ color: "var(--text)" }}>{s.value}</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>{s.sub}</p>
           </div>
         );
       })}

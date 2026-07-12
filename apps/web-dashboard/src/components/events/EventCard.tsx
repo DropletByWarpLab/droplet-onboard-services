@@ -40,9 +40,10 @@ export function EventCard({ event, onClick }: Props) {
   return (
     <button
       onClick={() => onClick(event)}
-      className="dp-card overflow-hidden text-left w-full group transition-all hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="card hover overflow-hidden text-left w-full group transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+      style={{ padding: 0 }}
     >
-      <div className="relative aspect-video bg-surface-secondary overflow-hidden">
+      <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
         <img
           src={event.thumbnail}
           alt={`${event.label} on ${cameraDisplay}`}
@@ -83,35 +84,32 @@ export function EventCard({ event, onClick }: Props) {
 
       <div className="p-3">
         <div className="flex items-center justify-between">
-          <span className="type-subheadline text-label-primary font-medium capitalize truncate">
+          <span className="type-subheadline font-medium capitalize truncate text-[color:var(--text)]">
             {event.label}
             {event.subLabel && (
-              <span className="text-label-tertiary font-normal ml-1.5 normal-case">
+              <span className="font-normal ml-1.5 normal-case text-[color:var(--text-muted)]">
                 · {event.subLabel}
               </span>
             )}
           </span>
         </div>
         <div className="flex items-center justify-between mt-1">
-          <span className="type-caption-1 text-label-tertiary truncate">
+          <span className="type-caption-1 font-mono truncate text-[color:var(--text-muted)]">
             {cameraDisplay}
           </span>
-          <span className="type-caption-1 text-label-tertiary flex-shrink-0 ml-2">
+          <span className="type-caption-1 font-mono flex-shrink-0 ml-2 text-[color:var(--text-muted)]">
             {fmtRel(event.startTime)}
           </span>
         </div>
         {event.zones.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1.5">
             {event.zones.slice(0, 3).map((zone) => (
-              <span
-                key={zone}
-                className="type-caption-2 px-1.5 py-0.5 rounded bg-surface-secondary text-label-secondary"
-              >
+              <span key={zone} className="badge muted">
                 {zone}
               </span>
             ))}
             {event.zones.length > 3 && (
-              <span className="type-caption-2 text-label-tertiary">
+              <span className="type-caption-2 text-[color:var(--text-muted)]">
                 +{event.zones.length - 3}
               </span>
             )}

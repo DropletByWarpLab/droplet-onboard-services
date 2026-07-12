@@ -176,13 +176,13 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
       {/* Body padding + scroll come from the <Dialog> primitive (WARP-1153). */}
       <div>
         <div className="flex items-center justify-between mb-4">
-          <h2 id={headingId} className="type-title-3 text-label-primary">
+          <h2 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
             {editing ? "Edit event" : "New event"}
           </h2>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm p-1"
+            className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm p-1"
           >
             <X size={18} />
           </button>
@@ -197,18 +197,25 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
 
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1">
-            <span className="type-caption-1 text-label-secondary">Title</span>
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Title</span>
             <input
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               disabled={externallySynced}
-              className="dp-input"
+              className="outline-none focus:border-[var(--brand)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+                padding: "8px 12px",
+              }}
               maxLength={500}
             />
           </label>
 
-          <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+          <label className="flex items-center gap-2 type-subheadline" style={{ color: "var(--text-muted)" }}>
             <input
               type="checkbox"
               checked={allDay}
@@ -220,7 +227,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="flex flex-col gap-1">
-              <span className="type-caption-1 text-label-secondary">Starts</span>
+              <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Starts</span>
               {/* Calendar UX clarity (Samantha QA #bugs): date + 15-minute time
                   dropdown. Same YYYY-MM-DDTHH:mm local-input contract as the
                   former datetime-local, so handleStartChange's duration-slide
@@ -233,7 +240,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               />
             </div>
             <div className="flex flex-col gap-1">
-              <span className="type-caption-1 text-label-secondary">Ends</span>
+              <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Ends</span>
               <DateTimePicker
                 label="Ends"
                 value={endsAt}
@@ -244,7 +251,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
           </div>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption-1 text-label-secondary">Location</span>
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Location</span>
             {/* WARP-307: fuzzy autocomplete via the orchestrator's
                 Nominatim proxy. Falls back to plain free-text entry
                 whenever the proxy returns no suggestions (offline,
@@ -253,19 +260,26 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               value={location}
               onChange={setLocation}
               disabled={externallySynced}
-              className="dp-input"
+              className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-[var(--radius-input)] text-[color:var(--text)] outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)] px-3 py-2"
               maxLength={500}
               placeholder="Location"
             />
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption-1 text-label-secondary">Notes</span>
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Notes</span>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               disabled={externallySynced}
-              className="dp-input min-h-[80px]"
+              className="min-h-[80px] outline-none focus:border-[var(--brand)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+                padding: "8px 12px",
+              }}
               maxLength={10000}
             />
           </label>
@@ -276,7 +290,8 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
             <button
               onClick={handleDelete}
               disabled={saving}
-              className="dp-btn-secondary text-system-red"
+              className="btn ghost"
+              style={{ color: "var(--danger)" }}
             >
               Delete
             </button>
@@ -284,13 +299,13 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
             <span />
           )}
           <div className="flex gap-2">
-            <button onClick={onClose} disabled={saving} className="dp-btn-secondary">
+            <button onClick={onClose} disabled={saving} className="btn ghost">
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={saving || externallySynced}
-              className="dp-btn-primary"
+              className="btn primary"
             >
               {saving ? "Saving…" : editing ? "Save" : "Create"}
             </button>

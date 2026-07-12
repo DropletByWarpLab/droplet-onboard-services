@@ -36,6 +36,10 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // departments.ts (registered by createApp) derefs this at module scope to
+    // build RESERVED_NAMES; the real config zod-defaults it, so the mock must
+    // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     FRIGATE_URL: "http://frigate:5000",
     DOCS_INTERNAL_URL: "http://docserver.test",
     DOCS_ENABLED: true,

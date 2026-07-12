@@ -26,51 +26,67 @@ export function CameraEvents({ events }: CameraEventsProps) {
 
   return (
     <div className="space-y-3">
-      <h2 className="type-headline text-label-primary">Recent Detections</h2>
-      <div className="dp-card divide-y divide-separator">
-        {events.map((event) => {
-          const Icon = LABEL_ICONS[event.label] || Clock;
-          return (
-            <div key={event.id} className="flex items-center gap-3 p-3">
-              {/* Thumbnail — only render if URL starts with our safe API prefix */}
-              <div className="w-16 h-12 rounded bg-surface-secondary overflow-hidden flex-shrink-0">
-                {event.thumbnail && event.thumbnail.startsWith("/api/") ? (
-                  <img
-                    src={event.thumbnail}
-                    alt={event.label}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center">
-                    <Icon size={16} className="text-label-quaternary" />
-                  </div>
-                )}
-              </div>
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <Icon size={14} className="text-accent flex-shrink-0" />
-                  <span className="type-subheadline text-label-primary font-medium capitalize">
-                    {event.label}
-                  </span>
-                  <span className="type-caption-2 text-label-quaternary">
-                    {Math.round(event.score * 100)}%
-                  </span>
+      <h2 className="type-headline" style={{ color: "var(--text)" }}>
+        Recent Detections
+      </h2>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="rows">
+          {events.map((event) => {
+            const Icon = LABEL_ICONS[event.label] || Clock;
+            return (
+              <div key={event.id} className="lrow">
+                {/* Thumbnail — only render if URL starts with our safe API prefix */}
+                <div
+                  className="w-16 h-12 rounded overflow-hidden flex-shrink-0"
+                  style={{ background: "var(--card-inner)" }}
+                >
+                  {event.thumbnail && event.thumbnail.startsWith("/api/") ? (
+                    <img
+                      src={event.thumbnail}
+                      alt={event.label}
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Icon size={16} style={{ color: "var(--text-faint)" }} />
+                    </div>
+                  )}
                 </div>
-                <p className="type-caption-1 text-label-tertiary truncate mt-0.5">
-                  {event.camera.replace(/_/g, " ")}
-                </p>
-              </div>
 
-              {/* Time */}
-              <span className="type-caption-1 text-label-tertiary flex-shrink-0">
-                {formatTimeAgo(event.startTime)}
-              </span>
-            </div>
-          );
-        })}
+                {/* Info */}
+                <div className="rt">
+                  <div className="flex items-center gap-2">
+                    <Icon size={14} className="flex-shrink-0" style={{ color: "var(--brand)" }} />
+                    <span
+                      className="type-subheadline font-medium capitalize"
+                      style={{ color: "var(--text)" }}
+                    >
+                      {event.label}
+                    </span>
+                    <span className="type-caption-2" style={{ color: "var(--text-faint)" }}>
+                      {Math.round(event.score * 100)}%
+                    </span>
+                  </div>
+                  <p
+                    className="type-caption-1 truncate mt-0.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {event.camera.replace(/_/g, " ")}
+                  </p>
+                </div>
+
+                {/* Time */}
+                <span
+                  className="type-caption-1 flex-shrink-0"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {formatTimeAgo(event.startTime)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

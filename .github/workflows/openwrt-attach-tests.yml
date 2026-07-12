@@ -12,6 +12,19 @@ on:
     paths:
       - "scripts/host/usr-local-sbin/droplet-openwrt-attach"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      # WARP-843: every file the path-unit re-apply wiring spans — the static
+      # guard (tests/openwrt-attach-path-unit.test.sh) pins invariants across
+      # all of them, so an edit to any one must re-run it.
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach.path"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach-reapply.service"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach.service"
+      - "scripts/host/droplet-set-hostapd.sh"
+      - "scripts/host/droplet-set-guest-wifi.sh"
+      - "services/oled-display/droplet-device-bridge.service"
+      - "services/oled-display/50-droplet-device-bridge.rules"
+      - "scripts/lib/single-box.sh"
+      - "scripts/install-device-bridge.sh"
+      - "scripts/factory-reset.sh"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
       - ".github/workflows/openwrt-attach-tests.yml"
@@ -20,6 +33,17 @@ on:
     paths:
       - "scripts/host/usr-local-sbin/droplet-openwrt-attach"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      # WARP-843: see the pull_request paths note above.
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach.path"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach-reapply.service"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-attach.service"
+      - "scripts/host/droplet-set-hostapd.sh"
+      - "scripts/host/droplet-set-guest-wifi.sh"
+      - "services/oled-display/droplet-device-bridge.service"
+      - "services/oled-display/50-droplet-device-bridge.rules"
+      - "scripts/lib/single-box.sh"
+      - "scripts/install-device-bridge.sh"
+      - "scripts/factory-reset.sh"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
       - ".github/workflows/openwrt-attach-tests.yml"

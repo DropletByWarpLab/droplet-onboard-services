@@ -11,6 +11,13 @@
  *
  * Presentational: the page owns the SWR hooks and passes data + callbacks in,
  * which keeps this trivially testable and free of fetch concerns.
+ *
+ * WARP-1088 — indigo shell: the search box onto the shared `.search` idiom,
+ * the Inbox/Triaged/From Droplet filter group onto `.pills` (segmented
+ * control — same aria-pressed/role="group" shape as the calendar view and
+ * report-range toggles), rows onto `.lrow`, and the "Drafted by Droplet"
+ * marker onto `.badge info` (droplet-shell.css / indigo-tokens.css). Pure
+ * recolor/reclass — no behavior change.
  */
 
 import { useMemo, useState } from "react";
@@ -91,40 +98,37 @@ export function EmailList({
   const noMatches = q.length > 0 && visibleThreads.length === 0;
 
   return (
-    <div className="flex flex-col h-full min-h-0 border-r border-separator bg-surface-primary">
+    <div
+      className="flex flex-col h-full min-h-0"
+      style={{ borderRight: "1px solid var(--border)", background: "var(--surface)" }}
+    >
       {/* Header — account summary, search, filter chips. */}
-      <div className="shrink-0 px-4 pt-4 pb-3 space-y-3 border-b border-separator">
+      <div
+        className="shrink-0 px-4 pt-4 pb-3 space-y-3"
+        style={{ borderBottom: "1px solid var(--border)" }}
+      >
         <div>
-          <h1 className="type-headline text-label-primary">Email</h1>
-          <p className="type-caption-1 text-label-tertiary mt-0.5">
+          <h1 className="type-headline" style={{ color: "var(--text)" }}>Email</h1>
+          <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
             {accountCount} {accountWord}
             {sync}
           </p>
         </div>
 
-        <div className="relative">
-          <Search
-            size={14}
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
-            aria-hidden
-          />
+        <label className="search">
+          <span style={{ display: "flex", flexShrink: 0, color: "var(--text-muted)" }}>
+            <Search size={14} aria-hidden />
+          </span>
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={searchPlaceholder}
             aria-label={searchPlaceholder}
-            className="
-              w-full h-9 pl-8 pr-3 rounded-lg
-              bg-surface-secondary border border-separator
-              type-footnote text-label-primary placeholder:text-label-tertiary
-              focus:outline-none focus:ring-2 focus:ring-accent/40
-              transition-colors duration-200 ease-smooth
-            "
           />
-        </div>
+        </label>
 
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter messages">
+        <div className="pills" role="group" aria-label="Filter messages">
           {FILTERS.map(({ slug, label }) => {
             const active = slug === filter;
             return (
@@ -133,16 +137,7 @@ export function EmailList({
                 type="button"
                 onClick={() => onFilterChange(slug)}
                 aria-pressed={active}
-                className={`
-                  inline-flex items-center h-7 px-2.5 rounded-full border
-                  type-caption-1 transition-colors duration-200 ease-smooth
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                  ${
-                    active
-                      ? "bg-accent-subtle border-accent/30 text-accent font-medium"
-                      : "bg-surface-secondary border-separator text-label-secondary hover:text-label-primary"
-                  }
-                `}
+                className={active ? "active" : ""}
               >
                 {label}
               </button>
@@ -158,24 +153,21 @@ export function EmailList({
             {Array.from({ length: 6 }).map((_, i) => (
               <li
                 key={i}
-                className="h-16 rounded-lg bg-surface-secondary animate-pulse"
+                className="h-16 rounded-lg animate-pulse"
+                style={{ background: "var(--inset)" }}
               />
             ))}
           </ul>
         ) : error ? (
           <div className="p-6 text-center" role="alert">
-            <p className="type-subheadline text-label-primary">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
               We couldn&rsquo;t load your messages
             </p>
-            <p className="type-footnote text-label-tertiary mt-1">
+            <p className="type-footnote mt-1" style={{ color: "var(--text-muted)" }}>
               This usually clears up on its own.
             </p>
             {onRetry && (
-              <button
-                type="button"
-                onClick={onRetry}
-                className="dp-btn-secondary text-sm mt-3"
-              >
+              <button type="button" onClick={onRetry} className="btn sm mt-3">
                 Try again
               </button>
             )}
@@ -184,13 +176,17 @@ export function EmailList({
           <div className="p-8 text-center">
             <Inbox
               size={28}
-              className="mx-auto text-label-quaternary mb-2"
+              className="mx-auto mb-2"
+              style={{ color: "var(--text-faint)" }}
               aria-hidden
             />
-            <p className="type-subheadline text-label-primary">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
               No messages here
             </p>
-            <p className="type-footnote text-label-tertiary mt-1 max-w-[220px] mx-auto">
+            <p
+              className="type-footnote mt-1 max-w-[220px] mx-auto"
+              style={{ color: "var(--text-muted)" }}
+            >
               {filter === "droplet"
                 ? "Drafts Droplet writes for you will show up here."
                 : "Nothing in this view right now."}
@@ -200,13 +196,17 @@ export function EmailList({
           <div className="p-8 text-center">
             <Search
               size={26}
-              className="mx-auto text-label-quaternary mb-2"
+              className="mx-auto mb-2"
+              style={{ color: "var(--text-faint)" }}
               aria-hidden
             />
-            <p className="type-subheadline text-label-primary">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
               No matches
             </p>
-            <p className="type-footnote text-label-tertiary mt-1 max-w-[220px] mx-auto">
+            <p
+              className="type-footnote mt-1 max-w-[220px] mx-auto"
+              style={{ color: "var(--text-muted)" }}
+            >
               No threads match &ldquo;{query.trim()}&rdquo; in this view.
             </p>
           </div>
@@ -249,56 +249,56 @@ function EmailRow({
       type="button"
       onClick={onSelect}
       aria-current={active ? "true" : undefined}
-      className={`
-        group w-full text-left px-4 py-2.5 flex gap-2.5 min-h-[44px]
-        border-l-2 transition-colors duration-200 ease-smooth
-        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40
-        ${
-          active
-            ? "bg-accent-subtle border-l-accent"
-            : "border-l-transparent hover:bg-surface-secondary"
-        }
-      `}
+      className={`lrow w-full text-left border-l-2 transition-colors duration-200 ease-smooth ${
+        active ? "" : "hover:bg-[var(--hover)]"
+      }`}
+      style={{
+        borderLeftColor: active ? "var(--brand)" : "transparent",
+        background: active ? "var(--brand-subtle)" : undefined,
+      }}
     >
       {/* Unread dot rail — fixed width so subjects stay aligned read or unread. */}
-      <span className="shrink-0 w-2 pt-1.5" aria-hidden>
+      <span className="shrink-0 w-2" aria-hidden>
         {unread && (
-          <span className="block w-2 h-2 rounded-full bg-accent" />
+          <span
+            className="block w-2 h-2 rounded-full"
+            style={{ background: "var(--brand)" }}
+          />
         )}
       </span>
 
-      <span className="flex-1 min-w-0">
+      <span className="rt">
         <span className="flex items-baseline gap-2">
           <span
-            className={`type-footnote truncate ${
-              unread
-                ? "text-label-primary font-semibold"
-                : "text-label-secondary"
-            }`}
+            className="truncate"
+            style={{
+              fontSize: "13.5px",
+              fontWeight: unread ? 600 : 500,
+              color: unread ? "var(--text)" : "var(--text-muted)",
+            }}
           >
             {sender}
           </span>
-          <span className="ml-auto shrink-0 type-caption-2 text-label-tertiary tabular-nums">
+          <span
+            className="rmeta mono ml-auto shrink-0 tabular-nums"
+          >
             {formatRowTime(thread.lastMessageAt)}
           </span>
         </span>
 
         <span
-          className={`block truncate type-subheadline mt-0.5 ${
-            unread ? "text-label-primary" : "text-label-secondary"
-          }`}
+          className="block truncate type-subheadline mt-0.5"
+          style={{ color: unread ? "var(--text)" : "var(--text-muted)" }}
         >
           {thread.subject || "(no subject)"}
         </span>
 
         {thread.snippet && (
-          <span className="block truncate type-caption-1 text-label-tertiary mt-0.5">
-            {thread.snippet}
-          </span>
+          <span className="sub truncate">{thread.snippet}</span>
         )}
 
         {thread.draftedByDroplet && (
-          <span className="inline-flex items-center gap-1 mt-1.5 h-5 px-1.5 rounded-full bg-accent-subtle type-caption-2 font-medium text-accent">
+          <span className="badge info" style={{ marginTop: 6 }}>
             <Sparkles size={10} aria-hidden />
             Drafted by Droplet
           </span>

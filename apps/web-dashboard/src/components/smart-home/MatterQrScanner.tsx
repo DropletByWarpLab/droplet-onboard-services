@@ -258,7 +258,10 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
   return (
     <div className="space-y-4">
       {/* Camera viewport — black box that lights up once permission grants */}
-      <div className="relative aspect-square bg-fill-quaternary rounded-xl overflow-hidden border border-separator-default">
+      <div
+        className="relative aspect-square rounded-xl overflow-hidden"
+        style={{ background: "var(--inset)", border: "1px solid var(--card-bd)" }}
+      >
         <video
           ref={videoRef}
           className="w-full h-full object-cover"
@@ -271,41 +274,43 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
         {/* Viewfinder overlay (corner brackets) only visible while scanning */}
         {status === "scanning" && (
           <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            <div className="w-3/5 aspect-square border-2 border-system-blue/60 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+            <div
+              className="w-3/5 aspect-square border-2 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+              style={{ borderColor: "color-mix(in srgb, var(--brand) 60%, transparent)" }}
+            />
           </div>
         )}
 
         {/* Status overlays for non-scanning states */}
         {status === "idle" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-label-secondary">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
             <Camera size={32} aria-hidden="true" />
             <p className="type-subheadline">Tap to scan a Matter device QR code</p>
-            <button
-              onClick={startCamera}
-              disabled={disabled}
-              className="px-4 py-2 bg-system-blue text-white rounded-lg type-callout font-medium hover:bg-system-blue/90 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
+            <button onClick={startCamera} disabled={disabled} className="btn primary">
               Start camera
             </button>
           </div>
         )}
 
         {status === "starting" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-label-secondary">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[var(--text-muted)]">
             <Loader2 size={28} className="animate-spin" aria-hidden="true" />
             <p className="type-footnote">Waiting for camera permission…</p>
           </div>
         )}
 
         {(status === "denied" || status === "no-camera" || status === "error") && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-label-secondary px-6 text-center">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[var(--text-muted)] px-6 text-center">
             <CameraOff size={32} aria-hidden="true" />
             <p className="type-footnote">{errorMsg}</p>
           </div>
         )}
 
         {status === "decoded" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-system-green bg-fill-quaternary/90">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-system-green"
+            style={{ background: "var(--scrim)" }}
+          >
             <Loader2 size={28} className="animate-spin" aria-hidden="true" />
             <p className="type-callout font-medium">QR detected — commissioning…</p>
           </div>
@@ -317,12 +322,12 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
       <div className="space-y-2">
         <label
           htmlFor="matter-manual-code"
-          className="flex items-center gap-2 type-subheadline font-medium text-label-primary"
+          className="flex items-center gap-2 type-subheadline font-medium text-[var(--text)]"
         >
           <KeyRound size={14} aria-hidden="true" />
           Or enter the pairing code
         </label>
-        <p className="type-footnote text-label-secondary">
+        <p className="type-footnote text-[var(--text-muted)]">
           Look on the device, packaging, or quick-start guide. The code is 11 or
           21 digits, sometimes shown with hyphens (e.g. 3497-0112-3320).
         </p>
@@ -339,13 +344,13 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
               if (e.key === "Enter") submitManual();
             }}
             placeholder="3497-0112-3320"
-            className="flex-1 px-3 py-2 bg-fill-tertiary border border-separator-default rounded-lg type-callout font-mono placeholder:text-label-tertiary focus:outline-none focus:border-system-blue"
+            className="flex-1 px-3 py-2 rounded-lg type-callout font-mono outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
             aria-describedby="matter-manual-help"
           />
           <button
             onClick={submitManual}
             disabled={disabled || !manualCode.trim()}
-            className="px-4 py-2 bg-system-blue text-white rounded-lg type-callout font-medium hover:bg-system-blue/90 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="btn primary"
           >
             Commission
           </button>
@@ -359,7 +364,7 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
         {errorMsg && (status === "denied" || status === "no-camera" || status === "scanning" || status === "idle") && (
           <div
             id="matter-manual-help"
-            className="flex items-start gap-2 type-footnote text-label-tertiary"
+            className="flex items-start gap-2 type-footnote text-[var(--text-muted)]"
           >
             <AlertCircle size={12} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
             <span>{errorMsg}</span>

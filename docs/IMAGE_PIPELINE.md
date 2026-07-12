@@ -160,8 +160,11 @@ Privilege follows the same window: the seed's `NOPASSWD` drop-in
 (`/etc/sudoers.d/droplet-firstboot`) exists only so the unattended
 `droplet-firstboot` unit can run `setup.sh`, and the unit's `ExecStartPost`
 deletes it once provisioning succeeds. After that, `droplet`'s sudo is
-password-gated; unattended privileged paths use the device-bridge's
-polkit-routed root units, never sudo. `tests/image-pipeline.test.sh` §(e)
+password-gated; unattended privileged paths use root systemd units the bridge
+cannot escalate into — the storage-pool apply via its narrow polkit start
+grant, the Wi-Fi writes via the `droplet-openwrt-attach.path` watcher
+(WARP-843: the bridge only rewrites its droplet-owned env file; root
+re-applies) — never sudo. `tests/image-pipeline.test.sh` §(e)
 asserts the grant is written, removed after the `.firstboot-done` marker, and
 that no other `NOPASSWD` grant sneaks into the seed.
 
