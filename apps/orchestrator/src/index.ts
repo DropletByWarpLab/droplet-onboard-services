@@ -35,6 +35,10 @@ import { runBusinessReviewCheck } from "./services/business-review-nudge.service
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
+import {
+  reconcileDepartments,
+  initReconcileKick,
+} from "./services/department-reconciler.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
@@ -633,6 +637,35 @@ async function main() {
       }
     },
     { lockKey: "droplet:guest-expiry-sweep" },
+  );
+
+  // WARP-1257: department/team NC provisioning reconciler (ADR-029 T5).
+  // Binds the debounced kickReconcile() post-mutation trigger the future
+  // department/membership routes (T6/T7) call after their write commits,
+  // then boot-runs one tick immediately (fire-and-forget, so a stuck NC
+  // instance never blocks orchestrator startup) followed by a recurring
+  // tick every 5 minutes. Converges Prisma-desired department/membership
+  // state toward Nextcloud, overwriting out-of-band drift and
+  // re-discovering groupfolder ids after an NC reinstall.
+  initReconcileKick(prisma);
+  void reconcileDepartments(prisma).catch((err) => {
+    logger.warn({ err }, "department-reconciler: boot tick failed (5-min cron will retry)");
+  });
+  cronRuntime.scheduleInterval(
+    5 * 60_000,
+    async () => {
+      const result = await reconcileDepartments(prisma);
+      if (
+        result.departmentsConverged > 0 ||
+        result.departmentsStillFailed > 0 ||
+        result.membershipsSynced > 0 ||
+        result.membershipsFailed > 0 ||
+        result.membershipsRemoved > 0
+      ) {
+        logger.info(result, "department-reconciler tick complete");
+      }
+    },
+    { lockKey: "droplet:department-reconciler" },
   );
 
   // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge
