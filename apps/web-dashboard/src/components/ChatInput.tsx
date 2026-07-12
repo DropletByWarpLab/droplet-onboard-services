@@ -46,6 +46,16 @@ interface ChatInputProps {
    */
   slashTools?: ToolCatalogEntry[];
   onToolCommand?: (tool: ToolCatalogEntry) => void;
+  /**
+   * WARP-904 — per-turn provider/model quick-switch. A compact affordance
+   * (the `ModelSelector` pill, optionally paired with the "local ·
+   * on-device" tag) rendered at the START of the composer's icon row —
+   * next to the input the user is about to send from, rather than up in
+   * the page header where it's easy to miss on a long thread. Omitted
+   * entirely (e.g. the home hero composer) renders the row exactly as
+   * it did before this prop existed.
+   */
+  modelSelector?: React.ReactNode;
 }
 
 /**
@@ -76,6 +86,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   onStop,
   slashTools,
   onToolCommand,
+  modelSelector,
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -420,6 +431,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         rows={1}
       />
       <div className="chat-crow">
+        {modelSelector}
         {dropEnabled ? (
           <>
             <input

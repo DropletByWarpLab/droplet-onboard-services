@@ -176,6 +176,12 @@ class ModelInfo(BaseModel):
 
 class ModelsResponse(BaseModel):
     models: list[ModelInfo]
+    # Additive (WARP-1284, defaults [] for back-compat): providers whose
+    # list_models() raised during the listing fan-out. Lets the orchestrator
+    # (and from there the setup wizard) distinguish "Ollama is down" from
+    # "no model pulled yet" — both used to arrive as a bare empty list.
+    # Consumers that only read `models` are unaffected.
+    degraded_providers: list[str] = Field(default_factory=list)
 
 
 # --- Keys ---

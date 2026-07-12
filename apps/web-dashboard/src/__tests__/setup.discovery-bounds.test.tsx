@@ -12,6 +12,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import React from "react";
 
+// WARP-1281: these polling-bounds walks drive 305-615 one-second
+// fake-timer iterations through the full setup page, which was already
+// borderline against the default 5s testTimeout under full-suite load
+// (pre-existing flake on main), and the discovery browse chain roughly
+// doubles the per-iteration work. File-scoped bound only — a hang guard,
+// not a performance target; the global config stays untouched.
+vi.setConfig({ testTimeout: 60_000 });
+
 vi.mock("framer-motion", async () => {
   const actual = await vi.importActual<typeof import("framer-motion")>(
     "framer-motion",
@@ -76,6 +84,9 @@ vi.mock("@/lib/api", () => ({
   // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
   // reads) the saved name; null = the pre-existing no-name baseline.
   fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
+  // WARP-817 — WifiStep reads the host topology on mount to decide its
+  // default disclosure state; null (best-effort) leaves the collapsed default.
+  getNetworkTopology: vi.fn(async () => null),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they
@@ -96,6 +107,12 @@ vi.mock("@/lib/api", () => ({
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
+  // WARP-1281: the discovery step now also runs the commissionable-device
+  // browse while scanning. Stub it healthy-and-empty — with the module
+  // mocked, a missing export would make every browse throw, which (by
+  // design) trips the service-unavailable state and hides the scanning
+  // caption + downshift hint these polling-bounds tests assert on.
+  discoverMatterDevices: vi.fn(async () => ({ devices: [], count: 0 })),
 }));
 
 import SetupPage from "@/app/setup/page";

@@ -10,13 +10,19 @@
 #
 # Sibling of droplet-set-hostapd.sh (WARP-808): that script writes the PRIMARY
 # (home) AP's SSID/PSK; this one writes the optional, isolated GUEST network.
-# Both upsert keys in the SAME droplet-openwrt-attach env file and restart that
-# one service — droplet-openwrt-attach regenerates /etc/hostapd.conf (now with a
-# second `bss=` stanza for the guest SSID), stands up the guest L3 subnet
+# Both upsert keys in the SAME creds file and re-apply via that one service —
+# droplet-openwrt-attach regenerates /etc/hostapd.conf (now with a second
+# `bss=` stanza for the guest SSID), stands up the guest L3 subnet
 # (192.168.30.0/24) + a dedicated dnsmasq-guest + an isolated `droplet_guest`
-# firewall zone, and respawns hostapd. The bridge sandbox can't touch hostapd /
-# systemctl beyond that one polkit-granted unit restart, so this is the whole
-# privileged surface.
+# firewall zone, and respawns hostapd. Privilege model (WARP-843, identical to
+# droplet-set-hostapd.sh): a root/operator invocation restarts the attach
+# service directly; inside the device-bridge sandbox (User=droplet +
+# NoNewPrivileges) the script writes the bridge's OWN droplet-owned
+# StateDirectory creds file (/var/lib/droplet-bridge/openwrt-attach.env — never
+# root-owned /etc) and the root droplet-openwrt-attach.path unit re-applies.
+# That creds file is droplet-writable, so root consumes it ONLY via the
+# whitelisted DROPLET_GUEST_* / DROPLET_AP_* parse, never as an EnvironmentFile.
+# The bridge holds NO restart grant of any kind.
 #
 # Invoked ONLY by the device-bridge's auth-gated POST/DELETE /openwrt/wifi/guest,
 # which the orchestrator reaches ONLY after an owner/admin session (+ the Tier-2
@@ -49,6 +55,8 @@
 #                                DROPLET_HOSTAPD_ENV_FILE so the guest + home AP
 #                                writes land in the SAME attach env file) —
 #                                default /etc/default/droplet-openwrt-attach.
+#   DROPLET_GUEST_NO_RESTART=1   force the unprivileged no-restart path
+#                                (what the sandboxed bridge gets from EUID!=0)
 #
 # Output: a single JSON object on stdout on success; a human refusal on stderr
 # + a non-zero exit on any validation failure.
@@ -58,11 +66,20 @@ set -euo pipefail
 PARAMS_JSON="${1:-}"
 
 DRY_RUN="${DROPLET_GUEST_DRY_RUN:-}"
-# Write to the SAME attach env file the home-AP write uses, so a single restart
-# applies both. Prefer an explicit guest override, then the hostapd env file the
+# Write to the SAME attach env file the home-AP write uses, so a single re-apply
+# covers both. Prefer an explicit guest override, then the hostapd env file the
 # bridge already pins, then the root default.
 ENV_FILE="${DROPLET_GUEST_ENV_FILE:-${DROPLET_HOSTAPD_ENV_FILE:-/etc/default/droplet-openwrt-attach}}"
 ATTACH_SERVICE="${DROPLET_GUEST_SERVICE:-droplet-openwrt-attach.service}"
+ATTACH_PATH_UNIT="droplet-openwrt-attach.path"
+
+# WARP-843: same privilege split as droplet-set-hostapd.sh — the sandboxed
+# bridge (EUID != 0) writes the env file and defers the re-apply to the
+# root-owned droplet-openwrt-attach.path unit; root restarts directly.
+RESTART_MODE="direct"
+if [ -n "${DROPLET_GUEST_NO_RESTART:-}" ] || [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  RESTART_MODE="path-unit"
+fi
 
 # SSID/PSK length bounds — keep in lock-step with droplet-set-hostapd.sh,
 # services/routing/schemas.py, and the GuestWifiCard client-side check.
@@ -157,28 +174,68 @@ PY
 }
 
 write_env() {
-  # write_env <enabled> <ssid> <psk> — atomic 0600 replace (the temp file is
-  # created 0600 so the PSK is never briefly group/world-readable).
+  # write_env <enabled> <ssid> <psk> — 0600 write via one of two strategies
+  # (mirrors droplet-set-hostapd.sh, WARP-843):
+  #   - writable directory (root / tests): atomic mktemp + mv replace; the
+  #     temp file is created 0600 so the PSK is never briefly world-readable.
+  #   - fallback in-place: only when the file is writable but its DIR is not.
+  #     The production sandbox does NOT hit this — the bridge owns its
+  #     StateDirectory, so the atomic mktemp+mv path above is used. flock
+  #     serializes with the sibling home-AP write to the SAME creds file.
+  # The full new content is built BEFORE any write so a failure inside the
+  # python rewrite can never leave a half-updated file.
   local enabled="$1" ssid="$2" psk="$3"
-  local tmp
-  tmp="$(mktemp "${ENV_DIR}/.droplet-openwrt-attach.XXXXXX")"
-  chmod 0600 "$tmp"
-  trap 'rm -f "$tmp"' EXIT
-  upsert_guest_env_file "$enabled" "$ssid" "$psk" > "$tmp"
-  mv "$tmp" "$ENV_FILE"
-  trap - EXIT
+  local new_content tmp
+  new_content="$(upsert_guest_env_file "$enabled" "$ssid" "$psk")"
+  if tmp="$(mktemp "${ENV_DIR}/.droplet-openwrt-attach.XXXXXX" 2>/dev/null)"; then
+    chmod 0600 "$tmp"
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s\n' "$new_content" > "$tmp"
+    mv "$tmp" "$ENV_FILE"
+    trap - EXIT
+  elif [ -w "$ENV_FILE" ]; then
+    exec 9<>"$ENV_FILE"
+    if command -v flock >/dev/null 2>&1; then
+      flock -w 10 -x 9 || die "timed out waiting for the env-file write lock"
+    fi
+    printf '%s\n' "$new_content" > "$ENV_FILE"
+    exec 9>&-
+  else
+    die "cannot write ${ENV_FILE}: directory not writable and file not writable (is it provisioned droplet:droplet 0600?)"
+  fi
   chmod 0600 "$ENV_FILE"
 }
 
 apply_restart() {
-  # Restart the attach service to regenerate hostapd.conf + the guest subnet.
-  # droplet-openwrt-attach only respawns hostapd / reapplies when the conf
-  # actually changed, so an identical re-submit causes no reload.
+  # Re-apply: regenerate hostapd.conf + the guest subnet via the attach
+  # service. droplet-openwrt-attach only respawns hostapd / reapplies when the
+  # conf actually changed, so an identical re-submit causes no reload.
+  # Privileged invocations restart directly; the sandboxed bridge defers to
+  # the root-owned droplet-openwrt-attach.path unit (WARP-843), which fired on
+  # the env-file write above.
   if [ -n "$DRY_RUN" ]; then
-    err "dry-run: wrote ${ENV_FILE}; would run: systemctl restart ${ATTACH_SERVICE}"
+    if [ "$RESTART_MODE" = "direct" ]; then
+      err "dry-run: wrote ${ENV_FILE}; would run: systemctl restart ${ATTACH_SERVICE}"
+    else
+      err "dry-run: wrote ${ENV_FILE}; would defer re-apply to ${ATTACH_PATH_UNIT} (unprivileged)"
+    fi
     return 0
   fi
-  systemctl restart "$ATTACH_SERVICE"
+  if [ "$RESTART_MODE" = "direct" ]; then
+    systemctl restart "$ATTACH_SERVICE"
+  else
+    err "restart skipped (unprivileged): ${ATTACH_PATH_UNIT} re-applies the env-file change"
+  fi
+}
+
+# restarted=true ONLY when this invocation itself ran systemctl (direct mode,
+# not dry-run). The reapply field names who applies the change otherwise.
+restarted_json() {
+  if [ "$RESTART_MODE" = "direct" ] && [ -z "$DRY_RUN" ]; then
+    echo true
+  else
+    echo false
+  fi
 }
 
 # --- Teardown path -----------------------------------------------------------
@@ -188,8 +245,9 @@ apply_restart() {
 if [ "$ACTION" = "remove" ]; then
   write_env "0" "" ""
   apply_restart
-  printf '{"ok": true, "enabled": false, "removed": true, "restarted": %s, "dry_run": %s}\n' \
-    "$([ -n "$DRY_RUN" ] && echo false || echo true)" \
+  printf '{"ok": true, "enabled": false, "removed": true, "restarted": %s, "reapply": "%s", "dry_run": %s}\n' \
+    "$(restarted_json)" \
+    "$RESTART_MODE" \
     "$([ -n "$DRY_RUN" ] && echo true || echo false)"
   exit 0
 fi
@@ -221,7 +279,8 @@ write_env "1" "$SSID" "$PSK"
 apply_restart
 
 # Single-line JSON the bridge parses with json.loads. NEVER include the PSK.
-printf '{"ok": true, "enabled": true, "ssid": %s, "restarted": %s, "dry_run": %s}\n' \
+printf '{"ok": true, "enabled": true, "ssid": %s, "restarted": %s, "reapply": "%s", "dry_run": %s}\n' \
   "$(SSID="$SSID" python3 -c 'import json,os;print(json.dumps(os.environ["SSID"]))')" \
-  "$([ -n "$DRY_RUN" ] && echo false || echo true)" \
+  "$(restarted_json)" \
+  "$RESTART_MODE" \
   "$([ -n "$DRY_RUN" ] && echo true || echo false)"

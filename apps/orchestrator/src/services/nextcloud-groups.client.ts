@@ -1,6 +1,9 @@
 import pino from "pino";
 import { config } from "../config.js";
-import { NextcloudOcsError } from "./nextcloud.client.js";
+import {
+  NextcloudOcsError,
+  NextcloudGroupNotFoundError,
+} from "./nextcloud.client.js";
 
 const logger = pino({ name: "nextcloud-groups-client" });
 
@@ -11,8 +14,11 @@ const logger = pino({ name: "nextcloud-groups-client" });
  * - OCS group provisioning (add/remove users to groups, list members)
  * - Groupfolders REST API (create/delete folders, add/remove groups, set permissions/quota)
  *
- * All mutating calls are idempotent: adding an existing membership or group resolves OK,
- * removing a non-member/non-group resolves OK. Real failures are surfaced as typed errors.
+ * Membership mutations are idempotent: adding an existing member or removing a
+ * non-member of an *existing* group resolves OK (Nextcloud reports statuscode 100).
+ * Operating against a group that does not exist surfaces NextcloudGroupNotFoundError
+ * (OCS statuscode 102 on the user-groups endpoints). Real failures are surfaced as
+ * typed errors.
  */
 
 function ocsUrl(endpoint: string): string {
@@ -59,12 +65,19 @@ async function readOcsErrorMessage(resp: Response, fallback: string): Promise<st
 // ── OCS Groups API ──
 
 /**
- * Add a user to an OCS group (idempotent).
+ * Add a user to an OCS group (idempotent for existing groups).
  * OCS v2 `POST /cloud/users/{uid}/groups?groupid=<gid>`.
  *
- * Returns normally on success. If the user is already in the group (OCS statuscode 102),
- * this still resolves OK — the operation is idempotent.
- * Throws NextcloudOcsError on real failures (group doesn't exist, etc.).
+ * Returns normally on success. Re-adding a user who is already a member of an
+ * existing group also resolves OK — Nextcloud reports statuscode 100 for that
+ * case (there is no "already a member" code for this endpoint).
+ *
+ * For this endpoint the OCS statuscodes are: 100 = success, 101 = no group
+ * specified, 102 = group does not exist, 103 = user does not exist,
+ * 104 = insufficient privileges, 105 = failed to add user to group.
+ * Statuscode 102 therefore means the target group is missing (a real failure)
+ * and is surfaced as NextcloudGroupNotFoundError — it must NOT be swallowed as
+ * an idempotent no-op. Any other non-success statuscode throws NextcloudOcsError.
  */
 export async function ncAddUserToGroup(
   adminToken: string,
@@ -92,15 +105,21 @@ export async function ncAddUserToGroup(
   const data = await resp.json();
   const ocsStatus = data?.ocs?.meta?.statuscode;
 
-  // statuscode 102 = user already in group (idempotent success)
-  // statuscode 100 = success in v1; statuscode 200 in v2
-  if (ocsStatus === 102) return;
+  // The OCS body statuscode is authoritative for this endpoint — a 2xx HTTP
+  // status does not by itself mean the membership op succeeded. Success is
+  // statuscode 100 (v1) or a 2xx statuscode (v2).
+  if (ocsStatus === 100 || (ocsStatus >= 200 && ocsStatus < 300)) return;
 
-  // v2 uses HTTP status; check that first
-  if (resp.status >= 200 && resp.status < 300) return;
-
-  // v1 uses ocs.meta.statuscode
-  if (ocsStatus === 100) return;
+  // statuscode 102 = "group does not exist" for POST /cloud/users/{uid}/groups
+  // (NOT "already a member"). Surface it as a typed not-found error so a failed
+  // membership op is never reported as success.
+  if (ocsStatus === 102) {
+    throw new NextcloudGroupNotFoundError(
+      `OCS add user to group: group "${groupId}" does not exist${
+        data?.ocs?.meta?.message ? ` (${data.ocs.meta.message})` : ""
+      }`
+    );
+  }
 
   throw new NextcloudOcsError(
     `OCS add user to group: ${data?.ocs?.meta?.message ?? "unknown error"}`,
@@ -109,12 +128,19 @@ export async function ncAddUserToGroup(
 }
 
 /**
- * Remove a user from an OCS group (idempotent).
+ * Remove a user from an OCS group (idempotent for existing groups).
  * OCS v2 `DELETE /cloud/users/{uid}/groups?groupid=<gid>`.
  *
- * Returns normally on success. If the user is not in the group (OCS statuscode 102),
- * this still resolves OK — the operation is idempotent.
- * Throws NextcloudOcsError on real failures.
+ * Returns normally on success. Removing a user who is not a member of an
+ * existing group also resolves OK — Nextcloud reports statuscode 100 for that
+ * case.
+ *
+ * For this endpoint the OCS statuscodes are: 100 = success, 101 = no group
+ * specified, 102 = group does not exist, 103 = user does not exist,
+ * 104 = insufficient privileges, 105 = failed to remove user from group.
+ * Statuscode 102 therefore means the target group is missing (a real failure)
+ * and is surfaced as NextcloudGroupNotFoundError — it must NOT be swallowed as
+ * an idempotent no-op. Any other non-success statuscode throws NextcloudOcsError.
  */
 export async function ncRemoveUserFromGroup(
   adminToken: string,
@@ -138,14 +164,19 @@ export async function ncRemoveUserFromGroup(
   const data = await resp.json();
   const ocsStatus = data?.ocs?.meta?.statuscode;
 
-  // statuscode 102 = user not in group (idempotent success)
-  if (ocsStatus === 102) return;
+  // The OCS body statuscode is authoritative for this endpoint. Success is
+  // statuscode 100 (v1) or a 2xx statuscode (v2).
+  if (ocsStatus === 100 || (ocsStatus >= 200 && ocsStatus < 300)) return;
 
-  // v2 HTTP status success
-  if (resp.status >= 200 && resp.status < 300) return;
-
-  // v1 statuscode
-  if (ocsStatus === 100) return;
+  // statuscode 102 = "group does not exist" for DELETE /cloud/users/{uid}/groups
+  // (NOT "user not in group"). Surface it as a typed not-found error.
+  if (ocsStatus === 102) {
+    throw new NextcloudGroupNotFoundError(
+      `OCS remove user from group: group "${groupId}" does not exist${
+        data?.ocs?.meta?.message ? ` (${data.ocs.meta.message})` : ""
+      }`
+    );
+  }
 
   throw new NextcloudOcsError(
     `OCS remove user from group: ${data?.ocs?.meta?.message ?? "unknown error"}`,

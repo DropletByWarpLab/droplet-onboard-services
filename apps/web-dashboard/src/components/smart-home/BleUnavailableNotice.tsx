@@ -36,14 +36,16 @@ export function BleUnavailableNotice({
     <div
       role="note"
       data-testid={testId}
-      className={`flex items-start gap-2 px-3 py-2.5 bg-surface-secondary border border-separator rounded-lg ${className ?? ""}`}
+      className={`flex items-start gap-2 px-3 py-2.5 rounded-lg ${className ?? ""}`}
+      style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}
     >
       <Info
         size={14}
-        className="mt-0.5 flex-shrink-0 text-label-tertiary"
+        className="mt-0.5 flex-shrink-0"
+        style={{ color: "var(--text-muted)" }}
         aria-hidden="true"
       />
-      <p className="type-footnote text-label-secondary">
+      <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
         {variant === "no-wifi-provisioning"
           ? "This Droplet can see Bluetooth devices but can't hand them Wi-Fi yet — add devices that are already on your Wi-Fi."
           : "This Droplet can add devices that are already on your home Wi-Fi. Devices that need Bluetooth for first-time setup aren't supported yet."}

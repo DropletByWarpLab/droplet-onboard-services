@@ -29,11 +29,11 @@ export function SensorReading({ device }: { device: MatterDevice }) {
 
   return (
     <div className="flex items-center gap-3">
-      <Icon size={20} className="text-label-tertiary flex-shrink-0" />
+      <Icon size={20} className="flex-shrink-0" style={{ color: "var(--text-muted)" }} />
       <div className="flex-1 min-w-0">
-        <span className="type-title-3 text-label-primary">{device.state}</span>
+        <span className="type-title-3" style={{ color: "var(--text)" }}>{device.state}</span>
         {unit && (
-          <span className="type-subheadline text-label-secondary ml-1">
+          <span className="type-subheadline ml-1" style={{ color: "var(--text-muted)" }}>
             {unit}
           </span>
         )}

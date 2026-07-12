@@ -60,18 +60,22 @@ export function MediaCitation({ hit, anchor }: MediaCitationProps): JSX.Element 
   const detailHref = `/files/${encodeURIComponent(hit.fileId)}`;
   return (
     <div
-      className="dp-card overflow-hidden"
+      className="overflow-hidden rounded-2xl"
+      style={{ background: "var(--card-bg)", border: "1px solid var(--card-bd)" }}
       data-citation-kind="media-timestamp"
     >
-      <div className="flex items-center justify-between px-3 py-2 border-b border-separator">
+      <div
+        className="flex items-center justify-between px-3 py-2"
+        style={{ borderBottom: "1px solid var(--card-bd)" }}
+      >
         <Link
           href={detailHref}
-          className="type-caption-1 text-label-primary truncate hover:underline"
+          className="type-caption-1 truncate hover:underline text-[var(--text)]"
           title={hit.filename}
         >
           {hit.filename}
         </Link>
-        <span className="type-caption-2 text-label-tertiary flex-shrink-0">
+        <span className="type-caption-2 flex-shrink-0 text-[var(--text-muted)]">
           {formatMs(anchor.startMs)}–{formatMs(anchor.endMs)}
         </span>
       </div>
@@ -95,7 +99,7 @@ export function MediaCitation({ hit, anchor }: MediaCitationProps): JSX.Element 
         />
       )}
       {hit.chunkText && (
-        <p className="px-3 py-2 type-caption-1 text-label-secondary line-clamp-3">
+        <p className="px-3 py-2 type-caption-1 line-clamp-3 text-[var(--text-muted)]">
           {hit.chunkText}
         </p>
       )}

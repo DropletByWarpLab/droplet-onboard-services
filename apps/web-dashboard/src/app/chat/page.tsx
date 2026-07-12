@@ -232,6 +232,16 @@ export default function ChatPage() {
   // the composer + pins the "Ready to use X" indicator (same as /tools).
   const { tools: slashTools } = useToolCatalog();
   const [selectedModel, setSelectedModel] = useState("");
+  // WARP-904 — the provider backing the currently-selected model, looked
+  // up from the same gated `/api/llm/models` list ModelSelector reads.
+  // Forwarded on every send so the orchestrator persists an explicit
+  // provider per turn instead of inferring one from the model name.
+  // Declared early (ahead of every handler below that closes over it)
+  // since useMemo/useState aren't hoisted.
+  const selectedProvider = useMemo(
+    () => models.find((m) => m.id === selectedModel)?.provider,
+    [models, selectedModel],
+  );
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
@@ -295,7 +305,7 @@ export default function ChatPage() {
     // Gate the auto-send on a fresh chat: no `?c=` deep link in the URL and no
     // messages already present (a loaded/hydrated thread). Otherwise discard.
     if (urlConversationId || messages.length > 0) return;
-    sendMessage(pending, selectedModel, systemPrompt || undefined);
+    sendMessage(pending, selectedModel, systemPrompt || undefined, selectedProvider);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
 
@@ -385,9 +395,9 @@ export default function ChatPage() {
   const handleSend = useCallback(
     (content: string) => {
       if (!selectedModel) return;
-      sendMessage(content, selectedModel, systemPrompt || undefined);
+      sendMessage(content, selectedModel, systemPrompt || undefined, selectedProvider);
     },
-    [selectedModel, sendMessage, systemPrompt]
+    [selectedModel, selectedProvider, sendMessage, systemPrompt]
   );
 
   // WARP-1121 — "Skip the rest" = the canonical wrap-up turn, everywhere it
@@ -473,9 +483,9 @@ export default function ChatPage() {
   const handleRetry = useCallback(
     (messageId: string) => {
       if (!selectedModel) return;
-      retryMessage(messageId, selectedModel, systemPrompt || undefined);
+      retryMessage(messageId, selectedModel, systemPrompt || undefined, selectedProvider);
     },
-    [retryMessage, selectedModel, systemPrompt],
+    [retryMessage, selectedModel, selectedProvider, systemPrompt],
   );
 
   // WARP-295: message-actions (Copy / Quote / Regenerate). Copy is
@@ -519,9 +529,9 @@ export default function ChatPage() {
   const handleRegenerate = useCallback(
     (messageId: string) => {
       if (!selectedModel) return;
-      regenerate(messageId, selectedModel, systemPrompt || undefined);
+      regenerate(messageId, selectedModel, systemPrompt || undefined, selectedProvider);
     },
-    [regenerate, selectedModel, systemPrompt],
+    [regenerate, selectedModel, selectedProvider, systemPrompt],
   );
 
   // WARP-844: edit & resend. Withheld while a stream is in flight (the
@@ -529,9 +539,15 @@ export default function ChatPage() {
   const handleEdit = useCallback(
     (messageId: string, newContent: string) => {
       if (!selectedModel) return;
-      void editMessage(messageId, newContent, selectedModel, systemPrompt || undefined);
+      void editMessage(
+        messageId,
+        newContent,
+        selectedModel,
+        systemPrompt || undefined,
+        selectedProvider,
+      );
     },
-    [editMessage, selectedModel, systemPrompt],
+    [editMessage, selectedModel, selectedProvider, systemPrompt],
   );
 
   // Index of the last assistant message — the page passes
@@ -607,8 +623,6 @@ export default function ChatPage() {
               </span>
             )}
           </div>
-          <ModelSelector value={selectedModel} onChange={setSelectedModel} />
-          {isLocalModel && <span className="chat-tag">local · on-device</span>}
           {/* WARP-461: workspace-global memory — always available. */}
           <MemoryPanel />
           {/* WARP-460: pins are per-session — the popover appears once
@@ -980,6 +994,15 @@ export default function ChatPage() {
           onStop={stop}
           slashTools={slashTools}
           onToolCommand={handleToolCommand}
+          // WARP-904 — per-turn quick-switch, compact + next to the
+          // composer instead of up in the header where a long thread
+          // scrolls it out of reach.
+          modelSelector={
+            <>
+              <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+              {isLocalModel && <span className="chat-tag">local · on-device</span>}
+            </>
+          }
         />
       </div>
 

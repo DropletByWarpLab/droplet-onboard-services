@@ -118,30 +118,28 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
     (filter.hasClip !== undefined ? 1 : 0);
 
   return (
-    <div className="dp-card p-4 mb-4 space-y-3">
+    <div className="card mb-4 space-y-3">
       <div className="flex items-center justify-between">
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
-          className="flex items-center gap-2 text-label-primary"
+          className="flex items-center gap-2"
         >
           <Filter size={16} />
           <span className="type-subheadline font-medium">Filters</span>
           {activeCount > 0 && (
-            <span className="type-caption-2 px-1.5 py-0.5 rounded-full bg-accent text-white">
-              {activeCount}
-            </span>
+            <span className="badge info">{activeCount}</span>
           )}
           <ChevronDown
             size={16}
-            className={`text-label-tertiary transition-transform ${collapsed ? "-rotate-90" : ""}`}
+            className={`transition-transform text-[color:var(--text-muted)] ${collapsed ? "-rotate-90" : ""}`}
           />
         </button>
         {activeCount > 0 && (
           <button
             type="button"
             onClick={clearAll}
-            className="flex items-center gap-1 type-caption-1 text-label-tertiary hover:text-label-primary"
+            className="flex items-center gap-1 type-caption-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)] transition-colors"
           >
             <X size={12} />
             Clear all
@@ -154,8 +152,8 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
           {/* Cameras */}
           {sortedCameras.length > 0 && (
             <div>
-              <div className="type-caption-2 text-label-tertiary mb-1.5">Cameras</div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">Cameras</div>
+              <div className="chiprow">
                 {sortedCameras.map((cam) => {
                   const active = selectedCameras.includes(cam.name);
                   return (
@@ -163,11 +161,7 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
                       key={cam.name}
                       type="button"
                       onClick={() => toggleCamera(cam.name)}
-                      className={`px-2.5 py-1 rounded-full type-caption-1 transition-colors ${
-                        active
-                          ? "bg-accent text-white"
-                          : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                      }`}
+                      className={`chip${active ? " on" : ""}`}
                     >
                       {cam.displayName}
                     </button>
@@ -180,8 +174,8 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
           {/* Labels */}
           {knownLabels.length > 0 && (
             <div>
-              <div className="type-caption-2 text-label-tertiary mb-1.5">Labels</div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">Labels</div>
+              <div className="chiprow">
                 {knownLabels.map((label) => {
                   const active = selectedLabels.includes(label);
                   return (
@@ -189,11 +183,7 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
                       key={label}
                       type="button"
                       onClick={() => toggleLabel(label)}
-                      className={`px-2.5 py-1 rounded-full type-caption-1 capitalize transition-colors ${
-                        active
-                          ? "bg-accent text-white"
-                          : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                      }`}
+                      className={`chip capitalize${active ? " on" : ""}`}
                     >
                       {label}
                     </button>
@@ -206,11 +196,17 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {/* Time preset */}
             <div>
-              <div className="type-caption-2 text-label-tertiary mb-1.5">When</div>
+              <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">When</div>
               <select
                 value={activePreset}
                 onChange={(e) => setTimePreset(e.target.value)}
-                className="w-full h-9 px-2 rounded-lg border border-separator bg-surface-secondary type-footnote text-label-primary focus:border-accent focus:outline-none"
+                className="w-full h-9 px-2 type-footnote outline-none focus:border-[var(--brand)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
               >
                 {TIME_PRESETS.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -223,8 +219,8 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
             {/* Score floor */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <span className="type-caption-2 text-label-tertiary">Min score</span>
-                <span className="type-caption-2 text-label-secondary font-mono">
+                <span className="type-caption-2 text-[color:var(--text-muted)]">Min score</span>
+                <span className="type-caption-2 font-mono text-[color:var(--text-muted)]">
                   {filter.minScore !== undefined
                     ? `${Math.round(filter.minScore * 100)}%`
                     : "Any"}
@@ -237,33 +233,28 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
                 step={0.05}
                 value={filter.minScore ?? 0}
                 onChange={(e) => setMinScore(e.target.value)}
-                className="w-full accent-accent"
+                className="w-full"
+                style={{ accentColor: "var(--brand)" }}
               />
             </div>
 
             {/* Clip / snapshot */}
             <div>
-              <div className="type-caption-2 text-label-tertiary mb-1.5">Media</div>
-              <div className="flex gap-1.5">
+              <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">Media</div>
+              <div className="pills" role="group" aria-label="Media">
                 <button
                   type="button"
                   onClick={() => setHasClip(undefined)}
-                  className={`flex-1 px-2 py-1.5 rounded-lg type-caption-1 transition-colors ${
-                    filter.hasClip === undefined
-                      ? "bg-accent text-white"
-                      : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                  }`}
+                  className={filter.hasClip === undefined ? "active" : undefined}
+                  aria-pressed={filter.hasClip === undefined}
                 >
                   All
                 </button>
                 <button
                   type="button"
                   onClick={() => setHasClip(true)}
-                  className={`flex-1 px-2 py-1.5 rounded-lg type-caption-1 transition-colors ${
-                    filter.hasClip === true
-                      ? "bg-accent text-white"
-                      : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-                  }`}
+                  className={filter.hasClip === true ? "active" : undefined}
+                  aria-pressed={filter.hasClip === true}
                 >
                   With clip
                 </button>

@@ -449,7 +449,7 @@ export default function CalendarPage() {
                   <li key={ev.id}>
                     <button
                       onClick={() => openDetail(ev)}
-                      className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-surface-secondary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-[var(--hover)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
                       type="button"
                     >
                       <span
