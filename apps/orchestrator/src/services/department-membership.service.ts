@@ -460,6 +460,14 @@ export interface UpdateMembershipRightResult {
  * PATCH /api/departments/:id/members/:userId — reader↔contributor/manager
  * transitions. Updates `right` + `syncState=pending` + bumps `aclVersion`
  * in one `$transaction`, then pushes the ordered NC transition.
+ *
+ * Demoting the last remaining `manager` of a department (manager → any
+ * non-manager right) is rejected with `LastManagerError` — the SAME
+ * last-manager invariant `removeMembership` (DELETE) enforces, so a
+ * rights-transition PATCH can't silently orphan a department with zero
+ * managers. The count + the update run inside the SAME `$transaction`
+ * (reusing the identical manager-count query the DELETE path uses) so a
+ * concurrent demotion/removal can't slip past the count window.
  */
 export async function updateMembershipRight(
   prisma: PrismaClient,
@@ -485,7 +493,16 @@ export async function updateMembershipRight(
 
   const oldRight = existing.right;
 
-  const updated = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
+    if (oldRight === "manager" && newRight !== "manager") {
+      const managerCount = await tx.departmentMembership.count({
+        where: { departmentId, right: "manager" },
+      });
+      if (managerCount <= 1) {
+        return { kind: "last-manager" as const };
+      }
+    }
+
     const row = await tx.departmentMembership.update({
       where: {
         departmentId_userId: { departmentId, userId: targetUserId },
@@ -493,8 +510,12 @@ export async function updateMembershipRight(
       data: { right: newRight, syncState: "pending" },
     });
     await bumpAclVersion(tx, departmentId);
-    return row;
+    return { kind: "ok" as const, row };
   });
+
+  if (result.kind === "last-manager") {
+    throw new LastManagerError(departmentId);
+  }
 
   await pushRightTransition(
     prisma,
@@ -504,16 +525,16 @@ export async function updateMembershipRight(
       ncGroupRw: dept.ncGroupRw,
       ncGroupRo: dept.ncGroupRo,
     },
-    updated.id,
+    result.row.id,
     targetUserId,
     oldRight,
     newRight,
   );
 
   const refreshed = await prisma.departmentMembership.findUnique({
-    where: { id: updated.id },
+    where: { id: result.row.id },
   });
-  return (refreshed ?? updated) as UpdateMembershipRightResult;
+  return (refreshed ?? result.row) as UpdateMembershipRightResult;
 }
 
 export type RemoveMembershipResult =

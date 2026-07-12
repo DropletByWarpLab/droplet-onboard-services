@@ -849,6 +849,12 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           if (err instanceof MembershipNotFoundError) {
             return res.status(404).json({ error: err.message, code: "MEMBERSHIP_NOT_FOUND" });
           }
+          if (err instanceof LastManagerError) {
+            return res.status(409).json({
+              error: err.message,
+              code: "LAST_MANAGER_INVARIANT",
+            });
+          }
           throw err;
         }
 
