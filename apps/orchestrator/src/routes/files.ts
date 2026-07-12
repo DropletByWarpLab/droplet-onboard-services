@@ -1071,10 +1071,25 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   // dept:<uuid>: path resolves UNDER the department mount point.
   // On the My-Files (personal) home ROOT we hide the shared folder entry so the
   // Household folder isn't shown twice — once as a space in the switcher and once inline.
-  // Composed with requireSpaceAccess middleware (reader minRight).
+  // Composed with requireSpaceAccess middleware (reader minRight). The gate's own
+  // parseSpaceValue() only recognizes "personal" / "household" / "dept:<uuid>" and
+  // fails closed on anything else — but this route's `?space=` contract predates it
+  // (WARP-883/WS-5) and uses "shared" as the household alias, with any other
+  // unrecognized value silently falling back to personal (rootForSpace/resolveSpace
+  // above mirror the same lenient contract). Translate at the gate boundary so the
+  // access check and the path-resolution below stay in agreement, while a malformed
+  // `dept:<uuid>` still fails closed per the gate's own truth table.
   router.get(
     "/files",
-    requireSpaceAccess(prisma, "reader"),
+    requireSpaceAccess(prisma, "reader", {
+      resolveSpace: (req) => {
+        const raw = req.query.space;
+        if (typeof raw !== "string") return undefined; // personal
+        if (raw === "shared") return "household"; // legacy WS-5 alias
+        if (raw.startsWith("dept:")) return raw; // pass through for uuid validation
+        return undefined; // "personal" or any unrecognized value -> personal
+      },
+    }),
     async (req, res, next) => {
       try {
         const requestedPath = (req.query.path as string) || "/";
