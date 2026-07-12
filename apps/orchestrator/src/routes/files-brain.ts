@@ -612,6 +612,25 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // WARP-905 — a held (ingestPolicy='await_approval') audio/video item
+      // must NOT be pushed through transcription + embedding here. An
+      // uploaded audio/video row lands at status='queued_for_transcription'
+      // regardless of its ingest policy (initialStatus is derived purely from
+      // MIME), so without this gate a held item would sail past the state +
+      // rate-cap checks below and get published to the transcription worker —
+      // bypassing the human approval gate entirely (a direct API caller or a
+      // stale-UI race). The approval gate is owned by POST /approve, which
+      // flips the policy to auto_embed and then drives the transcription
+      // worker itself. Mirror the /approve route's ingestPolicy guard and
+      // fail CLOSED: reject the promotion until the item is approved.
+      if (row.ingestPolicy === BrainIngestPolicy.await_approval) {
+        res.status(409).json({
+          error: "awaiting_approval",
+          ingestPolicy: row.ingestPolicy,
+        });
+        return;
+      }
+
       // Only queued or failed items are eligible. 'indexing' means the
       // worker is mid-flight; 'ready' is terminal. 409 either way.
       if (
