@@ -87,25 +87,49 @@ COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 # image build. `OPENSSL_CONF` stays intentionally NOT set (see above) —
 # shipping the module changes nothing at runtime until the operator
 # opts in (WARP-318).
+# WARP-1063: like ai-gateway, this process hosts TWO libcrypto instances
+# (pyca cryptography's static OpenSSL — initialized first by the boot
+# self-test — and CPython's system libcrypto). Each gets its OWN fips.so
+# copy at its OWN baked MODULESDIR; the FIPS module cannot be initialized
+# by two libcryptos resolving the same .so file (openssl#25553; see
+# services/ai-gateway/Dockerfile for the full story).
 COPY --from=fips-builder /out/fips.so /tmp/fips.so
 COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
-RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+RUN pyca_so="$(python -c 'import pathlib, cryptography; print(next((pathlib.Path(cryptography.__file__).parent / "hazmat" / "bindings").glob("_rust*.so")))')" && \
+    pyca_moddir="$(grep -a -o -m1 'MODULESDIR: "[^"]*"' "$pyca_so" | sed 's/^MODULESDIR: "//; s/"$//')" && \
+    { [ -n "$pyca_moddir" ] || { echo "FIPS: could not extract pyca cryptography's baked MODULESDIR from $pyca_so" >&2; exit 1; }; } && \
+    sh /tmp/install-fips-provider.sh /tmp/fips.so "$pyca_moddir" && \
     rm -f /tmp/fips.so /tmp/install-fips-provider.sh
 
 # WARP-967: probe the runtime combination for Python — CPython links the
 # system (Debian) libcrypto, so OPENSSL_CONF alone activates the
 # provider. `_hashlib` is probed directly because `hashlib.new()` can
 # silently fall back to CPython's built-in non-OpenSSL `_md5` module and
-# mask enforcement. OPENSSL_CONF is scoped to this RUN only; runtime
-# posture is unchanged.
+# mask enforcement. WARP-1063: pyca cryptography's static OpenSSL is
+# initialized FIRST (the production boot order) to prove both libcrypto
+# instances activate their own module copies side by side. OPENSSL_CONF
+# is scoped to this RUN only; runtime posture is unchanged.
 RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf python - <<'PY'
-import ssl  # OpenSSL init under the FIPS config must not crash
+from cryptography.hazmat.backends import default_backend
+b = default_backend()  # pyca static OpenSSL inits FIRST (production order)
+if not getattr(b, "_fips_enabled", False):
+    raise SystemExit("FIPS python self-test FAILED: pyca cryptography did not enter FIPS mode")
+from cryptography.hazmat.primitives import hashes
+h = hashes.Hash(hashes.SHA256()); h.update(b"probe"); h.finalize()  # pyca instance alive
+try:
+    hm = hashes.Hash(hashes.MD5()); hm.update(b"probe"); hm.finalize()
+except Exception:
+    pass
+else:
+    raise SystemExit("FIPS python self-test FAILED: MD5 succeeded in pyca cryptography under the FIPS config")
+import ssl  # system OpenSSL init under the FIPS config must not crash
+ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # default TLS client context constructible (WARP-1063)
 import _hashlib
-_hashlib.new("sha256", b"probe")  # FIPS-approved digest still works
+_hashlib.new("sha256", b"probe")  # FIPS-approved digest still works (system instance alive)
 try:
     _hashlib.new("md5", b"probe", usedforsecurity=True)
 except ValueError as exc:
-    print(f"FIPS build-time self-test OK (python/_hashlib): MD5 rejected ({exc})")
+    print(f"FIPS build-time self-test OK (python dual-libcrypto): pyca + system both enforcing, TLS context OK, MD5 rejected ({exc})")
 else:
     raise SystemExit("FIPS python self-test FAILED: MD5 succeeded under the FIPS config")
 PY

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type DepartmentRight } from "@prisma/client";
 import pino from "pino";
 import {
   ncListFiles,
@@ -30,9 +30,14 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncListOutboundShares,
   ncDirExists,
   NextcloudOcsError,
 } from "../services/nextcloud.client.js";
+import {
+  sendShareNotificationEmail,
+  type SendOptions as EmailSendOptions,
+} from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
@@ -49,6 +54,16 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import {
+  checkSpaceAccess,
+  requireSpaceAccess,
+  resolveDepartmentIdForSpaceReadOnly,
+  type SpaceAccessCaller,
+} from "../middleware/space.js";
+import {
+  resolveFileDepartment,
+  upsertFileRegistryEntry,
+} from "../services/file-registry.service.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -135,28 +150,72 @@ const SHARED_FOLDER_NAME = config.DROPLET_SHARED_FOLDER_NAME;
 /** Absolute home-relative path to the shared space root (e.g. "/Household"). */
 const SHARED_FOLDER_PATH = `/${SHARED_FOLDER_NAME}`;
 
-type Space = "personal" | "shared";
+type Space = "personal" | "shared" | string; // "personal", "shared", or "dept:<uuid>"
 
 /** Coerce an arbitrary `?space=` value to a known space (default personal). */
 function resolveSpace(raw: unknown): Space {
-  return raw === "shared" ? "shared" : "personal";
+  if (typeof raw !== "string") return "personal";
+  if (raw === "shared" || raw === "personal") return raw;
+  if (raw.startsWith("dept:")) return raw; // Keep dept:<uuid> as-is for resolution.
+  return "personal";
 }
 
 /**
- * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ * WARP-1261: generalized path routing for personal/shared/department spaces.
  *
- * - personal: the path is used verbatim (the user's home root).
- * - shared:   the path is resolved UNDER the shared-folder prefix, so
- *             `?space=shared&path=/Trips` → `/Household/Trips` and the bare
- *             shared root → `/Household`. The prefix is always applied here so
- *             a caller can never escape the shared mount via this route.
+ * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ * The registry prefix is ALWAYS applied for shared/department spaces so a caller
+ * can never escape via `../` (fail-closed, matches WARP-938 safety checks).
+ *
+ * - personal: the path is used verbatim (the user's home root) — "/" or "/path".
+ * - shared:   path is resolved UNDER the shared-folder prefix (e.g. "/Household/Trips").
+ * - dept:<uuid>: path is resolved UNDER the department mount point (e.g. "/Engineering/Docs").
+ *
+ * For dept:<uuid>, the Department row must exist and be active (enforced by the
+ * caller with requireSpaceAccess middleware or checkSpaceAccess prior to invoking).
+ * If resolution fails, throws a safe error (never silently falls back to personal).
  */
-function rootForSpace(space: Space, requestedPath: string): string {
+async function rootForSpace(prisma: PrismaClient, space: Space, requestedPath: string): Promise<string> {
   const rel = requestedPath.replace(/^\/+/, "");
+
+  if (space === "personal") {
+    return requestedPath || "/";
+  }
+
   if (space === "shared") {
     return rel ? `${SHARED_FOLDER_PATH}/${rel}` : SHARED_FOLDER_PATH;
   }
-  return requestedPath || "/";
+
+  if (space.startsWith("dept:")) {
+    const deptId = space.slice("dept:".length);
+    const dept = await prisma.department.findUnique({
+      where: { id: deptId },
+      select: { id: true, name: true, parentId: true, kind: true, state: true },
+    });
+
+    if (!dept) {
+      throw new Error(`Unknown space: ${space}`);
+    }
+    if (dept.state !== "active") {
+      throw new Error(`Space is not active: ${space}`);
+    }
+
+    // Resolve mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+    let mountName = dept.name;
+    if (dept.kind === "TEAM" && dept.parentId) {
+      const parent = await prisma.department.findUnique({
+        where: { id: dept.parentId },
+        select: { name: true },
+      });
+      if (parent) {
+        mountName = `${parent.name} — ${dept.name}`;
+      }
+    }
+
+    return rel ? `/${mountName}/${rel}` : `/${mountName}`;
+  }
+
+  throw new Error(`Malformed space: ${space}`);
 }
 
 /**
@@ -396,8 +455,86 @@ function handleFileError(
   next(err);
 }
 
-export function createFilesRouter(prisma: PrismaClient): Router {
+export function createFilesRouter(
+  prisma: PrismaClient,
+  // WARP-941: injectable transport seam for the person-share notification
+  // email — same seam createProtectedAuthRouter threads for invites, so
+  // tests never dial a real relay. Production callers pass nothing.
+  emailSendOptions: EmailSendOptions = {},
+): Router {
   const router = Router();
+
+  /**
+   * WARP-941 — best-effort notification email for person shares (shareType 0).
+   *
+   * Resolves the recipient's email from the LOCAL Prisma `User` directory by
+   * `nextcloudUsername`, case-insensitively — the same matching contract as
+   * GET /files/share-recipients, which is where the `shareWith` value the
+   * dashboard posts came from in the first place (ADR-013; the at-rest dcv1
+   * email blob is decrypted via readUserEmail). Delivery goes over the
+   * operator's SMTP channel via sendShareNotificationEmail, which no-ops
+   * unless the channel is configured AND enabled — identical gating to user
+   * invites.
+   *
+   * NEVER throws, and is invoked fire-and-forget: the share already exists in
+   * Nextcloud, so a directory gap, an unconfigured channel, or a relay outage
+   * must not fail or delay the share response.
+   */
+  async function notifyPersonShareByEmail(
+    req: Request,
+    shareWith: string,
+    filePath: string,
+  ): Promise<void> {
+    try {
+      // Full-directory scan is intentional at household scale (tens of rows):
+      // it resolves BOTH the recipient (exact-case then case-insensitive, in
+      // JS — no Postgres `mode:'insensitive'` query) and the caller's display
+      // name in a single round-trip. Narrow only if the directory grows large.
+      const rows = (await prisma.user.findMany({
+        select: { id: true, displayName: true, email: true, nextcloudUsername: true },
+      })) as Array<{
+        id: string;
+        displayName: string;
+        email: string | null;
+        nextcloudUsername: string | null;
+      }>;
+
+      const target = shareWith.toLowerCase();
+      // Prefer an exact-case match so two directory rows that differ only by
+      // case can't misdeliver this notification (it discloses the sharer +
+      // filename) to the wrong person; fall back to the case-insensitive
+      // contract for the normal single-variant case.
+      const recipient =
+        rows.find((u) => u.nextcloudUsername === shareWith) ??
+        rows.find((u) => u.nextcloudUsername?.toLowerCase() === target);
+      // WARP-233: decrypt the at-rest dcv1 blob. Null/empty → nothing to send to.
+      const to = recipient ? readUserEmail(recipient.email) : null;
+      if (!to) {
+        logger.info(
+          { shareWith, hasRecipientRow: Boolean(recipient) },
+          "share notification skipped — no directory email for recipient",
+        );
+        return;
+      }
+
+      const caller = rows.find((u) => u.id === req.user?.id);
+      const sharerDisplayName = caller?.displayName || req.user?.username || "Someone";
+
+      await sendShareNotificationEmail(
+        prisma,
+        {
+          to,
+          sharerDisplayName,
+          fileName: path.posix.basename(filePath) || filePath,
+        },
+        emailSendOptions,
+      );
+    } catch (err) {
+      // Directory lookup failed (or an unexpected throw): log and move on —
+      // the share itself already succeeded.
+      logger.warn({ err, shareWith }, "share notification email failed");
+    }
+  }
 
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
@@ -468,6 +605,51 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
         const token = await getToken(req);
         const user = getUser(req);
+
+        // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
+        // the doc-server session so a non-member never reaches the WOPI
+        // handshake for a dept file. TWO phases with DIFFERENT failure
+        // postures:
+        //   1. NC/file-id RESOLUTION is best-effort — a resolution failure
+        //      (NC unreachable, path no longer resolves) falls through to the
+        //      existing mint-time behavior rather than 500ing.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed). If
+        //      it stayed inside the swallow, a thrown membership lookup would be
+        //      silently discarded and the session minted anyway — the exact
+        //      cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
+        try {
+          const gateFileId = await ncGetFileId(token, user, filePath);
+          if (gateFileId !== null) {
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
+          }
+        } catch (gateErr) {
+          logger.debug(
+            { err: gateErr, filePath },
+            "editor-session: department gate resolution failed (best-effort, falling through)",
+          );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: requesterId(req),
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
+        }
 
         // Edit-vs-view: default to the owner's edit capability, then DOWNGRADE
         // to the share's permission if this is a shared-with-me item. We never
@@ -567,6 +749,54 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           res.status(400).json({ error: "filePath path-param is required" });
           return;
         }
+
+        // WARP-1260 (T8): department metadata gate. FileCitation is keyed
+        // by `filePath`, not `ncFileId`, so resolve the NC file id first.
+        // TWO phases with DIFFERENT failure postures:
+        //   1. NC/file-id RESOLUTION is best-effort — any resolution failure
+        //      (missing NC session, Nextcloud unreachable, path no longer
+        //      exists) falls through to the existing personal-space semantics
+        //      below rather than 500ing or 401ing a route that historically
+        //      never depended on NC.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed)
+        //      instead of being swallowed and falling through UNGATED — the
+        //      exact cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
+        try {
+          const gateToken = await getToken(req);
+          const gateNcUser = getUser(req);
+          const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
+          if (gateFileId !== null) {
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
+          }
+        } catch (gateErr) {
+          logger.debug(
+            { err: gateErr, filePath },
+            "citations: department gate resolution failed (best-effort, falling through)",
+          );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
+        }
+
         const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
         const limit = Math.max(
           1,
@@ -695,6 +925,40 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     return fileId;
   }
 
+  // ── WARP-1260 (T8) — metadata-route department gate ──
+  //
+  // comments/tags/citations/editor-session resolve a file's `ncFileId`
+  // (via `resolveFileIdOr404` above, or their own `ncGetFileId` call) and
+  // then call this: `resolveFileDepartment` → if the file IS registered
+  // to a department, run the SAME `requireSpaceAccess('reader')` truth
+  // table `middleware/space.ts` uses, inline, against that department.
+  // Files absent from the registry (`departmentId === null`) fall back to
+  // the existing personal-space semantics (per-user IDOR filters already
+  // on every route below) — no gate applied. Ships in the same release as
+  // dept spaces per the brief: fail-open here is a cross-department
+  // metadata leak. On denial this writes the 403 response itself (via
+  // `checkSpaceAccess`'s result) and returns `false`; the caller must
+  // `return` immediately without writing anything further.
+  async function gateFileSpaceAccess(
+    req: Request,
+    res: Response,
+    ncFileId: number,
+    minRight: DepartmentRight,
+  ): Promise<boolean> {
+    const departmentId = await resolveFileDepartment(prisma, ncFileId);
+    if (!departmentId) return true;
+    const caller: SpaceAccessCaller = {
+      id: requesterId(req),
+      role: (req as { user?: { role?: string } }).user?.role ?? "",
+    };
+    const access = await checkSpaceAccess(prisma, req, caller, departmentId, minRight);
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return false;
+    }
+    return true;
+  }
+
   // ── Comment delete (DELETE /api/files/comments/:id) ──
   // REGISTERED BEFORE the `/files/:filePath(*)/...` routes so the wildcard
   // doesn't shadow this literal path (`comments` would otherwise be captured
@@ -711,6 +975,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           res.status(404).json({ error: "Comment not found" });
           return;
         }
+        if (!(await gateFileSpaceAccess(req, res, row.ncFileId, "reader"))) return;
         // Author check uses the UUID owner column, never the username.
         const isAuthor = row.authorUserId === requesterId(req);
         if (!isAuthor && !isPrivilegedReq(req)) {
@@ -747,6 +1012,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const where = isPrivilegedReq(req)
           ? { ncFileId: fileId }
           : { ncFileId: fileId, authorUserId: requesterId(req) };
@@ -775,6 +1041,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const comment = await prisma.fileComment.create({
           data: {
             ncFileId: fileId,
@@ -806,6 +1073,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const tags = await prisma.fileTag.findMany({
           where: { ncFileId: fileId },
           orderBy: { createdAt: "asc" },
@@ -833,6 +1101,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const tag = await prisma.fileTag.upsert({
           where: { ncFileId_label: { ncFileId: fileId, label: parsed.data.label } },
           create: {
@@ -863,6 +1132,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
         if (fileId === null) return;
+        if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const label = req.params.label;
         await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
         safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
@@ -900,19 +1170,38 @@ export function createFilesRouter(prisma: PrismaClient): Router {
 
   // ── List directory contents ──
   //
-  // WARP-883: accepts an optional `?space=personal|shared` (default personal).
-  // `shared` resolves the listing under the Household group-folder prefix; the
-  // user's OWN token still drives the request (groupfolders mounts the folder
-  // into their home). On the My-Files (personal) home ROOT we hide the shared
-  // folder entry so the Household folder isn't shown twice — once as a space in
-  // the switcher and once inline.
-  router.get("/files", async (req, res, next) => {
-    try {
-      const requestedPath = (req.query.path as string) || "/";
-      const space = resolveSpace(req.query.space);
-      const filePath = rootForSpace(space, requestedPath);
-      const user = getUser(req);
-      const isPersonalRoot = space === "personal" && filePath === "/";
+  // WARP-883 (T5) + WARP-1261 (T9): accepts an optional `?space=` (default personal).
+  // personal: the path is used verbatim (the user's home root).
+  // shared: the path resolves UNDER the Household prefix (legacy WS-5 compatibility).
+  // dept:<uuid>: path resolves UNDER the department mount point.
+  // On the My-Files (personal) home ROOT we hide the shared folder entry so the
+  // Household folder isn't shown twice — once as a space in the switcher and once inline.
+  // Composed with requireSpaceAccess middleware (reader minRight). The gate's own
+  // parseSpaceValue() only recognizes "personal" / "household" / "dept:<uuid>" and
+  // fails closed on anything else — but this route's `?space=` contract predates it
+  // (WARP-883/WS-5) and uses "shared" as the household alias, with any other
+  // unrecognized value silently falling back to personal (rootForSpace/resolveSpace
+  // above mirror the same lenient contract). Translate at the gate boundary so the
+  // access check and the path-resolution below stay in agreement, while a malformed
+  // `dept:<uuid>` still fails closed per the gate's own truth table.
+  router.get(
+    "/files",
+    requireSpaceAccess(prisma, "reader", {
+      resolveSpace: (req) => {
+        const raw = req.query.space;
+        if (typeof raw !== "string") return undefined; // personal
+        if (raw === "shared") return "household"; // legacy WS-5 alias
+        if (raw.startsWith("dept:")) return raw; // pass through for uuid validation
+        return undefined; // "personal" or any unrecognized value -> personal
+      },
+    }),
+    async (req, res, next) => {
+      try {
+        const requestedPath = (req.query.path as string) || "/";
+        const space = resolveSpace(req.query.space);
+        const filePath = await rootForSpace(prisma, space, requestedPath);
+        const user = getUser(req);
+        const isPersonalRoot = space === "personal" && filePath === "/";
 
       // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"), not
       // the (space, requestedPath) pair — the shared prefix already makes the
@@ -942,15 +1231,23 @@ export function createFilesRouter(prisma: PrismaClient): Router {
 
   // ── Spaces (GET /api/files/spaces) ──
   //
-  // WARP-883: tells the dashboard which spaces exist so it can show/hide the
-  // My-Files / Shared switcher. "personal" always exists (every user has a
-  // home); "shared" exists iff the Household group folder mounted into THIS
-  // user's home (the groupfolders provisioning ran + this user is in the
-  // household group). Read-only + degrades to shared-unavailable on a
-  // Nextcloud outage (never 500) — same posture as the other read endpoints.
+  // WARP-883 (T5) + WARP-1261 (T9): tells the dashboard which spaces exist.
+  // Returns: personal always; household (shared) with legacy id for wire-compat
+  // + spaceRef for v2; active DEPARTMENT/TEAM rows where caller is member or
+  // owner/admin.
+  //
+  // sharedAvailable probes the Household groupfolder; demoted (membership
+  // decides visibility in v2, not the probe). Read-only + degrades gracefully
+  // on Nextcloud outage (never 500).
   router.get("/files/spaces", async (req, res, next) => {
     try {
       const user = getUser(req);
+      const userId = req.user?.id;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
       let sharedAvailable = false;
       try {
         sharedAvailable = await ncDirExists(
@@ -963,17 +1260,91 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         logger.warn({ err }, "files/spaces: shared-folder probe failed; reporting unavailable");
         sharedAvailable = false;
       }
+
+      // Build the response: personal, household (shared), then active departments.
+      const spaces: Array<Record<string, unknown>> = [
+        { id: "personal", name: "My Files", root: "/" },
+      ];
+
+      // Household absorption: the seeded HOUSEHOLD kind department is returned
+      // with id='shared' for wire-compat, plus spaceRef for v2 routing.
+      const household = await prisma.department.findFirst({
+        where: { kind: "HOUSEHOLD" },
+        select: { id: true, name: true },
+      });
+      if (household) {
+        spaces.push({
+          id: "shared",
+          name: household.name,
+          spaceRef: `dept:${household.id}`,
+          root: `/${SHARED_FOLDER_NAME}`,
+          kind: "household",
+          state: "active",
+          // No 'right' or 'available' — household is special (always available if it exists).
+        });
+      }
+
+      // DB-driven departments: personal always; then Department rows where
+      // state=active AND caller is owner/admin OR has membership.
+      const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
+
+      let deptQuery = prisma.department.findMany({
+        where: {
+          kind: { in: ["DEPARTMENT", "TEAM"] },
+          state: "active",
+        },
+        select: {
+          id: true,
+          name: true,
+          parentId: true,
+          kind: true,
+          memberships: isOwnerOrAdmin
+            ? false
+            : {
+                where: { userId },
+                select: { right: true },
+              },
+        },
+        orderBy: { createdAt: "asc" },
+      });
+
+      const depts = await deptQuery;
+
+      for (const dept of depts) {
+        // Check membership: skip if not owner/admin and not a member.
+        if (!isOwnerOrAdmin) {
+          const membershipArray = (dept.memberships as any) || [];
+          if (membershipArray.length === 0) continue; // Not a member, skip.
+        }
+
+        // Resolve the mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+        let mountName = dept.name;
+        if (dept.kind === "TEAM" && dept.parentId) {
+          const parent = await prisma.department.findUnique({
+            where: { id: dept.parentId },
+            select: { name: true },
+          });
+          if (parent) {
+            mountName = `${parent.name} — ${dept.name}`;
+          }
+        }
+
+        const membershipArray = (dept.memberships as any) || [];
+        const membershipRight = membershipArray[0]?.right;
+
+        spaces.push({
+          id: `dept:${dept.id}`,
+          name: dept.name,
+          root: `/${mountName}`,
+          kind: dept.kind === "TEAM" ? "team" : "department",
+          state: "active",
+          right: isOwnerOrAdmin ? undefined : membershipRight,
+        });
+      }
+
       res.json({
         sharedAvailable,
-        spaces: [
-          { id: "personal", name: "My Files", available: true, root: "/" },
-          {
-            id: "shared",
-            name: SHARED_FOLDER_NAME,
-            available: sharedAvailable,
-            root: SHARED_FOLDER_PATH,
-          },
-        ],
+        spaces,
       });
     } catch (err) {
       handleFileError(err, res, next);
@@ -1042,16 +1413,48 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       const user = getUser(req);
       const results: { name: string; path: string; size: number }[] = [];
 
+      // WARP-1260 (T8): file-registry writer. Resolved ONCE per request
+      // (one target space per upload call) — read-only, no gating (write-
+      // route space enforcement is WARP-1262/T10); null for personal or
+      // any space that doesn't resolve to an ACTIVE department.
+      const uploadDepartmentId = await resolveDepartmentIdForSpaceReadOnly(
+        prisma,
+        req.query.space,
+      );
+      const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+
       for (const file of files) {
         await ncUploadFile(token, user, targetPath, file.originalname, file.buffer);
+        const uploadedPath =
+          targetPath === "/"
+            ? `/${file.originalname}`
+            : `${targetPath}/${file.originalname}`;
         results.push({
           name: file.originalname,
-          path:
-            targetPath === "/"
-              ? `/${file.originalname}`
-              : `${targetPath}/${file.originalname}`,
+          path: uploadedPath,
           size: file.size,
         });
+
+        // Best-effort, non-blocking: a registry-write failure must never
+        // fail the upload the user is actively waiting on.
+        if (ownerUserId) {
+          try {
+            const ncFileId = await ncGetFileId(token, user, uploadedPath);
+            if (ncFileId !== null) {
+              await upsertFileRegistryEntry(prisma, {
+                ncFileId,
+                ownerUserId,
+                path: uploadedPath,
+                departmentId: uploadDepartmentId,
+              });
+            }
+          } catch (registryErr) {
+            logger.warn(
+              { err: registryErr, path: uploadedPath },
+              "upload: file-registry upsert failed (non-fatal)",
+            );
+          }
+        }
       }
 
       await cacheDel(CACHE_PREFIX + user + ":" + targetPath);
@@ -1178,6 +1581,15 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         },
         actor: actorFromRequest(req),
       });
+
+      // WARP-941 — person shares (shareType 0) notify the recipient by email,
+      // best-effort. Fire-and-forget: notifyPersonShareByEmail never throws,
+      // and nothing about mail may fail or delay this response — the share
+      // already exists in Nextcloud. Link shares (shareType 3) deliberately
+      // send nothing: no recipient, no lookup, no dial.
+      if (parsed.data.shareType === 0 && parsed.data.shareWith) {
+        void notifyPersonShareByEmail(req, parsed.data.shareWith, parsed.data.path);
+      }
 
       res.json(share);
     } catch (err) {
@@ -1780,6 +2192,24 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   router.get("/files/shared-with-me", async (req, res, next) => {
     try {
       const shares = await ncListSharedWithMe(await getToken(req));
+      res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next, { shares: [] });
+    }
+  });
+
+  // ── Shares I created (GET /api/files/shares-by-me) ── (WARP-941)
+  //
+  // Outbound counterpart of /files/shared-with-me, backing the dashboard's
+  // "Shared by me" tab (previously a hardcoded placeholder). Nextcloud scopes
+  // the un-filtered OCS shares listing to shares the authenticated user owns,
+  // so the caller's own NC token is the only scoping needed — same session
+  // gating as the sibling route. Same degrade contract too: an unreachable
+  // Nextcloud serves an empty list rather than a 500 so the Shared page
+  // still renders during an outage.
+  router.get("/files/shares-by-me", async (req, res, next) => {
+    try {
+      const shares = await ncListOutboundShares(await getToken(req));
       res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next, { shares: [] });

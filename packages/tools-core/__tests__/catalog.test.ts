@@ -76,6 +76,16 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     expect(byName.get("pm_list_projects")?.domain).toBe("pm");
     expect(byName.get("get_system_health")?.domain).toBe("system");
     expect(byName.get("business_profile_get")?.domain).toBe("business");
+    // WARP-899/WARP-900 — data-utility tools live in the data domain.
+    expect(byName.get("encode_text")?.domain).toBe("data");
+    expect(byName.get("decode_text")?.domain).toBe("data");
+    expect(byName.get("hash_text")?.domain).toBe("data");
+    expect(byName.get("convert_data_format")?.domain).toBe("data");
+    expect(byName.get("format_json")?.domain).toBe("data");
+    // WARP-901 — misc dev utilities live in the data domain.
+    expect(byName.get("timestamp_convert")?.domain).toBe("data");
+    expect(byName.get("uuid_generate")?.domain).toBe("data");
+    expect(byName.get("regex_test")?.domain).toBe("data");
   });
 
   it("marks a destructive tool as write + confirm and a read tool as neither", () => {

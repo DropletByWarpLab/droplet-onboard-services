@@ -166,7 +166,7 @@ function ProjectsWorkspace(): JSX.Element {
     view === "index" ? (
       <>
         {!readOnly && (
-          <button className="dp-btn-primary" type="button" onClick={() => setModal("newproject")}>
+          <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
           </button>
         )}
@@ -180,7 +180,7 @@ function ProjectsWorkspace(): JSX.Element {
           <PmIcon name="msg" size={14} /> Ask AI about this project
         </Link>
         {!readOnly && project && (
-          <button className="dp-btn-primary" type="button" onClick={() => setModal("newitem")}>
+          <button className="btn primary" type="button" onClick={() => setModal("newitem")}>
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}

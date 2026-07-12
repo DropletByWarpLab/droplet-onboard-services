@@ -66,6 +66,20 @@ class PrismaClientKnownRequestError extends Error {
   }
 }
 
+// WARP-1261: a stable, always-present HOUSEHOLD department fixture — matches
+// the shape (+ a real uuid-format id, since files-spaces.test.ts pins it with
+// `stringMatching(/^dept:[a-f0-9-]{36}$/)`) of the bootstrap-time seed row a
+// real box provisions. Referenced by both `department.findFirst`/`findUnique`
+// below.
+const DEFAULT_HOUSEHOLD = {
+  id: "00000000-0000-4000-8000-000000000001",
+  name: "Household",
+  kind: "HOUSEHOLD",
+  parentId: null,
+  state: "active",
+  quotaBytes: null,
+};
+
 vi.mock("@prisma/client", () => {
   const mockPrisma = {
     $connect: vi.fn().mockResolvedValue(undefined),
@@ -109,6 +123,33 @@ vi.mock("@prisma/client", () => {
     moduleSetting: {
       findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue({}),
+    },
+    // WARP-1260/1261: requireSpaceAccess (space middleware) and GET
+    // /api/files/spaces both read `department` — the household space is
+    // resolved via `findFirst({ where: { kind: "HOUSEHOLD" } })`, and
+    // dept:<uuid> access/path resolution reads it via `findUnique`. A mock
+    // without this model throws (real PrismaClientInitializationError from
+    // the un-mocked delegate), which the space gate treats as a fail-closed
+    // read error → every full-app files integration test 404s/500s. Seed a
+    // single always-present HOUSEHOLD row (mirrors the bootstrap-time seed
+    // on a real box) so the default "personal + household" listing works
+    // out of the box; tests that need additional DEPARTMENT/TEAM rows or a
+    // missing household override these mocks per-test.
+    department: {
+      findFirst: vi.fn(async (args?: { where?: { kind?: string } }) =>
+        args?.where?.kind === "HOUSEHOLD" ? DEFAULT_HOUSEHOLD : null
+      ),
+      findUnique: vi.fn(async (args?: { where?: { id?: string } }) =>
+        args?.where?.id === DEFAULT_HOUSEHOLD.id ? DEFAULT_HOUSEHOLD : null
+      ),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    // Membership lookups (owner/admin short-circuit still checks membership
+    // to decide whether to emit the audited "admin-space-entry" row; family/
+    // guest need an explicit row). `null` = "not a member" — the safe default
+    // for a fresh session with no seeded memberships.
+    departmentMembership: {
+      findUnique: vi.fn().mockResolvedValue(null),
     },
   };
   return {

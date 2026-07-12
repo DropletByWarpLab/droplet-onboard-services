@@ -6,11 +6,14 @@
  * The backend's analysis vocabulary is exactly "Read" | "Write · confirm"
  * (email-analysis.service.ts coerces to these). We render the full FEATURES §6
  * phrasing in the chip ("Read · stays on LAN" / "Write · confirm to apply") so
- * the meaning is legible, while the contract value drives the tier.
+ * the meaning is legible.
  *
- * Color carries a hint; the high-contrast label text carries the meaning (the
- * shipped tinted-text tokens fail AA at caption size — same lesson as the Tools
- * page badges), so the LABEL always uses label-primary.
+ * WARP-1088 — indigo shell: recolored onto the shared `.badge` language
+ * (droplet-shell.css, same idiom as StatusChip.tsx and the /tools page's
+ * Writes/Asks-first chips). `.badge.ok` / `.badge.warn` already carry
+ * AA-contrast-safe label text on their tinted backgrounds, so the safety
+ * meaning stays semantic — green for the read-only tier, amber for the
+ * write-and-confirm tier — without a separate high-contrast text override.
  */
 
 import { Eye, Pencil } from "lucide-react";
@@ -20,16 +23,10 @@ export function SafetyChip({ safety }: { safety: ActionSafety }) {
   const isWrite = safety === "Write · confirm";
   const label = isWrite ? "Write · confirm to apply" : "Read · stays on LAN";
   const Icon = isWrite ? Pencil : Eye;
-  const tint = isWrite ? "bg-system-orange/15" : "bg-system-green/15";
-  const iconColor = isWrite ? "text-system-orange" : "text-system-green";
 
   return (
-    <span
-      className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-full type-caption-2 font-medium text-label-primary ${tint}`}
-    >
-      <span className={iconColor}>
-        <Icon size={10} aria-hidden />
-      </span>
+    <span className={`badge ${isWrite ? "warn" : "ok"}`}>
+      <Icon size={10} aria-hidden />
       {label}
     </span>
   );

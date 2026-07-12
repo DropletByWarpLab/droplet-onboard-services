@@ -70,9 +70,10 @@ describe("ClimateControl", () => {
       />,
     );
     const cool = screen.getByRole("tab", { name: /cool/i });
-    expect(cool.className).toMatch(/bg-accent/);
+    // Active tab carries the indigo brand-subtle fill (WARP-1091 recolor; was bg-accent).
+    expect(cool.className).toContain("bg-[var(--brand-subtle)]");
     expect(cool.getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("tab", { name: /heat/i }).className).not.toMatch(/bg-accent/);
+    expect(screen.getByRole("tab", { name: /heat/i }).className).not.toContain("bg-[var(--brand-subtle)]");
   });
 
   // KAN-7: the mode tabs are interactive. Heat/cool/auto are Tier-1 (the page's

@@ -13,9 +13,11 @@
 #     hide docker on CI runners that ship it in /usr/bin);
 #   * it encodes the load-bearing steps: real setup.sh --fips activation,
 #     isolated compose project, per-service fips_self_test assertions,
-#     edge-TLS probes, the documented LIBRARY_HAS_NO_CIPHERS boot exception
-#     (with the fixed-boot path behind EXPECT_FIPS_STACK_BOOTS), MD5-refusal
-#     execs, the non-provider FIPS-gate guard, and a down -v teardown trap;
+#     edge-TLS probes, the full FIPS-enforcing boot (orchestrator health +
+#     API endpoints — always asserted since the WARP-1063 fix; the pre-fix
+#     LIBRARY_HAS_NO_CIPHERS exception branch is gone), the
+#     enforcing-AND-alive runtime crypto execs, the non-provider FIPS-gate
+#     guard, and a down -v teardown trap;
 #   * the compose file pins the FIPS boot gate OFF for every service whose
 #     image does NOT ship the validated provider (the WARP-318 collateral
 #     crash-loop fix this ticket carries);
@@ -89,31 +91,51 @@ if [ -f "$HARNESS" ]; then
   else
     fail "missing edge-TLS FIPS assertions (fips_edge_tls / ChaCha probe)"
   fi
-  # The documented merged exception: TLS-client boot blocked by the FIPS
-  # config's no-ciphers default context — asserted as EXPECTED current
-  # behavior, with the fixed-boot path guarded behind EXPECT_FIPS_STACK_BOOTS.
-  if grep -qE 'library has no ciphers|LIBRARY_HAS_NO_CIPHERS' "$HARNESS" \
-     && grep -q 'EXPECT_FIPS_STACK_BOOTS' "$HARNESS"; then
-    pass "asserts the documented LIBRARY_HAS_NO_CIPHERS boot exception (+ fixed-boot flag)"
+  # WARP-1063: the full FIPS-enforcing boot is ALWAYS asserted — the pre-fix
+  # branch that expected LIBRARY_HAS_NO_CIPHERS as documented behavior must be
+  # gone (no wait_for_log on that pattern), while the orchestrator health
+  # check anchors the fixed-boot assertions.
+  if grep -q '/api/orchestrator/health' "$HARNESS" \
+     && ! grep -qE "wait_for_log .*(library has no ciphers|LIBRARY_HAS_NO_CIPHERS)" "$HARNESS"; then
+    pass "asserts the full FIPS-enforcing boot (no expected-no-ciphers exception branch)"
   else
-    fail "missing the documented TLS-client no-ciphers exception assertion"
+    fail "harness still encodes the pre-WARP-1063 no-ciphers exception (or lost the health check)"
   fi
-  # The three API endpoints are asserted under the fixed-boot path.
+  # EXPECT_FIPS_STACK_BOOTS stays accepted (ticket-acceptance invocation) even
+  # though the fixed boot is now the default assertion.
+  if grep -q 'EXPECT_FIPS_STACK_BOOTS' "$HARNESS"; then
+    pass "still documents/accepts EXPECT_FIPS_STACK_BOOTS (back-compat no-op)"
+  else
+    fail "EXPECT_FIPS_STACK_BOOTS disappeared from the harness"
+  fi
+  # The three API endpoints are asserted on the fixed-boot path.
   ep_ok=true
   for ep in /api/llm/conversations /api/files/search/status /api/calendar/places; do
     grep -q "$ep" "$HARNESS" || { ep_ok=false; break; }
   done
   if $ep_ok; then
-    pass "smoke-checks the three API endpoints under EXPECT_FIPS_STACK_BOOTS"
+    pass "smoke-checks the three API endpoints under the FIPS-enforcing boot"
   else
     fail "missing endpoint smoke check ('${ep:-}')"
   fi
-  # Runtime MD5-refusal execs in BOTH stacks (Python + Node).
+  # Runtime enforcing-AND-alive execs in BOTH stacks (Python + Node): an
+  # approved digest must WORK (a dead provider also refuses MD5 — WARP-1063)
+  # and MD5 must be refused.
   if grep -q 'usedforsecurity=True' "$HARNESS" \
-     && grep -qE "createHash\(.md5.\)" "$HARNESS"; then
-    pass "execs MD5-refusal probes in both the Python and Node stacks"
+     && grep -qE "createHash\(.md5.\)" "$HARNESS" \
+     && grep -qE "createHash\(.sha256.\)" "$HARNESS" \
+     && grep -qE '_hashlib\.new\("sha256"' "$HARNESS"; then
+    pass "execs enforcing-AND-alive probes (SHA-256 works + MD5 refused) in both stacks"
   else
-    fail "missing runtime MD5-refusal exec probes"
+    fail "missing runtime enforcing-AND-alive exec probes"
+  fi
+  # The ai-gateway exec must exercise BOTH of its libcrypto instances in the
+  # production order (pyca cryptography first, then the system libssl) — the
+  # dual-instance collision is exactly what WARP-1063 fixed.
+  if grep -q 'default_backend' "$HARNESS" && grep -q 'PROTOCOL_TLS_CLIENT' "$HARNESS"; then
+    pass "ai-gateway exec probes both libcrypto instances (pyca + system ssl)"
+  else
+    fail "ai-gateway exec no longer probes the dual-libcrypto shape"
   fi
   # Non-provider services must not enter the FIPS gate (the WARP-318 fix):
   # assert on the FAILED self-test line, not RestartCount (a service can be

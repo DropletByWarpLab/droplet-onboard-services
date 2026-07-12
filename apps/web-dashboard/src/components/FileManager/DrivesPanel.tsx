@@ -114,8 +114,8 @@ function statusOf(d: DriveInfo): Status {
 }
 
 // Map a pool's health to a design `.badge` variant. The plain-language label
-// still comes from `poolStatusBadge()`; only the colour idiom moves to the
-// indigo Badge (the shared pool-display helper's Tailwind `cls` is legacy).
+// still comes from `poolStatusBadge()`; the colour idiom lives entirely in
+// the indigo Badge (WARP-1091 removed pool-display's unused `cls` field).
 function poolBadgeKind(status: PoolInfo["status"]): BadgeKind {
   switch (status) {
     case "active":

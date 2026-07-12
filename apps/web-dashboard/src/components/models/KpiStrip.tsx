@@ -102,19 +102,22 @@ function KpiTile({
   valueMuted?: boolean;
 }) {
   return (
-    <div className="dp-card p-4 flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-label-tertiary">
+    <div className="kpi">
+      <span className="k">
         <Icon size={13} strokeWidth={2} aria-hidden />
-        <span className="type-caption-1 font-medium">{label}</span>
-      </div>
-      <div
-        className={`type-title-3 tabular-nums ${
-          valueMuted ? "text-label-tertiary font-normal" : "text-label-primary"
-        }`}
+        {label}
+      </span>
+      <span
+        className="v tabular-nums"
+        style={
+          valueMuted
+            ? { color: "var(--text-muted)", fontWeight: 400 }
+            : undefined
+        }
       >
         {value}
-      </div>
-      <div className="type-caption-2 text-label-tertiary">{meta}</div>
+      </span>
+      <span className="d">{meta}</span>
     </div>
   );
 }

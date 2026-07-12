@@ -11,6 +11,7 @@
 
 import {
   Bell,
+  Braces,
   Building2,
   Calendar,
   Camera,
@@ -45,6 +46,9 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   pm: { label: "Projects", icon: ListChecks },
   business: { label: "Business", icon: Building2 },
   system: { label: "System", icon: HardDrive },
+  // WARP-899/WARP-900 — data-utility tools (encode/decode, hash, format conversion);
+  // WARP-901 — misc dev utilities (timestamp/UUID/regex). Both live in the data domain.
+  data: { label: "Data", icon: Braces },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

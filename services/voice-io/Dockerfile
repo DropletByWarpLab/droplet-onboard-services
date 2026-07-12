@@ -27,7 +27,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         alsa-utils \
         ffmpeg \
         curl \
-        ca-certificates
+        ca-certificates \
+        # libusb: runtime link target of the vendor xvf_host CLI, which
+        # POST /voice/restart-processor executes to reboot a wedged
+        # XVF3800 DSP over USB (WARP-1057). The binary itself is the
+        # host's copy, bind-mounted read-only by compose.
+        libusb-1.0-0
 
 WORKDIR /app
 

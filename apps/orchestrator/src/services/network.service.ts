@@ -9,6 +9,7 @@ import * as openwrt from "./openwrt.client.js";
 import * as hostapdBridge from "./hostapd-bridge.service.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { config } from "../config.js";
+import { fetchHostTopology } from "../lib/host-topology.js";
 import { RouterError } from "../types/router-error.js";
 import type {
   NetworkSummary,
@@ -455,8 +456,20 @@ export async function setDnsServers(servers: string[]): Promise<openwrt.WriteRes
   return result;
 }
 
-// WARP-871: read-only deployment-posture probe (ADR-018). Pass-through.
+// WARP-817: on the single-box shape (DROPLET_AP_MODE=hostapd) the routing
+// service's GET /network/topology probes the CONTAINERISED OpenWrt's "wan"
+// ubus interface, which single-box never configures — WAN is HOST-owned — so
+// it always reports UNKNOWN. Prefer the host device-bridge's own posture
+// probe there; multi-box (uci) keeps the existing routing-service-sourced
+// posture unchanged, and any host-probe failure falls back to it too (honest
+// degrade, never a wrong guess). This does NOT change
+// `assertPrimaryRouterPosture()` below — the brick-risk KAN-8 firmware gate
+// intentionally stays on the routing-service-only signal.
 export async function getTopology(): Promise<openwrt.NetworkTopology> {
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    const hostTopology = await fetchHostTopology();
+    if (hostTopology) return hostTopology;
+  }
   return openwrt.fetchTopology();
 }
 
