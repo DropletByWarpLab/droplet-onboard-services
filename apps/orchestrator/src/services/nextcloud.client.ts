@@ -1202,6 +1202,23 @@ export class NextcloudUserExistsError extends NextcloudOcsError {
   }
 }
 
+/**
+ * Thrown by the group-membership endpoints (`ncAddUserToGroup` /
+ * `ncRemoveUserFromGroup`) when Nextcloud reports OCS statuscode 102 for
+ * `POST`/`DELETE /cloud/users/{userid}/groups`. For those endpoints statuscode
+ * 102 means "group does not exist" — a genuine failure that must not be
+ * swallowed as an idempotent membership no-op. Note this is the *opposite* of
+ * the `POST /cloud/groups` / `POST /cloud/users` create endpoints, where 102
+ * means "already exists" (see `NextcloudUserExistsError`). Callers can
+ * `instanceof`-check this without string-matching the OCS message.
+ */
+export class NextcloudGroupNotFoundError extends NextcloudOcsError {
+  constructor(message = "Group does not exist") {
+    super(message, 102);
+    this.name = "NextcloudGroupNotFoundError";
+  }
+}
+
 
 export interface ShareCreateOptions {
   /** 0 = user, 1 = group, 3 = public link */
