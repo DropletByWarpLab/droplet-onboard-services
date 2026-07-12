@@ -94,6 +94,31 @@ jobs:
           sudo apt-get clean
           df -h /
 
+      # WARP-1065/WARP-1248: the rm above reclaims the ~14GB root disk to
+      # ~36GB, but a PR that rewrites Dockerfile RUN steps (e.g. this branch
+      # adding BuildKit cache mounts) busts the layer cache for those steps,
+      # so `docker compose --profile full build` rebuilds the multi-GB
+      # ai-gateway/CUDA/torch stages cold and holds them all in the local
+      # BuildKit store at once — still overflowing root ("no space left on
+      # device" importing ai-gateway). ubuntu-latest also mounts a large
+      # ephemeral disk at /mnt (~65GB free) that Docker ignores by default.
+      # Relocate Docker's data-root (image + BuildKit layer store) onto /mnt
+      # so a cold full-stack build gets that headroom. Safe here: no images
+      # have been pulled yet (checkout + free-disk only), and the GHCR layer
+      # cache is imported during the build via cache_from, not pre-pulled.
+      - name: Expand Docker disk (move data-root to /mnt)
+        run: |
+          set -eux
+          df -h / /mnt
+          sudo systemctl stop docker.socket docker.service
+          sudo mkdir -p /mnt/docker
+          printf '{\n  "data-root": "/mnt/docker"\n}\n' | sudo tee /etc/docker/daemon.json
+          sudo rm -rf /var/lib/docker
+          sudo systemctl start docker.service
+          docker info --format 'Docker Root Dir: {{.DockerRootDir}}'
+          test "$(docker info --format '{{.DockerRootDir}}')" = "/mnt/docker"
+          df -h / /mnt
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
