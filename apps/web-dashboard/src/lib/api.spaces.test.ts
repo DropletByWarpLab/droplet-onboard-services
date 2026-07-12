@@ -50,8 +50,14 @@ describe("WARP-883 — Files spaces api", () => {
     const body = {
       sharedAvailable: true,
       spaces: [
-        { id: "personal", name: "My Files", available: true, root: "/" },
-        { id: "shared", name: "Household", available: true, root: "/Household" },
+        { id: "personal", name: "My Files", root: "/" },
+        {
+          id: "shared",
+          name: "Household",
+          root: "/Household",
+          kind: "household",
+          state: "active",
+        },
       ],
     };
     authFetchMock.mockResolvedValue(res(body));

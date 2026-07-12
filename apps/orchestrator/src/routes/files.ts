@@ -1129,7 +1129,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   // WARP-883 (T5) + WARP-1261 (T9): tells the dashboard which spaces exist.
   // Returns: personal always; household (shared) with legacy id for wire-compat
   // + spaceRef for v2; active DEPARTMENT/TEAM rows where caller is member or
-  // owner/admin. BigInt-safe JSON encoding for quotas.
+  // owner/admin.
   //
   // sharedAvailable probes the Household groupfolder; demoted (membership
   // decides visibility in v2, not the probe). Read-only + degrades gracefully
@@ -1165,7 +1165,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       // with id='shared' for wire-compat, plus spaceRef for v2 routing.
       const household = await prisma.department.findFirst({
         where: { kind: "HOUSEHOLD" },
-        select: { id: true, name: true, quotaBytes: true },
+        select: { id: true, name: true },
       });
       if (household) {
         spaces.push({
@@ -1193,7 +1193,6 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           name: true,
           parentId: true,
           kind: true,
-          quotaBytes: true,
           memberships: isOwnerOrAdmin
             ? false
             : {
