@@ -44,6 +44,13 @@ const CAMERA_POLL_INTERVAL_MS = 10_000;
  *
  * Skipping leaves the pending entries in place; the customer sees them
  * in the Cameras page's discovery banner whenever they next visit.
+ *
+ * WARP-1282 — a transient backend outage during `load()` used to strand
+ * the step: the 10 s poll refreshed the *discovered* list once the backend
+ * came back but never re-ran the full load, so `existing` stayed
+ * empty/stale and the WARP-861 remove affordance silently vanished. The
+ * poll now re-runs the FULL `load()` while the last load is marked
+ * incomplete, and the error banner carries an explicit "Try again" button.
  */
 export function CamerasStep({
   onComplete,
@@ -62,6 +69,14 @@ export function CamerasStep({
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // WARP-1282 — true while the last `load()` didn't fully complete (discovery
+  // unreachable, or the existing-cameras read failed). Drives the error
+  // banner's "Try again" button and tells the 10 s poll to re-run the FULL
+  // load instead of the light discovered-only refresh. Mirrored into a ref so
+  // the interval callback (armed once) sees the current value.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const loadFailedRef = useRef(false);
+  const [retrying, setRetrying] = useState(false);
   // WARP-933 review — `alive` guards async setState after the customer advances
   // (the step unmounts while a fetch is still in flight); `savingRef` lets the
   // discovery poll pause while an accept-all is mid-flight, so a poll tick can't
@@ -81,28 +96,47 @@ export function CamerasStep({
       // discovery is the primary signal. A cameras-list error surfaces to
       // the user instead of silently hiding the "Already set up" section.
       let all: CameraInfo[];
+      let camerasListFailed = false;
       try {
         all = await fetchCameras();
       } catch {
         setError("Couldn't load existing cameras. Check your connection and try again.");
+        camerasListFailed = true;
         all = [];
       }
       const list = await fetchDiscoveredCameras();
       // GET /cameras includes pending discovered rows (enabled=false) —
       // filter to enabled so they don't duplicate the discovered cards.
       const enabled = all.filter((c) => c.enabled);
-      if (!alive.current) return;
+      // WARP-1282 — same guard as the poll: never apply results after unmount
+      // or under an in-flight accept-all (load() is now re-entered from the
+      // poll and the Try-again button, not just mount).
+      if (!alive.current || savingRef.current) return;
       setError(null); // clear any fetchCameras blip now that discovery succeeded
       setCameras(list);
-      setExisting(enabled);
+      if (camerasListFailed) {
+        // WARP-1282 — the existing-cameras read failed: keep whatever we last
+        // knew instead of blanking the "Already set up" section, and leave
+        // the load marked incomplete so the 10 s poll re-runs the FULL load
+        // until fetchCameras succeeds again.
+        setLoadFailed(true);
+        loadFailedRef.current = true;
+      } else {
+        setExisting(enabled);
+        setLoadFailed(false);
+        loadFailedRef.current = false;
+      }
       // WARP-933 — do NOT auto-skip when nothing's found yet. The step stays
       // visible (with an explicit "looking for cameras" state) and keeps
       // polling (below), so a camera plugged in DURING this step shows up live
       // instead of the page silently jumping past it.
     } catch {
+      if (!alive.current || savingRef.current) return;
       // Discovery service unreachable — surface it with a retry rather than
       // silently skipping, which read to customers as "the page doesn't work".
       setError("Couldn't check for cameras right now. Try again in a moment.");
+      setLoadFailed(true);
+      loadFailedRef.current = true;
     } finally {
       setLoading(false);
     }
@@ -122,6 +156,15 @@ export function CamerasStep({
       // Don't overwrite the cards while an accept-all is in flight (a tick
       // returning [] mid-save would blank them out under the save).
       if (savingRef.current) return;
+      // WARP-1282 — the last full load didn't complete (backend outage while
+      // this step was loading): the light discovered-only refresh below would
+      // leave `existing` empty/stale for the rest of the step. Re-run the
+      // FULL load instead — the first successful tick repopulates both lists
+      // and clears the error.
+      if (loadFailedRef.current) {
+        void load();
+        return;
+      }
       void fetchDiscoveredCameras()
         .then((list) => {
           if (alive.current && !savingRef.current) {
@@ -132,7 +175,20 @@ export function CamerasStep({
         .catch(() => {});
     }, CAMERA_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [load]);
+
+  // WARP-1282 — explicit recovery control on the error banner. Respects the
+  // same guards as the poll: never refetch under an in-flight accept-all, and
+  // don't stack retries.
+  async function handleTryAgain() {
+    if (savingRef.current || retrying) return;
+    setRetrying(true);
+    try {
+      await load();
+    } finally {
+      if (alive.current) setRetrying(false);
+    }
+  }
 
   async function handleAcceptAll() {
     setError(null);
@@ -310,7 +366,23 @@ export function CamerasStep({
         {error && (
           <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2 mt-3">
             <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-            <span>{error}</span>
+            <div className="flex flex-1 flex-col items-start gap-2">
+              <span>{error}</span>
+              {/* WARP-1282 — the copy promises "try again"; give it a real
+                  control. dp-btn-secondary carries the 44px min tap target.
+                  Only for load failures — accept/remove errors direct the
+                  customer to the Cameras page instead. */}
+              {loadFailed && (
+                <button
+                  type="button"
+                  onClick={handleTryAgain}
+                  disabled={retrying || saving}
+                  className="dp-btn-secondary type-footnote !px-3 disabled:opacity-50"
+                >
+                  {retrying ? "Checking…" : "Try again"}
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
