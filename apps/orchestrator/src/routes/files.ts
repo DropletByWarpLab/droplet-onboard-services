@@ -480,35 +480,47 @@ export function createFilesRouter(prisma: PrismaClient): Router {
 
         // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
         // the doc-server session so a non-member never reaches the WOPI
-        // handshake for a dept file. Best-effort: resolution failure falls
-        // through to the existing (mint-time) behavior rather than 500ing.
+        // handshake for a dept file. TWO phases with DIFFERENT failure
+        // postures:
+        //   1. NC/file-id RESOLUTION is best-effort — a resolution failure
+        //      (NC unreachable, path no longer resolves) falls through to the
+        //      existing mint-time behavior rather than 500ing.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed). If
+        //      it stayed inside the swallow, a thrown membership lookup would be
+        //      silently discarded and the session minted anyway — the exact
+        //      cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
         try {
           const gateFileId = await ncGetFileId(token, user, filePath);
           if (gateFileId !== null) {
-            const departmentId = await resolveFileDepartment(prisma, gateFileId);
-            if (departmentId) {
-              const gateCaller: SpaceAccessCaller = {
-                id: requesterId(req),
-                role: (req as { user?: { role?: string } }).user?.role ?? "",
-              };
-              const access = await checkSpaceAccess(
-                prisma,
-                req,
-                gateCaller,
-                departmentId,
-                "reader",
-              );
-              if (!access.allowed) {
-                res.status(access.status).json({ error: access.error });
-                return;
-              }
-            }
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
           }
         } catch (gateErr) {
           logger.debug(
             { err: gateErr, filePath },
             "editor-session: department gate resolution failed (best-effort, falling through)",
           );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: requesterId(req),
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
         }
 
         // Edit-vs-view: default to the owner's edit capability, then DOWNGRADE
@@ -611,40 +623,50 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
 
         // WARP-1260 (T8): department metadata gate. FileCitation is keyed
-        // by `filePath`, not `ncFileId`, so resolve the NC file id first —
-        // best-effort: any resolution failure (missing NC session,
-        // Nextcloud unreachable, path no longer exists) falls through to
-        // the existing personal-space semantics below rather than 500ing
-        // or 401ing a route that historically never depended on NC.
+        // by `filePath`, not `ncFileId`, so resolve the NC file id first.
+        // TWO phases with DIFFERENT failure postures:
+        //   1. NC/file-id RESOLUTION is best-effort — any resolution failure
+        //      (missing NC session, Nextcloud unreachable, path no longer
+        //      exists) falls through to the existing personal-space semantics
+        //      below rather than 500ing or 401ing a route that historically
+        //      never depended on NC.
+        //   2. The authorization DECISION (checkSpaceAccess) is NOT best-effort
+        //      and runs OUTSIDE the resolution try/catch: a denial returns 403
+        //      and any internal error (a transient department/membership Prisma
+        //      failure) propagates to the route's outer catch (fail-closed)
+        //      instead of being swallowed and falling through UNGATED — the
+        //      exact cross-department fail-open ADR-029 §3.2 closes. Mirrors the
+        //      comments/tags routes' `gateFileSpaceAccess` posture.
+        let gateDepartmentId: string | null = null;
         try {
           const gateToken = await getToken(req);
           const gateNcUser = getUser(req);
           const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
           if (gateFileId !== null) {
-            const departmentId = await resolveFileDepartment(prisma, gateFileId);
-            if (departmentId) {
-              const gateCaller: SpaceAccessCaller = {
-                id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
-                role: (req as { user?: { role?: string } }).user?.role ?? "",
-              };
-              const access = await checkSpaceAccess(
-                prisma,
-                req,
-                gateCaller,
-                departmentId,
-                "reader",
-              );
-              if (!access.allowed) {
-                res.status(access.status).json({ error: access.error });
-                return;
-              }
-            }
+            gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
           }
         } catch (gateErr) {
           logger.debug(
             { err: gateErr, filePath },
             "citations: department gate resolution failed (best-effort, falling through)",
           );
+        }
+        if (gateDepartmentId) {
+          const gateCaller: SpaceAccessCaller = {
+            id: (req as { user?: { id?: string } }).user?.id ?? "__none__",
+            role: (req as { user?: { role?: string } }).user?.role ?? "",
+          };
+          const access = await checkSpaceAccess(
+            prisma,
+            req,
+            gateCaller,
+            gateDepartmentId,
+            "reader",
+          );
+          if (!access.allowed) {
+            res.status(access.status).json({ error: access.error });
+            return;
+          }
         }
 
         const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
