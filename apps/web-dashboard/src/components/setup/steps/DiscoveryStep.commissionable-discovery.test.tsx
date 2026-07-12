@@ -119,7 +119,7 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     expect(readyList).toBeInTheDocument();
     expect(readyList).toHaveTextContent("Smart Bulb");
     // The pairing-code input stays the add path — the card must say so.
-    expect(readyList).toHaveTextContent(/pairing code below/i);
+    expect(readyList).toHaveTextContent(/pairing code printed on it below/i);
     // Real content on the surface — no scanning skeletons alongside it.
     expect(
       screen.queryByTestId("discovery-skeletons"),
@@ -150,6 +150,10 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     const unavailable = screen.getByTestId("discovery-unavailable");
     expect(unavailable).toBeInTheDocument();
     expect(unavailable).toHaveTextContent(/isn't available/i);
+    // A11y (VpnStep convention): polite live region — the state is
+    // non-urgent and self-healing, so role="status", never "alert".
+    expect(unavailable).toHaveAttribute("role", "status");
+    expect(unavailable).toHaveAttribute("aria-live", "polite");
     expect(
       screen.queryByTestId("discovery-skeletons"),
     ).not.toBeInTheDocument();
@@ -228,6 +232,44 @@ describe("DiscoveryStep commissionable-device discovery (WARP-1281)", () => {
     // Poll cadence is 3s — three consecutive failures land by ~9s.
     await advance(10_000);
     expect(screen.getByTestId("discovery-unavailable")).toBeInTheDocument();
+  });
+
+  it("keeps the unavailable verdict while the commissioned poll returns 200-empty (poll success must NOT clear it)", async () => {
+    // Regression pin for the original WARP-1281 masking bug: GET
+    // /matter/devices answers 200-with-empty-groups even when the
+    // controller is down, so a succeeding poll proves nothing — only a
+    // discovery SUCCESS may clear the verdict. The browse 503s once and
+    // then HANGS (never settles): if a poll-200 cleared the verdict,
+    // nothing could re-trip it before the assertions below, so a
+    // regression restoring the masking behavior fails here — unlike the
+    // plain 503 test, where the next 503 in the chain could re-trip the
+    // state between the poll settle and the assertion.
+    let discoverCalls = 0;
+    discoverMatterDevicesMock.mockImplementation(() => {
+      discoverCalls += 1;
+      if (discoverCalls === 1) return Promise.reject(controllerDown503());
+      // In flight forever — no further discovery settle can influence
+      // the verdict.
+      return new Promise<{ devices: MatterDiscoveredDevice[]; count: number }>(
+        () => {},
+      );
+    });
+    render(<DiscoveryStep onContinue={() => {}} />);
+    await flush();
+    expect(screen.getByTestId("discovery-unavailable")).toBeInTheDocument();
+
+    // Drive several 3s poll cycles — each commissioned poll succeeds
+    // with empty groups. The verdict must hold through every one.
+    for (let i = 0; i < 4; i++) {
+      await advance(3_000);
+      expect(screen.getByTestId("discovery-unavailable")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("discovery-skeletons"),
+      ).not.toBeInTheDocument();
+    }
+    // Guard against passing vacuously: the polls really did keep
+    // running and succeeding while the verdict held.
+    expect(fetchMatterDevicesMock.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it("runs discovery serially — never two browses in flight, next kicks only after the previous settles", async () => {

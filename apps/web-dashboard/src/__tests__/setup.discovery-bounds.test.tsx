@@ -12,6 +12,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import React from "react";
 
+// WARP-1281: these polling-bounds walks drive 305-615 one-second
+// fake-timer iterations through the full setup page, which was already
+// borderline against the default 5s testTimeout under full-suite load
+// (pre-existing flake on main), and the discovery browse chain roughly
+// doubles the per-iteration work. File-scoped bound only — a hang guard,
+// not a performance target; the global config stays untouched.
+vi.setConfig({ testTimeout: 60_000 });
+
 vi.mock("framer-motion", async () => {
   const actual = await vi.importActual<typeof import("framer-motion")>(
     "framer-motion",

@@ -273,7 +273,11 @@ export function DiscoveryStep({
     // Bumping the generation makes any browse still in flight from the
     // previous scan discard its result; the busy flag keeps the chain
     // strictly serial across the re-arm (the stale browse's settle hands
-    // the chain over to this scan's generation).
+    // the chain over to this scan's generation). Worst case the new
+    // scan's first browse therefore starts after the stale browse's
+    // remaining flight time (a browse runs ~15s server-side) plus the
+    // 3s gap — the serial guarantee is worth that latency; overlapping
+    // active mDNS browses would be worse for the controller.
     if (discoverTimerRef.current) clearTimeout(discoverTimerRef.current);
     discoverGenRef.current += 1;
     discoverEnabledRef.current = true;
@@ -446,8 +450,8 @@ export function DiscoveryStep({
             : serviceUnavailable
               ? // WARP-1281: don't claim we're scanning while the
                 // smart-home subsystem is demonstrably down — the body
-                // shows the service-unavailable state.
-                "Smart home isn't available yet"
+                // shows the service-unavailable state (same wording).
+                "Smart home isn't available right now"
               : // WARP-937: don't claim we're still "scanning" once polling
                 // has stopped with nothing found — the body shows a
                 // no-devices empty state, so the subtitle should match
@@ -464,7 +468,27 @@ export function DiscoveryStep({
           the title, "N devices found" subtitle, and the CTA stay pinned in the
           StepShell while only this list scrolls. The bound is viewport-relative
           (was a fixed max-h-[320px]) so it shrinks on a short landscape phone. */}
-      <ScrollRegion aria-label="Discovered devices" className="space-y-2 mb-8">
+      {/* WARP-1281 (UX): the region now holds both commissioned devices and
+          commissionable "ready to pair" cards, so the label says so. */}
+      <ScrollRegion
+        aria-label="Discovered and nearby devices"
+        className="space-y-2 mb-8"
+      >
+        {/* Polite live region (TwoFactorStep pattern): card lists aren't
+            announced on their own, so tell AT users when nearby devices
+            show up. Always mounted so the announcement fires on change. */}
+        <span
+          className="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {commissionables.length > 0
+            ? `${commissionables.length} device${
+                commissionables.length !== 1 ? "s" : ""
+              } ready to pair`
+            : ""}
+        </span>
         {discoveredDevices.map((device, index) => {
           const Icon = CATEGORY_ICONS[device.category] || Wifi;
           return (
@@ -518,10 +542,13 @@ export function DiscoveryStep({
                     {device.deviceName || "Matter device"}
                   </p>
                   <p className="type-caption-1 text-label-tertiary">
-                    Enter its pairing code below to add it
+                    Enter the pairing code printed on it below
                   </p>
                 </div>
-                <span className="type-caption-1 text-system-blue flex-shrink-0">
+                {/* UX (WARP-1281): label ramp, not system-blue — 12px blue
+                    on the card surface lands under AA 4.5:1; the icon tile
+                    keeps the info tint. */}
+                <span className="type-caption-1 text-label-secondary flex-shrink-0">
                   Ready to pair
                 </span>
               </div>
@@ -567,7 +594,15 @@ export function DiscoveryStep({
           the controller finishes starting. "Scan again" re-arms a fresh
           scan; Continue / Skip in the StepShell stay available throughout. */}
       {serviceUnavailable && (
-        <div className="text-center mb-4" data-testid="discovery-unavailable">
+        <div
+          // Polite live region (VpnStep convention): the state is
+          // non-urgent and self-healing, and Continue/Skip stay
+          // available — so role="status", not role="alert".
+          role="status"
+          aria-live="polite"
+          className="text-center mb-4"
+          data-testid="discovery-unavailable"
+        >
           <div className="flex flex-col items-center">
             <Hourglass
               size={28}
