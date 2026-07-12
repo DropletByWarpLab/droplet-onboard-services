@@ -741,6 +741,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // text. `agentModel` may be overridden per-turn by vision auto-routing.
       let agentMessages: ChatMessage[] = [...chatReq.messages];
       let agentModel = chatReq.model;
+      // WARP-904: the provider that actually served this turn — tracks
+      // `agentModel`. Vision auto-routing (below) can swap the user's selected
+      // model for a local VISION_MODEL whose provider differs from the one the
+      // caller forwarded, so the per-turn audit row must record THIS value, not
+      // `chatReq.provider`, or the persisted model/provider pair goes
+      // internally inconsistent (e.g. model:"llava:7b" + provider:"openai").
+      let agentProvider: string | null = chatReq.provider ?? null;
 
       let conversationId: string | null = null;
       let assistantMessageId: string | null = null;
@@ -979,13 +986,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCalls: liveToolCalls,
             status,
             reasoning: liveReasoning,
-            // WARP-904: `agentModel` may differ from `chatReq.model` when
-            // vision auto-routing overrode the user's selection — persist
-            // what actually ran, not what was requested. `provider` still
-            // reflects the user's pick (the vision-only reroute doesn't
-            // change provider in practice today).
+            // WARP-904: `agentModel`/`agentProvider` may differ from the
+            // caller's `chatReq.model`/`chatReq.provider` when vision
+            // auto-routing overrode the user's selection — persist what
+            // actually ran (model AND its provider, kept in lockstep above),
+            // not what was requested, so the audit row is a consistent pair.
             model: agentModel,
-            provider: chatReq.provider ?? null,
+            provider: agentProvider,
           });
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -1086,6 +1093,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             });
             if (route.mode === "image") {
               attachImageBlocksToLastUserMessage(agentMessages, blocks);
+              // WARP-904: when we auto-route to the local VISION_MODEL (a
+              // DIFFERENT model than the user picked), resolve ITS provider so
+              // the persisted audit pair stays consistent. The model list is
+              // already warm from the capability lookups above, so this is a
+              // cache hit. Unknown → null (honest "unknown") rather than the
+              // stale cloud provider, which would be a wrong, mismatched pair.
+              // The selected-model image case (route.model === chatReq.model)
+              // keeps the caller's forwarded provider untouched.
+              if (route.model !== chatReq.model) {
+                agentProvider =
+                  (await aiGateway.getModelProvider(route.model)) ?? null;
+              }
               agentModel = route.model;
               // Don't also inline a "no text could be extracted" note for an
               // image we're sending visually — OCR only over the rest.
