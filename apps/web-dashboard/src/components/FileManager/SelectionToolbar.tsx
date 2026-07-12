@@ -24,7 +24,21 @@ interface SelectionToolbarProps {
   onCopyTo: () => void;
   onDelete: () => void;
   onDownload: () => void;
+  /**
+   * WARP-1267 — true inside a `reader`-right department/team library.
+   * Rename/Move/Cut/Paste/Trash render visible-but-disabled with the
+   * shipped reader-posture tooltip copy (design brief §2); Copy and
+   * Download stay enabled — readers can duplicate elsewhere and download.
+   * Defaults false so every existing caller (My Files / Household) is
+   * unaffected.
+   */
+  readOnly?: boolean;
 }
+
+/** Verbatim copy (design brief §2) — ships as-is wherever a write action is
+ *  disabled for a reader-right space. */
+const READER_TOOLTIP =
+  "You can view and download here. Ask a manager for edit access.";
 
 /**
  * Floating action bar shown when one or more items are selected.
@@ -43,6 +57,7 @@ export function SelectionToolbar({
   onCopyTo,
   onDelete,
   onDownload,
+  readOnly = false,
 }: SelectionToolbarProps) {
   if (count === 0 && !hasClipboard) return null;
 
@@ -82,7 +97,13 @@ export function SelectionToolbar({
 
       <div className="flex items-center gap-1 flex-wrap">
         {canRename && (
-          <button onClick={onRename} className="btn sm" title="Rename">
+          <button
+            onClick={() => !readOnly && onRename()}
+            disabled={readOnly}
+            aria-disabled={readOnly || undefined}
+            className="btn sm"
+            title={readOnly ? READER_TOOLTIP : "Rename"}
+          >
             <Edit3 size={14} />
             Rename
           </button>
@@ -93,7 +114,13 @@ export function SelectionToolbar({
               <Download size={14} />
               Download
             </button>
-            <button onClick={onMove} className="btn sm" title="Move to folder">
+            <button
+              onClick={() => !readOnly && onMove()}
+              disabled={readOnly}
+              aria-disabled={readOnly || undefined}
+              className="btn sm"
+              title={readOnly ? READER_TOOLTIP : "Move to folder"}
+            >
               <FolderInput size={14} />
               Move
             </button>
@@ -101,14 +128,26 @@ export function SelectionToolbar({
               <Copy size={14} />
               Copy
             </button>
-            <button onClick={onCut} className="btn sm" title="Cut">
+            <button
+              onClick={() => !readOnly && onCut()}
+              disabled={readOnly}
+              aria-disabled={readOnly || undefined}
+              className="btn sm"
+              title={readOnly ? READER_TOOLTIP : "Cut"}
+            >
               <Scissors size={14} />
               Cut
             </button>
           </>
         )}
         {hasClipboard && (
-          <button onClick={onPaste} className="btn primary sm" title="Paste here">
+          <button
+            onClick={() => !readOnly && onPaste()}
+            disabled={readOnly}
+            aria-disabled={readOnly || undefined}
+            className="btn primary sm"
+            title={readOnly ? READER_TOOLTIP : "Paste here"}
+          >
             <ClipboardPaste size={14} />
             Paste
           </button>
@@ -119,10 +158,12 @@ export function SelectionToolbar({
         <>
           <div className="flex-1" />
           <button
-            onClick={onDelete}
+            onClick={() => !readOnly && onDelete()}
+            disabled={readOnly}
+            aria-disabled={readOnly || undefined}
             className="btn ghost sm"
-            style={{ color: "var(--danger)" }}
-            title="Move to trash"
+            style={{ color: readOnly ? undefined : "var(--danger)" }}
+            title={readOnly ? READER_TOOLTIP : "Move to trash"}
           >
             <Trash2 size={14} />
             Trash

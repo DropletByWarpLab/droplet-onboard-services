@@ -292,6 +292,20 @@ export interface FileSpace {
   kind?: string;
   /** Provision state (active, pending, failed, archiving, archived). */
   state?: string;
+  /**
+   * WARP-1267: true when the caller holds an actual membership row on this
+   * space. Owner/admin see every active department/team via see-all even
+   * without one — this flag is how the UI distinguishes "I'm a member here"
+   * from "I'm an admin visiting a library I don't belong to" (drives the
+   * admin foreign-library banner, brief §2). Undefined for personal/household.
+   */
+  isMember?: boolean;
+  /**
+   * WARP-1267: for kind='team' only — the parent department's display name.
+   * NC mounts team libraries flat; the dashboard owns the hierarchy illusion
+   * for the Files breadcrumb and the Spaces menu's nested team rows.
+   */
+  parentName?: string;
 }
 
 export interface FileSpacesResponse {
