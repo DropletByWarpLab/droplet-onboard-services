@@ -33,6 +33,8 @@ function device(partial: Partial<EnrichedNetworkDevice> = {}): EnrichedNetworkDe
     lastSeen: new Date().toISOString(),
     online: true,
     isBlocked: false,
+    manualBlock: false,
+    lastAppliedBlocked: null,
     groups: [],
     presenceDays: [],
     ...partial,
