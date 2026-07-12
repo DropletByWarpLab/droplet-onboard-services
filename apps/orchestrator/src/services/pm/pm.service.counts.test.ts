@@ -16,12 +16,12 @@ const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
 describe("getSummary count correctness", () => {
   it("counts stateless items as open and includes cancelled-this-week in doneThisWeek", async () => {
     const items = [
-      { dueDate: null, completedAt: null, state: { group: "started" } }, // open
-      { dueDate: null, completedAt: null, state: null }, // stateless → open (finding 5)
-      { dueDate: null, completedAt: null, state: null }, // stateless → open (finding 5)
-      { dueDate: null, completedAt: threeDaysAgo, state: { group: "completed" } }, // done this week
-      { dueDate: null, completedAt: threeDaysAgo, state: { group: "cancelled" } }, // done this week (finding 6)
-      { dueDate: null, completedAt: tenDaysAgo, state: { group: "cancelled" } }, // too old → not counted
+      { dueDate: null, completedAt: null, isCompleted: false, state: { group: "started" } }, // open
+      { dueDate: null, completedAt: null, isCompleted: false, state: null }, // stateless → open (finding 5)
+      { dueDate: null, completedAt: null, isCompleted: false, state: null }, // stateless → open (finding 5)
+      { dueDate: null, completedAt: threeDaysAgo, isCompleted: true, state: { group: "completed" } }, // done this week
+      { dueDate: null, completedAt: threeDaysAgo, isCompleted: true, state: { group: "cancelled" } }, // done this week (finding 6)
+      { dueDate: null, completedAt: tenDaysAgo, isCompleted: true, state: { group: "cancelled" } }, // too old → not counted
     ];
     const prisma = {
       pmProject: { findMany: async () => [{ id: "p1" }] },
@@ -46,6 +46,7 @@ describe("listProjects count correctness", () => {
       icon: null,
       color: null,
       leadId: null,
+      isArchived: false,
       archivedAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),

@@ -123,6 +123,11 @@ import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
 
+// data (WARP-901) — misc dev utilities, all Tier-1 read/pure-computation
+import timestampConvert from "./handlers/data/timestamp-convert.js";
+import uuidGenerate from "./handlers/data/uuid-generate.js";
+import regexTest from "./handlers/data/regex-test.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -229,6 +234,10 @@ const allTools: Tool[] = [
   erpScheduleAppointment,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
+  // WARP-901: misc dev utilities (all Tier-1 read/pure-computation)
+  timestampConvert,
+  uuidGenerate,
+  regexTest,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

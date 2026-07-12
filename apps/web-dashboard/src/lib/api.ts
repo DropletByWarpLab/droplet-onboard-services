@@ -4492,6 +4492,18 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
 }
 
 /**
+ * WARP-941 — outbound shares: everything the current user has shared to
+ * people, groups, or links. Backs the "Shared by me" tab (the outbound
+ * sibling of fetchSharedWithMe).
+ */
+export async function fetchSharedByMe(): Promise<ShareDetail[]> {
+  const res = await authFetch(`${BASE}/api/files/shares-by-me`);
+  if (!res.ok) throw new Error(`Failed to fetch shares-by-me: ${res.status}`);
+  const data = await res.json();
+  return data.shares ?? [];
+}
+
+/**
  * WARP-879 / WS-1 — household members the internal-sharing picker can target.
  * The orchestrator reads the local directory (ADR-013), so this is reachable
  * by every household role, not just admins.

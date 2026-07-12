@@ -177,7 +177,10 @@ export default function PeoplePage() {
             const deleting = busy === face.name;
             return (
               <div key={face.name} className="card" style={{ padding: 0, overflow: "hidden" }}>
-                <div className="relative aspect-square bg-surface-secondary">
+                <div
+                  className="relative aspect-square"
+                  style={{ background: "var(--card-inner)" }}
+                >
                   {cover ? (
                     <img
                       src={cover.imageUrl}
@@ -187,7 +190,7 @@ export default function PeoplePage() {
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center">
-                      <User size={32} className="text-label-quaternary" />
+                      <User size={32} style={{ color: "var(--text-faint)" }} />
                     </div>
                   )}
                   <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/70 text-white type-caption-2">

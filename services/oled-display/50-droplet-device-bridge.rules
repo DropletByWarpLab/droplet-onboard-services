@@ -1,40 +1,29 @@
-// WARP-808 follow-up — polkit rule for the Droplet device-bridge.
+// Polkit rule for the Droplet device-bridge.
 //
 // The bridge (droplet-device-bridge.service) runs as the unprivileged
 // `droplet` user inside a ProtectSystem=strict / NoNewPrivileges sandbox, so
-// it cannot sudo and cannot touch root-owned paths. The single-box Wi-Fi
-// write (scripts/host/droplet-set-hostapd.sh) needs exactly ONE privileged
-// action: `systemctl restart droplet-openwrt-attach.service` (which
-// regenerates /etc/hostapd.conf from the env files and respawns hostapd).
-// systemctl performs that via a D-Bus call to PID 1 — no process privilege
-// escalation — and polkit is the authorization gate. Allow `droplet` to
-// restart THAT ONE unit and nothing else.
+// it cannot sudo and cannot touch root-owned paths.
 //
-// The storage-pool write path (ADR-019 follow-up) needs one more, equally
-// narrow grant: `systemctl start droplet-storage-pool-apply.service` — the
-// root oneshot that consumes the bridge's spooled pool request
+// The storage-pool write path (ADR-019 follow-up) needs exactly ONE narrow
+// grant: `systemctl start droplet-storage-pool-apply.service` — the root
+// oneshot that consumes the bridge's spooled pool request
 // (/var/lib/droplet-bridge/pool-spool/request.json) and runs the repo-tracked
 // droplet-storage-pool.sh as root. mdadm/mkfs are direct binaries with no
-// unit of their own to restart, so unlike the Wi-Fi fix the privileged work
-// lives in that dedicated oneshot; the bridge still only talks to PID 1 over
-// D-Bus. Start verb ONLY — the bridge never stops or restarts it.
+// unit of their own, so the privileged work lives in that dedicated oneshot;
+// the bridge only talks to PID 1 over D-Bus. Start verb ONLY — the bridge
+// never stops or restarts it.
+//
+// HISTORY (WARP-843): the former second grant — restart on
+// droplet-openwrt-attach.service for the single-box Wi-Fi write (WARP-808 /
+// PR #551) — is REMOVED. The Wi-Fi write scripts skip systemctl entirely when
+// unprivileged; the root-owned droplet-openwrt-attach.path unit watches the
+// env file and re-applies the change, so the bridge needs no restart
+// privilege at all (and the fix no longer depends on polkitd JS-rule support
+// being present and healthy).
 //
 // Installed to /etc/polkit-1/rules.d/ by scripts/install-device-bridge.sh.
 // Requires polkit >= 106 (JS rules) — the shipping box runs Ubuntu 24.04
 // (polkit 124).
-polkit.addRule(function (action, subject) {
-  if (
-    action.id === "org.freedesktop.systemd1.manage-units" &&
-    action.lookup("unit") === "droplet-openwrt-attach.service" &&
-    // restart ONLY — droplet-set-hostapd.sh never starts/stops the unit, so
-    // the grant matches exactly what the write path needs (PR #551 review).
-    action.lookup("verb") === "restart" &&
-    subject.user === "droplet"
-  ) {
-    return polkit.Result.YES;
-  }
-});
-
 polkit.addRule(function (action, subject) {
   if (
     action.id === "org.freedesktop.systemd1.manage-units" &&
