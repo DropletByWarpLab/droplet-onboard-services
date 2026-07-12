@@ -325,6 +325,34 @@ describe("departments CRUD routes (WARP-1258)", () => {
       expect(res.body.department.description).toBe("Engineering team");
     });
 
+    it("surfaces an NC mount-point warning when a matching groupfolder already exists", async () => {
+      const { gfListFolders } = await import(
+        "../services/nextcloud-groups.client.js"
+      );
+      vi.mocked(gfListFolders).mockResolvedValueOnce([
+        {
+          id: 1,
+          mountPoint: "Design",
+          groups: {},
+          quota: -3,
+          size: 0,
+          acl: true,
+        },
+      ] as never);
+
+      const owner = mkUser("owner", "owner-id-2");
+      const app = buildDeptApp(prisma, owner);
+
+      const res = await request(app)
+        .post("/api/departments")
+        .send({ name: "Design" });
+
+      expect(res.status).toBe(201);
+      expect(res.body.warning).toMatch(
+        /mount point "Design" already exists/,
+      );
+    });
+
     it("rejects reserved name", async () => {
       const app = buildDeptApp(prisma, mkUser("owner"));
 

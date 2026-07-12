@@ -34,7 +34,10 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { validateDepartmentHierarchy } from "../services/department-validation.js";
 import { kickReconcile } from "../services/department-reconciler.service.js";
-import { gfListFolders } from "../services/nextcloud-groups.client.js";
+import {
+  gfListFolders,
+  type GroupfolderInfo,
+} from "../services/nextcloud-groups.client.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -218,10 +221,10 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
         try {
           const folders = await gfListFolders(adminBasicToken());
           const existingMount = folders.some(
-            (f: { mount_point: string }) => f.mount_point === name,
+            (f: GroupfolderInfo) => f.mountPoint === name,
           );
           if (existingMount) {
-            ncWarning = `Nextcloud groupfolder with mount_point "${name}" already exists (will be reused)`;
+            ncWarning = `Nextcloud groupfolder with mount point "${name}" already exists (will be reused)`;
           }
         } catch (err) {
           // Warn only; don't block
