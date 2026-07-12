@@ -163,6 +163,10 @@ class ProviderRouter:
         this turn so a cloud request uses the requesting user's key, not a
         device-global one.
         """
+        # Tool-call/tool-result message-contract integrity is enforced at
+        # ChatRequest construction (schemas.py `_validate_tool_message_integrity`,
+        # WARP-176), which covers the HTTP, gRPC and session paths alike — so no
+        # redundant re-validation is done here.
         await self.refresh_keys(user_id=user_id)
         provider = self.resolve_provider(request.model, request.provider)
 

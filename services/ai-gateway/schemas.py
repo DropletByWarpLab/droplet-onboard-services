@@ -117,6 +117,78 @@ class ChatRequest(BaseModel):
             )
         return self
 
+    # --- Tool-message integrity (WARP-176, prompt-injection hardening) ------
+    #
+    # The gateway replays conversation history back to the model, including the
+    # assistant `tool_calls[]` it emitted and the `role="tool"` results the
+    # orchestrator fed back. This validator enforces the *structural* contract
+    # of that tool-message exchange before anything reaches a provider, so a
+    # misbehaving tool — or a malicious client hand-crafting the request body —
+    # cannot smuggle fabricated or malformed tool results into the model's
+    # context:
+    #   * every tool result must reference an assistant tool_call that was
+    #     actually requested earlier in THIS request (no orphan / injected
+    #     results),
+    #   * tool_call ids must be unique (no id collision / spoofing),
+    #   * tool result content must be a plain string (reject None and reject
+    #     multimodal `list[ContentBlock]` smuggling),
+    #   * `tool_calls` / `tool_call_id` may only appear on their owning roles.
+    #
+    # This is deliberately GENERIC / boundary-level. Per-tool argument schemas
+    # (what fields a given tool accepts) are NOT validated here — tool dispatch
+    # and per-tool schemas live in the orchestrator/tools-core, and the gateway
+    # is a pure provider router (see router.py). Nor is the JSON well-formedness
+    # of tool_call `arguments` validated: they are model output and the
+    # orchestrator tolerates malformed args, so a strict check would reject
+    # turns the orchestrator accepts (see rule 1). Posture is fail-closed for
+    # the tool-RESULT threat surface: any violation raises → FastAPI 422.
+    @model_validator(mode="after")
+    def _validate_tool_message_integrity(self) -> "ChatRequest":
+        emitted_ids: set[str] = set()
+        for msg in self.messages:
+            role = msg.role
+
+            # 1. Assistant-emitted tool_calls: unique, non-empty ids.
+            #
+            # `function.arguments` is intentionally NOT validated for JSON
+            # well-formedness here. arguments are the MODEL's output (not a
+            # tool's), so they sit outside this guard's threat surface
+            # (fabricated/malformed tool RESULTS). More importantly the
+            # orchestrator's own safeParseArgs is deliberately TOLERANT of
+            # malformed args — it falls back to {} and dispatches — and the
+            # assistant message is replayed verbatim on the next iteration, so a
+            # strict JSON check here would 422 a live multi-iteration turn the
+            # orchestrator itself accepted. Match its leniency.
+            if role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if not tc.id or tc.id in emitted_ids:
+                        raise ValueError(f"duplicate tool_call id: {tc.id!r}")
+                    emitted_ids.add(tc.id)
+
+            # 2. tool_calls only ever belong on assistant messages.
+            if msg.tool_calls is not None and role != "assistant":
+                raise ValueError("tool_calls is only valid on assistant messages")
+
+            # 3. Tool result messages: referential + type integrity.
+            if role == "tool":
+                tcid = msg.tool_call_id
+                if not isinstance(tcid, str) or not tcid:
+                    raise ValueError(
+                        f"tool result tool_call_id must be a non-empty string, got {tcid!r}"
+                    )
+                if tcid not in emitted_ids:
+                    raise ValueError(
+                        f"tool result references unknown tool_call_id: {tcid!r}"
+                    )
+                if not isinstance(msg.content, str):
+                    raise ValueError("tool result content must be a string")
+
+            # 4. tool_call_id only ever belongs on tool messages.
+            if msg.tool_call_id is not None and role != "tool":
+                raise ValueError("tool_call_id is only valid on tool messages")
+
+        return self
+
 
 class ChatChoice(BaseModel):
     index: int = 0
