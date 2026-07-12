@@ -26,13 +26,17 @@ export function DiscoveryBanner({ count }: DiscoveryBannerProps) {
   if (dismissed || count === 0) return null;
 
   return (
-    <div className="flex items-center gap-3 bg-system-blue/10 border border-system-blue/20 rounded-lg p-3 mb-6">
-      <Wifi size={18} className="text-system-blue flex-shrink-0" />
-      <p className="type-subheadline text-label-primary flex-1">
+    <div
+      className="flex items-center gap-3 rounded-lg p-3 mb-6"
+      style={{ background: "var(--brand-subtle)", border: "1px solid color-mix(in srgb, var(--brand) 30%, transparent)" }}
+    >
+      <Wifi size={18} className="flex-shrink-0" style={{ color: "var(--brand)" }} />
+      <p className="type-subheadline flex-1" style={{ color: "var(--text)" }}>
         {count} Matter device{count > 1 ? "s" : ""} found on the network.{" "}
         <Link
           href="/devices/add-matter"
-          className="text-system-blue hover:underline font-medium"
+          className="hover:underline font-medium"
+          style={{ color: "var(--brand)" }}
         >
           Scan its QR code
         </Link>{" "}
@@ -41,7 +45,7 @@ export function DiscoveryBanner({ count }: DiscoveryBannerProps) {
       <button
         onClick={() => setDismissed(true)}
         aria-label="Dismiss discovery banner"
-        className="p-1 rounded text-label-tertiary hover:text-label-primary transition-colors"
+        className="p-1 rounded transition-colors text-[var(--text-muted)] hover:text-[var(--text)]"
       >
         <X size={14} aria-hidden="true" />
       </button>

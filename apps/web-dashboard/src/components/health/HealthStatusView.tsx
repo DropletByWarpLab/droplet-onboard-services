@@ -16,8 +16,8 @@ import type { SystemHealth, SystemHealthStatus } from "@/lib/api";
  * is up, so the green banner is faithful to the spec without us re-deriving
  * health here.
  *
- * Tokens only: dp-card / dp-tile / type-* / text-label-* / bg-system-* /
- * text-accent. No raw hex.
+ * Tokens only: the indigo shell primitives (.card / .lrow / .sect / .badge)
+ * + var(--text) / var(--text-muted) / var(--brand) / bg-system-*. No raw hex.
  */
 
 const BANNER_COPY: Record<
@@ -179,7 +179,7 @@ function HealthBody({ health }: { health: SystemHealth }) {
                 {c.name === "storage" && !up && (
                   <Link
                     href="/files/drives"
-                    className="rmeta text-accent"
+                    className="rmeta text-[var(--brand)]"
                     style={{ textDecoration: "none" }}
                   >
                     View drives

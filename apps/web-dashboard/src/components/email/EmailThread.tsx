@@ -13,6 +13,13 @@
  *     rendered here as a calm, actionable message pointing at Settings — never
  *     a thrown raw error, never a crash.
  *   - A genuine failure (404/409/5xx) is caught and shown as a calm line too.
+ *
+ * WARP-1088 — indigo shell: message/draft wells recolored onto `.card` +
+ * shell tokens, buttons onto `.btn primary`/`.btn`, the "Drafted by Droplet"
+ * chip onto `.badge info` (droplet-shell.css / indigo-tokens.css). The
+ * off-LAN and error notices keep their semantic system-orange/system-red/
+ * system-green tints unchanged — only the surrounding label text moves onto
+ * the shell tokens. Pure recolor/reclass — no behavior change.
  */
 
 import { useState } from "react";
@@ -73,9 +80,9 @@ export function EmailThread({
         aria-label="Loading conversation"
         className="flex flex-col h-full min-h-0 p-6 space-y-4"
       >
-        <div className="h-6 w-2/3 rounded bg-surface-secondary animate-pulse" />
-        <div className="h-32 rounded-xl bg-surface-secondary animate-pulse" />
-        <div className="h-32 rounded-xl bg-surface-secondary animate-pulse" />
+        <div className="h-6 w-2/3 rounded animate-pulse" style={{ background: "var(--inset)" }} />
+        <div className="h-32 rounded-xl animate-pulse" style={{ background: "var(--inset)" }} />
+        <div className="h-32 rounded-xl animate-pulse" style={{ background: "var(--inset)" }} />
       </div>
     );
   }
@@ -83,10 +90,10 @@ export function EmailThread({
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-8 text-center" role="alert">
-        <p className="type-subheadline text-label-primary">
+        <p className="type-subheadline" style={{ color: "var(--text)" }}>
           We couldn&rsquo;t open this conversation
         </p>
-        <p className="type-footnote text-label-tertiary mt-1">
+        <p className="type-footnote mt-1" style={{ color: "var(--text-muted)" }}>
           Try selecting it again in a moment.
         </p>
       </div>
@@ -96,11 +103,11 @@ export function EmailThread({
   if (!thread) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-        <Sparkles size={28} className="text-label-quaternary mb-3" aria-hidden />
-        <p className="type-subheadline text-label-primary">
+        <Sparkles size={28} className="mb-3" style={{ color: "var(--text-faint)" }} aria-hidden />
+        <p className="type-subheadline" style={{ color: "var(--text)" }}>
           Select a conversation
         </p>
-        <p className="type-footnote text-label-tertiary mt-1 max-w-[260px]">
+        <p className="type-footnote mt-1 max-w-[260px]" style={{ color: "var(--text-muted)" }}>
           Pick a message from the list to read it and see what Droplet found.
         </p>
       </div>
@@ -108,13 +115,13 @@ export function EmailThread({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-surface-primary">
+    <div className="flex flex-col h-full min-h-0" style={{ background: "var(--surface)" }}>
       {/* Thread header */}
-      <div className="shrink-0 px-5 py-4 border-b border-separator">
-        <h2 className="type-title-3 text-label-primary">
+      <div className="shrink-0 px-5 py-4" style={{ borderBottom: "1px solid var(--border)" }}>
+        <h2 className="type-title-3" style={{ color: "var(--text)" }}>
           {thread.subject || "(no subject)"}
         </h2>
-        <div className="flex items-center gap-2 mt-1 type-caption-1 text-label-tertiary">
+        <div className="flex items-center gap-2 mt-1 type-caption-1" style={{ color: "var(--text-muted)" }}>
           <span>{thread.lastSender ?? "Unknown sender"}</span>
           <span aria-hidden>·</span>
           <span>
@@ -122,7 +129,8 @@ export function EmailThread({
             {thread.messageCount === 1 ? "message" : "messages"}
           </span>
           <span
-            className="ml-auto inline-flex items-center gap-1 type-caption-2 text-label-secondary"
+            className="ml-auto inline-flex items-center gap-1 type-caption-2"
+            style={{ color: "var(--text-muted)" }}
             title="This conversation is indexed on your Droplet and never leaves the LAN."
           >
             <Lock size={11} className="text-system-green" aria-hidden />
@@ -152,29 +160,33 @@ export function EmailThread({
 function MessageBlock({ message }: { message: EmailMessage }) {
   const name = message.fromName ?? message.fromAddr;
   return (
-    <article className="dp-card p-4">
+    <article className="card" style={{ padding: "16px" }}>
       <header className="flex items-start gap-3">
         <span
-          className="shrink-0 w-8 h-8 rounded-full bg-accent-subtle flex items-center justify-center type-caption-1 font-semibold text-accent"
+          className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center type-caption-1 font-semibold"
+          style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
           aria-hidden
         >
           {initials(message.fromName, message.fromAddr)}
         </span>
         <div className="flex-1 min-w-0">
-          <p className="type-footnote text-label-primary font-medium truncate">
+          <p className="type-footnote font-medium truncate" style={{ color: "var(--text)" }}>
             {name}{" "}
             {message.fromName && (
-              <span className="font-normal text-label-tertiary">
+              <span className="font-normal" style={{ color: "var(--text-muted)" }}>
                 &lt;{message.fromAddr}&gt;
               </span>
             )}
           </p>
-          <p className="type-caption-2 text-label-tertiary mt-0.5 font-mono">
+          <p className="type-caption-2 mt-0.5 font-mono" style={{ color: "var(--text-muted)" }}>
             {formatMessageTime(message.receivedAt)}
           </p>
         </div>
       </header>
-      <div className="mt-3 type-footnote text-label-primary whitespace-pre-wrap leading-relaxed">
+      <div
+        className="mt-3 type-footnote whitespace-pre-wrap leading-relaxed"
+        style={{ color: "var(--text)" }}
+      >
         {message.bodyText ?? ""}
       </div>
     </article>
@@ -215,40 +227,50 @@ function DraftBlock({
   const queued = phase.kind === "queued";
 
   return (
-    <article className="dp-card p-4 border-accent/30">
+    <article
+      className="card"
+      style={{
+        padding: "16px",
+        borderColor: "color-mix(in srgb, var(--brand) 30%, var(--card-bd))",
+      }}
+    >
       <header className="flex items-start gap-3">
         <span
-          className="shrink-0 w-8 h-8 rounded-full bg-accent-subtle flex items-center justify-center type-caption-1 font-semibold text-accent"
+          className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center type-caption-1 font-semibold"
+          style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
           aria-hidden
         >
           {initials(null, draft.toAddrs[0] ?? "you")}
         </span>
         <div className="flex-1 min-w-0">
-          <p className="type-footnote text-label-primary font-medium">
+          <p className="type-footnote font-medium" style={{ color: "var(--text)" }}>
             Draft reply{" "}
-            <span className="font-normal text-label-tertiary">
+            <span className="font-normal" style={{ color: "var(--text-muted)" }}>
               to {draft.toAddrs.join(", ")}
             </span>
           </p>
-          <p className="type-caption-2 text-label-tertiary mt-0.5">
+          <p className="type-caption-2 mt-0.5" style={{ color: "var(--text-muted)" }}>
             {queued ? "Queued to send" : "Not sent yet"}
           </p>
         </div>
         {draft.draftedByDroplet && (
-          <span className="shrink-0 inline-flex items-center gap-1 h-5 px-1.5 rounded-full bg-accent-subtle type-caption-2 font-medium text-accent">
+          <span className="badge info shrink-0">
             <Sparkles size={10} aria-hidden />
             Drafted by Droplet
           </span>
         )}
       </header>
 
-      <div className="mt-3 type-footnote text-label-primary whitespace-pre-wrap leading-relaxed">
+      <div
+        className="mt-3 type-footnote whitespace-pre-wrap leading-relaxed"
+        style={{ color: "var(--text)" }}
+      >
         {draft.body}
       </div>
 
       {/* Send control — gated by an explicit confirm step (§6). */}
       {canSend && (
-        <div className="mt-4 pt-3 border-t border-separator">
+        <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
           {phase.kind === "queued" ? (
             <p className="type-footnote text-system-green">
               Sent — Droplet has queued this reply.
@@ -261,16 +283,16 @@ function DraftBlock({
               <button
                 type="button"
                 onClick={() => setPhase({ kind: "idle" })}
-                className="dp-btn-secondary text-sm"
+                className="btn sm"
               >
                 Back
               </button>
             </div>
           ) : phase.kind === "confirming" || sending ? (
             <div className="space-y-2.5">
-              <p className="type-footnote text-label-secondary">
+              <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
                 Sending this reply will email{" "}
-                <span className="font-medium text-label-primary">
+                <span className="font-medium" style={{ color: "var(--text)" }}>
                   {draft.toAddrs.join(", ")}
                 </span>
                 . This leaves your Droplet.
@@ -280,13 +302,7 @@ function DraftBlock({
                   type="button"
                   onClick={doSend}
                   disabled={sending}
-                  className="
-                    inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg
-                    bg-accent text-accent-foreground type-footnote font-medium
-                    transition-colors duration-200 ease-smooth
-                    hover:bg-accent-hover disabled:opacity-60
-                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                  "
+                  className="btn primary gap-1.5 type-footnote disabled:opacity-60"
                 >
                   <Send size={14} aria-hidden />
                   {sending ? "Sending…" : "Confirm and send"}
@@ -295,7 +311,7 @@ function DraftBlock({
                   type="button"
                   onClick={() => setPhase({ kind: "idle" })}
                   disabled={sending}
-                  className="dp-btn-secondary text-sm"
+                  className="btn sm"
                 >
                   Cancel
                 </button>
@@ -305,13 +321,7 @@ function DraftBlock({
             <button
               type="button"
               onClick={() => setPhase({ kind: "confirming" })}
-              className="
-                inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg
-                bg-accent text-accent-foreground type-footnote font-medium
-                transition-colors duration-200 ease-smooth
-                hover:bg-accent-hover
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-              "
+              className="btn primary gap-1.5 type-footnote"
             >
               <Send size={14} aria-hidden />
               Send reply
@@ -330,7 +340,7 @@ function OffLanNotice({ message }: { message: string }) {
       className="flex gap-2.5 p-3 rounded-lg bg-system-orange/10"
     >
       <Lock size={15} className="shrink-0 mt-0.5 text-system-orange" aria-hidden />
-      <p className="type-footnote text-label-primary">{message}</p>
+      <p className="type-footnote" style={{ color: "var(--text)" }}>{message}</p>
     </div>
   );
 }

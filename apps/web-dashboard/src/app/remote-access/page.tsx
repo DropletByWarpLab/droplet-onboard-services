@@ -367,6 +367,8 @@ function AddDeviceDialog({
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [copied, setCopied] = useState(false);
   const headingId = useId();
+  // WARP-650: label/input association for the device-name field.
+  const deviceLabelId = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const handleCreate = async () => {
@@ -436,15 +438,22 @@ function AddDeviceDialog({
         {step === "form" && (
           <div className="p-5 space-y-4">
             <div>
-              <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+              <label htmlFor={deviceLabelId} className="type-caption-1 text-label-tertiary mb-1.5 block">
                 Device name
               </label>
               <input
+                id={deviceLabelId}
                 ref={inputRef}
                 value={deviceLabel}
                 onChange={(e) => setDeviceLabel(e.target.value)}
                 placeholder="Alice&rsquo;s iPhone"
-                className="dp-input"
+                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 onKeyDown={(e) => e.key === "Enter" && handleCreate()}
                 maxLength={64}
               />
@@ -471,7 +480,7 @@ function AddDeviceDialog({
               <button
                 onClick={handleCreate}
                 disabled={submitting}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                className="btn primary"
               >
                 {submitting ? (
                   <>
@@ -554,14 +563,14 @@ function AddDeviceDialog({
             <div className="flex items-center gap-2">
               <button
                 onClick={handleCopyConf}
-                className="flex-1 dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                className="flex-1 btn justify-center"
               >
                 {copied ? <Check size={14} /> : <Copy size={14} />}
                 {copied ? "Copied" : "Copy text"}
               </button>
               <button
                 onClick={handleDownloadConf}
-                className="flex-1 dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                className="flex-1 btn justify-center"
               >
                 <Download size={14} />
                 Download .conf
@@ -579,7 +588,7 @@ function AddDeviceDialog({
             <div className="flex justify-end pt-1">
               <button
                 onClick={onClose}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                className="btn primary"
               >
                 Done
               </button>

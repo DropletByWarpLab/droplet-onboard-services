@@ -84,6 +84,20 @@ describe("EventForm ARIA (WARP-289)", () => {
     }
   });
 
+  it("Location field spans the full form width (WARP-1086)", () => {
+    // The indigo recolor swapped PlaceCombobox's `dp-input` class (which
+    // carried `w-full`) for an inline token string. Unlike the other inputs,
+    // PlaceCombobox's <input> sits in a plain block <div>, not a flex child,
+    // so it can't inherit stretch-width — it must keep `w-full` explicitly or
+    // the Location box collapses to its intrinsic UA width. jsdom has no CSS
+    // box model, but it can assert the class survived the swap.
+    render(
+      <EventForm open onClose={vi.fn()} onSaved={vi.fn()} initial={null} />,
+    );
+    const location = screen.getByTestId("place-input");
+    expect(location.className).toMatch(/\bw-full\b/);
+  });
+
   it("stacks the Starts/Ends grid on narrow viewports and goes 2-col at sm (WARP-943)", () => {
     // The date input carries an 8.5rem floor so the year isn't clipped; on a
     // ~360px phone two such columns overflow the cell, so the grid must stack

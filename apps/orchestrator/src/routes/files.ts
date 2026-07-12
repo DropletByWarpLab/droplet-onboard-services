@@ -30,9 +30,14 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncListOutboundShares,
   ncDirExists,
   NextcloudOcsError,
 } from "../services/nextcloud.client.js";
+import {
+  sendShareNotificationEmail,
+  type SendOptions as EmailSendOptions,
+} from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
@@ -405,8 +410,86 @@ function handleFileError(
   next(err);
 }
 
-export function createFilesRouter(prisma: PrismaClient): Router {
+export function createFilesRouter(
+  prisma: PrismaClient,
+  // WARP-941: injectable transport seam for the person-share notification
+  // email — same seam createProtectedAuthRouter threads for invites, so
+  // tests never dial a real relay. Production callers pass nothing.
+  emailSendOptions: EmailSendOptions = {},
+): Router {
   const router = Router();
+
+  /**
+   * WARP-941 — best-effort notification email for person shares (shareType 0).
+   *
+   * Resolves the recipient's email from the LOCAL Prisma `User` directory by
+   * `nextcloudUsername`, case-insensitively — the same matching contract as
+   * GET /files/share-recipients, which is where the `shareWith` value the
+   * dashboard posts came from in the first place (ADR-013; the at-rest dcv1
+   * email blob is decrypted via readUserEmail). Delivery goes over the
+   * operator's SMTP channel via sendShareNotificationEmail, which no-ops
+   * unless the channel is configured AND enabled — identical gating to user
+   * invites.
+   *
+   * NEVER throws, and is invoked fire-and-forget: the share already exists in
+   * Nextcloud, so a directory gap, an unconfigured channel, or a relay outage
+   * must not fail or delay the share response.
+   */
+  async function notifyPersonShareByEmail(
+    req: Request,
+    shareWith: string,
+    filePath: string,
+  ): Promise<void> {
+    try {
+      // Full-directory scan is intentional at household scale (tens of rows):
+      // it resolves BOTH the recipient (exact-case then case-insensitive, in
+      // JS — no Postgres `mode:'insensitive'` query) and the caller's display
+      // name in a single round-trip. Narrow only if the directory grows large.
+      const rows = (await prisma.user.findMany({
+        select: { id: true, displayName: true, email: true, nextcloudUsername: true },
+      })) as Array<{
+        id: string;
+        displayName: string;
+        email: string | null;
+        nextcloudUsername: string | null;
+      }>;
+
+      const target = shareWith.toLowerCase();
+      // Prefer an exact-case match so two directory rows that differ only by
+      // case can't misdeliver this notification (it discloses the sharer +
+      // filename) to the wrong person; fall back to the case-insensitive
+      // contract for the normal single-variant case.
+      const recipient =
+        rows.find((u) => u.nextcloudUsername === shareWith) ??
+        rows.find((u) => u.nextcloudUsername?.toLowerCase() === target);
+      // WARP-233: decrypt the at-rest dcv1 blob. Null/empty → nothing to send to.
+      const to = recipient ? readUserEmail(recipient.email) : null;
+      if (!to) {
+        logger.info(
+          { shareWith, hasRecipientRow: Boolean(recipient) },
+          "share notification skipped — no directory email for recipient",
+        );
+        return;
+      }
+
+      const caller = rows.find((u) => u.id === req.user?.id);
+      const sharerDisplayName = caller?.displayName || req.user?.username || "Someone";
+
+      await sendShareNotificationEmail(
+        prisma,
+        {
+          to,
+          sharerDisplayName,
+          fileName: path.posix.basename(filePath) || filePath,
+        },
+        emailSendOptions,
+      );
+    } catch (err) {
+      // Directory lookup failed (or an unexpected throw): log and move on —
+      // the share itself already succeeded.
+      logger.warn({ err, shareWith }, "share notification email failed");
+    }
+  }
 
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
@@ -1353,6 +1436,15 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         actor: actorFromRequest(req),
       });
 
+      // WARP-941 — person shares (shareType 0) notify the recipient by email,
+      // best-effort. Fire-and-forget: notifyPersonShareByEmail never throws,
+      // and nothing about mail may fail or delay this response — the share
+      // already exists in Nextcloud. Link shares (shareType 3) deliberately
+      // send nothing: no recipient, no lookup, no dial.
+      if (parsed.data.shareType === 0 && parsed.data.shareWith) {
+        void notifyPersonShareByEmail(req, parsed.data.shareWith, parsed.data.path);
+      }
+
       res.json(share);
     } catch (err) {
       handleFileError(err, res, next);
@@ -1954,6 +2046,24 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   router.get("/files/shared-with-me", async (req, res, next) => {
     try {
       const shares = await ncListSharedWithMe(await getToken(req));
+      res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next, { shares: [] });
+    }
+  });
+
+  // ── Shares I created (GET /api/files/shares-by-me) ── (WARP-941)
+  //
+  // Outbound counterpart of /files/shared-with-me, backing the dashboard's
+  // "Shared by me" tab (previously a hardcoded placeholder). Nextcloud scopes
+  // the un-filtered OCS shares listing to shares the authenticated user owns,
+  // so the caller's own NC token is the only scoping needed — same session
+  // gating as the sibling route. Same degrade contract too: an unreachable
+  // Nextcloud serves an empty list rather than a 500 so the Shared page
+  // still renders during an outage.
+  router.get("/files/shares-by-me", async (req, res, next) => {
+    try {
+      const shares = await ncListOutboundShares(await getToken(req));
       res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next, { shares: [] });

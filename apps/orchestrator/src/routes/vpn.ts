@@ -120,6 +120,22 @@ async function resolveEndpointHost(): Promise<string> {
 // clear now that resolveEndpointHost() reads the env var directly.
 export function _resetEndpointCacheForTests(): void {}
 
+/**
+ * WARP-1283: RouterError codes that mean "the routing sidecar is unavailable
+ * right now" — unreachable, timed out, or intentionally disabled. All three
+ * carry HTTP 503 per WARP-807, and this set mirrors the dashboard's
+ * ROUTER_UNREACHABLE_CODES so both sides classify identically. RouterError
+ * already carries this typed signal, so we branch on `code` here; the
+ * message-shape classifier in lib/upstream-unavailable.ts exists for clients
+ * WITHOUT typed errors (Nextcloud/Frigate/matter throw plain Errors) and would
+ * miss TIMEOUT ("… timed out") and DISABLED ("Router supervision is disabled").
+ */
+const ROUTING_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
+  "UNREACHABLE",
+  "TIMEOUT",
+  "DISABLED",
+]);
+
 function getUser(req: Request): { username: string; role: string } {
   return {
     username: req.user?.username ?? "dev",
@@ -199,6 +215,25 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         peerCount: status.peer_count,
       });
     } catch (err) {
+      // WARP-1283: every other input to this handler already degrades to null,
+      // but vpnStatus() throws when the routing sidecar can't be reached —
+      // which used to fall through to next(err) and land the setup wizard's
+      // Remote Access precheck on its generic ("this usually clears on its
+      // own") error page. The sidecar being down is a known, recoverable
+      // condition — answer with a stable code + customer-safe copy (ADR-002)
+      // so the wizard can say what's actually happening. Genuine unexpected
+      // errors (and real RouterErrors like AUTH) still go to next(err).
+      if (err instanceof RouterError && ROUTING_UNAVAILABLE_CODES.has(err.code)) {
+        logger.warn(
+          { err, code: err.code },
+          "vpn: routing service unavailable during status check",
+        );
+        return res.status(503).json({
+          error:
+            "The box's network service isn't responding right now. Try again in a minute.",
+          code: "ROUTING_UNAVAILABLE",
+        });
+      }
       next(err);
     }
   });
