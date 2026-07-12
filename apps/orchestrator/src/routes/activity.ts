@@ -14,7 +14,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { getActivitySigner } from "../services/activity.singleton.js";
-import { verifyActivityChain } from "../services/audit-verify.service.js";
+import { verifyActivityChainCoalesced } from "../services/audit-verify.service.js";
 import {
   hashSignature,
   type ActivityActorTypeName,
@@ -225,8 +225,9 @@ export function createActivityRouter(prisma: PrismaClient): Router {
 
         // WARP-237: the chain walk now lives in audit-verify.service so
         // the nightly tamper-detection cron shares the exact same logic.
+        // WARP-1027: coalesced so N concurrent admin tabs share one O(n) walk.
         // Response shape is byte-identical to the pre-extraction handler.
-        const result = await verifyActivityChain(prisma, signer);
+        const result = await verifyActivityChainCoalesced(prisma, signer);
         res.json({
           ok: result.ok,
           rowsChecked: result.rowsChecked,

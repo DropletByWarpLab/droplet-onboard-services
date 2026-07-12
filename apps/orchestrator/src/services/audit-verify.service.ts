@@ -86,6 +86,40 @@ export async function verifyActivityChain(
   return { ok: brokenAtId === null, rowsChecked, brokenAtId };
 }
 
+/**
+ * WARP-1027: coalesce concurrent chain-verify walks.
+ *
+ * `verifyActivityChain` is an O(n) HMAC pass over the whole ActivityRow table.
+ * `GET /api/activity/verify` auto-runs it on every /admin/audit mount plus
+ * manual re-verifies, and the 03:25 cron runs it too — so N admin tabs (or a
+ * re-verify racing the nightly run) would stack N full walks, and on a
+ * `DROPLET_AUDIT_RETENTION_DAYS<=0` keep-forever box each walk is unbounded.
+ *
+ * All concurrent callers await one shared in-flight walk; the ref clears when
+ * it settles, so worst-case concurrency is 1 and the next call re-walks fresh
+ * state. We deliberately do NOT cache the result: verification must reflect
+ * live DB state — a cached "ok" could mask a tamper (or a post-purge / new-row
+ * change) until a TTL expired. The response's `rowsChecked` already reports the
+ * walk size for keep-forever visibility.
+ *
+ * The shared walk binds the FIRST concurrent caller's `prisma`/`signer`; later
+ * joiners' args are ignored. Safe because both production callers use the
+ * process-singleton prisma and `getActivitySigner()` — do not pass a per-request
+ * client here expecting it to be honoured mid-flight.
+ */
+let inFlightVerify: Promise<ChainVerifyResult> | null = null;
+
+export function verifyActivityChainCoalesced(
+  prisma: PrismaClient,
+  signer: ActivityRowSigner,
+): Promise<ChainVerifyResult> {
+  if (inFlightVerify) return inFlightVerify;
+  inFlightVerify = verifyActivityChain(prisma, signer).finally(() => {
+    inFlightVerify = null;
+  });
+  return inFlightVerify;
+}
+
 export async function runNightlyChainVerification(
   prisma: PrismaClient,
 ): Promise<ChainVerifyResult | null> {
@@ -94,7 +128,9 @@ export async function runNightlyChainVerification(
     logger.warn("nightly chain verification skipped — signer not initialised");
     return null;
   }
-  const result = await verifyActivityChain(prisma, signer);
+  // WARP-1027: coalesce with any in-flight /activity/verify walk so the cron
+  // and a concurrent manual re-verify don't double-walk the whole chain.
+  const result = await verifyActivityChainCoalesced(prisma, signer);
   if (result.ok) {
     logger.info(
       { rowsChecked: result.rowsChecked },
