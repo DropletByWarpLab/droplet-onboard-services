@@ -388,6 +388,17 @@ envelope): `400 { error: "Invalid request", details }`, `503` (no endpoint host
 configured, or routing service disabled), `507` (VPN subnet IP-exhausted),
 `404 { error: "Peer not found" }`.
 
+**`GET /vpn/status` failure shape (WARP-1283).** When the box's routing service
+is unavailable (unreachable, timed out, or supervision disabled), the route
+returns a typed flat envelope: `503 { error: "<customer-safe copy>",
+code: "ROUTING_UNAVAILABLE" }`. **Behavior change for external clients:**
+previously a sidecar outage surfaced the global error-handler shape
+`{ error: "Service unavailable", message: "VPN status: fetch failed",
+code: "UNREACHABLE" }`; this route now returns the typed shape above with **no
+`message` field** — branch on `code`, not on `message` or the old error text
+(`error` is calm customer-safe copy, safe to show verbatim). Genuinely
+unexpected failures still surface the global-handler `500` shape.
+
 For phone self-add (writes need an owner/admin session):
 - POST `/vpn/peers` with `{ deviceLabel: "<deviceDisplayName>" }`
 - Response includes `conf` (wg-quick INI, returned **ONCE** — the private key is in
