@@ -71,13 +71,12 @@ export function ReviewCard({ review, onClick }: Props) {
   return (
     <button
       onClick={() => onClick(review)}
-      className="card hover overflow-hidden text-left w-full group transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
-      style={{
-        padding: 0,
-        boxShadow: !review.hasBeenReviewed
-          ? "0 0 0 2px color-mix(in srgb, var(--brand) 40%, transparent)"
-          : undefined,
-      }}
+      className={`card hover overflow-hidden text-left w-full group transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] ${
+        !review.hasBeenReviewed
+          ? "ring-2 ring-[color:color-mix(in_srgb,var(--brand)_40%,transparent)]"
+          : ""
+      }`}
+      style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
         <img
