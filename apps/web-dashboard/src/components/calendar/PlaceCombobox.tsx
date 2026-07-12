@@ -148,7 +148,16 @@ export function PlaceCombobox({
         <ul
           id="place-suggestions"
           role="listbox"
-          className="absolute left-0 right-0 top-full mt-1 dp-card dp-material overflow-hidden z-40 max-h-72 overflow-y-auto"
+          className="card absolute left-0 right-0 top-full mt-1 overflow-hidden z-40 max-h-72 overflow-y-auto"
+          style={{
+            padding: "4px 0",
+            background: "var(--glass)",
+            backdropFilter: "blur(20px) saturate(150%)",
+            WebkitBackdropFilter: "blur(20px) saturate(150%)",
+            border: "1px solid var(--card-bd)",
+            borderRadius: "var(--radius-card)",
+            boxShadow: "var(--lift)",
+          }}
         >
           {suggestions.map((s, idx) => (
             <li
@@ -165,16 +174,17 @@ export function PlaceCombobox({
               onMouseEnter={() => setActiveIdx(idx)}
               className={`flex items-start gap-2 px-3 py-2 cursor-pointer ${
                 idx === activeIdx
-                  ? "bg-accent-subtle"
-                  : "hover:bg-surface-secondary"
+                  ? "bg-[var(--brand-subtle)]"
+                  : "hover:bg-[var(--hover)]"
               }`}
             >
               <MapPin
                 size={14}
-                className="mt-0.5 flex-shrink-0 text-label-tertiary"
+                className="mt-0.5 flex-shrink-0"
+                style={{ color: "var(--text-muted)" }}
                 aria-hidden
               />
-              <span className="type-footnote text-label-primary">
+              <span className="type-footnote" style={{ color: "var(--text)" }}>
                 {s.displayName}
               </span>
             </li>
@@ -185,7 +195,8 @@ export function PlaceCombobox({
         // Tiny "searching…" affordance so the user knows something is
         // happening before suggestions land. Sized to not push layout.
         <span
-          className="absolute right-2 top-1/2 -translate-y-1/2 type-caption-2 text-label-tertiary pointer-events-none"
+          className="absolute right-2 top-1/2 -translate-y-1/2 type-caption-2 pointer-events-none"
+          style={{ color: "var(--text-muted)" }}
           aria-hidden
         >
           …

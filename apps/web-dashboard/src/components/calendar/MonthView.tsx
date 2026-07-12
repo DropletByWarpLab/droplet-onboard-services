@@ -87,12 +87,13 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
   const todayKey = dayKey(new Date());
 
   return (
-    <div className="dp-card overflow-hidden">
-      <div className="grid grid-cols-7 border-b border-separator">
+    <div className="card overflow-hidden" style={{ padding: 0 }}>
+      <div className="grid grid-cols-7" style={{ borderBottom: "1px solid var(--card-bd)" }}>
         {WEEKDAYS.map((w) => (
           <div
             key={w}
-            className="px-2 py-2 type-caption-2 text-label-tertiary text-center uppercase tracking-wide"
+            className="px-2 py-2 type-caption-2 text-center uppercase tracking-wide"
+            style={{ color: "var(--text-muted)" }}
           >
             <span className="hidden sm:inline">{w}</span>
             <span className="sm:hidden">{w[0]}</span>
@@ -116,10 +117,10 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
               aria-label={`${d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
               className={[
                 "min-h-[88px] sm:min-h-[104px] text-left p-1.5 align-top transition-colors",
-                "hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-inset",
-                isLastCol ? "" : "border-r border-separator",
-                isLastRow ? "" : "border-b border-separator",
-                inMonth ? "" : "bg-surface-secondary/40",
+                "hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-inset",
+                isLastCol ? "" : "border-r border-[color:var(--card-bd)]",
+                isLastRow ? "" : "border-b border-[color:var(--card-bd)]",
+                inMonth ? "" : "bg-[var(--inset)]",
               ].join(" ")}
             >
               <div className="mb-1">
@@ -127,11 +128,14 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
                   className={[
                     "type-caption-1 tabular-nums inline-flex items-center justify-center h-5 min-w-[20px] px-1 rounded-full",
                     isToday
-                      ? "bg-accent text-accent-foreground font-semibold"
-                      : inMonth
-                        ? "text-label-secondary"
-                        : "text-label-tertiary",
+                      ? "font-semibold"
+                      : "",
                   ].join(" ")}
+                  style={
+                    isToday
+                      ? { background: "var(--brand)", color: "#fff" }
+                      : { color: inMonth ? "var(--text-muted)" : "var(--text-faint)" }
+                  }
                 >
                   {d.getDate()}
                 </span>
@@ -158,13 +162,13 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
                     style={colorOf?.(ev) ? { borderLeft: `3px solid ${colorOf(ev)}` } : undefined}
                     className={[
                       "block truncate rounded px-1 py-0.5 type-caption-2 cursor-pointer",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-inset",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-inset",
                       // External events get a bordered neutral chip: surface-tertiary
                       // equals the card background in light mode, so without a distinct
                       // fill + border the chip was invisible on the white card.
                       ev.source === "external"
-                        ? "bg-surface-secondary text-label-secondary border border-separator"
-                        : "bg-accent-subtle text-accent",
+                        ? "bg-[var(--card-inner)] text-[color:var(--text-muted)] border border-[color:var(--card-bd)]"
+                        : "bg-[var(--brand-subtle)] text-[color:var(--brand)]",
                     ].join(" ")}
                   >
                     {!ev.allDay && (
@@ -174,7 +178,7 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
                   </span>
                 ))}
                 {dayEvents.length > 3 && (
-                  <span className="type-caption-2 text-label-tertiary px-1">
+                  <span className="type-caption-2 px-1" style={{ color: "var(--text-muted)" }}>
                     +{dayEvents.length - 3} more
                   </span>
                 )}
