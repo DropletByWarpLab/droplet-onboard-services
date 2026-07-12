@@ -76,6 +76,9 @@ vi.mock("@/lib/api", () => ({
   // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
   // reads) the saved name; null = the pre-existing no-name baseline.
   fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
+  // WARP-817 — WifiStep reads the host topology on mount to decide its
+  // default disclosure state; null (best-effort) leaves the collapsed default.
+  getNetworkTopology: vi.fn(async () => null),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they
