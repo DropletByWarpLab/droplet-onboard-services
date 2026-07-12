@@ -157,6 +157,16 @@ vi.mock("@prisma/client", () => {
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({}),
     },
+    // WARP-1269 (T17): manager-minted department shares registry. `null` =
+    // "not a tracked department share" — the safe default that keeps every
+    // pre-existing PUT/DELETE /files/share/:id test on the personal-share
+    // path (own-token, no extra authz) unless a test explicitly stubs a row.
+    departmentShare: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
