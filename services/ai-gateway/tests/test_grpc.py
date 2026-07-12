@@ -104,13 +104,19 @@ def _patch_grpc_generated():
 
 def _make_mock_router():
     """Create a mock ProviderRouter with async methods."""
+    from router import ModelListResult
+
     router = MagicMock()
     router.chat = AsyncMock(return_value={
         "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
         "model": "test-model",
         "usage": {"prompt_tokens": 5, "completion_tokens": 3},
     })
-    router.list_all_models = AsyncMock(return_value=[])
+    # WARP-1284: list_all_models returns a ModelListResult (models +
+    # degraded_providers), not a bare list.
+    router.list_all_models = AsyncMock(
+        return_value=ModelListResult(models=[], degraded_providers=[])
+    )
     return router
 
 

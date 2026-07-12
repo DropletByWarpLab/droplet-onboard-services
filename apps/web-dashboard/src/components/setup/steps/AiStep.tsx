@@ -123,6 +123,11 @@ export function AiStep({
   // for WAKING_NOTICE_DELAY_MS. Kept separate from `notice` (a settled,
   // retryable outcome) so the two soft states can't clobber each other.
   const [wakingNotice, setWakingNotice] = useState(false);
+  // WARP-1284 — the models response said `degraded: true`: the orchestrator
+  // couldn't reach the ai-gateway, or the gateway's Ollama provider errored
+  // during listing. An empty picker in this state means "can't reach the AI
+  // service", NOT "model still downloading" — the two render differently.
+  const [degraded, setDegraded] = useState(false);
   // WARP-1119 — optional persona preset picker (architecture brief §7.3).
   // null = hidden: the fetch failed (persona API unavailable, or the
   // caller's role can't read it) and the wizard must never block — or even
@@ -154,6 +159,10 @@ export function AiStep({
       const resp = await fetchModels();
       const list = resp.models ?? [];
       setModels(list);
+      // WARP-1284 — mirror the server's honesty flag; each poll tick
+      // re-evaluates it so the note self-heals the moment the AI service
+      // is reachable again (the 8s WARP-849 poll keeps running either way).
+      setDegraded(resp.degraded === true);
       const local = pickDefaultLocalModel(list);
       if (local) setSelectedModel(local.id);
     } catch {
@@ -252,8 +261,13 @@ export function AiStep({
 
   async function handleAsk() {
     if (!selectedModel) {
+      // WARP-1284 — degraded-aware: when the AI service is unreachable, the
+      // old "still warming up — give it a moment" copy would reintroduce the
+      // exact false framing this ticket removes.
       setError(
-        "Pick a model first. If the dropdown is empty, your AI is still warming up — give it a moment and try again.",
+        degraded
+          ? "We can't reach your AI service right now — you can skip this step and try from the Chat page later."
+          : "Pick a model first. If the dropdown is empty, your AI is still warming up — give it a moment and try again.",
       );
       return;
     }
@@ -369,8 +383,15 @@ export function AiStep({
             disabled={loading || submitting}
           >
             {loading && <option>Loading…</option>}
+            {/* WARP-1284 — degraded-aware placeholder: "available yet"
+                reads download-flavored, which is wrong when the service
+                is unreachable. */}
             {!loading && models.length === 0 && (
-              <option>No models available yet</option>
+              <option>
+                {degraded
+                  ? "Models unavailable right now"
+                  : "No models available yet"}
+              </option>
             )}
             {localModels.length > 0 && (
               <optgroup label="On your Droplet (private)">
@@ -392,12 +413,36 @@ export function AiStep({
             )}
           </select>
 
+          {/* WARP-1284 — the server flagged the response degraded: the AI
+              service (ai-gateway / Ollama) can't be reached, so an empty
+              picker is NOT a download in progress. Distinct, honest copy in
+              the same soft-notice styling; the WARP-849 poll keeps running
+              so this self-heals without any customer action. */}
+          {!loading && models.length === 0 && degraded && (
+            <div
+              data-testid="model-degraded"
+              role="status"
+              className="mt-2 flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+            >
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-label-tertiary"
+                aria-hidden="true"
+              />
+              <span>
+                We can&rsquo;t reach your AI service right now — it may be
+                restarting. We&rsquo;ll keep checking, or you can skip and
+                come back from the Chat page later.
+              </span>
+            </div>
+          )}
+
           {/* WARP-849 — empty registry = the first-boot pull is still
               running. Say so explicitly (the bare "No models available
               yet" read as "the GPT model doesn't link anymore") and
               keep checking in the background. Neutral note styling —
               this is expected behavior, not an error. */}
-          {!loading && models.length === 0 && (
+          {!loading && models.length === 0 && !degraded && (
             <div
               data-testid="model-downloading"
               role="status"
@@ -643,9 +688,13 @@ export function isLocalModel(m: ModelInfo): boolean {
     return false;
   // No provider field? Treat name-prefix matches as local — these are
   // the families the AI gateway routes to Ollama per
-  // `services/ai-gateway/router.py`.
+  // `services/ai-gateway/router.py`. `gpt-oss` (WARP-1284) mirrors
+  // router.py's documented gpt-oss/gpt collision: OpenAI's OPEN-WEIGHTS
+  // family is served locally by Ollama, so a missing provider field must
+  // never file the configured local model under "Cloud (uses internet)".
+  // Bare `gpt` (gpt-4o, …) intentionally stays non-local.
   const id = (m.id || m.name || "").toLowerCase();
-  return /^(llama|mistral|phi|qwen|gemma|tinyllama)/.test(id);
+  return /^(llama|mistral|phi|qwen|gemma|tinyllama|gpt-oss)/.test(id);
 }
 
 export function pickDefaultLocalModel(list: ModelInfo[]): ModelInfo | null {

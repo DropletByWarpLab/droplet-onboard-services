@@ -28,9 +28,15 @@ export function CameraNotificationToast({
           return (
             <div
               key={`${notif.timestamp}-${index}`}
-              className="dp-card bg-[var(--color-surface-primary)] shadow-lg border border-separator animate-in slide-in-from-right"
+              className="card animate-in slide-in-from-right"
+              style={{
+                background: "var(--glass)",
+                backdropFilter: "blur(20px) saturate(150%)",
+                WebkitBackdropFilter: "blur(20px) saturate(150%)",
+                boxShadow: "var(--lift)",
+              }}
             >
-              <div className="flex items-start gap-3 p-3">
+              <div className="flex items-start gap-3">
                 {notif.thumbnail && notif.thumbnail.startsWith("/api/") ? (
                   <img
                     src={notif.thumbnail}
@@ -38,22 +44,28 @@ export function CameraNotificationToast({
                     className="w-12 h-12 rounded object-cover flex-shrink-0"
                   />
                 ) : (
-                  <div className="w-12 h-12 rounded bg-accent/10 flex items-center justify-center flex-shrink-0">
-                    <Icon size={20} className="text-accent" />
+                  <div
+                    className="w-12 h-12 rounded flex items-center justify-center flex-shrink-0"
+                    style={{ background: "var(--brand-subtle)" }}
+                  >
+                    <Icon size={20} style={{ color: "var(--brand)" }} />
                   </div>
                 )}
                 <div className="flex-1 min-w-0">
-                  <p className="type-footnote text-label-primary font-medium capitalize">
+                  <p
+                    className="type-footnote font-medium capitalize"
+                    style={{ color: "var(--text)" }}
+                  >
                     {notif.label} detected
                   </p>
-                  <p className="type-caption-2 text-label-tertiary">
+                  <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                     {notif.camera?.replace(/_/g, " ")}
                     {notif.score ? ` \u00B7 ${Math.round(notif.score * 100)}%` : ""}
                   </p>
                 </div>
                 <button
                   onClick={() => onDismiss(index)}
-                  className="p-1 text-label-quaternary hover:text-label-secondary"
+                  className="p-1 text-[color:var(--text-faint)] hover:text-[color:var(--text-muted)]"
                 >
                   <X size={14} />
                 </button>
@@ -66,23 +78,39 @@ export function CameraNotificationToast({
           return (
             <div
               key={`${notif.timestamp}-${index}`}
-              className="dp-card bg-[var(--color-surface-primary)] shadow-lg border border-accent/30 animate-in slide-in-from-right"
+              className="card animate-in slide-in-from-right"
+              style={{
+                background: "var(--glass)",
+                backdropFilter: "blur(20px) saturate(150%)",
+                WebkitBackdropFilter: "blur(20px) saturate(150%)",
+                boxShadow: "var(--lift)",
+                borderColor: "color-mix(in srgb, var(--brand) 30%, transparent)",
+              }}
             >
-              <div className="flex items-center gap-3 p-3">
-                <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
-                  <Scan size={18} className="text-accent" />
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
+                  style={{ background: "var(--brand-subtle)" }}
+                >
+                  <Scan size={18} style={{ color: "var(--brand)" }} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="type-footnote text-label-primary font-medium">
+                  <p
+                    className="type-footnote font-medium"
+                    style={{ color: "var(--text)" }}
+                  >
                     New camera found
                   </p>
-                  <p className="type-caption-2 text-label-tertiary truncate">
+                  <p
+                    className="type-caption-2 truncate"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     {notif.camera?.replace(/_/g, " ")}
                   </p>
                 </div>
                 <button
                   onClick={() => onDismiss(index)}
-                  className="p-1 text-label-quaternary hover:text-label-secondary"
+                  className="p-1 text-[color:var(--text-faint)] hover:text-[color:var(--text-muted)]"
                 >
                   <X size={14} />
                 </button>

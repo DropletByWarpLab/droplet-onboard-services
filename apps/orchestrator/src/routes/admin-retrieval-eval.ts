@@ -7,14 +7,18 @@
  * offline gate, NOT a public surface. It returns `404 not_found` when
  * `NODE_ENV === "production"` so the live appliance never exposes it.
  *
- * Auth: piggybacks on the existing authMiddleware — any authenticated
- * user can hit the endpoint and gets results scoped to their own
- * userId via the per-arm `WHERE userId = $1` filter (no cross-user
- * leak by construction).
+ * Auth: WARP-449 — previously piggybacked on `authMiddleware` alone (any
+ * authenticated user could hit the endpoint, scoped to their own userId
+ * via the per-arm `WHERE userId = $1` filter). The route name and mount
+ * point live under `/admin/*`, so per ADR-004 §3 / WARP-449 AC #4 it now
+ * carries the same `requireRole("owner", "admin")` posture as the other
+ * `admin-*` route files — this is dev/eval-only tooling (404s in
+ * production) and every sibling admin router already gates on role.
  */
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = createLogger("admin-retrieval-eval");
 
@@ -37,7 +41,10 @@ interface SearchResultWire {
 export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
   const router = Router();
 
-  router.get("/admin/retrieval-eval/search", async (req, res) => {
+  router.get(
+    "/admin/retrieval-eval/search",
+    requireRole("owner", "admin"),
+    async (req, res) => {
     if (process.env.NODE_ENV === "production") {
       res.status(404).json({ error: "not_found" });
       return;

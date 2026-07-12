@@ -286,11 +286,11 @@ function CameraNotificationRow({
       onClick={onClick}
       aria-label={label}
       aria-pressed={active}
-      className={`flex items-center justify-center h-9 w-full rounded-lg transition-colors ${
-        active
-          ? "bg-accent text-white"
-          : "bg-surface-secondary text-label-tertiary hover:bg-surface-tertiary"
-      }`}
+      className="flex items-center justify-center h-9 w-full rounded-lg transition-colors hover:bg-[var(--hover)]"
+      style={{
+        background: active ? "var(--brand-subtle)" : "var(--inset)",
+        color: active ? "var(--brand)" : "var(--text-muted)",
+      }}
     >
       <Icon size={14} />
     </button>

@@ -4,6 +4,9 @@
 # — keep both branches consistent.
 *.sh text eol=lf
 *.service text eol=lf
+# systemd path units (WARP-843: droplet-openwrt-attach.path) parse on the
+# appliance like .service files — same CRLF hazard, same pin.
+*.path text eol=lf
 *.py text eol=lf
 Dockerfile text eol=lf
 *.yml text eol=lf

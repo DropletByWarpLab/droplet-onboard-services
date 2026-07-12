@@ -29,6 +29,8 @@ import {
   buildTransportOptions,
   buildInviteEmail,
   sendInviteEmail,
+  buildShareNotificationEmail,
+  sendShareNotificationEmail,
   isChannelReady,
   EmailChannelNotConfiguredError,
   EMAIL_CHANNEL_SINGLETON_ID,
@@ -264,5 +266,132 @@ describe("EmailChannelNotConfiguredError", () => {
     const err = new EmailChannelNotConfiguredError();
     expect(err.code).toBe("EMAIL_CHANNEL_NOT_CONFIGURED");
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+// ── WARP-941 — person-share notification email ──
+//
+// Same SMTP channel + transport primitives as invites, but DECOUPLED from
+// UserInvite: there is no persisted delivery state, so the outcome is the
+// explicit return value (`sent` / `skipped` / `failed`) and the store must
+// never be written. Like sendInviteEmail, it NEVER throws — the caller's
+// share already succeeded and must not be failed or delayed by mail.
+
+describe("buildShareNotificationEmail", () => {
+  it("names the sharer + file in both parts; the subject stays generic (no file name)", () => {
+    const msg = buildShareNotificationEmail({
+      to: "romain@example.com",
+      fromAddress: "droplet@example.com",
+      fromName: "Droplet",
+      sharerDisplayName: "Stefan",
+      fileName: "trip.jpg",
+    });
+
+    expect(msg.to).toBe("romain@example.com");
+    expect(msg.from).toBe('"Droplet" <droplet@example.com>');
+    expect(msg.subject).toMatch(/shared/i);
+    // Content PII stays out of relay subject logs — same posture as invites.
+    expect(msg.subject).not.toContain("trip.jpg");
+    expect(msg.text).toContain("Stefan");
+    expect(msg.text).toContain("trip.jpg");
+    expect(msg.html).toContain("Stefan");
+    expect(msg.html).toContain("trip.jpg");
+  });
+
+  it("escapes HTML-significant characters from sharer + file name in the html part", () => {
+    const msg = buildShareNotificationEmail({
+      to: "x@example.com",
+      fromAddress: "droplet@example.com",
+      fromName: "Droplet",
+      sharerDisplayName: "<script>alert(1)</script>",
+      fileName: '<img src="x">.pdf',
+    });
+
+    expect(msg.html).not.toContain("<script>");
+    expect(msg.html).not.toContain('<img src="x">');
+    expect(msg.html).toContain("&lt;script&gt;");
+  });
+
+  it("falls back to a neutral sharer when the display name is blank", () => {
+    const msg = buildShareNotificationEmail({
+      to: "x@example.com",
+      fromAddress: "droplet@example.com",
+      fromName: "",
+      sharerDisplayName: "   ",
+      fileName: "doc.txt",
+    });
+
+    expect(msg.text).toContain("Someone shared");
+    expect(msg.from).toBe('"Droplet" <droplet@example.com>');
+  });
+});
+
+describe("sendShareNotificationEmail", () => {
+  it("sends via the injected transport when the channel is ready — and writes NO rows", async () => {
+    const sendMail = vi.fn().mockResolvedValue({ accepted: ["romain@example.com"] });
+    const prisma = createPrismaMock(baseConfig({ passwordEnc: "" }));
+
+    const result = await sendShareNotificationEmail(
+      prisma as never,
+      { to: "romain@example.com", sharerDisplayName: "Stefan", fileName: "trip.jpg" },
+      { transportFactory: () => ({ sendMail }) as never },
+    );
+
+    expect(result).toEqual({ status: "sent" });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    const sentArg = sendMail.mock.calls[0][0];
+    expect(sentArg.to).toBe("romain@example.com");
+    expect(sentArg.text).toContain("trip.jpg");
+    // Unlike invites there is no persisted delivery state (no schema change).
+    expect(prisma.userInvite.update).not.toHaveBeenCalled();
+  });
+
+  it("skips (no dial, no throw, no rows) when no channel row exists", async () => {
+    const sendMail = vi.fn();
+    const prisma = createPrismaMock(null);
+
+    const result = await sendShareNotificationEmail(
+      prisma as never,
+      { to: "x@example.com", sharerDisplayName: "Stefan", fileName: "doc.txt" },
+      { transportFactory: () => ({ sendMail }) as never },
+    );
+
+    expect(result.status).toBe("skipped");
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(prisma.userInvite.update).not.toHaveBeenCalled();
+  });
+
+  it("skips when the channel is present but disabled (isChannelReady gating)", async () => {
+    const sendMail = vi.fn();
+    const prisma = createPrismaMock(baseConfig({ enabled: false }));
+
+    const result = await sendShareNotificationEmail(
+      prisma as never,
+      { to: "x@example.com", sharerDisplayName: "Stefan", fileName: "doc.txt" },
+      { transportFactory: () => ({ sendMail }) as never },
+    );
+
+    expect(result.status).toBe("skipped");
+    if (result.status === "skipped") {
+      expect(result.reason).toMatch(/not configured|disabled/i);
+    }
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it("returns failed (never throws) when the transport errors — share path stays alive", async () => {
+    const sendMail = vi.fn().mockRejectedValue(new Error("ECONNREFUSED 10.0.0.1:587"));
+    const prisma = createPrismaMock(baseConfig());
+
+    const result = await sendShareNotificationEmail(
+      prisma as never,
+      { to: "x@example.com", sharerDisplayName: "Stefan", fileName: "doc.txt" },
+      { transportFactory: () => ({ sendMail }) as never },
+    );
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.error).toContain("ECONNREFUSED");
+    }
+    expect(prisma.userInvite.update).not.toHaveBeenCalled();
   });
 });

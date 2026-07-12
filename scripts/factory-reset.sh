@@ -840,11 +840,17 @@ fi
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
   # Stop the bridge + rotation timer before wiping state so they don't
-  # race us writing back.
+  # race us writing back. WARP-843: also stop the attach env-file watcher —
+  # the /var/lib/droplet-bridge wipe below removes the customer creds file the
+  # path unit watches, and stopping it first prevents a spurious mid-reset AP
+  # re-apply (the unit stays enabled, so it resumes watching on the next boot).
   sudo systemctl stop droplet-wifi-rotate.timer 2>/dev/null || true
   sudo systemctl stop droplet-device-bridge.service 2>/dev/null || true
-  # /var/lib/droplet-bridge holds the rotation timestamp + key digest.
-  # systemd will recreate it on next start via StateDirectory=.
+  sudo systemctl stop droplet-openwrt-attach.path 2>/dev/null || true
+  # /var/lib/droplet-bridge holds the rotation timestamp + key digest AND the
+  # wizard's customer Wi-Fi creds (openwrt-attach.env — WARP-843). Wiping it
+  # returns the AP to the /etc/default provisioning SSID on the next attach run.
+  # systemd will recreate the directory on next start via StateDirectory=.
   sudo rm -rf /var/lib/droplet-bridge 2>/dev/null || true
   # The env file carries the auth token + OpenWrt password — regenerate
   # from the repo example on re-setup. We only remove the populated
@@ -854,8 +860,12 @@ if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
   # via the wizard gets persisted here too (resolve_ap_psk in
   # droplet-openwrt-attach), so a factory reset must remove it — the next
   # attach run then generates a FRESH per-box PSK, i.e. true factory state
-  # (PR #551 review). The wizard-written StateDirectory creds file is
-  # already covered by the /var/lib/droplet-bridge wipe above.
+  # (PR #551 review). The wizard-written customer creds themselves live in the
+  # bridge StateDirectory (openwrt-attach.env) and are already covered by the
+  # /var/lib/droplet-bridge wipe above; with that gone and ap-psk removed, the
+  # next attach run falls back to the /etc/default provisioning SSID + a fresh
+  # per-box PSK. /etc/default/droplet-openwrt-attach stays root-owned operator
+  # config and is deliberately NOT rewritten here.
   sudo rm -f /etc/droplet/ap-psk 2>/dev/null || true
   # Log files. These grow over time and can contain the current wifi
   # key's sha256 digest on "rotated" lines; nothing sensitive but
