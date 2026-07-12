@@ -87,6 +87,18 @@ export interface ChatMessage {
    * the conversation-scoped list drives SessionHeader instead).
    */
   attachments?: ChatAttachment[];
+  /**
+   * WARP-903 — set on the streaming assistant placeholder while the
+   * orchestrator cold-loads the selected model (from the `model_loading`
+   * SSE event, emitted before the agent loop); cleared by the NEXT event
+   * on the stream — once the model produces anything it is resident.
+   * Drives the "Loading <model> (<size> GB)…" copy on the pre-first-token
+   * thinking indicator so a 30-60 s cold load is never a silent gap.
+   * `sizeGb` is decimal gigabytes (one decimal) or null when the
+   * orchestrator couldn't report a size. Live-streaming only — never
+   * persisted, never set by loadConversation.
+   */
+  modelLoading?: { model: string; sizeGb: number | null };
 }
 
 /**

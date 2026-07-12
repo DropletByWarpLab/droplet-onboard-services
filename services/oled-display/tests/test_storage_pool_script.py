@@ -284,6 +284,22 @@ exit 0
 """,
     "lsblk": r"""
 printf 'lsblk %s\n' "$*" >> "$CMD_LOG"
+if [ "${1:-}" = "-s" ]; then
+  # WARP-857 ancestor chain: lsblk -s -rn -o NAME,TYPE <dev>. Emit "<name> <type>"
+  # lines from $LSBLK_ANCESTRY (records "<querybase>;name type;name type;..."),
+  # so a test can model an LVM/dm/md stack down to its TYPE=disk leaf. Unknown
+  # device or unset ancestry -> empty (the script falls back to the basename).
+  _dev=; for _a in "$@"; do _dev="$_a"; done
+  _base="$(basename "$_dev")"
+  if [ -n "${LSBLK_ANCESTRY:-}" ] && [ -f "$LSBLK_ANCESTRY" ]; then
+    while IFS= read -r _rec; do
+      [ -n "$_rec" ] || continue
+      [ "${_rec%%;*}" = "$_base" ] || continue
+      printf '%s\n' "${_rec#*;}" | tr ';' '\n'
+    done < "$LSBLK_ANCESTRY"
+  fi
+  exit 0
+fi
 if [ "${1:-}" = "-ndo" ] && [ "${2:-}" = "PKNAME" ]; then
   dev="$(basename "${3:-}")"
   case "$dev" in
@@ -567,6 +583,86 @@ def test_create_execute_partition_member_with_mounted_sibling_refuses(tmp_path):
     assert "mounted" in combined or "busy" in combined
     assert _first(cmds, "wipefs") == -1, cmds
     assert _first(cmds, "mdadm") == -1, cmds
+
+
+# ---------------------------------------------------------------------------
+# WARP-857 item 1 — is_os_disk walks the FULL dm/LVM/crypt/md ancestor chain
+# (lsblk -s) to the physical disk, not just one PKNAME level. A pool member
+# whose disk backs an LVM/LUKS-stacked root must be refused; a member on a
+# genuinely separate disk must NOT false-positive.
+# ---------------------------------------------------------------------------
+
+def test_create_execute_refuses_member_whose_disk_backs_lvm_root(tmp_path):
+    # Root is an LVM LV (vg-root) stacked over /dev/sda2 -> the OS physical disk
+    # is sda. A pool_create naming /dev/sda as a member must be refused: the
+    # ancestor walk resolves the LV down to sda. Before the fix, PKNAME of the LV
+    # source was the dm node (never sda), so the OS disk sailed through as a
+    # poolable member — a data-loss latent bug on any LVM/dm box.
+    ancestry = tmp_path / "ancestry.txt"
+    ancestry.write_text(
+        "vg-root;vg-root lvm;sda2 part;sda disk\n"
+        "sda;sda disk\n"
+        "sdb;sdb disk\n",
+        encoding="utf-8", newline="\n")
+    params = _create_params(members=["/dev/sda", "/dev/sdb"],
+                            confirm_phrase="ERASE sda sdb")
+    proc, cmds = _exec_run(
+        "pool_create", params, tmp_path,
+        mounts=[("/dev/mapper/vg-root", "/")],
+        extra_env={"LSBLK_ANCESTRY": _posix(ancestry)})
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    assert "os" in combined or "system" in combined or "boot" in combined
+    # Refused in the pre-flight, before any destructive command.
+    assert _first(cmds, "wipefs") == -1, cmds
+    assert _first(cmds, "mdadm") == -1, cmds
+
+
+def test_create_execute_allows_members_when_os_disk_is_separate(tmp_path):
+    # The full-chain walk must NOT false-positive: root on sdc's LV, pool members
+    # sda/sdb -> create proceeds (wipe + mdadm), sdc never touched. Confirms the
+    # refusal keys on a SHARED physical disk, not merely "root is on LVM".
+    ancestry = tmp_path / "ancestry.txt"
+    ancestry.write_text(
+        "vg-root;vg-root lvm;sdc2 part;sdc disk\n"
+        "sda;sda disk\n"
+        "sdb;sdb disk\n",
+        encoding="utf-8", newline="\n")
+    params = _create_params(members=["/dev/sda", "/dev/sdb"],
+                            confirm_phrase="ERASE sda sdb")
+    proc, cmds = _exec_run(
+        "pool_create", params, tmp_path,
+        mounts=[("/dev/mapper/vg-root", "/")],
+        extra_env={"LSBLK_ANCESTRY": _posix(ancestry)})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    mdadm_idx = _first(cmds, "mdadm")
+    assert mdadm_idx >= 0, cmds
+    assert "--create /dev/md0" in cmds[mdadm_idx], cmds
+
+
+# ---------------------------------------------------------------------------
+# WARP-857 item 2 — a btrfs-subvolume / bind-mount SOURCE (findmnt reports
+# /dev/sdX1[/subvol]) must not evade teardown enumeration: mounts_backed_by
+# strips the [...] suffix so the mount is recognised and released before the
+# wipe.
+# ---------------------------------------------------------------------------
+
+def test_adopt_execute_tears_down_btrfs_subvol_source(tmp_path):
+    # findmnt reports the mount SOURCE as /dev/sdb1[/@data]. mounts_backed_by
+    # must strip the [..] so it sees /dev/sdb1 (a PKNAME-child of the adopt
+    # target /dev/sdb) and unmounts it. Before the fix the bracketed source
+    # matched neither the disk node nor a child, so the mount was never
+    # enumerated (no umount) and a real wipe would hit EBUSY.
+    proc, cmds = _exec_run(
+        "drive_adopt", _adopt_params(), tmp_path,
+        mounts=[("/dev/sdb1[/@data]", "/mnt/droplet/data-btrfs")])
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    umount_idx = _first(cmds, "umount /mnt/droplet/data-btrfs")
+    assert umount_idx >= 0, cmds
+    # …and the unmount happens BEFORE the wipe (never a wipe over a live mount).
+    assert umount_idx < _first(cmds, "wipefs"), cmds
 
 
 # ---------------------------------------------------------------------------

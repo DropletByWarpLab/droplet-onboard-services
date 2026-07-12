@@ -71,83 +71,91 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
   }
 
   return (
-    <div className="dp-card mb-6">
-      <div className="p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {isEnabled ? (
-              <div className="w-10 h-10 rounded-full bg-system-green/10 flex items-center justify-center">
-                <ShieldCheck size={20} className="text-system-green" />
-              </div>
-            ) : (
-              <div className="w-10 h-10 rounded-full bg-system-orange/10 flex items-center justify-center">
-                <Shield size={20} className="text-system-orange" />
-              </div>
-            )}
-            <div>
-              <h3 className="type-subheadline text-label-primary font-medium">
-                Network Isolation
-              </h3>
-              <p className="type-caption-1 text-label-tertiary">
-                {isEnabled
-                  ? `Cameras isolated on ${config?.subnet || "192.168.100.0"}/${config?.netmask === "255.255.255.0" ? "24" : config?.netmask} (VLAN 100)`
-                  : "Cameras on main LAN — not isolated"}
-              </p>
+    <div className="card mb-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          {isEnabled ? (
+            <div
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ background: "rgba(34,197,94,0.14)" }}
+            >
+              <ShieldCheck size={20} style={{ color: "var(--success)" }} />
             </div>
-          </div>
-
+          ) : (
+            <div
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ background: "rgba(217,163,92,0.16)" }}
+            >
+              <Shield size={20} className="text-[#d9a35c] dark:text-[#e6b873]" />
+            </div>
+          )}
           <div>
-            {loading ? (
-              <div className="dp-btn-secondary px-3 py-2 rounded-lg">
-                <Loader2 size={16} className="animate-spin" />
-              </div>
-            ) : isEnabled ? (
-              <button
-                onClick={() => setTeardownOpen(true)}
-                className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg text-system-red hover:bg-system-red/10"
-              >
-                <ShieldOff size={16} />
-                <span className="type-subheadline">Disable</span>
-              </button>
-            ) : (
-              <button
-                onClick={handleSetup}
-                className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
-              >
-                <ShieldCheck size={16} />
-                <span className="type-subheadline">Enable Isolation</span>
-              </button>
-            )}
+            <h3 className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
+              Network Isolation
+            </h3>
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+              {isEnabled
+                ? `Cameras isolated on ${config?.subnet || "192.168.100.0"}/${config?.netmask === "255.255.255.0" ? "24" : config?.netmask} (VLAN 100)`
+                : "Cameras on main LAN — not isolated"}
+            </p>
           </div>
         </div>
 
-        {isEnabled && (
-          <div className="mt-3 pt-3 border-t border-separator grid grid-cols-3 gap-3">
-            <div>
-              <p className="type-caption-2 text-label-quaternary">Subnet</p>
-              <p className="type-footnote text-label-primary">{config?.subnet}/24</p>
+        <div>
+          {loading ? (
+            <div className="btn ghost">
+              <Loader2 size={16} className="animate-spin" />
             </div>
-            <div>
-              <p className="type-caption-2 text-label-quaternary">Firewall</p>
-              <p className="type-footnote text-system-green">Isolated</p>
-            </div>
-            <div>
-              <p className="type-caption-2 text-label-quaternary">DHCP</p>
-              <p className="type-footnote text-label-primary">
-                {config?.dhcp_pool ? "Active" : "Configured"}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {!isEnabled && (
-          <p className="mt-3 pt-3 border-t border-separator type-caption-1 text-label-quaternary">
-            Enable isolation to put cameras on a separate VLAN (192.168.100.0/24).
-            Users on the main network won&apos;t be able to access camera feeds directly —
-            only through the Droplet dashboard.
-          </p>
-        )}
+          ) : isEnabled ? (
+            <button
+              onClick={() => setTeardownOpen(true)}
+              className="btn ghost"
+              style={{ color: "var(--danger)" }}
+            >
+              <ShieldOff size={16} />
+              <span className="type-subheadline">Disable</span>
+            </button>
+          ) : (
+            <button onClick={handleSetup} className="btn primary">
+              <ShieldCheck size={16} />
+              <span className="type-subheadline">Enable Isolation</span>
+            </button>
+          )}
+        </div>
       </div>
+
+      {isEnabled && (
+        <div
+          className="mt-3 pt-3 grid grid-cols-3 gap-3"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
+          <div>
+            <p className="type-caption-2" style={{ color: "var(--text-faint)" }}>Subnet</p>
+            <p className="type-footnote" style={{ color: "var(--text)" }}>{config?.subnet}/24</p>
+          </div>
+          <div>
+            <p className="type-caption-2" style={{ color: "var(--text-faint)" }}>Firewall</p>
+            <p className="type-footnote" style={{ color: "var(--success)" }}>Isolated</p>
+          </div>
+          <div>
+            <p className="type-caption-2" style={{ color: "var(--text-faint)" }}>DHCP</p>
+            <p className="type-footnote" style={{ color: "var(--text)" }}>
+              {config?.dhcp_pool ? "Active" : "Configured"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!isEnabled && (
+        <p
+          className="mt-3 pt-3 type-caption-1"
+          style={{ borderTop: "1px solid var(--card-bd)", color: "var(--text-faint)" }}
+        >
+          Enable isolation to put cameras on a separate VLAN (192.168.100.0/24).
+          Users on the main network won&apos;t be able to access camera feeds directly —
+          only through the Droplet dashboard.
+        </p>
+      )}
 
       <ConfirmDialog
         open={teardownOpen}

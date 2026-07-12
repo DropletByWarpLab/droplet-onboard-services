@@ -33,6 +33,12 @@ import type { DraftRow, EmailFilter } from "@/lib/types-email";
 import { EmailList } from "./EmailList";
 import { EmailThread } from "./EmailThread";
 import { EmailAIPanel } from "./EmailAIPanel";
+// WARP-1088 — /email is its own workspace frame (not a ShellPage, same as
+// /chat), so it must bring the shared indigo tokens + primitive classes
+// (.card/.lrow/.chip/.btn/.badge/…) into scope itself via `.droplet-shell`
+// on the root below.
+import "@/components/shell/indigo-tokens.css";
+import "@/components/shell/droplet-shell.css";
 
 interface EmailWorkspaceProps {
   initialAccountId?: string;
@@ -154,6 +160,7 @@ export function EmailWorkspace({
   return (
     <div
       className="
+        droplet-shell
         grid min-h-0
         h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh
         grid-cols-1
@@ -188,17 +195,20 @@ export function EmailWorkspace({
           {/* Mobile-only "back to inbox" — never rendered on desktop, where the
               list is always visible beside the reader. */}
           {!isDesktop && hasSelection && (
-            <div className="shrink-0 border-b border-separator px-2 py-1.5">
+            <div
+              className="shrink-0 px-2 py-1.5"
+              style={{ borderBottom: "1px solid var(--border)" }}
+            >
               <button
                 type="button"
                 onClick={clearThread}
                 className="
                   inline-flex items-center gap-1 min-h-[44px] px-2 rounded-lg
-                  type-footnote text-label-secondary
+                  type-footnote
                   transition-colors duration-200 ease-smooth
-                  hover:text-label-primary
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                  hover:text-[color:var(--text)]
                 "
+                style={{ color: "var(--text-muted)" }}
               >
                 <ChevronLeft size={16} aria-hidden />
                 Back to inbox
@@ -278,7 +288,7 @@ function AIPanelDisclosure({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="shrink-0 border-t border-separator">
+    <div className="shrink-0" style={{ borderTop: "1px solid var(--border)" }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -286,21 +296,25 @@ function AIPanelDisclosure({
         aria-controls="email-ai-disclosure"
         className="
           group w-full flex items-center gap-1.5 min-h-[44px] px-4
-          text-left type-subheadline text-label-primary
+          text-left type-subheadline
           transition-colors duration-200 ease-smooth
-          hover:bg-surface-secondary
-          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40
+          hover:bg-[var(--hover)]
         "
+        style={{ color: "var(--text)" }}
       >
-        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent-subtle">
-          <Sparkles size={12} className="text-accent" aria-hidden />
+        <span
+          className="inline-flex items-center justify-center w-5 h-5 rounded-full"
+          style={{ background: "var(--brand-subtle)" }}
+        >
+          <Sparkles size={12} style={{ color: "var(--brand)" }} aria-hidden />
         </span>
         <span className="flex-1 font-semibold">About this thread</span>
         <ChevronDown
           size={16}
-          className={`text-label-tertiary transition-transform duration-200 ease-smooth ${
+          className={`transition-transform duration-200 ease-smooth ${
             open ? "rotate-180" : ""
           }`}
+          style={{ color: "var(--text-muted)" }}
           aria-hidden
         />
       </button>
@@ -337,18 +351,21 @@ function replySubject(subject: string): string {
 
 function NoAccountState() {
   return (
-    <div className="flex flex-col items-center justify-center min-h-[60dvh] p-8 text-center">
-      <span className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-accent-subtle mb-4">
-        <Mail size={26} className="text-accent" aria-hidden />
+    <div className="droplet-shell flex flex-col items-center justify-center min-h-[60dvh] p-8 text-center">
+      <span
+        className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4"
+        style={{ background: "var(--brand-subtle)" }}
+      >
+        <Mail size={26} style={{ color: "var(--brand)" }} aria-hidden />
       </span>
-      <h1 className="type-title-3 text-label-primary">
+      <h1 className="type-title-3" style={{ color: "var(--text)" }}>
         No email account connected yet
       </h1>
-      <p className="type-subheadline text-label-tertiary mt-2 max-w-md">
+      <p className="type-subheadline mt-2 max-w-md" style={{ color: "var(--text-muted)" }}>
         Once you connect a mailbox in Settings, Droplet will triage your inbox
         and summarise threads here, all on your Droplet.
       </p>
-      <a href="/settings" className="dp-btn-secondary text-sm mt-5">
+      <a href="/settings" className="btn sm mt-5">
         Go to Settings
       </a>
     </div>
@@ -396,20 +413,13 @@ function ReplyComposer({
 
   if (!open) {
     return (
-      <div className="shrink-0 border-t border-separator px-5 py-3">
+      <div className="shrink-0 px-5 py-3" style={{ borderTop: "1px solid var(--border)" }}>
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="
-            inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg
-            bg-surface-secondary border border-separator
-            type-footnote text-label-primary
-            transition-colors duration-200 ease-smooth
-            hover:bg-surface-tertiary
-            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-          "
+          className="btn gap-1.5 type-footnote"
         >
-          <Sparkles size={14} className="text-accent" aria-hidden />
+          <Sparkles size={14} style={{ color: "var(--brand)" }} aria-hidden />
           Write a reply
         </button>
       </div>
@@ -417,22 +427,19 @@ function ReplyComposer({
   }
 
   return (
-    <div className="shrink-0 border-t border-separator px-5 py-3 space-y-2">
+    <div
+      className="shrink-0 px-5 py-3 space-y-2"
+      style={{ borderTop: "1px solid var(--border)" }}
+    >
       <div className="flex items-center justify-between">
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           Reply to {to.join(", ")}
         </p>
         <button
           type="button"
           onClick={() => setOpen(false)}
           aria-label="Close reply"
-          className="
-            -mr-2 inline-flex items-center justify-center min-h-[44px] min-w-[44px]
-            rounded-md text-label-tertiary
-            transition-colors duration-200 ease-smooth
-            hover:text-label-primary
-            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-          "
+          className="icon-btn -mr-2"
         >
           <X size={14} aria-hidden />
         </button>
@@ -446,12 +453,13 @@ function ReplyComposer({
         onChange={(e) => setBody(e.target.value)}
         rows={4}
         placeholder="Write your reply…"
-        className="
-          w-full rounded-lg p-2.5 resize-y
-          bg-surface-secondary border border-separator
-          type-footnote text-label-primary placeholder:text-label-tertiary
-          focus:outline-none focus:ring-2 focus:ring-accent/40
-        "
+        className="w-full p-2.5 resize-y type-footnote placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--brand)]"
+        style={{
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-card)",
+          color: "var(--text)",
+        }}
       />
       {error && (
         <p role="alert" className="type-caption-1 text-system-red">
@@ -463,18 +471,12 @@ function ReplyComposer({
           type="button"
           onClick={save}
           disabled={busy || !body.trim()}
-          className="
-            inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg
-            bg-accent text-accent-foreground type-footnote font-medium
-            transition-colors duration-200 ease-smooth
-            hover:bg-accent-hover disabled:opacity-60
-            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-          "
+          className="btn primary gap-1.5 type-footnote disabled:opacity-60"
         >
           <Send size={14} aria-hidden />
           {busy ? "Saving…" : "Save draft"}
         </button>
-        <span className="type-caption-2 text-label-tertiary">
+        <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
           You&rsquo;ll confirm before it sends.
         </span>
       </div>

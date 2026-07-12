@@ -62,7 +62,8 @@ export function CameraGroupNav({
       <button
         type="button"
         onClick={onNewGroup}
-        className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-dashed border-separator text-label-tertiary hover:text-label-primary hover:border-label-tertiary transition-colors"
+        className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-dashed text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:border-[color:var(--text-muted)] transition-colors"
+        style={{ borderColor: "var(--border)" }}
       >
         <Plus size={14} />
         <span className="type-caption-1">New group</span>
@@ -88,17 +89,11 @@ function Pill({
     <button
       type="button"
       onClick={onClick}
-      className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors ${
-        active
-          ? "bg-accent text-white"
-          : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-      }`}
+      className={`chip flex-shrink-0${active ? " on" : ""}`}
     >
       {icon}
       <span className="type-caption-1 font-medium">{label}</span>
-      <span
-        className={`type-caption-2 ${active ? "text-white/80" : "text-label-tertiary"}`}
-      >
+      <span className="type-caption-2" style={{ opacity: active ? 0.8 : 1 }}>
         {count}
       </span>
     </button>
@@ -138,11 +133,8 @@ function GroupPill({
           e.preventDefault();
           onEdit();
         }}
-        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors ${
-          active
-            ? "bg-accent text-white pr-12"
-            : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
-        }`}
+        className={`chip${active ? " on" : ""}`}
+        style={active ? { paddingRight: 44 } : undefined}
       >
         {group.icon ? (
           <span className="type-caption-1">{group.icon}</span>
@@ -152,9 +144,7 @@ function GroupPill({
         <span className="type-caption-1 font-medium truncate max-w-[12rem]">
           {group.name}
         </span>
-        <span
-          className={`type-caption-2 ${active ? "text-white/80" : "text-label-tertiary"}`}
-        >
+        <span className="type-caption-2" style={{ opacity: active ? 0.8 : 1 }}>
           {count}
         </span>
       </button>
@@ -169,9 +159,7 @@ function GroupPill({
               e.stopPropagation();
               onEdit();
             }}
-            className={`p-1 rounded-full hover:bg-white/10 transition-colors ${
-              active ? "text-white/80 hover:text-white" : "text-label-tertiary hover:text-label-primary"
-            }`}
+            className="p-1 rounded-full hover:bg-[var(--hover)] text-[color:var(--text-muted)] hover:text-[color:var(--text)] transition-colors"
             title="Edit group"
           >
             <Pencil size={12} />
@@ -182,9 +170,7 @@ function GroupPill({
               e.stopPropagation();
               onDelete();
             }}
-            className={`p-1 rounded-full hover:bg-system-red/20 transition-colors ${
-              active ? "text-white/80 hover:text-white" : "text-label-tertiary hover:text-system-red"
-            }`}
+            className="p-1 rounded-full hover:bg-[rgba(239,68,68,0.12)] text-[color:var(--text-muted)] hover:text-[color:var(--danger)] transition-colors"
             title="Delete group"
           >
             <Trash2 size={12} />

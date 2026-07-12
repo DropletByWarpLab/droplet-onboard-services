@@ -24,6 +24,7 @@ import {
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { probeColdModel } from "../services/model-readiness.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -605,7 +606,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // When stream=true the client receives the SSE event types defined
   // in spec §8.2 (content_delta, tool_call, tool_result, done) plus
   // WARP-458's `reasoning_step` (when the per-request
-  // `captureReasoning` flag is true). Non-streaming returns the
+  // `captureReasoning` flag is true) and WARP-903's `model_loading`
+  // (emitted FIRST, at most once, when the selected model is installed
+  // in Ollama but needs a cold load). Non-streaming returns the
   // AgentResult shape (assistant message + trace + iterations +
   // stop_reason). The persisted assistant `ChatMessage.reasoning`
   // column is written REGARDLESS of `captureReasoning` so the
@@ -1395,6 +1398,34 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             abortController.abort();
           }
         });
+
+        // ── WARP-903 — cold-model loading signal ─────────────────────
+        // One budgeted lifecycle probe (Ollama /api/ps + /api/tags via
+        // model-readiness.service — chat completions stay DIRECT to
+        // Ollama; never ollama-manager's /proxy) BEFORE the agent loop.
+        // When the selected model is installed but not resident, tell
+        // the client now so the 30-60 s cold load renders as an explicit
+        // loading state instead of a silent hang. Probes `agentModel`
+        // (post vision auto-route) — the model this turn actually runs
+        // on. Non-fatal by contract: the probe itself never throws, and
+        // the belt-and-braces catch here means even a future regression
+        // degrades to "no event" — the turn must never block or fail on
+        // this. Streaming-only: the non-streaming path has no channel to
+        // deliver the event on.
+        try {
+          const cold = await probeColdModel(agentModel);
+          if (cold) {
+            onEvent({
+              type: "model_loading",
+              model: cold.model,
+              sizeGb: cold.sizeGb,
+            });
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] cold-model probe failed (non-fatal):", err);
+        }
+
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
             // Per-turn vision auto-route may override the user's selected model.
