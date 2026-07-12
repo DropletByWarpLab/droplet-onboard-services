@@ -45,6 +45,14 @@ import {
 } from "../services/email-channel.service.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  adminBasicToken,
+  DROPLET_ADMINS_GROUP,
+} from "../services/department-provisioner.service.js";
+import {
+  ncAddUserToGroup,
+  ncRemoveUserFromGroup,
+} from "../services/nextcloud-groups.client.js";
 
 const logger = createLogger("people-route");
 
@@ -75,6 +83,11 @@ const ROLE_RANK: Record<(typeof ROLE_VALUES)[number], number> = {
   admin: 2,
   owner: 3,
 };
+
+// WARP-1259 (T7): the box-wide `droplet-admins` NC group (mask 31 on every
+// active groupfolder, ADR-029 §3.5 Tier 1 admin-see-all) tracks this exact
+// role tier — owner and admin, nothing else.
+const ADMIN_TIER_ROLES = new Set<(typeof ROLE_VALUES)[number]>(["owner", "admin"]);
 
 const SCOPE_VALUES = [
   "team",
@@ -427,6 +440,36 @@ export function createPeopleRouter(
         // as defense-in-depth. Best-effort (the service swallows Redis
         // errors).
         await revokeAllSessions(req.params.id);
+
+        // WARP-1259 (T7): the box-wide `droplet-admins` invariant (ADR-029
+        // §3.5 Tier 1 admin-see-all — mask 31 on every active groupfolder)
+        // must track owner/admin promotion and demotion through the SAME
+        // code path that already revokes sessions on a role change. Wired
+        // right beside revokeAllSessions per the ticket. Best-effort and
+        // non-blocking: an NC outage must not fail the role change itself
+        // (the reconciler's droplet-admins-everywhere convergence pass
+        // eventually re-attaches the group to every folder regardless, but
+        // the direct user<->group membership here has no reconciler sweep
+        // of its own yet — a persistent NC outage needs operator follow-up,
+        // logged at error).
+        const wasAdminTier = ADMIN_TIER_ROLES.has(existing.role);
+        const isAdminTierNow = ADMIN_TIER_ROLES.has(parsed.data.role);
+        if (wasAdminTier !== isAdminTierNow && existing.nextcloudUsername) {
+          const ncUsername = existing.nextcloudUsername;
+          try {
+            const adminToken = adminBasicToken();
+            if (isAdminTierNow) {
+              await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
+            } else {
+              await ncRemoveUserFromGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
+            }
+          } catch (err) {
+            logger.error(
+              { err, userId: existing.id, ncUsername, isAdminTierNow },
+              "role change: droplet-admins NC group sync failed (non-blocking)",
+            );
+          }
+        }
 
         await recordActivity({
           kind: "system",

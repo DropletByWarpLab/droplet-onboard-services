@@ -34,6 +34,18 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { validateDepartmentHierarchy } from "../services/department-validation.js";
 import { kickReconcile } from "../services/department-reconciler.service.js";
+import { bumpAclVersion } from "../services/department-tx.js";
+import {
+  departmentManagerOrAdmin,
+  addMembership,
+  updateMembershipRight,
+  removeMembership,
+  UserNotFoundError,
+  DepartmentNotFoundError,
+  DuplicateMembershipError,
+  MembershipNotFoundError,
+  LastManagerError,
+} from "../services/department-membership.service.js";
 import {
   gfListFolders,
   type GroupfolderInfo,
@@ -104,6 +116,38 @@ const updateDepartmentSchema = z.object({
   name: z.string().optional(), // Catch this to return 400
 });
 
+const departmentRightSchema = z.enum(["reader", "contributor", "manager"]);
+
+const addMemberSchema = z.object({
+  userId: z.string().uuid(),
+  right: departmentRightSchema,
+});
+
+const updateMemberSchema = z.object({
+  right: departmentRightSchema,
+});
+
+/**
+ * Format a DepartmentMembership row for API response.
+ */
+function formatMembershipResponse(m: {
+  id: string;
+  departmentId: string;
+  userId: string;
+  right: string;
+  syncState: string;
+  ncPermissionMask?: number | null;
+}) {
+  return {
+    id: m.id,
+    departmentId: m.departmentId,
+    userId: m.userId,
+    right: m.right,
+    syncState: m.syncState,
+    ncPermissionMask: m.ncPermissionMask ?? null,
+  };
+}
+
 /**
  * Helper to format a Department row for API response.
  * BigInt fields are encoded as strings per the schema.
@@ -125,20 +169,6 @@ function formatDepartmentResponse(dept: Department & { _count?: { teams?: number
     memberCount: dept._count?.memberships ?? 0,
     teamCount: dept._count?.teams ?? 0,
   };
-}
-
-/**
- * Transaction helper to bump aclVersion in place. Used on every membership/state mutation
- * to ensure cache invalidation is atomic with the mutation itself.
- */
-async function bumpAclVersion(
-  tx: Parameters<Parameters<PrismaClient["$transaction"]>[0]>[0],
-  departmentId: string,
-): Promise<void> {
-  await tx.department.update({
-    where: { id: departmentId },
-    data: { aclVersion: { increment: 1 } },
-  });
 }
 
 export function createDepartmentsRouter(prisma: PrismaClient): Router {
@@ -682,6 +712,228 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
         res.json({
           department: formatDepartmentResponse(archived),
         });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/departments/:id/members ───────────────────────
+  // Add a member to a department (or team). Authorized for owner/admin
+  // OR a `manager` of the department itself OR its PARENT department
+  // (inherited-manager rule, ADR-029 2026-07-11 amendment). Any other
+  // authenticated caller (including a plain department member) is 403.
+  router.post(
+    "/departments/:id/members",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+
+        const departmentId = req.params.id;
+        const authorized = await departmentManagerOrAdmin(
+          prisma,
+          departmentId,
+          req.user,
+        );
+        if (!authorized) {
+          return res.status(403).json({
+            error: "Forbidden: requires owner/admin or manager of this department",
+            code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        const parsed = addMemberSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        const { userId, right } = parsed.data;
+
+        let membership;
+        try {
+          membership = await addMembership(
+            prisma,
+            departmentId,
+            userId,
+            right,
+            req.user.id,
+          );
+        } catch (err) {
+          if (err instanceof UserNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "USER_NOT_FOUND" });
+          }
+          if (err instanceof DepartmentNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "NOT_FOUND" });
+          }
+          if (err instanceof DuplicateMembershipError) {
+            return res.status(409).json({ error: err.message, code: "DUPLICATE_MEMBERSHIP" });
+          }
+          throw err;
+        }
+
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "user-plus",
+          what: "Department member added",
+          sub: `${userId} · ${right}`,
+          refs: {
+            actor: req.user.username ?? null,
+            departmentId,
+            targetUserId: userId,
+            right,
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.status(201).json({ membership: formatMembershipResponse(membership) });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── PATCH /api/departments/:id/members/:userId ──────────────
+  // Change a member's right. Same authz as POST /members.
+  // reader<->contributor/manager transitions push an ordered NC group
+  // change (upgrade: add-then-remove; downgrade: remove-then-add);
+  // contributor<->manager is policy-only (no NC call).
+  router.patch(
+    "/departments/:id/members/:userId",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+
+        const departmentId = req.params.id;
+        const targetUserId = req.params.userId;
+
+        const authorized = await departmentManagerOrAdmin(
+          prisma,
+          departmentId,
+          req.user,
+        );
+        if (!authorized) {
+          return res.status(403).json({
+            error: "Forbidden: requires owner/admin or manager of this department",
+            code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        const parsed = updateMemberSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        let membership;
+        try {
+          membership = await updateMembershipRight(
+            prisma,
+            departmentId,
+            targetUserId,
+            parsed.data.right,
+          );
+        } catch (err) {
+          if (err instanceof DepartmentNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "NOT_FOUND" });
+          }
+          if (err instanceof MembershipNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "MEMBERSHIP_NOT_FOUND" });
+          }
+          throw err;
+        }
+
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "user-cog",
+          what: "Department member right changed",
+          sub: `${targetUserId} → ${parsed.data.right}`,
+          refs: {
+            actor: req.user.username ?? null,
+            departmentId,
+            targetUserId,
+            right: parsed.data.right,
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.json({ membership: formatMembershipResponse(membership) });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── DELETE /api/departments/:id/members/:userId ─────────────
+  // Remove a member. Same authz as POST /members. Removing the last
+  // `manager` of a department (self-removal or otherwise) returns 409 —
+  // mirrors the WARP-480 last-owner invariant in routes/people.ts.
+  router.delete(
+    "/departments/:id/members/:userId",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+
+        const departmentId = req.params.id;
+        const targetUserId = req.params.userId;
+
+        const authorized = await departmentManagerOrAdmin(
+          prisma,
+          departmentId,
+          req.user,
+        );
+        if (!authorized) {
+          return res.status(403).json({
+            error: "Forbidden: requires owner/admin or manager of this department",
+            code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        try {
+          await removeMembership(prisma, departmentId, targetUserId);
+        } catch (err) {
+          if (err instanceof DepartmentNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "NOT_FOUND" });
+          }
+          if (err instanceof MembershipNotFoundError) {
+            return res.status(404).json({ error: err.message, code: "MEMBERSHIP_NOT_FOUND" });
+          }
+          if (err instanceof LastManagerError) {
+            return res.status(409).json({
+              error: err.message,
+              code: "LAST_MANAGER_INVARIANT",
+            });
+          }
+          throw err;
+        }
+
+        await recordActivity({
+          kind: "system",
+          severity: "warn",
+          sourceIcon: "user-minus",
+          what: "Department member removed",
+          sub: targetUserId,
+          refs: {
+            actor: req.user.username ?? null,
+            departmentId,
+            targetUserId,
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.status(204).send();
       } catch (err) {
         next(err);
       }

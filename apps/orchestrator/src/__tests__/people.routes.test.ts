@@ -57,6 +57,23 @@ vi.mock("../services/session.service.js", () => ({
   revokeAllSessions: revokeAllSessionsMock,
 }));
 
+// WARP-1259 (T7): the role-change route syncs the box-wide `droplet-admins`
+// NC group on owner/admin promote/demote through the same code path that
+// already revokes sessions. Mock the NC calls so we can assert group-sync
+// behavior (and its failure mode) without standing up Nextcloud.
+const { ncAddUserToGroupMock, ncRemoveUserFromGroupMock } = vi.hoisted(() => ({
+  ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
+  ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../services/nextcloud-groups.client.js", () => ({
+  ncAddUserToGroup: ncAddUserToGroupMock,
+  ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
+}));
+vi.mock("../services/department-provisioner.service.js", () => ({
+  adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
+  DROPLET_ADMINS_GROUP: "droplet-admins",
+}));
+
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
 
@@ -67,6 +84,7 @@ interface MockUser {
   email?: string | null;
   role: string;
   isLocal: boolean;
+  nextcloudUsername?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -79,6 +97,7 @@ function seedUser(over: Partial<MockUser> = {}): MockUser {
     email: over.email ?? null,
     role: over.role ?? "family",
     isLocal: over.isLocal ?? true,
+    nextcloudUsername: over.nextcloudUsername ?? null,
     createdAt: over.createdAt ?? new Date("2026-05-25T10:00:00Z"),
     updatedAt: over.updatedAt ?? new Date("2026-05-25T10:00:00Z"),
   };
@@ -254,6 +273,8 @@ function buildApp(
 beforeEach(() => {
   recordActivityMock.mockClear();
   revokeAllSessionsMock.mockClear();
+  ncAddUserToGroupMock.mockClear();
+  ncRemoveUserFromGroupMock.mockClear();
 });
 
 describe("GET /api/people", () => {
@@ -456,6 +477,95 @@ describe("PATCH /api/people/:id/role", () => {
     // No state change → no revoke (mirrors the no-op audit short-circuit).
     expect(res.status).toBe(200);
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("PATCH /api/people/:id/role — WARP-1259 droplet-admins NC sync", () => {
+  it("promote family -> admin adds to droplet-admins", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family", nextcloudUsername: "alice" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(ncAddUserToGroupMock).toHaveBeenCalledTimes(1);
+    expect(ncAddUserToGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "droplet-admins",
+    );
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("promote admin -> owner adds to droplet-admins (still admin-tier)", async () => {
+    // admin -> owner: both are admin-tier, so this is NOT a tier crossing
+    // and must NOT touch the NC group.
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "admin", nextcloudUsername: "alice" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(200);
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("demote admin -> family removes from droplet-admins", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "admin", nextcloudUsername: "alice" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(200);
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledTimes(1);
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "droplet-admins",
+    );
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("skips the NC call entirely when the user has no nextcloudUsername", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family", nextcloudUsername: null }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("role change still succeeds (non-blocking) when the NC group sync throws", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family", nextcloudUsername: "alice" }),
+    ]);
+    const app = buildApp(prisma);
+    ncAddUserToGroupMock.mockRejectedValueOnce(new Error("nc unreachable"));
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    // The role mutation itself must not fail just because NC is down.
+    expect(res.status).toBe(200);
+    expect(res.body.user.role).toBe("admin");
   });
 });
 
