@@ -367,6 +367,8 @@ function AddDeviceDialog({
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [copied, setCopied] = useState(false);
   const headingId = useId();
+  // WARP-650: label/input association for the device-name field.
+  const deviceLabelId = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const handleCreate = async () => {
@@ -436,10 +438,11 @@ function AddDeviceDialog({
         {step === "form" && (
           <div className="p-5 space-y-4">
             <div>
-              <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+              <label htmlFor={deviceLabelId} className="type-caption-1 text-label-tertiary mb-1.5 block">
                 Device name
               </label>
               <input
+                id={deviceLabelId}
                 ref={inputRef}
                 value={deviceLabel}
                 onChange={(e) => setDeviceLabel(e.target.value)}

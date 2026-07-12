@@ -199,12 +199,62 @@ export default function SettingsPage() {
           <div className="card space-y-3" style={{ marginBottom: 12 }}>
             <p className="type-headline text-label-primary">New user</p>
             <div className="grid grid-cols-2 gap-3">
+              <div>
+                {/* WARP-650: this field only carries a placeholder for sighted
+                    users (design keeps the compact 2-up layout); a visually
+                    hidden label gives it a programmatic name for screen
+                    readers (WCAG 1.3.1 / 4.1.2), matching the sr-only + htmlFor
+                    convention used elsewhere in the dashboard (e.g. MemoryPanel,
+                    EmailWorkspace). */}
+                <label htmlFor="new-user-email" className="sr-only">
+                  Work email
+                </label>
+                <input
+                  id="new-user-email"
+                  type="email"
+                  inputMode="email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  placeholder="you@company.com"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label htmlFor="new-user-display-name" className="sr-only">
+                  Display name (optional)
+                </label>
+                <input
+                  id="new-user-display-name"
+                  value={newDisplayName}
+                  onChange={(e) => setNewDisplayName(e.target.value)}
+                  placeholder="Display name (optional)"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
+                />
+              </div>
+            </div>
+            <div>
+              <label htmlFor="new-user-password" className="sr-only">
+                Password
+              </label>
               <input
-                type="email"
-                inputMode="email"
-                value={newEmail}
-                onChange={(e) => setNewEmail(e.target.value)}
-                placeholder="you@company.com"
+                id="new-user-password"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Create a password"
                 className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                 style={{
                   background: "var(--surface)",
@@ -212,35 +262,9 @@ export default function SettingsPage() {
                   borderRadius: "var(--radius-input)",
                   color: "var(--text)",
                 }}
-                autoFocus
-              />
-              <input
-                value={newDisplayName}
-                onChange={(e) => setNewDisplayName(e.target.value)}
-                placeholder="Display name (optional)"
-                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
-                style={{
-                  background: "var(--surface)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-input)",
-                  color: "var(--text)",
-                }}
+                onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
               />
             </div>
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Create a password"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
-              style={{
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-input)",
-                color: "var(--text)",
-              }}
-              onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
-            />
             <PasswordRulesChecklist password={newPassword} />
             {/* WARP-824 — require the new user to replace the temporary
                 password on first login. On by default; the orchestrator

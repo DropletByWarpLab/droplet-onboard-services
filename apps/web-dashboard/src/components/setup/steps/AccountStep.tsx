@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Eye, EyeOff, KeyRound, Lock, Mail, UserCheck } from "lucide-react";
 import {
   setupAdmin,
@@ -72,6 +72,13 @@ export function AccountStep({
   // floor (WARP-929) already stops back-navigation here, but this is the
   // belt-and-braces guard for any same-session re-render.
   const createdHere = useRef(false);
+
+  // WARP-650: label/input associations for the account-step form fields.
+  const claimCodeId = useId();
+  const emailId = useId();
+  const displayNameId = useId();
+  const passwordId = useId();
+  const confirmPasswordId = useId();
 
   // WARP-867 — proactive owner-exists detection. Tri-state probe: only an
   // EXPLICIT "complete" flips to sign-in; "unknown" (cold boot, 5xx, timeout)
@@ -251,7 +258,7 @@ export function AccountStep({
             cohesive form; the caption tells the user where to read the code. */}
         {mode === "create" && claimGateOn && (
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1">
+            <label htmlFor={claimCodeId} className="type-subheadline text-label-secondary block mb-1">
               Claim code
             </label>
             <p
@@ -267,6 +274,7 @@ export function AccountStep({
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
               />
               <input
+                id={claimCodeId}
                 type="text"
                 value={claimCode}
                 onChange={(e) => setClaimCode(e.target.value)}
@@ -282,7 +290,7 @@ export function AccountStep({
         )}
 
         <div>
-          <label className="type-subheadline text-label-secondary block mb-1.5">
+          <label htmlFor={emailId} className="type-subheadline text-label-secondary block mb-1.5">
             Work email
           </label>
           <div className="relative">
@@ -291,6 +299,7 @@ export function AccountStep({
               className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
             />
             <input
+              id={emailId}
               type="email"
               inputMode="email"
               value={email}
@@ -305,10 +314,11 @@ export function AccountStep({
 
         {mode === "create" && (
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={displayNameId} className="type-subheadline text-label-secondary block mb-1.5">
               Display name (optional)
             </label>
             <input
+              id={displayNameId}
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
@@ -319,7 +329,7 @@ export function AccountStep({
         )}
 
         <div>
-          <label className="type-subheadline text-label-secondary block mb-1">
+          <label htmlFor={passwordId} className="type-subheadline text-label-secondary block mb-1">
             Password
           </label>
           {/* WARP-668 — state the requirement up front, before the user types,
@@ -341,6 +351,7 @@ export function AccountStep({
               className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
             />
             <input
+              id={passwordId}
               type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -372,7 +383,7 @@ export function AccountStep({
 
         {mode === "create" && (
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={confirmPasswordId} className="type-subheadline text-label-secondary block mb-1.5">
               Confirm password
             </label>
             <div className="relative">
@@ -381,6 +392,7 @@ export function AccountStep({
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
               />
               <input
+                id={confirmPasswordId}
                 type={showPassword ? "text" : "password"}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
