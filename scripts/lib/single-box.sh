@@ -333,8 +333,25 @@ EOF
   fi
   log_success "Installed droplet-egress-audit collector (WARP-268)"
 
-  # --- Migrate from pre-rename service name if present -------------------
-  sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
+  # --- Migrate from the pre-rename service name if present (WARP-445) -----
+  # This block is the only code in scripts/ that still OPERATES on the
+  # legacy `droplet-poc-host-net` name (the de-poc rename itself landed in
+  # PR #676): a box provisioned BEFORE the rename still runs the old unit,
+  # and the only way to retire it is to name it here. ship-check's
+  # lifecycle-naming check grandfathers exactly this token for that reason
+  # (its allowlist + hint text are the only other mentions). Delete this
+  # whole block, and the grandfather with it, once the fleet has no
+  # pre-rename boxes left.
+  #
+  # Idempotent: on a second run the old unit file is gone, so the flag stays
+  # 0 and the rm sweep no-ops — no restart of the renamed service, no logs.
+  local legacy_host_net_migrated=0
+  if [ -f /etc/systemd/system/droplet-poc-host-net.service ]; then
+    legacy_host_net_migrated=1
+    sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
+  fi
+  # The file sweep stays unconditional — rm -f/-rf no-op when absent, and an
+  # earlier torn migration (unit gone, script/env/confdir left) still heals.
   sudo rm -f /etc/systemd/system/droplet-poc-host-net.service \
              /usr/local/sbin/droplet-poc-host-net \
              /etc/default/droplet-poc-host-net
@@ -349,6 +366,16 @@ EOF
   # setup.sh finishes. The relay itself is start-on-demand (no [Install]).
   sudo systemctl enable --now droplet-openwrt-attach.path >/dev/null 2>&1
   sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
+  # WARP-445: when the pre-rename unit was just stopped above, the renamed
+  # unit must be STARTED now (not just enabled) — otherwise br-lan loses its
+  # DHCP server + switch route until the next reboot. `restart` (not `start`)
+  # so a half-alive instance from a torn earlier migration picks up the fresh
+  # files too. `|| true`: a start failure must not abort setup — the unit
+  # fails loudly in journalctl and Restart=on-failure keeps retrying.
+  if [ "$legacy_host_net_migrated" = 1 ]; then
+    sudo systemctl restart droplet-host-net.service >/dev/null 2>&1 || true
+    log_success "Migrated pre-rename host-net service — old unit disabled + files removed, droplet-host-net.service enabled + started"
+  fi
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.
   sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
@@ -606,9 +633,51 @@ configure_single_box_env() {
     log_info "OnlyOffice doc-server: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
   fi
 
-  # One-time descriptive header (idempotent — only on the first write).
-  if ! grep -q 'Single-box deployment knobs' "$env_file"; then
-    cat >> "$env_file" << 'EOF'
+  # --- Descriptive header block: surgical replace (WARP-444) ---------------
+  # The block below is pure documentation (comment lines only); the knob
+  # VALUES are upsert_env'd after it. The previous skip-when-marker-present
+  # guard was only half idempotent: it never refreshed stale header prose
+  # after the knob set changed, and it did nothing about the duplicate
+  # blocks that pre-guard setup retries had already appended (the live box
+  # accumulated three). So instead of skipping: strip EVERY existing copy of
+  # the block — the marker line plus its enclosing run of comment lines and
+  # one preceding blank spacer — and append ONE fresh copy. A re-run
+  # converges to exactly one up-to-date block, and an .env carrying
+  # accumulated duplicates dedupes on the next run. Only comment/blank lines
+  # are ever removed, so KEY=value lines interleaved between stale blocks
+  # survive untouched.
+  local block_marker='Single-box deployment knobs (managed by scripts/lib/single-box.sh'
+  local had_block=0
+  if grep -qF "$block_marker" "$env_target"; then
+    had_block=1
+    # Same staged-write + rename discipline as upsert_env above (WARP-595
+    # atomicity, WARP-232 symlink-aware): rebuild into a 0600 stage next to
+    # the REAL target and rename over it — never truncate the live .env.
+    local block_stage="${env_target}.upsert.$$"
+    ( umask 077; awk -v marker="$block_marker" '
+        { lines[NR] = $0; if (index($0, marker) > 0) hit[NR] = 1 }
+        END {
+          for (i = 1; i <= NR; i++) {
+            if (!(i in hit)) continue
+            # Expand from the marker to the enclosing run of comment lines
+            # (covers both `# ===` fences, and stays bounded on a torn block
+            # missing its closing fence) plus one preceding blank spacer, so
+            # a removed block leaves no stranded fence or double blank.
+            s = i; while (s > 1 && lines[s-1] ~ /^#/) s--
+            if (s > 1 && lines[s-1] ~ /^[[:space:]]*$/) s--
+            e = i; while (e < NR && lines[e+1] ~ /^#/) e++
+            for (j = s; j <= e; j++) del[j] = 1
+          }
+          for (i = 1; i <= NR; i++) if (!(i in del)) print lines[i]
+        }' "$env_target" > "$block_stage" )
+    chmod 600 "$block_stage"
+    mv "$block_stage" "$env_target"
+  fi
+
+  # Append the one fresh copy (through $env_target — see the symlink note
+  # above; appending via the symlink would work, but every other write in
+  # this function targets the resolved path, so stay consistent).
+  cat >> "$env_target" << 'EOF'
 
 # ============================================================================
 # Single-box deployment knobs (managed by scripts/lib/single-box.sh —
@@ -660,6 +729,8 @@ configure_single_box_env() {
 #                        LAN, so it cannot strand the uplink.
 # ============================================================================
 EOF
+  if [ "$had_block" = 1 ]; then
+    log_info "Replaced existing single-box block in .env"
   fi
 
   upsert_env COMPOSE_PROFILES    "$merged_profiles"

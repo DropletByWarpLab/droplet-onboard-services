@@ -53,9 +53,10 @@
 #                           env-var names, CLI flags, service/file names,
 #                           log strings). Repo-wide net (docker-compose.yml,
 #                           .env.example, scripts/*.sh, scripts/lib/*.sh).
-#                           Grandfathers the KNOWN droplet-poc-host-net debt
-#                           (retired by ADR-018 action item 3) + a few "PoC"
-#                           prose comments — fails on any NEW occurrence.
+#                           Grandfathers ONLY the legacy identifier the
+#                           WARP-445 on-box migration cleanup must keep
+#                           naming (scripts/lib/single-box.sh) — fails on
+#                           any NEW occurrence.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -242,12 +243,12 @@ CHECKS
                         COMPOSE_PROFILES= value, or --flag. Every Droplet box
                         is the shipping product (architecture-guard rule 17 +
                         ADR-018), so surfaces are named by what the deployment
-                        IS, not its lifecycle stage. Grandfathers the KNOWN
-                        legacy debt as TRACKED exceptions (NOT silent): the
-                        `droplet-poc-host-net` host-net service/file/path
-                        (retired by ADR-018 action item 3, matched as a
-                        substring so it survives line moves) plus a handful of
-                        free-text "PoC" prose comments (per-line allowlist).
+                        IS, not its lifecycle stage. Grandfathers ONE tracked
+                        exception (NOT silent): the legacy
+                        `droplet-poc-host-net` identifier, which the WARP-445
+                        on-box migration cleanup in scripts/lib/single-box.sh
+                        must keep naming until no pre-rename box remains
+                        (matched as a substring so it survives line moves).
                         Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
                         `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or
                         `droplet-poc-*` service shipping to a customer box.
@@ -1019,8 +1020,9 @@ run_check_lifecycle_naming() {
   # `COMPOSE_PROFILES=single-box`.
   #
   # This check is the REPO-WIDE net for rule 17 across the broad user-facing
-  # surface set below. It carries the KNOWN droplet-poc-host-net debt as a
-  # tracked grandfather exception.
+  # surface set below. It carries ONE tracked grandfather exception — the
+  # legacy host-net identifier the WARP-445 migration cleanup still names
+  # (see the Tier 1 note below).
   #
   # COVERED SURFACES (curated — mirrors stale-repo-names' surface philosophy):
   #   docker/docker-compose.yml   (profile names, service names, env, comments)
@@ -1037,28 +1039,29 @@ run_check_lifecycle_naming() {
   #   scripts/test/               This check's own regex + the regression test's
   #                               synthetic `poc` mutation strings live here;
   #                               scanning them would self-trip the gate.
-  #   scripts/host/               The captured droplet-sys host artifacts
-  #                               (docker-compose.poc.yml, etc-systemd-system/
-  #                               droplet-host-net.service, usr-local-sbin/
-  #                               droplet-poc-host-net, …) are a point-in-time
-  #                               CAPTURE of what shipped to the box (rule 20 /
-  #                               ADR-018 §13). They ARE the tracked debt, not a
-  #                               new leak; ADR-018 action item 3 retires them.
+  #   scripts/host/               The captured droplet-sys host artifacts are a
+  #                               point-in-time CAPTURE of what shipped to the
+  #                               box (rule 20 / ADR-018 §13). The host-net set
+  #                               was de-poc renamed in place (PR #676), but the
+  #                               capture still holds e.g. docker-compose.poc.yml
+  #                               — tracked debt scheduled by ADR-018/SINGLE_BOX
+  #                               naming-cleanup notes, not a new leak.
   #   CLAUDE.md / package.json    Not operator-facing product surfaces.
   #
   # GRANDFATHERED LEGACY DEBT (tracked, NOT a silent exception — every entry
   # below is real tech debt with a retirement owner):
   #
-  #   Tier 1 — the `droplet-poc-host-net` host-net debt (a SUBSTRING grandfather,
-  #   robust to line moves). The single-box host-integration installer and its
-  #   setup.sh log line reference the legacy `droplet-poc-host-net` service /
-  #   file / path / leasefile. ADR-018 action item 3 ("retire droplet-poc-host-net;
-  #   fold into the OpenWrt overlay + setup.sh; de-poc naming sweep") owns the
-  #   removal. Until then these literal identifiers are allowed wherever they
-  #   appear: we strip the known token and only flag a RESIDUAL lifecycle token
-  #   on the same line (same technique stale-repo-names uses for
-  #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
-  #   scripts/setup.sh.
+  #   Tier 1 — the legacy host-net identifier (a SUBSTRING grandfather, robust
+  #   to line moves). The de-poc rename itself landed (PR #676): every live
+  #   surface uses `droplet-host-net`. What legitimately still names the OLD
+  #   identifier is the WARP-445 on-box migration cleanup in
+  #   scripts/lib/single-box.sh::install_single_box_host_integration — it must
+  #   spell out the pre-rename unit/file/path names to disable + remove them
+  #   from boxes provisioned before the rename. We strip the known token and
+  #   only flag a RESIDUAL lifecycle token on the same line (same technique
+  #   stale-repo-names uses for inference-engine.local). Retirement owner:
+  #   delete the migration block + this grandfather once the fleet has no
+  #   pre-rename boxes left.
   #
   #   Tier 2 — RETIRED (WARP-850). The six free-text "PoC" comment mentions
   #   that used to live here (docker-compose.yml ×2, .env.example ×1,
@@ -1113,10 +1116,14 @@ run_check_lifecycle_naming() {
 
   # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
   # the token re-scan, so they're allowed wherever they appear (robust to
-  # line moves). Retirement owner: ADR-018 action item 3.
+  # line moves). Sole remaining entry: the pre-rename host-net identifier the
+  # WARP-445 on-box migration cleanup (scripts/lib/single-box.sh) must keep
+  # naming to remove it from already-provisioned boxes. Retirement owner:
+  # delete alongside that migration block once no pre-rename box remains.
+  # (`droplet-poc-lan` was dropped from this list in the WARP-445 sweep — no
+  # covered surface references it anymore.)
   local -a grandfathered_tokens=(
     "droplet-poc-host-net"
-    "droplet-poc-lan"
   )
 
   # --- Scan. -----------------------------------------------------------------
@@ -1177,9 +1184,10 @@ run_check_lifecycle_naming() {
   printf "    |   COMPOSE_PROFILES=poc    → COMPOSE_PROFILES=single-box\n" >&2
   printf "    |   setup.sh --poc          → setup.sh --single-box\n" >&2
   printf "    |   droplet-poc-* service   → name it by its role (e.g. -host-net)\n" >&2
-  printf "    | If your reference is the KNOWN droplet-poc-host-net debt (retired\n" >&2
-  printf "    | by ADR-018 action item 3) or another tracked exception, add it to\n" >&2
-  printf "    | the grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
+  printf "    | If your reference is the droplet-poc-host-net migration cleanup\n" >&2
+  printf "    | (WARP-445 — scripts/lib/single-box.sh removes the pre-rename unit\n" >&2
+  printf "    | from old boxes) or another tracked exception, add it to the\n" >&2
+  printf "    | grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
   printf "    | retirement owner — never as a silent exception.\n" >&2
   CHECK_RESULTS[$label]=fail
   return 1
