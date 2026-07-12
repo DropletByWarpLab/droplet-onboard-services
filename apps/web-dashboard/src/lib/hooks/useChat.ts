@@ -137,6 +137,8 @@ function extractCitations(toolName: string, data: unknown): ChatCitation[] {
  * Streaming response: parse the SSE events defined in the orchestrator's
  * `apps/orchestrator/src/types/sse-events.ts`:
  *
+ *   - `model_loading` → the selected model needs a cold load (WARP-903);
+ *                       show an explicit loading state until the next event
  *   - `content_delta` → append text to the streaming assistant message
  *   - `tool_call`     → record a pending tool dispatch as a chip
  *   - `tool_result`   → fill in the chip with `ok`/`data`/`status`/`message`
@@ -194,6 +196,19 @@ interface ReasoningStepEvent extends SSEEventBase {
   text: string;
 }
 
+/**
+ * WARP-903 — the orchestrator's pre-agent-loop cold-load signal: the
+ * selected model is installed in Ollama but not resident in memory, so
+ * the first token is 30-60 s away. Arrives at most once, always before
+ * any other event on the turn. `sizeGb` is decimal gigabytes (one
+ * decimal), or null when unreported.
+ */
+interface ModelLoadingEvent extends SSEEventBase {
+  type: "model_loading";
+  model: string;
+  sizeGb: number | null;
+}
+
 interface DoneEvent extends SSEEventBase {
   type: "done";
   iterations: number;
@@ -206,6 +221,7 @@ type SSEEvent =
   | ToolCallEvent
   | ToolResultEvent
   | ReasoningStepEvent
+  | ModelLoadingEvent
   | DoneEvent;
 
 /**
@@ -1668,12 +1684,31 @@ function applyEvent(
   setMessages((prev) => {
     const idx = prev.findIndex((m) => m.id === assistantId);
     if (idx === -1) return prev;
-    const last = prev[idx];
-    if (last.role !== "assistant") return prev;
+    if (prev[idx].role !== "assistant") return prev;
+
+    // WARP-903 — the cold-load window. A `model_loading` event stamps the
+    // loading payload onto the placeholder; ANY other event first clears
+    // it (first token, reasoning step, tool call, and done all mean the
+    // model is resident, so the loading copy must go — including on paths
+    // below that otherwise return the array unchanged).
+    if (evt.type === "model_loading") {
+      const updated = [...prev];
+      updated[idx] = {
+        ...updated[idx],
+        modelLoading: { model: evt.model, sizeGb: evt.sizeGb },
+      };
+      return updated;
+    }
+    let base = prev;
+    if (prev[idx].modelLoading) {
+      base = [...prev];
+      base[idx] = { ...base[idx], modelLoading: undefined };
+    }
+    const last = base[idx];
 
     switch (evt.type) {
       case "content_delta": {
-        const updated = [...prev];
+        const updated = [...base];
         updated[idx] = { ...last, content: last.content + evt.text };
         return updated;
       }
@@ -1681,7 +1716,7 @@ function applyEvent(
         // WARP-458 — steps arrive before the answer's content_delta;
         // concatenate with blank lines, mirroring how the orchestrator
         // persists the trace to ChatMessage.reasoning.
-        const updated = [...prev];
+        const updated = [...base];
         updated[idx] = {
           ...last,
           reasoning: last.reasoning
@@ -1696,7 +1731,7 @@ function applyEvent(
           name: evt.name,
           args: evt.args,
         };
-        const updated = [...prev];
+        const updated = [...base];
         updated[idx] = {
           ...last,
           toolCalls: [...(last.toolCalls ?? []), chip],
@@ -1706,7 +1741,7 @@ function applyEvent(
       case "tool_result": {
         const calls = last.toolCalls ?? [];
         const callIdx = calls.findIndex((c) => c.id === evt.id);
-        if (callIdx === -1) return prev;
+        if (callIdx === -1) return base;
         const updatedCalls = [...calls];
         updatedCalls[callIdx] = {
           ...calls[callIdx],
@@ -1718,7 +1753,7 @@ function applyEvent(
           // "Approve & run" button can complete the action in-chat.
           ...(evt.confirmation ? { confirmation: evt.confirmation } : {}),
         };
-        const updated = [...prev];
+        const updated = [...base];
         // WARP-295: when the matching tool is a retrieval tool, fold
         // its result rows into the assistant message's citations. The
         // chip row below the bubble re-renders as each result lands so
@@ -1753,7 +1788,7 @@ function applyEvent(
         if (evt.stop_reason === "error") {
           // eslint-disable-next-line no-console
           console.error("[chat] agent loop ended with error:", evt.error);
-          const updated = [...prev];
+          const updated = [...base];
           updated[idx] = {
             ...last,
             // DASH-03: do NOT set `failureKind` on a live turn. Per the
@@ -1788,7 +1823,7 @@ function applyEvent(
           (!last.toolCalls || last.toolCalls.length === 0) &&
           (!last.reasoning || !last.reasoning.trim())
         ) {
-          const updated = [...prev];
+          const updated = [...base];
           updated[idx] = {
             ...last,
             error: {
@@ -1799,10 +1834,10 @@ function applyEvent(
           };
           return updated;
         }
-        return prev;
+        return base;
       }
       default:
-        return prev;
+        return base;
     }
   });
 }

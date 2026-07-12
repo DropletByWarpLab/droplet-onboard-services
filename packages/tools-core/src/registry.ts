@@ -130,6 +130,10 @@ import decodeText from "./handlers/data/decode-text.js";
 import hashText from "./handlers/data/hash-text.js";
 import convertDataFormat from "./handlers/data/convert-format.js";
 import formatJson from "./handlers/data/format-json.js";
+// data (WARP-901) — misc dev utilities, all Tier-1 read/pure-computation
+import timestampConvert from "./handlers/data/timestamp-convert.js";
+import uuidGenerate from "./handlers/data/uuid-generate.js";
+import regexTest from "./handlers/data/regex-test.js";
 
 const allTools: Tool[] = [
   // network
@@ -244,6 +248,10 @@ const allTools: Tool[] = [
   hashText,
   convertDataFormat,
   formatJson,
+  // WARP-901: misc dev utilities (all Tier-1 read/pure-computation)
+  timestampConvert,
+  uuidGenerate,
+  regexTest,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

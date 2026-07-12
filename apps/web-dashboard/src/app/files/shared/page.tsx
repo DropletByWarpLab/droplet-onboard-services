@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   ArrowLeft,
   Share2,
@@ -11,7 +11,7 @@ import {
   ExternalLink,
   type LucideIcon,
 } from "lucide-react";
-import { useSharedWithMe } from "@/lib/hooks/useShares";
+import { useSharedWithMe, useSharedByMe } from "@/lib/hooks/useShares";
 import { useToast } from "@/components/Toast";
 import type { ShareDetail } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -34,29 +34,37 @@ function formatStime(stime: number | null): string {
   });
 }
 
+/**
+ * First segment of a row's sub line — who the share connects the user to.
+ * Inbound rows name the OWNER (who shared it with me); outbound rows name
+ * the RECIPIENT (who I shared it with), or the link audience for shareType 3
+ * (WARP-941).
+ */
+function shareCounterparty(share: ShareDetail, tab: Tab): string {
+  if (tab === "with-me") {
+    return share.ownerDisplayName || share.uidOwner || "Unknown owner";
+  }
+  if (share.shareType === 3) return "Anyone with the link";
+  return share.shareWithDisplayName || share.shareWith || "Unknown recipient";
+}
+
 export default function SharedPage() {
   const [tab, setTab] = useState<Tab>("with-me");
-  const { items, isLoading } = useSharedWithMe();
+  const withMe = useSharedWithMe();
+  // WARP-941 — real outbound listing (GET /api/files/shares-by-me) replaces
+  // the old "Outbound shares coming soon" placeholder.
+  const byMe = useSharedByMe();
   const { toast } = useToast();
 
-  // "Shared by me" (outbound shares) is blocked on a reverse-share endpoint
-  // that does not exist yet: the orchestrator needs to expose the current
-  // user's *outbound* shares (e.g. GET /api/files/shares?direction=outbound,
-  // backed by a Nextcloud OCS shares query filtered to shares this user owns).
-  // `useSharedWithMe` only returns inbound shares. Until that endpoint lands
-  // the tab stays visible but empty. NOTE: building the endpoint is out of
-  // scope here — this is the tracked gap, not a TODO to implement inline.
-  const visibleShares: ShareDetail[] = useMemo(() => {
-    if (tab === "with-me") return items;
-    return [];
-  }, [tab, items]);
+  const visibleShares: ShareDetail[] = tab === "with-me" ? withMe.items : byMe.items;
+  const isLoading = tab === "with-me" ? withMe.isLoading : byMe.isLoading;
 
   return (
     <ShellPage
       icon={<Share2 size={15} />}
       label="Shared"
       title="Shared"
-      sub="Files other users on this Droplet have shared with you."
+      sub="Files shared with you, and files you've shared with others."
       actions={
         <Link href="/files" className="btn ghost" aria-label="Back to files">
           <ArrowLeft size={15} />
@@ -70,6 +78,7 @@ export default function SharedPage() {
           onClick={() => setTab("with-me")}
           className={"tab" + (tab === "with-me" ? " active" : "")}
           type="button"
+          aria-pressed={tab === "with-me"}
         >
           Shared with me
         </button>
@@ -77,24 +86,13 @@ export default function SharedPage() {
           onClick={() => setTab("by-me")}
           className={"tab" + (tab === "by-me" ? " active" : "")}
           type="button"
+          aria-pressed={tab === "by-me"}
         >
           Shared by me
         </button>
       </div>
 
-      {tab === "by-me" && (
-        <div className="card">
-          <div className="empty">
-            <span className="ei"><Share2 size={24} /></span>
-            <span className="eh">Outbound shares coming soon</span>
-            <span style={{ maxWidth: "44ch" }}>
-              Open a file in <strong>Files</strong> and click the share icon to create a link.
-            </span>
-          </div>
-        </div>
-      )}
-
-      {tab === "with-me" && isLoading && visibleShares.length === 0 && (
+      {isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span>Loading…</span>
@@ -114,7 +112,20 @@ export default function SharedPage() {
         </div>
       )}
 
-      {tab === "with-me" && visibleShares.length > 0 && (
+      {tab === "by-me" && !isLoading && visibleShares.length === 0 && (
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><Share2 size={24} /></span>
+            <span className="eh">You haven&apos;t shared anything yet</span>
+            <span style={{ maxWidth: "44ch" }}>
+              Share a file from <strong>Files</strong> — with a person or by link — and
+              it&apos;ll show up here.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {visibleShares.length > 0 && (
         <div className="card" style={{ padding: 0 }}>
           <div className="rows">
             {visibleShares.map((share) => {
@@ -128,7 +139,7 @@ export default function SharedPage() {
                   <span className="rt">
                     <span className="nm">{fileName || "Shared item"}</span>
                     <span className="sub">
-                      {share.ownerDisplayName || share.uidOwner || "Unknown owner"}
+                      {shareCounterparty(share, tab)}
                       {" · "}
                       {label}
                       {share.stime ? ` · ${formatStime(share.stime)}` : ""}

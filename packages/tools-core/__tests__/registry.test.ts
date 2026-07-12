@@ -108,6 +108,10 @@ const EXPECTED_TOOL_NAMES = [
   "hash_text",
   "convert_data_format",
   "format_json",
+  // WARP-901 — misc dev utilities (data domain, all Tier-1)
+  "timestamp_convert",
+  "uuid_generate",
+  "regex_test",
 ];
 
 describe("TOOLS registry", () => {
@@ -160,6 +164,13 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("convert_data_format")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("format_json")?.requiresWrite).toBe(false);
     expect(TOOLS.get("format_json")?.requiresConfirmation).toBe(false);
+    // WARP-901 — misc dev utilities are all Tier-1 (no write, no confirm).
+    expect(TOOLS.get("timestamp_convert")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("timestamp_convert")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("uuid_generate")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("uuid_generate")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("regex_test")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("regex_test")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

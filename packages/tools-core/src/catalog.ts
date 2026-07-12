@@ -158,7 +158,16 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   business: ["business_profile_get"],
   system: ["get_system_health", "list_drives", "list_storage_pools"],
-  data: ["encode_text", "decode_text", "hash_text", "convert_data_format", "format_json"],
+  data: [
+    "encode_text",
+    "decode_text",
+    "hash_text",
+    "convert_data_format",
+    "format_json",
+    "timestamp_convert",
+    "uuid_generate",
+    "regex_test",
+  ],
 };
 
 /** Ordered domain list — drives the filter-chip order in the dashboard. */
@@ -286,6 +295,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   hash_text: "Get a checksum-style hash of some text",
   convert_data_format: "Convert data between JSON, CSV, and YAML",
   format_json: "Pretty-print or compact a block of JSON",
+  // Data (misc dev utilities)
+  timestamp_convert: "Convert a timestamp between formats",
+  uuid_generate: "Generate a unique ID",
+  regex_test: "Test a pattern against some text",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

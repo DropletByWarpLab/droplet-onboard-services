@@ -46,4 +46,24 @@ describe("encodeSSE", () => {
     expect(out).toContain('"iterations":3');
     expect(out).toContain('"stop_reason":"model_done"');
   });
+
+  it("encodes model_loading with model + sizeGb (WARP-903)", () => {
+    const e: SSEEvent = {
+      type: "model_loading",
+      model: "gpt-oss:20b",
+      sizeGb: 13.8,
+    };
+    const out = encodeSSE(e);
+    expect(out).toContain("event: model_loading");
+    expect(out).toContain('"model":"gpt-oss:20b"');
+    expect(out).toContain('"sizeGb":13.8');
+    expect(out.endsWith("\n\n")).toBe(true);
+  });
+
+  it("encodes model_loading with a null sizeGb (size unreported)", () => {
+    const e: SSEEvent = { type: "model_loading", model: "qwen3", sizeGb: null };
+    const out = encodeSSE(e);
+    expect(out).toContain("event: model_loading");
+    expect(out).toContain('"sizeGb":null');
+  });
 });

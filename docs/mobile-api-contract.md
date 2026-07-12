@@ -514,6 +514,7 @@ types on the same stream — render or ignore as needed:
 | `tool_call` | `{ id, name, args }` | The model invoked an MCP tool |
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
+| `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
 
 Native clients should detect end-of-stream on `event: done` /

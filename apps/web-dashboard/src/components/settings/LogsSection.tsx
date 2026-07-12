@@ -13,7 +13,7 @@ import { downloadLogBundle } from "@/lib/api";
  * bundle leaves the appliance — the copy says so, so the owner knows what
  * they're sharing.
  *
- * Tokens only (dp-card / type-*, text-label-*, system-red/green, accent). No
+ * Tokens only (.card / type-*, indigo CSS vars, system-red/green). No
  * hardcoded colors, no emoji, sentence-case copy. The single button transition
  * is the shared `transition-colors` (250ms ease) — no bespoke motion, so
  * prefers-reduced-motion needs no special handling here.
@@ -61,16 +61,19 @@ export function LogsSection() {
 
   return (
     <section className="mb-10">
-      <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
+      <h2
+        className="type-footnote uppercase tracking-wider px-1 mb-2"
+        style={{ color: "var(--text-muted)" }}
+      >
         Diagnostics
       </h2>
 
-      <div className="dp-card p-4 space-y-4">
+      <div className="card space-y-4">
         <div className="flex items-center gap-2.5">
-          <FileText size={16} className="text-label-secondary" />
+          <FileText size={16} style={{ color: "var(--text-muted)" }} />
           <div>
-            <p className="type-headline text-label-primary">Download logs</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-headline" style={{ color: "var(--text)" }}>Download logs</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               A zip of recent service logs to share with support. Tokens,
               passwords and keys are removed before it leaves your Droplet.
             </p>
@@ -81,7 +84,8 @@ export function LogsSection() {
           <div className="flex flex-col gap-1.5 sm:w-56">
             <label
               htmlFor="logs-range"
-              className="type-caption-1 text-label-secondary px-0.5"
+              className="type-caption-1 px-0.5"
+              style={{ color: "var(--text-muted)" }}
             >
               Time range
             </label>
@@ -90,7 +94,13 @@ export function LogsSection() {
               value={windowHours}
               onChange={(e) => setWindowHours(Number(e.target.value))}
               disabled={busy}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             >
               {RANGE_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -103,7 +113,7 @@ export function LogsSection() {
           <button
             onClick={handleDownload}
             disabled={busy}
-            className="dp-btn-primary type-subheadline !min-h-[40px] inline-flex items-center gap-2 disabled:opacity-60"
+            className="btn primary type-subheadline !min-h-[40px] inline-flex items-center gap-2 disabled:opacity-60"
           >
             <Download size={15} />
             {busy ? "Preparing…" : "Download logs"}
