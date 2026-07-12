@@ -1,0 +1,49 @@
+[Unit]
+# WARP-843 — root relay between droplet-openwrt-attach.path and the attach
+# service. See the .path unit for the full design; the short version:
+#
+#   - The sandboxed device-bridge writes the customer Wi-Fi SSID/PSK + guest
+#     BSS keys into its own StateDirectory
+#     (/var/lib/droplet-bridge/openwrt-attach.env) but holds NO privilege to
+#     restart anything.
+#   - droplet-openwrt-attach.service is Type=oneshot + RemainAfterExit=yes, so
+#     it is "active" from boot on and a path-triggered *start* would be a
+#     no-op. This relay is a plain oneshot: every path trigger runs it, and it
+#     performs the *restart* on the attach service, which regenerates
+#     /etc/hostapd.conf and respawns hostapd only when the conf changed
+#     (HOSTAPD_CHANGED gate — identical re-submits cause no AP reload).
+#
+# Deliberately NO [Install] section: never enabled, never runs at boot — it
+# only ever runs when droplet-openwrt-attach.path triggers it (systemd
+# serializes starts of the same unit, so write bursts coalesce).
+#
+# Repo-tracked at scripts/host/etc-systemd-system/ and installed by
+# scripts/lib/single-box.sh (setup.sh --single-box) — never hand-placed.
+Description=Re-apply droplet-openwrt-attach after an env-file change (WARP-843)
+
+[Service]
+Type=oneshot
+# Settle window: the unprivileged bridge writes the droplet-owned creds file in
+# its StateDirectory (atomic mktemp+mv — the bridge owns that directory).
+# Sleeping 1s lets an in-flight write finish and coalesces rapid successive
+# triggers before the attach service re-reads the creds via its validated
+# customer_ap_creds / customer_guest_creds parse.
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/systemctl restart droplet-openwrt-attach.service
+# The attach run itself (docker execs, hostapd respawn) can take a while on a
+# busy box; keep a bounded ceiling well above its normal few seconds.
+TimeoutStartSec=180
+
+# --- Hardening (mirrors droplet-storage-pool-apply.service) ---
+# Root is required (systemctl restart of a root unit), but the orthogonal
+# reductions cost nothing: this unit only talks to PID 1 over the local D-Bus
+# socket — it never needs the network, user homes, or kernel tunables.
+PrivateNetwork=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
