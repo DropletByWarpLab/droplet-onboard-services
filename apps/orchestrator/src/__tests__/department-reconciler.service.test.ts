@@ -234,6 +234,15 @@ function buildPrisma(
         },
       ),
     },
+    // WARP-1271 (T19a): reconcileDepartments() also sweeps UserUsagePolicy
+    // rows (usage-policy-reconciler.service.ts) on the same tick. No fixture
+    // in this suite seeds any policy rows, so an empty list is the correct
+    // default — the sweep is a no-op that doesn't disturb the department/
+    // membership assertions below.
+    userUsagePolicy: {
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue({}),
+    },
   };
 }
 

@@ -86,6 +86,9 @@ import type {
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
+  UsagePolicy,
+  UsageWithMeta,
+  AdminFilesUsageResponse,
 } from "./types";
 import type {
   EmailAccount,
@@ -4845,6 +4848,46 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to ${action} user: ${res.status}`);
   }
+}
+
+// ── WARP-1271 (T19a): per-user usage settings ──
+// `userId` here is the LOCAL User UUID (RosterUser.userId), never the
+// Nextcloud username `updateUser`/`setUserEnabled` above key on — a
+// different namespace (WARP-947).
+
+export async function fetchUserUsage(userId: string): Promise<UsageWithMeta> {
+  const res = await authFetch(`${BASE}/api/people/${userId}/usage`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch usage: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateUserUsage(
+  userId: string,
+  data: { storageQuotaBytes?: string | null; maxUploadSizeMb?: number | null },
+): Promise<{ policy: UsagePolicy }> {
+  const res = await authFetch(`${BASE}/api/people/${userId}/usage`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update usage: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Admin usage roster — per-user + per-department storage (WARP-1271). */
+export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
+  const res = await authFetch(`${BASE}/api/admin/files/usage`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch usage roster: ${res.status}`);
+  }
+  return res.json();
 }
 
 // --- Remote Access (WireGuard VPN) ---

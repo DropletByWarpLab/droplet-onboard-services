@@ -75,10 +75,36 @@ const logger = pino({ name: "files-route" });
 const CACHE_PREFIX = "files:list:";
 const CACHE_TTL = 10;
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: config.MAX_UPLOAD_SIZE_MB * 1024 * 1024 },
-});
+const MEMORY_STORAGE = multer.memoryStorage();
+
+/**
+ * WARP-1271 (T19a) — per-user upload cap. `UserUsagePolicy.maxUploadSizeMb`
+ * (when set) tightens `config.MAX_UPLOAD_SIZE_MB` for the authenticated
+ * caller; it can only shrink the ceiling, never raise it (min(), never a
+ * bypass). `Infinity` means "no policy override" — min() then resolves to
+ * the config default. One indexed `findUnique` per request (no cross-
+ * request cache — the brief's "cache per-request only" is naturally true
+ * here since this runs once per upload call, not per file).
+ */
+async function resolveUploadLimitMb(
+  prisma: PrismaClient,
+  userId: string | undefined,
+): Promise<number> {
+  if (!userId) return config.MAX_UPLOAD_SIZE_MB;
+  try {
+    const policy = await prisma.userUsagePolicy.findUnique({
+      where: { userId },
+      select: { maxUploadSizeMb: true },
+    });
+    const override = policy?.maxUploadSizeMb;
+    if (override != null && override > 0) {
+      return Math.min(config.MAX_UPLOAD_SIZE_MB, override);
+    }
+  } catch (err) {
+    logger.warn({ err, userId }, "upload: usage-policy lookup failed; using config default");
+  }
+  return config.MAX_UPLOAD_SIZE_MB;
+}
 
 /**
  * Resolve the Nextcloud credential for this request. For JWT sessions the
@@ -1288,11 +1314,28 @@ export function createFilesRouter(
   );
 
   // ── Multer error handler ──
-  function handleUpload(req: Request, res: Response, next: NextFunction) {
-    upload.array("files", 20)(req, res, (err) => {
+  // WARP-1271 (T19a): the per-request file-size limit is resolved from the
+  // caller's UserUsagePolicy BEFORE constructing the multer instance —
+  // multer's `limits` are fixed at construction, so a per-user cap means a
+  // per-request multer(), not a shared module-level one. LIMIT_FILE_SIZE
+  // gets an honest 413 (was 400) naming the ACTUAL limit that applied,
+  // which may be tighter than config.MAX_UPLOAD_SIZE_MB.
+  async function handleUpload(req: Request, res: Response, next: NextFunction) {
+    const userId = (req as { user?: { id?: string } }).user?.id;
+    const limitMb = await resolveUploadLimitMb(prisma, userId);
+    const scopedUpload = multer({
+      storage: MEMORY_STORAGE,
+      limits: { fileSize: limitMb * 1024 * 1024 },
+    });
+    scopedUpload.array("files", 20)(req, res, (err) => {
       if (err instanceof MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(413).json({
+            error: `File too large (max ${limitMb}MB for your account)`,
+          });
+          return;
+        }
         const messages: Record<string, string> = {
-          LIMIT_FILE_SIZE: `File too large (max ${config.MAX_UPLOAD_SIZE_MB}MB)`,
           LIMIT_FILE_COUNT: "Too many files (max 20)",
           LIMIT_UNEXPECTED_FILE: 'Unexpected field name (use "files")',
         };

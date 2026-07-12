@@ -271,6 +271,12 @@ async function narrowAllowedToolsForRole(
   return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
 }
 
+// D-7: enforcement deferred — UserUsagePolicy.llmDailyMessageCap (WARP-1271)
+// is persisted but NOT enforced here. A future ticket wires a Redis UTC-day
+// counter beside narrowAllowedToolsForRole and returns an honest 429 when a
+// non-privileged caller's daily message count exceeds their configured cap.
+// Do not read llmDailyMessageCap in this file until that ticket lands.
+
 /**
  * WARP-1121 (§9.3/§15) — server-side write-tool strip for interview turns.
  * The interview session must never carry write tools REGARDLESS of the

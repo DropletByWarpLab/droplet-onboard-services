@@ -176,6 +176,17 @@ const MATRIX: GuardedRoute[] = [
   { method: "patch", path: "/api/people/u1/scope", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/people/u1", allowed: ["owner", "admin"] },
 
+  // WARP-1271 (T19a): per-user usage settings — same owner+admin posture as
+  // the rest of /api/people mutations. GET is also gated (unlike
+  // /people/permissions) because it exposes another user's live storage
+  // usage, not just a static ability matrix.
+  { method: "put", path: "/api/people/u1/usage", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/people/u1/usage", allowed: ["owner", "admin"] },
+
+  // WARP-1271 (T19a): admin usage roster — per-user + per-department
+  // storage. Same posture as the rest of /api/admin/files.
+  { method: "get", path: "/api/admin/files/usage", allowed: ["owner", "admin"] },
+
   // WARP-1258 (T6): departments/teams CRUD — same owner+admin posture as
   // people mutations. GET /api/departments is open (not in this matrix as it's
   // a read with no role restriction).

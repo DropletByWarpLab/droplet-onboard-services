@@ -714,6 +714,50 @@ export interface InviteCreateRequest {
   ttlHours?: number;
 }
 
+// ── WARP-1271 (T19a): per-user usage settings ──
+
+/** BigInt fields string-encoded (ADR-029 §8 wire contract). */
+export interface UsagePolicy {
+  userId: string;
+  storageQuotaBytes: string | null;
+  quotaSyncState: "pending" | "synced" | "failed" | "removing";
+  maxUploadSizeMb: number | null;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+/** GET /api/people/:id/usage response — `usedBytes` is display-only, read
+ *  live from Nextcloud; `null` when unknown (no NC account yet, or the read
+ *  failed) rather than a fabricated 0. */
+export interface UsageWithMeta {
+  policy: UsagePolicy | null;
+  usedBytes: string | null;
+}
+
+/** One row of GET /api/admin/files/usage's `users` array. `"—"` on any
+ *  field means the per-user quota read failed — render it verbatim, don't
+ *  treat it as a number. */
+export interface AdminUsageUserRow {
+  userId: string;
+  displayName: string;
+  quota: string | null;
+  used: string;
+  free: string | null;
+}
+
+export interface AdminUsageDepartmentRow {
+  id: string;
+  name: string;
+  kind: string;
+  sizeBytes: string;
+  quotaBytes: string | null;
+}
+
+export interface AdminFilesUsageResponse {
+  users: AdminUsageUserRow[];
+  departments: AdminUsageDepartmentRow[];
+}
+
 export interface InviteCreateResponse {
   token: string;
   url: string;

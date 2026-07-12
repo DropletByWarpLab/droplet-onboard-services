@@ -671,6 +671,54 @@ export async function ncGetUserQuota(token: string): Promise<{
   }
 }
 
+/**
+ * WARP-1271 (T19a) — fetch an ARBITRARY user's storage quota via the admin
+ * credential. `ncGetUserQuota` above only reads the CALLER's own quota
+ * (`/cloud/user` resolves against the bearer's own session); the admin
+ * usage roster and the per-user usage-settings GET need someone ELSE's
+ * quota, which requires the admin-scoped single-user detail endpoint
+ * (`GET /cloud/users/{userid}`) — same OCS `quota` object shape as
+ * `/cloud/user`, just keyed by username instead of the token owner.
+ * Returns null on any failure (unknown user, NC unreachable, malformed
+ * response) — callers degrade to an honest "—" display, never a 500.
+ */
+export async function ncGetUserQuotaAdmin(
+  adminToken: string,
+  username: string
+): Promise<{
+  used: number;
+  free: number | null;
+  total: number | null;
+  quota: number | null;
+} | null> {
+  try {
+    const resp = await fetch(
+      ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}?format=json`),
+      { headers: ocsHeaders(adminToken) }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.ocs?.meta?.status !== "ok") return null;
+    const q = data?.ocs?.data?.quota ?? {};
+    // Nextcloud returns -3 for unlimited quota; surface that as null (same
+    // convention as ncGetUserQuota).
+    const parseNum = (v: unknown): number | null => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n) || n < 0) return null;
+      return n;
+    };
+    return {
+      used: parseNum(q.used) ?? 0,
+      free: parseNum(q.free),
+      total: parseNum(q.total),
+      quota: parseNum(q.quota),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function ncLoginWithCredentials(
   username: string,
   password: string
