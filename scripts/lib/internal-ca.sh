@@ -66,7 +66,10 @@ INTERNAL_CA_SERVICES=(
 )
 # Host-network services are dialled as host.docker.internal (multi-box/dev)
 # or the droplet_default bridge-gateway IP (single-box) — extra SANs.
-INTERNAL_CA_HOSTNET_SERVICES=(routing switch oled-display matter-controller)
+# WARP-1061: camera-discovery joins — it is host-network too and its mesh
+# callers (orchestrator cameras.ts, mcp-server) dial it via
+# host.docker.internal:8085, so its server cert needs that SAN.
+INTERNAL_CA_HOSTNET_SERVICES=(routing switch oled-display matter-controller camera-discovery)
 
 internal_ca_ensure() {
   mkdir -p "$INTERNAL_CA_DIR"

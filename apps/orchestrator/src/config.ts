@@ -49,12 +49,12 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   MQTT_BROKER: z.string().default("mqtt://localhost:1883"),
   // WARP-236 — internal service-to-service mTLS. Defaults keep dev/CI on plain
-  // HTTP. NOTE (WARP-1062 doc-truth): nothing sets this to "1" today — neither
-  // scripts/setup.sh nor compose — so the mesh mTLS code below (index.ts HTTPS
-  // listener, lib/internal-tls.ts clients) is dormant on every box. On-box
-  // enablement plus the still-unwired server hops (nginx proxy_ssl, the
-  // FastAPI/uvicorn listeners, ai-gateway gRPC) is a separate follow-up
-  // ticket; see docs/security/internal-mtls.md "Wiring status".
+  // HTTP. WARP-1061 wired the mesh end-to-end: scripts/setup.sh writes the
+  // knob (default "0") into every .env, compose delivers it + the per-service
+  // bundles, and BOTH halves of every first-party hop (nginx proxy_ssl, the
+  // FastAPI/uvicorn listeners, ai-gateway gRPC, this service's listener +
+  // clients) key on it — an operator flips it to "1" and recreates the stack.
+  // See docs/security/internal-mtls.md "Enforcement matrix".
   DROPLET_INTERNAL_TLS: z.string().default("0"),
   DROPLET_TLS_CERT: z.string().default("/data/service-tls/cert.pem"),
   DROPLET_TLS_KEY: z.string().default("/data/service-tls/key.pem"),

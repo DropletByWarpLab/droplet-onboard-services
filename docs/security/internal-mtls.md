@@ -12,15 +12,14 @@ A file-based internal CA lives at `data/secrets/internal-ca/` (minted once by
 into `data/secrets/service-tls/<service>/{cert.pem,key.pem,ca.pem}`. Each
 container bind-mounts only its own bundle read-only at `/data/service-tls`.
 
-- **Servers** — the design target is that every first-party listener
-  (orchestrator HTTPS :3000, FastAPI/uvicorn services, ai-gateway gRPC :50051,
-  Mosquitto :8883, matter-controller :8083) requires and verifies a CA-signed
-  client cert on every connection. **Wired today:** the orchestrator :3000
-  listener (flag-gated) and Mosquitto :8883 (live) only — see "Wiring status"
-  below.
-- **Clients** (undici fetch, httpx, paho, mqtt.js, grpc, nginx `proxy_ssl_*`)
-  present their own bundle and pin trust to the internal CA. Most HTTP clients
-  are wired (flag-gated); the gaps are listed under "Wiring status".
+- **Servers** — every first-party listener (orchestrator HTTPS :3000, the
+  FastAPI/uvicorn services, ai-gateway gRPC :50051, matter-controller :8083,
+  Mosquitto :8883) requires and verifies a CA-signed client cert on every
+  connection. All are wired as of WARP-1061 (flag-gated except Mosquitto,
+  which is live/scheme-gated) — see the enforcement matrix.
+- **Clients** (undici fetch, httpx, paho, mqtt.js, grpc, nginx `proxy_ssl_*`,
+  and the host-side urllib/curl callers) present their own bundle and pin
+  trust to the internal CA. All first-party hops are wired (flag-gated).
 - **Mosquitto** maps the peer CN to the MQTT username
   (`use_identity_as_username true`) and a static ACL file scopes each CN to
   exactly the topics it uses.
@@ -67,65 +66,86 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (design target)
+## Enforcement matrix (implemented — WARP-1061)
 
-| # | Client → Server | Transport | Was | Design (DROPLET_INTERNAL_TLS=1) |
-|---|---|---|---|---|
-| 1 | nginx gateway → orchestrator :3000 | `proxy_pass` | plain | mTLS (gateway client cert) |
-| 2 | nginx gateway → ai-gateway :8000 | `proxy_pass` | plain | mTLS (gateway client cert) |
-| 4 | orchestrator → ai-gateway :8000 | undici fetch | bearer | mTLS + bearer |
-| 5 | mcp-server → orchestrator :3000 | fetch | bearer | mTLS + bearer |
-| 6 | voice-io → orchestrator :3000 | httpx | bearer | mTLS + bearer |
-| 7 | email-indexer → orchestrator :3000 | httpx | bearer | mTLS + bearer |
-| 8 | rag-eval → orchestrator :3000 | httpx | admin | mTLS |
-| 9 | orchestrator → rag-eval :8090 | fetch | none | mTLS |
-| 10 | orchestrator → voice-io :8086 | fetch | none | mTLS |
-| 11 | orchestrator → routing/switch/oled/matter | fetch | bearers | mTLS + bearer |
-| 12 | mcp-server → routing :8080, switch :8081 | fetch | bearers | mTLS + bearer |
-| 13 | switch → routing; camera-discovery → routing | httpx | token | mTLS + token |
-| 14 | routing → orchestrator :3000 (sampler) | httpx | bearer | mTLS + bearer |
-| 15 | ops-console → orchestrator/ai-gateway/voice-io probes | httpx | URLs | mTLS |
-| 16 | file-indexer → ai-gateway :50051 (gRPC) | grpc | insecure | gRPC mTLS |
+Every row below is wired end-to-end (client presents its bundle AND the
+server requires a CA-signed client cert) and gated on `DROPLET_INTERNAL_TLS`
+(default `0` = plaintext, byte-identical to the pre-mTLS posture). "impl."
+notes which ticket landed the last missing half.
 
-**Out of mTLS scope (documented exclusions):** nginx → web-dashboard / nextcloud
-/ docserver (user plane); orchestrator → nextcloud WebDAV / frigate :5000
-(third-party servers); orchestrator → device-identity-svc (Unix socket,
-filesystem-scoped); ai-gateway → ollama, voice-io → wyoming (third-party, no/raw
-TLS). `ORCHESTRATOR_URL` on the ai-gateway container is dead config (no reader).
+| # | Client → Server | Transport | Flag off | Flag on | impl. |
+|---|---|---|---|---|---|
+| 1 | nginx gateway → orchestrator :3000 (`/api/`, `/api/ws/`) | `proxy_pass` | plain | mTLS (gateway client cert, `proxy_ssl_verify` CA-pinned) | 1061 |
+| 2 | nginx gateway → ai-gateway :8000 (`/ai/`) | `proxy_pass` | plain | mTLS (gateway client cert) | 1061 |
+| 4 | orchestrator → ai-gateway :8000 | undici fetch | bearer | mTLS + bearer | 236/1061 |
+| 5 | mcp-server → orchestrator :3000 | undici fetch | bearer | mTLS + bearer | 236 |
+| 6 | voice-io → orchestrator :3000 | httpx | bearer | mTLS + bearer | 236 |
+| 7 | email-indexer → orchestrator :3000 | httpx | bearer | mTLS + bearer | 236 |
+| 8 | rag-eval → orchestrator :3000 (ragas runner) | urllib | admin route | mTLS | 1061 |
+| 9 | orchestrator → rag-eval :8090 | undici fetch | none | mTLS | 236/1061 |
+| 10 | orchestrator → voice-io :8086 | undici fetch | none | mTLS | 236/1061 |
+| 11 | orchestrator → routing :8080 / switch :8081 / oled :8082 / matter :8083 | undici fetch | bearers | mTLS + bearer | 236/1061 |
+| 12 | mcp-server → routing :8080, switch :8081, camera-discovery :8085 | undici fetch | bearers | mTLS + bearer | 236/1061 |
+| 13 | switch → routing; camera-discovery → routing | httpx | token | mTLS + token | 1061 |
+| 14 | routing → orchestrator :3000 (throughput sampler + off-LAN egress meter + DNS-block meter) | httpx | bearer | mTLS + bearer | 236/1061 |
+| 15 | ops-console → mesh probes (orchestrator, ai-gateway, voice-io, routing, switch, file-indexer, camera-discovery) | httpx | URLs | mTLS | 236/1061 |
+| 16 | file-indexer → ai-gateway :50051 (gRPC embed) | grpc | insecure | gRPC mTLS (`require_client_auth`) | 1061 |
+| 17 | orchestrator → file-indexer :8090 (health + admin reindex) | undici fetch | none | mTLS | 1061 |
+| 18 | orchestrator → camera-discovery :8085 (scan, drivers) | undici fetch | device secret | mTLS + bearer | 1061 |
+| 19 | ai-gateway → orchestrator :3000 (off-LAN posture read) | httpx | bearer | mTLS + bearer | 1061 |
+| 20 | egress-audit collector (host) → orchestrator :3000 | urllib | bearer | mTLS + bearer (host `egress-audit` identity) | 1061 |
+| 21 | device-bridge (host) → orchestrator `/api/health` | urllib | none | mTLS (host `device-bridge` identity) | 1061 |
+| 22 | droplet-shutdown-screen.sh (host) → oled-display :8082 | curl | bearer | mTLS + bearer (`device-bridge` identity) | 1061 |
+| 23 | operator CLIs — `droplet-admin device-identity`, `scripts/verify.sh` mesh probes | curl | bearer/none | mTLS (host `host-admin` identity) | 1061 |
 
-### Wiring status (verified against main, 2026-07-09 — WARP-1062 doc-truth)
+**Container healthchecks** follow the same contract: the orchestrator's
+compose healthcheck runs the cert-presenting `dist/healthcheck.js`
+(WARP-236 client, wired by WARP-1061), and the voice-io / rag-eval image
+HEALTHCHECKs run the shared cert-presenting client
+(`services/_shared/healthcheck.py`). Every healthcheck is plain HTTP when the
+flag is off.
 
-The table above is the **design target**, not the shipped posture. What has
-actually landed from WARP-236:
+### Documented exemptions (stay plaintext with the flag on)
 
-- **Live everywhere:** the internal CA + per-service bundle issuance/rotation,
-  and the certs' non-mesh consumers — Postgres TLS (WARP-233), Redis TLS
-  (WARP-234), and MQTT mTLS :8883 (WARP-235, scheme-gated, always on).
-- **Wired but dormant (flag-gated, and nothing sets `DROPLET_INTERNAL_TLS=1`
-  today — neither `scripts/setup.sh` nor compose):** the orchestrator :3000
-  HTTPS+client-cert listener (`index.ts` / `lib/internal-tls.ts`) and the
-  HTTP client sides of hops 4–7, 9–12, 14–15 (undici/httpx helpers).
-- **Not wired at all (code gap, not just a flag):**
-  - nginx `proxy_ssl_*` client certs for hops 1–2 (`docker/nginx/nginx.conf`
-    has no `proxy_ssl` directives);
-  - every FastAPI/uvicorn **server** listener (ai-gateway :8000, routing,
-    switch, voice-io, ops-console, camera-discovery, email-indexer, rag-eval —
-    all launch plain `uvicorn` with no ssl args; `uvicorn_ssl_kwargs()` in
-    `services/_shared/internal_tls.py` has no callers);
-  - ai-gateway gRPC :50051 (`grpc_server.py` uses `add_insecure_port`) and the
-    file-indexer gRPC client (`embedder.py` uses `insecure_channel`) — hop 16;
-  - matter-controller :8083 server (plain `node:http`);
-  - rag-eval → orchestrator client (hop 8) and switch/camera-discovery →
-    routing clients (hop 13) — no `internal_tls` usage;
-  - the compose orchestrator healthcheck (inline plain-HTTP fetch, not
-    `dist/healthcheck.js`).
+| Surface | Why exempt |
+|---|---|
+| ops-console inbound :8087 | loopback-published for the operator's tunneled BROWSER, which cannot present internal client certs; bearer token + 127.0.0.1 bind + reverse tunnel are the gate. It IS an mTLS *client* for its mesh probes (row 15) — the probe rewrite is scoped to the mesh registry names so exempt targets are never probed over TLS. |
+| mcp-server inbound :9090 | JWT-gated surface for OFF-stack consumers (droplet-local-LLM, Claude Desktop) that hold no internal identity. It is an mTLS *client* toward the orchestrator/routing/switch (rows 5, 12). |
+| nginx → web-dashboard :3001 / nextcloud / docserver | user plane; holds no service secrets — the browser is the real client and the gateway terminates the public TLS. |
+| device-bridge inbound :9090 (host) | loopback-bound host listener (BRIDGE_BIND=127.0.0.1) with its own bearer; a host python stdlib server with no TLS listener support worth adding. Orchestrator → bridge calls stay plain http on the host-gateway leg. Loopback-only ⇒ acceptable per the WARP-1061 host-caller policy. |
+| orchestrator → frigate :5000, device-bridge :9090, nextcloud WebDAV, HQ issuance | third-party / host / WAN surfaces outside the compose mesh (frigate is loopback-published; HQ is public TLS). |
+| ai-gateway → ollama, ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
+| orchestrator → device-identity-svc | Unix socket, filesystem-scoped — no network hop to encrypt. |
+| db :5432 / cache :6380 / broker :8883 | already TLS under their own workstreams (WARP-233/234/235); not keyed on this flag (MQTT is scheme-gated). |
 
-Enabling the flag on a box today would therefore break hops 1–2 (nginx speaks
-plain to an HTTPS orchestrator) and 4/9–13/15–16 (TLS clients or plain clients
-against mismatched servers). Completing the server-side wiring + on-box
-enablement is a separate follow-up ticket; the harness check
-`transit.mesh.plain-http-refused` (WARP-966) tracks the observable posture and
-FAILs until that lands.
+### Host-caller decisions (WARP-1061 stage 3)
+
+Host-side (non-compose) callers get real client certs — none of them is
+LAN-crossing, but every one of them dials a listener that REQUIRES a client
+cert once the flag is on, so a "loopback plaintext exemption" was only
+possible for *listeners* (see the exemptions table), never for callers of
+the mesh. Three host identities are issued by `internal_ca_issue_all` into
+`data/secrets/service-tls/<name>/`:
+
+| Identity | Consumers | Delivery |
+|---|---|---|
+| `egress-audit` | droplet-egress-audit.service anomaly POSTs | `/usr/local/sbin/droplet-egress-audit` greps `DROPLET_INTERNAL_TLS` from the repo `.env` and exports the `DROPLET_TLS_*` contract pointing at the bundle |
+| `device-bridge` | device-bridge.py `/api/health` read; droplet-shutdown-screen.sh → oled :8082 | `install-device-bridge.sh` mirrors the knob (unconditionally — flips must propagate) + seeds the bundle paths into `/etc/droplet/device-bridge.env` |
+| `host-admin` | `droplet-admin device-identity {status,reseal}`, `scripts/verify.sh` direct mesh probes | read straight from the repo tree (`REPO_ROOT/data/secrets/service-tls/host-admin`); flag from env or the repo `.env` |
+
+### Wiring status (WARP-1061 — end-to-end, dormant by default)
+
+- **Live everywhere:** the internal CA + per-service bundle
+  issuance/rotation, Postgres TLS (WARP-233), Redis TLS (WARP-234), MQTT
+  mTLS :8883 (WARP-235, scheme-gated, always on).
+- **Wired and flag-gated (everything in the matrix):** flipping
+  `DROPLET_INTERNAL_TLS=1` + recreating the stack turns every row on
+  together. `scripts/setup.sh` writes the knob (default `0`) into fresh
+  `.env`s and backfills it on upgrades; nothing ships with it on.
+- The harness check `transit.mesh.plain-http-refused` (WARP-966) tracks the
+  observable posture on a live box and passes only where an operator has
+  enabled the flag. Live-box enablement validation (real hardware, full
+  profile set) is the remaining follow-up — the wiring itself is complete.
 
 ## Env contract
 
@@ -215,6 +235,37 @@ inside the 0700 `data/secrets` tree — the same readability constraint that
 shaped the old passwd-file handling.
 
 ## Runbook
+
+### Enabling internal mTLS on a box (WARP-1061)
+
+Default posture is OFF — a box that never touches the knob keeps today's
+plaintext mesh byte-for-byte. To enable:
+
+```
+./scripts/setup.sh --skip-build --skip-docker   # issue/refresh ALL bundles,
+                                                # incl. the host identities
+# set DROPLET_INTERNAL_TLS=1 in .env (keep the file chmod 600)
+docker compose -f docker/docker-compose.yml --env-file .env build
+docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate
+sudo ./scripts/install-device-bridge.sh          # mirror the knob + bridge certs
+sudo systemctl restart droplet-egress-audit.service droplet-device-bridge.service
+./scripts/verify.sh                              # probes present certs when on
+```
+
+The image rebuild matters once per upgrade to WARP-1061 images (the Python
+services' CMD moved to the TLS-aware launcher); after that a flag flip only
+needs the `up -d --force-recreate` so every container re-reads the knob.
+Roll back by setting the knob to `0` and recreating — no certs are removed.
+
+Spot-check a hop (certless peer must be refused):
+
+```
+docker compose exec gateway curl -s --cacert /etc/nginx/service-tls/ca.pem \
+  --cert /etc/nginx/service-tls/cert.pem --key /etc/nginx/service-tls/key.pem \
+  https://orchestrator:3000/api/orchestrator/health          # 200
+docker compose exec gateway curl -sk https://orchestrator:3000/api/orchestrator/health
+                                                             # TLS alert — no client cert
+```
 
 ### Routine rotation (quarterly or on demand)
 
