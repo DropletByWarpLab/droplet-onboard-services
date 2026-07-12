@@ -256,7 +256,7 @@ export function MotionMaskEditor({ cameraName, masks, onChange }: Props) {
             type="button"
             onClick={mode.kind === "drawing" ? finishDrawing : () => setMode({ kind: "drawing", points: [] })}
             disabled={mode.kind === "drawing" && mode.points.length < 6}
-            className="dp-btn-primary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
+            className="btn primary w-full justify-center disabled:opacity-50"
           >
             {mode.kind === "drawing" ? (
               <>
@@ -274,7 +274,7 @@ export function MotionMaskEditor({ cameraName, masks, onChange }: Props) {
             <button
               type="button"
               onClick={cancelDrawing}
-              className="dp-btn-secondary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg type-caption-1"
+              className="btn ghost w-full justify-center"
             >
               <X size={12} />
               Cancel (Esc)
@@ -282,7 +282,7 @@ export function MotionMaskEditor({ cameraName, masks, onChange }: Props) {
           )}
 
           {masks.length === 0 && mode.kind !== "drawing" && (
-            <p className="type-caption-1 text-label-tertiary">
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               No motion masks yet. Draw polygons over areas Frigate should
               <strong> ignore</strong> for motion — moving foliage, glare, the
               corner where your dog sleeps.
@@ -295,27 +295,28 @@ export function MotionMaskEditor({ cameraName, masks, onChange }: Props) {
               className={`rounded-lg border ${
                 mode.kind === "editing" && mode.index === i
                   ? "border-system-red"
-                  : "border-separator"
+                  : "border-[color:var(--card-bd)]"
               } p-2 flex items-center gap-2`}
             >
               <span className="w-3 h-3 rounded-sm bg-system-red flex-shrink-0" />
-              <span className="flex-1 type-subheadline text-label-primary">
+              <span className="flex-1 type-subheadline" style={{ color: "var(--text)" }}>
                 Mask {i + 1}
               </span>
-              <span className="type-caption-2 text-label-tertiary">
+              <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                 {m.coordinates.length / 2} pts
               </span>
               <button
                 type="button"
                 onClick={() => setMode({ kind: "editing", index: i })}
-                className="px-2 py-0.5 rounded type-caption-2 bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
+                className="px-2 py-0.5 rounded type-caption-2 transition-colors bg-[var(--inset)] hover:bg-[var(--hover)]"
+                style={{ color: "var(--text-muted)" }}
               >
                 Edit
               </button>
               <button
                 type="button"
                 onClick={() => deleteMask(i)}
-                className="p-1 rounded text-label-tertiary hover:text-system-red"
+                className="p-1 rounded transition-colors text-[var(--text-muted)] hover:text-system-red"
                 title="Delete mask"
               >
                 <Trash2 size={12} />
@@ -323,7 +324,7 @@ export function MotionMaskEditor({ cameraName, masks, onChange }: Props) {
             </div>
           ))}
 
-          <p className="type-caption-2 text-label-tertiary">
+          <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
             Drag a vertex to move it. Shift-click a vertex to delete it.
           </p>
         </div>

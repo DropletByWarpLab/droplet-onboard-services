@@ -38,8 +38,19 @@ import "@/components/chat/thinking.css";
  * Droplet mark + a shimmering label, shown on the assistant turn while the
  * model is generating but hasn't emitted its first token. role=status so a
  * screen reader announces it once (no per-token spam).
+ *
+ * WARP-903 — `label`/`srText` let the cold-load window swap the copy to
+ * "Loading <model> (<size> GB)…" without introducing a second loading
+ * component: same mark, same shimmer, same tokens, same reduced-motion
+ * behavior — only the words change.
  */
-function ThinkingIndicator() {
+function ThinkingIndicator({
+  label = "Droplet is thinking",
+  srText = "Droplet is generating a response…",
+}: {
+  label?: string;
+  srText?: string;
+}) {
   return (
     <div className="ds-thinking" role="status" aria-live="polite">
       <span className="ds-thinking-avatar" aria-hidden="true">
@@ -49,8 +60,8 @@ function ThinkingIndicator() {
           <polygon points="26,2 8,28 26,36" fill="#6366f1" opacity="0.6" />
         </svg>
       </span>
-      <span className="ds-thinking-label">Droplet is thinking</span>
-      <span className="sr-only">Droplet is generating a response…</span>
+      <span className="ds-thinking-label">{label}</span>
+      <span className="sr-only">{srText}</span>
     </div>
   );
 }
@@ -171,6 +182,20 @@ export const ChatMessage = memo(function ChatMessage({
   const isThinking =
     !isUser && isStreaming && !message.content && !hasToolCalls && !confirmCall && !hasFailure;
   if (isThinking) {
+    // WARP-903 — cold model load. The orchestrator told us (model_loading
+    // SSE) the first token is a 30-60 s weights load away; say so instead
+    // of the generic thinking copy, so the wait is never a silent hang.
+    // Cleared upstream (useChat.applyEvent) by the next stream event.
+    if (message.modelLoading) {
+      const { model, sizeGb } = message.modelLoading;
+      const size = sizeGb != null ? ` (${sizeGb} GB)` : "";
+      return (
+        <ThinkingIndicator
+          label={`Loading ${model}${size}…`}
+          srText={`The AI model ${model} is loading — the first reply can take a little longer than usual.`}
+        />
+      );
+    }
     return <ThinkingIndicator />;
   }
 

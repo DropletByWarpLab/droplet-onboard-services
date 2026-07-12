@@ -159,13 +159,16 @@ export interface InviteEmailInput {
 }
 
 /** A fully-formed message ready to hand to a nodemailer transport. */
-export interface InviteEmailMessage {
+export interface OutboundEmailMessage {
   to: string;
   from: string;
   subject: string;
   text: string;
   html: string;
 }
+
+/** Alias kept for the invite call sites that predate WARP-941. */
+export type InviteEmailMessage = OutboundEmailMessage;
 
 /** Escape the five HTML-significant characters so the URL is safe in markup. */
 function escapeHtml(s: string): string {
@@ -202,6 +205,51 @@ export function buildInviteEmail(input: InviteEmailInput): InviteEmailMessage {
     "<p>You've been invited to join a Droplet household.</p>",
     `<p><a href="${safeUrl}">Accept your invitation</a> and set up your account.</p>`,
     `<p>Or paste this link into your browser:<br><span>${safeUrl}</span></p>`,
+    "<p>If you weren't expecting this, you can ignore this email.</p>",
+  ].join("\n");
+
+  return { to: input.to, from, subject, text, html };
+}
+
+/** Input to {@link buildShareNotificationEmail}. */
+export interface ShareNotificationEmailInput {
+  to: string;
+  fromAddress: string;
+  fromName: string;
+  /** Display name of the household member who created the share. */
+  sharerDisplayName: string;
+  /** Base name of the shared file/folder (no path segments). */
+  fileName: string;
+}
+
+/**
+ * Build the person-share notification email (WARP-941). Deliberately mirrors
+ * {@link buildInviteEmail}'s posture: the subject is generic — no file name
+ * (content PII) transits relay subject logs — while the body names the sharer
+ * and the file so the email is actionable. No link is embedded: the appliance
+ * has no single canonical public origin to bake into an email, so the copy
+ * directs the recipient to their dashboard's Files → Shared surface instead
+ * of risking a dead or wrong-host URL.
+ */
+export function buildShareNotificationEmail(
+  input: ShareNotificationEmailInput,
+): OutboundEmailMessage {
+  const fromName = input.fromName?.trim() || "Droplet";
+  const from = `"${fromName}" <${input.fromAddress}>`;
+  const sharer = input.sharerDisplayName?.trim() || "Someone";
+  const subject = "A file was shared with you on Droplet";
+
+  const text = [
+    `${sharer} shared "${input.fileName}" with you on your household Droplet.`,
+    "",
+    "Sign in to your Droplet dashboard and open Files → Shared to view it.",
+    "",
+    "If you weren't expecting this, you can ignore this email.",
+  ].join("\n");
+
+  const html = [
+    `<p>${escapeHtml(sharer)} shared <strong>&quot;${escapeHtml(input.fileName)}&quot;</strong> with you on your household Droplet.</p>`,
+    "<p>Sign in to your Droplet dashboard and open <strong>Files &rarr; Shared</strong> to view it.</p>",
     "<p>If you weren't expecting this, you can ignore this email.</p>",
   ].join("\n");
 
@@ -350,4 +398,89 @@ async function markFailed(
   }
   logger.warn({ inviteId }, "Invite email send failed");
   return { status: "failed", error: errMessage };
+}
+
+/** Input to {@link sendShareNotificationEmail}. */
+export interface SendShareNotificationInput {
+  to: string;
+  sharerDisplayName: string;
+  fileName: string;
+}
+
+/**
+ * Outcome of a share-notification send attempt. Unlike invites there is no
+ * persisted delivery state (WARP-941 keeps the schema untouched), so the
+ * outcome is explicit in the return value instead of a row column:
+ * `skipped` = channel not configured/enabled (the expected state until the
+ * operator wires SMTP — not an error), `failed` = a real attempted-but-errored
+ * send.
+ */
+export type ShareNotificationResult =
+  | { status: "sent" }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; error: string };
+
+/**
+ * Send a person-share notification email over the operator's SMTP channel
+ * (WARP-941). Decoupled from `UserInvite` — no rows are written.
+ *
+ * Contract (same never-throw posture as {@link sendInviteEmail}):
+ *   - channel unconfigured/disabled → `skipped`, no dial. Delivery only
+ *     happens when the operator configured AND enabled SMTP
+ *     ({@link isChannelReady}) — identical gating to user invites.
+ *   - transport/decrypt/config-read failure → `failed`, logged, swallowed.
+ *   - NEVER throws: the caller's share already succeeded in Nextcloud and
+ *     must not be failed or delayed by mail problems.
+ *
+ * The SMTP password is decrypted in-memory immediately before the dial and
+ * is never persisted in plaintext, returned, or logged. The recipient email
+ * is deliberately kept out of log lines.
+ */
+export async function sendShareNotificationEmail(
+  prisma: PrismaClient,
+  input: SendShareNotificationInput,
+  options: SendOptions = {},
+): Promise<ShareNotificationResult> {
+  const factory = options.transportFactory ?? defaultTransportFactory;
+
+  try {
+    const cfg = await loadChannelConfig(prisma);
+    if (!isChannelReady(cfg)) {
+      logger.info(
+        "Share notification skipped — outbound email channel not configured or disabled",
+      );
+      return {
+        status: "skipped",
+        reason: "Outbound email channel is not configured or is disabled.",
+      };
+    }
+    // isChannelReady guarantees cfg is non-null here.
+    const config = cfg as EmailChannelConfig;
+
+    // Decrypt the password only if one is set (unauthenticated relays allowed).
+    let password = "";
+    if (config.passwordEnc.length > 0) {
+      password = decryptSecret(config.passwordEnc);
+    }
+
+    const transport = factory(buildTransportOptions(config, password));
+    const message = buildShareNotificationEmail({
+      to: input.to,
+      fromAddress: config.fromAddress,
+      fromName: config.fromName,
+      sharerDisplayName: input.sharerDisplayName,
+      fileName: input.fileName,
+    });
+
+    await transport.sendMail(message);
+    logger.info("Share notification email sent");
+    return { status: "sent" };
+  } catch (err) {
+    // Transport errors AND decrypt/config-read failures land here. The message
+    // is operator-facing; it never contains the password (the catch is
+    // upstream of any plaintext) nor the recipient address.
+    const errMessage = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: errMessage }, "Share notification email failed");
+    return { status: "failed", error: errMessage };
+  }
 }

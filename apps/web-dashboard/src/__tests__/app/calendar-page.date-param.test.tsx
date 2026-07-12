@@ -105,7 +105,7 @@ describe("Calendar page ?date= deep link (WARP-1131)", () => {
     const section = document.getElementById(agendaDayId("2026-03-14"));
     expect(section).not.toBeNull();
     const heading = section!.querySelector("h3");
-    expect(heading?.className).toContain("text-accent");
+    expect(heading).toHaveAttribute("aria-current", "true");
   });
 
   it("falls back to today for a malformed date param", () => {

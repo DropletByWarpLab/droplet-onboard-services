@@ -1,5 +1,5 @@
 /**
- * WARP-81: device-registry reconciler.
+ * WARP-81 / WARP-106: device-registry reconciler.
  *
  * Drives the `NetworkDevice` / `DevicePresenceDay` tables from DHCP +
  * wireless + firewall snapshots pulled by the orchestrator's routing
@@ -10,12 +10,19 @@
  *   2. Resolve `vendor` on first sight via the injected OUI lookup, then
  *      leave it alone (no repeated lookups, no overwrites — user-curated
  *      displayName/icon/groups live on the same row).
- *   3. Cross-reference the firewall: if the device's MAC has an active
- *      REJECT rule, flip `isBlocked = true`. IMPORTANT: if the firewall
- *      fetch failed (caller passes a `RouterError` instead of an array),
- *      we MUST preserve the last-persisted `isBlocked` — silently
- *      clearing it would unblock devices the user intentionally blocked
- *      just because the router hiccupped.
+ *   3. Firewall DRIFT DETECTION (WARP-106) — NOT block authoring. The
+ *      schedule ticker is the single source of truth for block state: it
+ *      alone writes `NetworkDevice.lastAppliedBlocked`. The reconciler
+ *      never writes any block field. When the firewall fetch succeeds it
+ *      cross-references the live REJECT rules against each device's
+ *      ticker-desired `lastAppliedBlocked` and, on a mismatch, emits a
+ *      `log.warn` so ops can see the firewall lagging the ticker — the
+ *      ticker re-dispatches on its next tick, so we deliberately do NOT
+ *      re-sync here. This guarantees the reconciler can never clobber
+ *      ticker intent (there is no reconciler-vs-ticker race). A firewall
+ *      fetch failure (caller passes a `RouterError` instead of an array)
+ *      is a no-op for drift detection: with no live state to compare we
+ *      log nothing and touch nothing.
  *   4. Roll up presence into `DevicePresenceDay` — one row per
  *      (mac, calendar-day) incremented by `pollIntervalMs / 60_000`.
  *   5. 30-day retention on presence rows (`purgePresenceRows`) — wire to
@@ -36,6 +43,16 @@ import { normalizeMac } from "../lib/mac.js";
 import { createLogger } from "../lib/logger.js";
 
 const log = createLogger("device-registry");
+
+/**
+ * Minimal logger surface the reconciler needs — satisfied by the module
+ * `pino` logger in production and by a `vi.fn()` spy in tests, so drift
+ * warnings are assertable without a real sink. See WARP-106.
+ */
+export interface ReconcileLogger {
+  warn(obj: object, msg?: string): void;
+  debug(obj: object, msg?: string): void;
+}
 
 export interface DhcpLease {
   mac: string;
@@ -61,10 +78,12 @@ export interface ReconcileInput {
   leases: DhcpLease[];
   wirelessClients: WirelessClient[];
   /**
-   * Array of active reject rules when the firewall fetch succeeded.
-   * A `RouterError` instance when it failed — in that case the
-   * reconciler preserves each row's existing `isBlocked` value rather
-   * than clearing it (spec §6.2).
+   * Array of active reject rules when the firewall fetch succeeded — used
+   * for drift detection against each device's ticker-desired
+   * `lastAppliedBlocked` (WARP-106). A `RouterError` instance when it
+   * failed — in that case there is no live state to compare, so drift
+   * detection is skipped entirely (the reconciler never writes block
+   * state either way).
    */
   firewallRules: FirewallRejectRule[] | RouterError;
   pollIntervalMs: number;
@@ -89,7 +108,11 @@ function safeNormalize(mac: string): string | null {
   }
 }
 
-export function createDeviceRegistry(prisma: PrismaClient, ouiLookup: OuiLookup) {
+export function createDeviceRegistry(
+  prisma: PrismaClient,
+  ouiLookup: OuiLookup,
+  logger: ReconcileLogger = log,
+) {
   return {
     /**
      * Ingest a DHCP/wireless/firewall snapshot. Safe to call repeatedly —
@@ -130,10 +153,25 @@ export function createDeviceRegistry(prisma: PrismaClient, ouiLookup: OuiLookup)
         // Resolve vendor once, on first sight. Never overwrite.
         const vendor = existing?.vendor ?? ouiLookup.lookup(mac);
 
-        // Firewall state: cascade from the rules on success, preserve on failure.
-        const isBlocked = firewallOk
-          ? blockedMacs!.has(mac)
-          : existing?.isBlocked ?? false;
+        // WARP-106: firewall drift DETECTION only — never authoring. The
+        // schedule ticker owns `lastAppliedBlocked`; if the live firewall
+        // disagrees with the ticker's desired state we log it and move on
+        // (the ticker re-dispatches next tick). We only compare once the
+        // ticker has authored a state (lastAppliedBlocked != null) and only
+        // when we actually have live firewall data to compare against.
+        if (firewallOk && existing?.lastAppliedBlocked != null) {
+          const firewallBlocked = blockedMacs!.has(mac);
+          if (firewallBlocked !== existing.lastAppliedBlocked) {
+            logger.warn(
+              {
+                mac,
+                firewallBlocked,
+                lastAppliedBlocked: existing.lastAppliedBlocked,
+              },
+              "firewall block-state drift vs ticker desired state",
+            );
+          }
+        }
 
         await prisma.networkDevice.upsert({
           where: { mac },
@@ -142,15 +180,14 @@ export function createDeviceRegistry(prisma: PrismaClient, ouiLookup: OuiLookup)
             vendor: vendor ?? undefined,
             hostname: hostname ?? undefined,
             lastIp: ip ?? undefined,
-            isBlocked,
             firstSeen: now,
             lastSeen: now,
           },
           update: {
-            // Only update mutable fields — leave firstSeen alone.
+            // Only update mutable fields — leave firstSeen and all block
+            // state alone (block state is ticker-authored; WARP-106).
             hostname: hostname ?? undefined,
             lastIp: ip ?? undefined,
-            isBlocked,
             lastSeen: now,
           },
         });
@@ -164,7 +201,7 @@ export function createDeviceRegistry(prisma: PrismaClient, ouiLookup: OuiLookup)
         }
       }
 
-      log.debug(
+      logger.debug(
         { observed: observed.size, firewallOk },
         "reconcile complete",
       );

@@ -32,21 +32,21 @@ export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
   const label = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
   return (
-    <div className="dp-card p-3.5">
+    <div className="card" style={{ padding: "14px" }}>
       <div className="flex items-center justify-between mb-2">
-        <span className="type-subheadline font-semibold text-label-primary">{label}</span>
+        <span className="type-subheadline font-semibold" style={{ color: "var(--text)" }}>{label}</span>
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
             aria-label="Previous month"
-            className="inline-flex items-center justify-center h-6 w-6 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+            className="inline-flex items-center justify-center h-6 w-6 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
           >
             <ChevronLeft size={13} />
           </button>
           <button
             onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
             aria-label="Next month"
-            className="inline-flex items-center justify-center h-6 w-6 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+            className="inline-flex items-center justify-center h-6 w-6 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
           >
             <ChevronRight size={13} />
           </button>
@@ -58,7 +58,8 @@ export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
           <div
             key={i}
             aria-hidden="true"
-            className="text-center type-caption-2 text-label-tertiary font-semibold py-0.5"
+            className="text-center type-caption-2 font-semibold py-0.5"
+            style={{ color: "var(--text-muted)" }}
           >
             {d}
           </div>
@@ -77,17 +78,23 @@ export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
               aria-current={isToday ? "date" : undefined}
               className={[
                 "relative text-center type-caption-1 tabular-nums py-1 rounded transition-colors",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]",
                 isToday
-                  ? "bg-accent text-white font-semibold"
-                  : inMonth
-                    ? "text-label-secondary hover:bg-surface-secondary"
-                    : "text-label-quaternary hover:bg-surface-secondary",
+                  ? "font-semibold"
+                  : "hover:bg-[var(--hover)]",
               ].join(" ")}
+              style={
+                isToday
+                  ? { background: "var(--brand)", color: "#fff" }
+                  : { color: inMonth ? "var(--text-muted)" : "var(--text-faint)" }
+              }
             >
               {d.getDate()}
               {hasEvents && !isToday && (
-                <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 h-1 w-1 rounded-full bg-accent" />
+                <span
+                  className="absolute bottom-0.5 left-1/2 -translate-x-1/2 h-1 w-1 rounded-full"
+                  style={{ background: "var(--brand)" }}
+                />
               )}
             </button>
           );

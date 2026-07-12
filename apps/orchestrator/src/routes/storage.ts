@@ -892,9 +892,16 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   function validMdDevice(d: unknown): d is string {
     return typeof d === "string" && /^md\d{1,3}$/.test(d);
   }
-  /** Member block-device path allow-list (no shell metacharacters). */
+  /** Member block-device path allow-list. WARP-857 defense-in-depth: a pool
+   *  member must be a WHOLE-disk kernel node (never a partition, never md<N>),
+   *  mirroring validAdoptDevice's shape prefixed with /dev/. The host script
+   *  wipes whole disks and its managed teardown releases every child partition
+   *  via the kernel topology, so a partition member (e.g. /dev/sda1) would
+   *  under-deliver the whole-disk erase the confirm phrase promises — reject it
+   *  at the edge rather than half-erase. Also blocks shell metacharacters. */
   function validMember(m: unknown): m is string {
-    return typeof m === "string" && /^\/dev\/[A-Za-z0-9/_-]{1,64}$/.test(m);
+    return typeof m === "string" &&
+      /^\/dev\/(sd[a-z]{1,2}|nvme\d+n\d+|mmcblk\d+|vd[a-z]{1,2})$/.test(m);
   }
   const VALID_LEVELS = new Set(["raid0", "raid1", "raid5", "raid6", "raid10", "jbod"]);
   // WARP-662 drive_adopt: a WHOLE-disk kernel name (never a partition, never
@@ -947,7 +954,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         return res.status(400).json({ error: "Invalid RAID level" });
       }
       if (!Array.isArray(members) || members.length < 1 || !members.every(validMember)) {
-        return res.status(400).json({ error: "Invalid members — expected /dev/* paths" });
+        return res.status(400).json({ error: "Invalid members — expected whole-disk /dev/* paths" });
+      }
+      // WARP-857 defense-in-depth: every member must be a DISTINCT physical
+      // disk. Members are validated as whole-disk nodes above, so a disk is its
+      // own parent — uniqueness of the device names is uniqueness of parent
+      // disks. Reject a repeated disk before it reaches the destructive host
+      // script (which would otherwise wipe + add the same spindle twice).
+      if (new Set(members).size !== members.length) {
+        return res.status(400).json({ error: "Invalid members — each must be a distinct whole disk" });
       }
       return evalAndRespond(
         res,

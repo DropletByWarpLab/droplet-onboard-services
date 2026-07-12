@@ -71,6 +71,28 @@ def _fetch_item_status(item_id: str) -> str | None:
     return row[0] if row else None
 
 
+def _fetch_item_policy(item_id: str) -> str | None:
+    """Look up BrainMemoryItem.ingestPolicy. Returns None if the row is missing.
+
+    WARP-905: an item uploaded with ingestPolicy='await_approval' is HELD —
+    the inline document path must NOT embed it until a human releases it via
+    POST /api/files/brain/:id/approve (which flips the policy to 'auto_embed'
+    and re-publishes the uploaded event). None (missing row / DB hiccup) is
+    treated as not-held so a transient read failure never silently swallows a
+    file.
+    """
+    import db
+
+    # IDX-01: same shared-connection lock discipline as _fetch_item_status.
+    with db._db_lock, db.get_conn().cursor() as cur:
+        cur.execute(
+            'SELECT "ingestPolicy" FROM "BrainMemoryItem" WHERE "id" = %s',
+            (item_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _indexed_topic(user_id: str) -> str:
     """Per-user topic for the dashboard's WebSocket bridge.
 
@@ -219,6 +241,23 @@ def handle_brain_uploaded(payload: dict) -> None:
         logger.info(
             "brain_ingest: itemId=%s is queued_for_transcription, "
             "skipping inline dispatch",
+            item_id,
+        )
+        return
+
+    # WARP-905: respect the per-item ingest policy. An upload created with
+    # ingestPolicy='await_approval' is HELD — no extraction, no embedding, no
+    # status flip — until a human approves it (the approve route flips the
+    # policy to 'auto_embed' and re-publishes this event). A DB read failure
+    # falls through as not-held so a transient hiccup never drops the file.
+    try:
+        policy = _fetch_item_policy(item_id)
+    except Exception:
+        logger.exception("brain_ingest: policy lookup failed for %s", item_id)
+        policy = None
+    if policy == "await_approval":
+        logger.info(
+            "brain_ingest: itemId=%s is await_approval, holding for approval",
             item_id,
         )
         return

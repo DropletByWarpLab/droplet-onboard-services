@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -63,6 +63,14 @@ export default function PairDevicePage() {
   const [status, setStatus] = useState<PairingCodeStatus | null>(null);
 
   const platformInfo = PLATFORM_OPTIONS.find((p) => p.id === platform)!;
+
+  // WARP-650: label/input associations for the pairing form fields.
+  const deviceNameId = useId();
+  // The platform picker is a button group, not a single labelable control
+  // (<label htmlFor> only targets input/select/textarea/button etc.), so it
+  // is associated via aria-labelledby on the role="group" wrapper instead —
+  // the standard WCAG 1.3.1 technique for grouped controls.
+  const platformGroupId = useId();
 
   const handleCreate = async () => {
     if (!deviceName.trim()) {
@@ -141,10 +149,11 @@ export default function PairDevicePage() {
       {!code ? (
         <div className="dp-card p-5 space-y-4">
           <div>
-            <label className="type-caption-2 text-label-tertiary uppercase tracking-wide block mb-1.5">
+            <label htmlFor={deviceNameId} className="type-caption-2 text-label-tertiary uppercase tracking-wide block mb-1.5">
               Device name
             </label>
             <input
+              id={deviceNameId}
               type="text"
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
@@ -159,10 +168,10 @@ export default function PairDevicePage() {
           </div>
 
           <div>
-            <label className="type-caption-2 text-label-tertiary uppercase tracking-wide block mb-1.5">
+            <label id={platformGroupId} className="type-caption-2 text-label-tertiary uppercase tracking-wide block mb-1.5">
               Platform
             </label>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby={platformGroupId}>
               {PLATFORM_OPTIONS.map((p) => (
                 <button
                   key={p.id}

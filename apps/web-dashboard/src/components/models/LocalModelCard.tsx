@@ -61,23 +61,21 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
   const hasMeter = model.diskBarPct != null;
 
   return (
-    <div className="dp-card p-4 flex flex-col gap-3.5">
+    <div className="card flex flex-col gap-3.5" style={{ padding: "16px" }}>
       {/* Header: glyph · name + family · status chip */}
       <div className="flex items-start gap-2.5">
         <span
-          className="
-            w-8 h-8 rounded-md bg-accent-subtle text-accent
-            flex items-center justify-center flex-shrink-0
-          "
+          className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
+          style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
           aria-hidden
         >
           <Cpu size={18} strokeWidth={2} />
         </span>
         <div className="flex-1 min-w-0">
-          <h3 className="type-subheadline text-label-primary font-medium truncate">
+          <h3 className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
             {model.name}
           </h3>
-          <p className="type-caption-1 text-label-tertiary truncate">
+          <p className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
             {model.family}
             {model.role ? ` · ${model.role}` : ""}
           </p>
@@ -85,8 +83,9 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
         <span
           className={`
             inline-flex items-center gap-1.5 h-6 px-2 rounded-full
-            type-caption-2 font-medium text-label-primary ${status.tint}
+            type-caption-2 font-medium ${status.tint}
           `}
+          style={{ color: "var(--text)" }}
         >
           <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} aria-hidden />
           {status.label}
@@ -97,7 +96,7 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
           Otherwise we say so plainly rather than draw an empty/zero bar. */}
       {hasMeter ? (
         <div
-          className="h-1.5 rounded-full bg-surface-secondary overflow-hidden"
+          className="h-1.5 rounded-full overflow-hidden bg-[var(--inset)]"
           role="progressbar"
           aria-label="On-disk usage"
           aria-valuenow={model.diskBarPct ?? undefined}
@@ -105,19 +104,19 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
           aria-valuemax={100}
         >
           <div
-            className="h-full rounded-full bg-accent"
+            className="h-full rounded-full bg-[var(--brand)]"
             style={{ width: `${Math.min(100, Math.max(0, model.diskBarPct!))}%` }}
           />
         </div>
       ) : (
-        <p className="type-caption-2 text-label-quaternary">
+        <p className="type-caption-2" style={{ color: "var(--text-faint)" }}>
           On-disk usage not available yet
         </p>
       )}
 
       {/* Foot stats — on-disk GB and a tokens/sec sample, both honest about
           missing data, plus the always-true "local-only" reassurance. */}
-      <div className="flex items-center gap-4 type-caption-1 text-label-tertiary">
+      <div className="flex items-center gap-4 type-caption-1" style={{ color: "var(--text-muted)" }}>
         <span className="inline-flex items-center gap-1">
           <HardDrive size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">{gb}</span>
@@ -130,7 +129,7 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
           <BookOpen size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">ctx {formatContext(model.contextLength)}</span>
         </span>
-        <span className="inline-flex items-center gap-1 ml-auto text-label-secondary">
+        <span className="inline-flex items-center gap-1 ml-auto" style={{ color: "var(--text-muted)" }}>
           <ShieldCheck size={12} strokeWidth={2} aria-hidden />
           local-only
         </span>

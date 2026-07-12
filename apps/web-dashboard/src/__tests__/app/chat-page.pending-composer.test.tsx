@@ -216,6 +216,9 @@ describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
         "summarize my notes",
         "m1",
         undefined,
+        // WARP-904 — the page now forwards the selected model's provider
+        // (looked up from the mocked useModels() list above) on every send.
+        "ollama",
       ),
     );
   });

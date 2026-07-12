@@ -330,7 +330,7 @@ export default function CameraSettingsPage() {
                   key={label}
                   type="button"
                   onClick={() => removeLabel(label)}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-full type-caption-1 capitalize bg-accent text-white hover:bg-accent-hover"
+                  className="chip on capitalize"
                   title="Click to stop tracking"
                 >
                   {label}
@@ -374,7 +374,13 @@ export default function CameraSettingsPage() {
                 }}
                 placeholder="Custom label…"
                 maxLength={32}
-                className="h-7 px-2 rounded-full border border-separator bg-surface-secondary type-caption-2 text-label-primary focus:border-accent focus:outline-none"
+                className="h-7 px-2 type-caption-2 outline-none focus:border-[var(--brand)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-pill)",
+                  color: "var(--text)",
+                }}
               />
             </div>
 
@@ -531,15 +537,16 @@ function ToggleRow({
 }) {
   return (
     <label className="flex items-center justify-between gap-3 cursor-pointer">
-      <span className="type-subheadline text-label-primary">{label}</span>
+      <span className="type-subheadline" style={{ color: "var(--text)" }}>
+        {label}
+      </span>
       <button
         type="button"
         role="switch"
         aria-checked={value}
         onClick={() => onChange(!value)}
-        className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors ${
-          value ? "bg-accent" : "bg-surface-tertiary"
-        }`}
+        className="relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors"
+        style={{ background: value ? "var(--brand)" : "var(--inset)" }}
       >
         <span
           className={`inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${

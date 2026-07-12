@@ -25,6 +25,7 @@ import multer, { MulterError } from "multer";
 import { createHash } from "node:crypto";
 import {
   BrainMemoryItemStatus,
+  BrainIngestPolicy,
   type BrainMemoryItem,
   type PrismaClient,
 } from "@prisma/client";
@@ -330,6 +331,18 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
           ? BrainMemoryItemStatus.queued_for_transcription
           : BrainMemoryItemStatus.indexing;
 
+        // WARP-905: optional ingest policy. Default 'auto_embed' preserves the
+        // historical behaviour (embed immediately). 'await_approval' HOLDS the
+        // upload — the file-indexer's brain_ingest gate + the daily ASR pass's
+        // select_queued_items filter both skip await_approval rows, so nothing
+        // is embedded until POST /files/brain/:id/approve releases it. Any
+        // value other than the explicit 'await_approval' opt-in is auto_embed.
+        const ingestPolicy: BrainIngestPolicy =
+          (req.body as Record<string, unknown>)?.ingestPolicy ===
+          BrainIngestPolicy.await_approval
+            ? BrainIngestPolicy.await_approval
+            : BrainIngestPolicy.auto_embed;
+
         // WARP-864: content-hash dedup. Re-uploading identical bytes
         // reuses the existing item (per user) instead of creating a
         // duplicate row + storage dir + full re-ingest.
@@ -367,6 +380,7 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
               source: "chat_attachment" as unknown as never,
               originatingChatId: chatId,
               status: initialStatus,
+              ingestPolicy,
               sha256,
             },
           });
@@ -405,29 +419,40 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         });
         await writeManifest(userId, item.id, serialize(updated));
 
-        try {
-          mqttPublish("droplet/files/brain/uploaded", {
-            itemId: item.id,
-            userId,
-            path,
-            mimeType: file.mimetype,
-            filename: file.originalname,
-            originatingChatId: chatId,
-          });
-        } catch (e) {
-          // MQTT publish is best-effort — the manifest on disk is the
-          // durable signal the indexer falls back on.
-          logger.warn(
-            { err: e, itemId: item.id },
-            "MQTT publish for brain upload failed (non-fatal)",
-          );
+        // WARP-905: only kick off ingestion when the policy is auto_embed.
+        // A held (await_approval) upload is NOT published — it stays dormant
+        // until POST /files/brain/:id/approve flips the policy and publishes.
+        // Not-publishing is the fail-CLOSED guarantee: even if the indexer's
+        // policy read later hiccups, a held file was never handed to it, so it
+        // can't be embedded before a human approves. (The indexer's own policy
+        // gate is defense-in-depth for any other publish path.)
+        if (ingestPolicy === BrainIngestPolicy.auto_embed) {
+          try {
+            mqttPublish("droplet/files/brain/uploaded", {
+              itemId: item.id,
+              userId,
+              path,
+              mimeType: file.mimetype,
+              filename: file.originalname,
+              originatingChatId: chatId,
+            });
+          } catch (e) {
+            // MQTT publish is best-effort — the manifest on disk is the
+            // durable signal the indexer falls back on.
+            logger.warn(
+              { err: e, itemId: item.id },
+              "MQTT publish for brain upload failed (non-fatal)",
+            );
+          }
         }
 
         // WARP-218: report the actual initial status so a direct
         // upload-response consumer (CLI, scripts, third-party clients)
         // sees `queued_for_transcription` for audio/video. The dashboard
         // uses GET to render the chip and is unaffected either way.
-        res.status(202).json({ itemId: item.id, status: initialStatus });
+        // WARP-905: echo the ingest policy so the caller can immediately
+        // render the "awaiting approval" affordance without a follow-up GET.
+        res.status(202).json({ itemId: item.id, status: initialStatus, ingestPolicy });
       } catch (e) {
         next(e);
       }
@@ -587,6 +612,25 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // WARP-905 — a held (ingestPolicy='await_approval') audio/video item
+      // must NOT be pushed through transcription + embedding here. An
+      // uploaded audio/video row lands at status='queued_for_transcription'
+      // regardless of its ingest policy (initialStatus is derived purely from
+      // MIME), so without this gate a held item would sail past the state +
+      // rate-cap checks below and get published to the transcription worker —
+      // bypassing the human approval gate entirely (a direct API caller or a
+      // stale-UI race). The approval gate is owned by POST /approve, which
+      // flips the policy to auto_embed and then drives the transcription
+      // worker itself. Mirror the /approve route's ingestPolicy guard and
+      // fail CLOSED: reject the promotion until the item is approved.
+      if (row.ingestPolicy === BrainIngestPolicy.await_approval) {
+        res.status(409).json({
+          error: "awaiting_approval",
+          ingestPolicy: row.ingestPolicy,
+        });
+        return;
+      }
+
       // Only queued or failed items are eligible. 'indexing' means the
       // worker is mid-flight; 'ready' is terminal. 409 either way.
       if (
@@ -635,6 +679,82 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
       res.status(202).json({
         itemId,
         status: BrainMemoryItemStatus.queued_for_transcription,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── POST /api/files/brain/:itemId/approve ──
+  // WARP-905 — release an item held under ingestPolicy='await_approval'.
+  // Flips the policy to 'auto_embed' and re-drives ingestion: audio/video go
+  // through the transcription worker (publishRunOne); documents re-publish
+  // `droplet/files/brain/uploaded` so brain_ingest (now unblocked by the
+  // policy flip) extracts + embeds them. Idempotent-safe: a second call after
+  // the flip returns 409 not_pending_approval. Cross-user → 404 (no existence
+  // leak — same pattern as the other :itemId routes).
+  router.post("/files/brain/:itemId/approve", async (req, res, next) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const itemId = req.params.itemId;
+      const row = await prisma.brainMemoryItem.findUnique({
+        where: { id: itemId },
+      });
+      if (!row || row.userId !== userId) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      if (row.ingestPolicy !== BrainIngestPolicy.await_approval) {
+        res.status(409).json({
+          error: "not_pending_approval",
+          ingestPolicy: row.ingestPolicy,
+        });
+        return;
+      }
+
+      const updated = await prisma.brainMemoryItem.update({
+        where: { id: itemId },
+        data: { ingestPolicy: BrainIngestPolicy.auto_embed },
+      });
+      await writeManifest(userId, itemId, serialize(updated));
+
+      const isAudioOrVideo =
+        updated.mimeType?.startsWith("audio/") === true ||
+        updated.mimeType?.startsWith("video/") === true;
+
+      try {
+        if (isAudioOrVideo) {
+          // Held audio/video sits at status='queued_for_transcription'; the
+          // daily pass skipped it while held. run_one drives it now.
+          publishRunOne({ publish: mqttPublish }, { itemId, userId });
+        } else {
+          mqttPublish("droplet/files/brain/uploaded", {
+            itemId,
+            userId,
+            path: updated.storagePath,
+            mimeType: updated.mimeType,
+            filename: updated.filename,
+            originatingChatId: updated.originatingChatId,
+          });
+        }
+      } catch (e) {
+        // MQTT publish is best-effort — the flipped policy is the durable
+        // signal (the daily pass now selects the row, or a re-upload re-drives
+        // the document path).
+        logger.warn(
+          { err: e, itemId },
+          "MQTT publish for brain approve failed (non-fatal)",
+        );
+      }
+
+      res.status(202).json({
+        itemId,
+        status: updated.status,
+        ingestPolicy: updated.ingestPolicy,
       });
     } catch (e) {
       next(e);

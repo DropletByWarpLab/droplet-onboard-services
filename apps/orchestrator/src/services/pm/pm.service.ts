@@ -198,7 +198,7 @@ function mapProject(row: ProjectRow): ApiProject {
     icon: row.icon,
     color: row.color,
     leadId: row.leadId,
-    archived: row.archivedAt !== null,
+    archived: row.isArchived,
     openCount: 0,
     doneCount: 0,
     groups: EMPTY_GROUPS(),
@@ -351,7 +351,7 @@ export async function listProjects(
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
-  if (!opts.includeArchived) where.archivedAt = null;
+  if (!opts.includeArchived) where.isArchived = false;
   const take =
     opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
@@ -366,7 +366,7 @@ export async function listProjects(
   // grouped by project + state group. Cheap at household scale.
   if (projects.length > 0) {
     const items = await prisma.pmWorkItem.findMany({
-      where: { projectId: { in: projects.map((p) => p.id) }, archivedAt: null },
+      where: { projectId: { in: projects.map((p) => p.id) }, isArchived: false },
       select: { projectId: true, state: { select: { group: true } } },
     });
     const byProject = new Map<string, Record<PmStateGroup, number>>();
@@ -396,15 +396,20 @@ export async function getSummary(
   workspaceSlug: string = HOME_WORKSPACE_SLUG,
 ): Promise<ApiPmSummary> {
   const projects = await prisma.pmProject.findMany({
-    where: { workspace: { slug: workspaceSlug }, archivedAt: null },
+    where: { workspace: { slug: workspaceSlug }, isArchived: false },
     select: { id: true },
   });
   if (projects.length === 0) {
     return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 };
   }
   const items = await prisma.pmWorkItem.findMany({
-    where: { projectId: { in: projects.map((p) => p.id) }, archivedAt: null },
-    select: { dueDate: true, completedAt: true, state: { select: { group: true } } },
+    where: { projectId: { in: projects.map((p) => p.id) }, isArchived: false },
+    select: {
+      dueDate: true,
+      completedAt: true,
+      isCompleted: true,
+      state: { select: { group: true } },
+    },
   });
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -421,7 +426,10 @@ export async function getSummary(
       itemsOpen += 1;
       if (it.dueDate && it.dueDate < now) overdue += 1;
     }
-    if ((g === "completed" || g === "cancelled") && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
+    // WARP-884: `isCompleted` is the canonical completion signal — no longer
+    // re-derived from `state.group` combined with a `completedAt` truthy
+    // check (the exact dual-signal split-brain this ticket closes).
+    if (it.isCompleted && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
   }
   return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
 }
@@ -522,7 +530,12 @@ export async function updateProject(
   if (fields.icon !== undefined) data.icon = fields.icon;
   if (fields.color !== undefined) data.color = fields.color;
   if (fields.leadId !== undefined) data.leadId = fields.leadId;
-  if (fields.archived !== undefined) data.archivedAt = fields.archived ? new Date() : null;
+  if (fields.archived !== undefined) {
+    // isArchived is the canonical signal (WARP-884); archivedAt stays the
+    // audit timestamp, written/cleared alongside it so the two never diverge.
+    data.isArchived = fields.archived;
+    data.archivedAt = fields.archived ? new Date() : null;
+  }
   const updated = await prisma.pmProject.update({
     where: { id: projectId },
     data,
@@ -574,6 +587,12 @@ export async function createState(
   return mapState(row);
 }
 
+/** True for the two terminal PmStateGroup values — the shared predicate
+ *  updateState/deleteState use to detect a terminal↔non-terminal flip. */
+function isTerminalGroup(group: ApiState["group"]): boolean {
+  return group === "completed" || group === "cancelled";
+}
+
 export async function updateState(
   prisma: PrismaClient,
   stateId: string,
@@ -581,7 +600,29 @@ export async function updateState(
 ): Promise<ApiState> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
   if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
-  const row = await prisma.pmState.update({ where: { id: stateId }, data: fields });
+
+  const groupChanged = fields.group !== undefined && fields.group !== existing.group;
+  const wasTerminal = isTerminalGroup(existing.group);
+  const willBeTerminal = isTerminalGroup(fields.group ?? existing.group);
+
+  const row = await prisma.$transaction(async (tx) => {
+    const updated = await tx.pmState.update({ where: { id: stateId }, data: fields });
+    // WARP-884: a state's group is the canonical "is this column terminal"
+    // signal. When it flips terminal <-> non-terminal, every work item
+    // currently sitting in this state must have its completion signal
+    // re-synced — otherwise an item shows group="started" (via its live
+    // state) yet isCompleted/completedAt still says "done" (or vice versa):
+    // the exact split-brain this ticket closes. Scoped to the items whose
+    // isCompleted disagrees with the new terminal-ness so a no-op cascade
+    // (e.g. completed -> cancelled, both terminal) touches no rows.
+    if (groupChanged && wasTerminal !== willBeTerminal) {
+      await tx.pmWorkItem.updateMany({
+        where: { stateId, isCompleted: !willBeTerminal },
+        data: { isCompleted: willBeTerminal, completedAt: willBeTerminal ? new Date() : null },
+      });
+    }
+    return updated;
+  });
   return mapState(row);
 }
 
@@ -601,7 +642,32 @@ export async function deleteState(prisma: PrismaClient, stateId: string): Promis
     if (otherDefaults === 0) throw new Error(PM_ERRORS.STATE_IS_DEFAULT);
   }
   try {
-    await prisma.pmState.delete({ where: { id: stateId } });
+    await prisma.$transaction(async (tx) => {
+      // WARP-885: `stateId ON DELETE SET NULL` would otherwise strand every
+      // item parked in this state in a NULL-state limbo with no kanban column
+      // to land in. Reassign them to the project's default landing state
+      // first (the same fallback createWorkItem uses) so deleting a state
+      // never orphans work — and re-sync the completion signal (WARP-884) in
+      // case the deleted state's terminal-ness differs from the default's, so
+      // the reassignment itself can't introduce a split-brain.
+      const fallback = await tx.pmState.findFirst({
+        where: { projectId: existing.projectId, isDefault: true, id: { not: stateId } },
+      });
+      if (fallback) {
+        const wasTerminal = isTerminalGroup(existing.group);
+        const willBeTerminal = isTerminalGroup(fallback.group);
+        await tx.pmWorkItem.updateMany({
+          where: { stateId },
+          data: {
+            stateId: fallback.id,
+            ...(wasTerminal !== willBeTerminal
+              ? { isCompleted: willBeTerminal, completedAt: willBeTerminal ? new Date() : null }
+              : {}),
+          },
+        });
+      }
+      await tx.pmState.delete({ where: { id: stateId } });
+    });
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
     throw err;
@@ -669,7 +735,7 @@ export async function listWorkItems(
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
-  const where: Prisma.PmWorkItemWhereInput = { projectId, archivedAt: null };
+  const where: Prisma.PmWorkItemWhereInput = { projectId, isArchived: false };
   if (filters.stateId) where.stateId = filters.stateId;
   if (filters.priority) where.priority = filters.priority;
   if (filters.parentId !== undefined) where.parentId = filters.parentId;
@@ -713,7 +779,7 @@ export async function searchWorkItems(
   if (q.length === 0) return [];
   const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
   const where: Prisma.PmWorkItemWhereInput = {
-    archivedAt: null,
+    isArchived: false,
     OR: [
       { name: { contains: q, mode: "insensitive" } },
       { descriptionHtml: { contains: q, mode: "insensitive" } },
@@ -786,14 +852,15 @@ export async function createWorkItem(
     [...project.states].sort((a, b) => a.sortOrder - b.sortOrder)[0]?.id ??
     null;
 
-  // Stamp completedAt when the resolved state is terminal (completed/cancelled).
+  // Stamp completedAt/isCompleted when the resolved state is terminal
+  // (completed/cancelled). isCompleted is the canonical signal (WARP-884);
+  // completedAt is written alongside it as the audit timestamp.
   const resolvedStateGroup = stateId
     ? (project.states.find((s) => s.id === stateId)?.group ?? null)
     : null;
-  const initialCompletedAt =
-    resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled"
-      ? new Date()
-      : null;
+  const initialIsCompleted =
+    resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled";
+  const initialCompletedAt = initialIsCompleted ? new Date() : null;
 
   let created;
   try {
@@ -821,6 +888,7 @@ export async function createWorkItem(
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
           sortOrder: sequenceId,
+          isCompleted: initialIsCompleted,
           completedAt: initialCompletedAt,
           assignees: input.assignees?.length
             ? { create: input.assignees.map((userId) => ({ userId })) }
@@ -871,11 +939,15 @@ export async function updateWorkItem(
   const project = await prisma.pmProject.findUnique({ where: { id: existing.projectId } });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
-  // When transitioning into a terminal-group state, stamp completedAt.
+  // When transitioning into/out of a terminal-group state, sync
+  // isCompleted/completedAt. isCompleted is the canonical signal (WARP-884);
+  // completedAt is written alongside it as the audit timestamp.
   let completedAt: Date | null | undefined;
+  let isCompleted: boolean | undefined;
   if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
     if (fields.stateId === null) {
       completedAt = null;
+      isCompleted = false;
     } else {
       // The target state must belong to THIS work item's project. Distinguish
       // "no such state" (404) from "state belongs to another project" (422) so
@@ -884,8 +956,8 @@ export async function updateWorkItem(
       const target = await prisma.pmState.findUnique({ where: { id: fields.stateId } });
       if (!target) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
       if (target.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_STATE);
-      completedAt =
-        target.group === "completed" || target.group === "cancelled" ? new Date() : null;
+      isCompleted = target.group === "completed" || target.group === "cancelled";
+      completedAt = isCompleted ? new Date() : null;
     }
   }
 
@@ -925,6 +997,7 @@ export async function updateWorkItem(
     if (fields.stateId !== undefined) {
       data.state = fields.stateId ? { connect: { id: fields.stateId } } : { disconnect: true };
       if (completedAt !== undefined) data.completedAt = completedAt;
+      if (isCompleted !== undefined) data.isCompleted = isCompleted;
     }
     if (fields.parentId !== undefined) {
       data.parent = fields.parentId ? { connect: { id: fields.parentId } } : { disconnect: true };
@@ -1009,11 +1082,36 @@ export async function transitionWorkItem(
   return updateWorkItem(prisma, actorId, id, { stateId });
 }
 
-export async function deleteWorkItem(prisma: PrismaClient, id: string): Promise<void> {
+export async function deleteWorkItem(
+  prisma: PrismaClient,
+  actorId: string | null,
+  id: string,
+): Promise<void> {
   const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
   if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   try {
-    await prisma.pmWorkItem.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
+      // promote every sub-issue to a root item with zero audit trail the
+      // instant the parent is deleted. Emit one parent_removed activity row
+      // per orphaned child BEFORE the delete, so the DB cascade is always
+      // preceded by an explainable entry in the child's own history feed.
+      const children = await tx.pmWorkItem.findMany({
+        where: { parentId: id },
+        select: { id: true },
+      });
+      for (const child of children) {
+        await writeActivity(tx, {
+          workItemId: child.id,
+          actorId,
+          verb: "parent_removed",
+          field: "parentId",
+          oldValue: id,
+          newValue: null,
+        });
+      }
+      await tx.pmWorkItem.delete({ where: { id } });
+    });
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     throw err;

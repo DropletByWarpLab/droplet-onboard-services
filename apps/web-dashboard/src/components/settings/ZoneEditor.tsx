@@ -367,7 +367,7 @@ export function ZoneEditor({
           <button
             type="button"
             onClick={mode.kind === "drawing" ? finishDrawing : startDrawing}
-            className="dp-btn-primary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg type-subheadline"
+            className="btn primary w-full justify-center disabled:opacity-50"
             disabled={mode.kind === "drawing" && mode.points.length < 6}
           >
             {mode.kind === "drawing" ? (
@@ -386,7 +386,7 @@ export function ZoneEditor({
             <button
               type="button"
               onClick={cancelDrawing}
-              className="dp-btn-secondary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg type-caption-1"
+              className="btn ghost w-full justify-center"
             >
               <X size={12} />
               Cancel (Esc)
@@ -394,7 +394,7 @@ export function ZoneEditor({
           )}
 
           {zones.length === 0 && mode.kind !== "drawing" && (
-            <p className="type-caption-1 text-label-tertiary">
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               No zones yet. Click <strong>New zone</strong> and tap points on the
               snapshot to outline an area Frigate should care about.
             </p>
@@ -406,7 +406,7 @@ export function ZoneEditor({
               <div
                 key={`${z.name}-${i}`}
                 className={`rounded-lg border ${
-                  isEditing ? "border-accent" : "border-separator"
+                  isEditing ? "border-[color:var(--brand)]" : "border-[color:var(--card-bd)]"
                 } p-2 space-y-2`}
               >
                 <div className="flex items-center gap-2">
@@ -419,13 +419,15 @@ export function ZoneEditor({
                     value={z.name}
                     onChange={(e) => renameZone(i, e.target.value)}
                     maxLength={40}
-                    className="flex-1 type-subheadline text-label-primary bg-transparent focus:outline-none"
+                    className="flex-1 type-subheadline bg-transparent focus:outline-none text-[var(--text)]"
                   />
                   <button
                     type="button"
                     onClick={() => startEditing(i)}
                     className={`p-1 rounded ${
-                      isEditing ? "text-accent" : "text-label-tertiary hover:text-label-primary"
+                      isEditing
+                        ? "text-[var(--brand)]"
+                        : "text-[var(--text-muted)] hover:text-[var(--text)]"
                     }`}
                     title="Edit polygon"
                   >
@@ -434,7 +436,7 @@ export function ZoneEditor({
                   <button
                     type="button"
                     onClick={() => deleteZone(i)}
-                    className="p-1 rounded text-label-tertiary hover:text-system-red"
+                    className="p-1 rounded text-[var(--text-muted)] hover:text-system-red"
                     title="Delete zone"
                   >
                     <Trash2 size={12} />
@@ -451,10 +453,10 @@ export function ZoneEditor({
                           key={label}
                           type="button"
                           onClick={() => toggleZoneObject(i, label)}
-                          className={`px-1.5 py-0.5 rounded-full type-caption-2 capitalize ${
+                          className={`px-1.5 py-0.5 rounded-full type-caption-2 capitalize transition-colors ${
                             active
-                              ? "bg-accent text-white"
-                              : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
+                              ? "bg-[var(--brand)] text-white"
+                              : "bg-[var(--inset)] text-[var(--text-muted)] hover:bg-[var(--hover)]"
                           }`}
                         >
                           {label}
@@ -462,7 +464,7 @@ export function ZoneEditor({
                       );
                     })}
                     {z.objects.length === 0 && (
-                      <span className="type-caption-2 text-label-tertiary self-center">
+                      <span className="type-caption-2 self-center" style={{ color: "var(--text-muted)" }}>
                         (any tracked object)
                       </span>
                     )}
@@ -471,7 +473,7 @@ export function ZoneEditor({
 
                 {/* Inertia slider */}
                 <div className="flex items-center gap-2">
-                  <span className="type-caption-2 text-label-tertiary w-16">Inertia</span>
+                  <span className="type-caption-2 w-16" style={{ color: "var(--text-muted)" }}>Inertia</span>
                   <input
                     type="range"
                     min={1}
@@ -479,9 +481,9 @@ export function ZoneEditor({
                     step={1}
                     value={z.inertia}
                     onChange={(e) => setZoneInertia(i, Number(e.target.value))}
-                    className="flex-1 accent-accent"
+                    className="flex-1 accent-[var(--brand)]"
                   />
-                  <span className="type-caption-2 text-label-secondary font-mono w-6 text-right">
+                  <span className="type-caption-2 font-mono w-6 text-right" style={{ color: "var(--text-muted)" }}>
                     {z.inertia}
                   </span>
                 </div>
@@ -489,7 +491,7 @@ export function ZoneEditor({
             );
           })}
 
-          <p className="type-caption-2 text-label-tertiary">
+          <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
             Drag a vertex to move it. Shift-click a vertex to delete it (min 3
             remain). Click a polygon to edit it.
           </p>
@@ -507,11 +509,12 @@ export function ZoneEditor({
         <div>
           <h3
             id={namePromptHeadingId}
-            className="type-title-3 text-label-primary mb-2"
+            className="type-title-3 mb-2"
+            style={{ color: "var(--text)" }}
           >
             Name this zone
           </h3>
-          <p className="type-caption-1 text-label-tertiary mb-3">
+          <p className="type-caption-1 mb-3" style={{ color: "var(--text-muted)" }}>
             Letters, numbers, hyphens, underscores. Up to 40 characters.
           </p>
           <input
@@ -526,13 +529,19 @@ export function ZoneEditor({
             maxLength={40}
             placeholder="front_yard"
             aria-label="Zone name"
-            className="w-full h-10 px-3 rounded-lg border border-separator bg-surface-secondary type-subheadline text-label-primary focus:border-accent focus:outline-none"
+            className="w-full h-10 px-3 type-subheadline outline-none focus:border-[var(--brand)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
           />
           <div className="flex justify-end gap-2 mt-3">
             <button
               type="button"
               onClick={() => setNamePromptOpen(false)}
-              className="dp-btn-secondary px-3 py-2 rounded-lg type-subheadline"
+              className="btn ghost"
             >
               Cancel
             </button>
@@ -544,7 +553,7 @@ export function ZoneEditor({
                 !/^[a-zA-Z0-9_-]{1,40}$/.test(pendingName.trim()) ||
                 zones.some((z) => z.name === pendingName.trim())
               }
-              className="dp-btn-primary px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
+              className="btn primary disabled:opacity-50"
             >
               Create
             </button>

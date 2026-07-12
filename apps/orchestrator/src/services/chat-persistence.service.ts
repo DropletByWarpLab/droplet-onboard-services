@@ -94,6 +94,14 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
     reasoning: string | null;
     /** WARP-844 — thumbs rating, or null when unrated. */
     feedback: "up" | "down" | null;
+    /**
+     * WARP-904 — the model/provider actually used for THIS turn (may
+     * differ from `ChatSession.model`/`provider` once the user has
+     * quick-switched mid-conversation). NULL on rows persisted before
+     * this column existed, or when the caller never supplied one.
+     */
+    model: string | null;
+    provider: string | null;
   }>;
 }
 
@@ -151,6 +159,9 @@ export class ChatPersistenceService {
         reasoning: m.reasoning ?? null,
         // WARP-844 — thumbs rating, restored so the toolbar shows state.
         feedback: (m.feedback as "up" | "down" | null) ?? null,
+        // WARP-904 — per-message audit trail (see PersistedConversationDetail).
+        model: m.model ?? null,
+        provider: m.provider ?? null,
       })),
     };
   }
@@ -451,6 +462,17 @@ export class ChatPersistenceService {
     conversationId: string;
     userContent: string;
     turnId: string | null;
+    /**
+     * WARP-904 — the model/provider the user had selected when they sent
+     * this turn. Stamped onto BOTH rows at creation time; the assistant
+     * row's may be overwritten at {@link finalizeAssistantMessage} if
+     * vision auto-routing changed the model that actually ran. Optional
+     * so existing callers (tests, any future caller that doesn't track
+     * model per turn) keep working — omitted means both columns stay
+     * NULL, exactly like before this column existed.
+     */
+    model?: string;
+    provider?: string | null;
   }): Promise<{
     userMessageId: string;
     assistantMessageId: string;
@@ -480,6 +502,8 @@ export class ChatPersistenceService {
             turnId: args.turnId,
             status: "completed",
             completedAt: new Date(),
+            model: args.model ?? null,
+            provider: args.provider ?? null,
           },
           select: { id: true, status: true },
         }));
@@ -494,6 +518,8 @@ export class ChatPersistenceService {
             content: "",
             turnId: args.turnId,
             status: "streaming",
+            model: args.model ?? null,
+            provider: args.provider ?? null,
           },
           select: { id: true, status: true },
         }));
@@ -554,6 +580,15 @@ export class ChatPersistenceService {
     toolCalls: PersistedToolCall[];
     status: "completed" | "failed" | "aborted";
     reasoning?: string | null;
+    /**
+     * WARP-904 — the model/provider that actually produced this turn.
+     * Overwrites the tentative value {@link createTurnRows} stamped at
+     * turn start, which matters when vision auto-routing swapped in a
+     * different model mid-turn. Same undefined-skip contract as
+     * `reasoning`: omit to leave whatever createTurnRows already set.
+     */
+    model?: string;
+    provider?: string | null;
   }): Promise<void> {
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
@@ -575,6 +610,13 @@ export class ChatPersistenceService {
       // on an already-persisted row.
       if (args.reasoning !== undefined) {
         data.reasoning = args.reasoning;
+      }
+      // WARP-904: same undefined-skip contract for the audit columns.
+      if (args.model !== undefined) {
+        data.model = args.model;
+      }
+      if (args.provider !== undefined) {
+        data.provider = args.provider;
       }
       await tx.chatMessage.update({
         where: { id: args.messageId },

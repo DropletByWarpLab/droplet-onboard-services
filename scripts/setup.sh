@@ -70,7 +70,8 @@ Options:
   --fips             Activate FIPS 140-3 mode (per-customer, default OFF).
                      Sets DROPLET_FIPS_MODE=1 in .env; setup.sh derives the
                      per-service OPENSSL_CONF / DROPLET_FIPS_REQUIRED /
-                     OPENSSL_MODULES / NODE_OPTIONS from it. The validated
+                     NODE_OPTIONS from it (OPENSSL_MODULES is actively
+                     removed — WARP-1063; see docs/fips.md). The validated
                      OpenSSL FIPS provider (CMVP #4282) already ships in every
                      image, so NO rebuild is needed — on an existing box:
                      ./scripts/setup.sh --fips --skip-docker --skip-build

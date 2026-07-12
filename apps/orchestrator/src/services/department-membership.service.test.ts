@@ -429,6 +429,15 @@ describe("updateMembershipRight", () => {
       userId: "u1",
       right: "manager",
     });
+    // A second manager so the demotion clears the last-manager invariant;
+    // this case only exercises NC transition ordering, not the guard.
+    seedUser(users, "keep-mgr", "keep-mgr-nc");
+    seedMembership(membershipsByKey, membershipsById, {
+      id: "m-keep",
+      departmentId: dept.id,
+      userId: "keep-mgr",
+      right: "manager",
+    });
 
     const row = await updateMembershipRight(prisma, dept.id, "u1", "reader");
 
@@ -482,6 +491,58 @@ describe("updateMembershipRight", () => {
     await expect(
       updateMembershipRight(prisma, dept.id, "ghost", "manager"),
     ).rejects.toBeInstanceOf(MembershipNotFoundError);
+  });
+
+  it("last-manager invariant: refuses to demote the sole manager via PATCH, row untouched", async () => {
+    const { prisma, departments, users, membershipsByKey, membershipsById } = createMockPrisma();
+    const dept = seedDept(departments, { aclVersion: 0 });
+    seedUser(users, "mgr1", "mgr1-nc");
+    seedMembership(membershipsByKey, membershipsById, {
+      id: "m1",
+      departmentId: dept.id,
+      userId: "mgr1",
+      right: "manager",
+    });
+
+    await expect(
+      updateMembershipRight(prisma, dept.id, "mgr1", "reader"),
+    ).rejects.toBeInstanceOf(LastManagerError);
+
+    // Nothing mutated: no NC calls, the row keeps its manager right +
+    // synced state, and aclVersion is NOT bumped (the tx returned
+    // "last-manager" before the update/bump ran) — mirrors the DELETE
+    // last-manager guard so a rights-transition PATCH can't orphan a dept.
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+    expect(membershipsById.get("m1")?.right).toBe("manager");
+    expect(membershipsById.get("m1")?.syncState).toBe("synced");
+    expect(departments.get(dept.id).aclVersion).toBe(0);
+  });
+
+  it("allows demoting a manager via PATCH when a second manager remains", async () => {
+    const { prisma, departments, users, membershipsByKey, membershipsById } = createMockPrisma();
+    const dept = seedDept(departments, { aclVersion: 0 });
+    seedUser(users, "mgr1", "mgr1-nc");
+    seedUser(users, "mgr2", "mgr2-nc");
+    seedMembership(membershipsByKey, membershipsById, {
+      id: "m1",
+      departmentId: dept.id,
+      userId: "mgr1",
+      right: "manager",
+    });
+    seedMembership(membershipsByKey, membershipsById, {
+      id: "m2",
+      departmentId: dept.id,
+      userId: "mgr2",
+      right: "manager",
+    });
+
+    const row = await updateMembershipRight(prisma, dept.id, "mgr1", "reader");
+
+    expect(row.right).toBe("reader");
+    expect(membershipsById.get("m1")?.right).toBe("reader");
+    expect(membershipsById.get("m2")?.right).toBe("manager");
+    expect(departments.get(dept.id).aclVersion).toBe(1);
   });
 });
 
