@@ -1632,7 +1632,13 @@ export interface EnrichedNetworkDevice {
   lastIp: string | null;
   firstSeen: string;
   lastSeen: string;
+  // WARP-106: `isBlocked` is a COMPUTED display flag from the API —
+  // `lastAppliedBlocked ?? manualBlock`. `manualBlock` (user intent) and
+  // `lastAppliedBlocked` (ticker-authored source of truth) are the authored
+  // fields the API now also returns.
   isBlocked: boolean;
+  manualBlock: boolean;
+  lastAppliedBlocked?: boolean | null;
   online: boolean;
   signal?: number;
   groups: DeviceGroupRef[];

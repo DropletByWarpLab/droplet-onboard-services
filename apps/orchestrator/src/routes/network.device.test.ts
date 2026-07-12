@@ -97,7 +97,10 @@ type DeviceRow = {
   lastIp: string | null;
   firstSeen: Date;
   lastSeen: Date;
-  isBlocked: boolean;
+  // WARP-106: no stored `isBlocked`. The two authored block fields; the
+  // service computes `isBlocked = lastAppliedBlocked ?? manualBlock`.
+  manualBlock: boolean;
+  lastAppliedBlocked: boolean | null;
   groupIds: string[];
 };
 
@@ -330,7 +333,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: ["grp-1"],
       });
       deviceStore.set("AA:BB:CC:DD:EE:02", {
@@ -343,7 +347,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: [],
       });
 
@@ -368,7 +373,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: [],
       });
 
@@ -376,6 +382,8 @@ describe("Network devices + groups API (WARP-82)", () => {
       expect(res.status).toBe(200);
       expect(res.body.device.mac).toBe("AA:BB:CC:DD:EE:01");
       expect(res.body.device.displayName).toBe("TV");
+      // WARP-106: API boundary exposes the computed display flag.
+      expect(res.body.device.isBlocked).toBe(false);
       expect(res.body.presence).toEqual([]);
     });
 
@@ -406,7 +414,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: [],
       });
 
@@ -429,7 +438,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: [],
       });
 
@@ -457,7 +467,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: ["grp-a"],
       });
 
@@ -490,7 +501,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: [],
       });
 
@@ -538,7 +550,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: ["grp-a"],
       });
       const res = await request(app).get("/api/network/groups");
@@ -621,7 +634,8 @@ describe("Network devices + groups API (WARP-82)", () => {
         lastIp: null,
         firstSeen: new Date(),
         lastSeen: new Date(),
-        isBlocked: false,
+        manualBlock: false,
+        lastAppliedBlocked: null,
         groupIds: ["grp-a"],
       });
       const res = await request(app).delete("/api/network/groups/grp-a");

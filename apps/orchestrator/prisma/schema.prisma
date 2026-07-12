@@ -1057,13 +1057,27 @@ model NetworkDevice {
   lastIp             String?
   firstSeen          DateTime            @default(now())
   lastSeen           DateTime            @default(now())
-  isBlocked          Boolean             @default(false)
+  // WARP-106: block state has exactly two authored fields + one computed
+  // projection. There is a single source of truth — the schedule ticker.
+  //
+  //   manualBlock        — USER INTENT. Set by the /manualBlock endpoint;
+  //                        an INPUT to the schedule ticker, never the
+  //                        firewall's effective state on its own.
+  //   lastAppliedBlocked — TICKER-AUTHORED effective firewall state and the
+  //                        SOURCE OF TRUTH for display. Only the schedule
+  //                        ticker writes it (atomically, with the
+  //                        ScheduleEvent). Nullable — null means "ticker has
+  //                        never touched this device" so the next tick
+  //                        dispatches regardless of desired state (bootstrap);
+  //                        on orchestrator restart it reconstitutes the
+  //                        ticker's state so we don't re-dispatch every device.
+  //
+  // The old reconciler-authored `isBlocked` column is GONE (WARP-106): the
+  // reconciler is now a pure drift DETECTOR — it logs when the live firewall
+  // disagrees with lastAppliedBlocked but never writes block state, so it can
+  // never clobber ticker intent. The API boundary exposes a COMPUTED, always-
+  // boolean `isBlocked = (lastAppliedBlocked ?? manualBlock)` for display.
   manualBlock        Boolean             @default(false)
-  // Last firewall state successfully dispatched by the schedule ticker.
-  // Nullable — null means "ticker has never touched this device" and the
-  // next tick will dispatch regardless of desired state (bootstrap). On
-  // orchestrator restart this field reconstitutes the ticker's state so we
-  // don't re-dispatch every device. See WARP critical-fix-cron-state.
   lastAppliedBlocked Boolean?
   // WARP-613: last egress policy the egress-reconciler pushed to the router.
   // Maintained independently of lastAppliedBlocked (which the schedule ticker

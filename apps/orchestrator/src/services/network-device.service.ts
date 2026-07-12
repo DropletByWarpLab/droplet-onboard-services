@@ -191,6 +191,11 @@ export function createNetworkDeviceService(
         const signal = signalByMac.get(row.mac);
         return {
           ...row,
+          // WARP-106: computed display flag. `lastAppliedBlocked` is the
+          // ticker-authored source of truth; fall back to `manualBlock`
+          // (user intent) before the ticker has ever run. There is no
+          // reconciler-authored `isBlocked` column anymore.
+          isBlocked: row.lastAppliedBlocked ?? row.manualBlock,
           online,
           signal,
         };
@@ -213,7 +218,14 @@ export function createNetworkDeviceService(
     if (!device) {
       throw DeviceRegistryError.notFound(`Device ${mac}`);
     }
-    return { device, presence: device.presenceDays ?? [] };
+    // WARP-106: attach the computed display flag (see listDevices).
+    return {
+      device: {
+        ...device,
+        isBlocked: device.lastAppliedBlocked ?? device.manualBlock,
+      },
+      presence: device.presenceDays ?? [],
+    };
   }
 
   async function updateDevice(

@@ -96,7 +96,6 @@ describe("schedule-ticker with real firewall adapter (AC3)", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -123,7 +122,6 @@ describe("schedule-ticker with real firewall adapter (AC3)", () => {
     const device = {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: true, // already blocked
       groups: [],
     };
