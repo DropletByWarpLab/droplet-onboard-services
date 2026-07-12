@@ -550,6 +550,17 @@ export interface VoiceEchoCheckResult {
 }
 
 /**
+ * WARP-1057 — DSP reboot issued (`POST /api/voice/restart-processor`).
+ * `restarted_at` anchors the health card's "wait for audio to return"
+ * window (~10 s while the XVF3800 re-enumerates).
+ */
+export interface VoiceRestartResult {
+  ok: boolean;
+  method: string;
+  restarted_at: number;
+}
+
+/**
  * WARP-1059 — calibration-mode toggle result (`POST`/`DELETE`
  * `/api/voice/calibration-mode`). `expires_at` is the fail-safe TTL
  * expiry (epoch seconds) after an enter/renew; null after an exit.

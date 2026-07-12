@@ -248,7 +248,7 @@ describe("deriveHealthChecks (WARP-1055)", () => {
     expect(withActions).toHaveLength(1);
   });
 
-  it("flatlined DSP: processor card red with Test again, others wait", () => {
+  it("flatlined DSP: processor card red with Restart processor (WARP-1057), others wait", () => {
     const checks = deriveHealthChecks({
       surface: { kind: "broken", brokenCause: "flatlined" },
       status: status({ input_flatlined: true }),
@@ -258,7 +258,8 @@ describe("deriveHealthChecks (WARP-1055)", () => {
     if (!Array.isArray(checks)) throw new Error("expected cards");
     const byId = Object.fromEntries(checks.map((c) => [c.id, c]));
     expect(byId.dsp.status).toBe("err");
-    expect(byId.dsp.actionLabel).toBe("Test again");
+    expect(byId.dsp.action).toBe("restart-dsp");
+    expect(byId.dsp.actionLabel).toBe("Restart processor");
     expect(byId.level.status).toBe("dash");
     expect(byId.level.result).toBe("Waiting on the mic processor.");
   });

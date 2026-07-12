@@ -7,9 +7,10 @@
  * exposes exactly ONE inline text action; no card ever dead-ends.
  *
  * §7.2: collapses to a single explanatory card when no microphone is
- * detected. §7.3: after two failed re-tests the processor card
- * escalates to the power-cycle copy + Get help link (the restart
- * endpoint is WARP-1057 — deliberately NOT a button here).
+ * detected. §7.3: the wedged processor card's inline action is the
+ * WARP-1057 "Restart processor" (confirm + DSP reboot, wired in
+ * VoiceSurface); after two failed restarts the card escalates to the
+ * power-cycle copy + Get help link instead.
  */
 
 import Link from "next/link";
@@ -39,7 +40,7 @@ export function HealthStrip({
   onAction,
 }: {
   checks: VoiceCheckModel[] | "collapsed";
-  /** §7.3 — two failed re-tests: swap the processor card's action for
+  /** §7.3 — two failed restarts: swap the processor card's action for
    *  the power-cycle escalation copy. */
   dspEscalated?: boolean;
   onAction: (action: VoiceCheckAction) => void;

@@ -1536,11 +1536,27 @@ services:
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
+      # WARP-1057 — DSP restart path. POST /voice/restart-processor execs
+      # the vendor xvf_host CLI (`REBOOT 1` — the host watchdog's exact
+      # heal) over raw USB. The whole host /usr/local/bin is bound
+      # read-only rather than the single binary: a single-file bind of a
+      # not-yet-installed tool would materialise a root-owned DIRECTORY
+      # at the host path (breaking a later install AND the watchdog's -x
+      # probe), while the directory bind is a live view — install the
+      # tool on the host and the endpoint starts working, no recreate.
+      # /dev/bus/usb is the same live-bind pattern as /dev/snd above so
+      # the re-enumerated device node stays reachable.
+      - /usr/local/bin:/host/usr-local-bin:ro
+      - /dev/bus/usb:/dev/bus/usb
     # ALSA sound-class char major is 116; the wildcard minor covers ANY
     # card, including one that enumerates after container-create (which the
     # old per-minor `devices:` rule could not). read / write / mknod.
+    # 189 is the usb_device char class — xvf_host's control path to the
+    # XVF3800 (WARP-1057); wildcard minor for the same late-enumeration
+    # reason (a DSP reboot re-enumerates by design).
     device_cgroup_rules:
       - "c 116:* rmw"
+      - "c 189:* rmw"
     # Pairs with the device-cgroup grant above, matching the oled-display
     # scoped-device pattern: the cgroup rule is the real access control;
     # this just stops a setuid binary inside the container from escalating
@@ -1580,6 +1596,12 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1057 — recovery half of the flatline watchdog above. The
+      # xvf_host binary as seen INSIDE the container (default resolves
+      # into the /host/usr-local-bin read-only bind); timeout is the
+      # subprocess deadline for the REBOOT control write.
+      - XVF_HOST_PATH=${XVF_HOST_PATH:-/host/usr-local-bin/xvf_host}
+      - XVF_RESTART_TIMEOUT_S=${XVF_RESTART_TIMEOUT_S:-}
       # WARP-1055 — where the applied mic calibration persists (JSON on
       # the voice-calibration named volume above). The dashboard wizard
       # writes it via POST /voice/calibration; startup re-applies the
