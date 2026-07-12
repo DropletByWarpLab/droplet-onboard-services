@@ -77,6 +77,7 @@ import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
+import { createDepartmentsRouter } from "./routes/departments.js";
 import {
   initScopeLoader,
   loadUserEffectiveScopes,
@@ -363,6 +364,10 @@ export function createApp(
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
+  // WARP-1258 (T6): departments/teams CRUD. Manages department/team lifecycle,
+  // membership, and integration with Nextcloud groupfolders. Provisioning is
+  // async (reconciler converges NC state).
+  app.use("/api", createDepartmentsRouter(prisma));
   // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).
