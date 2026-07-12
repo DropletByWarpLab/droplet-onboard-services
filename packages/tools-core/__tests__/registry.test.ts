@@ -102,6 +102,12 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // WARP-899/WARP-900 — data-utility domain (all Tier-1 read/pure-computation)
+  "encode_text",
+  "decode_text",
+  "hash_text",
+  "convert_data_format",
+  "format_json",
   // WARP-901 — misc dev utilities (data domain, all Tier-1)
   "timestamp_convert",
   "uuid_generate",
@@ -147,6 +153,17 @@ describe("TOOLS registry", () => {
     // WARP-1120 — business_profile_get is a Tier-1 read (no write, no confirm).
     expect(TOOLS.get("business_profile_get")?.requiresWrite).toBe(false);
     expect(TOOLS.get("business_profile_get")?.requiresConfirmation).toBe(false);
+    // WARP-899/WARP-900 — data-utility tools are all Tier-1 (no write, no confirm).
+    expect(TOOLS.get("encode_text")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("encode_text")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("decode_text")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("decode_text")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("hash_text")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("hash_text")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("convert_data_format")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("convert_data_format")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("format_json")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("format_json")?.requiresConfirmation).toBe(false);
     // WARP-901 — misc dev utilities are all Tier-1 (no write, no confirm).
     expect(TOOLS.get("timestamp_convert")?.requiresWrite).toBe(false);
     expect(TOOLS.get("timestamp_convert")?.requiresConfirmation).toBe(false);
