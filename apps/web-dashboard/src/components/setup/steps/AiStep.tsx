@@ -261,8 +261,13 @@ export function AiStep({
 
   async function handleAsk() {
     if (!selectedModel) {
+      // WARP-1284 — degraded-aware: when the AI service is unreachable, the
+      // old "still warming up — give it a moment" copy would reintroduce the
+      // exact false framing this ticket removes.
       setError(
-        "Pick a model first. If the dropdown is empty, your AI is still warming up — give it a moment and try again.",
+        degraded
+          ? "We can't reach your AI service right now — you can skip this step and try from the Chat page later."
+          : "Pick a model first. If the dropdown is empty, your AI is still warming up — give it a moment and try again.",
       );
       return;
     }
@@ -378,8 +383,15 @@ export function AiStep({
             disabled={loading || submitting}
           >
             {loading && <option>Loading…</option>}
+            {/* WARP-1284 — degraded-aware placeholder: "available yet"
+                reads download-flavored, which is wrong when the service
+                is unreachable. */}
             {!loading && models.length === 0 && (
-              <option>No models available yet</option>
+              <option>
+                {degraded
+                  ? "Models unavailable right now"
+                  : "No models available yet"}
+              </option>
             )}
             {localModels.length > 0 && (
               <optgroup label="On your Droplet (private)">
@@ -419,7 +431,8 @@ export function AiStep({
               />
               <span>
                 We can&rsquo;t reach your AI service right now — it may be
-                restarting. We&rsquo;ll keep checking.
+                restarting. We&rsquo;ll keep checking, or you can skip and
+                come back from the Chat page later.
               </span>
             </div>
           )}

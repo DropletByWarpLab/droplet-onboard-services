@@ -26,7 +26,7 @@
  * the wizard nav provider).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, cleanup } from "@testing-library/react";
+import { render, screen, act, cleanup, fireEvent } from "@testing-library/react";
 import React from "react";
 import type { ModelInfo } from "@/lib/types";
 
@@ -83,7 +83,20 @@ describe("setup AI step — degraded models signal (WARP-1284)", () => {
       /can(?:'|’)t reach your ai service right now/i,
     );
     expect(note.textContent).toMatch(/we(?:'|’)ll keep checking/i);
+    // UX note (skip-clause parity with the downloading note): the degraded
+    // note must end with the same escape hatch.
+    expect(note.textContent).toMatch(
+      /or you can skip and come back from the chat page later/i,
+    );
     expect(screen.queryByTestId("model-downloading")).not.toBeInTheDocument();
+    // UX note: the select placeholder must not read download-flavored under
+    // the degraded note.
+    expect(
+      screen.getByRole("option", { name: /models unavailable right now/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /no models available yet/i }),
+    ).not.toBeInTheDocument();
     // Skip must stay available — the wizard never blocks on AI.
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -100,6 +113,40 @@ describe("setup AI step — degraded models signal (WARP-1284)", () => {
       screen.getByText(/your ai model is still downloading/i),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("model-degraded")).not.toBeInTheDocument();
+    // Placeholder keeps its existing copy when the empty list is honest.
+    expect(
+      screen.getByRole("option", { name: /no models available yet/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /models unavailable right now/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("asks-without-model error is degraded-aware (no false warming-up framing)", async () => {
+    // UX note: clicking "Ask the AI" with an empty degraded picker used to
+    // surface "…your AI is still warming up — give it a moment and try
+    // again", reintroducing the exact false framing this ticket removes.
+    fetchModelsMock.mockResolvedValue({ models: [], degraded: true });
+    render(<AiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await flushMicrotasks();
+
+    fireEvent.click(screen.getByRole("button", { name: /ask the ai/i }));
+    expect(
+      screen.getByText(/skip this step and try from the chat page later/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/still warming up/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the existing pick-a-model error copy when not degraded", async () => {
+    fetchModelsMock.mockResolvedValue({ models: [] });
+    render(<AiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await flushMicrotasks();
+
+    fireEvent.click(screen.getByRole("button", { name: /ask the ai/i }));
+    expect(screen.getByText(/pick a model first/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/skip this step and try from the chat page later/i),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the 8 s re-poll running while degraded and self-heals when a model appears", async () => {
