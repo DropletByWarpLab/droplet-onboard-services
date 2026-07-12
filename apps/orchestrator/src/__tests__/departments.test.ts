@@ -579,4 +579,76 @@ describe("departments CRUD routes (WARP-1258)", () => {
       }
     });
   });
+
+  describe("PATCH /api/departments/:id/members/:userId — HOUSEHOLD guard", () => {
+    it("rejects right changes on HOUSEHOLD department (WARP-1263)", async () => {
+      const owner = mkUser("owner");
+      const app = buildDeptApp(prisma, owner);
+
+      // Create a mock HOUSEHOLD department
+      const householdDept = {
+        id: "household-1",
+        name: "Household",
+        slug: "household",
+        kind: "HOUSEHOLD",
+        parentId: null,
+        state: "active",
+        quotaBytes: null,
+        ncGroupRw: "household",
+        ncGroupRo: null,
+        ncGroupfolderId: 1,
+        description: "Legacy household",
+        createdBy: "system",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        archivedAt: null,
+        aclVersion: 0,
+        provisionError: null,
+        syncError: null,
+      };
+      prisma._departments.set(householdDept.id, householdDept);
+
+      // Add owner as a member of household
+      prisma._memberships.set("household-owner-1", {
+        id: "household-owner-1",
+        departmentId: householdDept.id,
+        userId: owner.id,
+        right: "manager",
+        syncState: "synced",
+        ncPermissionMask: 31,
+        grantedBy: "system",
+        grantedAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Add another user as contributor
+      const memberId = "household-family-1";
+      prisma._memberships.set(memberId, {
+        id: memberId,
+        departmentId: householdDept.id,
+        userId: "family-user",
+        right: "contributor",
+        syncState: "synced",
+        ncPermissionMask: 31,
+        grantedBy: "system",
+        grantedAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Attempt to change the family user's right to reader
+      const patchRes = await request(app)
+        .patch(`/api/departments/${householdDept.id}/members/family-user`)
+        .send({ right: "reader" });
+
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.code).toBe("HOUSEHOLD_RIGHTS_IMMUTABLE");
+      expect(patchRes.body.error).toContain(
+        "Cannot change member rights for the Household department"
+      );
+
+      // Verify the membership was not changed
+      const membership = prisma._memberships.get(memberId);
+      expect(membership.right).toBe("contributor");
+    });
+  });
 });

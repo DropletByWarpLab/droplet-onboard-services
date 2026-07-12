@@ -107,11 +107,13 @@ vi.mock("@prisma/client", () => {
     // (bypassing the gate's fail-open .catch) and 500s every gated route.
     // `null` means "no directory row" → the gate fails open, matching a
     // fresh auth-disabled dev session.
+    // WARP-1263: household-seed service needs findMany for user iteration.
     user: {
       findUnique: vi.fn().mockResolvedValue(null),
       // WARP-233: findUserByEmail probes findUnique (blind index) then
       // findFirst (pre-backfill plaintext fallback) — same "no row" default.
       findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
     },
     // Module toggles: app.ts installs the module gate on every non-core
     // module router; requireModuleEnabled() reads ModuleSetting overrides via
@@ -143,6 +145,8 @@ vi.mock("@prisma/client", () => {
         args?.where?.id === DEFAULT_HOUSEHOLD.id ? DEFAULT_HOUSEHOLD : null
       ),
       findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
     },
     // Membership lookups (owner/admin short-circuit still checks membership
     // to decide whether to emit the audited "admin-space-entry" row; family/
@@ -150,6 +154,8 @@ vi.mock("@prisma/client", () => {
     // for a fresh session with no seeded memberships.
     departmentMembership: {
       findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({}),
     },
   };
   return {
