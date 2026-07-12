@@ -30,8 +30,11 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncListMyShares,
+  ncGetShare,
   ncDirExists,
   NextcloudOcsError,
+  type ShareDetail,
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
@@ -59,6 +62,8 @@ import {
   resolveFileDepartment,
   upsertFileRegistryEntry,
 } from "../services/file-registry.service.js";
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -1557,7 +1562,23 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
   // expireDate / password / note / shareWith). Callers that pass only `path`
   // get a public read-only link from the defaults.
-  router.post("/files/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // WARP-1269 (T17): `?space=`/body `space` threading for department/household
+  // content. Personal shares (no space, or `space: "personal"`) are
+  // COMPLETELY UNTOUCHED — same caller-token OCS call, same response, same
+  // audit row shape as before this ticket. A dept/household space requires
+  // `manager` right (requireSpaceAccess below) and, once past the gate, the
+  // OCS share is minted with the NC ADMIN credential (department members
+  // other than the manager themselves are not necessarily NC users with
+  // sharing rights on the groupfolder-mounted path) — never the caller's own
+  // token for that branch. On OCS success a `DepartmentShare` registry row is
+  // written for authz/audit on later PUT/DELETE and the "shared by me" list;
+  // on OCS failure no row is written and the error surfaces honestly.
+  router.post(
+    "/files/share",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "manager", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -1580,7 +1601,22 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const share = await ncCreateShareV2(await getToken(req), parsed.data.path, {
+      // WARP-938 (security): same traversal guard the other space-threaded
+      // write routes apply BEFORE the space prefix goes on — doubly
+      // important here since the dept branch below mints the share with the
+      // NC ADMIN credential, so a `..` escape would be a privilege
+      // escalation, not just a wrong-folder mistake.
+      if (!isSafeUserPath(parsed.data.path)) {
+        res.status(400).json({ error: "path must not contain '..' segments" });
+        return;
+      }
+
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const targetPath = await rootForSpace(prisma, space, parsed.data.path);
+      const departmentId = req.spaceDepartmentId ?? null;
+      const shareToken = departmentId ? adminBasicToken() : await getToken(req);
+
+      const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
         permissions: parsed.data.permissions,
         expireDate: parsed.data.expireDate,
@@ -1588,6 +1624,18 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         note: parsed.data.note,
         shareWith: parsed.data.shareWith,
       });
+
+      if (departmentId) {
+        await prisma.departmentShare.create({
+          data: {
+            departmentId,
+            ncShareId: share.id,
+            createdById: req.user!.id,
+            shareType: parsed.data.shareType,
+            path: parsed.data.path,
+          },
+        });
+      }
 
       // WARP-237: share creation is a mandatory-emit privileged action.
       // NEVER put the share password in refs.
@@ -1604,6 +1652,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           shareWith: parsed.data.shareWith ?? null,
           expireDate: parsed.data.expireDate ?? null,
           passwordProtected: parsed.data.password !== undefined,
+          departmentId: departmentId ?? null,
         },
         actor: actorFromRequest(req),
       });
@@ -2306,6 +2355,59 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     }
   });
 
+  /**
+   * WARP-1269 (T17): shared PUT/DELETE authz + credential resolution for
+   * `/files/share/:id`. A `shareId` with a `DepartmentShare` registry row
+   * was minted with the ADMIN credential (the manager-share path above) —
+   * mutating it must use that same credential, and the caller must be
+   * either the row's creator, an owner/admin, or a manager (own- or
+   * parent-department, via `departmentManagerOrAdmin`) of that department.
+   * A `shareId` with NO registry row is an ordinary personal share:
+   * completely unchanged from pre-T17 behavior — the caller's own token,
+   * no extra authz beyond the existing `requireRole` gate.
+   *
+   * On denial this writes the 403 response itself (audited via
+   * `recordAccessDenied`, matching the space-middleware convention) and
+   * returns `{ ok: false }`; callers MUST stop processing.
+   */
+  async function resolveShareMutationAuth(
+    req: Request,
+    res: Response,
+    shareId: number
+  ): Promise<
+    | { ok: true; token: string; deptRow: { departmentId: string } | null }
+    | { ok: false }
+  > {
+    const deptRow = await prisma.departmentShare.findUnique({
+      where: { ncShareId: shareId },
+      select: { departmentId: true, createdById: true },
+    });
+    if (!deptRow) {
+      return { ok: true, token: await getToken(req), deptRow: null };
+    }
+
+    const caller = req.user;
+    if (!caller) {
+      recordAccessDenied(req, "share-no-session");
+      res.status(403).json({ error: "Forbidden: no session" });
+      return { ok: false };
+    }
+
+    const isCreator = deptRow.createdById === caller.id;
+    const isPrivileged =
+      isCreator ||
+      caller.role === "owner" ||
+      caller.role === "admin" ||
+      (await departmentManagerOrAdmin(prisma, deptRow.departmentId, caller));
+    if (!isPrivileged) {
+      recordAccessDenied(req, "share-not-authorized");
+      res.status(403).json({ error: "Forbidden: not authorized to modify this share" });
+      return { ok: false };
+    }
+
+    return { ok: true, token: adminBasicToken(), deptRow: { departmentId: deptRow.departmentId } };
+  }
+
   // ── Update existing share (PUT /api/files/share/:id) ──
   router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
@@ -2337,7 +2439,10 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         });
         return;
       }
-      const token = await getToken(req);
+
+      const auth = await resolveShareMutationAuth(req, res, shareId);
+      if (!auth.ok) return;
+      const { token } = auth;
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
@@ -2366,7 +2471,31 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Invalid share id" });
         return;
       }
-      await ncDeleteShare(await getToken(req), shareId);
+
+      const auth = await resolveShareMutationAuth(req, res, shareId);
+      if (!auth.ok) return;
+      const { token, deptRow } = auth;
+
+      await ncDeleteShare(token, shareId);
+
+      if (deptRow) {
+        // WARP-1269 (T17): keep the row for audit/"shared by me" history —
+        // revoke, don't delete.
+        await prisma.departmentShare.update({
+          where: { ncShareId: shareId },
+          data: { revokedAt: new Date() },
+        });
+        await recordActivity({
+          kind: "file",
+          severity: "info",
+          sourceIcon: "share-2",
+          what: "Share revoked",
+          sub: String(shareId),
+          refs: { shareId, departmentId: deptRow.departmentId },
+          actor: actorFromRequest(req),
+        });
+      }
+
       res.json({ deleted: shareId });
     } catch (err) {
       handleFileError(err, res, next);
@@ -2378,6 +2507,42 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     try {
       const shares = await ncListSharedWithMe(await getToken(req));
       res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next, { shares: [] });
+    }
+  });
+
+  // ── Shared-by-me outbox (GET /api/files/shared-by-me) ──
+  //
+  // WARP-1269 (T17): personal shares the caller owns (OCS, caller's own
+  // token, no path filter) UNION the caller's non-revoked `DepartmentShare`
+  // registry rows (admin-minted manager shares), each rehydrated to the same
+  // `ShareDetail` wire shape via the admin credential — the registry row
+  // itself only carries the id/department/audit fields, not live share
+  // state (permissions/expiry/password), so live OCS state is the source of
+  // truth for what's rendered. A department share whose live OCS record is
+  // gone (deleted directly in Nextcloud, out of band) is silently dropped
+  // rather than surfaced as a broken row.
+  router.get("/files/shared-by-me", async (req, res, next) => {
+    try {
+      const callerId = req.user?.id ?? "";
+      const [personalShares, deptRows] = await Promise.all([
+        ncListMyShares(await getToken(req)),
+        callerId
+          ? prisma.departmentShare.findMany({
+              where: { createdById: callerId, revokedAt: null },
+              select: { ncShareId: true },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const deptShares: ShareDetail[] = [];
+      for (const row of deptRows) {
+        const detail = await ncGetShare(adminBasicToken(), row.ncShareId);
+        if (detail) deptShares.push(detail);
+      }
+
+      res.json({ shares: [...personalShares, ...deptShares] });
     } catch (err) {
       handleFileError(err, res, next, { shares: [] });
     }

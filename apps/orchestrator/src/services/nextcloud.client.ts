@@ -1379,6 +1379,49 @@ export async function ncListSharedWithMe(
     : [];
 }
 
+/**
+ * List shares the current caller OWNS (no `path` filter — the OCS
+ * endpoint returns every share the acting credential minted when called
+ * without one). WARP-1269 (T17): used for the "shared by me" aggregate —
+ * called with the caller's own token for personal shares.
+ */
+export async function ncListMyShares(token: string): Promise<ShareDetail[]> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS list own shares failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map((r) => mapShareRecord(r)) : [];
+}
+
+/**
+ * Fetch a single share's live detail by id. Returns `null` on 404 (the
+ * share was deleted directly in Nextcloud, out of band from our
+ * `DepartmentShare` registry row) rather than throwing — callers
+ * reconciling a registry listing against live OCS state treat a missing
+ * share as "drop it from the list", not a hard failure. WARP-1269 (T17):
+ * used to source live details for admin-minted department shares (called
+ * with the admin credential, since the registry row's `createdById` may
+ * not be the OCS share owner from Nextcloud's point of view).
+ */
+export async function ncGetShare(
+  token: string,
+  shareId: number
+): Promise<ShareDetail | null> {
+  const url = ocsUrl(`/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`);
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error(`OCS get share failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.statuscode === 404) return null;
+  const record = Array.isArray(data?.ocs?.data) ? data.ocs.data[0] : data?.ocs?.data;
+  return record ? mapShareRecord(record) : null;
+}
+
 // ── WebDAV Move / Copy / Rename ──
 
 /**
