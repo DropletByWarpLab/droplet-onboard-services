@@ -22,8 +22,8 @@ import {
  * SMTP transport error is never rendered — only a friendly line — so a 535/auth
  * string never lands in the DOM.
  *
- * Tokens only (dp-group / dp-row / dp-input / dp-btn-primary, type-*,
- * text-label-*, system-red/green, accent). No hardcoded colors.
+ * Tokens only (.card / indigo inputs / .btn primary, type-*, indigo CSS
+ * vars, system-red/green). No hardcoded colors.
  */
 const SECURITY_OPTIONS: Array<{ value: EmailChannelUpdate["security"]; label: string }> = [
   { value: "starttls", label: "STARTTLS (587)" },
@@ -98,17 +98,20 @@ export function EmailChannelSection() {
 
   return (
     <section className="mb-10">
-      <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
+      <h2
+        className="type-footnote uppercase tracking-wider px-1 mb-2"
+        style={{ color: "var(--text-muted)" }}
+      >
         Outbound email
       </h2>
 
-      <div className="dp-card p-4 space-y-4">
+      <div className="card space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <Mail size={16} className="text-label-secondary" />
+            <Mail size={16} style={{ color: "var(--text-muted)" }} />
             <div>
-              <p className="type-headline text-label-primary">SMTP relay</p>
-              <p className="type-caption-1 text-label-tertiary mt-0.5">
+              <p className="type-headline" style={{ color: "var(--text)" }}>SMTP relay</p>
+              <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
                 Used to deliver invite emails. Your provider&rsquo;s SMTP — the box never sends mail itself.
               </p>
             </div>
@@ -126,9 +129,9 @@ export function EmailChannelSection() {
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="h-4 w-4 rounded-sm accent-accent"
+            className="h-4 w-4 rounded-sm accent-[var(--brand)]"
           />
-          <span className="type-subheadline text-label-primary">
+          <span className="type-subheadline" style={{ color: "var(--text)" }}>
             Enable outbound email
           </span>
         </label>
@@ -140,7 +143,13 @@ export function EmailChannelSection() {
               value={host}
               onChange={(e) => setHost(e.target.value)}
               placeholder="smtp.gmail.com"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
           </Field>
           <Field label="Port" htmlFor="smtp-port">
@@ -151,7 +160,13 @@ export function EmailChannelSection() {
               value={port}
               onChange={(e) => setPort(Number(e.target.value) || 0)}
               placeholder="587"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
           </Field>
           <Field label="Username" htmlFor="smtp-username">
@@ -160,7 +175,13 @@ export function EmailChannelSection() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="postmaster@yourdomain.com"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
             />
           </Field>
@@ -171,7 +192,13 @@ export function EmailChannelSection() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={cfg?.hasPassword ? "Saved — replace to change" : "App password"}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="new-password"
             />
           </Field>
@@ -183,7 +210,13 @@ export function EmailChannelSection() {
               value={fromAddress}
               onChange={(e) => setFromAddress(e.target.value)}
               placeholder="droplet@yourdomain.com"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
           </Field>
           <Field label="From name" htmlFor="smtp-from-name">
@@ -192,7 +225,13 @@ export function EmailChannelSection() {
               value={fromName}
               onChange={(e) => setFromName(e.target.value)}
               placeholder="Droplet"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
           </Field>
           <Field label="Security" htmlFor="smtp-security">
@@ -200,7 +239,13 @@ export function EmailChannelSection() {
               id="smtp-security"
               value={security}
               onChange={(e) => setSecurity(e.target.value as EmailChannelUpdate["security"])}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             >
               {SECURITY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -226,7 +271,7 @@ export function EmailChannelSection() {
           <button
             onClick={handleSave}
             disabled={saving}
-            className="dp-btn-primary type-subheadline !min-h-[40px]"
+            className="btn primary type-subheadline !min-h-[40px]"
           >
             {saving ? "Saving…" : "Save"}
           </button>
@@ -247,7 +292,7 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={htmlFor} className="type-caption-1 text-label-secondary px-0.5">
+      <label htmlFor={htmlFor} className="type-caption-1 px-0.5" style={{ color: "var(--text-muted)" }}>
         {label}
       </label>
       {children}
