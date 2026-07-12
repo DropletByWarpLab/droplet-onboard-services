@@ -1379,6 +1379,32 @@ export async function ncListSharedWithMe(
     : [];
 }
 
+/**
+ * List the shares the current user has CREATED (outbound), across their whole
+ * tree — the reverse of {@link ncListSharedWithMe}. Backs the dashboard's
+ * "Shared by me" tab (WARP-941).
+ *
+ * Same OCS endpoint as {@link ncListShares} but WITHOUT a `path` filter, so
+ * Nextcloud scopes the listing to the shares the authenticated user
+ * INITIATED — getSharesBy defaults to `uid_initiator = me`, i.e. exactly the
+ * shares this user created. We deliberately DON'T pass `reshares=true`: that
+ * broadens getSharesBy to `uid_owner = me OR uid_initiator = me`, folding in
+ * reshares of files the user merely OWNS but did not personally create, which
+ * misrepresents a tab labeled "Shared by me". `subfiles=true` is likewise
+ * omitted — it only enumerates children of a Folder node identified by `path`,
+ * so with no `path` the node is null and the flag is a no-op.
+ */
+export async function ncListOutboundShares(token: string): Promise<ShareDetail[]> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS list outbound shares failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map((r) => mapShareRecord(r)) : [];
+}
+
 // ── WebDAV Move / Copy / Rename ──
 
 /**
