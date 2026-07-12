@@ -233,6 +233,19 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/llm/chat", allowed: ["owner", "admin", "family", "guest", "service"] },
   { method: "delete", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
   { method: "patch", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
+
+  // WARP-540: OTA update operator surface — owner+admin only INCLUDING
+  // the GETs (voice-proxy posture: release SHAs, failure history, and the
+  // maintenance window are operator material, not household reading), and
+  // `service` is denied everywhere. Mutations additionally audit via
+  // recordActivity (asserted in routes/updates.test.ts).
+  { method: "get", path: "/api/updates/status", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/updates/history", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/updates/settings", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/updates/check-now", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/updates/apply-now", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/updates/skip", allowed: ["owner", "admin"] },
+  { method: "put", path: "/api/updates/settings", allowed: ["owner", "admin"] },
 ];
 
 /**

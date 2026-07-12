@@ -83,6 +83,7 @@ import {
 } from "./services/scope-loader.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
+import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
@@ -388,6 +389,12 @@ export function createApp(
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+
+  // WARP-540: OTA update operator surface (/api/updates/*) — status,
+  // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
+  // Owner+admin only (reads included, voice-proxy posture); every mutation
+  // writes an activity row via recordActivity.
+  app.use("/api", createUpdatesRouter(prisma));
 
   // WARP-472: F4 hardware contract endpoint (admin/owner only).
   app.use("/api", createHardwareRouter(prisma));

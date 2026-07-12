@@ -5554,3 +5554,121 @@ export async function sendDraft(id: string): Promise<SendDraftResult> {
   const body = (await res.json()) as { id: string; status: string };
   return { status: "queued", id: body.id };
 }
+
+// --- WARP-540: OTA updates operator surface (/settings/updates) ---
+
+/** One DeviceUpdate row as the orchestrator serializes it (no manifest). */
+export interface UpdateRelease {
+  id: string;
+  status:
+    | "pending"
+    | "superseded"
+    | "verifying"
+    | "applying"
+    | "committed"
+    | "rolled_back"
+    | "failed"
+    | "rejected";
+  channel: string;
+  releaseTag: string | null;
+  gitSha: string;
+  builtAt: string;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The WARP-538 operator knobs persisted on the box. */
+export interface UpdateAgentSettings {
+  channel: string;
+  applyWindowCron: string;
+  autoApply: boolean;
+}
+
+export interface UpdatesStatus {
+  /** Newest committed OTA release; null = still on the factory image. */
+  current: UpdateRelease | null;
+  /** Newest pending / verifying / applying row, if any. */
+  pending: UpdateRelease | null;
+  /** Most recently decided terminal row (committed/rolled_back/failed/rejected). */
+  lastVerdict: UpdateRelease | null;
+  /** WARP-539 rollback-also-failed verdict — render the red banner. */
+  degraded: boolean;
+  settings: UpdateAgentSettings;
+  /** False on boxes without the host compose socket — apply-now is disabled. */
+  applyAvailable: boolean;
+}
+
+export type CheckNowOutcome =
+  | "no_release"
+  | "fetch_failed"
+  | "verify_failed"
+  | "channel_mismatch"
+  | "already_known"
+  | "pending_created";
+
+export interface CheckNowResult {
+  outcome: CheckNowOutcome;
+  detail?: string;
+  gitSha?: string;
+  deviceUpdateId?: string;
+}
+
+export async function getUpdatesStatus(): Promise<UpdatesStatus> {
+  const res = await authFetch(`${BASE}/api/updates/status`);
+  if (!res.ok) throw new Error(`Failed to load update status: ${res.status}`);
+  return res.json();
+}
+
+export async function getUpdatesHistory(limit = 50): Promise<UpdateRelease[]> {
+  const res = await authFetch(`${BASE}/api/updates/history?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to load update history: ${res.status}`);
+  const body = (await res.json()) as { updates: UpdateRelease[] };
+  return body.updates;
+}
+
+export async function checkForUpdatesNow(): Promise<CheckNowResult> {
+  const res = await authFetch(`${BASE}/api/updates/check-now`, { method: "POST" });
+  if (!res.ok) throw new Error(`Update check failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Force the pending release to apply immediately. Resolves on the 202
+ * dispatch; progress is read back through getUpdatesStatus (the row's
+ * status is the cursor). Throws with the server's error code on 409/503
+ * (`apply_unavailable`, `apply_in_progress`, `nothing_pending`).
+ */
+export async function applyUpdateNow(): Promise<{ deviceUpdateId: string }> {
+  const res = await authFetch(`${BASE}/api/updates/apply-now`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to start the update: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Skip the pending release (it stays skipped until a newer one appears). */
+export async function skipPendingUpdate(): Promise<{ deviceUpdateId: string }> {
+  const res = await authFetch(`${BASE}/api/updates/skip`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to skip the release: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function saveUpdateSettings(
+  patch: Partial<UpdateAgentSettings>,
+): Promise<UpdateAgentSettings> {
+  const res = await authFetch(`${BASE}/api/updates/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save update settings: ${res.status}`);
+  }
+  return res.json();
+}
