@@ -48,6 +48,23 @@ def nc_root(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def clear_gf_dept_cache():
+    """WARP-1264: the groupfolder->Department lookup is a module-level TTL
+    cache — clear it before/after every test so one test's monkeypatched
+    result can never leak into the next."""
+    watcher._gf_dept_cache.clear()
+    yield
+    watcher._gf_dept_cache.clear()
+
+
+def _mock_gf_lookup(monkeypatch, result):
+    """Bypass the TTL cache + DB round-trip: stub the resolver directly."""
+    monkeypatch.setattr(
+        watcher, "_lookup_department_for_groupfolder", lambda gfid: result
+    )
+
+
 # ── _parse_watch_target ──────────────────────────────────────────────────
 
 
@@ -61,14 +78,53 @@ def test_parse_home_file(nc_root):
     assert t.home_user == "alice"
 
 
-def test_parse_groupfolder_file(nc_root):
+def test_parse_groupfolder_file_household(nc_root, monkeypatch):
+    _mock_gf_lookup(
+        monkeypatch, {"id": "hh-uuid", "kind": "HOUSEHOLD", "name": "Household"}
+    )
     p = nc_root / "__groupfolders" / "3" / "Trips" / "notes.txt"
     t = watcher._parse_watch_target(str(p))
     assert t is not None
+    # WARP-1264: kind=HOUSEHOLD keeps the legacy sentinel verbatim — no
+    # reindex of existing rows.
     assert t.index_user == "__household__"
     assert t.stored_path == "/Household/Trips/notes.txt"
     assert t.cache_path == "__groupfolders/3/Trips/notes.txt"
     assert t.home_user is None
+
+
+def test_parse_groupfolder_file_department(nc_root, monkeypatch):
+    _mock_gf_lookup(
+        monkeypatch,
+        {"id": "6e2c9e2a-1111-4c1a-9c1a-000000000001", "kind": "DEPARTMENT", "name": "Finance"},
+    )
+    p = nc_root / "__groupfolders" / "7" / "Q3" / "budget.xlsx"
+    t = watcher._parse_watch_target(str(p))
+    assert t is not None
+    assert t.index_user == "__dept_6e2c9e2a-1111-4c1a-9c1a-000000000001__"
+    assert t.stored_path == "/Finance/Q3/budget.xlsx"
+    assert t.cache_path == "__groupfolders/7/Q3/budget.xlsx"
+    assert t.home_user is None
+
+
+def test_parse_groupfolder_file_team(nc_root, monkeypatch):
+    _mock_gf_lookup(
+        monkeypatch,
+        {"id": "6e2c9e2a-2222-4c1a-9c1a-000000000002", "kind": "TEAM", "name": "Finance — Payroll"},
+    )
+    p = nc_root / "__groupfolders" / "9" / "run.csv"
+    t = watcher._parse_watch_target(str(p))
+    assert t is not None
+    assert t.index_user == "__dept_6e2c9e2a-2222-4c1a-9c1a-000000000002__"
+    assert t.stored_path == "/Finance — Payroll/run.csv"
+
+
+def test_parse_groupfolder_unknown_id_skipped(nc_root, monkeypatch):
+    """WARP-1264: an unrecognized groupfolder id must be skipped, never
+    attributed to any corpus (fail-closed)."""
+    _mock_gf_lookup(monkeypatch, None)
+    p = nc_root / "__groupfolders" / "999" / "mystery.txt"
+    assert watcher._parse_watch_target(str(p)) is None
 
 
 def test_parse_groupfolder_trash_and_versions_excluded(nc_root):
@@ -80,6 +136,50 @@ def test_parse_non_watched_paths_rejected(nc_root):
     # appdata / trashbin / bare user dirs are not "{user}/files/…".
     assert watcher._parse_watch_target(str(nc_root / "appdata_abc" / "preview" / "1.png")) is None
     assert watcher._parse_watch_target(str(nc_root / "alice" / "files_trashbin" / "a.txt")) is None
+
+
+# ── _lookup_department_for_groupfolder (TTL cache) ───────────────────────
+
+
+def test_lookup_department_for_groupfolder_caches_result(monkeypatch):
+    calls = []
+
+    def fake_fetch(gfid):
+        calls.append(gfid)
+        return {"id": "dept-1", "kind": "DEPARTMENT", "name": "Ops"}
+
+    monkeypatch.setattr("db.fetch_department_for_groupfolder", fake_fetch)
+    first = watcher._lookup_department_for_groupfolder(42)
+    second = watcher._lookup_department_for_groupfolder(42)
+    assert first == second == {"id": "dept-1", "kind": "DEPARTMENT", "name": "Ops"}
+    assert calls == [42]  # second call served from cache, no re-fetch
+
+
+def test_lookup_department_for_groupfolder_refetches_after_ttl(monkeypatch):
+    calls = []
+
+    def fake_fetch(gfid):
+        calls.append(gfid)
+        return {"id": "dept-1", "kind": "DEPARTMENT", "name": "Ops"}
+
+    monkeypatch.setattr("db.fetch_department_for_groupfolder", fake_fetch)
+    monkeypatch.setattr(watcher, "_GF_DEPT_CACHE_TTL_SECONDS", 0.0)
+    watcher._lookup_department_for_groupfolder(42)
+    watcher._lookup_department_for_groupfolder(42)
+    assert calls == [42, 42]  # TTL expired immediately -> re-fetched
+
+
+def test_lookup_department_for_groupfolder_caches_unknown(monkeypatch):
+    calls = []
+
+    def fake_fetch(gfid):
+        calls.append(gfid)
+        return None
+
+    monkeypatch.setattr("db.fetch_department_for_groupfolder", fake_fetch)
+    assert watcher._lookup_department_for_groupfolder(999) is None
+    assert watcher._lookup_department_for_groupfolder(999) is None
+    assert calls == [999]
 
 
 # ── _sniff_text_mime (extensionless files) ───────────────────────────────
