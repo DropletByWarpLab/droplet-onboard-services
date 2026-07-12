@@ -46,19 +46,19 @@ export function DeviceDetailPanel({
     // padding (WARP-1153).
     <Dialog open onClose={onClose} labelledBy={headingId} placement="right" flush>
       {/* Header */}
-      <div className="flex items-center justify-between p-5 border-b border-separator">
+      <div className="flex items-center justify-between p-5" style={{ borderBottom: "1px solid var(--card-bd)" }}>
         <div>
-          <h2 id={headingId} className="type-title-3 text-label-primary">
+          <h2 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
             {device.name}
           </h2>
-          <p className="type-caption-1 text-label-tertiary capitalize">
+          <p className="type-caption-1 capitalize" style={{ color: "var(--text-muted)" }}>
             {device.category.replace("_", " ")} &middot; {device.state}
           </p>
         </div>
         <button
           onClick={onClose}
           aria-label="Close"
-          className="p-2 rounded-lg text-label-tertiary hover:bg-surface-secondary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="p-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 text-[var(--text-muted)] hover:bg-[var(--hover)] focus-visible:ring-[var(--brand)]"
         >
           <X size={20} />
         </button>
@@ -69,7 +69,7 @@ export function DeviceDetailPanel({
         {/* Connection state — offline is a warning, not a saved-state */}
         {!isConnected && (
           <div className="bg-system-orange/10 border border-system-orange/20 rounded-lg p-3">
-            <p className="type-caption-1 text-label-secondary capitalize">
+            <p className="type-caption-1 capitalize" style={{ color: "var(--text-muted)" }}>
               {device.connectionState}
             </p>
           </div>
@@ -78,7 +78,7 @@ export function DeviceDetailPanel({
         {/* Toggle */}
         {isToggleable && isConnected && (
           <div className="flex items-center justify-between">
-            <span className="type-subheadline text-label-primary">Power</span>
+            <span className="type-subheadline" style={{ color: "var(--text)" }}>Power</span>
             <ToggleSwitch on={isOn} onToggle={() => cmd("toggle")} />
           </div>
         )}
@@ -86,7 +86,7 @@ export function DeviceDetailPanel({
         {/* Brightness */}
         {device.category === "light" && isConnected && brightnessPct != null && (
           <div>
-            <span className="type-caption-1 text-label-tertiary mb-2 block">
+            <span className="type-caption-1 mb-2 block" style={{ color: "var(--text-muted)" }}>
               Brightness
             </span>
             <BrightnessSlider
@@ -108,41 +108,49 @@ export function DeviceDetailPanel({
         )}
 
         {/* Device info */}
-        <div className="pt-4 border-t border-separator space-y-3">
+        <div className="pt-4 space-y-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
           <div>
-            <span className="type-caption-1 text-label-tertiary block mb-1">
+            <span className="type-caption-1 block mb-1" style={{ color: "var(--text-muted)" }}>
               Node ID
             </span>
-            <code className="type-caption-1 text-label-secondary bg-surface-secondary px-2 py-1 rounded">
+            <code
+              className="type-caption-1 px-2 py-1 rounded"
+              style={{ color: "var(--text-muted)", background: "var(--card-inner)" }}
+            >
               {device.nodeId}
             </code>
           </div>
           {device.vendorName && (
             <div>
-              <span className="type-caption-1 text-label-tertiary block mb-1">Vendor</span>
-              <span className="type-caption-1 text-label-secondary">{device.vendorName}</span>
+              <span className="type-caption-1 block mb-1" style={{ color: "var(--text-muted)" }}>Vendor</span>
+              <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>{device.vendorName}</span>
             </div>
           )}
           {device.productName && (
             <div>
-              <span className="type-caption-1 text-label-tertiary block mb-1">Product</span>
-              <span className="type-caption-1 text-label-secondary">{device.productName}</span>
+              <span className="type-caption-1 block mb-1" style={{ color: "var(--text-muted)" }}>Product</span>
+              <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>{device.productName}</span>
             </div>
           )}
           {device.serialNumber && (
             <div>
-              <span className="type-caption-1 text-label-tertiary block mb-1">Serial</span>
-              <span className="type-caption-1 text-label-secondary">{device.serialNumber}</span>
+              <span className="type-caption-1 block mb-1" style={{ color: "var(--text-muted)" }}>Serial</span>
+              <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>{device.serialNumber}</span>
             </div>
           )}
         </div>
 
         {/* Attributes (collapsible) */}
         <details className="pt-2">
-          <summary className="type-caption-1 text-label-tertiary cursor-pointer hover:text-label-secondary">
+          <summary
+            className="type-caption-1 cursor-pointer text-[var(--text-muted)] hover:text-[var(--text)]"
+          >
             All Attributes
           </summary>
-          <pre className="mt-2 type-caption-2 text-label-tertiary bg-surface-secondary rounded-lg p-3 overflow-x-auto max-h-60">
+          <pre
+            className="mt-2 type-caption-2 rounded-lg p-3 overflow-x-auto max-h-60"
+            style={{ color: "var(--text-muted)", background: "var(--card-inner)" }}
+          >
             {JSON.stringify(device.attributes, null, 2)}
           </pre>
         </details>

@@ -39,7 +39,11 @@ type DeviceRow = {
   lastIp: string | null;
   firstSeen: Date;
   lastSeen: Date;
-  isBlocked: boolean;
+  // WARP-106: no `isBlocked` column. `manualBlock` (intent) +
+  // `lastAppliedBlocked` (ticker-authored source of truth) are the only
+  // block fields; the service computes `isBlocked` for the API boundary.
+  manualBlock: boolean;
+  lastAppliedBlocked: boolean | null;
   groupIds: string[];
 };
 
@@ -196,7 +200,8 @@ function makeDevice(partial: Partial<DeviceRow> & { mac: string }): DeviceRow {
     lastIp: partial.lastIp ?? null,
     firstSeen: partial.firstSeen ?? new Date(),
     lastSeen: partial.lastSeen ?? new Date(),
-    isBlocked: partial.isBlocked ?? false,
+    manualBlock: partial.manualBlock ?? false,
+    lastAppliedBlocked: partial.lastAppliedBlocked ?? null,
     groupIds: partial.groupIds ?? [],
   };
 }
@@ -288,6 +293,33 @@ describe("network-device.service", () => {
       expect(list).toHaveLength(1);
       expect(list[0].mac).toBe("AA:BB:CC:DD:EE:01");
     });
+
+    // WARP-106: the API boundary exposes a computed
+    // `isBlocked = (lastAppliedBlocked ?? manualBlock)`.
+    it("computes isBlocked from lastAppliedBlocked (ticker) falling back to manualBlock", async () => {
+      devices.set("AA:BB:CC:DD:EE:01", makeDevice({
+        mac: "AA:BB:CC:DD:EE:01",
+        lastAppliedBlocked: true,
+        manualBlock: false,
+      }));
+      devices.set("AA:BB:CC:DD:EE:02", makeDevice({
+        mac: "AA:BB:CC:DD:EE:02",
+        lastAppliedBlocked: null,
+        manualBlock: true,
+      }));
+      devices.set("AA:BB:CC:DD:EE:03", makeDevice({
+        mac: "AA:BB:CC:DD:EE:03",
+        lastAppliedBlocked: false,
+        manualBlock: true,
+      }));
+
+      const list = await svc.listDevices();
+      const by = new Map<string, any>(list.map((d: any) => [d.mac as string, d]));
+      expect(by.get("AA:BB:CC:DD:EE:01")!.isBlocked).toBe(true);
+      expect(by.get("AA:BB:CC:DD:EE:02")!.isBlocked).toBe(true);
+      // ticker is source of truth — applied=false overrides stale intent.
+      expect(by.get("AA:BB:CC:DD:EE:03")!.isBlocked).toBe(false);
+    });
   });
 
   describe("getDevice", () => {
@@ -306,6 +338,8 @@ describe("network-device.service", () => {
 
       const result = await svc.getDevice("aa:bb:cc:dd:ee:01");
       expect(result.device.mac).toBe("AA:BB:CC:DD:EE:01");
+      // WARP-106: computed display flag present on the single-device read.
+      expect(result.device.isBlocked).toBe(false);
       expect(result.presence).toHaveLength(30);
       // newest first
       expect(result.presence[0].date.getTime()).toBeGreaterThan(

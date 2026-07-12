@@ -6,6 +6,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import * as displayClient from "../services/display.client.js";
+import { requireRole } from "../middleware/auth.js";
 
 export function createDisplayRouter(_prisma: PrismaClient): Router {
   const router = Router();
@@ -67,12 +68,10 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
   // and, combined with the appliance being the video/storage hub, a coerced
   // SSID join is a credible pivot vector. Non-privileged users (family,
   // guest) cannot invoke this even though they can hit other /display/*.
-  router.post("/display/wifi/connect", async (req, res) => {
-    const user = (req as { user?: { role?: string } }).user;
-    const role = user?.role;
-    if (role !== "owner" && role !== "admin") {
-      return res.status(403).json({ error: "admin role required" });
-    }
+  // WARP-449: migrated off the inline req.user.role check onto the
+  // canonical requireRole guard (same posture, now covered by the
+  // rbac.test.ts matrix instead of a route-local check).
+  router.post("/display/wifi/connect", requireRole("owner", "admin"), async (req, res) => {
     const { ssid, password } = req.body ?? {};
     if (typeof ssid !== "string" || ssid.length === 0 || ssid.length > 64) {
       return res.status(400).json({ error: "ssid (1-64 chars) required" });

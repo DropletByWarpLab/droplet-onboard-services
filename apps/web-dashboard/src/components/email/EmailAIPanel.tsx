@@ -11,6 +11,11 @@
  * This panel is read-only: it surfaces what Droplet noticed. Nothing here
  * mutates — the only write path on this surface (sending a draft) lives in the
  * thread column behind an explicit confirm step.
+ *
+ * WARP-1088 — indigo shell: recolored onto the shared `.card`/`.badge`
+ * language + shell tokens (droplet-shell.css / indigo-tokens.css). The
+ * `.droplet-shell` scope itself is established by EmailWorkspace's root, one
+ * level up. Pure recolor/reclass — no behavior change.
  */
 
 import { FileText, Mail, Sparkles, Video, Wrench } from "lucide-react";
@@ -27,10 +32,13 @@ interface EmailAIPanelProps {
 
 const PanelTitle = () => (
   <div className="flex items-center gap-1.5">
-    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent-subtle">
-      <Sparkles size={12} className="text-accent" aria-hidden />
+    <span
+      className="inline-flex items-center justify-center w-5 h-5 rounded-full"
+      style={{ background: "var(--brand-subtle)" }}
+    >
+      <Sparkles size={12} style={{ color: "var(--brand)" }} aria-hidden />
     </span>
-    <h2 className="type-subheadline text-label-primary font-semibold">
+    <h2 className="type-subheadline font-semibold" style={{ color: "var(--text)" }}>
       Droplet · about this thread
     </h2>
   </div>
@@ -45,33 +53,30 @@ export function EmailAIPanel({
   return (
     <aside
       aria-label="Droplet thread analysis"
-      className="flex flex-col h-full min-h-0 border-l border-separator bg-surface-primary overflow-y-auto"
+      className="flex flex-col h-full min-h-0 overflow-y-auto"
+      style={{ borderLeft: "1px solid var(--border)", background: "var(--surface)" }}
     >
-      <div className="shrink-0 px-4 py-3 border-b border-separator">
+      <div className="shrink-0 px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
         <PanelTitle />
       </div>
 
       <div className="flex-1 min-h-0 p-4 space-y-5">
         {isLoading ? (
           <div aria-label="Loading analysis" className="space-y-3">
-            <div className="h-24 rounded-xl bg-surface-secondary animate-pulse" />
-            <div className="h-4 w-24 rounded bg-surface-secondary animate-pulse" />
-            <div className="h-16 rounded-xl bg-surface-secondary animate-pulse" />
+            <div className="h-24 rounded-xl animate-pulse" style={{ background: "var(--inset)" }} />
+            <div className="h-4 w-24 rounded animate-pulse" style={{ background: "var(--inset)" }} />
+            <div className="h-16 rounded-xl animate-pulse" style={{ background: "var(--inset)" }} />
           </div>
         ) : error ? (
-          <div className="dp-card text-center py-8" role="alert">
-            <p className="type-subheadline text-label-primary">
+          <div className="card text-center" style={{ padding: "32px 0" }} role="alert">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
               Analysis isn&rsquo;t available
             </p>
-            <p className="type-footnote text-label-tertiary mt-1">
+            <p className="type-footnote mt-1" style={{ color: "var(--text-muted)" }}>
               Droplet couldn&rsquo;t read this thread just now.
             </p>
             {onRetry && (
-              <button
-                type="button"
-                onClick={onRetry}
-                className="dp-btn-secondary text-sm mt-3"
-              >
+              <button type="button" onClick={onRetry} className="btn sm mt-3">
                 Try again
               </button>
             )}
@@ -80,18 +85,19 @@ export function EmailAIPanel({
           <div className="text-center py-10">
             <Sparkles
               size={24}
-              className="mx-auto text-label-quaternary mb-2"
+              className="mx-auto mb-2"
+              style={{ color: "var(--text-faint)" }}
               aria-hidden
             />
-            <p className="type-footnote text-label-tertiary max-w-[220px] mx-auto">
+            <p className="type-footnote max-w-[220px] mx-auto" style={{ color: "var(--text-muted)" }}>
               Select a conversation and Droplet will summarise it here.
             </p>
           </div>
         ) : (
           <>
             {/* Summary + callouts */}
-            <div className="dp-card p-3.5">
-              <p className="type-footnote text-label-primary leading-relaxed">
+            <div className="card" style={{ padding: "14px" }}>
+              <p className="type-footnote leading-relaxed" style={{ color: "var(--text)" }}>
                 {analysis.summary}
               </p>
               {analysis.callouts.length > 0 && (
@@ -99,10 +105,12 @@ export function EmailAIPanel({
                   {analysis.callouts.map((c, i) => (
                     <li
                       key={i}
-                      className="flex gap-2 type-caption-1 text-label-secondary"
+                      className="flex gap-2 type-caption-1"
+                      style={{ color: "var(--text-muted)" }}
                     >
                       <span
-                        className="mt-1.5 shrink-0 w-1 h-1 rounded-full bg-accent"
+                        className="mt-1.5 shrink-0 w-1 h-1 rounded-full"
+                        style={{ background: "var(--brand)" }}
                         aria-hidden
                       />
                       <span>{c.label}</span>
@@ -117,7 +125,8 @@ export function EmailAIPanel({
               <section aria-labelledby="ai-actions-h">
                 <h3
                   id="ai-actions-h"
-                  className="type-caption-2 uppercase tracking-[0.12em] text-label-tertiary font-semibold mb-2"
+                  className="type-caption-2 uppercase tracking-[0.12em] font-semibold mb-2"
+                  style={{ color: "var(--text-muted)" }}
                 >
                   Actions
                 </h3>
@@ -131,8 +140,8 @@ export function EmailAIPanel({
                           from here. They prime the next step; the actual write
                           happens behind the thread's confirm gate or in chat.
                           No trailing chevron — these rows are not clickable. */}
-                      <div className="dp-card p-3">
-                        <span className="block type-footnote text-label-primary">
+                      <div className="card" style={{ padding: "12px" }}>
+                        <span className="block type-footnote" style={{ color: "var(--text)" }}>
                           {a.label}
                         </span>
                         <span className="block mt-1.5">
@@ -150,7 +159,8 @@ export function EmailAIPanel({
               <section aria-labelledby="ai-related-h">
                 <h3
                   id="ai-related-h"
-                  className="type-caption-2 uppercase tracking-[0.12em] text-label-tertiary font-semibold mb-2"
+                  className="type-caption-2 uppercase tracking-[0.12em] font-semibold mb-2"
+                  style={{ color: "var(--text-muted)" }}
                 >
                   Related
                 </h3>
@@ -163,7 +173,7 @@ export function EmailAIPanel({
                   <RelatedGroup
                     items={analysis.related.threads}
                     icon={Mail}
-                    iconClass="text-accent"
+                    iconClass="text-[color:var(--brand)]"
                   />
                   <RelatedGroup
                     items={analysis.related.cameras}
@@ -173,7 +183,7 @@ export function EmailAIPanel({
                   <RelatedGroup
                     items={analysis.related.tools}
                     icon={Wrench}
-                    iconClass="text-label-secondary"
+                    iconClass="text-[color:var(--text-muted)]"
                   />
                 </ul>
               </section>
@@ -209,7 +219,8 @@ function RelatedGroup({
       {items.map((label, i) => (
         <li
           key={`${label}-${i}`}
-          className="flex items-center gap-2 px-1 py-1.5 type-caption-1 text-label-secondary"
+          className="flex items-center gap-2 px-1 py-1.5 type-caption-1"
+          style={{ color: "var(--text-muted)" }}
         >
           <Icon size={13} className={`shrink-0 ${iconClass}`} aria-hidden />
           <span className="truncate">{label}</span>

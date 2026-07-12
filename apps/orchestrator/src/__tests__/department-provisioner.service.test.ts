@@ -298,7 +298,10 @@ describe("archiveDepartment", () => {
     expect(prisma.rows.get(d.id)!.state).toBe("archived");
   });
 
-  it("flips to failed (not archived) when gfDeleteFolder throws", async () => {
+  // WARP-1257 CR (blocking): an archive that fails partway must land in the
+  // archive-specific failure state so the reconciler retries it down the
+  // ARCHIVE path — never the generic `failed` the provision path picks up.
+  it("flips to archive_failed (not archived, not generic failed) when gfDeleteFolder throws", async () => {
     gfDeleteFolderMock.mockRejectedValue(new Error("nc down"));
     const d = dept({
       state: "active",
@@ -311,7 +314,7 @@ describe("archiveDepartment", () => {
     await archiveDepartment(prisma as any, d.id);
 
     const row = prisma.rows.get(d.id)!;
-    expect(row.state).toBe("failed");
+    expect(row.state).toBe("archive_failed");
     expect(row.provisionError).toContain("nc down");
   });
 });

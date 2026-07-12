@@ -392,8 +392,14 @@ export default function AuditPage() {
       <div className="toolbar">
         <select
           aria-label="Filter by kind"
-          className="dp-input"
-          style={{ width: "auto" }}
+          className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+          style={{
+            width: "auto",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
           value={kind}
           onChange={(e) => setKind(e.target.value)}
         >
@@ -409,8 +415,14 @@ export default function AuditPage() {
             pre-upgrade unattributed rows by design. */}
         <select
           aria-label="Filter by actor"
-          className="dp-input"
-          style={{ width: "auto" }}
+          className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+          style={{
+            width: "auto",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
           value={actorType}
           onChange={(e) => setActorType(e.target.value)}
         >

@@ -58,6 +58,14 @@
   --color-system-yellow: #ffcc00;
   --color-system-green: #34c759;
   --color-system-blue: #007aff;
+  /* Text-on-tint variant of system-red — WARP-633. The shared inline-error
+     pattern (`text-system-red` over its own `bg-system-red/10` tint) reads
+     the vivid --color-system-red as BODY TEXT, which only computes ~3.1:1
+     against the tint (and ~3.55:1 against plain white) — under WCAG AA's
+     4.5:1 floor. red-700 clears it with margin (5.1–6.5:1 across tinted +
+     base surfaces) without touching the vivid red used for icons, dots,
+     borders, and badges elsewhere. See the compound-selector override below. */
+  --color-system-red-text: #b91c1c;
 
   /* Material backgrounds */
   --color-sidebar-bg: rgba(242, 242, 247, 0.82);
@@ -147,6 +155,11 @@
   --color-system-yellow: #ffd60a;
   --color-system-green: #30d158;
   --color-system-blue: #0a84ff;
+  /* Text-on-tint variant — WARP-633. The dark system-red is borderline on
+     its own tint over the dark secondary surface (~4.50:1 — right at the
+     AA floor, no margin). Lightened to 6.0–7.5:1 across tinted + base
+     dark surfaces. */
+  --color-system-red-text: #ff6961;
 
   /* Material backgrounds */
   --color-sidebar-bg: rgba(28, 28, 30, 0.82);
@@ -212,6 +225,22 @@
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background-color: var(--color-label-secondary);
+}
+
+/* Accessible inline-error text — WARP-633.
+   `text-system-red` + `bg-system-red/10` is the shared inline-error /
+   status-pill pattern (10+ setup-wizard steps plus dashboard forms,
+   settings, and network panels). Reading the vivid --color-system-red as
+   BODY TEXT on its own tint only computes ~3.1:1 (light) — under WCAG
+   AA's 4.5:1 floor. This compound-selector override repoints the TEXT
+   color only when both utilities land on the same element, via the
+   --color-system-red-text token (≥4.5:1 in both themes, see :root/.dark
+   above) — icons, borders, and other bg-system-red/text-system-red
+   pairings that don't combine these two exact classes are untouched.
+   Declared unlayered (matches .custom-scrollbar above) so it beats the
+   Tailwind `@layer utilities` cascade regardless of selector specificity. */
+.text-system-red.bg-system-red\/10 {
+  color: var(--color-system-red-text);
 }
 
 /* ============================================================
@@ -367,11 +396,14 @@
     color: var(--color-label-primary);
   }
 
-  /* Primary button */
+  /* Primary button. `disabled:` lives here (not per-call-site) so every
+     disabled primary button — wizard included — reads as inert instead of
+     still looking clickable. WARP-634. */
   .dp-btn-primary {
     @apply inline-flex items-center justify-center gap-2 px-5 py-2.5
            bg-accent text-accent-foreground font-medium rounded-sm
            hover:opacity-85 active:scale-[0.97] active:opacity-70
+           disabled:opacity-60 disabled:pointer-events-none
            transition-all duration-200 ease-smooth
            min-h-[44px];
   }

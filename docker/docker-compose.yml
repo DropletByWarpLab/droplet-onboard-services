@@ -126,9 +126,10 @@ services:
       # bundled OpenSSL must enter FIPS in lockstep with the other Node services
       # so the orchestrator's /_/fips probe reflects a consistent posture. All
       # empty/false by default → byte-identical to today; setup.sh --fips fills
-      # them from the knob.
+      # them from the knob. No OPENSSL_MODULES: node resolves fips.so from its
+      # own baked MODULESDIR copy (WARP-1063 — a process-wide module path makes
+      # multi-libcrypto processes fight over one fips.so; openssl#25553).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
-      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
       - NODE_OPTIONS=${NODE_OPTIONS:-}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     # WARP-535 (OTA foundations): liveness probe so the update agent's
@@ -257,42 +258,44 @@ services:
       - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # WARP-318: FIPS 140-3 per-customer activation, keyed on the single
       # DROPLET_FIPS_MODE knob. Default OFF → the `:-` defaults below render
-      # today's exact byte-identical posture (empty MODULES/NODE_OPTIONS,
+      # today's exact byte-identical posture (empty NODE_OPTIONS,
       # DROPLET_FIPS_REQUIRED=false, OPENSSL_CONF=/etc/ssl/openssl.cnf). When
       # setup.sh --fips writes OPENSSL_CONF=/etc/ssl/openssl-fips.cnf +
-      # OPENSSL_MODULES + NODE_OPTIONS=--openssl-shared-config +
-      # DROPLET_FIPS_REQUIRED=true into .env, the validated provider activates
-      # WITHOUT a rebuild (Node needs all three vars together — its bundled
-      # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
+      # NODE_OPTIONS=--openssl-shared-config + DROPLET_FIPS_REQUIRED=true into
+      # .env, the validated provider activates WITHOUT a rebuild.
       #
-      # ┌─ Postgres-under-FIPS (P1011) — VERIFIED behavior today (WARP-317) ───┐
-      # │ Under `setup.sh --fips` the interpolations below DO hand this        │
-      # │ container the FIPS config (OPENSSL_CONF=/etc/ssl/openssl-fips.cnf    │
-      # │ + MODULES + NODE_OPTIONS + REQUIRED=true): the provider loads and    │
-      # │ enforces (the boot self-test passes, MD5 is refused). But the        │
-      # │ orchestrator then CANNOT complete startup: Prisma's `$connect()`     │
-      # │ (before the API server ever listens) throws P1011 "library has no    │
-      # │ ciphers" (OpenSSL 0A0000A1). WARP-317's fips-stack smoke test        │
-      # │ surfaced this in CI and asserts it as the documented exception.      │
+      # ┌─ Prisma-under-FIPS (P1011) — root-caused + fixed by WARP-1063 ───────┐
+      # │ WARP-317's smoke test surfaced that this container could not boot    │
+      # │ FIPS-on: Prisma's `$connect()` threw P1011 "library has no ciphers"  │
+      # │ (0A0000A1) while the boot self-test read fips:true. Root cause: the  │
+      # │ orchestrator hosts TWO libcrypto instances — Node's bundled OpenSSL  │
+      # │ and the Prisma query engine's system libssl — and the FIPS module    │
+      # │ cannot be initialized by two libcryptos resolving the SAME fips.so  │
+      # │ file (upstream limitation, openssl#25553: the second activation      │
+      # │ fails with `common libcrypto routines::init fail`). The old          │
+      # │ process-wide OPENSSL_MODULES forced exactly that collision: Node     │
+      # │ activated first and won; Prisma's libssl lost, and under the         │
+      # │ config's fips=yes property pin a provider-less libcrypto has ZERO    │
+      # │ fetchable algorithms — its default SSL_CTX comes up empty and TLS-   │
+      # │ client construction dies before any peer contact. (ai-gateway hit    │
+      # │ the same wall: pyca cryptography's static OpenSSL vs the system      │
+      # │ libssl httpx uses.) The old self-tests couldn't see it: getFips()/   │
+      # │ _fips_enabled mirror the property pin, and "MD5 refused" is also     │
+      # │ true of a dead provider.                                             │
       # │                                                                      │
-      # │ ROOT CAUSE is NOT the plaintext db hop — it is the shared FIPS        │
-      # │ config: docker/openssl-fips.cnf activates only fips+base and pins    │
-      # │ default_properties=fips=yes, which leaves a DEFAULT client SSL_CTX   │
-      # │ with ZERO usable ciphersuites, so quaint/libpq fails constructing    │
-      # │ the TLS client before it even reaches `db`. (ai-gateway hits the     │
-      # │ same wall in httpx — see its LIBRARY_HAS_NO_CIPHERS at boot.) A      │
-      # │ correct FIPS config needs an ssl_conf/system_default section that    │
-      # │ keeps the FIPS-approved suites available to the default context;     │
-      # │ that fix is WARP-967/WARP-318 provider-config territory, NOT this    │
-      # │ ticket, and NOT a DATABASE_URL edit (WARP-233 owns that line).       │
-      # │                                                                      │
-      # │ Once the config is fixed, set EXPECT_FIPS_STACK_BOOTS=1 in the        │
-      # │ fips-stack test to assert the full FIPS-enforcing boot. The separate │
-      # │ WARP-233 clash (Postgres TLS + sslmode=require) still lands on top    │
-      # │ of that and keeps decision (A) `?sslmode=disable` on the FIPS path.  │
+      # │ The WARP-1063 fix: no process-wide OPENSSL_MODULES (removed below +  │
+      # │ from setup.sh); each image installs a dedicated fips.so COPY into    │
+      # │ every bundled runtime's own baked MODULESDIR so each libcrypto       │
+      # │ activates its own module (docker/fips/install-fips-provider.sh);     │
+      # │ docker/openssl-fips.cnf pins an explicit FIPS-approved TLS posture   │
+      # │ (ssl_conf/system_default); and both boot self-tests now positively   │
+      # │ probe an approved digest so a dead provider fails the boot with the  │
+      # │ real diagnosis. tests/integration/fips-stack.test.sh asserts the     │
+      # │ full FIPS-enforcing boot. The separate WARP-233 clash (Postgres TLS  │
+      # │ + sslmode=require) still lands on top of this and keeps decision (A) │
+      # │ `?sslmode=disable` on the FIPS path.                                 │
       # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
-      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
       - NODE_OPTIONS=${NODE_OPTIONS:-}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
       # WARP-519: rag-eval HTTP trigger server. The orchestrator's
@@ -558,10 +561,12 @@ services:
       # orchestrator documents. Pin the stock config until WARP-318
       # flips activation deliberately.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
-      # WARP-318: the two extra vars Node's bundled OpenSSL needs to enter FIPS
-      # (system ossl-modules dir + shared-config opt-in). Empty by default →
-      # byte-identical to today; setup.sh --fips populates them from the knob.
-      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
+      # WARP-318: the extra var Node's bundled OpenSSL needs to enter FIPS
+      # (shared-config opt-in). Empty by default → byte-identical to today;
+      # setup.sh --fips populates it from the knob. No OPENSSL_MODULES: each
+      # libcrypto in this container (node bundled + Prisma's system libssl)
+      # resolves fips.so from its OWN baked MODULESDIR copy (WARP-1063;
+      # openssl#25553 — one shared module file breaks the second initializer).
       - NODE_OPTIONS=${NODE_OPTIONS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -585,7 +590,15 @@ services:
   # Direct host publish would collide with routing (host-net :8080) and
   # bypass auth/HTTPS the gateway enforces.
   nextcloud:
-    image: nextcloud:29-apache
+    # WARP-1254: digest-pinned so the appliance never silently drifts onto a
+    # newer Nextcloud/groupfolders point release across an image re-pull — the
+    # exact groupfolders version bundled server-side is otherwise not
+    # reproducible. Validated live against this digest in
+    # docs/spikes/WARP-1254-groupfolders-spike.md (Nextcloud 29.0.16 build 1,
+    # groupfolders 17.0.16). Bumping this pin (e.g. for an NC security patch)
+    # should be a deliberate, reviewed change — re-run that spike's curl
+    # checks against the new digest before rolling it out.
+    image: nextcloud:29-apache@sha256:a7fbfcd4759bdd19b8fb8b1044b47ee3a9471d2e2c8bc68d56a2e671f86cebd2
     # WARP-234: the zz-redis-tls.config.php file-mount makes Docker pre-create
     # config/ as root:root (www-data cannot write config.php -> install fails)
     # AND, under the TLS-only Postgres (WARP-233, PGSSLMODE=require), the
@@ -962,13 +975,12 @@ services:
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
-      # false default → byte-identical to today. NOTE: like the orchestrator,
-      # this container opens a Prisma/libpq connection to `db`, so under
-      # `setup.sh --fips` it hits the SAME shared-FIPS-config no-ciphers wall
-      # (P1011 "library has no ciphers" at TLS-client construction — see the
-      # orchestrator's Postgres-under-FIPS box; root cause is docker/
-      # openssl-fips.cnf offering no default-context ciphers, WARP-967/318, not
-      # this line). DATABASE_URL is left exactly as-is (WARP-233 owns it).
+      # false default → byte-identical to today. WARP-1063: this container
+      # carries two libcrypto instances (pyca cryptography's static OpenSSL +
+      # the system libssl its Prisma/libpq + httpx paths use); each activates
+      # its OWN fips.so copy from its own baked MODULESDIR (see the
+      # orchestrator's Prisma-under-FIPS box for the openssl#25553 story).
+      # DATABASE_URL is left exactly as-is (WARP-233 owns it).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:
@@ -1524,11 +1536,27 @@ services:
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
+      # WARP-1057 — DSP restart path. POST /voice/restart-processor execs
+      # the vendor xvf_host CLI (`REBOOT 1` — the host watchdog's exact
+      # heal) over raw USB. The whole host /usr/local/bin is bound
+      # read-only rather than the single binary: a single-file bind of a
+      # not-yet-installed tool would materialise a root-owned DIRECTORY
+      # at the host path (breaking a later install AND the watchdog's -x
+      # probe), while the directory bind is a live view — install the
+      # tool on the host and the endpoint starts working, no recreate.
+      # /dev/bus/usb is the same live-bind pattern as /dev/snd above so
+      # the re-enumerated device node stays reachable.
+      - /usr/local/bin:/host/usr-local-bin:ro
+      - /dev/bus/usb:/dev/bus/usb
     # ALSA sound-class char major is 116; the wildcard minor covers ANY
     # card, including one that enumerates after container-create (which the
     # old per-minor `devices:` rule could not). read / write / mknod.
+    # 189 is the usb_device char class — xvf_host's control path to the
+    # XVF3800 (WARP-1057); wildcard minor for the same late-enumeration
+    # reason (a DSP reboot re-enumerates by design).
     device_cgroup_rules:
       - "c 116:* rmw"
+      - "c 189:* rmw"
     # Pairs with the device-cgroup grant above, matching the oled-display
     # scoped-device pattern: the cgroup rule is the real access control;
     # this just stops a setuid binary inside the container from escalating
@@ -1568,6 +1596,12 @@ services:
       # once audio returns (e.g. after an xvf_host DSP reboot).
       - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
       - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
+      # WARP-1057 — recovery half of the flatline watchdog above. The
+      # xvf_host binary as seen INSIDE the container (default resolves
+      # into the /host/usr-local-bin read-only bind); timeout is the
+      # subprocess deadline for the REBOOT control write.
+      - XVF_HOST_PATH=${XVF_HOST_PATH:-/host/usr-local-bin/xvf_host}
+      - XVF_RESTART_TIMEOUT_S=${XVF_RESTART_TIMEOUT_S:-}
       # WARP-1055 — where the applied mic calibration persists (JSON on
       # the voice-calibration named volume above). The dashboard wizard
       # writes it via POST /voice/calibration; startup re-applies the

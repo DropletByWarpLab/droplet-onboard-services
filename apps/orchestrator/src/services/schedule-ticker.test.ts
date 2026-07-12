@@ -74,7 +74,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -100,7 +99,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -125,7 +123,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -150,7 +147,6 @@ describe("schedule-ticker", () => {
     const device = {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     };
@@ -176,7 +172,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: false,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -202,7 +197,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: true,
       lastAppliedBlocked: true, // already applied — no dispatch expected
       groups: [],
     });
@@ -223,7 +217,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: false,
-      isBlocked: false,
       lastAppliedBlocked: null,
       groups: [],
     });
@@ -244,7 +237,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: false, // prior state says unblocked; desired is now blocked
       groups: [],
     });
@@ -270,7 +262,6 @@ describe("schedule-ticker", () => {
     prisma._stores.devices.set("AA:BB:CC:DD:EE:FF", {
       mac: "AA:BB:CC:DD:EE:FF",
       manualBlock: true,
-      isBlocked: false,
       lastAppliedBlocked: false, // prior state: unblocked — should stay
       groups: [],
     });

@@ -16,6 +16,10 @@ vi.mock("../config.js", () => ({
     MQTT_BROKER: "mqtt://localhost:1883",
     AI_GATEWAY_URL: "http://localhost:8000",
     NEXTCLOUD_URL: "http://localhost:8080",
+    // departments.ts (registered by createApp) derefs this at module scope to
+    // build RESERVED_NAMES; the real config zod-defaults it, so the mock must
+    // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     PORT: 3000,
     NODE_ENV: "test",
     FILES_ROOT: ".data/files",

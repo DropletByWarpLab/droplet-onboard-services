@@ -61,8 +61,8 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
       {/* Current temperature */}
       {currentTemp != null && (
         <div className="text-center">
-          <span className="type-caption-1 text-label-tertiary">Current</span>
-          <p className="type-large-title text-label-primary">
+          <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Current</span>
+          <p className="type-large-title" style={{ color: "var(--text)" }}>
             {currentTemp.toFixed(1)}°C
           </p>
         </div>
@@ -74,20 +74,20 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
           <button
             onClick={() => adjustTemp(-0.5)}
             aria-label="Lower target temperature by 0.5°C"
-            className="w-10 h-10 rounded-full bg-surface-secondary flex items-center justify-center
-              hover:bg-surface-tertiary transition-colors"
+            className="w-10 h-10 rounded-full flex items-center justify-center
+              transition-colors bg-[var(--inset)] hover:bg-[var(--hover)]"
           >
             <Minus size={18} aria-hidden="true" />
           </button>
           <div className="text-center min-w-[80px]">
-            <span className="type-caption-1 text-label-tertiary">Target</span>
-            <p className="type-title-1 text-accent">{targetTemp.toFixed(1)}°C</p>
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>Target</span>
+            <p className="type-title-1" style={{ color: "var(--brand)" }}>{targetTemp.toFixed(1)}°C</p>
           </div>
           <button
             onClick={() => adjustTemp(0.5)}
             aria-label="Raise target temperature by 0.5°C"
-            className="w-10 h-10 rounded-full bg-surface-secondary flex items-center justify-center
-              hover:bg-surface-tertiary transition-colors"
+            className="w-10 h-10 rounded-full flex items-center justify-center
+              transition-colors bg-[var(--inset)] hover:bg-[var(--hover)]"
           >
             <Plus size={18} aria-hidden="true" />
           </button>
@@ -98,7 +98,7 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
       <div
         role="tablist"
         aria-label="Climate mode"
-        className="flex gap-1 bg-surface-secondary rounded-lg p-1"
+        className="flex gap-1 rounded-lg p-1 bg-[var(--inset)]"
       >
         {MODES.map((mode) => {
           const active = hvacMode === mode;
@@ -114,11 +114,11 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
               className={`
                 flex-1 py-1.5 px-2 rounded-md type-caption-1 capitalize text-center
                 transition-colors duration-150
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]
                 ${
                   active
-                    ? "bg-accent text-white font-medium cursor-default"
-                    : "text-label-secondary hover:bg-surface-tertiary hover:text-label-primary"
+                    ? "font-medium cursor-default bg-[var(--brand-subtle)] text-[var(--brand)]"
+                    : "text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
                 }
               `}
             >

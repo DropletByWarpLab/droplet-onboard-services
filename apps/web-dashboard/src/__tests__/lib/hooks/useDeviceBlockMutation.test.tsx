@@ -36,7 +36,8 @@ function makeDevice(
     lastSeen: new Date().toISOString(),
     online: true,
     isBlocked: false,
-    manualBlock: null,
+    manualBlock: false,
+    lastAppliedBlocked: null,
     groups: [],
     presenceDays: [],
     ...partial,
@@ -112,13 +113,17 @@ describe("useDeviceBlockMutation — optimistic flip + rollback", () => {
       await Promise.resolve();
     });
 
-    expect(
-      (
-        result.current.swr.cache.get(key)?.data as
-          | { device: EnrichedNetworkDevice }
-          | undefined
-      )?.device.isBlocked,
-    ).toBe(true);
+    const optimisticDevice = (
+      result.current.swr.cache.get(key)?.data as
+        | { device: EnrichedNetworkDevice }
+        | undefined
+    )?.device;
+    // WARP-106: the optimistic object must be self-consistent with the
+    // server's computed `isBlocked = lastAppliedBlocked ?? manualBlock` —
+    // all three flip together.
+    expect(optimisticDevice?.isBlocked).toBe(true);
+    expect(optimisticDevice?.manualBlock).toBe(true);
+    expect(optimisticDevice?.lastAppliedBlocked).toBe(true);
 
     // Finish the request so the test cleans up.
     await act(async () => {

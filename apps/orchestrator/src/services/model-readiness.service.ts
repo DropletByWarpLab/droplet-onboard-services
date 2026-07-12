@@ -149,6 +149,110 @@ export async function warmDefaultModel(): Promise<void> {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// WARP-903 — cold-model probe. `/api/llm/chat` (streaming) asks "is
+// the selected model already resident in memory?" right before the
+// agent loop so it can emit a `model_loading` SSE event instead of
+// letting the customer stare at a silent 30-60 s first-token gap.
+// Lifecycle observability only — chat completions go DIRECT to Ollama
+// via the ai-gateway and must never route through ollama-manager's
+// /proxy (same posture as the pull/warm logic above).
+// ──────────────────────────────────────────────────────────────────
+
+/** Shared budget for the two lifecycle GETs. Local Ollama answers both
+ *  in single-digit milliseconds; a wedged Ollama costs AT MOST this
+ *  much added latency on the turn — never a failure (spec: 1-2 s). */
+const COLD_PROBE_BUDGET_MS = 1500;
+
+export interface ColdModelStatus {
+  /** The model name exactly as the caller requested (echoed on the wire). */
+  model: string;
+  /** Decimal gigabytes on disk (one decimal), or null when unreported. */
+  sizeGb: number | null;
+}
+
+/** Ollama canonicalises un-tagged names to `<name>:latest`. */
+function canonicalModelName(name: string): string {
+  return name.includes(":") ? name : `${name}:latest`;
+}
+
+/**
+ * One-shot coldness check for `model` against Ollama's documented
+ * lifecycle endpoints — GET /api/ps (models loaded in memory) + GET
+ * /api/tags (models installed on disk, with sizes). Returns a
+ * ColdModelStatus when the model is INSTALLED but NOT LOADED (a real
+ * cold load is about to happen); null in every other case:
+ *
+ *   - already loaded (warm)            → null
+ *   - unknown to Ollama                → null (cloud-provider model, or
+ *     a not-yet-pulled name — either way a "loading" claim the stream
+ *     could never honestly clear)
+ *   - probe error / non-2xx / timeout  → null (the probe is an
+ *     optimization, never a dependency — WARP-903 AC)
+ *
+ * NEVER throws.
+ */
+export async function probeColdModel(
+  model: string,
+): Promise<ColdModelStatus | null> {
+  try {
+    const signal = AbortSignal.timeout(COLD_PROBE_BUDGET_MS);
+    // allSettled, not all: if ONE fetch rejects (e.g. a socket reset on
+    // /api/ps) while the OTHER resolves 2xx, Promise.all would reject and we
+    // would return null WITHOUT ever consuming the resolved sibling's body —
+    // under undici an undrained body can pin the socket until GC. allSettled
+    // lets us reach and drain that fulfilled body below.
+    const [psSettled, tagsSettled] = await Promise.allSettled([
+      fetch(`${OLLAMA_URL}/api/ps`, { signal }),
+      fetch(`${OLLAMA_URL}/api/tags`, { signal }),
+    ]);
+    const psResp = psSettled.status === "fulfilled" ? psSettled.value : null;
+    const tagsResp =
+      tagsSettled.status === "fulfilled" ? tagsSettled.value : null;
+    if (!psResp?.ok || !tagsResp?.ok) {
+      // Not fully usable — a rejection (socket reset / unreachable) or a
+      // non-2xx on either endpoint. Drain every body that DID resolve (a
+      // rejected fetch has none), then claim nothing: without a good /api/ps
+      // we cannot know loadedness. Same drain as the happy path's .json().
+      await Promise.all([
+        psResp?.json().catch(() => undefined),
+        tagsResp?.json().catch(() => undefined),
+      ]);
+      logger.debug(
+        {
+          model,
+          psStatus: psResp?.status ?? "unreachable",
+          tagsStatus: tagsResp?.status ?? "unreachable",
+        },
+        "cold_probe_skipped (Ollama non-2xx or unreachable)",
+      );
+      return null;
+    }
+    const ps = (await psResp.json()) as OllamaTagsResponse;
+    const tags = (await tagsResp.json()) as OllamaTagsResponse;
+    const wanted = canonicalModelName(model);
+    const loaded = new Set(
+      (ps.models ?? []).map((m) => canonicalModelName(m.name)),
+    );
+    if (loaded.has(wanted)) return null; // warm — nothing to announce
+    const installed = (tags.models ?? []).find(
+      (m) => canonicalModelName(m.name) === wanted,
+    );
+    if (!installed) return null; // cloud model / not pulled — not ours to claim
+    const sizeGb =
+      typeof installed.size === "number" && installed.size > 0
+        ? Math.round(installed.size / 1e8) / 10
+        : null;
+    return { model, sizeGb };
+  } catch (err) {
+    logger.debug(
+      { model, err: (err as Error).message },
+      "cold_probe_failed (non-fatal — chat proceeds without model_loading)",
+    );
+    return null;
+  }
+}
+
 /**
  * Idempotent: check whether `LLM_MODEL` is already pulled; if not,
  * kick off a background pull and return immediately. Safe to call on

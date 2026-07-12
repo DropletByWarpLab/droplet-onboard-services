@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator
+from typing import NamedTuple
 
 from auth.byok import get_api_key
 from middleware.off_lan_gating import check_off_lan_gate
@@ -50,6 +51,21 @@ PROVIDER_PREFIXES = {
     "anthropic": ["claude"],
     "openai": ["gpt", "o1", "o3"],
 }
+
+
+class ModelListResult(NamedTuple):
+    """Result of the list_all_models provider fan-out (WARP-1284).
+
+    `degraded_providers` names the providers whose list_models() raised.
+    Before this existed, a dead Ollama produced the same bare empty list as
+    a genuine first-boot model pull, so the setup wizard showed "your model
+    is still downloading" for an unreachable AI service. Unkeyed cloud
+    providers return [] rather than raising, so a healthy single-box with
+    no BYOK keys reports an empty degraded list.
+    """
+
+    models: list[ModelInfo]
+    degraded_providers: list[str]
 
 
 class ProviderRouter:
@@ -111,19 +127,28 @@ class ProviderRouter:
         # Default to Ollama (local-first)
         return self.ollama
 
-    async def list_all_models(self, user_id: str | None = None) -> list[ModelInfo]:
-        """Query all providers for available models concurrently."""
+    async def list_all_models(self, user_id: str | None = None) -> ModelListResult:
+        """Query all providers for available models concurrently.
+
+        WARP-1284: per-provider failures are no longer silently swallowed
+        into a shorter list — the survivors' models still return, and the
+        failed providers are NAMED in `degraded_providers` so callers
+        (/ai/models → orchestrator → setup wizard) can tell "provider down"
+        apart from "provider has no models yet".
+        """
         await self.refresh_keys(user_id=user_id)
         tasks = [provider.list_models() for provider in self._providers.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         models: list[ModelInfo] = []
+        degraded_providers: list[str] = []
         for provider_name, result in zip(self._providers.keys(), results):
             if isinstance(result, Exception):
                 logger.warning("Failed to list models from %s: %s", provider_name, result)
+                degraded_providers.append(provider_name)
             else:
                 models.extend(result)
-        return models
+        return ModelListResult(models=models, degraded_providers=degraded_providers)
 
     async def chat(
         self, request: ChatRequest, user_id: str | None = None
@@ -138,6 +163,10 @@ class ProviderRouter:
         this turn so a cloud request uses the requesting user's key, not a
         device-global one.
         """
+        # Tool-call/tool-result message-contract integrity is enforced at
+        # ChatRequest construction (schemas.py `_validate_tool_message_integrity`,
+        # WARP-176), which covers the HTTP, gRPC and session paths alike — so no
+        # redundant re-validation is done here.
         await self.refresh_keys(user_id=user_id)
         provider = self.resolve_provider(request.model, request.provider)
 

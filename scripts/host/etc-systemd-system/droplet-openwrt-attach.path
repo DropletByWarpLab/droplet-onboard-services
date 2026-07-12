@@ -1,0 +1,47 @@
+[Unit]
+# WARP-843 — re-apply the single-box AP config whenever its env file changes.
+#
+# The setup wizard's Home Wi-Fi save runs droplet-set-hostapd.sh INSIDE the
+# device-bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges).
+# That unprivileged invocation writes the customer SSID/PSK into the bridge's
+# own StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env, droplet-owned)
+# — which sidesteps the read-only /etc namespace entirely (the 422/EROFS the
+# save used to hit) — but can NEVER run the privileged
+# `systemctl restart droplet-openwrt-attach.service` itself. The previous
+# polkit-rule route (PR #551) depended on polkitd JS-rules support the box
+# lacks, so the re-apply never fired and the save appeared to do nothing.
+#
+# THIS unit closes the loop with zero grants to the droplet user: root-owned
+# systemd watches that droplet-writable creds file and starts the reapply relay
+# on every change. The creds file is DELIBERATELY the bridge StateDirectory and
+# NOT root-owned /etc/default: the root attach service EnvironmentFile-s
+# /etc/default (operator/hardware config only), and a droplet-writable file must
+# never be a root EnvironmentFile — root instead parses only the whitelisted
+# DROPLET_AP_*/DROPLET_GUEST_* keys out of the creds file, with validation.
+# The relay restarts droplet-openwrt-attach.service, which regenerates
+# /etc/hostapd.conf from the env file and — via its HOSTAPD_CHANGED gate —
+# respawns hostapd ONLY when the conf actually changed. An identical re-submit
+# therefore still causes no AP reload (WARP-843 AC4).
+#
+# Why the relay (droplet-openwrt-attach-reapply.service) instead of pointing
+# Unit= straight at droplet-openwrt-attach.service: the attach service is a
+# Type=oneshot with RemainAfterExit=yes, so it sits "active" from boot onward —
+# a path-unit *start* of an already-active unit is a no-op and would never
+# re-run ExecStart. The relay is a plain oneshot (inactive between runs), so
+# every trigger really executes, and its ExecStart performs the *restart* the
+# attach service needs.
+#
+# Repo-tracked at scripts/host/etc-systemd-system/ and installed + enabled by
+# scripts/lib/single-box.sh (setup.sh --single-box) — never hand-placed on a
+# box (architecture-guard rule 20).
+Description=Watch the droplet-openwrt-attach env file and re-apply AP config on change (WARP-843)
+
+[Path]
+# PathModified fires on an in-place rewrite as well as on an atomic
+# replace-by-rename (the bridge owns its StateDirectory, so the host-script
+# write uses mktemp+mv there), so every customer Wi-Fi save re-applies.
+PathModified=/var/lib/droplet-bridge/openwrt-attach.env
+Unit=droplet-openwrt-attach-reapply.service
+
+[Install]
+WantedBy=multi-user.target
