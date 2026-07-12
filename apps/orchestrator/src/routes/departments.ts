@@ -742,6 +742,9 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
   // OR a `manager` of the department itself OR its PARENT department
   // (inherited-manager rule, ADR-029 2026-07-11 amendment). Any other
   // authenticated caller (including a plain department member) is 403.
+  // WARP-1295: HOUSEHOLD departments reject adds with 400 — household
+  // membership is role-driven (seeded/backfilled), so it must be immutable
+  // across all three verbs, matching the WARP-1263 PATCH guard below.
   router.post(
     "/departments/:id/members",
     async (req: Request, res: Response, next: NextFunction) => {
@@ -760,6 +763,21 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           return res.status(403).json({
             error: "Forbidden: requires owner/admin or manager of this department",
             code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        // WARP-1295: HOUSEHOLD department membership is immutable. Mirrors the
+        // WARP-1263 PATCH guard so the role-driven household membership cannot
+        // be mutated via any verb — without this, a delete-then-re-add on the
+        // household bypasses the rights-immutability invariant.
+        const dept = await prisma.department.findUnique({
+          where: { id: departmentId },
+        });
+        if (dept?.kind === "HOUSEHOLD") {
+          return res.status(400).json({
+            error:
+              "Cannot add members to the Household department (membership is role-driven)",
+            code: "HOUSEHOLD_MEMBERSHIP_IMMUTABLE",
           });
         }
 
@@ -917,6 +935,9 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
   // Remove a member. Same authz as POST /members. Removing the last
   // `manager` of a department (self-removal or otherwise) returns 409 —
   // mirrors the WARP-480 last-owner invariant in routes/people.ts.
+  // WARP-1295: HOUSEHOLD departments reject removals with 400 — the other
+  // half of the delete-then-re-add bypass (see the POST/PATCH guards above);
+  // household membership is role-driven and immutable across all verbs.
   router.delete(
     "/departments/:id/members/:userId",
     async (req: Request, res: Response, next: NextFunction) => {
@@ -937,6 +958,20 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           return res.status(403).json({
             error: "Forbidden: requires owner/admin or manager of this department",
             code: "NOT_DEPARTMENT_MANAGER",
+          });
+        }
+
+        // WARP-1295: HOUSEHOLD department membership is immutable (mirrors the
+        // WARP-1263 PATCH guard). Removing a role-driven household membership is
+        // the other half of the delete-then-re-add bypass, so reject it too.
+        const dept = await prisma.department.findUnique({
+          where: { id: departmentId },
+        });
+        if (dept?.kind === "HOUSEHOLD") {
+          return res.status(400).json({
+            error:
+              "Cannot remove members from the Household department (membership is role-driven)",
+            code: "HOUSEHOLD_MEMBERSHIP_IMMUTABLE",
           });
         }
 
