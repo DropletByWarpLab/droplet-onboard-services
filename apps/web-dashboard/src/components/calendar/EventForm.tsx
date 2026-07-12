@@ -260,7 +260,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               value={location}
               onChange={setLocation}
               disabled={externallySynced}
-              className="bg-[var(--surface)] border border-[var(--border)] rounded-[var(--radius-input)] text-[color:var(--text)] outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)] px-3 py-2"
+              className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-[var(--radius-input)] text-[color:var(--text)] outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)] px-3 py-2"
               maxLength={500}
               placeholder="Location"
             />
