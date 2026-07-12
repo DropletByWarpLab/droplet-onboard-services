@@ -2086,6 +2086,33 @@ model ActivityDailyRoot {
   createdAt         DateTime @default(now())
 }
 
+/// WARP-263 — per-device hardware inventory baseline (NIST SSDF
+/// supply-chain transparency). Singleton row (single-appliance
+/// assumption, same `id = "singleton"` pattern as `ApplianceSetup`)
+/// holding the last-known-good hardware component list (SoM/baseboard,
+/// RAM SKU, disk model+serial, USB/PCI peripherals — see
+/// `hardware-inventory.collector.ts`) as compared by
+/// `hardware-bom.service.ts`. `components` is the canonical snapshot;
+/// `componentsHash` is `hashComponents(canonicalizeComponents(components))`
+/// for a cheap equality check without re-parsing JSON on every boot.
+/// `signature`/`algorithm` are `signWithDeviceKey(canonical)` over the
+/// same canonical bytes — the WARP-230 device-identity TPM key, so this
+/// row can't be silently rewritten without invalidating the signature.
+/// On divergence the service overwrites this row with the new snapshot
+/// AND emits a `hardware_changed` ActivityRow (kind `system`) — this
+/// table always holds "current committed baseline"; the change history
+/// lives in the signed activity chain, not here.
+model HardwareBaseline {
+  // Fixed singleton key — one appliance, one hardware baseline.
+  id             String   @id @default("singleton")
+  components     Json
+  componentsHash String
+  signature      String
+  algorithm      String
+  capturedAt     DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+}
+
 /// WARP-181: who performed the action behind an ActivityRow. `user` =
 /// an authenticated household member (actorId REQUIRED — recorder
 /// enforces it); `ai` = the agent loop / tool dispatch (actorId is the
