@@ -76,7 +76,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_BASE="${REPO_ROOT}/docker/docker-compose.yml"
 COMPOSE_OVERRIDE="${REPO_ROOT}/docker/docker-compose.test.override.yml"
+COMPOSE_MACOS_OVERRIDE="${REPO_ROOT}/docker/docker-compose.test.macos.yml"
+HOST_OS="$(uname -s)"
 COMPOSE=(docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}")
+
+# WARP-226: on macOS, Docker Desktop's File Sharing allow-list rejects the base
+# Nextcloud /mnt/droplet bind-mount, so `compose up` dies before the stack is
+# healthy. Layer a Darwin-only override that drops that (test-irrelevant) mount.
+# Linux — CI runners and the Jetson appliance — is untouched; the mount stays.
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  COMPOSE+=(-f "${COMPOSE_MACOS_OVERRIDE}")
+fi
 
 # Services the integration suite touches. Listed explicitly so we
 # don't accidentally bring up frigate / switch / camera-discovery.
@@ -130,6 +140,10 @@ if ! docker info >/dev/null 2>&1; then
 fi
 if [[ ! -f "${COMPOSE_BASE}" ]] || [[ ! -f "${COMPOSE_OVERRIDE}" ]]; then
   err "Compose files missing — expected ${COMPOSE_BASE} and ${COMPOSE_OVERRIDE}"
+  exit 1
+fi
+if [[ "${HOST_OS}" == "Darwin" ]] && [[ ! -f "${COMPOSE_MACOS_OVERRIDE}" ]]; then
+  err "macOS Compose override missing — expected ${COMPOSE_MACOS_OVERRIDE}"
   exit 1
 fi
 
