@@ -52,6 +52,16 @@ jobs:
       # (docker-build.yml no longer needs this since it went one-image-per-
       # runner, but this job still builds the whole stack on one disk — the
       # GHCR layer cache below speeds up builds without shrinking them.)
+      #
+      # setup-e2e disk regression (2026-07-11): ~36GB post-clean only fits
+      # when the GHCR layer cache mostly hits. With a stale cache (source-only
+      # merge train — see the docker-build.yml push paths fix) or a PR that
+      # touches docker/fips/** / docker/openssl-fips.cnf (invalidates an early
+      # layer of EVERY image, e.g. PR #957), the multi-GB builder stages
+      # rebuild cold in the local BuildKit store and the job dies with
+      # "no space left on device" importing ai-gateway. The second rm batch
+      # reclaims another ~10-14GB of toolchains this job never uses so a
+      # cold full-stack build fits too.
       - name: Free disk space
         run: |
           set -eux
@@ -66,6 +76,20 @@ jobs:
             /usr/local/share/boost \
             "$AGENT_TOOLSDIRECTORY/Ruby" \
             "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo rm -rf \
+            /usr/local/.ghcup \
+            /usr/lib/jvm \
+            /usr/share/swift \
+            /usr/lib/google-cloud-sdk \
+            /usr/local/aws-cli \
+            /usr/local/aws-sam-cli \
+            /opt/microsoft \
+            /opt/az \
+            /usr/share/miniconda \
+            /usr/local/share/vcpkg \
+            /usr/local/lib/node_modules \
+            "$AGENT_TOOLSDIRECTORY/go" \
             || true
           sudo apt-get clean
           df -h /
