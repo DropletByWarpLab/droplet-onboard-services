@@ -274,17 +274,24 @@ export interface DocEditorSession {
 }
 
 // WARP-883 (ADR-027 WS-5) — Files spaces (My Files / shared Household).
-export type FileSpaceId = "personal" | "shared";
+// WARP-1261: extended with DB-driven departments/teams.
+export type FileSpaceId = string; // "personal", "shared", "dept:<uuid>"
 
 /** A browsable Files space as reported by GET /api/files/spaces. */
 export interface FileSpace {
   id: FileSpaceId;
-  /** Display name ("My Files" or the shared folder name, e.g. "Household"). */
+  /** Display name ("My Files", "Household", or department/team name). */
   name: string;
-  /** Whether the space exists for this user (drives switcher visibility). */
-  available: boolean;
-  /** Home-relative root path for the space ("/" or "/Household"). */
+  /** For departments/teams: the `dept:<uuid>` reference; for household: spaceRef='dept:<uuid>' for v2 routing. */
+  spaceRef?: string;
+  /** Home-relative root path for the space ("/" or mount point). */
   root: string;
+  /** The effective right the caller has in this space (personal→undefined, dept→'reader'|'contributor'|'manager'). */
+  right?: string;
+  /** Department kind: 'personal'|'household'|'department'|'team'. */
+  kind?: string;
+  /** Provision state (active, pending, failed, archiving, archived). */
+  state?: string;
 }
 
 export interface FileSpacesResponse {
