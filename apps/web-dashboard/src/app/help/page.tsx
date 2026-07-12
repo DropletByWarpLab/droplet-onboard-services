@@ -31,8 +31,8 @@ import { LifeBuoy } from "lucide-react";
  * wizard's steps use, so "Learn more" links in the setup flow deep-link
  * here cleanly (e.g. /help#internet, /help#cameras, etc.).
  *
- * Style discipline: only design tokens (dp-card, type-*, text-label-*,
- * bg-surface-*), no freelance colours or font sizes. Offline-first
+ * Style discipline: only design tokens (.card, .btn, type-*, indigo CSS
+ * vars), no freelance colours or font sizes. Offline-first
  * copy: no "connect to cloud", no "sync account" language anywhere.
  * The page is plain-text on purpose — no markdown library needed.
  */

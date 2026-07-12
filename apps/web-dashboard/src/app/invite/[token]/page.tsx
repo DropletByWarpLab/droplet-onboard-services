@@ -16,7 +16,7 @@
  * + display name are read-only — the admin pre-claimed them.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { Lock, User as UserIcon, Eye, EyeOff, ShieldOff } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
@@ -45,6 +45,11 @@ export default function InviteAcceptPage({ params }: PageProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-650: label/input associations for the invite-acceptance form.
+  const usernameId = useId();
+  const displayNameId = useId();
+  const passwordId = useId();
+  const confirmId = useId();
 
   const loadInvite = useCallback(async () => {
     setState({ kind: "loading" });
@@ -172,7 +177,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
 
         <div className="space-y-4">
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={usernameId} className="type-subheadline text-label-secondary block mb-1.5">
               Username
             </label>
             <div className="relative">
@@ -181,6 +186,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
               />
               <input
+                id={usernameId}
                 type="text"
                 value={info.username}
                 readOnly
@@ -192,10 +198,11 @@ export default function InviteAcceptPage({ params }: PageProps) {
 
           {info.displayName && (
             <div>
-              <label className="type-subheadline text-label-secondary block mb-1.5">
+              <label htmlFor={displayNameId} className="type-subheadline text-label-secondary block mb-1.5">
                 Display name
               </label>
               <input
+                id={displayNameId}
                 type="text"
                 value={info.displayName}
                 readOnly
@@ -206,7 +213,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
           )}
 
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={passwordId} className="type-subheadline text-label-secondary block mb-1.5">
               Choose a password
             </label>
             <div className="relative">
@@ -215,6 +222,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
               />
               <input
+                id={passwordId}
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -235,7 +243,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
           </div>
 
           <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={confirmId} className="type-subheadline text-label-secondary block mb-1.5">
               Confirm password
             </label>
             <div className="relative">
@@ -244,6 +252,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
               />
               <input
+                id={confirmId}
                 type={showPassword ? "text" : "password"}
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}

@@ -13,11 +13,11 @@
  *      shouldn't crash the poller.
  *   2. Firewall fetch failures are passed through to the reconciler as
  *      a `RouterError` — NOT caught and replaced with an empty list.
- *      This is load-bearing: `device-registry.reconcile` preserves each
- *      row's existing `isBlocked` when it sees a RouterError, rather
- *      than clearing it. Silently substituting `[]` would unblock every
- *      device the user intentionally blocked, just because the router
- *      hiccupped.
+ *      This is load-bearing (WARP-106): on a `RouterError` the reconciler
+ *      skips firewall drift detection entirely (there is no live state to
+ *      compare). Silently substituting `[]` would make the reconciler
+ *      "see" every blocked device as unblocked and log spurious drift
+ *      warnings against the ticker's desired state on every hiccup.
  *
  * The openwrt client exposes module-level functions (`fetchDhcpLeases`,
  * `fetchWirelessClients`, `fetchFirewallRules`) rather than a class. We
@@ -89,13 +89,14 @@ export function createDeviceReconcilePoller(
           logRouterError(log, err, "fetchWirelessClients failed; using empty list");
           return [] as OpenwrtWirelessClient[];
         }),
-        // Firewall: pass the RouterError through to the reconciler so
-        // `isBlocked` is preserved. See device-registry.service.ts §3.
+        // Firewall: pass the RouterError through to the reconciler so it
+        // skips drift detection this tick (no live state to compare
+        // against). See device-registry.service.ts §3 (WARP-106).
         openwrt
           .fetchFirewallRules()
           .then((rules) => toRejectRules(rules))
           .catch((err: unknown): FirewallRejectRule[] | RouterError => {
-            logRouterError(log, err, "fetchFirewallRules failed; preserving last isBlocked");
+            logRouterError(log, err, "fetchFirewallRules failed; skipping firewall drift detection this tick");
             if (err instanceof RouterError) return err;
             return RouterError.unknown("fetchFirewallRules failed", {
               label: "Firewall rules",

@@ -48,6 +48,8 @@ function makeDevice(overrides: Partial<EnrichedNetworkDevice> = {}): EnrichedNet
     firstSeen: new Date().toISOString(),
     lastSeen: new Date().toISOString(),
     isBlocked: false,
+    manualBlock: false,
+    lastAppliedBlocked: null,
     online: true,
     groups: [],
     presenceDays: [],

@@ -495,3 +495,149 @@ describe("reconcileDepartments — stuck-failed alert", () => {
     );
   });
 });
+
+// WARP-1257 CR (blocking): the reconciler must preserve the ORIGINAL intent
+// of a row whose NC-side operation failed partway. A transient NC error mid-
+// archive must NOT get retried down the provision path (which silently un-
+// archives the department and restores group access). The explicit-state,
+// never-guess rule (CLAUDE.md) is honoured with a distinct `archive_failed`
+// ProvisionState — the retry routes on that, never on an overloaded `failed`.
+describe("reconcileDepartments — intent-preserving archive retry (WARP-1257 CR)", () => {
+  it("retries a partially-failed archive down the archive path, never re-provisioning it", async () => {
+    // An operator archived this department; the reconciler picked it up in
+    // `archiving` state with its NC groups + folder still populated.
+    const d = dept({
+      state: "archiving",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 42,
+    });
+    const prisma = buildPrisma([d]);
+
+    // Tick 1: the folder delete hits a transient NC error partway through the
+    // archive (groups already removed, folder delete 5xx).
+    gfDeleteFolderMock.mockRejectedValueOnce(new Error("nc groupfolders 503"));
+    await reconcileDepartments(prisma as any);
+
+    // The row must retain its archive intent — it is NOT parked in the generic
+    // `failed`/`active` buckets the provision path would resurrect.
+    expect(prisma.deptRows.get(d.id)!.state).not.toBe("failed");
+    expect(prisma.deptRows.get(d.id)!.state).not.toBe("active");
+
+    // Tick 2: NC is healthy again.
+    await reconcileDepartments(prisma as any);
+
+    const row = prisma.deptRows.get(d.id)!;
+    expect(row.state).toBe("archived"); // archive completed, not silently reversed
+    expect(gfDeleteFolderMock).toHaveBeenCalledTimes(2); // archive retried, not provisioned
+    // provisionDepartment is the ONLY caller of ncEnsureGroup / gfCreateFolder;
+    // neither firing proves the row never went down the provision path.
+    expect(ncEnsureGroupMock).not.toHaveBeenCalled();
+    expect(gfCreateFolderMock).not.toHaveBeenCalled();
+  });
+
+  it("routes an archive_failed row to the archive path (not provision) on the next sweep", async () => {
+    const d = dept({
+      state: "archive_failed",
+      provisionError: "nc groupfolders 503",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 42,
+    });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(gfDeleteFolderMock).toHaveBeenCalledWith(expect.any(String), 42);
+    expect(ncEnsureGroupMock).not.toHaveBeenCalled();
+    expect(prisma.deptRows.get(d.id)!.state).toBe("archived");
+  });
+});
+
+// WARP-1257 CR (blocking, security-relevant): a membership whose removal
+// failed partway must be retried as a REMOVAL, never re-synced (which silently
+// re-grants revoked access and reports the row `synced`). Distinct
+// `remove_failed` NcSyncState carries the removal intent across the failure.
+describe("reconcileDepartments — intent-preserving removal retry (WARP-1257 CR)", () => {
+  const activeDept = () =>
+    dept({
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 42,
+    });
+
+  // Keep the active-department convergence pass from spuriously creating a
+  // duplicate folder while we exercise the membership state machine.
+  const folderKnown = () =>
+    gfListFoldersMock.mockResolvedValue([
+      { id: 42, mountPoint: "Engineering", groups: {}, quota: -3, size: 0, acl: false, manage: [] },
+    ]);
+
+  it("retries a partially-failed membership removal as a removal, never re-syncing it", async () => {
+    const d = activeDept();
+    const m = membership({ syncState: "removing", right: "contributor" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+    folderKnown();
+
+    // Tick 1: the first NC group removal hits a transient error.
+    ncRemoveUserFromGroupMock.mockRejectedValueOnce(new Error("nc OCS 503"));
+    await reconcileDepartments(prisma as any);
+
+    // The row survives and retains its removal intent — NOT parked in the
+    // generic `failed`/`synced` buckets the re-sync path would re-add.
+    expect(prisma.memRows.has(m.id)).toBe(true);
+    expect(prisma.memRows.get(m.id)!.syncState).not.toBe("failed");
+    expect(prisma.memRows.get(m.id)!.syncState).not.toBe("synced");
+
+    // Tick 2: NC healthy — removal retried to completion.
+    await reconcileDepartments(prisma as any);
+
+    expect(prisma.memRows.has(m.id)).toBe(false); // removed, not restored
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled(); // access never re-granted
+  });
+
+  it("routes a remove_failed membership to the removal path (not re-sync) on the next sweep", async () => {
+    const d = activeDept();
+    const m = membership({
+      syncState: "remove_failed",
+      right: "manager",
+      syncError: "nc OCS 503",
+    });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+    folderKnown();
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering",
+    );
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "alice",
+      "dept-engineering-ro",
+    );
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(prisma.memRows.has(m.id)).toBe(false);
+    expect(result.membershipsRemoved).toBe(1);
+  });
+
+  it("marks a failed removal as remove_failed (preserving intent), not the generic failed", async () => {
+    const d = activeDept();
+    const m = membership({ syncState: "removing", right: "contributor" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+    folderKnown();
+    ncRemoveUserFromGroupMock.mockRejectedValue(new Error("nc OCS 503"));
+
+    await reconcileDepartments(prisma as any);
+
+    const row = prisma.memRows.get(m.id)!;
+    expect(row.syncState).toBe("remove_failed");
+    expect(prisma.memRows.has(m.id)).toBe(true);
+  });
+});

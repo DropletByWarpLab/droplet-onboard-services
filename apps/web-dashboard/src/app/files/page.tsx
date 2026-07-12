@@ -74,6 +74,18 @@ export default function FilesPage() {
     () => spaces.find((s) => s.id === "shared")?.root ?? null,
     [spaces]
   );
+  // WARP-1247: the Move/Copy dialog's picker tree and confirm handler are
+  // HOME-relative (the picker is not space-aware — see handleMoveCopyConfirm),
+  // so its seed must be the home-relative form of the space-relative
+  // `currentPath`. Generalized to any space via the active space's root.
+  const activeSpaceRoot = useMemo(
+    () => spaces.find((s) => s.id === space)?.root ?? "/",
+    [spaces, space]
+  );
+  const homeRelativeCurrentPath = useMemo(() => {
+    if (!activeSpaceRoot || activeSpaceRoot === "/") return currentPath;
+    return currentPath === "/" ? activeSpaceRoot : `${activeSpaceRoot}${currentPath}`;
+  }, [activeSpaceRoot, currentPath]);
   // WARP-1262 (T10): write destinations rooted at `currentPath` (upload,
   // new-folder, paste-into-current-folder) are already SPACE-relative — the
   // exact shape the write routes now resolve server-side via
@@ -927,7 +939,14 @@ export default function FilesPage() {
         <MoveCopyDialog
           mode={moveDialog.mode}
           selectionLabels={selectionLabels}
-          currentDir={currentPath}
+          // WARP-1247: this is the 4th write-destination path with the
+          // WARP-1200 defect — `currentPath` is SPACE-relative, but the
+          // dialog's tree + `handleMoveCopyConfirm` (bulkMoveFiles /
+          // bulkCopyFiles) are already home-relative. Seeding from the raw
+          // `currentPath` let the stale default (e.g. "/Trips" while the
+          // Household tab is active) get confirmed without re-picking a
+          // node, writing into the personal space instead of "/Household/Trips".
+          currentDir={homeRelativeCurrentPath}
           forbiddenPrefixes={forbiddenPrefixes}
           onCancel={() => setMoveDialog(null)}
           onConfirm={handleMoveCopyConfirm}

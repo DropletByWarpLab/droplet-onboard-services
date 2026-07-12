@@ -24,6 +24,8 @@ function makeDevice(overrides: Partial<EnrichedNetworkDevice> = {}): EnrichedNet
     firstSeen: new Date(Date.now() - 86_400_000 * 10).toISOString(),
     lastSeen: new Date().toISOString(),
     isBlocked: false,
+    manualBlock: false,
+    lastAppliedBlocked: null,
     online: true,
     groups: [],
     presenceDays: [],

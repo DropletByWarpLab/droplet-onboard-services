@@ -19,7 +19,7 @@
  * are local User.id UUID; parentId creates one-level nesting (TEAM → DEPARTMENT parent).
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 
 const SCHEMA_PATH = path.resolve(
@@ -28,8 +28,24 @@ const SCHEMA_PATH = path.resolve(
   "schema.prisma",
 );
 
+const MIGRATIONS_DIR = path.resolve(process.cwd(), "prisma", "migrations");
+
 function readSchema(): string {
   return readFileSync(SCHEMA_PATH, "utf-8");
+}
+
+function readMigrationSql(): string {
+  const dirs = readdirSync(MIGRATIONS_DIR).filter((d) =>
+    d.includes("warp_1255_departments"),
+  );
+  expect(
+    dirs.length,
+    "must ship a `warp_1255_departments` migration directory",
+  ).toBe(1);
+  return readFileSync(
+    path.join(MIGRATIONS_DIR, dirs[0]!, "migration.sql"),
+    "utf-8",
+  );
 }
 
 describe("WARP-1255 schema: departments and teams", () => {
@@ -233,5 +249,88 @@ describe("WARP-1255 schema: departments and teams", () => {
       expect(memBlock[0]).toMatch(/@deprecated/);
       expect(memBlock[0]).toMatch(/model GroupMembership \{/);
     }
+  });
+});
+
+describe("WARP-1255 migration: additive, uniformly idempotent (safe to re-run)", () => {
+  it("guards every CREATE TYPE with the DO/EXCEPTION duplicate_object idiom", () => {
+    const sql = readMigrationSql();
+    // Four enums: DepartmentRight, DepartmentKind, ProvisionState, NcSyncState.
+    // Each CREATE TYPE must sit inside a duplicate_object guard so a second
+    // run is a no-op instead of erroring "type already exists".
+    for (const t of [
+      "DepartmentRight",
+      "DepartmentKind",
+      "ProvisionState",
+      "NcSyncState",
+    ]) {
+      const guard = new RegExp(
+        String.raw`DO \$\$ BEGIN[\s\S]*?CREATE TYPE "${t}"[\s\S]*?WHEN duplicate_object THEN null;[\s\S]*?END \$\$;`,
+      );
+      expect(guard.test(sql), `${t} CREATE TYPE must be guarded`).toBe(true);
+    }
+  });
+
+  it("creates every table + index with IF NOT EXISTS (re-runnable)", () => {
+    const sql = readMigrationSql();
+    for (const table of [
+      "Department",
+      "DepartmentMembership",
+      "DepartmentShare",
+      "UserInviteDepartment",
+      "UserUsagePolicy",
+    ]) {
+      expect(
+        new RegExp(String.raw`CREATE TABLE IF NOT EXISTS "${table}"`).test(sql),
+        `${table} must be CREATE TABLE IF NOT EXISTS`,
+      ).toBe(true);
+    }
+    // No bare CREATE INDEX / CREATE TABLE (all must carry IF NOT EXISTS).
+    const bareCreate = sql.match(
+      /CREATE (?:UNIQUE )?(?:INDEX|TABLE)(?! IF NOT EXISTS)/g,
+    );
+    expect(
+      bareCreate,
+      `every CREATE INDEX/TABLE must use IF NOT EXISTS; found: ${bareCreate?.join(", ")}`,
+    ).toBeNull();
+    // File.departmentId is added with ADD COLUMN IF NOT EXISTS.
+    expect(sql).toMatch(
+      /ALTER TABLE "File"\s+ADD COLUMN IF NOT EXISTS "departmentId"/,
+    );
+  });
+
+  it("wraps the self-referencing Department.parentId FK in a duplicate_object guard", () => {
+    // WARP-1255 review (PR #981): the self-ref FK is added OUTSIDE the
+    // CREATE TABLE IF NOT EXISTS block (unlike the inline FKs on the other
+    // tables), so it needs its own DO/EXCEPTION guard or a second run aborts
+    // with `constraint "Department_parentId_fkey" already exists`.
+    const sql = readMigrationSql();
+    const guardedFk =
+      /DO \$\$ BEGIN\s+ALTER TABLE "Department"\s+ADD CONSTRAINT "Department_parentId_fkey"[\s\S]*?EXCEPTION\s+WHEN duplicate_object THEN null;\s+END \$\$;/;
+    expect(
+      guardedFk.test(sql),
+      "Department_parentId_fkey must sit inside a DO $$ ... EXCEPTION WHEN duplicate_object guard",
+    ).toBe(true);
+  });
+
+  it("has no bare (unguarded) ALTER TABLE ... ADD CONSTRAINT", () => {
+    // Any top-level ADD CONSTRAINT must be either inline in a CREATE TABLE
+    // IF NOT EXISTS or wrapped in a DO/EXCEPTION guard. A standalone
+    // `ALTER TABLE ... ADD CONSTRAINT` (immediately preceded by ALTER TABLE,
+    // not a DO $$ BEGIN) is the exact defect this migration was flagged for.
+    const sql = readMigrationSql();
+    const bareAlterConstraint =
+      /(^|\n)ALTER TABLE "[^"]+"\s+ADD CONSTRAINT/g;
+    const matches = sql.match(bareAlterConstraint);
+    expect(
+      matches,
+      `standalone ALTER TABLE ... ADD CONSTRAINT must be guarded; found: ${matches?.join(" | ")}`,
+    ).toBeNull();
+  });
+
+  it("does not seed or mutate any rows (purely additive)", () => {
+    const sql = readMigrationSql();
+    expect(sql).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\s+"/i);
   });
 });

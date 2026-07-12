@@ -267,6 +267,12 @@ vi.mock("@prisma/client", () => {
       ready: "ready",
       failed: "failed",
     },
+    // WARP-905: the route also imports BrainIngestPolicy to parse + default
+    // the per-item ingest policy on upload.
+    BrainIngestPolicy: {
+      auto_embed: "auto_embed",
+      await_approval: "await_approval",
+    },
   };
 });
 

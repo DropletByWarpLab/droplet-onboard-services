@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { AlertCircle, Eye, EyeOff, Lock, ShieldCheck, Wifi } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AlertCircle, ChevronRight, Eye, EyeOff, Lock, ShieldCheck, Wifi } from "lucide-react";
 import {
   confirmNetworkCommand,
   fetchNetworkOperation,
+  getNetworkTopology,
   RouterStatusError,
   routerUnreachableNotice,
   setWifiPassword,
@@ -27,9 +28,21 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * runs its own local network for connected gear (switch, cameras); broadcasting
  * a joinable Wi-Fi is opt-in, and many homes keep the box on an existing
  * network. So this step is fully skippable — leaving the fields blank writes
- * nothing and the box stays reachable either way. Because Wi-Fi now has the
- * whole step to itself (no longer a cramped section behind a disclosure), the
- * fields render directly; skipping is the footer "Skip" action.
+ * nothing and the box stays reachable either way.
+ *
+ * Auto-collapse via host topology (WARP-817). WARP-809 originally shipped this
+ * behind a manual "Add a Wi-Fi network" disclosure, collapsed by default; the
+ * WIFI-ADDRESS-THEME-HANDOFF split (#548) gave Wi-Fi the whole step to itself
+ * and rendered the fields directly instead. This reintroduces the disclosure,
+ * now driven by the box's deployment posture instead of a static default: most
+ * customers plug the Droplet into an existing home router (DOWNSTREAM_ROUTER)
+ * and never need to broadcast a second Wi-Fi, so the fields stay collapsed for
+ * them; a box that IS the home's router (PRIMARY_ROUTER) needs this step, so it
+ * opens expanded. `getNetworkTopology()` (`@/lib/api`) is best-effort — a
+ * `null` (unreachable/error/UNKNOWN) leaves the fields collapsed, the same
+ * degrade-safe default WARP-809 shipped. Manual disclosure always stays
+ * available either way, and a manual toggle before the topology fetch resolves
+ * is never overridden (`wifiUserToggled`).
  *
  * Single-box write path (WARP-808): the Droplet IS the AP, so the write goes
  * through the host hostapd — the orchestrator stages the SSID
@@ -55,6 +68,12 @@ export function WifiStep({
   onComplete: () => void;
   onSkip: () => void;
 }) {
+  // WARP-817: collapsed by default (mirrors WARP-809's degrade-safe default —
+  // downstream/unknown/error all collapse); opens only once the host topology
+  // probe confirms this box IS the primary router. `wifiUserToggledRef` stops
+  // a late-resolving fetch from clobbering a manual click.
+  const [wifiExpanded, setWifiExpanded] = useState(false);
+  const wifiUserToggledRef = useRef(false);
   const [ssid, setSsid] = useState("");
   const [wifiPassword, setWifiPasswordValue] = useState("");
   const [showWifiPassword, setShowWifiPassword] = useState(false);
@@ -73,6 +92,22 @@ export function WifiStep({
   // The dashboard surface to monospace inside the notice — Network, the page
   // that actually has the Wi-Fi controls (WARP-807 UX review).
   const NETWORK_DESTINATION = "Network";
+
+  // WARP-817: read the deployment posture once on mount and open the fields
+  // only for a confirmed PRIMARY_ROUTER. getNetworkTopology() is best-effort
+  // (never throws — null on any read error), so DOWNSTREAM_ROUTER, UNKNOWN,
+  // and a failed read all leave the collapsed default in place. A manual
+  // toggle (the disclosure button) wins over a late-resolving fetch.
+  useEffect(() => {
+    let cancelled = false;
+    getNetworkTopology().then((topology) => {
+      if (cancelled || wifiUserToggledRef.current) return;
+      if (topology?.posture === "PRIMARY_ROUTER") setWifiExpanded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function validate(): string | null {
     const wifiName = ssid.trim();
@@ -223,77 +258,107 @@ export function WifiStep({
           a viewport too short scrolls the whole panel rather than clipping). */}
       <>
         <div className="space-y-4">
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Network name (SSID)
-            </label>
-            <div className="relative">
-              <Wifi
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-                aria-hidden="true"
-              />
-              <input
-                type="text"
-                value={ssid}
-                onChange={(e) => setSsid(e.target.value)}
-                placeholder="Studio Fotonia"
-                className="dp-input pl-10"
-                maxLength={SSID_MAX}
-                autoComplete="off"
-                spellCheck={false}
-                aria-describedby="wifi-ssid-hint"
-              />
-            </div>
-            <p id="wifi-ssid-hint" className="type-caption-1 text-label-tertiary mt-1.5">
-              Up to {SSID_MAX} characters.
-            </p>
-          </div>
-
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Wi-Fi password
-            </label>
-            <div className="relative">
-              <Lock
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-                aria-hidden="true"
-              />
-              <input
-                type={showWifiPassword ? "text" : "password"}
-                value={wifiPassword}
-                onChange={(e) => setWifiPasswordValue(e.target.value)}
-                placeholder="Wi-Fi password"
-                className="dp-input pl-10 pr-10"
-                maxLength={PSK_MAX}
-                autoComplete="off"
-                aria-describedby="wifi-psk-hint"
-              />
-              <button
-                type="button"
-                onClick={() => setShowWifiPassword((s) => !s)}
-                aria-label={
-                  showWifiPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
-                }
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
-              >
-                {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-            <p id="wifi-psk-hint" className="type-caption-1 text-label-tertiary mt-1.5">
-              Use at least {PSK_MIN} characters.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
-            <ShieldCheck
-              size={14}
-              className="text-system-green flex-shrink-0"
+          {/* WARP-817: collapsed by default for a downstream/unknown/error
+              posture (the common case), expanded when the box's host topology
+              probe confirms it IS the primary router. Manual disclosure is
+              always available either way — this is the exact "Add a Wi-Fi
+              network" affordance WARP-809 shipped, now topology-driven instead
+              of a static default. */}
+          <button
+            type="button"
+            onClick={() => {
+              wifiUserToggledRef.current = true;
+              setWifiExpanded((open) => !open);
+            }}
+            aria-expanded={wifiExpanded}
+            aria-controls="home-wifi-fields"
+            className="flex items-center gap-2 w-full text-left type-subheadline text-label-primary rounded-md px-1 py-1.5 transition-colors duration-200 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <ChevronRight
+              size={16}
+              className={`flex-shrink-0 text-label-tertiary transition-transform duration-200 ${
+                wifiExpanded ? "rotate-90" : ""
+              }`}
               aria-hidden="true"
             />
-            WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz from your Droplet
-          </div>
+            Add a Wi-Fi network
+          </button>
+
+          {wifiExpanded && (
+            <div id="home-wifi-fields" className="space-y-4">
+              <div>
+                <label className="type-subheadline text-label-secondary block mb-1.5">
+                  Network name (SSID)
+                </label>
+                <div className="relative">
+                  <Wifi
+                    size={16}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="text"
+                    value={ssid}
+                    onChange={(e) => setSsid(e.target.value)}
+                    placeholder="Studio Fotonia"
+                    className="dp-input pl-10"
+                    maxLength={SSID_MAX}
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-describedby="wifi-ssid-hint"
+                  />
+                </div>
+                <p id="wifi-ssid-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+                  Up to {SSID_MAX} characters.
+                </p>
+              </div>
+
+              <div>
+                <label className="type-subheadline text-label-secondary block mb-1.5">
+                  Wi-Fi password
+                </label>
+                <div className="relative">
+                  <Lock
+                    size={16}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type={showWifiPassword ? "text" : "password"}
+                    value={wifiPassword}
+                    onChange={(e) => setWifiPasswordValue(e.target.value)}
+                    placeholder="Wi-Fi password"
+                    className="dp-input pl-10 pr-10"
+                    maxLength={PSK_MAX}
+                    autoComplete="off"
+                    aria-describedby="wifi-psk-hint"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowWifiPassword((s) => !s)}
+                    aria-label={
+                      showWifiPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
+                    }
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
+                  >
+                    {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                <p id="wifi-psk-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+                  Use at least {PSK_MIN} characters.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
+                <ShieldCheck
+                  size={14}
+                  className="text-system-green flex-shrink-0"
+                  aria-hidden="true"
+                />
+                WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz from your Droplet
+              </div>
+            </div>
+          )}
 
           {/* WARP-808: on the single-box shape the Droplet IS the router, so
               changing the Wi-Fi name/key reconfigures the AP and drops every

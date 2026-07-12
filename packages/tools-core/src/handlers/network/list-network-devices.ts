@@ -7,11 +7,18 @@ const inputSchema = {
 } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const devices = await ctx.prisma.networkDevice.findMany({
+  // WARP-106: `isBlocked` is no longer a stored column. Select the two
+  // authored block fields and expose a computed, always-boolean
+  // `isBlocked = (lastAppliedBlocked ?? manualBlock)` — `lastAppliedBlocked`
+  // (ticker-authored effective state) is the source of truth, falling back
+  // to `manualBlock` (user intent) before the ticker has run. The raw
+  // authored fields stay internal; the tool surfaces only the flag.
+  const rows = await ctx.prisma.networkDevice.findMany({
     select: {
       mac: true,
       displayName: true,
-      isBlocked: true,
+      lastAppliedBlocked: true,
+      manualBlock: true,
       vendor: true,
       hostname: true,
       lastIp: true,
@@ -20,6 +27,10 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
     },
     orderBy: { lastSeen: "desc" },
   });
+  const devices = rows.map(({ lastAppliedBlocked, manualBlock, ...rest }) => ({
+    ...rest,
+    isBlocked: lastAppliedBlocked ?? manualBlock,
+  }));
   return { ok: true, data: { devices } };
 }
 

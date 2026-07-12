@@ -441,6 +441,78 @@ def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
     assert fake_io["upserts"] == []
 
 
+def test_handle_uploaded_holds_when_await_approval(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-905: an item uploaded with ingestPolicy='await_approval' is HELD.
+    The handler logs and returns WITHOUT extracting, embedding, marking, or
+    publishing a status flip — nothing is ingested until the approve route
+    flips the policy to 'auto_embed' and re-publishes the uploaded event.
+    """
+    import brain_ingest
+
+    text_path = _write_text_payload(tmp_path, "item-hold", "alpha beta gamma")
+
+    # Row exists + is a document (passes the status gate), but its policy
+    # holds it. Stub both db reads so the test needs no Postgres.
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: "indexing")
+    monkeypatch.setattr(
+        brain_ingest, "_fetch_item_policy", lambda _i: "await_approval"
+    )
+
+    dispatch_calls: list[tuple] = []
+    monkeypatch.setattr(
+        brain_ingest,
+        "dispatch",
+        lambda *a, **k: dispatch_calls.append((a, k)) or None,
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-hold",
+            "userId": USER_ID,
+            "path": str(text_path),
+            "mimeType": "text/plain",
+        }
+    )
+
+    assert dispatch_calls == [], "dispatch must NOT run for held items"
+    assert fake_io["published"] == [], "no status flip while held"
+    assert fake_io["marked"] == [], "held item stays in its pre-approval state"
+    assert fake_io["upserts"] == [], "no chunks embedded while held"
+
+
+def test_handle_uploaded_proceeds_when_policy_auto_embed(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-905: the default ingestPolicy='auto_embed' does NOT gate ingestion —
+    an auto_embed document is extracted, embedded, and marked ready as before.
+    """
+    import brain_ingest
+
+    text_path = _write_text_payload(
+        tmp_path, "item-auto", "alpha beta gamma delta epsilon"
+    )
+
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: "indexing")
+    monkeypatch.setattr(
+        brain_ingest, "_fetch_item_policy", lambda _i: "auto_embed"
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-auto",
+            "userId": USER_ID,
+            "path": str(text_path),
+            "mimeType": "text/plain",
+        }
+    )
+
+    # Ingested end-to-end: chunks written + marked ready.
+    assert len(fake_io["upserts"]) >= 1
+    assert any(m["status"] == "ready" for m in fake_io["marked"])
+
+
 # ── WARP-330: every failure path must persist status='failed' ──
 #
 # These regressions are pinned because the original bug was that several

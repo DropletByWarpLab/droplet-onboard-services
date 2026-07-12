@@ -143,54 +143,66 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
     // `flush`: sectioned layout — the full-width header divider + sections
     // own their padding (WARP-1153).
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl" flush>
-      <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-        <h2 id={headingId} className="type-headline text-label-primary capitalize truncate">
+      <div
+        className="flex items-center justify-between px-4 py-3"
+        style={{ borderBottom: "1px solid var(--card-bd)" }}
+      >
+        <h2
+          id={headingId}
+          className="type-headline capitalize truncate"
+          style={{ color: "var(--text)" }}
+        >
           {event.label}
           {event.subLabel && (
-            <span className="text-label-tertiary font-normal normal-case ml-2">
+            <span className="font-normal normal-case ml-2" style={{ color: "var(--text-muted)" }}>
               · {event.subLabel}
             </span>
           )}
         </h2>
-        <button
-          onClick={onClose}
-          aria-label="Close"
-          className="p-1 text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
-        >
+        <button onClick={onClose} aria-label="Close" className="icon-btn" style={{ width: 32, height: 32 }}>
           <X size={18} />
         </button>
       </div>
 
       <div className="p-4 space-y-3">
-        <div className="rounded-lg overflow-hidden bg-black">
+        <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
           {event.clipUrl ? (
             <video
               key={event.id}
               src={event.clipUrl}
               controls
               autoPlay
-              className="w-full max-h-[60vh] bg-black"
+              className="w-full max-h-[60vh]"
+              style={{ background: "var(--inset)" }}
             />
           ) : event.snapshotUrl ? (
             <img
               src={event.snapshotUrl}
               alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain bg-black"
+              className="w-full max-h-[60vh] object-contain"
+              style={{ background: "var(--inset)" }}
             />
           ) : (
             <img
               src={event.thumbnail}
               alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain bg-black"
+              className="w-full max-h-[60vh] object-contain"
+              style={{ background: "var(--inset)" }}
             />
           )}
         </div>
 
         {/* GenAI description (Phase 7.7) — only renders when there is one. */}
         {event.description && (
-          <div className="p-3 rounded-lg bg-accent-subtle flex items-start gap-2.5">
-            <Sparkles size={14} className="text-accent flex-shrink-0 mt-0.5" />
-            <p className="type-subheadline flex-1 italic leading-snug text-label-primary">
+          <div
+            className="p-3 rounded-lg flex items-start gap-2.5"
+            style={{
+              background: "var(--brand-subtle)",
+              border: "1px solid color-mix(in srgb, var(--brand) 25%, transparent)",
+            }}
+          >
+            <Sparkles size={14} className="flex-shrink-0 mt-0.5" style={{ color: "var(--brand)" }} />
+            <p className="type-subheadline flex-1 italic leading-snug" style={{ color: "var(--text)" }}>
               &ldquo;{event.description}&rdquo;
             </p>
             <button
@@ -198,7 +210,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
               disabled={regenerating}
               title="Generate a fresh description"
               aria-label="Regenerate description"
-              className="p-1 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary flex-shrink-0"
+              className="p-1 rounded flex-shrink-0 text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)]"
             >
               {regenerating ? (
                 <Loader2 size={12} className="animate-spin" />
@@ -212,12 +224,12 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
         {/* Metadata + actions */}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="type-subheadline text-label-secondary">
+            <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
               {cameraDisplay} · {startedAt.toLocaleString()} ·{" "}
               {Math.round(event.score * 100)}% confidence
             </p>
             {event.zones.length > 0 && (
-              <p className="type-caption-1 text-label-tertiary mt-1">
+              <p className="type-caption-1 mt-1" style={{ color: "var(--text-muted)" }}>
                 Zones: {event.zones.join(", ")}
               </p>
             )}
@@ -227,7 +239,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
               <button
                 onClick={() => setTagPanelOpen((o) => !o)}
                 disabled={tagging}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-secondary text-label-primary hover:bg-surface-tertiary type-subheadline transition-colors disabled:opacity-50"
+                className="btn"
                 title="Tag this person for face recognition"
               >
                 {tagging ? (
@@ -243,10 +255,10 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 onClick={handleToggleRetain}
                 disabled={retainBusy}
                 aria-pressed={retained}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-subheadline transition-colors ${
+                className={`btn ${
                   retained
-                    ? "bg-system-orange/15 text-system-orange hover:bg-system-orange/25"
-                    : "bg-surface-secondary text-label-primary hover:bg-surface-tertiary"
+                    ? "!bg-system-orange/15 !text-system-orange !border-transparent hover:!bg-system-orange/25"
+                    : ""
                 } ${retainBusy ? "opacity-60 cursor-wait" : ""}`}
                 title={retained ? "Unsave (allow normal retention)" : "Save (retain indefinitely)"}
               >
@@ -263,10 +275,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 </span>
               </button>
             )}
-            <Link
-              href={`/cameras/${encodeURIComponent(event.camera)}`}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-secondary text-label-primary hover:bg-surface-tertiary type-subheadline transition-colors"
-            >
+            <Link href={`/cameras/${encodeURIComponent(event.camera)}`} className="btn">
               <ExternalLink size={14} />
               <span className="hidden sm:inline">Open camera</span>
             </Link>
@@ -274,7 +283,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
               <a
                 href={event.clipUrl}
                 download={`${event.camera}-${event.label}-${event.id}.mp4`}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-secondary text-label-primary hover:bg-surface-tertiary type-subheadline transition-colors"
+                className="btn"
               >
                 <Download size={14} />
                 <span className="hidden sm:inline">Download</span>
@@ -285,10 +294,11 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
 
         {/* Inline tag-as-person panel — replaces the native prompt(). */}
         {tagPanelOpen && (
-          <div className="p-3 rounded-lg bg-surface-secondary border border-separator space-y-2">
+          <div className="card space-y-2" style={{ padding: 12 }}>
             <label
               htmlFor={`${headingId}-tag-input`}
-              className="type-caption-1 text-label-tertiary block"
+              className="type-caption-1 block"
+              style={{ color: "var(--text-muted)" }}
             >
               Tag this person — letters, numbers, spaces, hyphens, underscores
             </label>
@@ -306,14 +316,20 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 }}
                 placeholder="Alice"
                 maxLength={40}
-                className="dp-input flex-1"
+                className="flex-1 px-3 py-2 outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 aria-invalid={tagError ? true : undefined}
                 aria-describedby={tagError ? `${headingId}-tag-error` : undefined}
               />
               <button
                 onClick={() => void handleTagSubmit()}
                 disabled={tagging}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                className="btn primary sm"
               >
                 {tagging ? (
                   <Loader2 size={14} className="animate-spin" />
@@ -327,7 +343,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                   setTagName("");
                   setTagError(null);
                 }}
-                className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                className="type-subheadline px-3 py-2 transition-colors text-[color:var(--brand)] hover:text-[color:var(--brand-hover)]"
               >
                 Cancel
               </button>
