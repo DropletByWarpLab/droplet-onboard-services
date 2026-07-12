@@ -432,6 +432,10 @@ export function createFilesRouter(
     filePath: string,
   ): Promise<void> {
     try {
+      // Full-directory scan is intentional at household scale (tens of rows):
+      // it resolves BOTH the recipient (exact-case then case-insensitive, in
+      // JS — no Postgres `mode:'insensitive'` query) and the caller's display
+      // name in a single round-trip. Narrow only if the directory grows large.
       const rows = (await prisma.user.findMany({
         select: { id: true, displayName: true, email: true, nextcloudUsername: true },
       })) as Array<{
@@ -442,7 +446,13 @@ export function createFilesRouter(
       }>;
 
       const target = shareWith.toLowerCase();
-      const recipient = rows.find((u) => u.nextcloudUsername?.toLowerCase() === target);
+      // Prefer an exact-case match so two directory rows that differ only by
+      // case can't misdeliver this notification (it discloses the sharer +
+      // filename) to the wrong person; fall back to the case-insensitive
+      // contract for the normal single-variant case.
+      const recipient =
+        rows.find((u) => u.nextcloudUsername === shareWith) ??
+        rows.find((u) => u.nextcloudUsername?.toLowerCase() === target);
       // WARP-233: decrypt the at-rest dcv1 blob. Null/empty → nothing to send to.
       const to = recipient ? readUserEmail(recipient.email) : null;
       if (!to) {

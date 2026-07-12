@@ -245,6 +245,45 @@ describe("WARP-941 — POST /api/files/share person-share notification email", (
     expect(sendMail.mock.calls[0][0].to).toBe("romain@example.com");
   });
 
+  it("prefers an exact-case nextcloudUsername match over a differently-cased row", async () => {
+    // Two directory rows whose nextcloudUsername differ ONLY by case. The
+    // differently-cased "Romain" is listed FIRST, so a naive case-insensitive
+    // .find() would misdeliver the notification (which discloses the sharer +
+    // filename) to the WRONG person. The row that matches shareWith exactly
+    // must win; the case-insensitive path is only a fallback.
+    const rows: UserRow[] = [
+      {
+        id: "uuid-caller",
+        displayName: "Stefan",
+        email: "stef@example.com",
+        nextcloudUsername: "Stefan-Cruceru",
+      },
+      {
+        id: "uuid-romain-other",
+        displayName: "Romain (other)",
+        email: "wrong-romain@example.com",
+        nextcloudUsername: "Romain",
+      },
+      {
+        id: "uuid-romain-exact",
+        displayName: "Romain",
+        email: "romain@example.com",
+        nextcloudUsername: "romain",
+      },
+    ];
+    const sendMail = vi.fn().mockResolvedValue(undefined);
+    const { app } = buildApp({ sendMail, rows });
+
+    const res = await request(app)
+      .post("/api/files/share")
+      .send({ path: "/doc.txt", shareType: 0, shareWith: "romain" });
+
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(sendMail).toHaveBeenCalledTimes(1));
+    // The exact "romain" row is notified — NOT the differently-cased "Romain".
+    expect(sendMail.mock.calls[0][0].to).toBe("romain@example.com");
+  });
+
   it("no-ops (share still 200, no dial) when the SMTP channel is not configured", async () => {
     const sendMail = vi.fn();
     const { app } = buildApp({ sendMail, channel: null });

@@ -837,7 +837,7 @@ describe("nextcloud.client — shares v2", () => {
 
   // WARP-941 — outbound listing for the dashboard's "Shared by me" tab.
   describe("ncListOutboundShares", () => {
-    it("GETs the OCS shares endpoint WITHOUT a path filter, with reshares+subfiles", async () => {
+    it("GETs the OCS shares endpoint WITHOUT a path filter, initiator-only (no reshares/subfiles)", async () => {
       const fetchMock = vi.fn().mockResolvedValue(
         mockResponse({
           ok: true,
@@ -871,14 +871,18 @@ describe("nextcloud.client — shares v2", () => {
       expect(shares[1].shareType).toBe(3);
 
       const [url] = fetchMock.mock.calls[0];
+      // Initiator-only: NO path filter (Nextcloud then scopes to shares this
+      // user CREATED — uid_initiator), and none of the broadening/inbound
+      // params. `reshares` would widen getSharesBy to files the user merely
+      // OWNS but did not create; `subfiles` is a no-op without a folder `path`.
+      // Both are dropped so the "Shared by me" tab means "shares I created".
       expect(url).toBe(
-        "http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares?reshares=true&subfiles=true"
+        "http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares"
       );
-      // The whole point vs ncListShares / ncListSharedWithMe: NO path filter
-      // (Nextcloud then scopes to shares the token's user owns) and NOT the
-      // inbound query.
       expect(url).not.toContain("path=");
       expect(url).not.toContain("shared_with_me");
+      expect(url).not.toContain("reshares");
+      expect(url).not.toContain("subfiles");
     });
 
     it("returns [] when OCS returns empty array", async () => {
