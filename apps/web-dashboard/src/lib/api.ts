@@ -3392,6 +3392,10 @@ export interface BrainUploadResponse {
   /** WARP-864: true when identical bytes were already uploaded and the
    * existing item was reused instead of ingesting a duplicate. */
   deduplicated?: boolean;
+  /** WARP-905: the applied ingest policy. 'await_approval' means the upload
+   * is HELD (not embedded) until it is approved. Absent on partial-deploy
+   * windows before WARP-905 lands → treat as 'auto_embed'. */
+  ingestPolicy?: BrainIngestPolicy;
 }
 
 /**
@@ -3404,14 +3408,20 @@ export interface BrainUploadResponse {
  * `chatId` is optional — if set, the orchestrator stamps it onto the
  * BrainMemoryItem row's `originatingChatId` so a future "scope to this
  * conversation" filter (Phase 2) can do the join.
+ *
+ * WARP-905: `ingestPolicy` is optional — pass 'await_approval' to HOLD the
+ * upload for human approval instead of embedding it immediately. Omitted /
+ * 'auto_embed' preserves the historical embed-on-upload behaviour.
  */
 export async function uploadBrainFile(
   file: File,
   chatId?: string,
+  ingestPolicy?: BrainIngestPolicy,
 ): Promise<BrainUploadResponse> {
   const form = new FormData();
   form.append("file", file);
   if (chatId) form.append("chatId", chatId);
+  if (ingestPolicy) form.append("ingestPolicy", ingestPolicy);
   const res = await authFetch(`${BASE}/api/files/brain/upload`, {
     method: "POST",
     body: form,
@@ -3435,6 +3445,27 @@ export async function uploadBrainFile(
       );
     }
     throw new Error(body.error || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-905 — release a brain-memory item that was HELD under
+ * ingestPolicy='await_approval'. Flips the policy to 'auto_embed' and
+ * re-drives ingestion (the file-indexer, now unblocked, extracts + embeds;
+ * audio/video go through the transcription worker). The subsequent status
+ * flips arrive over the WS bridge like any other upload.
+ */
+export async function approveBrainItem(
+  itemId: string,
+): Promise<{ itemId: string; status: BrainMemoryItemStatus; ingestPolicy: BrainIngestPolicy }> {
+  const res = await authFetch(
+    `${BASE}/api/files/brain/${encodeURIComponent(itemId)}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Approve failed: ${res.status}`);
   }
   return res.json();
 }
@@ -5147,6 +5178,15 @@ export type BrainMemoryItemStatus =
   | "ready"
   | "failed";
 
+/**
+ * WARP-905 — per-item ingest policy. Orthogonal to `status`: this is the gate
+ * the file-indexer consults before embedding a chat-attached upload.
+ *   - auto_embed     → embed on upload (the default; historical behaviour).
+ *   - await_approval → hold the upload until a human approves it (the
+ *                      "pending decision" state surfaced in the files/brain UI).
+ */
+export type BrainIngestPolicy = "auto_embed" | "await_approval";
+
 /** A row from FileContentChunk shaped for the dashboard. */
 export interface KnowledgeChunkItem {
   id: string;
@@ -5217,6 +5257,10 @@ export interface BrainMemoryItemInfo {
   // WARP-214: status drives the StatusChip; failureReason surfaces in tooltip.
   status?: BrainMemoryItemStatus;
   failureReason?: string | null;
+  // WARP-905: 'await_approval' means the item is HELD — surfaced as an
+  // "Awaiting approval" affordance instead of the status pill. Absent on
+  // legacy rows / partial-deploy windows → treated as 'auto_embed'.
+  ingestPolicy?: BrainIngestPolicy;
 }
 
 /**

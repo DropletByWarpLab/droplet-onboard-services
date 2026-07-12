@@ -1011,11 +1011,26 @@ model BrainMemoryItem {
   // pre-WARP-864 rows — which stay NULL until backfilled — are exempt).
   sha256 String?
 
+  // WARP-905: explicit ingest policy (no guessing per CLAUDE.md). Distinct
+  // from `status` (the pipeline lifecycle: indexing → ready | failed): this
+  // column is the POLICY gate the file-indexer consults before embedding.
+  //   - auto_embed     → default; the upload is embedded immediately (the
+  //                      historical behaviour — every pre-WARP-905 row is
+  //                      auto_embed via the column default).
+  //   - await_approval → the upload is HELD (not embedded) until a human
+  //                      releases it via POST /files/brain/:id/approve. This
+  //                      is the "pending decision" state surfaced in the
+  //                      files/brain UI alongside `status`.
+  // Indexed so "list the items awaiting my approval" is a direct query, not
+  // a derivation over status + an absence predicate.
+  ingestPolicy BrainIngestPolicy @default(auto_embed)
+
   @@unique([userId, sha256])
   @@index([userId, uploadedAt])
   @@index([userId, originatingChatId])
   @@index([userId, status])
   @@index([status])
+  @@index([userId, ingestPolicy])
 }
 
 enum BrainMemorySource {
@@ -1027,6 +1042,17 @@ enum BrainMemoryItemStatus {
   indexing
   ready
   failed
+}
+
+/// WARP-905 — per-item ingest policy. Orthogonal to BrainMemoryItemStatus
+/// (which tracks the embedding pipeline lifecycle): this enum is the gate the
+/// file-indexer consults before it embeds a chat-attached upload.
+///   - auto_embed     → embed on upload (the default; historical behaviour).
+///   - await_approval → hold the upload until a human approves it. The
+///                      "pending decision" state the files/brain UI renders.
+enum BrainIngestPolicy {
+  auto_embed
+  await_approval
 }
 
 // ── WARP-613: phone-home egress policy ──
