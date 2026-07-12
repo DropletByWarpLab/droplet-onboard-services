@@ -1,15 +1,28 @@
 name: rag-eval-tests
 
-# Pytest for tests/retrieval-eval/ragas/test_aggregate.py. Path-filtered so
-# it only runs when the runner or the test file itself changes. No Compose
-# stack or Ollama — purely unit-level arithmetic tests (WARP-521).
+# Two lightweight pytest lanes, path-filtered:
+#   1. tests/retrieval-eval/ragas/test_aggregate.py — the offline runner's
+#      aggregation arithmetic (WARP-521). No Compose stack or Ollama.
+#   2. services/rag-eval/tests/ — the appliance eval service's pure-stdlib
+#      run-state logic (wired in by the WARP-970 CI-coverage gate: every
+#      service with a Dockerfile must have its suite on CI).
+# Neither lane installs ragas/torch — that heavy stack stays deferred; these
+# are purely unit-level tests.
 
 on:
   pull_request:
     paths:
-      - tests/retrieval-eval/ragas/ragas_runner.py
-      - tests/retrieval-eval/ragas/test_aggregate.py
-      - .github/workflows/rag-eval-tests.yml
+      - "tests/retrieval-eval/ragas/ragas_runner.py"
+      - "tests/retrieval-eval/ragas/test_aggregate.py"
+      - "services/rag-eval/**"
+      - ".github/workflows/rag-eval-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tests/retrieval-eval/ragas/ragas_runner.py"
+      - "tests/retrieval-eval/ragas/test_aggregate.py"
+      - "services/rag-eval/**"
+      - ".github/workflows/rag-eval-tests.yml"
   workflow_dispatch:
 
 concurrency:
@@ -19,12 +32,16 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Two small unit suites — 15 min is a generous ceiling.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
+          # 3.11 matches services/rag-eval/Dockerfile's base image.
           python-version: "3.11"
           cache: pip
 
@@ -33,10 +50,14 @@ jobs:
         # pyyaml + datasets: top-level imports in ragas_runner.py that must
         #   resolve when the module is imported (ragas itself is deferred and
         #   NOT installed here — that's the whole point of this lightweight lane).
-        # pytest: test runner.
+        # pytest: test runner. The services/rag-eval suite needs nothing else —
+        #   run_state.py is pure stdlib (its conftest handles sys.path).
         run: |
           python -m pip install --upgrade pip
           pip install pandas pyyaml datasets pytest
 
-      - name: Run pytest
+      - name: Run pytest (ragas aggregate)
         run: pytest tests/retrieval-eval/ragas/test_aggregate.py -v
+
+      - name: Run pytest (rag-eval service unit tests)
+        run: pytest services/rag-eval/tests -v

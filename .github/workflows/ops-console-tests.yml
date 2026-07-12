@@ -1,0 +1,47 @@
+name: ops-console-tests
+
+# Pytest for services/ops-console. Path-filtered. The suite is fully mocked
+# (no Docker daemon needed — ops/docker_client.py is exercised through fakes).
+
+on:
+  pull_request:
+    paths:
+      - "services/ops-console/**"
+      - ".github/workflows/ops-console-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/ops-console/**"
+      - ".github/workflows/ops-console-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ops-console-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Plain pytest suite — 15 min is a generous ceiling.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/ops-console
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/ops-console/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v

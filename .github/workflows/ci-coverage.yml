@@ -4,6 +4,16 @@ name: ci-coverage
 # test suite. Fires on every PR and main push — intentionally NOT path-filtered
 # so nobody can add a new service without tests by dodging the filter.
 #
+# ENFORCED since 2026-07-11 (WARP-970). Baseline at enforcement time:
+# `bash scripts/check-ci-coverage.sh` green over 14 services/* with a
+# Dockerfile + 2 apps/* with a package.json, with exactly one exemption
+# (services/oled-display — hardware-only, see .github/ci-coverage-exempt).
+# The threshold is structural 100%: every audited directory needs a
+# `<name>-tests.yml` workflow whose `paths:` filter covers it, a recognised
+# test command, and a real test suite. The audit job below ("ci-coverage")
+# is meant to be a required status check on main — if it is red, the PR
+# does not merge.
+#
 # To add a new service:
 #   1. Ship a `services/<name>/tests/` directory with at least one test.
 #   2. Add `.github/workflows/<name>-tests.yml` that runs pytest (or vitest /
@@ -13,19 +23,9 @@ name: ci-coverage
 # Exemptions (rare): add the path one per line to `.github/ci-coverage-exempt`.
 
 on:
-  # Still manual-only — but no longer for minutes (those are flowing again
-  # as of 2026-06: docker-build's ~18-min job runs green on every PR).
-  # Re-enabling this audit today would fail every PR because:
-  #   1. The 12 test workflows still disabled by #220 lost their `paths:`
-  #      filters along with their triggers — restore each `on:` block from
-  #      110efe7c^ (the #220 parent).
-  #   2. services/email-indexer, services/ops-console and services/pm have
-  #      no test workflow at all — add one each, or exempt them in
-  #      .github/ci-coverage-exempt with a reason.
-  # Once `bash scripts/check-ci-coverage.sh` exits 0 on main, restore:
-  #   pull_request:
-  #   push:
-  #     branches: [main]
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -34,8 +34,11 @@ concurrency:
 
 jobs:
   audit:
-    name: Every service and app has a test workflow
+    # The job name is the status-check context branch protection matches on —
+    # keep "ci-coverage" in sync with the ruleset's required checks if renamed.
+    name: ci-coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Run CI coverage audit
