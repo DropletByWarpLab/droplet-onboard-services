@@ -119,15 +119,19 @@ describe("setup Cameras step — outage recovery (WARP-1282)", () => {
     render(<CamerasStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await flushMicrotasks();
 
-    // The outage surfaced — and the banner carries an explicit control now.
-    expect(
-      screen.getByText(/couldn't check for cameras right now/i),
-    ).toBeInTheDocument();
+    // The outage surfaced — announced to screen readers (role="alert", the
+    // same convention the sibling step banners carry) — and the banner
+    // carries an explicit control now.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /couldn't check for cameras right now/i,
+    );
     const tryAgain = screen.getByRole("button", { name: /try again/i });
     // A11y: the control must be a real ≥44px tap target — the secondary
     // button token carries min-h-[44px] (same convention as WARP-302's
-    // "Scan again").
+    // "Scan again") — with an on-convention focus ring (the token ships
+    // none; CoverageExtendersPanel precedent).
     expect(tryAgain.className).toMatch(/dp-btn-secondary/);
+    expect(tryAgain.className).toMatch(/focus-visible:ring-2/);
 
     await act(async () => {
       fireEvent.click(tryAgain);
@@ -247,5 +251,36 @@ describe("setup Cameras step — outage recovery (WARP-1282)", () => {
       await Promise.resolve();
     });
     expect(onComplete).toHaveBeenCalledWith(2);
+  });
+
+  it("an accept-all failure shows its own error WITHOUT the load-recovery Try again button", async () => {
+    // Partial outage keeps the load marked incomplete (recovery armed)…
+    fetchCamerasMock.mockRejectedValue(new Error("backend flapping"));
+    fetchDiscoveredCamerasMock.mockResolvedValue(DISCOVERED_TWO);
+    // …and every accept fails, so the step stays put with an ACTION error.
+    acceptDiscoveredCameraMock.mockRejectedValue(new Error("boom"));
+
+    render(<CamerasStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await flushMicrotasks();
+    expect(screen.getByText(/Hikvision DS-2CD2143G2/)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /add these cameras/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The action error is announced…
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /couldn't add the cameras just now/i,
+    );
+    // …but the load-recovery control must NOT ride beneath copy that points
+    // at the Cameras page instead — the button only serves load failures.
+    expect(
+      screen.queryByRole("button", { name: /^try again$/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -17,6 +17,12 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *  cleanup; never a while-true. */
 const CAMERA_POLL_INTERVAL_MS = 10_000;
 
+/** WARP-1282 — the banner distinguishes WHERE the error came from so its
+ *  "Try again" control (which re-runs `load()`) only renders for load
+ *  failures; accept/remove failures direct the customer to the Cameras page
+ *  instead, and a load-retry button beneath that copy would be incoherent. */
+type StepError = { kind: "load" | "action"; message: string };
+
 /**
  * Wizard step — pick up any IP cameras the box discovered.
  *
@@ -68,13 +74,12 @@ export function CamerasStep({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<StepError | null>(null);
   // WARP-1282 — true while the last `load()` didn't fully complete (discovery
-  // unreachable, or the existing-cameras read failed). Drives the error
-  // banner's "Try again" button and tells the 10 s poll to re-run the FULL
-  // load instead of the light discovered-only refresh. Mirrored into a ref so
-  // the interval callback (armed once) sees the current value.
-  const [loadFailed, setLoadFailed] = useState(false);
+  // unreachable, or the existing-cameras read failed). Tells the 10 s poll to
+  // re-run the FULL load instead of the light discovered-only refresh. A ref
+  // (not state) so the interval callback (armed once) sees the current value;
+  // the banner's "Try again" button gates on `error.kind` instead.
   const loadFailedRef = useRef(false);
   const [retrying, setRetrying] = useState(false);
   // WARP-933 review — `alive` guards async setState after the customer advances
@@ -100,7 +105,11 @@ export function CamerasStep({
       try {
         all = await fetchCameras();
       } catch {
-        setError("Couldn't load existing cameras. Check your connection and try again.");
+        setError({
+          kind: "load",
+          message:
+            "Couldn't load existing cameras. Check your connection and try again.",
+        });
         camerasListFailed = true;
         all = [];
       }
@@ -119,11 +128,9 @@ export function CamerasStep({
         // knew instead of blanking the "Already set up" section, and leave
         // the load marked incomplete so the 10 s poll re-runs the FULL load
         // until fetchCameras succeeds again.
-        setLoadFailed(true);
         loadFailedRef.current = true;
       } else {
         setExisting(enabled);
-        setLoadFailed(false);
         loadFailedRef.current = false;
       }
       // WARP-933 — do NOT auto-skip when nothing's found yet. The step stays
@@ -134,8 +141,8 @@ export function CamerasStep({
       if (!alive.current || savingRef.current) return;
       // Discovery service unreachable — surface it with a retry rather than
       // silently skipping, which read to customers as "the page doesn't work".
-      setError("Couldn't check for cameras right now. Try again in a moment.");
-      setLoadFailed(true);
+      // The button carries the "try again" verb, so the copy stays short.
+      setError({ kind: "load", message: "Couldn't check for cameras right now." });
       loadFailedRef.current = true;
     } finally {
       setLoading(false);
@@ -204,15 +211,20 @@ export function CamerasStep({
       const failed = results.filter((r) => r.status === "rejected");
       const accepted = results.length - failed.length;
       if (accepted === 0) {
-        setError(
-          "Couldn't add the cameras just now. Try again from the Cameras page.",
-        );
+        setError({
+          kind: "action",
+          message:
+            "Couldn't add the cameras just now. Try again from the Cameras page.",
+        });
         setSaving(false);
         return;
       }
       onComplete(accepted);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Save failed. Try again.");
+      setError({
+        kind: "action",
+        message: e instanceof Error ? e.message : "Save failed. Try again.",
+      });
       setSaving(false);
     } finally {
       // Resume the discovery poll regardless of outcome (success unmounts; the
@@ -230,7 +242,10 @@ export function CamerasStep({
       // state instead of refetching into a stale read.
       setExisting((prev) => prev.filter((c) => c.name !== cam.name));
     } catch {
-      setError("Couldn't remove that camera. Try again from the Cameras page.");
+      setError({
+        kind: "action",
+        message: "Couldn't remove that camera. Try again from the Cameras page.",
+      });
     } finally {
       setRemoving(null);
     }
@@ -364,20 +379,25 @@ export function CamerasStep({
         )}
 
         {error && (
-          <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2 mt-3">
+          <div
+            role="alert"
+            className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2 mt-3"
+          >
             <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
             <div className="flex flex-1 flex-col items-start gap-2">
-              <span>{error}</span>
-              {/* WARP-1282 — the copy promises "try again"; give it a real
-                  control. dp-btn-secondary carries the 44px min tap target.
-                  Only for load failures — accept/remove errors direct the
-                  customer to the Cameras page instead. */}
-              {loadFailed && (
+              <span>{error.message}</span>
+              {/* WARP-1282 — an explicit recovery control. dp-btn-secondary
+                  carries the 44px min tap target; the focus ring follows the
+                  CoverageExtendersPanel precedent (the token ships none).
+                  Load failures only — accept/remove errors direct the
+                  customer to the Cameras page, which this button doesn't
+                  serve. */}
+              {error.kind === "load" && (
                 <button
                   type="button"
                   onClick={handleTryAgain}
                   disabled={retrying || saving}
-                  className="dp-btn-secondary type-footnote !px-3 disabled:opacity-50"
+                  className="dp-btn-secondary type-footnote !px-3 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >
                   {retrying ? "Checking…" : "Try again"}
                 </button>
