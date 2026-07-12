@@ -21,8 +21,14 @@ import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/re
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
 import { toHomeRelativePath } from "@/components/FileManager/search-target";
 
-const PERSONAL: FileSpace = { id: "personal", name: "My Files", available: true, root: "/" };
-const SHARED: FileSpace = { id: "shared", name: "Household", available: true, root: "/Household" };
+const PERSONAL: FileSpace = { id: "personal", name: "My Files", root: "/" };
+const SHARED: FileSpace = {
+  id: "shared",
+  name: "Household",
+  root: "/Household",
+  kind: "household",
+  state: "active",
+};
 
 // Listing entries carry HOME-relative paths (WARP-1140) — in the shared
 // space the folder row for "Trips" reads "/Household/Trips".

@@ -56,6 +56,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
   checkSpaceAccess,
+  requireSpaceAccess,
   resolveDepartmentIdForSpaceReadOnly,
   type SpaceAccessCaller,
 } from "../middleware/space.js";
@@ -149,28 +150,72 @@ const SHARED_FOLDER_NAME = config.DROPLET_SHARED_FOLDER_NAME;
 /** Absolute home-relative path to the shared space root (e.g. "/Household"). */
 const SHARED_FOLDER_PATH = `/${SHARED_FOLDER_NAME}`;
 
-type Space = "personal" | "shared";
+type Space = "personal" | "shared" | string; // "personal", "shared", or "dept:<uuid>"
 
 /** Coerce an arbitrary `?space=` value to a known space (default personal). */
 function resolveSpace(raw: unknown): Space {
-  return raw === "shared" ? "shared" : "personal";
+  if (typeof raw !== "string") return "personal";
+  if (raw === "shared" || raw === "personal") return raw;
+  if (raw.startsWith("dept:")) return raw; // Keep dept:<uuid> as-is for resolution.
+  return "personal";
 }
 
 /**
- * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ * WARP-1261: generalized path routing for personal/shared/department spaces.
  *
- * - personal: the path is used verbatim (the user's home root).
- * - shared:   the path is resolved UNDER the shared-folder prefix, so
- *             `?space=shared&path=/Trips` → `/Household/Trips` and the bare
- *             shared root → `/Household`. The prefix is always applied here so
- *             a caller can never escape the shared mount via this route.
+ * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ * The registry prefix is ALWAYS applied for shared/department spaces so a caller
+ * can never escape via `../` (fail-closed, matches WARP-938 safety checks).
+ *
+ * - personal: the path is used verbatim (the user's home root) — "/" or "/path".
+ * - shared:   path is resolved UNDER the shared-folder prefix (e.g. "/Household/Trips").
+ * - dept:<uuid>: path is resolved UNDER the department mount point (e.g. "/Engineering/Docs").
+ *
+ * For dept:<uuid>, the Department row must exist and be active (enforced by the
+ * caller with requireSpaceAccess middleware or checkSpaceAccess prior to invoking).
+ * If resolution fails, throws a safe error (never silently falls back to personal).
  */
-function rootForSpace(space: Space, requestedPath: string): string {
+async function rootForSpace(prisma: PrismaClient, space: Space, requestedPath: string): Promise<string> {
   const rel = requestedPath.replace(/^\/+/, "");
+
+  if (space === "personal") {
+    return requestedPath || "/";
+  }
+
   if (space === "shared") {
     return rel ? `${SHARED_FOLDER_PATH}/${rel}` : SHARED_FOLDER_PATH;
   }
-  return requestedPath || "/";
+
+  if (space.startsWith("dept:")) {
+    const deptId = space.slice("dept:".length);
+    const dept = await prisma.department.findUnique({
+      where: { id: deptId },
+      select: { id: true, name: true, parentId: true, kind: true, state: true },
+    });
+
+    if (!dept) {
+      throw new Error(`Unknown space: ${space}`);
+    }
+    if (dept.state !== "active") {
+      throw new Error(`Space is not active: ${space}`);
+    }
+
+    // Resolve mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+    let mountName = dept.name;
+    if (dept.kind === "TEAM" && dept.parentId) {
+      const parent = await prisma.department.findUnique({
+        where: { id: dept.parentId },
+        select: { name: true },
+      });
+      if (parent) {
+        mountName = `${parent.name} — ${dept.name}`;
+      }
+    }
+
+    return rel ? `/${mountName}/${rel}` : `/${mountName}`;
+  }
+
+  throw new Error(`Malformed space: ${space}`);
 }
 
 /**
@@ -1125,19 +1170,38 @@ export function createFilesRouter(
 
   // ── List directory contents ──
   //
-  // WARP-883: accepts an optional `?space=personal|shared` (default personal).
-  // `shared` resolves the listing under the Household group-folder prefix; the
-  // user's OWN token still drives the request (groupfolders mounts the folder
-  // into their home). On the My-Files (personal) home ROOT we hide the shared
-  // folder entry so the Household folder isn't shown twice — once as a space in
-  // the switcher and once inline.
-  router.get("/files", async (req, res, next) => {
-    try {
-      const requestedPath = (req.query.path as string) || "/";
-      const space = resolveSpace(req.query.space);
-      const filePath = rootForSpace(space, requestedPath);
-      const user = getUser(req);
-      const isPersonalRoot = space === "personal" && filePath === "/";
+  // WARP-883 (T5) + WARP-1261 (T9): accepts an optional `?space=` (default personal).
+  // personal: the path is used verbatim (the user's home root).
+  // shared: the path resolves UNDER the Household prefix (legacy WS-5 compatibility).
+  // dept:<uuid>: path resolves UNDER the department mount point.
+  // On the My-Files (personal) home ROOT we hide the shared folder entry so the
+  // Household folder isn't shown twice — once as a space in the switcher and once inline.
+  // Composed with requireSpaceAccess middleware (reader minRight). The gate's own
+  // parseSpaceValue() only recognizes "personal" / "household" / "dept:<uuid>" and
+  // fails closed on anything else — but this route's `?space=` contract predates it
+  // (WARP-883/WS-5) and uses "shared" as the household alias, with any other
+  // unrecognized value silently falling back to personal (rootForSpace/resolveSpace
+  // above mirror the same lenient contract). Translate at the gate boundary so the
+  // access check and the path-resolution below stay in agreement, while a malformed
+  // `dept:<uuid>` still fails closed per the gate's own truth table.
+  router.get(
+    "/files",
+    requireSpaceAccess(prisma, "reader", {
+      resolveSpace: (req) => {
+        const raw = req.query.space;
+        if (typeof raw !== "string") return undefined; // personal
+        if (raw === "shared") return "household"; // legacy WS-5 alias
+        if (raw.startsWith("dept:")) return raw; // pass through for uuid validation
+        return undefined; // "personal" or any unrecognized value -> personal
+      },
+    }),
+    async (req, res, next) => {
+      try {
+        const requestedPath = (req.query.path as string) || "/";
+        const space = resolveSpace(req.query.space);
+        const filePath = await rootForSpace(prisma, space, requestedPath);
+        const user = getUser(req);
+        const isPersonalRoot = space === "personal" && filePath === "/";
 
       // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"), not
       // the (space, requestedPath) pair — the shared prefix already makes the
@@ -1167,15 +1231,23 @@ export function createFilesRouter(
 
   // ── Spaces (GET /api/files/spaces) ──
   //
-  // WARP-883: tells the dashboard which spaces exist so it can show/hide the
-  // My-Files / Shared switcher. "personal" always exists (every user has a
-  // home); "shared" exists iff the Household group folder mounted into THIS
-  // user's home (the groupfolders provisioning ran + this user is in the
-  // household group). Read-only + degrades to shared-unavailable on a
-  // Nextcloud outage (never 500) — same posture as the other read endpoints.
+  // WARP-883 (T5) + WARP-1261 (T9): tells the dashboard which spaces exist.
+  // Returns: personal always; household (shared) with legacy id for wire-compat
+  // + spaceRef for v2; active DEPARTMENT/TEAM rows where caller is member or
+  // owner/admin.
+  //
+  // sharedAvailable probes the Household groupfolder; demoted (membership
+  // decides visibility in v2, not the probe). Read-only + degrades gracefully
+  // on Nextcloud outage (never 500).
   router.get("/files/spaces", async (req, res, next) => {
     try {
       const user = getUser(req);
+      const userId = req.user?.id;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
       let sharedAvailable = false;
       try {
         sharedAvailable = await ncDirExists(
@@ -1188,17 +1260,91 @@ export function createFilesRouter(
         logger.warn({ err }, "files/spaces: shared-folder probe failed; reporting unavailable");
         sharedAvailable = false;
       }
+
+      // Build the response: personal, household (shared), then active departments.
+      const spaces: Array<Record<string, unknown>> = [
+        { id: "personal", name: "My Files", root: "/" },
+      ];
+
+      // Household absorption: the seeded HOUSEHOLD kind department is returned
+      // with id='shared' for wire-compat, plus spaceRef for v2 routing.
+      const household = await prisma.department.findFirst({
+        where: { kind: "HOUSEHOLD" },
+        select: { id: true, name: true },
+      });
+      if (household) {
+        spaces.push({
+          id: "shared",
+          name: household.name,
+          spaceRef: `dept:${household.id}`,
+          root: `/${SHARED_FOLDER_NAME}`,
+          kind: "household",
+          state: "active",
+          // No 'right' or 'available' — household is special (always available if it exists).
+        });
+      }
+
+      // DB-driven departments: personal always; then Department rows where
+      // state=active AND caller is owner/admin OR has membership.
+      const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
+
+      let deptQuery = prisma.department.findMany({
+        where: {
+          kind: { in: ["DEPARTMENT", "TEAM"] },
+          state: "active",
+        },
+        select: {
+          id: true,
+          name: true,
+          parentId: true,
+          kind: true,
+          memberships: isOwnerOrAdmin
+            ? false
+            : {
+                where: { userId },
+                select: { right: true },
+              },
+        },
+        orderBy: { createdAt: "asc" },
+      });
+
+      const depts = await deptQuery;
+
+      for (const dept of depts) {
+        // Check membership: skip if not owner/admin and not a member.
+        if (!isOwnerOrAdmin) {
+          const membershipArray = (dept.memberships as any) || [];
+          if (membershipArray.length === 0) continue; // Not a member, skip.
+        }
+
+        // Resolve the mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+        let mountName = dept.name;
+        if (dept.kind === "TEAM" && dept.parentId) {
+          const parent = await prisma.department.findUnique({
+            where: { id: dept.parentId },
+            select: { name: true },
+          });
+          if (parent) {
+            mountName = `${parent.name} — ${dept.name}`;
+          }
+        }
+
+        const membershipArray = (dept.memberships as any) || [];
+        const membershipRight = membershipArray[0]?.right;
+
+        spaces.push({
+          id: `dept:${dept.id}`,
+          name: dept.name,
+          root: `/${mountName}`,
+          kind: dept.kind === "TEAM" ? "team" : "department",
+          state: "active",
+          right: isOwnerOrAdmin ? undefined : membershipRight,
+        });
+      }
+
       res.json({
         sharedAvailable,
-        spaces: [
-          { id: "personal", name: "My Files", available: true, root: "/" },
-          {
-            id: "shared",
-            name: SHARED_FOLDER_NAME,
-            available: sharedAvailable,
-            root: SHARED_FOLDER_PATH,
-          },
-        ],
+        spaces,
       });
     } catch (err) {
       handleFileError(err, res, next);

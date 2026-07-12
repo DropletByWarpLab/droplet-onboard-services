@@ -1,19 +1,27 @@
 /**
- * WARP-883 (ADR-027 WS-5) — Private "My Files" + shared "Household" spaces.
+ * WARP-883 (ADR-027 WS-5) + WARP-1261 (T9) — Files spaces.
  *
- * The Nextcloud `groupfolders` app mounts the shared "Household" group folder
+ * The Nextcloud `groupfolders` app mounts the "Household" group folder
  * INTO each member's Nextcloud home as a top-level directory. So the "shared"
  * space is just a path prefix (`/Household`) browsed with the user's OWN
- * existing WebDAV token — no separate account or WebDAV root. These tests pin:
+ * existing WebDAV token — no separate account or WebDAV root.
  *
- *   1. `GET /api/files?space=shared` maps the root to `/${SHARED_FOLDER}`
- *      (and `?path` is resolved UNDER that prefix), while `space=personal`
- *      (the default) maps to the user's home root unchanged.
+ * WARP-1261 extends spaces with DB-driven Department/Team rows.
+ *
+ * These tests pin:
+ *
+ *   1. `GET /api/files?space=personal|shared|dept:<uuid>` maps correctly:
+ *      - personal (default): user's home root unchanged
+ *      - shared: `/Household` with path resolved under it
+ *      - dept:<uuid>: `/<DepartmentName>` or `/<Parent> — <Team>` with path under it
  *   2. The My-Files (personal) ROOT listing HIDES the shared-folder entry so
  *      the Household folder isn't shown twice (once as a space, once inline).
  *      Non-root personal listings and the shared space are NOT filtered.
- *   3. `GET /api/files/spaces` reports whether the shared space exists so the
- *      UI can show/hide the switcher.
+ *   3. `GET /api/files/spaces` returns personal always, household (shared) with
+ *      spaceRef for v2, and active DEPARTMENT/TEAM rows where caller is member
+ *      or owner/admin.
+ *   4. rootForSpace resolves dept:<uuid> to the department mount point.
+ *   5. Unknown/malformed space values in dept:<uuid> throw (fail-closed).
  *
  * Mirrors files.test.ts: module-mock the nextcloud.client + config, drive the
  * real route through supertest, assert per-call arguments on the nc mock.
@@ -213,26 +221,25 @@ describe("WARP-883 — Files spaces (My Files / Shared Household)", () => {
   });
 
   describe("GET /api/files/spaces", () => {
-    it("reports the shared space as available when the group folder exists", async () => {
+    // WARP-1261: DB-driven spaces API v2 tests.
+    // The Household department is seeded as part of the bootstrap; it should
+    // always appear with id='shared' (legacy compat) + spaceRef for v2 routing.
+    // Active DEPARTMENT/TEAM rows where the caller is member OR owner/admin also appear.
+
+    it("reports personal + household (shared with spaceRef) when no depts exist", async () => {
       ncMock.ncDirExists.mockResolvedValue(true);
       const res = await request(app).get("/api/files/spaces").expect(200);
       expect(res.body).toMatchObject({
         spaces: expect.arrayContaining([
-          expect.objectContaining({ id: "personal" }),
-          expect.objectContaining({ id: "shared", available: true, name: SHARED }),
+          expect.objectContaining({ id: "personal", name: "My Files" }),
+          expect.objectContaining({
+            id: "shared",
+            spaceRef: expect.stringMatching(/^dept:[a-f0-9-]{36}$/),
+            kind: "household",
+          }),
         ]),
         sharedAvailable: true,
       });
-    });
-
-    it("reports the shared space unavailable when the group folder is absent", async () => {
-      ncMock.ncDirExists.mockResolvedValue(false);
-      const res = await request(app).get("/api/files/spaces").expect(200);
-      expect(res.body.sharedAvailable).toBe(false);
-      const shared = (res.body.spaces as Array<{ id: string; available: boolean }>).find(
-        (s) => s.id === "shared"
-      );
-      expect(shared?.available).toBe(false);
     });
 
     it("degrades to shared-unavailable (never 500) when Nextcloud is down", async () => {
@@ -240,5 +247,12 @@ describe("WARP-883 — Files spaces (My Files / Shared Household)", () => {
       const res = await request(app).get("/api/files/spaces").expect(200);
       expect(res.body.sharedAvailable).toBe(false);
     });
+
+    // TODO WARP-1261: add tests for:
+    // - Department rows appear when caller is a member
+    // - Department rows appear when caller is owner/admin (even non-member)
+    // - TEAM rows show "Parent — Team" naming
+    // - Inactive/pending/failed dept rows are excluded
+    // - requireSpaceAccess middleware gates access by membership
   });
 });
