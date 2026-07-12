@@ -425,4 +425,124 @@ describe("WARP-1262 (T10) — move/copy cross-space dual-check matrix", () => {
     expect(res.status).toBe(403);
     expect(ncMock.ncMoveFile).not.toHaveBeenCalled();
   });
+
+  it("the canonical 'shared' alias resolves on BOTH move sides (no false 'malformed' 403)", async () => {
+    // Regression for the CR: checkCrossSpaceSide used to call
+    // resolveRawSpaceToDepartmentId on the RAW value, so "shared" (the id the
+    // rest of the app actually produces for the Household space) fell through
+    // to `malformed` and 403'd every legitimate Household move/copy.
+    const householdApp = buildApp(
+      makePrismaStub({
+        household: { id: "44444444-4444-4444-8444-444444444444", name: "Household", parentId: null, kind: "HOUSEHOLD", state: "active" },
+      }),
+      { id: "u-owner", username: "dev", role: "owner" },
+    );
+    const moveRes = await request(householdApp)
+      .post("/api/files/move")
+      .send({ from: "/a.pdf", to: "/b.pdf", fromSpace: "shared", toSpace: "shared" });
+    expect(moveRes.status).toBe(200);
+    expect(ncMock.ncMoveFile).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      "/Household/a.pdf",
+      "/Household/b.pdf",
+      false,
+    );
+
+    const copyRes = await request(householdApp)
+      .post("/api/files/copy")
+      .send({ from: "/a.pdf", to: "/b.pdf", fromSpace: "shared", toSpace: "shared" });
+    expect(copyRes.status).toBe(200);
+    expect(ncMock.ncCopyFile).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      "/Household/a.pdf",
+      "/Household/b.pdf",
+      false,
+    );
+  });
+});
+
+describe("WARP-1262 (security) — '..' path traversal is rejected on every space-threaded write route", () => {
+  // CONTRIB_A holds contributor on DEPT_A, so each request below PASSES the
+  // space-authorization gate for its declared `space=dept:A` — proving the 400
+  // comes from the traversal guard in rootForSpace (the previously-missing
+  // check), not from the access gate. Before the fix, `../Beta/...` would
+  // normalize under WebDAV into DEPT_B — a sibling dept CONTRIB_A has zero
+  // rights in — and the destructive op would succeed.
+  const app = buildApp(prismaFull, CONTRIB_A);
+  const TRAVERSAL = "../Beta/secret.pdf";
+
+  it("delete: `..` in ?path (the CR's exact scenario) → 400, NC never called", async () => {
+    const res = await request(app)
+      .delete("/api/files")
+      .query({ path: TRAVERSAL, space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncDeleteFile).not.toHaveBeenCalled();
+  });
+
+  it("delete: personal `..` is rejected too (fail-closed for every space) → 400", async () => {
+    const res = await request(app).delete("/api/files").query({ path: "../../etc/passwd" });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncDeleteFile).not.toHaveBeenCalled();
+  });
+
+  it("rename: `..` in path → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/rename")
+      .send({ path: TRAVERSAL, newName: "x.txt", space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncMoveFile).not.toHaveBeenCalled();
+  });
+
+  it("upload: `..` in ?path → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/upload")
+      .query({ path: TRAVERSAL, space: `dept:${DEPT_A.id}` })
+      .attach("files", Buffer.from("x"), "report.txt");
+    expect(res.status).toBe(400);
+    expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+  });
+
+  it("favorite: `..` in path → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/favorite")
+      .send({ path: TRAVERSAL, favorite: true, space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncSetFavorite).not.toHaveBeenCalled();
+  });
+
+  it("version restore: `..` in path → 400 before ncGetFileId", async () => {
+    ncMock.ncGetFileId.mockResolvedValue(42);
+    const res = await request(app)
+      .post("/api/files/versions/restore")
+      .send({ path: TRAVERSAL, versionId: "v1", space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncGetFileId).not.toHaveBeenCalled();
+    expect(ncMock.ncRestoreVersion).not.toHaveBeenCalled();
+  });
+
+  it("move: `..` in from (cross-dept escape) → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/move")
+      .send({ from: TRAVERSAL, to: "/ok.pdf", fromSpace: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncMoveFile).not.toHaveBeenCalled();
+  });
+
+  it("copy: `..` in from → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/copy")
+      .send({ from: TRAVERSAL, to: "/ok.pdf", fromSpace: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncCopyFile).not.toHaveBeenCalled();
+  });
+
+  it("bulk-delete: a single `..` path fails the WHOLE batch closed → 400, NC never called", async () => {
+    const res = await request(app)
+      .post("/api/files/bulk-delete")
+      .send({ paths: ["/Reports/ok.pdf", TRAVERSAL], space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncDeleteFile).not.toHaveBeenCalled();
+  });
 });

@@ -191,6 +191,19 @@ function resolveSpaceGuardToken(req: Request): unknown {
 }
 
 /**
+ * WARP-1262 (security): thrown by `rootForSpace` when a caller-supplied path
+ * contains a `..` traversal segment. Mapped to HTTP 400 by `handleFileError`
+ * so every space-threaded write route rejects traversal with a clean client
+ * error instead of handing the escaped path to the WebDAV client.
+ */
+class UnsafePathError extends Error {
+  constructor(message = "path must not contain '..' segments") {
+    super(message);
+    this.name = "UnsafePathError";
+  }
+}
+
+/**
  * WARP-1261: generalized path routing for personal/shared/department spaces.
  *
  * Map a (space, requested path) pair to the real WebDAV home-relative path.
@@ -206,6 +219,19 @@ function resolveSpaceGuardToken(req: Request): unknown {
  * If resolution fails, throws a safe error (never silently falls back to personal).
  */
 async function rootForSpace(prisma: PrismaClient, space: Space, requestedPath: string): Promise<string> {
+  // WARP-1262 (security): reject path traversal at the single (space, path) →
+  // operational-path chokepoint. The downstream WebDAV builder only strips
+  // leading slashes, so a `..` segment would be resolved by fetch/undici's URL
+  // normalizer and land the operation in a SIBLING space the caller was never
+  // gated for — `requireSpaceAccess`/`checkSpaceAccess` only authorizes the
+  // declared `space` token, never `path`. mkdir already guards its own input
+  // (isSafeUserPath, below); enforcing it HERE makes the "a caller can never
+  // escape via `../`" contract documented above true for EVERY write route
+  // (upload/delete/rename/move/copy/bulk-*/favorite/version-restore) — current
+  // and future — not just the one route that remembered to call isSafeUserPath.
+  if (!isSafeUserPath(requestedPath)) {
+    throw new UnsafePathError();
+  }
   const rel = requestedPath.replace(/^\/+/, "");
 
   if (space === "personal") {
@@ -448,6 +474,13 @@ function handleFileError(
   next: NextFunction,
   degradeTo?: unknown
 ): void {
+  // WARP-1262 (security): a `..` traversal in a caller-supplied path is a bad
+  // request, never a 5xx — map it to 400 (before the NC-outage branches, since
+  // it originates client-side, not from an upstream).
+  if (err instanceof UnsafePathError) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
   if (err instanceof MissingNcTokenError) {
     res.status(401).json({ error: err.message });
     return;
@@ -1688,7 +1721,17 @@ export function createFilesRouter(
     rawSpace: unknown,
     minRight: DepartmentRight,
   ): Promise<{ ok: true; departmentId: string | null } | { ok: false }> {
-    const resolved = await resolveRawSpaceToDepartmentId(prisma, rawSpace);
+    // WARP-1262 (fix): translate the legacy WS-5 "shared" literal to the gate's
+    // "household" token BEFORE resolving — exactly as resolveSpaceGuardToken
+    // does for every single-space write route. `resolveRawSpaceToDepartmentId`
+    // → parseSpaceValue only recognizes "household", so a raw "shared" (the
+    // canonical id the rest of the app — resolveSpace(), the dashboard's
+    // FileSpaceId, move/copy fromSpace/toSpace — actually produces for that
+    // space) would otherwise fall through to `malformed` and 403 a legitimate
+    // Household move/copy. Anything else passes through unchanged so a truly
+    // malformed value still fails closed.
+    const guardSpace = rawSpace === "shared" ? "household" : rawSpace;
+    const resolved = await resolveRawSpaceToDepartmentId(prisma, guardSpace);
     if (!resolved.ok) {
       recordAccessDenied(req, resolved.reason);
       res.status(403).json({ error: resolved.error });
