@@ -209,6 +209,23 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     expect(dialog.textContent).toMatch(/— used/);
   });
 
+  it("shows the sync-state transition (Applying to storage… -> Applied) after save", async () => {
+    const dialog = await openEditDialog();
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
+      target: { value: "5" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByText("Applying to storage…")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(within(dialog).getByText("Applied")).toBeInTheDocument();
+    });
+  });
+
   it("rejects a non-positive upload cap without saving", async () => {
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());

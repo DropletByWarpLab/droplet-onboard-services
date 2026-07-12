@@ -16,6 +16,7 @@ import {
   Link as LinkIcon,
   Building2,
   ChevronRight,
+  Loader2,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
@@ -238,6 +239,10 @@ export default function UsersPage() {
   const [editUploadCapMb, setEditUploadCapMb] = useState("");
   const [editUsedBytes, setEditUsedBytes] = useState<string | null>(null);
   const [editUsageLoading, setEditUsageLoading] = useState(false);
+  // WARP-1270 QA fix: transient sync-state text under the Usage fields —
+  // "Applying to storage…" while the PATCH is in flight, then "Applied"
+  // once the orchestrator confirms (design brief §4).
+  const [editUsageSyncText, setEditUsageSyncText] = useState<string | null>(null);
 
   // WARP-1271 (T19a): roster "used / limit" column, keyed by local User.id.
   // Sourced from the admin usage-roster endpoint (one call for every row,
@@ -584,6 +589,7 @@ export default function UsersPage() {
     setEditStorageUnit("GB");
     setEditUploadCapMb("");
     setEditUsedBytes(null);
+    setEditUsageSyncText(null);
 
     // WARP-1271 (T19a): usage settings key on the LOCAL User UUID
     // (RosterUser.userId), not the Nextcloud username — rows without a
@@ -676,11 +682,19 @@ export default function UsersPage() {
         await updateUser(editing.id, patch);
       }
       if (usagePatch && editing.userId) {
+        // WARP-1270 QA fix: surface the sync-state transition under the
+        // Usage fields instead of closing the dialog silently — the box
+        // still has to push the quota to storage after this call resolves.
+        setEditUsageSyncText("Applying to storage…");
         await updateUserUsage(editing.userId, usagePatch);
+        setEditUsageSyncText("Applied");
+        // Let "Applied" stay visible for a beat before the dialog closes.
+        await new Promise((resolve) => setTimeout(resolve, 700));
       }
       closeEdit();
       await reload();
     } catch (err: any) {
+      setEditUsageSyncText(null);
       setError(err?.message || "Failed to update user");
     }
   };
@@ -1704,6 +1718,18 @@ export default function UsersPage() {
                     <div className="type-caption-1 mono" style={{ color: "var(--text-faint)" }}>
                       {editUsageLoading ? "Loading usage…" : `${formatBytes(editUsedBytes)} used`}
                     </div>
+                    {editUsageSyncText && (
+                      <div
+                        className="type-caption-1 mono"
+                        style={{ color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}
+                        role="status"
+                      >
+                        {editUsageSyncText === "Applying to storage…" && (
+                          <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                        )}
+                        {editUsageSyncText}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1715,12 +1741,14 @@ export default function UsersPage() {
               <button
                 onClick={closeEdit}
                 className="btn ghost"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 Cancel
               </button>
               <button
                 onClick={handleEditSave}
                 className="btn primary"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 <Check size={14} />
                 Save

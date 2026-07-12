@@ -173,9 +173,9 @@ export default function AdminFilesPage() {
             alignItems: "center",
             gap: 12,
             padding: "12px 16px",
-            borderColor: "rgba(239,68,68,0.25)",
-            background: "rgba(239,68,68,0.08)",
-            color: "#ef4444",
+            borderColor: "color-mix(in srgb, var(--color-system-red) 25%, transparent)",
+            background: "color-mix(in srgb, var(--color-system-red) 8%, transparent)",
+            color: "var(--color-system-red)",
             fontSize: 13,
             marginBottom: 16,
           }}
