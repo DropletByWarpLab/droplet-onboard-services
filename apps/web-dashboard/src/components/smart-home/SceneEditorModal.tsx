@@ -172,23 +172,23 @@ export function SceneEditorModal({
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="lg">
       {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
       <div>
-        <h2 id={headingId} className="type-title-3 text-label-primary mb-1">
+        <h2 id={headingId} className="type-title-3 mb-1" style={{ color: "var(--text)" }}>
           {mode === "create" ? "New routine" : "Edit routine"}
         </h2>
-        <p className="type-subheadline text-label-tertiary mb-4">
+        <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
           A routine runs several devices at once. Drag to reorder — actions run top
           to bottom.
         </p>
 
         {hydrating ? (
-          <div className="flex items-center gap-2 py-8 text-label-tertiary justify-center">
+          <div className="flex items-center gap-2 py-8 justify-center" style={{ color: "var(--text-muted)" }}>
             <Loader2 size={18} className="animate-spin" />
             <span className="type-subheadline">Loading…</span>
           </div>
         ) : (
           <div className="space-y-4">
             <div>
-              <label htmlFor="routine-name" className="type-subheadline text-label-secondary block mb-1.5">
+              <label htmlFor="routine-name" className="type-subheadline block mb-1.5" style={{ color: "var(--text-muted)" }}>
                 Name
               </label>
               <input
@@ -197,14 +197,14 @@ export function SceneEditorModal({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Good night"
-                className="dp-input"
+                className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
                 maxLength={120}
                 autoComplete="off"
               />
             </div>
 
             {devices.length === 0 ? (
-              <p className="type-subheadline text-label-tertiary">
+              <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                 No controllable devices are paired yet. Add a device first, then
                 build a routine.
               </p>
@@ -218,16 +218,21 @@ export function SceneEditorModal({
                     <Reorder.Item
                       key={a.key}
                       value={a}
-                      className="flex items-center gap-2 bg-surface-secondary/60 rounded-lg px-2 py-2"
+                      className="flex items-center gap-2 rounded-lg px-2 py-2"
+                      style={{ background: "var(--card-inner)" }}
                     >
-                      <span className="text-label-quaternary cursor-grab active:cursor-grabbing" aria-hidden>
+                      <span
+                        className="cursor-grab active:cursor-grabbing"
+                        style={{ color: "var(--text-faint)" }}
+                        aria-hidden
+                      >
                         <GripVertical size={16} />
                       </span>
                       <select
                         aria-label="Device"
                         value={a.deviceNodeId}
                         onChange={(e) => onDeviceChange(a.key, e.target.value)}
-                        className="dp-input flex-1 min-w-0"
+                        className="flex-1 min-w-0 px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
                       >
                         {devices.map((d) => (
                           <option key={d.nodeId} value={d.nodeId}>
@@ -239,7 +244,7 @@ export function SceneEditorModal({
                         aria-label="Action"
                         value={a.command}
                         onChange={(e) => onCommandChange(a.key, e.target.value)}
-                        className="dp-input"
+                        className="px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
                       >
                         {cmds.map((c) => (
                           <option key={c.command} value={c.command}>
@@ -257,7 +262,7 @@ export function SceneEditorModal({
                           onChange={(e) =>
                             patchAction(a.key, { args: { brightness: Number(e.target.value) } })
                           }
-                          className="dp-input w-20"
+                          className="w-20 px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
                         />
                       )}
                       {kind === "temp" && (
@@ -270,14 +275,14 @@ export function SceneEditorModal({
                           onChange={(e) =>
                             patchAction(a.key, { args: { temperature: Number(e.target.value) } })
                           }
-                          className="dp-input w-20"
+                          className="w-20 px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
                         />
                       )}
                       <button
                         type="button"
                         onClick={() => setActions((x) => x.filter((y) => y.key !== a.key))}
                         aria-label="Remove action"
-                        className="text-label-tertiary hover:text-system-red transition-colors p-1"
+                        className="transition-colors p-1 text-[var(--text-muted)] hover:text-system-red"
                       >
                         <Trash2 size={16} />
                       </button>
@@ -311,7 +316,7 @@ export function SceneEditorModal({
                 type="button"
                 onClick={handleSave}
                 disabled={!canSave}
-                className="dp-btn-primary flex items-center gap-2"
+                className="btn primary"
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}
                 {mode === "create" ? "Create routine" : "Save changes"}
