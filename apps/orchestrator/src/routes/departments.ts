@@ -2,11 +2,13 @@
  * WARP-1258 (T6) — departments CRUD routes.
  *
  * Implements the department/team lifecycle API per ADR-029 §4:
- *   GET    /api/departments              — list all active departments (any authenticated role)
+ *   GET    /api/departments              — list departments/teams, scoped + myRight (any authenticated role)
+ *   GET    /api/departments/:id          — detail: row + member roster + child teams + usedBytes
  *   POST   /api/departments              — create department (owner+admin)
  *   POST   /api/departments/:id/teams    — create team under department (owner+admin)
  *   PATCH  /api/departments/:id          — update department (owner+admin)
  *   DELETE /api/departments/:id          — archive department (owner+admin)
+ *   POST   /api/departments/:id/restore  — restore an archived department (owner+admin, WARP-1270)
  *
  * All mutations validate against reserved names, active ancestors, and existing
  * Nextcloud mount points (best-effort warn-only). Slug generation: lowercase-dash
@@ -151,8 +153,21 @@ function formatMembershipResponse(m: {
 /**
  * Helper to format a Department row for API response.
  * BigInt fields are encoded as strings per the schema.
+ *
+ * `myRight` (WARP-1270, T18) — the CALLER's own membership right on this
+ * row, or null if they hold none. Populated by the list/detail routes from
+ * a batch membership lookup; used by the dashboard to (a) decide whether a
+ * non-admin manager may see/manage a unit at all (manager-delegation view,
+ * design brief §3) and (b) render the caller's own rights chip. Never
+ * derived from role — a plain owner/admin has `myRight: null` unless they
+ * also hold an explicit membership row (admin see-all is a separate,
+ * loud, audited path, not a membership fabrication).
  */
-function formatDepartmentResponse(dept: Department & { _count?: { teams?: number; memberships?: number } }) {
+function formatDepartmentResponse(
+  dept: Department & { _count?: { teams?: number; memberships?: number } },
+  myRight: string | null = null,
+  usedBytes: string | null = null,
+) {
   return {
     id: dept.id,
     name: dept.name,
@@ -168,6 +183,8 @@ function formatDepartmentResponse(dept: Department & { _count?: { teams?: number
     archivedAt: dept.archivedAt,
     memberCount: dept._count?.memberships ?? 0,
     teamCount: dept._count?.teams ?? 0,
+    myRight,
+    usedBytes,
   };
 }
 
@@ -175,17 +192,41 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   // ── GET /api/departments ────────────────────────────────────
-  // List all non-archived departments and teams. Any authenticated role.
-  // Returns {id, name, slug, kind, parentId, state, quotaBytes, memberCount, teamCount}.
+  // List departments and teams. Any authenticated role.
+  // Returns {id, name, slug, kind, parentId, state, quotaBytes, memberCount, teamCount, myRight}.
   // BigInt fields are string-encoded.
+  //
+  // WARP-1270 (T18) scoping, layered on top of the T6-shipped shape:
+  //   - owner/admin: EVERY department/team, every state (including
+  //     archived) — admin see-all (ADR-029 §3.5) needs the archived rows
+  //     too so the Departments tab can render the Archive chip + Restore.
+  //   - everyone else: only units they hold a membership row in (the
+  //     manager-delegation view, brief §3 — "sees ONLY their unit's
+  //     panel"), archived rows hidden (nothing to manage once archived).
+  // `myRight` is populated for every caller from one batch membership
+  // query — used by the dashboard to gate the manager-delegation view and
+  // render the caller's own rights chip; never derived from role.
   router.get(
     "/departments",
-    async (_req: Request, res: Response, next: NextFunction) => {
+    async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const isAdminTier = req.user?.role === "owner" || req.user?.role === "admin";
+
+        const ownMemberships = req.user
+          ? await prisma.departmentMembership.findMany({
+              where: { userId: req.user.id },
+              select: { departmentId: true, right: true },
+            })
+          : [];
+        const myRightById = new Map(ownMemberships.map((m) => [m.departmentId, m.right]));
+
         const departments = await prisma.department.findMany({
-          where: {
-            state: { not: "archived" }, // Hide fully archived departments
-          },
+          where: isAdminTier
+            ? {}
+            : {
+                state: { not: "archived" },
+                id: { in: [...myRightById.keys()] },
+              },
           include: {
             _count: {
               select: { memberships: true, teams: true },
@@ -193,9 +234,179 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           },
         });
 
+        // Best-effort usedBytes for the card quota meters — one NC call for
+        // the whole list (mirrors admin-files.ts's sizing), never fabricated
+        // on failure. Skipped entirely when nothing has a discovered
+        // groupfolder yet (avoids a pointless NC round-trip on an empty list).
+        let foldersById = new Map<number, GroupfolderInfo>();
+        if (departments.some((d) => d.ncGroupfolderId !== null)) {
+          try {
+            const folders = await gfListFolders(adminBasicToken());
+            foldersById = new Map(folders.map((f) => [f.id, f]));
+          } catch (err) {
+            logger.warn({ err }, "GET /departments: could not read groupfolder sizes");
+          }
+        }
+
         res.json({
-          departments: departments.map(formatDepartmentResponse),
+          departments: departments.map((d) => {
+            const gf = d.ncGroupfolderId !== null ? foldersById.get(d.ncGroupfolderId) : undefined;
+            return formatDepartmentResponse(
+              d,
+              myRightById.get(d.id) ?? null,
+              gf ? String(gf.size) : null,
+            );
+          }),
         });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/departments/:id ─────────────────────────────────
+  // Detail for one department/team: the row itself, its member roster
+  // (id, displayName, right, syncState — no email; the member table
+  // (brief §3) doesn't need it and the column is encrypted-at-rest), its
+  // child teams (summary only, for a DEPARTMENT), and a best-effort
+  // `usedBytes` read from the discovered NC groupfolder (mirrors the
+  // admin usage-roster sizing in admin-files.ts — "—" via null on any
+  // read failure, never a fabricated 0).
+  //
+  // Authz: owner/admin see any unit (admin see-all). Everyone else must
+  // hold a membership row on THIS unit, or — for a TEAM — on its parent
+  // DEPARTMENT (inherited-manager rule extends to read access here too;
+  // a parent manager needs to see the child team's roster to manage it).
+  router.get(
+    "/departments/:id",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+
+        const departmentId = req.params.id;
+        const dept = await prisma.department.findUnique({
+          where: { id: departmentId },
+          include: {
+            _count: { select: { memberships: true, teams: true } },
+            teams: {
+              include: { _count: { select: { memberships: true, teams: true } } },
+            },
+          },
+        });
+        if (!dept) {
+          return res.status(404).json({ error: "Department not found", code: "NOT_FOUND" });
+        }
+
+        const isAdminTier = req.user.role === "owner" || req.user.role === "admin";
+        let authorized = isAdminTier;
+        let ownMembership = await prisma.departmentMembership.findUnique({
+          where: { departmentId_userId: { departmentId, userId: req.user.id } },
+          select: { right: true },
+        });
+        if (!authorized && ownMembership) authorized = true;
+        if (!authorized && dept.parentId) {
+          const parentMembership = await prisma.departmentMembership.findUnique({
+            where: { departmentId_userId: { departmentId: dept.parentId, userId: req.user.id } },
+            select: { right: true },
+          });
+          if (parentMembership) authorized = true;
+        }
+        if (!authorized) {
+          return res.status(403).json({
+            error: "Forbidden: not a member of this department",
+            code: "NOT_A_MEMBER",
+          });
+        }
+
+        const memberships = await prisma.departmentMembership.findMany({
+          where: { departmentId },
+          include: { user: { select: { id: true, displayName: true, username: true } } },
+          orderBy: { grantedAt: "asc" },
+        });
+
+        let usedBytes: string | null = null;
+        if (dept.ncGroupfolderId !== null) {
+          try {
+            const folders = await gfListFolders(adminBasicToken());
+            const gf = folders.find((f: GroupfolderInfo) => f.id === dept.ncGroupfolderId);
+            if (gf) usedBytes = String(gf.size);
+          } catch (err) {
+            logger.warn({ err, departmentId }, "GET /departments/:id: could not read groupfolder size");
+          }
+        }
+
+        res.json({
+          department: formatDepartmentResponse(dept, ownMembership?.right ?? null),
+          usedBytes,
+          members: memberships.map((m) => ({
+            userId: m.userId,
+            displayName: m.user.displayName || m.user.username,
+            right: m.right,
+            syncState: m.syncState,
+          })),
+          teams: dept.teams.map((t) => formatDepartmentResponse(t)),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/departments/:id/restore ───────────────────────
+  // Restore an archived (or archiving) department/team back to the
+  // provisioning lifecycle. owner + admin only. Sets state to `pending`
+  // so the reconciler re-provisions the NC side (group + groupfolder +
+  // masks + quota) exactly like a fresh create — the department's row and
+  // its existing DepartmentMembership rows (never deleted by archive) are
+  // the desired state the reconciler converges NC toward. Copy on the
+  // caller side: "Members regain access with the rights they had before
+  // it was archived."
+  router.post(
+    "/departments/:id/restore",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const departmentId = req.params.id;
+        const existing = await prisma.department.findUnique({ where: { id: departmentId } });
+        if (!existing) {
+          return res.status(404).json({ error: "Department not found", code: "NOT_FOUND" });
+        }
+        if (existing.state !== "archived" && existing.state !== "archiving") {
+          return res.status(400).json({
+            error: `Only an archived department can be restored (current state: ${existing.state})`,
+            code: "NOT_ARCHIVED",
+          });
+        }
+
+        const restored = await prisma.$transaction(async (tx) => {
+          const result = await tx.department.update({
+            where: { id: departmentId },
+            data: { state: "pending", archivedAt: null },
+            include: { _count: { select: { memberships: true, teams: true } } },
+          });
+          await bumpAclVersion(tx, departmentId);
+          return result;
+        });
+
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "folder-plus",
+          what: "Department restored",
+          sub: `${restored.name}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            departmentId,
+            departmentName: restored.name,
+          },
+          actor: actorFromRequest(req),
+        });
+
+        kickReconcile();
+
+        res.json({ department: formatDepartmentResponse(restored) });
       } catch (err) {
         next(err);
       }

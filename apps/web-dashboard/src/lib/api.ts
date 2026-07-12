@@ -88,6 +88,11 @@ import type {
   UsagePolicy,
   UsageWithMeta,
   AdminFilesUsageResponse,
+  Department,
+  DepartmentDetail,
+  DepartmentRight,
+  CreateDepartmentPayload,
+  DepartmentMembership,
 } from "./types";
 import type {
   EmailAccount,
@@ -4818,6 +4823,172 @@ export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
     throw new Error(body.error || `Failed to fetch usage roster: ${res.status}`);
   }
   return res.json();
+}
+
+// ── WARP-1270 (T18): Departments & teams ──
+// Rights map 1:1 to the ADR-029 permission truth (reader/contributor/manager);
+// the PATCH member-right call is the only writer (design brief §3).
+
+export async function listDepartments(): Promise<{ departments: Department[] }> {
+  const res = await authFetch(`${BASE}/api/departments`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to list departments: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getDepartment(id: string): Promise<DepartmentDetail> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to load department: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function createDepartment(
+  payload: CreateDepartmentPayload,
+): Promise<{ department: Department; warning: string | null }> {
+  const res = await authFetch(`${BASE}/api/departments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to create department: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function createTeam(
+  departmentId: string,
+  payload: CreateDepartmentPayload,
+): Promise<{ team: Department }> {
+  const res = await authFetch(
+    `${BASE}/api/departments/${encodeURIComponent(departmentId)}/teams`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to create team: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function archiveDepartment(id: string): Promise<{ department: Department }> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to archive: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function restoreDepartment(id: string): Promise<{ department: Department }> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to restore: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function addDepartmentMember(
+  departmentId: string,
+  userId: string,
+  right: DepartmentRight,
+): Promise<{ membership: DepartmentMembership }> {
+  const res = await authFetch(
+    `${BASE}/api/departments/${encodeURIComponent(departmentId)}/members`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, right }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to add member: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function updateDepartmentMemberRight(
+  departmentId: string,
+  userId: string,
+  right: DepartmentRight,
+): Promise<{ membership: DepartmentMembership }> {
+  const res = await authFetch(
+    `${BASE}/api/departments/${encodeURIComponent(departmentId)}/members/${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ right }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to update rights: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function removeDepartmentMember(
+  departmentId: string,
+  userId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/departments/${encodeURIComponent(departmentId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to remove member: ${res.status}`) as Error & {
+      code?: string;
+    };
+    err.code = body.code;
+    throw err;
+  }
 }
 
 // --- Remote Access (WireGuard VPN) ---

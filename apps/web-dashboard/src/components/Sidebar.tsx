@@ -12,6 +12,7 @@ import {
   Film,
   FlaskConical,
   FolderKanban,
+  FolderLock,
   FolderOpen,
   Globe,
   HardDrive,
@@ -205,6 +206,16 @@ const NAV_GROUPS: NavGroup[] = [
       // updates and adds the full Roles / Groups / Sessions entries
       // with workspace:"business" set.
       { href: "/users", label: "Users", icon: Users },
+      // WARP-1270 (T18): company-wide storage usage roster (people +
+      // libraries). Business-only, owner/admin — mirrors the server-side
+      // `requireRole("owner","admin")` gate on GET /api/admin/files/usage.
+      {
+        href: "/admin/files",
+        label: "Company files",
+        icon: FolderLock,
+        workspace: "business",
+        roles: ["owner", "admin"],
+      },
       // WARP-555: read-only catalog of the assistant's built-in tools.
       // No role restriction — the /api/llm/tools/catalog route filters
       // write tools out for non-privileged roles, so family/guest see a

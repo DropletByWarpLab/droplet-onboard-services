@@ -109,7 +109,13 @@ describe("POST /api/admin/files/:id/reindex", () => {
 // ── WARP-1271 (T19a): GET /api/admin/files/usage ───────────────────────
 
 function mkUsagePrisma(opts: {
-  users?: Array<{ id: string; displayName: string; username: string; nextcloudUsername: string | null }>;
+  users?: Array<{
+    id: string;
+    displayName: string;
+    username: string;
+    nextcloudUsername: string | null;
+    usagePolicy?: { maxUploadSizeMb: number | null } | null;
+  }>;
   departments?: Array<{ id: string; name: string; kind: string; ncGroupfolderId: number | null; quotaBytes: bigint | null }>;
 }) {
   return {
@@ -168,8 +174,36 @@ describe("GET /api/admin/files/usage", () => {
         quota: "5000000000",
         used: "4000000000",
         free: "1000000000",
+        largestUploadMb: null,
+        lastActive: null,
       },
     ]);
+  });
+
+  it("returns the per-user upload-cap override from UserUsagePolicy", async () => {
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 4_000_000_000,
+      free: 1_000_000_000,
+      total: 5_000_000_000,
+      quota: 5_000_000_000,
+    });
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          {
+            id: "u1",
+            displayName: "Alice",
+            username: "alice",
+            nextcloudUsername: "alice",
+            usagePolicy: { maxUploadSizeMb: 2048 },
+          },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users[0].largestUploadMb).toBe(2048);
   });
 
   it("tolerates a per-user quota-read failure with an honest '—', never dropping the row or 500ing", async () => {
@@ -185,7 +219,7 @@ describe("GET /api/admin/files/usage", () => {
     const res = await request(app).get("/api/admin/files/usage");
     expect(res.status).toBe(200);
     expect(res.body.users).toEqual([
-      { userId: "u1", displayName: "Alice", quota: "—", used: "—", free: "—" },
+      { userId: "u1", displayName: "Alice", quota: "—", used: "—", free: "—", largestUploadMb: null, lastActive: null },
     ]);
   });
 
@@ -201,7 +235,7 @@ describe("GET /api/admin/files/usage", () => {
     const res = await request(app).get("/api/admin/files/usage");
     expect(res.status).toBe(200);
     expect(res.body.users).toEqual([
-      { userId: "u2", displayName: "NoNc", quota: null, used: "—", free: null },
+      { userId: "u2", displayName: "NoNc", quota: null, used: "—", free: null, largestUploadMb: null, lastActive: null },
     ]);
     expect(ncGetUserQuotaAdminMock).not.toHaveBeenCalled();
   });

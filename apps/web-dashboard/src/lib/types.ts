@@ -313,6 +313,85 @@ export interface FileSpacesResponse {
   spaces: FileSpace[];
 }
 
+// ── WARP-1270 (T18): Departments & teams tab, invite grants, company files ──
+
+/** One word per person per library (design brief §0.2) — neutral, text-first. */
+export type DepartmentRight = "reader" | "contributor" | "manager";
+
+export type DepartmentKind = "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
+
+export type DepartmentState =
+  | "pending"
+  | "provisioning"
+  | "active"
+  | "failed"
+  | "archiving"
+  | "archived";
+
+/** A row from GET /api/departments (list) or the `department` slice of
+ *  GET /api/departments/:id. BigInt fields are string-encoded. `myRight`
+ *  is the CALLER's own membership right on this unit, or null — never
+ *  derived from role (admin see-all is separate from holding a row). */
+export interface Department {
+  id: string;
+  name: string;
+  slug: string;
+  kind: DepartmentKind;
+  parentId: string | null;
+  description: string | null;
+  state: DepartmentState;
+  quotaBytes: string | null;
+  aclVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  memberCount: number;
+  teamCount: number;
+  myRight: DepartmentRight | null;
+  /** Best-effort bytes used, read from the discovered NC groupfolder (one
+   *  batch lookup for the whole list). Null on any read failure or before
+   *  discovery — never a fabricated 0. */
+  usedBytes: string | null;
+}
+
+export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
+
+/** One row of GET /api/departments/:id's `members` array — no email (the
+ *  member table doesn't need it and the column is encrypted-at-rest). */
+export interface DepartmentMember {
+  userId: string;
+  displayName: string;
+  right: DepartmentRight;
+  syncState: DepartmentSyncState;
+}
+
+export interface DepartmentDetail {
+  department: Department;
+  /** Best-effort bytes used, read from the discovered NC groupfolder.
+   *  Null on any read failure or before discovery — never a fabricated 0. */
+  usedBytes: string | null;
+  members: DepartmentMember[];
+  /** Child TEAM summaries, populated only when `department.kind` is DEPARTMENT. */
+  teams: Department[];
+}
+
+export interface CreateDepartmentPayload {
+  name: string;
+  description?: string;
+  /** Decimal-string bytes (BigInt wire contract). */
+  quotaBytes?: string;
+}
+
+/** GET /api/departments/:id/members row → membership-write payload. */
+export interface DepartmentMembership {
+  id: string;
+  departmentId: string;
+  userId: string;
+  right: DepartmentRight;
+  syncState: DepartmentSyncState;
+  ncPermissionMask: number | null;
+}
+
 export interface TrashItemInfo {
   /** Nextcloud-assigned name used as restore key (e.g. "photo.jpg.d1712860391") */
   name: string;
@@ -689,6 +768,9 @@ export interface InviteCreateRequest {
   displayName?: string;
   role?: InviteRole;
   ttlHours?: number;
+  /** WARP-1270 (T18) — optional department/team grants, converted to
+   *  DepartmentMembership rows at accept time (orchestrator WARP-1265). */
+  departments?: Array<{ departmentId: string; right?: DepartmentRight }>;
 }
 
 // ── WARP-1271 (T19a): per-user usage settings ──
@@ -720,6 +802,12 @@ export interface AdminUsageUserRow {
   quota: string | null;
   used: string;
   free: string | null;
+  /** WARP-1270 (T18) — UserUsagePolicy.maxUploadSizeMb override; null =
+   *  system default, no override set. */
+  largestUploadMb: number | null;
+  /** WARP-1270 (T18) — always null today (no per-user activity tracking
+   *  yet); render "—", never a fabricated date. */
+  lastActive: string | null;
 }
 
 export interface AdminUsageDepartmentRow {

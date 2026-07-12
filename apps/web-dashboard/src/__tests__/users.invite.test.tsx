@@ -46,6 +46,20 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
+// WARP-1270 (T18): the page now reads useWorkspace() unconditionally (the
+// "People" / "Departments & teams" tab strip gate). These tests exercise
+// the Home-mode invite flow, so isBusiness: false — matches every prior
+// assertion here (no tab strip, no department-assignment section).
+vi.mock("@/lib/workspace", () => ({
+  useWorkspace: () => ({
+    workspaceType: "home",
+    isHome: true,
+    isBusiness: false,
+    setWorkspaceType: () => {},
+    homeVariant: "B",
+  }),
+}));
+
 // Stub QRCodeSVG so we don't pull in the canvas/svg quirks in jsdom and
 // can assert the value prop directly.
 vi.mock("qrcode.react", () => ({

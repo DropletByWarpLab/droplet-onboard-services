@@ -120,6 +120,20 @@ interface AdminUsageUserRow {
   quota: string | null; // null = unlimited; "—" = read failed
   used: string; // "—" on read failure
   free: string | null; // null = unlimited/unknown; "—" = read failed
+  /** WARP-1270 (T18) — the per-user upload-cap override (UserUsagePolicy.
+   *  maxUploadSizeMb); null = system default, no override set. */
+  largestUploadMb: number | null;
+  /**
+   * WARP-1270 (T18) — always null today: Droplet has no per-user
+   * last-activity timestamp (auth is stateless JWT, no login-audit table
+   * yet). Kept as an explicit field (renders "—" client-side, the design
+   * brief's sanctioned honest-unknown treatment) rather than inventing a
+   * proxy from `User.updatedAt` (which changes on ANY row edit, not
+   * activity) or omitting the column and silently diverging from the
+   * design packet's roster spec (people usage table: "…largest-upload
+   * override, last-active"). Wire to a real source when one exists.
+   */
+  lastActive: string | null;
 }
 
 interface AdminUsageDepartmentRow {
@@ -132,15 +146,22 @@ interface AdminUsageDepartmentRow {
 
 async function fetchUserUsageRow(
   adminToken: string,
-  user: { id: string; displayName: string; username: string; nextcloudUsername: string | null },
+  user: {
+    id: string;
+    displayName: string;
+    username: string;
+    nextcloudUsername: string | null;
+    usagePolicy: { maxUploadSizeMb: number | null } | null;
+  },
 ): Promise<AdminUsageUserRow> {
   const displayName = user.displayName || user.username;
+  const largestUploadMb = user.usagePolicy?.maxUploadSizeMb ?? null;
   if (!user.nextcloudUsername) {
-    return { userId: user.id, displayName, quota: null, used: "—", free: null };
+    return { userId: user.id, displayName, quota: null, used: "—", free: null, largestUploadMb, lastActive: null };
   }
   const quota = await ncGetUserQuotaAdmin(adminToken, user.nextcloudUsername).catch(() => null);
   if (!quota) {
-    return { userId: user.id, displayName, quota: "—", used: "—", free: "—" };
+    return { userId: user.id, displayName, quota: "—", used: "—", free: "—", largestUploadMb, lastActive: null };
   }
   return {
     userId: user.id,
@@ -148,6 +169,8 @@ async function fetchUserUsageRow(
     quota: quota.quota !== null ? String(Math.trunc(quota.quota)) : null,
     used: String(Math.trunc(quota.used)),
     free: quota.free !== null ? String(Math.trunc(quota.free)) : null,
+    largestUploadMb,
+    lastActive: null,
   };
 }
 
@@ -162,7 +185,13 @@ export function createAdminFilesUsageRouter(prisma: PrismaClient): Router {
         const adminToken = adminBasicToken();
 
         const users = await prisma.user.findMany({
-          select: { id: true, displayName: true, username: true, nextcloudUsername: true },
+          select: {
+            id: true,
+            displayName: true,
+            username: true,
+            nextcloudUsername: true,
+            usagePolicy: { select: { maxUploadSizeMb: true } },
+          },
         });
 
         const userRows: AdminUsageUserRow[] = [];

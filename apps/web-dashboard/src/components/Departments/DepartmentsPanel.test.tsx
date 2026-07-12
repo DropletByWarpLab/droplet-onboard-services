@@ -1,0 +1,305 @@
+/**
+ * WARP-1270 (T18) — Departments & teams tab panel (design brief §3).
+ *
+ * Covers list + detail render, rights-select → API call, remove confirm,
+ * create-department modal (slug preview + submit), archive/restore, the
+ * Household system card, empty state, and admin-vs-manager affordance
+ * gating (create/archive admin-only; member management manager-or-admin).
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import React from "react";
+import type { Department, DepartmentDetail, RosterUser } from "@/lib/types";
+
+const listDepartmentsMock = vi.fn();
+const getDepartmentMock = vi.fn();
+const createDepartmentMock = vi.fn();
+const createTeamMock = vi.fn();
+const archiveDepartmentMock = vi.fn();
+const restoreDepartmentMock = vi.fn();
+const addDepartmentMemberMock = vi.fn();
+const updateDepartmentMemberRightMock = vi.fn();
+const removeDepartmentMemberMock = vi.fn();
+
+vi.mock("@/lib/api", () => ({
+  listDepartments: (...a: any[]) => listDepartmentsMock(...a),
+  getDepartment: (...a: any[]) => getDepartmentMock(...a),
+  createDepartment: (...a: any[]) => createDepartmentMock(...a),
+  createTeam: (...a: any[]) => createTeamMock(...a),
+  archiveDepartment: (...a: any[]) => archiveDepartmentMock(...a),
+  restoreDepartment: (...a: any[]) => restoreDepartmentMock(...a),
+  addDepartmentMember: (...a: any[]) => addDepartmentMemberMock(...a),
+  updateDepartmentMemberRight: (...a: any[]) => updateDepartmentMemberRightMock(...a),
+  removeDepartmentMember: (...a: any[]) => removeDepartmentMemberMock(...a),
+}));
+
+vi.mock("framer-motion", async () => {
+  const actual: any = await vi.importActual("framer-motion");
+  return { ...actual, useReducedMotion: () => true };
+});
+
+import { DepartmentsPanel } from "./DepartmentsPanel";
+
+function dept(overrides: Partial<Department> = {}): Department {
+  return {
+    id: "d1",
+    name: "Finance",
+    slug: "finance",
+    kind: "DEPARTMENT",
+    parentId: null,
+    description: null,
+    state: "active",
+    quotaBytes: null,
+    aclVersion: 1,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    archivedAt: null,
+    memberCount: 1,
+    teamCount: 0,
+    myRight: "manager",
+    usedBytes: null,
+    ...overrides,
+  };
+}
+
+function detail(department: Department, overrides: Partial<DepartmentDetail> = {}): DepartmentDetail {
+  return {
+    department,
+    usedBytes: null,
+    members: [
+      { userId: "u1", displayName: "Priya Nair", right: "contributor", syncState: "synced" },
+    ],
+    teams: [],
+    ...overrides,
+  };
+}
+
+const PEOPLE: RosterUser[] = [
+  { id: "priya", userId: "u1", username: "priya", displayName: "Priya Nair" },
+  { id: "tom", userId: "u2", username: "tom", displayName: "Tom Alvarez" },
+];
+
+beforeEach(() => {
+  listDepartmentsMock.mockReset();
+  getDepartmentMock.mockReset();
+  createDepartmentMock.mockReset();
+  createTeamMock.mockReset();
+  archiveDepartmentMock.mockReset();
+  restoreDepartmentMock.mockReset();
+  addDepartmentMemberMock.mockReset();
+  updateDepartmentMemberRightMock.mockReset();
+  removeDepartmentMemberMock.mockReset();
+});
+
+describe("DepartmentsPanel — empty state", () => {
+  it("shows the verbatim empty-state copy + create CTA for an admin", async () => {
+    listDepartmentsMock.mockResolvedValue({ departments: [] });
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No departments yet")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(
+        "No departments yet — create the first one to give a group of people their own file library.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new department/i })).toBeInTheDocument();
+  });
+
+  it("hides the create CTA for a non-admin", async () => {
+    listDepartmentsMock.mockResolvedValue({ departments: [] });
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No departments yet")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: /new department/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("DepartmentsPanel — list + detail", () => {
+  it("auto-selects the first department and loads its member roster", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(getDepartmentMock).toHaveBeenCalledWith("d1");
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Priya Nair")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText(/rights for priya nair/i)).toHaveValue("contributor");
+  });
+
+  it("renders the Household card under a System divider", async () => {
+    const finance = dept();
+    const household = dept({ id: "hh", name: "Household", kind: "HOUSEHOLD", memberCount: 3, myRight: null });
+    listDepartmentsMock.mockResolvedValue({ departments: [finance, household] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("household-card")).toBeInTheDocument();
+    });
+    expect(within(screen.getByTestId("household-card")).getByText("Household")).toBeInTheDocument();
+    expect(screen.getByText("System")).toBeInTheDocument();
+  });
+
+  it("changing a member's rights calls updateDepartmentMemberRight and reloads", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+    updateDepartmentMemberRightMock.mockResolvedValue({
+      membership: { id: "m1", departmentId: "d1", userId: "u1", right: "manager", syncState: "pending", ncPermissionMask: null },
+    });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    const rightsSelect = await screen.findByLabelText(/rights for priya nair/i);
+
+    fireEvent.change(rightsSelect, { target: { value: "manager" } });
+
+    await waitFor(() => {
+      expect(updateDepartmentMemberRightMock).toHaveBeenCalledWith("d1", "u1", "manager");
+    });
+    // Reloaded detail after the write (called at least twice: initial + post-write).
+    await waitFor(() => {
+      expect(getDepartmentMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("remove member shows the verbatim confirm copy and calls removeDepartmentMember on confirm", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+    removeDepartmentMemberMock.mockResolvedValue(undefined);
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    const removeBtn = await screen.findByRole("button", { name: /remove priya nair from finance/i });
+
+    fireEvent.click(removeBtn);
+
+    const dialog = await screen.findByRole("dialog", { name: /remove member/i });
+    expect(dialog.textContent).toMatch(
+      /Remove Priya Nair from Finance\? They lose access to these files immediately\./,
+    );
+    const confirmBtn = dialog.querySelector("button.danger") as HTMLButtonElement;
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(removeDepartmentMemberMock).toHaveBeenCalledWith("d1", "u1");
+    });
+  });
+
+  it("a HOUSEHOLD unit's rights select is disabled with the honest tooltip copy", async () => {
+    const household = dept({ id: "hh", name: "Household", kind: "HOUSEHOLD", myRight: "manager" });
+    listDepartmentsMock.mockResolvedValue({ departments: [household] });
+    getDepartmentMock.mockResolvedValue(detail(household));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.getByText("Household access follows each person's role for now.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/rights for priya nair/i)).toBeDisabled();
+  });
+});
+
+describe("DepartmentsPanel — create department", () => {
+  it("shows a live mono slug preview and submits the create payload", async () => {
+    listDepartmentsMock.mockResolvedValue({ departments: [] });
+    createDepartmentMock.mockResolvedValue({
+      department: dept({ id: "d2", name: "Legal", slug: "legal" }),
+      warning: null,
+    });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("No departments yet")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /new department/i }));
+    const dialog = await screen.findByRole("dialog");
+    const nameInput = within(dialog).getByPlaceholderText("Finance");
+    fireEvent.change(nameInput, { target: { value: "Legal Team" } });
+
+    expect(within(dialog).getByText("legal-team")).toBeInTheDocument();
+
+    // After creating, the panel reloads the list — return the new dept.
+    listDepartmentsMock.mockResolvedValueOnce({
+      departments: [dept({ id: "d2", name: "Legal Team", slug: "legal-team" })],
+    });
+    getDepartmentMock.mockResolvedValue(
+      detail(dept({ id: "d2", name: "Legal Team", slug: "legal-team" })),
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /create department/i }));
+
+    await waitFor(() => {
+      expect(createDepartmentMock).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "Legal Team" }),
+      );
+    });
+  });
+});
+
+describe("DepartmentsPanel — archive / restore", () => {
+  it("archive confirm shows verbatim copy and calls archiveDepartment", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+    archiveDepartmentMock.mockResolvedValue({ department: { ...finance, state: "archiving" } });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /^archive$/i }));
+    const dialog = await screen.findByRole("dialog", { name: /archive finance/i });
+    expect(dialog.textContent).toMatch(
+      /Files stay stored and admins can still retrieve them\. Members lose access now\./,
+    );
+    const confirmBtn = dialog.querySelector("button.danger") as HTMLButtonElement;
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(archiveDepartmentMock).toHaveBeenCalledWith("d1");
+    });
+  });
+
+  it("an archived unit shows Restore instead of Archive; confirming calls restoreDepartment", async () => {
+    const archived = dept({ state: "archived", archivedAt: "2026-06-01T00:00:00Z" });
+    listDepartmentsMock.mockResolvedValue({ departments: [archived] });
+    getDepartmentMock.mockResolvedValue(detail(archived));
+    restoreDepartmentMock.mockResolvedValue({ department: { ...archived, state: "pending" } });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: /^archive$/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /restore/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: /restore finance/i });
+    expect(dialog.textContent).toMatch(
+      /Members regain access with the rights they had before it was archived\./,
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: /^restore$/i }));
+
+    await waitFor(() => {
+      expect(restoreDepartmentMock).toHaveBeenCalledWith("d1");
+    });
+  });
+
+  it("archive/restore controls are absent for a non-admin manager", async () => {
+    const finance = dept({ myRight: "manager" });
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier={false} />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: /^archive$/i })).not.toBeInTheDocument();
+    // But member management (a manager-right unit) IS available.
+    expect(screen.getByLabelText(/rights for priya nair/i)).not.toBeDisabled();
+  });
+});

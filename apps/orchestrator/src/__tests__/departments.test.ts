@@ -233,6 +233,21 @@ function createMockPrisma(): PrismaClient & {
       }),
 
       deleteMany: vi.fn(async () => ({ count: 0 })),
+
+      // WARP-1270 (T18): the GET /api/departments list route now reads the
+      // caller's own memberships (myRight + non-admin scoping). Filters on
+      // whatever subset of {userId, departmentId} the caller's `where`
+      // supplies — every call site in departments.ts uses one or the other.
+      findMany: vi.fn(async (query?: any) => {
+        let results = Array.from(memberships.values());
+        if (query?.where?.userId) {
+          results = results.filter((m) => m.userId === query.where.userId);
+        }
+        if (query?.where?.departmentId) {
+          results = results.filter((m) => m.departmentId === query.where.departmentId);
+        }
+        return results;
+      }),
     },
 
     $transaction: vi.fn(async (fn: (tx: any) => Promise<any>) => {
