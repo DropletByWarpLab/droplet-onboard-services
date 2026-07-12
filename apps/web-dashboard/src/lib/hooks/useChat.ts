@@ -728,7 +728,16 @@ export function useChat(options: UseChatOptions = {}) {
   }, [authReady]);
 
   const sendMessage = useCallback(
-    async (content: string, model: string, systemPrompt?: string) => {
+    async (
+      content: string,
+      model: string,
+      systemPrompt?: string,
+      // WARP-904 — the provider of the currently-selected model, looked
+      // up by the caller from `/api/llm/models`. Forwarded verbatim so
+      // the orchestrator persists an explicit provider on this turn
+      // instead of inferring one from the model name.
+      provider?: string,
+    ) => {
       // WARP-859 — files staged in the composer ride onto THIS message
       // and then leave the input. Snapshot the staged chips for display
       // on the user bubble, and fold them into the conversation-scoped
@@ -842,6 +851,10 @@ export function useChat(options: UseChatOptions = {}) {
       try {
         const response = await sendChat({
           model,
+          // WARP-904 — explicit provider for this turn's audit trail
+          // (omitted entirely when the caller doesn't know it, so the
+          // server falls back to its existing name-based routing).
+          ...(provider ? { provider } : {}),
           messages: replayMessages,
           stream: true,
           signal: controller.signal,
@@ -1088,7 +1101,12 @@ export function useChat(options: UseChatOptions = {}) {
    * test suite relies on this.
    */
   const retryMessage = useCallback(
-    async (messageId: string, model: string, systemPrompt?: string) => {
+    async (
+      messageId: string,
+      model: string,
+      systemPrompt?: string,
+      provider?: string,
+    ) => {
       const snapshot = messagesRef.current;
       const idx = snapshot.findIndex((m) => m.id === messageId);
       if (idx === -1) return;
@@ -1114,7 +1132,7 @@ export function useChat(options: UseChatOptions = {}) {
         return prev.filter((_, k) => k !== i && k !== userIdx);
       });
 
-      await sendMessage(retryPrompt, model, systemPrompt);
+      await sendMessage(retryPrompt, model, systemPrompt, provider);
     },
     [sendMessage],
   );
@@ -1134,7 +1152,12 @@ export function useChat(options: UseChatOptions = {}) {
    * regresses.
    */
   const regenerate = useCallback(
-    async (messageId: string, model: string, systemPrompt?: string) => {
+    async (
+      messageId: string,
+      model: string,
+      systemPrompt?: string,
+      provider?: string,
+    ) => {
       const snapshot = messagesRef.current;
       const idx = snapshot.findIndex((m) => m.id === messageId);
       if (idx === -1) return;
@@ -1154,7 +1177,7 @@ export function useChat(options: UseChatOptions = {}) {
         return prev.filter((_, k) => k !== i && k !== userIdx);
       });
 
-      await sendMessage(prompt, model, systemPrompt);
+      await sendMessage(prompt, model, systemPrompt, provider);
     },
     [sendMessage],
   );
@@ -1201,6 +1224,7 @@ export function useChat(options: UseChatOptions = {}) {
       newContent: string,
       model: string,
       systemPrompt?: string,
+      provider?: string,
     ) => {
       const trimmed = newContent.trim();
       if (!trimmed) return;
@@ -1239,7 +1263,7 @@ export function useChat(options: UseChatOptions = {}) {
       });
       messagesRef.current = current.slice(0, currentIdx);
 
-      await sendMessage(trimmed, model, systemPrompt);
+      await sendMessage(trimmed, model, systemPrompt, provider);
     },
     [sendMessage],
   );
@@ -1388,6 +1412,10 @@ export function useChat(options: UseChatOptions = {}) {
           ...(m.role === "assistant" && m.feedback
             ? { feedback: m.feedback }
             : {}),
+          // WARP-904 — per-message audit trail (persisted on both user
+          // and assistant rows going forward; absent on older history).
+          ...(m.model ? { model: m.model } : {}),
+          ...(m.provider ? { provider: m.provider } : {}),
           ...(m.role === "assistant" && m.toolCalls?.length
             ? {
                 toolCalls: m.toolCalls.map((c) => ({
