@@ -153,12 +153,19 @@ class ChatRequest(BaseModel):
                     if not tc.id or tc.id in emitted_ids:
                         raise ValueError(f"duplicate tool_call id: {tc.id!r}")
                     emitted_ids.add(tc.id)
-                    try:
-                        json.loads(tc.function.arguments)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            "tool_call arguments must be valid JSON"
-                        ) from exc
+                    # Empty/whitespace arguments == a zero-arg call. Some models
+                    # (notably local Ollama) emit "" rather than "{}" for
+                    # parameterless tools, and the orchestrator replays the
+                    # model's raw arguments verbatim — so treat "" as valid or
+                    # the guard would 422 a legitimate zero-arg agent turn. Only
+                    # NON-empty arguments are required to be valid JSON.
+                    if tc.function.arguments.strip():
+                        try:
+                            json.loads(tc.function.arguments)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(
+                                "tool_call arguments must be valid JSON"
+                            ) from exc
 
             # 2. tool_calls only ever belong on assistant messages.
             if msg.tool_calls is not None and role != "assistant":

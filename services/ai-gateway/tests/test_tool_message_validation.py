@@ -42,6 +42,22 @@ def test_paired_tool_call_and_result_ok():
     assert req.messages[2].tool_call_id == "call_1"
 
 
+def test_zero_arg_tool_call_with_empty_arguments_ok():
+    # Zero-arg tool calls: some models (notably local Ollama) emit
+    # arguments="" instead of "{}". The orchestrator replays the model's raw
+    # arguments, so "" must be accepted or the guard would 422 a legitimate
+    # zero-arg agent turn. Only NON-empty arguments must be valid JSON.
+    req = ChatRequest(
+        model="llama3:8b",
+        messages=[
+            ChatMessage(role="user", content="ping"),
+            _assistant_tool_call("call_1", args=""),
+            ChatMessage(role="tool", content="pong", tool_call_id="call_1"),
+        ],
+    )
+    assert len(req.messages) == 3
+
+
 def test_plain_chat_without_tools_ok():
     # Regression: ordinary conversations must be untouched.
     req = ChatRequest(
