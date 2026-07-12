@@ -25,7 +25,6 @@ import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
 import {
   resolveSearchResultTarget,
-  toHomeRelativePath,
   toSpaceRelativePath,
 } from "@/components/FileManager/search-target";
 import { StarButton } from "@/components/FileManager/StarButton";
@@ -75,18 +74,22 @@ export default function FilesPage() {
     () => spaces.find((s) => s.id === "shared")?.root ?? null,
     [spaces]
   );
-  // WARP-1200: the write APIs (upload / mkdir / paste destination) take
-  // HOME-relative paths — the same shape the listing entries carry — but
-  // `currentPath` is relative to the ACTIVE space's root. Passing it verbatim
-  // while the Household tab was active silently landed uploads and new
-  // folders in the personal space ("/Trips" instead of "/Household/Trips").
-  // Every write destination below must use this resolved form.
-  const homeRelativeCurrentPath = useMemo(
-    () =>
-      space === "shared"
-        ? toHomeRelativePath(currentPath, sharedRoot)
-        : currentPath,
-    [space, currentPath, sharedRoot]
+  // WARP-1262 (T10): write destinations rooted at `currentPath` (upload,
+  // new-folder, paste-into-current-folder) are already SPACE-relative — the
+  // exact shape the write routes now resolve server-side via
+  // `?space=`/body `space` — so they're passed straight through with the
+  // active `space` alongside. This replaces the WARP-1200 client-side
+  // `toHomeRelativePath` pre-translation (which built the HOME-relative
+  // form by hand); the server now owns that resolution.
+  //
+  // Listing entries, by contrast, always carry HOME-relative paths
+  // (WARP-1140) — a selected file's `.path` is "/Household/Trips/x.pdf",
+  // not the space-relative "/Trips/x.pdf" the write routes expect. Any
+  // handler that operates on an entry path (delete/rename/move/copy/
+  // favorite) must convert with this helper before calling the API.
+  const toActiveSpaceRelative = useCallback(
+    (p: string) => (space === "shared" ? toSpaceRelativePath(p, sharedRoot) : p),
+    [space, sharedRoot]
   );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -178,9 +181,14 @@ export default function FilesPage() {
       const count = fileList.length;
       setUploadProgress(`Uploading ${count} file${count > 1 ? "s" : ""}...`);
       try {
-        await uploadFiles(homeRelativeCurrentPath, fileList, (percent) => {
-          setUploadPercent(percent);
-        });
+        await uploadFiles(
+          currentPath,
+          fileList,
+          (percent) => {
+            setUploadPercent(percent);
+          },
+          space
+        );
         await refresh();
         setUploadProgress(null);
       } catch (err) {
@@ -191,7 +199,7 @@ export default function FilesPage() {
         setUploadPercent(0);
       }
     },
-    [homeRelativeCurrentPath, refresh, toast]
+    [currentPath, space, refresh, toast]
   );
 
   // ── Download ──
@@ -235,7 +243,7 @@ export default function FilesPage() {
     const filePath = pendingDeletePath;
     if (!filePath) return;
     try {
-      await deleteFile(filePath);
+      await deleteFile(toActiveSpaceRelative(filePath), space);
       if (selectedFile?.path === filePath) setSelectedFile(null);
       fm.clearSelection();
       setPendingDeletePath(null);
@@ -244,7 +252,7 @@ export default function FilesPage() {
       toast(translateError(err, "files"));
       throw err;
     }
-  }, [pendingDeletePath, selectedFile, refresh, toast, fm]);
+  }, [pendingDeletePath, selectedFile, refresh, toast, fm, toActiveSpaceRelative, space]);
 
   const handleBulkDelete = useCallback(() => {
     if (fm.selectedCount === 0) return;
@@ -253,7 +261,10 @@ export default function FilesPage() {
 
   const performBulkDelete = useCallback(async () => {
     try {
-      const results = await bulkDeleteFiles(fm.selectedPaths);
+      const results = await bulkDeleteFiles(
+        fm.selectedPaths.map(toActiveSpaceRelative),
+        space
+      );
       const failed = results.filter((r) => !r.ok);
       if (failed.length > 0) {
         toast(`${failed.length} item(s) failed to delete`);
@@ -266,24 +277,24 @@ export default function FilesPage() {
       toast(translateError(err, "files"));
       throw err;
     }
-  }, [fm, refresh, toast]);
+  }, [fm, refresh, toast, toActiveSpaceRelative, space]);
 
   // ── New folder ──
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     const folderPath =
-      homeRelativeCurrentPath === "/"
+      currentPath === "/"
         ? `/${newFolderName.trim()}`
-        : `${homeRelativeCurrentPath}/${newFolderName.trim()}`;
+        : `${currentPath}/${newFolderName.trim()}`;
     try {
-      await createDirectory(folderPath);
+      await createDirectory(folderPath, space);
       setNewFolderName("");
       setShowNewFolder(false);
       await refresh();
     } catch (err) {
       toast(translateError(err, "files"));
     }
-  }, [homeRelativeCurrentPath, newFolderName, refresh, toast]);
+  }, [currentPath, space, newFolderName, refresh, toast]);
 
   // ── Share (opens full dialog) ──
   const handleShare = useCallback((file: FileEntryInfo) => {
@@ -320,7 +331,7 @@ export default function FilesPage() {
   const handleRenameCommit = useCallback(
     async (file: FileEntryInfo, newName: string) => {
       try {
-        await renameFile(file.path, newName);
+        await renameFile(toActiveSpaceRelative(file.path), newName, space);
         fm.endRename();
         if (selectedFile?.path === file.path) setSelectedFile(null);
         await refresh();
@@ -329,10 +340,18 @@ export default function FilesPage() {
         fm.endRename();
       }
     },
-    [fm, selectedFile, refresh, toast]
+    [fm, selectedFile, refresh, toast, toActiveSpaceRelative, space]
   );
 
   // ── Move / copy (bulk via dialog) ──
+  //
+  // WARP-1262 (T10): the picker (<MoveCopyDialog>) only ever browses the
+  // PERSONAL space (T15's job to make it space-aware) — `moveDialog.paths`
+  // (HOME-relative entry paths) and `targetDir` (personal-relative, from the
+  // dialog's own tree) are left unconverted and sent with no `space` arg
+  // (defaults "personal"), unchanged from pre-T10. Threading the active
+  // `space` here without also making the picker space-aware would silently
+  // mis-resolve `targetDir` under a space it was never browsed in.
   const handleMoveCopyConfirm = useCallback(
     async (targetDir: string) => {
       if (!moveDialog) return;
@@ -359,21 +378,18 @@ export default function FilesPage() {
   const handlePasteClipboard = useCallback(async () => {
     if (!fm.clipboard) return;
     try {
-      // WARP-1200: clipboard paths are home-relative entry paths, so the
-      // paste DESTINATION must be home-relative too — same defect class as
-      // the upload/mkdir targets.
+      // WARP-1262 (T10): clipboard paths are home-relative entry paths
+      // (WARP-1140) — converted to the active space's space-relative form,
+      // same as every other entry-path write below. The paste DESTINATION
+      // (`currentPath`) is already space-relative, so it's passed straight
+      // through with the active `space`.
+      const paths = fm.clipboard.paths.map(toActiveSpaceRelative);
       if (fm.clipboard.mode === "cut") {
-        const results = await bulkMoveFiles(
-          fm.clipboard.paths,
-          homeRelativeCurrentPath
-        );
+        const results = await bulkMoveFiles(paths, currentPath, false, space);
         const failed = results.filter((r) => !r.ok);
         if (failed.length > 0) toast(`${failed.length} move(s) failed`);
       } else {
-        const results = await bulkCopyFiles(
-          fm.clipboard.paths,
-          homeRelativeCurrentPath
-        );
+        const results = await bulkCopyFiles(paths, currentPath, false, space);
         const failed = results.filter((r) => !r.ok);
         if (failed.length > 0) toast(`${failed.length} copy(s) failed`);
       }
@@ -383,7 +399,7 @@ export default function FilesPage() {
     } catch (err) {
       toast(translateError(err, "files"));
     }
-  }, [fm, homeRelativeCurrentPath, refresh, toast]);
+  }, [fm, currentPath, space, refresh, toast, toActiveSpaceRelative]);
 
   // ── Row click / open ──
   const handleRowSelect = useCallback(
@@ -517,6 +533,10 @@ export default function FilesPage() {
   ]);
 
   // ── Selection toolbar actions ──
+  //
+  // WARP-1262 (T10): the dialog's tree only browses the PERSONAL space
+  // (T15's job to make it space-aware) — these prefixes stay in the entries'
+  // raw HOME-relative form to match, unconverted.
   const forbiddenPrefixes = useMemo(
     () => (moveDialog ? moveDialog.paths : []),
     [moveDialog]

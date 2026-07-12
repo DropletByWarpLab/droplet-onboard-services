@@ -119,13 +119,13 @@ async function resolveHouseholdDepartmentId(
 
 /**
  * Read-only resolution of `?space=` → `departmentId | null`, WITHOUT any
- * authorization check. Used by the file-registry writer (upload route) to
- * decide what `File.departmentId` to stamp on a newly-uploaded file — it
- * needs to know the target space, not gate access to it (uploads to a
- * dept space are gated by the write-route threading, WARP-1262/T10; this
- * ticket only owns the registry write and the read-side metadata gate).
- * Returns null for personal, malformed, or any space that doesn't resolve
- * to an ACTIVE department (never registers a file against a
+ * authorization check. Now that write routes thread + gate their own space
+ * (WARP-1262/T10 — `requireSpaceAccess` populates `req.spaceDepartmentId`,
+ * which write handlers use directly for the file-registry stamp), this
+ * helper is kept for any read-only/metadata caller that needs the same
+ * resolution WITHOUT a route-level access check. Returns null for
+ * personal, malformed, or any space that doesn't resolve to an ACTIVE
+ * department (never registers a file against a
  * pending/failed/archiving/archived/unknown space).
  */
 export async function resolveDepartmentIdForSpaceReadOnly(
@@ -146,6 +146,38 @@ export async function resolveDepartmentIdForSpaceReadOnly(
     select: { state: true },
   });
   return dept && dept.state === "active" ? departmentId : null;
+}
+
+/**
+ * Resolve a raw `?space=`/body `space` token to a `departmentId | null`
+ * WITHOUT any access check (existence/active-state/rights are checked
+ * downstream by `checkSpaceAccess`). Shared by `requireSpaceAccess` and by
+ * routes that need to resolve TWO spaces in one request — the move/copy
+ * cross-space dual-check (WARP-1262/T10) calls this once per side, then
+ * runs `checkSpaceAccess` against each resolved id with the side's own
+ * `minRight`, so both a malformed source AND a malformed target fail
+ * closed with the same audited error the single-space guard would give.
+ */
+export async function resolveRawSpaceToDepartmentId(
+  prisma: PrismaClient,
+  rawSpace: unknown,
+): Promise<{ ok: true; departmentId: string | null } | { ok: false; reason: string; error: string }> {
+  const token = parseSpaceValue(rawSpace);
+  if (token.kind === "personal") {
+    return { ok: true, departmentId: null };
+  }
+  if (token.kind === "malformed") {
+    return { ok: false, reason: "space-malformed", error: "Forbidden: malformed space id" };
+  }
+  if (token.kind === "household") {
+    const id = await resolveHouseholdDepartmentId(prisma);
+    if (!id) {
+      return { ok: false, reason: "space-unknown", error: "Forbidden: unknown space" };
+    }
+    return { ok: true, departmentId: id };
+  }
+  // dept:<uuid> — existence + active-state checked by checkSpaceAccess.
+  return { ok: true, departmentId: token.id };
 }
 
 // ── Core truth-table check ──────────────────────────────────────────
@@ -335,25 +367,13 @@ export function requireSpaceAccess(
         }
       }
 
-      let departmentId: string | null;
-      if (token.kind === "personal") {
-        departmentId = null;
-      } else if (token.kind === "malformed") {
-        recordAccessDenied(req, "space-malformed");
-        res.status(403).json({ error: "Forbidden: malformed space id" });
+      const resolved = await resolveRawSpaceToDepartmentId(prisma, rawSpace);
+      if (!resolved.ok) {
+        recordAccessDenied(req, resolved.reason);
+        res.status(403).json({ error: resolved.error });
         return;
-      } else if (token.kind === "household") {
-        const id = await resolveHouseholdDepartmentId(prisma);
-        if (!id) {
-          recordAccessDenied(req, "space-unknown");
-          res.status(403).json({ error: "Forbidden: unknown space" });
-          return;
-        }
-        departmentId = id;
-      } else {
-        // dept:<uuid> — existence + active-state checked by checkSpaceAccess.
-        departmentId = token.id;
       }
+      const departmentId = resolved.departmentId;
 
       const result = await checkSpaceAccess(prisma, req, caller, departmentId, minRight);
       if (!result.allowed) {

@@ -4038,21 +4038,31 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
   return res.json();
 }
 
+// WARP-1262 (T10): every write call below takes an optional `space` — the
+// orchestrator's write routes now resolve+gate the operational path
+// server-side (`?space=`/body `space`, mirroring the read routes' own
+// contract at `fetchFiles` above). Kept out of the request entirely for
+// "personal" so the URL/body shape — and any test/cache assertions pinned
+// to it — stays byte-identical to before WARP-883 introduced spaces.
 export async function uploadFiles(
   path: string,
   files: FileList | File[],
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  space: FileSpaceId = "personal"
 ): Promise<void> {
   const formData = new FormData();
   for (const file of files) {
     formData.append("files", file);
   }
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const url = `${BASE}/api/files/upload?${qs.toString()}`;
 
   if (onProgress) {
     // Use XMLHttpRequest for progress events
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${BASE}/api/files/upload?path=${encodeURIComponent(path)}`);
+      xhr.open("POST", url);
       xhr.withCredentials = true;
 
       xhr.upload.onprogress = (e) => {
@@ -4074,29 +4084,33 @@ export async function uploadFiles(
     });
   }
 
-  const res = await authFetch(
-    `${BASE}/api/files/upload?path=${encodeURIComponent(path)}`,
-    { method: "POST", body: formData }
-  );
+  const res = await authFetch(url, { method: "POST", body: formData });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Upload failed: ${body}`);
   }
 }
 
-export async function deleteFile(path: string): Promise<void> {
-  const res = await authFetch(
-    `${BASE}/api/files?path=${encodeURIComponent(path)}`,
-    { method: "DELETE" }
-  );
+export async function deleteFile(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const res = await authFetch(`${BASE}/api/files?${qs.toString()}`, {
+    method: "DELETE",
+  });
   if (!res.ok) throw new Error(`Failed to delete: ${res.status}`);
 }
 
-export async function createDirectory(path: string): Promise<void> {
+export async function createDirectory(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/mkdir`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify(space === "personal" ? { path } : { path, space }),
   });
   if (!res.ok) throw new Error(`Failed to create directory: ${res.status}`);
 }
@@ -4125,12 +4139,15 @@ export async function fetchShares(path: string): Promise<ShareDetail[]> {
 
 export async function renameFile(
   path: string,
-  newName: string
+  newName: string,
+  space: FileSpaceId = "personal"
 ): Promise<{ from: string; to: string }> {
   const res = await authFetch(`${BASE}/api/files/rename`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, newName }),
+    body: JSON.stringify(
+      space === "personal" ? { path, newName } : { path, newName, space }
+    ),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -4140,15 +4157,26 @@ export async function renameFile(
   return data.renamed;
 }
 
+// WARP-1262 (T10): `fromSpace`/`toSpace` independently default to "personal"
+// — the orchestrator's cross-space dual-check gates each side on its own
+// right (move: contributor/contributor; copy: reader/contributor).
 export async function moveFile(
   from: string,
   to: string,
-  overwrite = false
+  overwrite = false,
+  fromSpace: FileSpaceId = "personal",
+  toSpace: FileSpaceId = "personal"
 ): Promise<{ from: string; to: string }> {
   const res = await authFetch(`${BASE}/api/files/move`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, overwrite }),
+    body: JSON.stringify({
+      from,
+      to,
+      overwrite,
+      ...(fromSpace !== "personal" ? { fromSpace } : {}),
+      ...(toSpace !== "personal" ? { toSpace } : {}),
+    }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -4161,12 +4189,20 @@ export async function moveFile(
 export async function copyFile(
   from: string,
   to: string,
-  overwrite = false
+  overwrite = false,
+  fromSpace: FileSpaceId = "personal",
+  toSpace: FileSpaceId = "personal"
 ): Promise<{ from: string; to: string }> {
   const res = await authFetch(`${BASE}/api/files/copy`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, overwrite }),
+    body: JSON.stringify({
+      from,
+      to,
+      overwrite,
+      ...(fromSpace !== "personal" ? { fromSpace } : {}),
+      ...(toSpace !== "personal" ? { toSpace } : {}),
+    }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -4176,13 +4212,17 @@ export async function copyFile(
   return data.copied;
 }
 
+// WARP-1262 (T10): bulk ops act on a SINGLE space (every path in the batch +
+// the destination dir resolved under the same space) — see the orchestrator
+// route comment for why this isn't a dual-check like single move/copy.
 export async function bulkDeleteFiles(
-  paths: string[]
+  paths: string[],
+  space: FileSpaceId = "personal"
 ): Promise<BulkOperationResult[]> {
   const res = await authFetch(`${BASE}/api/files/bulk-delete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ paths }),
+    body: JSON.stringify(space === "personal" ? { paths } : { paths, space }),
   });
   if (!res.ok && res.status !== 207) {
     const body = await res.json().catch(() => ({}));
@@ -4195,12 +4235,17 @@ export async function bulkDeleteFiles(
 export async function bulkMoveFiles(
   paths: string[],
   toDir: string,
-  overwrite = false
+  overwrite = false,
+  space: FileSpaceId = "personal"
 ): Promise<BulkOperationResult[]> {
   const res = await authFetch(`${BASE}/api/files/bulk-move`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ paths, toDir, overwrite }),
+    body: JSON.stringify(
+      space === "personal"
+        ? { paths, toDir, overwrite }
+        : { paths, toDir, overwrite, space }
+    ),
   });
   if (!res.ok && res.status !== 207) {
     const body = await res.json().catch(() => ({}));
@@ -4213,12 +4258,17 @@ export async function bulkMoveFiles(
 export async function bulkCopyFiles(
   paths: string[],
   toDir: string,
-  overwrite = false
+  overwrite = false,
+  space: FileSpaceId = "personal"
 ): Promise<BulkOperationResult[]> {
   const res = await authFetch(`${BASE}/api/files/bulk-copy`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ paths, toDir, overwrite }),
+    body: JSON.stringify(
+      space === "personal"
+        ? { paths, toDir, overwrite }
+        : { paths, toDir, overwrite, space }
+    ),
   });
   if (!res.ok && res.status !== 207) {
     const body = await res.json().catch(() => ({}));
@@ -4238,25 +4288,33 @@ export async function fetchTrash(): Promise<TrashItemInfo[]> {
   return data.items ?? [];
 }
 
-export async function restoreTrashItem(name: string): Promise<void> {
+export async function restoreTrashItem(
+  name: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/trash/restore`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(space === "personal" ? { name } : { name, space }),
   });
   if (!res.ok) throw new Error(`Failed to restore: ${res.status}`);
 }
 
-export async function deleteTrashItem(name: string): Promise<void> {
-  const res = await authFetch(
-    `${BASE}/api/files/trash/item?name=${encodeURIComponent(name)}`,
-    { method: "DELETE" }
-  );
+export async function deleteTrashItem(
+  name: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ name });
+  if (space !== "personal") qs.set("space", space);
+  const res = await authFetch(`${BASE}/api/files/trash/item?${qs.toString()}`, {
+    method: "DELETE",
+  });
   if (!res.ok) throw new Error(`Failed to purge trash item: ${res.status}`);
 }
 
-export async function emptyTrash(): Promise<void> {
-  const res = await authFetch(`${BASE}/api/files/trash`, { method: "DELETE" });
+export async function emptyTrash(space: FileSpaceId = "personal"): Promise<void> {
+  const qs = space !== "personal" ? `?space=${encodeURIComponent(space)}` : "";
+  const res = await authFetch(`${BASE}/api/files/trash${qs}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to empty trash: ${res.status}`);
 }
 
@@ -4274,11 +4332,17 @@ export async function fetchVersions(
   return res.json();
 }
 
-export async function restoreVersion(path: string, versionId: string): Promise<void> {
+export async function restoreVersion(
+  path: string,
+  versionId: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/versions/restore`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, versionId }),
+    body: JSON.stringify(
+      space === "personal" ? { path, versionId } : { path, versionId, space }
+    ),
   });
   if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
 }
@@ -4380,11 +4444,17 @@ export async function deleteFileTag(path: string, label: string): Promise<void> 
 
 // --- Phase 2: favorites / recents / search / thumbnails / shares v2 ---
 
-export async function toggleFavorite(path: string, favorite: boolean): Promise<void> {
+export async function toggleFavorite(
+  path: string,
+  favorite: boolean,
+  space: FileSpaceId = "personal"
+): Promise<void> {
   const res = await authFetch(`${BASE}/api/files/favorite`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, favorite }),
+    body: JSON.stringify(
+      space === "personal" ? { path, favorite } : { path, favorite, space }
+    ),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

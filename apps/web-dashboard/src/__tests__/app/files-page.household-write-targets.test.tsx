@@ -1,25 +1,23 @@
 /**
- * WARP-1200 — Files: writes issued while the Household tab is active must
- * target the SHARED space, not the personal one.
+ * WARP-1200 / WARP-1262 (T10) — Files: writes issued while the Household tab
+ * is active must target the SHARED space, not the personal one.
  *
- * Bug: `currentPath` is relative to the ACTIVE space's root, but the write
- * APIs (upload / mkdir / paste destination) take HOME-relative paths — the
- * same shape the listing entries already carry (WARP-1140). The page passed
- * `currentPath` verbatim, so with the Household tab active an upload (button
- * or drag-drop), a new folder, and a clipboard paste all landed in the
- * personal space ("/x" instead of "/Household/x") and the Household listing
- * never showed them.
+ * WARP-1200 originally fixed this by pre-translating `currentPath` (space-
+ * relative) to a HOME-relative path client-side before calling the write
+ * APIs. WARP-1262 moves that resolution server-side: the write routes now
+ * accept `?space=`/body `space` and resolve the operational path themselves
+ * (`rootForSpace`), so the client just passes `currentPath` verbatim
+ * alongside the active `space` — no more `toHomeRelativePath`.
  *
- * These tests drive the real <FilesPage> with its data hooks stubbed
- * (mock stack modeled on files-page.doubleclick-preview.test.tsx), switch to
- * the Household tab, and pin every write destination to the shared root
- * resolved by toHomeRelativePath — plus a guard that the personal tab's
- * targets are byte-identical to before.
+ * These tests drive the real <FilesPage> with its data hooks stubbed (mock
+ * stack modeled on files-page.doubleclick-preview.test.tsx), switch to the
+ * Household tab, and pin every write call to (space-relative path, "shared")
+ * — plus a guard that the personal tab's calls stay space-omitted, byte-
+ * identical to pre-WARP-883.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
-import { toHomeRelativePath } from "@/components/FileManager/search-target";
 
 const PERSONAL: FileSpace = { id: "personal", name: "My Files", available: true, root: "/" };
 const SHARED: FileSpace = { id: "shared", name: "Household", available: true, root: "/Household" };
@@ -52,7 +50,7 @@ vi.mock("@/lib/hooks/useFileManager", () => ({
   useFileManager: () => ({
     selectedPaths: [],
     selectedCount: 0,
-    clipboard: { mode: "copy" as const, paths: ["/report.pdf"] },
+    clipboard: { mode: "copy" as const, paths: ["/Household/report.pdf"] },
     renamingPath: null,
     isSelected: () => false,
     toggleSelection: vi.fn(),
@@ -137,23 +135,25 @@ function dropFile(onElement: HTMLElement) {
   fireEvent.drop(onElement, { dataTransfer: { files: [file] } });
 }
 
-describe("Files page — Household-tab writes target the shared space (WARP-1200)", () => {
+describe("Files page — Household-tab writes thread the `space` param (WARP-1262/T10)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     cleanup();
   });
 
-  it("upload (drag-drop / Upload button share handleUpload) at the Household root targets the shared root", async () => {
+  it("upload (drag-drop / Upload button share handleUpload) at the Household root passes the space-relative root + 'shared'", async () => {
     render(<FilesPage />);
     switchToHousehold();
 
     dropFile(screen.getByText("Trips"));
 
     await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(uploadFiles).mock.calls[0][0]).toBe("/Household");
+    const call = vi.mocked(uploadFiles).mock.calls[0];
+    expect(call[0]).toBe("/");
+    expect(call[3]).toBe("shared");
   });
 
-  it("upload inside a Household subfolder targets the shared subfolder (no double prefix)", async () => {
+  it("upload inside a Household subfolder passes the space-relative subfolder (no home-relative prefix)", async () => {
     render(<FilesPage />);
     switchToHousehold();
 
@@ -164,10 +164,12 @@ describe("Files page — Household-tab writes target the shared space (WARP-1200
     dropFile(screen.getByRole("button", { name: /folder trips/i }));
 
     await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(uploadFiles).mock.calls[0][0]).toBe("/Household/Trips");
+    const call = vi.mocked(uploadFiles).mock.calls[0];
+    expect(call[0]).toBe("/Trips");
+    expect(call[3]).toBe("shared");
   });
 
-  it("new folder created in the Household tab targets the shared root", async () => {
+  it("new folder created in the Household tab passes the space-relative destination + 'shared'", async () => {
     render(<FilesPage />);
     switchToHousehold();
 
@@ -178,26 +180,36 @@ describe("Files page — Household-tab writes target the shared space (WARP-1200
     fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createDirectory).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(createDirectory).mock.calls[0][0]).toBe("/Household/Tax docs");
+    expect(vi.mocked(createDirectory).mock.calls[0]).toEqual(["/Tax docs", "shared"]);
   });
 
-  it("pasting the clipboard in the Household tab targets the shared root", async () => {
+  it("pasting the clipboard in the Household tab converts the source to space-relative and targets the space-relative root + 'shared'", async () => {
     render(<FilesPage />);
     switchToHousehold();
 
     fireEvent.click(screen.getByRole("button", { name: /paste/i }));
 
     await waitFor(() => expect(bulkCopyFiles).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(bulkCopyFiles).mock.calls[0]).toEqual([["/report.pdf"], "/Household"]);
+    // Clipboard held the home-relative "/Household/report.pdf" — converted to
+    // "/report.pdf" (space-relative to the active Household space) before
+    // being sent, alongside the space-relative destination root and "shared".
+    expect(vi.mocked(bulkCopyFiles).mock.calls[0]).toEqual([
+      ["/report.pdf"],
+      "/",
+      false,
+      "shared",
+    ]);
   });
 
-  it("personal-tab writes are unchanged (upload '/', mkdir '/name')", async () => {
+  it("personal-tab writes omit `space` entirely (upload '/', mkdir '/name') — unchanged from pre-WARP-883", async () => {
     render(<FilesPage />);
     // No tab switch — personal is the default space.
 
     dropFile(screen.getByText("Trips"));
     await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(uploadFiles).mock.calls[0][0]).toBe("/");
+    const uploadCall = vi.mocked(uploadFiles).mock.calls[0];
+    expect(uploadCall[0]).toBe("/");
+    expect(uploadCall[3]).toBe("personal");
 
     fireEvent.click(screen.getByRole("button", { name: /new folder/i }));
     fireEvent.change(screen.getByPlaceholderText(/folder name/i), {
@@ -205,34 +217,6 @@ describe("Files page — Household-tab writes target the shared space (WARP-1200
     });
     fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
     await waitFor(() => expect(createDirectory).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(createDirectory).mock.calls[0][0]).toBe("/Notes");
-  });
-});
-
-describe("toHomeRelativePath (WARP-1200 pure helper)", () => {
-  it("maps the space root to the shared root", () => {
-    expect(toHomeRelativePath("/", "/Household")).toBe("/Household");
-  });
-
-  it("prefixes nested space-relative paths", () => {
-    expect(toHomeRelativePath("/Trips/2026", "/Household")).toBe("/Household/Trips/2026");
-  });
-
-  it("tolerates a trailing slash on the shared root", () => {
-    expect(toHomeRelativePath("/Trips", "/Household/")).toBe("/Household/Trips");
-  });
-
-  it("passes through when no shared root is known (personal space)", () => {
-    expect(toHomeRelativePath("/Docs/a.pdf", null)).toBe("/Docs/a.pdf");
-    expect(toHomeRelativePath("/Docs/a.pdf", "/")).toBe("/Docs/a.pdf");
-  });
-
-  it("round-trips with toSpaceRelativePath", async () => {
-    const { toSpaceRelativePath } = await import(
-      "@/components/FileManager/search-target"
-    );
-    expect(toHomeRelativePath(toSpaceRelativePath("/Household/Trips", "/Household"), "/Household")).toBe(
-      "/Household/Trips"
-    );
+    expect(vi.mocked(createDirectory).mock.calls[0]).toEqual(["/Notes", "personal"]);
   });
 });
