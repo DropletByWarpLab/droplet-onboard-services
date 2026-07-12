@@ -397,51 +397,124 @@ function unionContentAndNameHits(
 /**
  * WARP-1140 — index owner of shared "Household" (groupfolder) chunks.
  *
- * The file-indexer physically watches `__groupfolders/<id>/…` (groupfolder
+ * The file-indexer physically watches `__groupfolders/{id}/…` (groupfolder
  * content never lives under any user's home dir) and writes those chunks
  * under this sentinel userId with a `/<SHARED_FOLDER_NAME>/…` display path —
- * the same path each member sees in their own WebDAV home. Content search
- * includes this corpus only for users who actually have the shared space
- * mounted (see `householdSearchUserIds`). Must match the file-indexer's
- * `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
+ * the same path each member sees in their own WebDAV home. Must match the
+ * file-indexer's `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
  */
 const HOUSEHOLD_INDEX_USER = "__household__";
-/** Cache TTL for the per-user shared-space membership probe (seconds). */
-const HOUSEHOLD_MEMBER_TTL = 300;
 
 /**
- * WARP-1140 — resolve which FileContentChunk owners this request may search:
- * always the user's own corpus, plus the shared Household corpus iff the
- * shared groupfolder is mounted in THEIR home (same `ncDirExists` probe as
- * GET /api/files/spaces, cached to keep type-ahead search off WebDAV).
- *
- * Best-effort by design: any failure (no NC session, Nextcloud down) means
- * "personal only" — content search must keep its pre-WARP-1140 behaviour of
- * never failing just because the membership probe can't run.
+ * WARP-1264 — department chunk-corpus sentinel. The file-indexer emits
+ * chunks for a non-household groupfolder-backed department under this
+ * sentinel userId (services/file-indexer/watcher.py
+ * `_lookup_department_for_groupfolder`).
  */
-async function householdSearchUserIds(
+function deptSentinel(departmentId: string): string {
+  return `__dept_${departmentId}__`;
+}
+
+/** Corpus resolution result: the FileContentChunk `userId` list this caller
+ * may search, plus the max `aclVersion` across their visible departments
+ * (folded into the search cache key so a rights/membership change can never
+ * serve a stale cached result — see `deptSearchCorpora`). */
+interface DeptSearchCorpora {
+  corpora: string[];
+  aclVersion: number;
+}
+
+/**
+ * WARP-1264 — resolve which caller (local User id + role) this request
+ * acts as. For the trusted MCP service principal, swaps in the asserted NC
+ * user's LOCAL identity (same pattern as `middleware/space.ts`'s
+ * `_service:mcp` handling) — the service principal's own `role: "service"`
+ * must never be used for a department-membership decision. Returns null
+ * when no caller identity can be resolved (fail-closed → personal corpus
+ * only).
+ */
+async function resolveSearchCaller(
   req: Request,
+  prisma: PrismaClient,
+): Promise<{ id: string; role: string } | null> {
+  if (isMcpService(req)) {
+    const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!assertedNcUser) return null;
+    const localUser = await prisma.user.findUnique({
+      where: { nextcloudUsername: assertedNcUser },
+      select: { id: true, role: true },
+    });
+    return localUser ? { id: localUser.id, role: localUser.role } : null;
+  }
+  const id = req.user?.id;
+  const role = req.user?.role;
+  if (!id || !role) return null;
+  return { id, role };
+}
+
+/**
+ * WARP-1264 — resolve which FileContentChunk owners this request may
+ * search: always the user's own corpus, plus one `__dept_<uuid>__` sentinel
+ * per ACTIVE department the caller is visible into — owner/admin see ALL
+ * active departments (audited "see-all", same posture as
+ * `checkSpaceAccess`); everyone else sees only their own active
+ * `DepartmentMembership` rows.
+ *
+ * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
+ * among the caller's visible departments, BOTH the legacy `__household__`
+ * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
+ * under either form (old watcher builds vs. WARP-1264 builds) stays
+ * searchable without a reindex.
+ *
+ * No WebDAV probes — membership is read straight from Postgres (the
+ * `?space=` middleware's ONE-`findUnique`-per-space philosophy, but
+ * aggregated for the whole visible set in a single query here).
+ *
+ * Best-effort by design: any failure (no session, DB hiccup) means
+ * "personal only" — content search must never fail outright just because
+ * the corpus lookup can't run.
+ */
+async function deptSearchCorpora(
+  req: Request,
+  prisma: PrismaClient,
   user: string,
-): Promise<string[]> {
-  const cacheKey = `filesearch:household-member:${user}`;
+): Promise<DeptSearchCorpora> {
   try {
-    const cached = await cacheGet<boolean>(cacheKey);
-    if (cached !== null && cached !== undefined) {
-      return cached ? [user, HOUSEHOLD_INDEX_USER] : [user];
+    const caller = await resolveSearchCaller(req, prisma);
+    if (!caller) return { corpora: [user], aclVersion: 0 };
+
+    const isOwnerOrAdmin = caller.role === "owner" || caller.role === "admin";
+    type VisibleDept = { id: string; kind: string; aclVersion: number };
+    let depts: VisibleDept[];
+    if (isOwnerOrAdmin) {
+      depts = await prisma.department.findMany({
+        where: { state: "active" },
+        select: { id: true, kind: true, aclVersion: true },
+      });
+    } else {
+      const memberships = await prisma.departmentMembership.findMany({
+        where: { userId: caller.id, department: { state: "active" } },
+        select: { department: { select: { id: true, kind: true, aclVersion: true } } },
+      });
+      depts = memberships.map((m) => m.department);
     }
-    const isMember = await ncDirExists(
-      await getToken(req),
-      user,
-      SHARED_FOLDER_PATH,
-    );
-    await cacheSet(cacheKey, isMember, HOUSEHOLD_MEMBER_TTL);
-    return isMember ? [user, HOUSEHOLD_INDEX_USER] : [user];
+
+    const corpora = [user];
+    let aclVersion = 0;
+    for (const dept of depts) {
+      if (dept.aclVersion > aclVersion) aclVersion = dept.aclVersion;
+      if (dept.kind === "HOUSEHOLD") {
+        corpora.push(HOUSEHOLD_INDEX_USER);
+      }
+      corpora.push(deptSentinel(dept.id));
+    }
+    return { corpora, aclVersion };
   } catch (err) {
     logger.debug(
       { err },
-      "householdSearchUserIds: membership probe failed; personal corpus only",
+      "deptSearchCorpora: department lookup failed; personal corpus only",
     );
-    return [user];
+    return { corpora: [user], aclVersion: 0 };
   }
 }
 
@@ -2590,18 +2663,24 @@ export function createFilesRouter(
         return;
       }
 
-      // WARP-1140: which chunk corpora this user may search — their own,
-      // plus the shared Household corpus when the shared space is mounted
-      // for them. Best-effort (personal-only on any probe failure) so this
-      // never introduces a new failure mode into search.
-      const searchUserIds = await householdSearchUserIds(req, user);
+      // WARP-1264: which chunk corpora this user may search — their own,
+      // plus one sentinel per ACTIVE department they're visible into
+      // (owner/admin see all). Best-effort (personal-only on any lookup
+      // failure) so this never introduces a new failure mode into search.
+      const { corpora: searchUserIds, aclVersion } = await deptSearchCorpora(
+        req,
+        prisma,
+        user,
+      );
       const additionalUserIds = searchUserIds.slice(1);
 
       // Check Redis cache first (60s TTL on identical queries). The mode is
       // part of the key so keyword/semantic/hybrid results never collide.
-      // WARP-1140: the corpus list is part of the key so a household
-      // membership change never serves the other scope's cached results.
-      const cacheKey = `filesearch:${mode}:${searchUserIds.join(",")}:${q}:${limit}`;
+      // WARP-1264: the corpus list AND the max aclVersion across the
+      // caller's visible departments are part of the key, so neither a
+      // membership change nor a rights change on an unchanged corpus set
+      // can ever serve a stale cached result.
+      const cacheKey = `filesearch:${mode}:v${aclVersion}:${searchUserIds.join(",")}:${q}:${limit}`;
       const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
       if (cached) {
         res.json({ results: cached });
@@ -2811,9 +2890,11 @@ export function createFilesRouter(
   router.get("/files/search/status", async (req, res, next) => {
     try {
       const user = getUser(req);
-      // WARP-1140: same corpus rule as content search — own chunks plus the
-      // Household corpus when the shared space is mounted for this user.
-      const searchUserIds = await householdSearchUserIds(req, user);
+      // WARP-1264: same corpus rule as content search — own chunks plus one
+      // sentinel per ACTIVE department the caller is visible into
+      // (owner/admin see all, an audited see-all consistent with
+      // `checkSpaceAccess`).
+      const { corpora: searchUserIds } = await deptSearchCorpora(req, prisma, user);
 
       // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
       // which reflects the latest init attempt; a hot reload from "down"
