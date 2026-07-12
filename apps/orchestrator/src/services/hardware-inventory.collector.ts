@@ -10,10 +10,13 @@
  * the canonical `HardwareComponent` shape. Each category is collected
  * independently and best-effort — a missing/failing tool (not installed,
  * no `/dev/mem` permission, container without the device passthrough)
- * degrades that ONE category to an empty list with a logged warning
- * rather than failing the whole collection, mirroring the "appliance
- * keeps running" posture used elsewhere (e.g. `activity.service.ts`'s
- * `recordSafely`).
+ * does NOT fail the whole collection, mirroring the "appliance keeps
+ * running" posture used elsewhere (e.g. `activity.service.ts`'s
+ * `recordSafely`). Crucially, a failed category is reported back in the
+ * snapshot's `degradedCategories` list rather than silently coerced into
+ * an empty component list: the reconciler needs to tell "probe failed
+ * this boot" apart from "hardware genuinely absent", otherwise a transient
+ * probe failure would masquerade as a hardware change (false tamper).
  *
  * ⚠ HARDWARE-VERIFY DEFERRED: this module was written and unit-tested
  * (see `hardware-inventory.collector.test.ts`) against captured
@@ -42,6 +45,16 @@ export interface HardwareComponent {
 export interface HardwareInventorySnapshot {
   collectedAt: string;
   components: HardwareComponent[];
+  /**
+   * Categories whose probe FAILED this collection (timeout / missing tool /
+   * no permission). Distinct from "genuinely empty": a degraded category's
+   * components are UNKNOWN this boot, not absent. Consumers (see
+   * `hardware-bom.service.ts`) MUST NOT treat a snapshot with a non-empty
+   * `degradedCategories` as authoritative — diffing a degraded read against a
+   * trusted baseline would emit a false tamper signal for hardware that never
+   * changed. Empty array = every category read cleanly.
+   */
+  degradedCategories: HardwareComponentCategory[];
 }
 
 export interface HardwareInventoryCollector {
@@ -49,6 +62,15 @@ export interface HardwareInventoryCollector {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+
+/** How a category's underlying tool is invoked. Injectable so the failure
+ * path (timeout / missing tool / permission) can be exercised deterministically
+ * in tests without depending on which binaries happen to exist on the runner. */
+export type CommandRunner = (
+  bin: string,
+  args: string[],
+  timeoutMs: number,
+) => Promise<string>;
 
 function runCommand(
   bin: string,
@@ -226,65 +248,104 @@ export function parsePciComponents(lspciOutput: string): HardwareComponent[] {
 export interface LinuxCollectorOptions {
   /** Per-command exec timeout. Defaults to 10s. */
   commandTimeoutMs?: number;
+  /** Injection seam for tests; defaults to the real `execFile`-backed runner. */
+  runCommand?: CommandRunner;
 }
 
 /**
- * Production collector. Every category degrades independently — see the
- * module doc comment for the "appliance keeps running" rationale.
+ * Production collector. Every category is collected independently and
+ * best-effort, but a category whose probe FAILS is reported as
+ * `degraded` — NOT silently coerced into an empty (authoritative) list.
+ * A degraded category means "unknown this boot", which the reconciler
+ * uses to avoid mistaking a transient probe failure for a hardware change.
  */
 export function createLinuxHardwareInventoryCollector(
   opts: LinuxCollectorOptions = {},
 ): HardwareInventoryCollector {
   const timeoutMs = opts.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const run: CommandRunner = opts.runCommand ?? runCommand;
 
   async function collectCategory(
-    label: string,
-    run: () => Promise<HardwareComponent[]>,
-  ): Promise<HardwareComponent[]> {
+    category: HardwareComponentCategory,
+    parse: () => Promise<HardwareComponent[]>,
+  ): Promise<{ components: HardwareComponent[]; degraded: boolean }> {
     try {
-      return await run();
+      return { components: await parse(), degraded: false };
     } catch (err) {
       logger.warn(
-        { err, category: label },
-        "hardware inventory: category unavailable, skipping (best-effort)",
+        { err, category },
+        "hardware inventory: category probe failed — marking degraded, NOT treating as empty (best-effort)",
       );
-      return [];
+      return { components: [], degraded: true };
     }
   }
 
   return {
     async collect() {
-      const [som, ram, disk, usb, pci] = await Promise.all([
-        collectCategory("som", async () => {
-          const out = await runCommand("dmidecode", ["-t", "baseboard"], timeoutMs);
-          const component = parseBaseboardComponent(out);
-          return component ? [component] : [];
-        }),
-        collectCategory("ram", async () => {
-          const out = await runCommand("dmidecode", ["-t", "memory"], timeoutMs);
-          return parseMemoryComponents(out);
-        }),
-        collectCategory("disk", async () => {
-          const out = await runCommand(
-            "lsblk",
-            ["-J", "-d", "-o", "NAME,MODEL,SERIAL,TYPE"],
-            timeoutMs,
-          );
-          return parseDiskComponents(out);
-        }),
-        collectCategory("usb", async () => {
-          const out = await runCommand("lsusb", [], timeoutMs);
-          return parseUsbComponents(out);
-        }),
-        collectCategory("pci", async () => {
-          const out = await runCommand("lspci", [], timeoutMs);
-          return parsePciComponents(out);
-        }),
-      ]);
+      const specs: {
+        category: HardwareComponentCategory;
+        parse: () => Promise<HardwareComponent[]>;
+      }[] = [
+        {
+          category: "som",
+          parse: async () => {
+            const out = await run("dmidecode", ["-t", "baseboard"], timeoutMs);
+            const component = parseBaseboardComponent(out);
+            return component ? [component] : [];
+          },
+        },
+        {
+          category: "ram",
+          parse: async () => {
+            const out = await run("dmidecode", ["-t", "memory"], timeoutMs);
+            return parseMemoryComponents(out);
+          },
+        },
+        {
+          category: "disk",
+          parse: async () => {
+            const out = await run(
+              "lsblk",
+              ["-J", "-d", "-o", "NAME,MODEL,SERIAL,TYPE"],
+              timeoutMs,
+            );
+            return parseDiskComponents(out);
+          },
+        },
+        {
+          category: "usb",
+          parse: async () => {
+            const out = await run("lsusb", [], timeoutMs);
+            return parseUsbComponents(out);
+          },
+        },
+        {
+          category: "pci",
+          parse: async () => {
+            const out = await run("lspci", [], timeoutMs);
+            return parsePciComponents(out);
+          },
+        },
+      ];
+
+      const results = await Promise.all(
+        specs.map(async (spec) => ({
+          category: spec.category,
+          ...(await collectCategory(spec.category, spec.parse)),
+        })),
+      );
+
+      const components: HardwareComponent[] = [];
+      const degradedCategories: HardwareComponentCategory[] = [];
+      for (const result of results) {
+        components.push(...result.components);
+        if (result.degraded) degradedCategories.push(result.category);
+      }
 
       return {
         collectedAt: new Date().toISOString(),
-        components: [...som, ...ram, ...disk, ...usb, ...pci],
+        components,
+        degradedCategories,
       };
     },
   };
@@ -299,10 +360,11 @@ export function createLinuxHardwareInventoryCollector(
 export function createFixtureHardwareInventoryCollector(
   components: HardwareComponent[],
   collectedAt: string = new Date().toISOString(),
+  degradedCategories: HardwareComponentCategory[] = [],
 ): HardwareInventoryCollector {
   return {
     async collect() {
-      return { collectedAt, components };
+      return { collectedAt, components, degradedCategories };
     },
   };
 }

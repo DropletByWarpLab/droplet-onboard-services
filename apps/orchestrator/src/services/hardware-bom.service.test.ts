@@ -19,7 +19,10 @@ import {
   type RecordActivityFn,
 } from "./hardware-bom.service.js";
 import { createFixtureHardwareInventoryCollector } from "./hardware-inventory.collector.js";
-import type { HardwareComponent } from "./hardware-inventory.collector.js";
+import type {
+  HardwareComponent,
+  HardwareComponentCategory,
+} from "./hardware-inventory.collector.js";
 
 function makeFakePrisma() {
   const rows = new Map<string, Record<string, unknown>>();
@@ -74,11 +77,20 @@ function makeRecordActivity() {
   return { fn, calls };
 }
 
-function makeDeps(overrides: Partial<HardwareBomDeps> & { components: HardwareComponent[] }) {
+function makeDeps(
+  overrides: Partial<HardwareBomDeps> & {
+    components: HardwareComponent[];
+    degradedCategories?: HardwareComponentCategory[];
+  },
+) {
   const prisma = makeFakePrisma();
   const identity = makeFakeIdentity();
   const recordActivity = makeRecordActivity();
-  const collector = createFixtureHardwareInventoryCollector(overrides.components);
+  const collector = createFixtureHardwareInventoryCollector(
+    overrides.components,
+    undefined,
+    overrides.degradedCategories,
+  );
   return {
     prisma,
     identity,
@@ -223,5 +235,64 @@ describe("checkHardwareInventory", () => {
     expect(Buffer.from(identity.signCalls[1]!).toString("utf8")).toBe(
       canonicalizeComponents(changed),
     );
+  });
+
+  it("inconclusive: a degraded probe does NOT overwrite the baseline nor emit hardware_changed", async () => {
+    // Capture a clean baseline first.
+    const { deps, prisma, identity, recordActivity } = makeDeps({ components: BASELINE_COMPONENTS });
+    await checkHardwareInventory(deps);
+    const baselineHash = prisma._rows.get(HARDWARE_BASELINE_ID)!.componentsHash;
+    identity.signCalls.length = 0;
+
+    // Next boot: the usb probe fails, so its component is missing AND the
+    // snapshot is flagged degraded. This looks identical to "the usb device
+    // was removed" if degradation is ignored — the exact false-tamper case.
+    const degradedComponents = BASELINE_COMPONENTS.filter((c) => c.category !== "usb");
+    const deps2: HardwareBomDeps = {
+      ...deps,
+      collector: createFixtureHardwareInventoryCollector(
+        degradedComponents,
+        undefined,
+        ["usb"],
+      ),
+      now: new Date("2026-07-11T05:00:00.000Z"),
+    };
+
+    const result = await checkHardwareInventory(deps2);
+
+    expect(result.status).toBe("inconclusive");
+    if (result.status !== "inconclusive") throw new Error("unreachable");
+    expect(result.degradedCategories).toEqual(["usb"]);
+
+    // No hardware_changed tamper signal — only the distinct inconclusive warn.
+    const changedCalls = recordActivity.calls.filter((c) => c.what === "hardware_changed");
+    expect(changedCalls).toHaveLength(0);
+    expect(recordActivity.calls).toHaveLength(1);
+    const call = recordActivity.calls[0]!;
+    expect(call.what).toBe("hardware_probe_inconclusive");
+    expect(call.kind).toBe("system");
+    expect(call.severity).toBe("warn");
+    expect(call.actor).toEqual({ type: "system" });
+    expect(call.refs).toEqual({ degradedCategories: ["usb"] });
+
+    // The trusted signed baseline is untouched — not re-signed, not overwritten.
+    expect(identity.signCalls).toHaveLength(0);
+    expect(prisma._rows.get(HARDWARE_BASELINE_ID)!.componentsHash).toBe(baselineHash);
+  });
+
+  it("inconclusive on first boot: a degraded probe does not capture a partial baseline", async () => {
+    const { deps, prisma, identity, recordActivity } = makeDeps({
+      components: BASELINE_COMPONENTS.filter((c) => c.category !== "pci"),
+      degradedCategories: ["pci"],
+    });
+
+    const result = await checkHardwareInventory(deps);
+
+    expect(result.status).toBe("inconclusive");
+    // Nothing signed, no baseline row baked from an incomplete read.
+    expect(identity.signCalls).toHaveLength(0);
+    expect(prisma._rows.get(HARDWARE_BASELINE_ID)).toBeUndefined();
+    expect(recordActivity.calls).toHaveLength(1);
+    expect(recordActivity.calls[0]!.what).toBe("hardware_probe_inconclusive");
   });
 });

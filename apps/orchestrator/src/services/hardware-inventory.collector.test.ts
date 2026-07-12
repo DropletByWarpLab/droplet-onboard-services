@@ -15,6 +15,7 @@ import {
   parseUsbComponents,
   parsePciComponents,
   createFixtureHardwareInventoryCollector,
+  createLinuxHardwareInventoryCollector,
 } from "./hardware-inventory.collector.js";
 
 const DMIDECODE_BASEBOARD = `# dmidecode 3.3
@@ -187,13 +188,60 @@ describe("parsePciComponents", () => {
 });
 
 describe("createFixtureHardwareInventoryCollector", () => {
-  it("returns exactly the components it was given", async () => {
+  it("returns exactly the components it was given, undegraded by default", async () => {
     const fixture = [{ category: "som" as const, id: "x", model: "y" }];
     const collector = createFixtureHardwareInventoryCollector(fixture, "2026-07-11T00:00:00.000Z");
     const snapshot = await collector.collect();
     expect(snapshot).toEqual({
       collectedAt: "2026-07-11T00:00:00.000Z",
       components: fixture,
+      degradedCategories: [],
     });
+  });
+});
+
+describe("createLinuxHardwareInventoryCollector degradation", () => {
+  it("marks a category degraded (not silently empty) when its probe throws", async () => {
+    // Inject a runner that fails only for `lsusb` (usb category) — timeout /
+    // missing tool / permission. The other categories collect normally.
+    const collector = createLinuxHardwareInventoryCollector({
+      runCommand: async (bin) => {
+        if (bin === "lsusb") {
+          throw Object.assign(new Error("spawn lsusb ETIMEDOUT"), { code: "ETIMEDOUT" });
+        }
+        if (bin === "lspci") return LSPCI_OUTPUT;
+        if (bin === "lsblk") return LSBLK_JSON;
+        if (bin === "dmidecode") return DMIDECODE_BASEBOARD;
+        return "";
+      },
+    });
+
+    const snapshot = await collector.collect();
+
+    // The failed usb probe is reported as degraded, NOT as an empty/authoritative
+    // reading — this is the signal the reconciler needs to avoid a false tamper.
+    expect(snapshot.degradedCategories).toEqual(["usb"]);
+    expect(snapshot.components.some((c) => c.category === "usb")).toBe(false);
+    // Healthy categories still collected.
+    expect(snapshot.components.some((c) => c.category === "pci")).toBe(true);
+    expect(snapshot.components.some((c) => c.category === "disk")).toBe(true);
+  });
+
+  it("reports no degraded categories when every probe succeeds", async () => {
+    const collector = createLinuxHardwareInventoryCollector({
+      runCommand: async (bin, args) => {
+        if (bin === "lsusb") return LSUSB_OUTPUT;
+        if (bin === "lspci") return LSPCI_OUTPUT;
+        if (bin === "lsblk") return LSBLK_JSON;
+        // dmidecode is called for both baseboard and memory.
+        if (bin === "dmidecode") {
+          return args.includes("memory") ? DMIDECODE_MEMORY : DMIDECODE_BASEBOARD;
+        }
+        return "";
+      },
+    });
+
+    const snapshot = await collector.collect();
+    expect(snapshot.degradedCategories).toEqual([]);
   });
 });

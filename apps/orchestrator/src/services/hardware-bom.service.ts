@@ -75,7 +75,8 @@ export interface HardwareComponentDiff {
 export type HardwareBomCheckResult =
   | { status: "captured"; componentCount: number }
   | { status: "unchanged" }
-  | { status: "changed"; diff: HardwareComponentDiff };
+  | { status: "changed"; diff: HardwareComponentDiff }
+  | { status: "inconclusive"; degradedCategories: string[] };
 
 /**
  * Canonical form: components sorted by (category, id) then JSON-stringified
@@ -149,6 +150,14 @@ function summarizeDiff(diff: HardwareComponentDiff): string {
  * Collect the current hardware inventory, compare it to the recorded
  * baseline, and reconcile:
  *
+ *   - probe degraded (one or more category probes failed this boot) →
+ *     INCONCLUSIVE. The read is not authoritative — its missing categories
+ *     are unknown, not "absent" — so we do NOT diff, do NOT re-sign, and do
+ *     NOT overwrite the trusted baseline (any of which would emit a false
+ *     tamper signal and, worse, discard the known-good signed BOM). We emit
+ *     one `hardware_probe_inconclusive` ActivityRow (kind `system`, severity
+ *     `warn`) so the degradation is still surfaced, then return early. The
+ *     next clean read reconciles normally.
  *   - no baseline yet (first boot) → sign + persist the snapshot as the
  *     new baseline. No audit row — establishing the first baseline is
  *     not a "change".
@@ -170,6 +179,33 @@ export async function checkHardwareInventory(
   const now = deps.now ?? new Date();
 
   const snapshot = await collector.collect();
+
+  // A degraded read (any category probe failed) is NOT authoritative: its
+  // missing/partial categories are UNKNOWN this boot, not "hardware absent".
+  // Reconciling it would emit a false `hardware_changed` tamper signal and
+  // overwrite the trusted signed baseline with an incomplete snapshot,
+  // permanently discarding the known-good BOM. Skip the whole diff/sign/persist
+  // path and surface a distinct, non-tamper warn instead. Handles first boot
+  // too — we must never bake a partial reading in as the signed baseline.
+  const degradedCategories = snapshot.degradedCategories ?? [];
+  if (degradedCategories.length > 0) {
+    await recordActivity({
+      kind: "system",
+      severity: "warn",
+      sourceIcon: "cpu",
+      what: "hardware_probe_inconclusive",
+      sub: `hardware inventory probe degraded (${degradedCategories.join(", ")}) — baseline left unchanged`,
+      refs: { degradedCategories },
+      actor: { type: "system" },
+      at: now,
+    });
+    logger.warn(
+      { degradedCategories },
+      "hardware inventory probe degraded — inconclusive, skipping reconcile (baseline unchanged)",
+    );
+    return { status: "inconclusive", degradedCategories };
+  }
+
   const canonical = canonicalizeComponents(snapshot.components);
   const componentsHash = hashComponents(canonical);
 
