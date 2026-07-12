@@ -37,6 +37,10 @@ interface MockMessage {
   status: string;
   completedAt: Date | null;
   createdAt: Date;
+  /** WARP-904 — per-message provider/model audit columns. Optional for
+   *  the same back-compat reason as toolCalls/toolCallId above. */
+  model?: string | null;
+  provider?: string | null;
 }
 
 function makePrismaMock() {
@@ -195,6 +199,8 @@ function makePrismaMock() {
         status: args.data.status ?? "completed",
         completedAt: args.data.completedAt ?? null,
         createdAt: new Date(),
+        model: args.data.model ?? null,
+        provider: args.data.provider ?? null,
       };
       messages.push(row);
       return row;
@@ -803,6 +809,190 @@ describe("ChatPersistenceService (WARP-304)", () => {
     expect(sessions[0].updatedAt.getTime()).toBeGreaterThan(
       new Date(2026, 0, 1).getTime(),
     );
+  });
+
+  // ── WARP-904: per-message provider/model audit trail ──
+
+  it("createTurnRows stamps model/provider onto both the user and assistant rows", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { userMessageId, assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "hello",
+      turnId: "t1",
+      model: "claude-sonnet-4-20250514",
+      provider: "anthropic",
+    });
+
+    const userRow = messages.find((m) => m.id === userMessageId);
+    const assistantRow = messages.find((m) => m.id === assistantMessageId);
+    expect(userRow).toMatchObject({
+      model: "claude-sonnet-4-20250514",
+      provider: "anthropic",
+    });
+    expect(assistantRow).toMatchObject({
+      model: "claude-sonnet-4-20250514",
+      provider: "anthropic",
+    });
+  });
+
+  it("createTurnRows leaves model/provider null when the caller omits them", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { userMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "hello",
+      turnId: "t1",
+    });
+
+    const userRow = messages.find((m) => m.id === userMessageId);
+    expect(userRow?.model).toBeNull();
+    expect(userRow?.provider).toBeNull();
+  });
+
+  it("finalizeAssistantMessage overwrites the assistant row's model (vision auto-route case)", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "describe this image",
+      turnId: "t1",
+      model: "mistral:7b-instruct",
+      provider: "ollama",
+    });
+
+    // The vision auto-route swapped the model mid-turn — the assistant
+    // row must reflect what actually ran, not the original selection.
+    await svc.finalizeAssistantMessage({
+      conversationId: "s1",
+      messageId: assistantMessageId,
+      content: "A cat.",
+      toolCalls: [],
+      status: "completed",
+      model: "llava:7b",
+      provider: "ollama",
+    });
+
+    const assistantRow = messages.find((m) => m.id === assistantMessageId);
+    expect(assistantRow?.model).toBe("llava:7b");
+    // The user row is untouched — it still reflects the original request.
+    const userRow = messages.find(
+      (m) => m.id !== assistantMessageId && m.turnId === "t1",
+    );
+    expect(userRow?.model).toBe("mistral:7b-instruct");
+  });
+
+  it("finalizeAssistantMessage leaves model/provider untouched when omitted", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "hello",
+      turnId: "t1",
+      model: "gpt-4o",
+      provider: "openai",
+    });
+
+    await svc.finalizeAssistantMessage({
+      conversationId: "s1",
+      messageId: assistantMessageId,
+      content: "hi there",
+      toolCalls: [],
+      status: "completed",
+      // model/provider intentionally omitted
+    });
+
+    const assistantRow = messages.find((m) => m.id === assistantMessageId);
+    expect(assistantRow?.model).toBe("gpt-4o");
+    expect(assistantRow?.provider).toBe("openai");
+  });
+
+  it("getConversationForUser surfaces per-message model/provider", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "T",
+      model: "gpt-4o",
+      provider: "openai",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    messages.push(
+      {
+        id: "m1",
+        sessionId: "s1",
+        role: "user",
+        content: "hi",
+        turnId: "t1",
+        status: "completed",
+        completedAt: new Date(),
+        createdAt: new Date(),
+        model: "gpt-4o",
+        provider: "openai",
+      },
+      {
+        id: "m2",
+        sessionId: "s1",
+        role: "assistant",
+        content: "hello",
+        turnId: "t1",
+        status: "completed",
+        completedAt: new Date(),
+        createdAt: new Date(),
+        // model/provider omitted — pre-WARP-904 row.
+      },
+    );
+    const svc = new ChatPersistenceService(prisma as never);
+    const detail = await svc.getConversationForUser("s1", "alice");
+    expect(detail!.messages[0]).toMatchObject({
+      model: "gpt-4o",
+      provider: "openai",
+    });
+    expect(detail!.messages[1]).toMatchObject({
+      model: null,
+      provider: null,
+    });
   });
 
   it("createTurnRows is idempotent on the same (sessionId, turnId)", async () => {

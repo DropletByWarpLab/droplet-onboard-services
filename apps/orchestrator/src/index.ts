@@ -95,6 +95,8 @@ import { initActivityRecorder, recordActivity } from "./services/activity.single
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
 import { runNightlyChainVerification } from "./services/audit-verify.service.js";
+import { checkHardwareInventory } from "./services/hardware-bom.service.js";
+import { createLinuxHardwareInventoryCollector } from "./services/hardware-inventory.collector.js";
 import {
   BRAIN_ROOT,
   migrateBrainMemoryDirectoryLayout,
@@ -176,6 +178,29 @@ async function main() {
     actor: { type: "system" },
   });
   logger.info("Activity recorder initialized");
+
+  // WARP-263: per-device hardware inventory (NIST SSDF supply-chain
+  // transparency). Runs every boot, not just the literal first one — the
+  // components genuinely can't change without a reboot, so "check every
+  // boot" is the honest way to catch a first-boot baseline AND any later
+  // component swap. Signs with the same WARP-230 device-identity key as
+  // the audit chain; a divergence overwrites the baseline and emits a
+  // `hardware_changed` ActivityRow via the recorder just initialized
+  // above. Non-fatal: device-identity-svc being down (or a Windows/dev
+  // host missing dmidecode/lsblk/lsusb/lspci) must not block startup —
+  // the collector already degrades per-category, this just guards the
+  // signer/DB round-trip too.
+  try {
+    const hwResult = await checkHardwareInventory({
+      prisma,
+      identity: createDeviceIdentityClient(),
+      collector: createLinuxHardwareInventoryCollector(),
+      recordActivity,
+    });
+    logger.info({ status: hwResult.status }, "hardware inventory check complete");
+  } catch (err) {
+    logger.warn({ err }, "hardware inventory check failed (continuing startup)");
+  }
 
   // KAN-6 — one-shot, idempotent backfill: convert pre-KAN-6 SceneSchedule
   // rows (which stored the fire HOUR as a UTC value in BYHOUR, timezone='UTC')

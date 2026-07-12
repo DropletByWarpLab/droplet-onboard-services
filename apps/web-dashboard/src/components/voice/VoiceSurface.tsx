@@ -12,17 +12,22 @@
  *
  * Deliberately absent (no dead-end affordances):
  *  - "Add a voice" / enrollment — Flow B is WARP-1056;
- *  - "Restart processor" — the DSP restart endpoint is WARP-1057
- *    (§7.3 escalation copy + Get help renders instead);
  *  - "See all in Activity" — the voice activity feed is WARP-1058.
+ *
+ * WARP-1057 wired the §7.3 processor card's "Restart processor" inline
+ * action: confirm dialog (~10 s hearing outage) → POST
+ * /api/voice/restart-processor → watch the live status poll until
+ * `input_flatlined` clears; after two failed restarts the card
+ * escalates to the power-cycle copy + Get help.
  */
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, UserRound } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { useToast } from "@/components/Toast";
-import { measureVoiceLevel } from "@/lib/api";
+import { measureVoiceLevel, restartVoiceProcessor } from "@/lib/api";
 import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
 import { CalibrationWizard } from "./CalibrationWizard";
 import { HealthStrip } from "./HealthStrip";
@@ -67,10 +72,26 @@ const SUB_NO_MIC = "No microphone is detected on this Droplet.";
 const SUB_FLATLINED = "The mic processor is not responding.";
 const SUB_UNAVAILABLE = "The voice service isn't responding on this Droplet.";
 
-/* §7.3 — escalate the processor card after this many failed re-tests. */
+/* §7.3 — escalate the processor card after this many failed restarts. */
 const DSP_ESCALATE_AFTER = 2;
 /* Wake re-test listening window (health-card "Test again"). */
 const WAKE_TEST_WINDOW_MS = 12_000;
+/* WARP-1057 — how long a DSP reboot gets before it counts as a failed
+   restart. The chip drops off USB + re-enumerates in ~10 s; the pipeline
+   then needs a real audio frame to clear `input_flatlined`. */
+const RESTART_WAIT_MS = 20_000;
+
+/* §7.3 restart copy. */
+const RESTART_CONFIRM_TITLE = "Restart the mic processor?";
+const RESTART_CONFIRM_BODY =
+  "Droplet's hearing will pause for about 10 seconds while the processor restarts. It comes back on its own — nothing else is interrupted.";
+const RESTART_ISSUED_TOAST =
+  "Restarting the mic processor — listening pauses for about 10 seconds.";
+const RESTART_OK_TOAST = "Mic processor is back — audio is flowing again.";
+const RESTART_FAILED_TOAST =
+  "The processor didn't come back after the restart.";
+const RESTART_REQUEST_FAILED_TOAST =
+  "Couldn't restart the processor — the voice service didn't respond.";
 
 export interface VoiceSurfaceProps {
   status: VoiceStatusInfo | null;
@@ -104,6 +125,10 @@ export function VoiceSurface({
   const [dspRetries, setDspRetries] = useState(0);
   const [wakeTestArmed, setWakeTestArmed] = useState(false);
   const wakeBaselineRef = useRef<number | null>(null);
+  // WARP-1057 — restart flow: confirm dialog → issued (pending) →
+  // success (flatline clears) or failed (still flatlined at deadline).
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [restartPending, setRestartPending] = useState(false);
 
   const surface = deriveVoiceSurfaceState({
     status,
@@ -114,10 +139,57 @@ export function VoiceSurface({
   });
   const checks = deriveHealthChecks({ surface, status, calibration, nowS: now });
 
-  // §7.3 — the retry counter resets the moment audio flows again.
+  // §7.3 — the failed-restart counter resets the moment audio flows again.
   useEffect(() => {
     if (!status?.input_flatlined && dspRetries !== 0) setDspRetries(0);
   }, [status?.input_flatlined, dspRetries]);
+
+  // WARP-1057 — a pending restart succeeds when the live status poll
+  // shows the flatline cleared (the pipeline saw a real audio frame).
+  useEffect(() => {
+    if (!restartPending) return;
+    if (status && !status.input_flatlined) {
+      setRestartPending(false);
+      toast(RESTART_OK_TOAST, "success");
+    }
+  }, [restartPending, status, toast]);
+  // …and fails when the deadline passes with the flatline still up:
+  // count it toward the §7.3 escalation (two failures → power-cycle copy).
+  useEffect(() => {
+    if (!restartPending) return;
+    const timer = setTimeout(() => {
+      setRestartPending(false);
+      setDspRetries((n) => n + 1);
+      toast(RESTART_FAILED_TOAST, "error");
+      onRefresh();
+    }, RESTART_WAIT_MS);
+    return () => clearTimeout(timer);
+    // onRefresh is stable from the page wrapper; re-arming the deadline
+    // on a re-render identity change would silently extend the window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restartPending, toast]);
+
+  // Runs inside ConfirmDialog's onConfirm contract: resolving closes
+  // the dialog, so request-level failures are caught (not rethrown) —
+  // they count toward §7.3 escalation rather than inviting a blind
+  // retry of a tool that isn't there.
+  async function handleRestartConfirm() {
+    try {
+      await restartVoiceProcessor();
+    } catch (err) {
+      setDspRetries((n) => n + 1);
+      toast(
+        err instanceof Error && err.message
+          ? err.message
+          : RESTART_REQUEST_FAILED_TOAST,
+        "error",
+      );
+      return;
+    }
+    toast(RESTART_ISSUED_TOAST, "info");
+    setRestartPending(true);
+    onRefresh();
+  }
 
   // Health-card wake re-test: watch the live poll for a fresh wake.
   useEffect(() => {
@@ -177,10 +249,9 @@ export function VoiceSurface({
       toast('Listening — say "Hey Droplet"…', "info");
       return;
     }
-    // test-dsp — §7.3: re-poll; after two failed re-tests the card
-    // escalates to the power-cycle copy (WARP-1057 owns the restart).
-    setDspRetries((n) => n + 1);
-    onRefresh();
+    // restart-dsp (WARP-1057) — §7.3: confirm the ~10 s hearing outage
+    // before issuing the reboot.
+    setRestartConfirmOpen(true);
   }
 
   function handleWizardClose(result: { applied: boolean }) {
@@ -437,6 +508,18 @@ export function VoiceSurface({
           onClose={handleWizardClose}
         />
       )}
+
+      {/* ── §7.3 restart confirm (WARP-1057) ── */}
+      <ConfirmDialog
+        open={restartConfirmOpen}
+        onConfirm={handleRestartConfirm}
+        onCancel={() => setRestartConfirmOpen(false)}
+        title={RESTART_CONFIRM_TITLE}
+        description={RESTART_CONFIRM_BODY}
+        confirmLabel="Restart processor"
+        variant="neutral"
+        accessory={<SafetyChip safety="Write · confirm" />}
+      />
     </div>
   );
 }

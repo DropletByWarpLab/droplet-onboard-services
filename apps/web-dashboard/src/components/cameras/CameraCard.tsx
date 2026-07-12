@@ -34,10 +34,10 @@ const SNAPSHOT_INTERVAL_MS = 2000;
 const HOVER_LATENCY_DELAY_MS = 250;
 
 const STATUS_CONFIG = {
-  recording: { label: "Recording", color: "bg-system-green", pulse: false },
-  detecting: { label: "Detecting", color: "bg-system-orange", pulse: true },
-  idle: { label: "Idle", color: "bg-label-quaternary", pulse: false },
-  offline: { label: "Offline", color: "bg-system-red", pulse: false },
+  recording: { label: "Recording", color: "var(--success)", pulse: false },
+  detecting: { label: "Detecting", color: "#d9a35c", pulse: true },
+  idle: { label: "Idle", color: "var(--text-faint)", pulse: false },
+  offline: { label: "Offline", color: "var(--danger)", pulse: false },
 } as const;
 
 export function CameraCard({
@@ -146,9 +146,10 @@ export function CameraCard({
       onMouseLeave={endHover}
       onFocus={startHover}
       onBlur={endHover}
-      className="dp-card overflow-hidden text-left w-full transition-all duration-200 ease-smooth hover:shadow-md group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="card overflow-hidden text-left w-full transition-all duration-200 ease-smooth hover:shadow-md group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+      style={{ padding: 0 }}
     >
-      <div className="relative aspect-video bg-surface-secondary">
+      <div className="relative aspect-video" style={{ background: "var(--card-inner)" }}>
         {showImage ? (
           // Two persistent <img> elements stacked. The MJPEG one is only
           // mounted while hovering (so we don't burn bandwidth at rest);
@@ -175,7 +176,7 @@ export function CameraCard({
           </>
         ) : (
           <div className="w-full h-full flex items-center justify-center">
-            <VideoOff size={32} className="text-label-quaternary" />
+            <VideoOff size={32} style={{ color: "var(--text-faint)" }} />
           </div>
         )}
 
@@ -183,7 +184,8 @@ export function CameraCard({
         <div className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm">
           <Circle
             size={8}
-            className={`${statusCfg.color} fill-current ${statusCfg.pulse ? "animate-pulse" : ""}`}
+            className={`fill-current ${statusCfg.pulse ? "animate-pulse" : ""}`}
+            style={{ color: statusCfg.color }}
           />
           <span className="type-caption-2 text-white">{statusCfg.label}</span>
         </div>
@@ -201,7 +203,7 @@ export function CameraCard({
             aria-pressed={isPinned}
             className={`absolute top-2 left-2 p-1.5 rounded-full backdrop-blur-sm transition-all ${
               isPinned
-                ? "bg-accent/90 text-white opacity-100"
+                ? "bg-[var(--brand)] text-white opacity-100"
                 : "bg-black/60 text-white opacity-70 hover:opacity-100 group-hover:opacity-100"
             } ${pinBusy ? "opacity-50 cursor-wait" : ""}`}
           >
@@ -217,7 +219,7 @@ export function CameraCard({
             Sits to the right of the pin so they don't overlap. */}
         {useLive && (
           <div
-            className={`absolute top-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm ${
+            className={`absolute top-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-[#ef4444] backdrop-blur-sm ${
               onTogglePin ? "left-12" : "left-2"
             }`}
           >
@@ -244,17 +246,26 @@ export function CameraCard({
 
       {/* Info */}
       <div className="p-3">
-        <h3 className="type-subheadline text-label-primary font-medium truncate">
+        <h3
+          className="type-subheadline font-medium truncate"
+          style={{ color: "var(--text)" }}
+        >
           {camera.displayName}
         </h3>
         <div className="flex items-center justify-between mt-1">
-          <p className="type-caption-1 text-label-tertiary truncate">
+          <p
+            className="type-caption-1 truncate"
+            style={{ color: "var(--text-muted)" }}
+          >
             {camera.manufacturer
               ? `${camera.manufacturer}${camera.model ? ` ${camera.model}` : ""}`
               : camera.ipAddress}
           </p>
           {camera.lastDetection && (
-            <span className="type-caption-2 text-accent flex-shrink-0 ml-2">
+            <span
+              className="type-caption-2 flex-shrink-0 ml-2"
+              style={{ color: "var(--brand)" }}
+            >
               {camera.lastDetection.label}
             </span>
           )}

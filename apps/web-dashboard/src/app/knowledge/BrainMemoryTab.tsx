@@ -19,6 +19,7 @@
 
 import { useState } from "react";
 import {
+  Check,
   Download,
   FileArchive,
   Sparkles,
@@ -28,6 +29,7 @@ import {
   type BrainMemoryItemInfo,
   transcribeNow,
   TranscribeNowUnavailable,
+  approveBrainItem,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { useBrainStatus } from "@/lib/hooks/useBrainStatus";
@@ -49,6 +51,11 @@ export function BrainMemoryTab() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [exportPending, setExportPending] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  // WARP-905: items the user just approved. The WS bridge streams the ensuing
+  // status flips, but the ingestPolicy flip itself doesn't ride a WS topic, so
+  // we optimistically treat these as released until the next GET reconciles.
+  const [approvedIds, setApprovedIds] = useState<Set<string>>(() => new Set());
+  const [approvingId, setApprovingId] = useState<string | null>(null);
   // WARP-218 not yet merged: feature-detect transcribeNow availability so the
   // overflow menu hides itself once we observe the route returning 404.
   const [transcribeNowAvailable, setTranscribeNowAvailable] = useState(true);
@@ -113,6 +120,25 @@ export function BrainMemoryTab() {
       } else {
         setActionMessage(`Transcribe failed: ${(e as Error).message}`);
       }
+    }
+  }
+
+  async function handleApprove(itemId: string) {
+    setApprovingId(itemId);
+    setActionMessage(null);
+    try {
+      await approveBrainItem(itemId);
+      // Released — the status pill takes over from here (WS flips arrive on
+      // `droplet/files/<user>/brain/indexed`).
+      setApprovedIds((prev) => {
+        const next = new Set(prev);
+        next.add(itemId);
+        return next;
+      });
+    } catch (e) {
+      setActionMessage(`Approve failed: ${(e as Error).message}`);
+    } finally {
+      setApprovingId(null);
     }
   }
 
@@ -213,6 +239,11 @@ export function BrainMemoryTab() {
           // WARP-214: object-icon set keyed off MIME — Headphones for audio,
           // Film for video, Mail for email, FileArchive for archives, etc.
           const Icon = iconForMime(item.mimeType);
+          // WARP-905: a held item (ingestPolicy=await_approval) surfaces an
+          // "Awaiting approval" affordance instead of the status pill until
+          // the user releases it (optimistically tracked in approvedIds).
+          const isHeld =
+            item.ingestPolicy === "await_approval" && !approvedIds.has(item.id);
           return (
           <li
             key={item.id}
@@ -227,14 +258,23 @@ export function BrainMemoryTab() {
                 <p className="type-subheadline text-label-primary truncate">
                   {item.filename}
                 </p>
-                <StatusChip
-                  itemId={item.id}
-                  status={item.status ?? "ready"}
-                  failureReason={item.failureReason}
-                  onTranscribeNow={
-                    transcribeNowAvailable ? handleTranscribeNow : undefined
-                  }
-                />
+                {isHeld ? (
+                  <span
+                    className="badge muted"
+                    data-testid="brain-awaiting-approval"
+                  >
+                    Awaiting approval
+                  </span>
+                ) : (
+                  <StatusChip
+                    itemId={item.id}
+                    status={item.status ?? "ready"}
+                    failureReason={item.failureReason}
+                    onTranscribeNow={
+                      transcribeNowAvailable ? handleTranscribeNow : undefined
+                    }
+                  />
+                )}
               </div>
               <p className="type-caption-1 text-label-tertiary">
                 {item.mimeType} · {(item.sizeBytes / 1024).toFixed(1)} KB ·{" "}
@@ -242,6 +282,24 @@ export function BrainMemoryTab() {
               </p>
             </div>
             <div className="flex items-center gap-1 flex-shrink-0">
+              {isHeld && (
+                <button
+                  type="button"
+                  onClick={() => handleApprove(item.id)}
+                  disabled={approvingId === item.id}
+                  className="
+                    inline-flex items-center gap-1 type-caption-1 text-accent
+                    px-2 py-1 rounded-md hover:bg-accent-subtle
+                    transition-colors disabled:opacity-50
+                  "
+                  title="Approve & index"
+                  aria-label="Approve and index"
+                  data-testid="brain-approve"
+                >
+                  <Check size={14} />
+                  {approvingId === item.id ? "Approving…" : "Approve & index"}
+                </button>
+              )}
               <a
                 href={`/api/files/brain/${encodeURIComponent(item.id)}/download`}
                 className="

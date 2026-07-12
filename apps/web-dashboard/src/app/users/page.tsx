@@ -161,6 +161,11 @@ export default function UsersPage() {
 
   // Stable id used to wire up `aria-labelledby` on the invite dialog.
   const inviteHeadingId = useId();
+  // WARP-650: label/input associations for the invite form fields.
+  const inviteEmailId = useId();
+  const inviteDisplayId = useId();
+  const inviteRoleId = useId();
+  const inviteTtlId = useId();
   // Held so we can restore focus to the trigger on Escape-close.
   const inviteTriggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -227,6 +232,9 @@ export default function UsersPage() {
 
   // Stable id for the Edit dialog headline (mirrors invite dialog pattern).
   const editHeadingId = useId();
+  // WARP-650: label/input associations for the Edit dialog fields.
+  const editDisplayNameId = useId();
+  const editPasswordId = useId();
   // The element that opened the Edit dialog — captured at open time so we
   // can restore focus on close. Each user row owns its own Edit button so
   // a single ref isn't sufficient; capture document.activeElement instead.
@@ -898,10 +906,11 @@ export default function UsersPage() {
               <>
                 <div className="p-4 space-y-3">
                   <div>
-                    <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                    <label htmlFor={inviteEmailId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                       Work email
                     </label>
                     <input
+                      id={inviteEmailId}
                       autoFocus
                       type="email"
                       value={inviteEmail}
@@ -917,10 +926,11 @@ export default function UsersPage() {
                     />
                   </div>
                   <div>
-                    <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                    <label htmlFor={inviteDisplayId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                       Display name (optional)
                     </label>
                     <input
+                      id={inviteDisplayId}
                       value={inviteDisplay}
                       onChange={(e) => setInviteDisplay(e.target.value)}
                       placeholder="Display name"
@@ -935,10 +945,11 @@ export default function UsersPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                      <label htmlFor={inviteRoleId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Role
                       </label>
                       <select
+                        id={inviteRoleId}
                         value={inviteRole}
                         onChange={(e) => setInviteRole(e.target.value as InviteRole)}
                         className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
@@ -954,10 +965,11 @@ export default function UsersPage() {
                       </select>
                     </div>
                     <div>
-                      <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                      <label htmlFor={inviteTtlId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Link expires in
                       </label>
                       <select
+                        id={inviteTtlId}
                         value={inviteTtlHours}
                         onChange={(e) => setInviteTtlHours(Number(e.target.value))}
                         className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
@@ -1386,10 +1398,11 @@ export default function UsersPage() {
             </div>
             <div className="p-4 space-y-3">
               <div>
-                <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                <label htmlFor={editDisplayNameId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                   Display name
                 </label>
                 <input
+                  id={editDisplayNameId}
                   value={editDisplayName}
                   onChange={(e) => setEditDisplayName(e.target.value)}
                   className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
@@ -1402,10 +1415,11 @@ export default function UsersPage() {
                 />
               </div>
               <div>
-                <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+                <label htmlFor={editPasswordId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                   Set new password (leave blank to keep)
                 </label>
                 <input
+                  id={editPasswordId}
                   type="password"
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}

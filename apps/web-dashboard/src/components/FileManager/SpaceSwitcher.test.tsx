@@ -1,10 +1,14 @@
 /**
- * WARP-883 (ADR-027 WS-5) — Files space switcher (My Files / Household).
+ * WARP-883 (ADR-027 WS-5) + WARP-1261 (spaces v2) — Files space switcher
+ * (My Files / Household / departments / teams).
  *
  * The switcher sits atop the Files surface and toggles the active space. It
- * only appears when the shared "Household" space is available; with only the
- * personal space it renders nothing (no lone toggle). Selecting a space fires
- * onChange with the space id so the page can re-root the listing.
+ * only appears when there is more than one usable space to switch between;
+ * with only the personal space it renders nothing (no lone toggle). "Usable"
+ * is derived from the v2 wire contract — personal is always usable, every
+ * other space is usable once its provisioning `state` is "active" (there is no
+ * longer an `available` boolean on the wire). Selecting a space fires onChange
+ * with the space id so the page can re-root the listing.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -22,6 +26,14 @@ const SHARED: FileSpace = {
   root: "/Household",
   kind: "household",
   state: "active",
+};
+const DEPARTMENT: FileSpace = {
+  id: "dept:00000000-0000-0000-0000-000000000001",
+  name: "Engineering",
+  root: "/Engineering",
+  kind: "department",
+  state: "active",
+  right: "contributor",
 };
 
 describe("SpaceSwitcher", () => {
@@ -68,7 +80,7 @@ describe("SpaceSwitcher", () => {
     expect(onChange).toHaveBeenCalledWith("shared");
   });
 
-  it("renders nothing when the shared space is not active yet", () => {
+  it("renders nothing when the only shared space is not yet active", () => {
     const { container } = render(
       <SpaceSwitcher
         spaces={[PERSONAL, { ...SHARED, state: "pending" }]}
@@ -78,6 +90,38 @@ describe("SpaceSwitcher", () => {
     );
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("renders active department spaces returned by the v2 API", () => {
+    render(
+      <SpaceSwitcher
+        spaces={[PERSONAL, DEPARTMENT]}
+        active="personal"
+        onChange={() => {}}
+      />
+    );
+    expect(screen.getByRole("tab", { name: /my files/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /engineering/i })
+    ).toBeInTheDocument();
+  });
+
+  it("omits non-active spaces but keeps active ones", () => {
+    render(
+      <SpaceSwitcher
+        spaces={[
+          PERSONAL,
+          SHARED,
+          { ...DEPARTMENT, state: "archiving" },
+        ]}
+        active="personal"
+        onChange={() => {}}
+      />
+    );
+    expect(screen.getByRole("tab", { name: /household/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /engineering/i })
+    ).not.toBeInTheDocument();
   });
 
   it("renders nothing when only the personal space is present", () => {

@@ -42,12 +42,12 @@ export function BrightnessSlider({
         aria-valuemax={100}
         aria-valuenow={localPct}
         aria-valuetext={`${localPct}%`}
-        className="flex-1 h-1.5 rounded-full appearance-none bg-label-quaternary
+        className="flex-1 h-1.5 rounded-full appearance-none bg-[var(--inset)]
           [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4
           [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full
-          [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:cursor-pointer"
+          [&::-webkit-slider-thumb]:bg-[var(--brand)] [&::-webkit-slider-thumb]:cursor-pointer"
       />
-      <span className="type-caption-1 text-label-secondary w-8 text-right">
+      <span className="type-caption-1 w-8 text-right" style={{ color: "var(--text-muted)" }}>
         {localPct}%
       </span>
     </div>

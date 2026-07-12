@@ -21,10 +21,8 @@ export function DeviceGroup({
   return (
     <section>
       <div className="flex items-center gap-2 mb-4">
-        <h2 className="type-title-3 text-label-primary">{title}</h2>
-        <span className="type-caption-1 text-label-quaternary bg-surface-secondary px-2 py-0.5 rounded-full">
-          {devices.length}
-        </span>
+        <h2 className="type-title-3" style={{ color: "var(--text)" }}>{title}</h2>
+        <span className="badge muted">{devices.length}</span>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

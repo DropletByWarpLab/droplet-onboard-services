@@ -83,7 +83,7 @@ export function DoneStep({
           type="button"
           onClick={handleRetry}
           disabled={retrying}
-          className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline disabled:opacity-60"
+          className="dp-btn-primary type-subheadline"
         >
           {retrying ? "Retrying…" : "Retry"}
         </button>

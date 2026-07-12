@@ -57,7 +57,8 @@ export function DangerZoneSection() {
     <section className="mb-10" aria-labelledby="danger-zone-heading">
       <h2
         id="danger-zone-heading"
-        className="type-footnote text-system-red uppercase tracking-wider px-1 mb-2"
+        className="type-footnote uppercase tracking-wider px-1 mb-2"
+        style={{ color: "var(--danger)" }}
       >
         Danger zone
       </h2>
@@ -144,19 +145,29 @@ function ReformatDriveCard() {
 
   return (
     <>
-      {/* System-red framed card — visually set apart from the neutral settings
-          groups above it. Tokens only (border/text/bg system-red). */}
-      <div className="rounded-xl border border-system-red/30 bg-system-red/[0.03] p-4">
+      {/* Danger-tinted card — visually set apart from the neutral settings
+          groups above it. var(--danger) throughout, no invented colours. */}
+      <div
+        className="card"
+        style={{
+          borderColor: "color-mix(in srgb, var(--danger) 30%, var(--card-bd))",
+          background: "color-mix(in srgb, var(--danger) 4%, var(--card-bg))",
+        }}
+      >
         <div className="flex items-start gap-3">
           <span
-            className="flex-none flex h-9 w-9 items-center justify-center rounded-lg bg-system-red/10 text-system-red"
+            className="flex-none flex h-9 w-9 items-center justify-center rounded-lg"
+            style={{
+              background: "color-mix(in srgb, var(--danger) 12%, transparent)",
+              color: "var(--danger)",
+            }}
             aria-hidden="true"
           >
             <ShieldAlert size={18} />
           </span>
           <div className="min-w-0">
-            <p className="type-subheadline text-label-primary">Reformat a drive</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>Reformat a drive</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               Erase everything on a drive and set it up fresh. This can't be
               undone — back up anything you want to keep first.
             </p>
@@ -164,9 +175,9 @@ function ReformatDriveCard() {
         </div>
 
         {loadError ? (
-          <p className="type-footnote text-label-tertiary mt-4">{loadError}</p>
+          <p className="type-footnote mt-4" style={{ color: "var(--text-muted)" }}>{loadError}</p>
         ) : dataDrives.length === 0 ? (
-          <p className="type-footnote text-label-tertiary mt-4">
+          <p className="type-footnote mt-4" style={{ color: "var(--text-muted)" }}>
             No drives available to reformat.
           </p>
         ) : (
@@ -174,7 +185,8 @@ function ReformatDriveCard() {
             <div className="space-y-1.5">
               <label
                 htmlFor="danger-zone-drive"
-                className="block type-footnote text-label-secondary"
+                className="block type-footnote"
+                style={{ color: "var(--text-muted)" }}
               >
                 Choose a drive
               </label>
@@ -185,7 +197,13 @@ function ReformatDriveCard() {
                   setSelectedUuid(e.target.value);
                   setOpError(null);
                 }}
-                className="dp-input"
+                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
               >
                 <option value="">Select a drive…</option>
                 {dataDrives.map((d) => (
@@ -198,7 +216,7 @@ function ReformatDriveCard() {
 
             {selected && (
               <div className="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200">
-                <p className="type-footnote text-label-primary">
+                <p className="type-footnote" style={{ color: "var(--text)" }}>
                   This erases everything on {targetName}. It can't be undone.
                 </p>
                 {/* Only when the modal is closed — while it's open the modal
@@ -206,11 +224,16 @@ function ReformatDriveCard() {
                 {!confirmOpen && opError && (
                   <div
                     role="alert"
-                    className="mt-2 flex items-start gap-2 type-footnote text-label-primary bg-system-red/10 rounded-sm px-3 py-2"
+                    className="mt-2 flex items-start gap-2 type-footnote rounded-sm px-3 py-2"
+                    style={{
+                      color: "var(--text)",
+                      background: "color-mix(in srgb, var(--danger) 10%, transparent)",
+                    }}
                   >
                     <AlertCircle
                       size={14}
-                      className="mt-0.5 flex-shrink-0 text-system-red"
+                      className="mt-0.5 flex-shrink-0"
+                      style={{ color: "var(--danger)" }}
                       aria-hidden="true"
                     />
                     <span>{opError}</span>
@@ -223,7 +246,7 @@ function ReformatDriveCard() {
                     setOpError(null);
                     setConfirmOpen(true);
                   }}
-                  className="mt-3 type-subheadline px-4 rounded-md bg-system-red text-white hover:bg-system-red/90 transition-colors min-h-[44px]"
+                  className="btn danger mt-3"
                 >
                   Reformat this drive
                 </button>
@@ -317,17 +340,28 @@ function FactoryResetCard() {
 
   return (
     <>
-      {/* Fenced, system-red-tinted card so it reads as categorically dangerous. */}
-      <div className="rounded-lg border border-system-red/30 bg-system-red/[0.04] overflow-hidden">
+      {/* Fenced, danger-tinted card so it reads as categorically dangerous. */}
+      <div
+        className="card"
+        style={{
+          borderColor: "color-mix(in srgb, var(--danger) 30%, var(--card-bd))",
+          background: "color-mix(in srgb, var(--danger) 4%, var(--card-bg))",
+          padding: 0,
+          overflow: "hidden",
+        }}
+      >
         {dispatched ? (
           // Terminal progress notice — the box is wiping and returning to setup.
           <div className="flex items-start gap-3 p-4">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-system-red/10">
-              <RotateCcw size={18} className="text-system-red" aria-hidden="true" />
+            <span
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+              style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
+            >
+              <RotateCcw size={18} style={{ color: "var(--danger)" }} aria-hidden="true" />
             </span>
             <div className="min-w-0">
-              <p className="type-headline text-label-primary">Factory reset is under way</p>
-              <p className="type-footnote text-label-secondary mt-1 leading-relaxed">
+              <p className="type-headline" style={{ color: "var(--text)" }}>Factory reset is under way</p>
+              <p className="type-footnote mt-1 leading-relaxed" style={{ color: "var(--text-muted)" }}>
                 The box is erasing all data and returning to first-run setup. This
                 takes a few minutes, and the dashboard will go offline while it
                 works. When it comes back, you&rsquo;ll start from the setup wizard.
@@ -337,18 +371,21 @@ function FactoryResetCard() {
         ) : (
           <div className="flex items-center justify-between gap-4 p-4">
             <div className="flex items-start gap-3 min-w-0">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-system-red/10">
-                <AlertTriangle size={18} className="text-system-red" aria-hidden="true" />
+              <span
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+                style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
+              >
+                <AlertTriangle size={18} style={{ color: "var(--danger)" }} aria-hidden="true" />
               </span>
               <div className="min-w-0">
-                <p className="type-headline text-label-primary">Factory reset</p>
-                <p className="type-footnote text-label-secondary mt-1 leading-relaxed">
+                <p className="type-headline" style={{ color: "var(--text)" }}>Factory reset</p>
+                <p className="type-footnote mt-1 leading-relaxed" style={{ color: "var(--text-muted)" }}>
                   Erase every account, file, message, smart-home setup, and
                   setting on this box and return it to first-run setup. This
                   cannot be undone.
                 </p>
                 {latestJob?.status === "failed" && latestJob.failureReason && (
-                  <p className="type-caption-1 text-label-tertiary mt-1">
+                  <p className="type-caption-1 mt-1" style={{ color: "var(--text-muted)" }}>
                     Last attempt didn&rsquo;t start: {latestJob.failureReason}
                   </p>
                 )}
@@ -358,7 +395,7 @@ function FactoryResetCard() {
               ref={triggerRef}
               type="button"
               onClick={() => setModalOpen(true)}
-              className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-sm border border-system-red/40 bg-transparent px-4 py-2.5 font-medium text-system-red type-subheadline transition-all duration-200 ease-smooth hover:bg-system-red/10 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/50"
+              className="btn danger shrink-0"
             >
               Factory reset…
             </button>

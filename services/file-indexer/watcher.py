@@ -151,6 +151,19 @@ _GF_DEPT_CACHE_TTL_SECONDS = 300.0
 _gf_dept_cache: dict[int, tuple[Optional[dict], float]] = {}
 _gf_dept_cache_lock = threading.Lock()
 
+# WARP-1264: graceful-degradation sentinel. The Department lookup is an
+# *enhancement* layered over the pre-WARP-1264 default — where ALL groupfolder
+# content indexed under the household sentinel with zero DB dependency. When
+# Postgres is unreachable we degrade to that legacy default rather than letting
+# a connection error propagate out of `_parse_watch_target` (a pure path parse
+# that also runs in on_deleted / reconcile / crash-recovery, none of which can
+# assume DB reachability). The household branch reads only `kind`, so id/name
+# are placeholders. This value is deliberately NEVER cached, so a real
+# department resolves on the next event as soon as the DB recovers — a
+# transient blip must never pin a real department to the household corpus for
+# the TTL window.
+_HOUSEHOLD_FALLBACK: dict = {"id": None, "kind": "HOUSEHOLD", "name": SHARED_FOLDER_NAME}
+
 
 def _lookup_department_for_groupfolder(gfid: int) -> Optional[dict]:
     """Resolve a groupfolder id to its Department `{id, kind, name}`.
@@ -158,6 +171,12 @@ def _lookup_department_for_groupfolder(gfid: int) -> Optional[dict]:
     TTL-cached (`_GF_DEPT_CACHE_TTL_SECONDS`) so the hot indexing path
     doesn't round-trip to Postgres on every file event. Returns None for an
     unrecognized groupfolder id — callers must skip rather than guess.
+
+    Resilient to a DB outage: a pure path parse must never be coupled to a
+    mandatory, blocking DB round-trip. If the lookup can't reach Postgres it
+    degrades to `_HOUSEHOLD_FALLBACK` (the legacy pre-WARP-1264 behaviour)
+    instead of raising — the failure is logged, not swallowed, and the
+    fallback is not cached so the real department resolves once the DB is back.
     """
     now = time.time()
     with _gf_dept_cache_lock:
@@ -167,7 +186,19 @@ def _lookup_department_for_groupfolder(gfid: int) -> Optional[dict]:
 
     from db import fetch_department_for_groupfolder
 
-    dept = fetch_department_for_groupfolder(gfid)
+    try:
+        dept = fetch_department_for_groupfolder(gfid)
+    except Exception as e:
+        # Degrade to the legacy household corpus rather than aborting the
+        # caller (delete / reconcile / index). Not cached — retried next event.
+        logger.warning(
+            "groupfolder %d department lookup failed (%s) — degrading to the "
+            "household sentinel (not cached; re-attempted on the next event)",
+            gfid,
+            e,
+        )
+        return _HOUSEHOLD_FALLBACK
+
     with _gf_dept_cache_lock:
         _gf_dept_cache[gfid] = (dept, now)
     return dept

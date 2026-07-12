@@ -89,32 +89,47 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
     <div
       onClick={onClick}
       className={`
-        dp-card cursor-pointer transition-all duration-200
-        ${isOn && isConnected ? "ring-1 ring-accent/20 bg-accent/[0.03]" : ""}
+        card hover transition-all duration-200
         ${!isConnected ? "opacity-60" : ""}
       `}
+      style={
+        isOn && isConnected
+          ? {
+              borderColor: "color-mix(in srgb, var(--brand) 30%, var(--card-bd))",
+              background: "var(--brand-subtle)",
+            }
+          : undefined
+      }
     >
       <div className="flex items-start gap-3">
         {/* Icon */}
         <div
-          className={`
-            w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0
-            ${isOn && isConnected ? "bg-accent/15 text-accent" : "bg-surface-secondary text-label-tertiary"}
-          `}
+          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={
+            isOn && isConnected
+              ? { background: "var(--brand-subtle)", color: "var(--brand)" }
+              : { background: "var(--card-inner)", color: "var(--text-muted)" }
+          }
         >
           {isConnected ? <Icon size={20} /> : <WifiOff size={20} />}
         </div>
 
         {/* Name + state + source */}
         <div className="flex-1 min-w-0">
-          <p className="type-subheadline text-label-primary font-medium truncate">
+          <p className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
             {device.name}
           </p>
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="type-caption-1 text-label-tertiary capitalize truncate">
+            <span
+              className="type-caption-1 capitalize truncate"
+              style={{ color: "var(--text-muted)" }}
+            >
               {subtitle}
             </span>
-            <span className="type-caption-2 text-label-quaternary px-1.5 py-0.5 rounded-sm bg-surface-secondary/70 flex-shrink-0 max-w-[120px] truncate">
+            <span
+              className="type-caption-2 px-1.5 py-0.5 rounded-sm flex-shrink-0 max-w-[120px] truncate"
+              style={{ color: "var(--text-faint)", background: "var(--card-inner)" }}
+            >
               {deviceSource(device)}
             </span>
           </div>
@@ -128,7 +143,7 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
 
       {/* Brightness slider for lights that are on */}
       {device.category === "light" && isOn && isConnected && brightnessPct != null && (
-        <div className="mt-3 pt-3 border-t border-separator">
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
           <BrightnessSlider
             brightness={brightnessPct}
             onBrightnessChange={handleBrightness}
@@ -138,7 +153,7 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
 
       {/* Sensor reading inline */}
       {(device.category === "sensor" || device.category === "binary_sensor") && isConnected && (
-        <div className="mt-3 pt-3 border-t border-separator">
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
           <SensorReading device={device} />
         </div>
       )}

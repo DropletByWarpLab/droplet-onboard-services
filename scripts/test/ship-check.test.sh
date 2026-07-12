@@ -816,9 +816,11 @@ test_stale_repo_names_catches_inference_engine_reintro() {
 # must be named by what the deployment IS, not by its lifecycle stage. A new
 # `profiles: ["poc"]`, `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or a
 # `droplet-poc-*` service that ships to a customer is the exact drift rule 17
-# exists to stop. The repo already carries a KNOWN legacy `droplet-poc-host-net`
-# debt (slated for retirement by ADR-018 action item 3); the lifecycle-naming
-# check grandfathers that explicit set and FAILS only on NEW occurrences.
+# exists to stop. One legacy identifier legitimately remains in the tree: the
+# WARP-445 on-box migration cleanup (scripts/lib/single-box.sh) must name the
+# pre-rename `droplet-poc-host-net` unit/files to remove them from boxes
+# provisioned before the rename. The lifecycle-naming check grandfathers that
+# explicit token and FAILS only on NEW occurrences.
 #
 # This is the repo-wide net for rule 17: lifecycle-naming scans
 # docker-compose.yml + .env.example + top-level scripts/*.sh + scripts/lib/*.sh.
@@ -844,8 +846,9 @@ test_lifecycle_naming_catches_new_poc_token() {
   # shellcheck disable=SC2064  # capture path values at trap-set time
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: lifecycle-naming PASSES on the unmutated tree (the known
-  #    droplet-poc-host-net + comment debt is all grandfathered).
+  # 1. Sanity: lifecycle-naming PASSES on the unmutated tree (the WARP-445
+  #    migration-cleanup references in scripts/lib/single-box.sh are
+  #    grandfathered).
   if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
     printf "    baseline lifecycle-naming failed against unmodified real repo\n" >&2
     printf "    (the grandfather allowlist is out of sync with the tree — update it)\n" >&2

@@ -320,13 +320,23 @@ prepare_and_build() {
 # function bodies and runs them against a stubbed compose runner), mirroring
 # wait_for_openwrt_ready in scripts/lib/single-box.sh (WARP-826).
 #
-# Tunables (env, ~150 s default budget on top of start_stack's own NC wait):
-#   NEXTCLOUD_OCC_READY_TRIES     poll attempts (default 30)
-#   NEXTCLOUD_OCC_READY_INTERVAL  seconds between polls (default 5)
+# WARP-1064: this occ poll is start_stack's ONLY Nextcloud readiness gate.
+# It used to run stacked on top of a curl loop against
+# http://localhost:8080/status.php — but Nextcloud stopped publishing host
+# port 8080 in 945cf766 ("gateway is the only ingress"; on single-box the
+# host-network routing service owns :8080), so that loop could never
+# succeed and burned its full 300 s on EVERY provision before this poll
+# even started (measured 2026-07-05: ~7m38s of dead wait, 47% of the
+# reflash). occ status inside the container is the honest installed
+# signal; poll it fast and break immediately.
+#
+# Tunables (env, 120 s default budget — the single Nextcloud wait):
+#   NEXTCLOUD_OCC_READY_TRIES     poll attempts (default 60)
+#   NEXTCLOUD_OCC_READY_INTERVAL  seconds between polls (default 2)
 # >>> wait_for_nextcloud_installed (WARP-990)
 wait_for_nextcloud_installed() {
-  local tries="${NEXTCLOUD_OCC_READY_TRIES:-30}"
-  local interval="${NEXTCLOUD_OCC_READY_INTERVAL:-5}"
+  local tries="${NEXTCLOUD_OCC_READY_TRIES:-60}"
+  local interval="${NEXTCLOUD_OCC_READY_INTERVAL:-2}"
   local i=0 occ_out
   while [ "$i" -lt "$tries" ]; do
     i=$((i + 1))
@@ -348,6 +358,158 @@ wait_for_nextcloud_installed() {
 }
 # <<< wait_for_nextcloud_installed (WARP-990)
 
+# =============================================================================
+# Nextcloud auto-install recovery (WARP-1064)
+# =============================================================================
+# The official nextcloud image only auto-installs on the ONE boot that finds
+# an empty volume AND a complete env (NEXTCLOUD_ADMIN_USER/PASSWORD +
+# POSTGRES_HOST/DB/USER/PASSWORD — all six, or it prints "Next step: Access
+# your instance to finish the web-based installation!" and serves the manual
+# wizard instead). Either fall-through OR an install that exhausted the
+# entrypoint's 10 retries leaves version.php in the volume — and the
+# entrypoint's install branch is gated on a VERSION mismatch, not on
+# installed-ness, so every later boot skips it entirely. The box then reports
+# `occ status → installed:false` FOREVER: no wait budget can succeed, setup
+# proceeds degraded on every re-run, and the WARP-990 reconcile is skipped
+# every time (reproduced locally 2026-07-09 on a fresh volume with a
+# deliberately incomplete env; restarting with a complete env did NOT
+# recover). This is the provisioning miss the old 7.6-minute double-wait was
+# masking.
+#
+# A second, compounding trap (also reproduced locally): Nextcloud's
+# PostgreSQL Setup never installs as the supplied CREATEROLE-capable user —
+# it mints a dedicated non-superuser role (oc_admin, then oc_admin2, 3, …
+# one per retry) and installs as THAT. So when the `nextcloud` database
+# still holds oc_* tables from a previous install (reflash that lost
+# nextcloud-data but kept pgdata, or an asymmetric volume wipe — the
+# WARP-234 stale-bind-mount `volume rm` failure), every install attempt
+# creates a fresh oc_adminN and immediately dies with
+#   SQLSTATE[42501] permission denied for table oc_migrations
+# (owned by the DEAD oc_admin of the previous install). The entrypoint's 10
+# retries just mint 10 more roles and then exit 1. Auto-install can NEVER
+# converge into a stale DB.
+#
+# Recovery: when the wait expires AND occ itself parses (container up, PHP
+# fine) but reports installed:false, then (1) if the DB carries stale oc_*
+# tables, recreate it — occ status just told us nothing live uses it, and
+# its rows are orphaned without the matching nextcloud-data volume — and
+# drop the dead oc_adminN roles; (2) run the same `occ maintenance:install`
+# the entrypoint would have run, with the container's OWN env (single source
+# of truth — .env via env_file), then set trusted_domains exactly like the
+# entrypoint does. Idempotent by construction: occ refuses a second install
+# on an installed instance, and we only enter on installed:false.
+#
+# GUARD — never race the image's own first-boot install: with the wait
+# budget cut to 120 s (WARP-1064), a slow-but-healthy first boot (rsync of
+# the whole Nextcloud tree + the entrypoint's retried maintenance:install +
+# appstore hooks — ALL before apache2 starts) can outlive the wait. That is
+# real provisioning work, not dead wait — so before judging, hold off
+# (bounded) while the entrypoint is still initializing, then read the
+# verdict. apache2 running = entrypoint done, the verdict is final;
+# container unreachable = dead, nothing to hold for. Tunables (env):
+#   NEXTCLOUD_ENTRYPOINT_WAIT_TRIES     probes while initializing (default 20)
+#   NEXTCLOUD_ENTRYPOINT_WAIT_INTERVAL  seconds between probes (default 15)
+# Sentinel-delimited for unit testing, like its two siblings.
+# >>> recover_nextcloud_autoinstall (WARP-1064)
+recover_nextcloud_autoinstall() {
+  local ep_tries="${NEXTCLOUD_ENTRYPOINT_WAIT_TRIES:-20}"
+  local ep_interval="${NEXTCLOUD_ENTRYPOINT_WAIT_INTERVAL:-15}"
+  local ep_i=0 ep_probe ep_initializing=0
+  while [ "$ep_i" -lt "$ep_tries" ]; do
+    # No pgrep in the nextcloud image — scan /proc comms. Prints
+    # "initializing" only when the container answers AND apache2 isn't up yet
+    # (the entrypoint execs apache2 only after rsync + install + hooks).
+    ep_probe=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      exec -T nextcloud sh -c \
+      'if grep -sqx apache2 /proc/[0-9]*/comm; then echo serving; else echo initializing; fi' \
+      2>/dev/null || true)
+    case "$ep_probe" in
+      *initializing*) ep_initializing=1 ;; # entrypoint still working — hold
+      *) ep_initializing=0; break ;; # serving (verdict is final) or unreachable (dead)
+    esac
+    ep_i=$((ep_i + 1))
+    if [ "$ep_i" -eq 1 ]; then
+      log_info "Nextcloud's entrypoint is still initializing (first-boot rsync/install) — waiting for it instead of racing it (WARP-1064)..."
+    fi
+    sleep "$ep_interval"
+  done
+  if [ "$ep_initializing" = 1 ]; then
+    # Budget spent and the entrypoint is STILL working. NEVER fall through to
+    # a second install here — racing the in-flight one was observed live
+    # (2026-07-11): both installers fight over the same DB and the entrypoint
+    # burns its whole retry loop against an already-installed instance. Bail;
+    # the degraded-path breadcrumb stands and the next bring-up reconciles.
+    log_warn "Nextcloud's entrypoint is still initializing after $((ep_tries * ep_interval))s — not racing it with a second install (WARP-1064); re-run setup once it settles."
+    return 1
+  fi
+
+  local occ_out
+  occ_out=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -u 33 nextcloud php occ status --output=json 2>/dev/null || true)
+  case "$occ_out" in
+    # Converged while we held (the slow-healthy first boot) — nothing to fix.
+    *'"installed":true'* | *'"installed": true'*) return 0 ;;
+    *'"installed":false'*) ;; # the recoverable state — fall through
+    *) return 1 ;;            # container not answering occ — not ours to fix
+  esac
+
+  log_warn "Nextcloud is running but NOT installed (first-boot auto-install never completed) — recovering with occ maintenance:install (WARP-1064)..."
+
+  # --- Stale-DB guard (see the block comment above) --------------------------
+  # A leftover oc_migrations table means a previous install's schema is in the
+  # way (owned by a dead oc_adminN role) and the installer can never converge.
+  # The instance is NOT installed (checked above), so those rows are orphaned
+  # state — recreate the database and drop the dead roles so install can run.
+  # A virgin/empty nextcloud DB skips this entirely.
+  local stale_probe
+  stale_probe=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
+    psql -U "${POSTGRES_USER:-droplet}" -w -d nextcloud -tAc \
+    "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='oc_migrations'" 2>/dev/null || true)
+  if [ "$(printf '%s' "$stale_probe" | tr -d '[:space:]')" = "1" ]; then
+    log_warn "Stale Nextcloud schema found in the 'nextcloud' database (dead previous install) — recreating it so the install can converge..."
+    if ! run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
+      psql -U "${POSTGRES_USER:-droplet}" -w -d postgres -v ON_ERROR_STOP=1 \
+        -c "DROP DATABASE IF EXISTS nextcloud WITH (FORCE)" \
+        -c "CREATE DATABASE nextcloud OWNER ${POSTGRES_USER:-droplet}" \
+        -c "DO \$\$ DECLARE r text; BEGIN FOR r IN SELECT rolname FROM pg_roles WHERE rolname ~ '^oc_admin[0-9]*\$' LOOP EXECUTE 'DROP ROLE ' || quote_ident(r); END LOOP; END \$\$"; then
+      log_error "Could not recreate the stale 'nextcloud' database — aborting the recovery install"
+      return 1
+    fi
+  fi
+
+  # Runs inside the container so the credentials come from ITS env (env_file
+  # ../.env), exactly what the image's own auto-install would have used. The
+  # guard mirrors the entrypoint's install gate; trusted_domains mirrors its
+  # post-install loop (without it the gateway's Host header is rejected).
+  # shellcheck disable=SC2016  # single-quoted on purpose: $VARS expand inside the container
+  if ! run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -u 33 nextcloud sh -c '
+      set -e
+      for v in NEXTCLOUD_ADMIN_USER NEXTCLOUD_ADMIN_PASSWORD POSTGRES_HOST POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD; do
+        eval "val=\${$v:-}"
+        if [ -z "$val" ]; then echo "recovery install: $v is empty in the container env — cannot install" >&2; exit 1; fi
+      done
+      php /var/www/html/occ maintenance:install -n \
+        --admin-user "$NEXTCLOUD_ADMIN_USER" --admin-pass "$NEXTCLOUD_ADMIN_PASSWORD" \
+        --database pgsql --database-name "$POSTGRES_DB" --database-user "$POSTGRES_USER" \
+        --database-pass "$POSTGRES_PASSWORD" --database-host "$POSTGRES_HOST"
+      idx=1
+      for d in ${NEXTCLOUD_TRUSTED_DOMAINS:-}; do
+        php /var/www/html/occ config:system:set trusted_domains "$idx" --value="$d"
+        idx=$((idx + 1))
+      done
+    '; then
+    log_error "Nextcloud recovery install FAILED — see output above"
+    return 1
+  fi
+
+  log_success "Nextcloud recovered: occ maintenance:install completed"
+  return 0
+}
+# <<< recover_nextcloud_autoinstall (WARP-1064)
+
 # >>> run_nextcloud_post_install_hook (WARP-990)
 run_nextcloud_post_install_hook() {
   # The mounted hook — the single source of truth (docker/nextcloud-init.sh,
@@ -359,12 +521,18 @@ run_nextcloud_post_install_hook() {
   log_info "Reconciling Nextcloud Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."
 
   if ! wait_for_nextcloud_installed; then
-    # LOUD but non-fatal — the rest of setup (verify.sh, local DNS) must still
-    # run; a box with a lagging Nextcloud is degraded, not bricked.
-    log_error "Nextcloud never reported installed (php occ status) within budget — SKIPPING the Droplet provisioning reconcile (WARP-990)."
-    log_error "Without it the household group / shared folder / OnlyOffice connector are missing and the setup wizard's account creation fails (WARP-989)."
-    log_error "Recover manually once Nextcloud is up:  $recover_cmd"
-    return 0
+    # WARP-1064: before declaring the box degraded, try to self-heal the
+    # never-auto-installed state (see recover_nextcloud_autoinstall above) —
+    # a stuck volume reports installed:false forever, so *waiting longer*
+    # can never fix it, but an explicit occ maintenance:install can.
+    if ! recover_nextcloud_autoinstall; then
+      # LOUD but non-fatal — the rest of setup (verify.sh, local DNS) must
+      # still run; a box with a lagging Nextcloud is degraded, not bricked.
+      log_error "Nextcloud never reported installed (php occ status) within budget — SKIPPING the Droplet provisioning reconcile (WARP-990)."
+      log_error "Without it the household group / shared folder / OnlyOffice connector are missing and the setup wizard's account creation fails (WARP-989)."
+      log_error "Recover manually once Nextcloud is up:  $recover_cmd"
+      return 0
+    fi
   fi
 
   # WARP-484 capture-and-branch pattern (see the workspace-settings seeder in
@@ -458,28 +626,14 @@ start_stack() {
     log_warn "Some services may still be starting — continuing with verification"
   fi
 
-  # --- Wait for Nextcloud initial setup to complete ---
-  # Nextcloud auto-installs on first boot (empty nextcloud-data volume).
-  # The OCS API and setup wizard won't work until this finishes.
-  log_info "Waiting for Nextcloud to complete initial setup..."
-  local nc_retries=60  # 5 minutes (60 * 5s)
-  while [ $nc_retries -gt 0 ]; do
-    local nc_status
-    nc_status=$(curl -sf http://localhost:8080/status.php 2>/dev/null \
-      | python3 -c "import sys,json; print(json.load(sys.stdin).get('installed',False))" 2>/dev/null \
-      || echo "false")
-    if [ "$nc_status" = "True" ]; then
-      log_success "Nextcloud is installed and ready"
-      break
-    fi
-    nc_retries=$((nc_retries - 1))
-    sleep 5
-  done
-  if [ $nc_retries -eq 0 ]; then
-    log_warn "Nextcloud setup may still be in progress — check: docker compose logs nextcloud"
-  fi
-
-  # --- Reconcile Droplet's Nextcloud provisioning (WARP-990) ---
+  # --- Wait for Nextcloud + reconcile Droplet's provisioning (WARP-990) ---
+  # Nextcloud auto-installs on first boot (empty nextcloud-data volume); the
+  # OCS API and setup wizard won't work until that finishes. The hook below
+  # gates on wait_for_nextcloud_installed (php occ status inside the
+  # container — the honest installed signal; see the WARP-1064 note on the
+  # function), which replaced the old localhost:8080 status.php curl loop
+  # that could never succeed after the port publish was removed (945cf766).
+  #
   # The post-installation hook (docker/nextcloud-init.sh) only fires on the
   # single boot that auto-installs into an EMPTY nextcloud-data volume — a
   # volume-preserving reset/reflash never re-enters that window, and a raced

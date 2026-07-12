@@ -182,6 +182,83 @@ def test_lookup_department_for_groupfolder_caches_unknown(monkeypatch):
     assert calls == [999]
 
 
+# ── WARP-1264 regression guard: parse must not require a live Postgres ────
+#
+# _parse_watch_target() is a *pure path parse* invoked from on_deleted(),
+# reconcile_index(), and _run_index()'s crash-recovery status write — none of
+# which can assume the DB is reachable. The department lookup is an
+# enhancement layered over the pre-WARP-1264 default (all groupfolder content
+# indexed under the household sentinel); a DB outage must degrade to that
+# default, never propagate a connection error out of the parse.
+
+
+def test_parse_groupfolder_degrades_to_household_when_db_unreachable(
+    nc_root, monkeypatch
+):
+    """A groupfolder path must parse WITHOUT a live Postgres: when the
+    Department lookup can't reach the DB it degrades to the legacy household
+    sentinel rather than raising a connection error out of the parse."""
+    import psycopg2
+
+    def boom(gfid):
+        raise psycopg2.OperationalError(
+            'connection to server at "localhost" (127.0.0.1), port 5432 failed: '
+            "Connection refused"
+        )
+
+    monkeypatch.setattr("db.fetch_department_for_groupfolder", boom)
+    p = nc_root / "__groupfolders" / "1" / "Trips" / "notes.txt"
+    t = watcher._parse_watch_target(str(p))  # must not raise
+    assert t is not None
+    assert t.index_user == "__household__"
+    assert t.stored_path == "/Household/Trips/notes.txt"
+    assert t.home_user is None
+
+
+def test_parse_groupfolder_department_resolves_through_real_db_seam(
+    nc_root, monkeypatch
+):
+    """The department corpus is preserved on the live path: with the DB
+    reachable and returning a Department row, the file indexes under the
+    __dept_<uuid>__ sentinel — exercised through the real
+    _lookup_department_for_groupfolder + db seam, not the stubbed resolver."""
+    monkeypatch.setattr(
+        "db.fetch_department_for_groupfolder",
+        lambda gfid: {"id": "dept-uuid-42", "kind": "DEPARTMENT", "name": "Finance"},
+    )
+    p = nc_root / "__groupfolders" / "7" / "Q3" / "budget.xlsx"
+    t = watcher._parse_watch_target(str(p))
+    assert t is not None
+    assert t.index_user == "__dept_dept-uuid-42__"
+    assert t.stored_path == "/Finance/Q3/budget.xlsx"
+    assert t.home_user is None
+
+
+def test_department_lookup_db_error_fallback_is_not_cached(monkeypatch):
+    """A DB error degrades to the household fallback WITHOUT poisoning the TTL
+    cache — otherwise a transient blip would pin a real department to the
+    household corpus for the whole TTL window. Once the DB recovers, the very
+    next call must resolve the real department."""
+    import psycopg2
+
+    calls = []
+
+    def flaky(gfid):
+        calls.append(gfid)
+        if len(calls) == 1:
+            raise psycopg2.OperationalError("connection refused")
+        return {"id": "dept-9", "kind": "DEPARTMENT", "name": "Ops"}
+
+    monkeypatch.setattr("db.fetch_department_for_groupfolder", flaky)
+
+    first = watcher._lookup_department_for_groupfolder(7)
+    assert first == {"id": None, "kind": "HOUSEHOLD", "name": watcher.SHARED_FOLDER_NAME}
+
+    second = watcher._lookup_department_for_groupfolder(7)
+    assert second == {"id": "dept-9", "kind": "DEPARTMENT", "name": "Ops"}
+    assert calls == [7, 7]  # fallback was NOT cached; DB retried on recovery
+
+
 # ── _sniff_text_mime (extensionless files) ───────────────────────────────
 
 

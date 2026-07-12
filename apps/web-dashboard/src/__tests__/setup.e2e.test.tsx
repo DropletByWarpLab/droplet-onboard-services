@@ -86,6 +86,12 @@ vi.mock("@/lib/api", () => ({
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
 
+  // WARP-817 — WifiStep reads the host topology on mount to decide its default
+  // disclosure state. null (best-effort "couldn't tell") leaves the collapsed
+  // default in place; this e2e walk skips Wi-Fi via blank SSID, so the
+  // disclosure state doesn't otherwise matter here.
+  getNetworkTopology: vi.fn(async () => null),
+
   // WARP-979 — Secured / name-your-box step (the reworked `address` step).
   checkBoxName: (name: string) => checkBoxNameMock(name),
   setBoxName: (name: string) => setBoxNameMock(name),

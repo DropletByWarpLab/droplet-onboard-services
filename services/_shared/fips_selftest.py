@@ -3,21 +3,30 @@
 Each service calls ``assert_fips_at_boot(service_name)`` at startup. The
 helper:
 
-1. Confirms the OpenSSL FIPS provider is loaded — by way of
-   ``cryptography``'s backend ``_fips_enabled`` flag.
-2. Negative-confirms by attempting an OpenSSL-backed
+1. Confirms the ``fips=yes`` default property string is pinned — by way
+   of ``cryptography``'s backend ``_fips_enabled`` flag. NOTE: this flag
+   mirrors ``EVP_default_properties_is_fips_enabled`` — it proves the
+   property PIN, not that the validated provider actually activated.
+2. Positive-confirms the provider is ACTIVE by requiring an approved
+   digest to work: ``_hashlib.new("sha256", ..., usedforsecurity=True)``
+   must succeed (WARP-1063). If the fips provider failed to activate
+   (unreadable fips.so, wrong OPENSSL_MODULES, integrity-MAC mismatch),
+   the ``fips=yes`` property pin leaves NOTHING fetchable — SHA-256 dies
+   here with the real reason instead of the process later crashing on an
+   opaque ``LIBRARY_HAS_NO_CIPHERS`` TLS error (see docs/fips.md).
+3. Negative-confirms by attempting an OpenSSL-backed
    ``_hashlib.new("md5", ..., usedforsecurity=True)`` and asserting it
    raises a FIPS-disabled error. Deliberately NOT ``hashlib.new`` — that
    wrapper silently falls back to the builtin ``_md5`` when OpenSSL
    rejects the digest, masking enforcement (WARP-1018; see
    :func:`md5_should_fail`).
-3. Emits a structured JSON log line on stdout so the audit-log integration
+4. Emits a structured JSON log line on stdout so the audit-log integration
    (WARP-237) can ingest it retroactively::
 
        {"event":"fips_self_test","service":"<name>","fips":true,
         "provider":"OpenSSL 3 FIPS"}
 
-4. On any failure mode raises :class:`FipsSelfTestError`. Callers that
+5. On any failure mode raises :class:`FipsSelfTestError`. Callers that
    want fail-closed behavior should let it propagate so the container
    exits non-zero. :func:`assert_fips_at_boot_or_exit` is the shorthand
    for that.
@@ -117,6 +126,35 @@ def md5_should_fail() -> Optional[str]:
     return None
 
 
+def sha256_should_work() -> Optional[str]:
+    """Return an error string when a FIPS-APPROVED digest is unusable.
+
+    Returns None when SHA-256 works (the expected state). WARP-1063: the
+    negative MD5 probe alone cannot distinguish "provider active and
+    enforcing" from "provider failed to activate" — under the shared FIPS
+    config's ``default_properties = fips=yes`` pin, a provider-activation
+    failure ALSO refuses MD5 (nothing is fetchable at all), while every
+    TLS client in the process later dies constructing its SSL context
+    (``LIBRARY_HAS_NO_CIPHERS``, Prisma P1011). Requiring an approved
+    digest to work at boot turns that state into an immediate, correctly
+    diagnosed self-test failure.
+
+    Probes ``_hashlib`` directly for the same WARP-1018 reason as
+    :func:`md5_should_fail`: ``hashlib`` would silently fall back to the
+    builtin non-OpenSSL implementation and mask a dead provider.
+    """
+    try:
+        import _hashlib
+    except ImportError:
+        return "_hashlib missing — CPython built without OpenSSL"
+
+    try:
+        _hashlib.new("sha256", b"fips-selftest-probe", usedforsecurity=True).hexdigest()
+    except Exception as err:  # noqa: BLE001 — reason string is the payload
+        return str(err) or "sha256 unavailable"
+    return None
+
+
 LogSink = Callable[[str], None]
 
 
@@ -134,8 +172,11 @@ def assert_fips_at_boot(
 
     Emits a structured log line on success. Raises ``FipsSelfTestError``
     on any failure mode:
-      - ``_fips_enabled`` is False (OpenSSL FIPS provider not loaded).
-      - MD5 succeeds (FIPS provider loaded but not enforcing).
+      - ``_fips_enabled`` is False (the fips=yes property pin is absent —
+        OPENSSL_CONF likely not pointing at the FIPS config).
+      - SHA-256 fails (property pin present but the validated provider
+        did NOT activate — nothing is fetchable; WARP-1063).
+      - MD5 succeeds (provider loaded but not enforcing).
 
     Callers should let the exception propagate so the process exits non-zero.
     """
@@ -146,6 +187,16 @@ def assert_fips_at_boot(
         raise FipsSelfTestError(
             "cryptography backend reports FIPS not enabled — "
             "OPENSSL_CONF likely not pointing at the FIPS config",
+            service,
+        )
+
+    sha256_err = sha256_should_work()
+    if sha256_err is not None:
+        raise FipsSelfTestError(
+            "approved digest SHA-256 unavailable — the fips=yes property "
+            "pin is set but the validated provider did not activate "
+            "(check fips.so / OPENSSL_MODULES / fipsmodule.cnf integrity; "
+            f"TLS clients would fail with LIBRARY_HAS_NO_CIPHERS): {sha256_err}",
             service,
         )
 

@@ -62,10 +62,10 @@ export function RoutinesSection({
 
   const header = (
     <div className="flex items-center justify-between mb-3">
-      <h2 className="type-title-3 text-label-primary">
+      <h2 className="type-title-3" style={{ color: "var(--text)" }}>
         Routines{" "}
         {scenes.length > 0 && (
-          <span className="type-subheadline text-label-tertiary">({scenes.length})</span>
+          <span className="type-subheadline" style={{ color: "var(--text-muted)" }}>({scenes.length})</span>
         )}
       </h2>
       {canAuthor && (
@@ -107,14 +107,17 @@ export function RoutinesSection({
         <div className="grid c3">
           {scenes.map((scene) => (
             <div key={scene.id} className="card flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-accent/15 text-accent">
+              <div
+                className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
+              >
                 <Sparkles size={20} />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="type-subheadline text-label-primary font-medium truncate">
+                <p className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
                   {scene.name}
                 </p>
-                <p className="type-caption-1 text-label-tertiary">
+                <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
                   {scene.actionCount} action{scene.actionCount === 1 ? "" : "s"}
                 </p>
               </div>

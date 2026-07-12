@@ -1,10 +1,19 @@
 /**
- * WARP-81: tests for the DHCP/wireless reconciler.
+ * WARP-81 / WARP-106: tests for the DHCP/wireless reconciler.
  *
  * Follows the in-memory-map + vi.fn() Prisma mock pattern used in
  * src/__tests__/device-clients.test.ts. The reconciler is constructed
  * with an injected OUI lookup so we can assert vendor resolution
- * without touching the real CSV.
+ * without touching the real CSV, and (WARP-106) an injected logger so we
+ * can assert drift-detection warnings without a real pino sink.
+ *
+ * WARP-106: the reconciler no longer authors any block state. The dropped
+ * `isBlocked` column is gone; `manualBlock` (user intent) and
+ * `lastAppliedBlocked` (ticker-authored source of truth) are the only block
+ * fields, and the ticker is the single writer of `lastAppliedBlocked`. The
+ * reconciler is a pure DRIFT DETECTOR — it logs when the live firewall
+ * disagrees with the ticker's desired state but never writes block state, so
+ * it can never clobber ticker intent (no reconciler-vs-ticker race).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -19,7 +28,8 @@ type DeviceRow = {
   lastIp: string | null;
   firstSeen: Date;
   lastSeen: Date;
-  isBlocked: boolean;
+  manualBlock: boolean;
+  lastAppliedBlocked: boolean | null;
 };
 
 type PresenceRow = {
@@ -55,7 +65,8 @@ function makePrismaMock() {
         lastIp: create.lastIp ?? null,
         firstSeen: create.firstSeen,
         lastSeen: create.lastSeen,
-        isBlocked: create.isBlocked ?? false,
+        manualBlock: create.manualBlock ?? false,
+        lastAppliedBlocked: create.lastAppliedBlocked ?? null,
       };
       devices.set(create.mac, row);
       return row;
@@ -119,10 +130,16 @@ function makeOuiLookup(table: Record<string, string>): OuiLookup {
   };
 }
 
+/** Minimal drift-detection logger spy injected into the reconciler. */
+function makeLoggerSpy() {
+  return { warn: vi.fn(), debug: vi.fn() };
+}
+
 describe("device-registry.service", () => {
   let prisma: ReturnType<typeof makePrismaMock>["prisma"];
   let devices: ReturnType<typeof makePrismaMock>["devices"];
   let presence: ReturnType<typeof makePrismaMock>["presence"];
+  let logger: ReturnType<typeof makeLoggerSpy>;
   let reg: ReturnType<typeof createDeviceRegistry>;
 
   beforeEach(() => {
@@ -130,7 +147,8 @@ describe("device-registry.service", () => {
     prisma = mock.prisma;
     devices = mock.devices;
     presence = mock.presence;
-    reg = createDeviceRegistry(prisma, makeOuiLookup({ F81EDF: "Apple Inc" }));
+    logger = makeLoggerSpy();
+    reg = createDeviceRegistry(prisma, makeOuiLookup({ F81EDF: "Apple Inc" }), logger);
   });
 
   it("first-sight: upserts a new MAC with vendor resolved + firstSeen set", async () => {
@@ -148,7 +166,9 @@ describe("device-registry.service", () => {
     expect(row!.hostname).toBe("mbp");
     expect(row!.firstSeen).toBeInstanceOf(Date);
     expect(row!.lastSeen).toBeInstanceOf(Date);
-    expect(row!.isBlocked).toBe(false);
+    // Reconciler never authors block state — it defaults from the column.
+    expect(row!.manualBlock).toBe(false);
+    expect(row!.lastAppliedBlocked).toBeNull();
   });
 
   it("existing device: updates lastSeen + lastIp, preserves firstSeen", async () => {
@@ -160,7 +180,8 @@ describe("device-registry.service", () => {
       lastIp: "10.0.0.1",
       firstSeen: originalFirstSeen,
       lastSeen: originalFirstSeen,
-      isBlocked: false,
+      manualBlock: false,
+      lastAppliedBlocked: null,
     });
 
     await reg.reconcile({
@@ -177,17 +198,9 @@ describe("device-registry.service", () => {
     expect(row.lastSeen.getTime()).toBeGreaterThan(originalFirstSeen.getTime());
   });
 
-  it("block-state cascade: an active REJECT rule sets isBlocked = true", async () => {
-    await reg.reconcile({
-      leases: [{ mac: "F8:1E:DF:AA:BB:CC", ip: "10.0.0.1" }],
-      wirelessClients: [],
-      firewallRules: [{ srcMac: "f8:1e:df:aa:bb:cc" }],
-      pollIntervalMs: 10_000,
-    });
-    expect(devices.get("F8:1E:DF:AA:BB:CC")!.isBlocked).toBe(true);
-  });
+  // ── WARP-106: drift detection (reconciler never authors block state) ──
 
-  it("block-state preserved when firewall fetch returns a RouterError", async () => {
+  it("drift detected: live firewall REJECT vs ticker lastAppliedBlocked=false → warns, does NOT clobber", async () => {
     devices.set("F8:1E:DF:AA:BB:CC", {
       mac: "F8:1E:DF:AA:BB:CC",
       vendor: "Apple Inc",
@@ -195,7 +208,88 @@ describe("device-registry.service", () => {
       lastIp: "10.0.0.1",
       firstSeen: new Date("2026-01-01"),
       lastSeen: new Date("2026-01-01"),
-      isBlocked: true,
+      manualBlock: false,
+      lastAppliedBlocked: false, // ticker's desired effective state = unblocked
+    });
+
+    await reg.reconcile({
+      leases: [{ mac: "F8:1E:DF:AA:BB:CC", ip: "10.0.0.1" }],
+      wirelessClients: [],
+      // Live firewall says this MAC IS blocked — disagrees with the ticker.
+      firewallRules: [{ srcMac: "f8:1e:df:aa:bb:cc" }],
+      pollIntervalMs: 10_000,
+    });
+
+    // (a) No clobber — the ticker owns lastAppliedBlocked; reconciler left it.
+    expect(devices.get("F8:1E:DF:AA:BB:CC")!.lastAppliedBlocked).toBe(false);
+    // (b) Drift was logged with the observed-vs-desired context.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mac: "F8:1E:DF:AA:BB:CC",
+        firewallBlocked: true,
+        lastAppliedBlocked: false,
+      }),
+      expect.stringMatching(/drift/i),
+    );
+  });
+
+  it("no drift: live firewall agrees with ticker lastAppliedBlocked → silent, no write", async () => {
+    devices.set("F8:1E:DF:AA:BB:CC", {
+      mac: "F8:1E:DF:AA:BB:CC",
+      vendor: "Apple Inc",
+      hostname: null,
+      lastIp: "10.0.0.1",
+      firstSeen: new Date("2026-01-01"),
+      lastSeen: new Date("2026-01-01"),
+      manualBlock: true,
+      lastAppliedBlocked: true, // ticker already applied the block
+    });
+
+    await reg.reconcile({
+      leases: [{ mac: "F8:1E:DF:AA:BB:CC", ip: "10.0.0.1" }],
+      wirelessClients: [],
+      firewallRules: [{ srcMac: "f8:1e:df:aa:bb:cc" }],
+      pollIntervalMs: 10_000,
+    });
+
+    expect(devices.get("F8:1E:DF:AA:BB:CC")!.lastAppliedBlocked).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("bootstrap: lastAppliedBlocked=null (ticker never ran) → no drift warning", async () => {
+    devices.set("F8:1E:DF:AA:BB:CC", {
+      mac: "F8:1E:DF:AA:BB:CC",
+      vendor: "Apple Inc",
+      hostname: null,
+      lastIp: "10.0.0.1",
+      firstSeen: new Date("2026-01-01"),
+      lastSeen: new Date("2026-01-01"),
+      manualBlock: false,
+      lastAppliedBlocked: null,
+    });
+
+    await reg.reconcile({
+      leases: [{ mac: "F8:1E:DF:AA:BB:CC", ip: "10.0.0.1" }],
+      wirelessClients: [],
+      firewallRules: [{ srcMac: "f8:1e:df:aa:bb:cc" }],
+      pollIntervalMs: 10_000,
+    });
+
+    // Nothing to compare against — ticker hasn't authored a desired state yet.
+    expect(devices.get("F8:1E:DF:AA:BB:CC")!.lastAppliedBlocked).toBeNull();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("firewall fetch fails (RouterError): no drift detection, no block write, no throw", async () => {
+    devices.set("F8:1E:DF:AA:BB:CC", {
+      mac: "F8:1E:DF:AA:BB:CC",
+      vendor: "Apple Inc",
+      hostname: null,
+      lastIp: "10.0.0.1",
+      firstSeen: new Date("2026-01-01"),
+      lastSeen: new Date("2026-01-01"),
+      manualBlock: true,
+      lastAppliedBlocked: true,
     });
 
     await reg.reconcile({
@@ -205,8 +299,10 @@ describe("device-registry.service", () => {
       pollIntervalMs: 10_000,
     });
 
-    // Prior block state must NOT be silently cleared.
-    expect(devices.get("F8:1E:DF:AA:BB:CC")!.isBlocked).toBe(true);
+    // We can't observe live firewall state, so we can't detect drift and we
+    // never touch the ticker-owned field.
+    expect(devices.get("F8:1E:DF:AA:BB:CC")!.lastAppliedBlocked).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("presence increment: seenMinutes grows by poll-delta", async () => {
@@ -264,7 +360,8 @@ describe("device-registry.service", () => {
       lastIp: "10.0.0.1",
       firstSeen: new Date(),
       lastSeen: new Date(),
-      isBlocked: false,
+      manualBlock: false,
+      lastAppliedBlocked: null,
     });
 
     await reg.forgetDevice("f8:1e:df:aa:bb:cc");
