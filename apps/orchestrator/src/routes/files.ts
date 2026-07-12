@@ -50,14 +50,14 @@ import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
-import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
   checkSpaceAccess,
   requireSpaceAccess,
-  resolveDepartmentIdForSpaceReadOnly,
+  resolveRawSpaceToDepartmentId,
   type SpaceAccessCaller,
 } from "../middleware/space.js";
 import {
@@ -158,6 +158,36 @@ function resolveSpace(raw: unknown): Space {
   if (raw === "shared" || raw === "personal") return raw;
   if (raw.startsWith("dept:")) return raw; // Keep dept:<uuid> as-is for resolution.
   return "personal";
+}
+
+/**
+ * WARP-1262 (T10): raw `?space=` / body `space` extraction, query taking
+ * precedence over body when a caller supplies both (mirrors the space
+ * middleware's own `defaultSpaceResolver` precedence). Write routes with a
+ * path in the querystring (delete, trash) read `?space=`; routes with a
+ * JSON body (mkdir, rename, favorite, ...) read `body.space`. Shared by
+ * every write route below so the (space, requestedPath) → resolved-path
+ * flow and the `requireSpaceAccess` guard always agree on which raw value
+ * they're resolving.
+ */
+function spaceQueryOrBody(req: Request): unknown {
+  if (req.query.space !== undefined) return req.query.space;
+  return (req.body as Record<string, unknown> | undefined)?.space;
+}
+
+/**
+ * `requireSpaceAccess`'s `resolveSpace` option for `spaceQueryOrBody`,
+ * translating the legacy WS-5 "shared" literal to the gate's "household"
+ * token and letting anything else the gate itself doesn't recognize fail
+ * closed via its own `parseSpaceValue` (see the `/files` list route above
+ * for why this alias exists).
+ */
+function resolveSpaceGuardToken(req: Request): unknown {
+  const raw = spaceQueryOrBody(req);
+  if (typeof raw !== "string") return undefined;
+  if (raw === "shared") return "household";
+  if (raw.startsWith("dept:")) return raw;
+  return undefined;
 }
 
 /**
@@ -1399,9 +1429,22 @@ export function createFilesRouter(
   // WARP-171: per-route guard. owner + admin + family — household
   // file writes. service principals never upload (the file-indexer
   // talks to Nextcloud's WebDAV directly, not through this API).
-  router.post("/files/upload", requireRole("owner", "admin", "family"), handleUpload, async (req, res, next) => {
+  //
+  // WARP-1262 (T10): `?space=` is read via the query string ONLY (never
+  // multipart body fields) — `requireSpaceAccess` is composed BEFORE
+  // `handleUpload` (multer), so `req.body` isn't populated yet when the
+  // gate runs. `path` (the target dir) is space-relative; the server
+  // resolves the operational path, killing the client-side pre-translation.
+  router.post(
+    "/files/upload",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    handleUpload,
+    async (req, res, next) => {
     try {
-      const targetPath = (req.query.path as string) || "/";
+      const rawTargetPath = (req.query.path as string) || "/";
+      const space = resolveSpace(req.query.space);
+      const targetPath = await rootForSpace(prisma, space, rawTargetPath);
 
       const files = req.files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -1413,14 +1456,11 @@ export function createFilesRouter(
       const user = getUser(req);
       const results: { name: string; path: string; size: number }[] = [];
 
-      // WARP-1260 (T8): file-registry writer. Resolved ONCE per request
-      // (one target space per upload call) — read-only, no gating (write-
-      // route space enforcement is WARP-1262/T10); null for personal or
-      // any space that doesn't resolve to an ACTIVE department.
-      const uploadDepartmentId = await resolveDepartmentIdForSpaceReadOnly(
-        prisma,
-        req.query.space,
-      );
+      // WARP-1260 (T8) writer, WARP-1262 (T10) gate: the space was already
+      // resolved + authorized by `requireSpaceAccess` above, so the
+      // file-registry departmentId is just the guard's own resolved value
+      // — no second lookup needed.
+      const uploadDepartmentId = req.spaceDepartmentId ?? null;
       const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
 
       for (const file of files) {
@@ -1471,13 +1511,21 @@ export function createFilesRouter(
   });
 
   // ── Delete a file or directory ──
-  router.delete("/files", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=` threading — path is space-relative, resolved
+  // server-side; killing the client-side `toHomeRelativePath` pre-translate.
+  router.delete(
+    "/files",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
-      const filePath = req.query.path as string;
-      if (!filePath) {
+      const rawPath = req.query.path as string;
+      if (!rawPath) {
         res.status(400).json({ error: "path query parameter is required" });
         return;
       }
+      const space = resolveSpace(req.query.space);
+      const filePath = await rootForSpace(prisma, space, rawPath);
 
       const user = getUser(req);
       await ncDeleteFile(await getToken(req), user, filePath);
@@ -1493,7 +1541,12 @@ export function createFilesRouter(
   });
 
   // ── Create a directory ──
-  router.post("/files/mkdir", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=` (query or body) threading.
+  router.post(
+    "/files/mkdir",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({ path: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -1508,19 +1561,23 @@ export function createFilesRouter(
       // leading slashes, so a `..` segment would resolve to a sibling of the
       // intended target — letting an authenticated user create directories
       // anywhere in their storage. Normalize and require the result to stay
-      // anchored at root with no `..` segments.
+      // anchored at root with no `..` segments. Checked on the RAW
+      // space-relative input, before the space prefix is applied.
       if (!isSafeUserPath(parsed.data.path)) {
         res.status(400).json({ error: "path must not contain '..' segments" });
         return;
       }
 
-      const user = getUser(req);
-      await ncCreateDirectory(await getToken(req), user, parsed.data.path);
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const targetPath = await rootForSpace(prisma, space, parsed.data.path);
 
-      const parentPath = path.posix.dirname(parsed.data.path) || "/";
+      const user = getUser(req);
+      await ncCreateDirectory(await getToken(req), user, targetPath);
+
+      const parentPath = path.posix.dirname(targetPath) || "/";
       await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
 
-      res.json({ created: parsed.data.path });
+      res.json({ created: targetPath });
     } catch (err) {
       handleFileError(err, res, next);
     }
@@ -1616,6 +1673,35 @@ export function createFilesRouter(
   //  Phase 1 — Rename / Move / Copy (single + bulk) + Trash + Versions
   // ────────────────────────────────────────────────────────────
 
+  /**
+   * WARP-1262 (T10): resolve + gate ONE side of a cross-space move/copy —
+   * shared by both routes below so the resolve-then-check sequence (and
+   * its `recordAccessDenied` audit trail) has exactly one implementation.
+   * Writes the 403 response and returns `{ ok: false }` on denial; callers
+   * MUST stop processing when this returns `ok: false` (the response is
+   * already sent).
+   */
+  async function checkCrossSpaceSide(
+    req: Request,
+    res: Response,
+    caller: SpaceAccessCaller,
+    rawSpace: unknown,
+    minRight: DepartmentRight,
+  ): Promise<{ ok: true; departmentId: string | null } | { ok: false }> {
+    const resolved = await resolveRawSpaceToDepartmentId(prisma, rawSpace);
+    if (!resolved.ok) {
+      recordAccessDenied(req, resolved.reason);
+      res.status(403).json({ error: resolved.error });
+      return { ok: false };
+    }
+    const check = await checkSpaceAccess(prisma, req, caller, resolved.departmentId, minRight);
+    if (!check.allowed) {
+      res.status(check.status).json({ error: check.error });
+      return { ok: false };
+    }
+    return { ok: true, departmentId: check.departmentId };
+  }
+
   /** Invalidate listing caches for the given parent paths (source + destination). */
   async function invalidateParents(user: string, ...paths: string[]): Promise<void> {
     const parents = new Set<string>();
@@ -1654,7 +1740,14 @@ export function createFilesRouter(
   }
 
   // ── Rename (POST /api/files/rename) ──
-  router.post("/files/rename", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=`/body `space` threading — rename stays a
+  // single-space op (same-dir), gated `contributor` like the other
+  // write-within-a-space verbs.
+  router.post(
+    "/files/rename",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -1672,7 +1765,9 @@ export function createFilesRouter(
         });
         return;
       }
-      const { path: filePath, newName } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const filePath = await rootForSpace(prisma, space, parsed.data.path);
+      const { newName } = parsed.data;
       const parentDir = path.posix.dirname(filePath) || "/";
       const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
 
@@ -1688,19 +1783,52 @@ export function createFilesRouter(
   });
 
   // ── Move (POST /api/files/move) ──
+  //
+  // WARP-1262 (T10): cross-space DUAL-CHECK. `fromSpace`/`toSpace` each
+  // default independently to personal (no implicit "same as the other
+  // side" fallback — an omitted `?space=`/body-space pair must behave
+  // exactly like the pre-T10 personal-only route, brief §3.1). Move
+  // deletes the source, so the source side needs `contributor` (not
+  // `reader` — see the copy route below for the asymmetry); the target
+  // side always needs `contributor`. Each side is resolved + checked
+  // independently via `resolveRawSpaceToDepartmentId` + `checkSpaceAccess`
+  // (the same primitives `requireSpaceAccess` composes) since a single
+  // route can't be gated by ONE space token here.
   router.post("/files/move", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
         to: z.string().min(1),
         overwrite: z.boolean().optional().default(false),
+        fromSpace: z.string().optional(),
+        toSpace: z.string().optional(),
       });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({ error: "Invalid move request", details: parsed.error.flatten() });
         return;
       }
-      const { from, to, overwrite } = parsed.data;
+      const { from: rawFrom, to: rawTo, overwrite, fromSpace: rawFromSpace, toSpace: rawToSpace } = parsed.data;
+
+      const role = req.user?.role;
+      const userId = req.user?.id;
+      if (typeof role !== "string" || !role || typeof userId !== "string" || !userId) {
+        recordAccessDenied(req, "space-no-session");
+        res.status(403).json({ error: "Forbidden: no session" });
+        return;
+      }
+      const caller: SpaceAccessCaller = { id: userId, role };
+
+      // Move deletes the source — contributor required on BOTH sides.
+      const fromResult = await checkCrossSpaceSide(req, res, caller, rawFromSpace, "contributor");
+      if (!fromResult.ok) return;
+      const toResult = await checkCrossSpaceSide(req, res, caller, rawToSpace, "contributor");
+      if (!toResult.ok) return;
+
+      const fromSpaceValue = resolveSpace(rawFromSpace);
+      const toSpaceValue = resolveSpace(rawToSpace);
+      const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
+      const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
       const user = getUser(req);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
@@ -1714,19 +1842,49 @@ export function createFilesRouter(
   });
 
   // ── Copy (POST /api/files/copy) ──
+  //
+  // WARP-1262 (T10): cross-space DUAL-CHECK, same shape as move — but copy
+  // does NOT delete the source, so the source side only needs `reader`;
+  // the target side still needs `contributor`. This asymmetry is the
+  // whole point of the ticket's dual-check requirement: a reader on dept A
+  // may copy INTO dept A content they can write to, without needing
+  // contributor rights on a source they're only reading from.
   router.post("/files/copy", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
         to: z.string().min(1),
         overwrite: z.boolean().optional().default(false),
+        fromSpace: z.string().optional(),
+        toSpace: z.string().optional(),
       });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({ error: "Invalid copy request", details: parsed.error.flatten() });
         return;
       }
-      const { from, to, overwrite } = parsed.data;
+      const { from: rawFrom, to: rawTo, overwrite, fromSpace: rawFromSpace, toSpace: rawToSpace } = parsed.data;
+
+      const role = req.user?.role;
+      const userId = req.user?.id;
+      if (typeof role !== "string" || !role || typeof userId !== "string" || !userId) {
+        recordAccessDenied(req, "space-no-session");
+        res.status(403).json({ error: "Forbidden: no session" });
+        return;
+      }
+      const caller: SpaceAccessCaller = { id: userId, role };
+
+      // Copy doesn't delete the source — only reader required there; the
+      // target is written to, so contributor required there.
+      const fromResult = await checkCrossSpaceSide(req, res, caller, rawFromSpace, "reader");
+      if (!fromResult.ok) return;
+      const toResult = await checkCrossSpaceSide(req, res, caller, rawToSpace, "contributor");
+      if (!toResult.ok) return;
+
+      const fromSpaceValue = resolveSpace(rawFromSpace);
+      const toSpaceValue = resolveSpace(rawToSpace);
+      const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
+      const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
       const user = getUser(req);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
@@ -1740,7 +1898,14 @@ export function createFilesRouter(
   });
 
   // ── Bulk delete (POST /api/files/bulk-delete) ──
-  router.post("/files/bulk-delete", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): bulk ops act on a SINGLE space (the dashboard's
+  // multi-select lives inside one space view) — `?space=`/body `space`
+  // threading, every path in the batch resolved under the same space.
+  router.post(
+    "/files/bulk-delete",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({ paths: z.array(z.string().min(1)).min(1).max(200) });
       const parsed = schema.safeParse(req.body);
@@ -1748,7 +1913,10 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid bulk-delete request" });
         return;
       }
-      const { paths } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const paths = await Promise.all(
+        parsed.data.paths.map((p) => rootForSpace(prisma, space, p)),
+      );
       const user = getUser(req);
       const token = await getToken(req);
 
@@ -1776,7 +1944,12 @@ export function createFilesRouter(
   });
 
   // ── Bulk move (POST /api/files/bulk-move) ──
-  router.post("/files/bulk-move", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): single-space threading (see bulk-delete above).
+  router.post(
+    "/files/bulk-move",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -1788,10 +1961,15 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid bulk-move request" });
         return;
       }
-      const { paths, toDir, overwrite } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const paths = await Promise.all(
+        parsed.data.paths.map((p) => rootForSpace(prisma, space, p)),
+      );
+      const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
+      const { overwrite } = parsed.data;
       const user = getUser(req);
       const token = await getToken(req);
-      const normalizedDir = toDir.replace(/\/+$/, "") || "/";
+      const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
         try {
@@ -1820,7 +1998,12 @@ export function createFilesRouter(
   });
 
   // ── Bulk copy (POST /api/files/bulk-copy) ──
-  router.post("/files/bulk-copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): single-space threading (see bulk-delete above).
+  router.post(
+    "/files/bulk-copy",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -1832,10 +2015,15 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid bulk-copy request" });
         return;
       }
-      const { paths, toDir, overwrite } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const paths = await Promise.all(
+        parsed.data.paths.map((p) => rootForSpace(prisma, space, p)),
+      );
+      const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
+      const { overwrite } = parsed.data;
       const user = getUser(req);
       const token = await getToken(req);
-      const normalizedDir = toDir.replace(/\/+$/, "") || "/";
+      const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
         try {
@@ -1874,7 +2062,20 @@ export function createFilesRouter(
   });
 
   // ── Trash: restore (POST /api/files/trash/restore) ──
-  router.post("/files/trash/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // WARP-1262 (T10): `?space=`/body `space` threading. NC's trashbin is a
+  // flat per-user WebDAV area keyed by trash-assigned filename (not a
+  // space-relative path) — `ncRestoreTrashItem`/`ncDeleteTrashItem`/
+  // `ncEmptyTrash` restore to/purge from the ORIGINAL location automatically
+  // and take no path argument to resolve, so there's nothing for
+  // `rootForSpace` to do here. The gate still runs (contributor required)
+  // so a caller can't purge/restore dept trash without dept write rights;
+  // an omitted `space` defaults to personal, unchanged from pre-T10.
+  router.post(
+    "/files/trash/restore",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({ name: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -1892,7 +2093,12 @@ export function createFilesRouter(
   });
 
   // ── Trash: delete single item permanently (DELETE /api/files/trash/item) ──
-  router.delete("/files/trash/item", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=` threading (see trash/restore above).
+  router.delete(
+    "/files/trash/item",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const name = req.query.name as string;
       if (!name) {
@@ -1909,10 +2115,15 @@ export function createFilesRouter(
   });
 
   // ── Trash: empty (DELETE /api/files/trash) ──
-  router.delete("/files/trash", requireRole("owner", "admin", "family"), async (_req, res, next) => {
+  // WARP-1262 (T10): `?space=` threading (see trash/restore above).
+  router.delete(
+    "/files/trash",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
-      const user = getUser(_req);
-      await ncEmptyTrash(await getToken(_req), user);
+      const user = getUser(req);
+      await ncEmptyTrash(await getToken(req), user);
       safePublish(`droplet/files/${user}/trash-emptied`, {});
       res.json({ emptied: true });
     } catch (err) {
@@ -1943,7 +2154,12 @@ export function createFilesRouter(
   });
 
   // ── Versions: restore (POST /api/files/versions/restore) ──
-  router.post("/files/versions/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=`/body `space` threading, contributor gate.
+  router.post(
+    "/files/versions/restore",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -1954,7 +2170,9 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid restore request" });
         return;
       }
-      const { path: filePath, versionId } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const filePath = await rootForSpace(prisma, space, parsed.data.path);
+      const { versionId } = parsed.data;
       const user = getUser(req);
       const token = await getToken(req);
 
@@ -1986,7 +2204,12 @@ export function createFilesRouter(
   const SEARCH_TTL = 5;
 
   // ── Favorite toggle (POST /api/files/favorite) ──
-  router.post("/files/favorite", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1262 (T10): `?space=`/body `space` threading, contributor gate.
+  router.post(
+    "/files/favorite",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -1997,7 +2220,9 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid favorite request" });
         return;
       }
-      const { path: filePath, favorite } = parsed.data;
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const filePath = await rootForSpace(prisma, space, parsed.data.path);
+      const { favorite } = parsed.data;
       const user = getUser(req);
       await ncSetFavorite(await getToken(req), user, filePath, favorite);
       await cacheDel(FAVORITES_CACHE_PREFIX + user);

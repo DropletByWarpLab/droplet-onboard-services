@@ -75,6 +75,12 @@ export function MoveCopyDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // WARP-1262 (T10): this tree still only ever browses/creates in the
+  // PERSONAL space (`fetchFiles`/`createDirectory` below take no `space`
+  // arg) — a space-aware picker is T15's job ("full UI"). Callers must NOT
+  // pass a non-personal `space` down to this dialog's `onConfirm` handler
+  // without also treating `targetDir` (and the moved/copied paths) as
+  // personal-relative; see the Files page's `handleMoveCopyConfirm`.
   const loadChildren = useCallback(async (dirPath: string) => {
     setTree((prev) => updateNode(prev, dirPath, (node) => ({ ...node, loading: true })));
     try {
