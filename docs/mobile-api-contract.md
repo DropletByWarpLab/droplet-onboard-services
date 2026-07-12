@@ -388,6 +388,17 @@ envelope): `400 { error: "Invalid request", details }`, `503` (no endpoint host
 configured, or routing service disabled), `507` (VPN subnet IP-exhausted),
 `404 { error: "Peer not found" }`.
 
+**`GET /vpn/status` failure shape (WARP-1283).** When the box's routing service
+is unavailable (unreachable, timed out, or supervision disabled), the route
+returns a typed flat envelope: `503 { error: "<customer-safe copy>",
+code: "ROUTING_UNAVAILABLE" }`. **Behavior change for external clients:**
+previously a sidecar outage surfaced the global error-handler shape
+`{ error: "Service unavailable", message: "VPN status: fetch failed",
+code: "UNREACHABLE" }`; this route now returns the typed shape above with **no
+`message` field** — branch on `code`, not on `message` or the old error text
+(`error` is calm customer-safe copy, safe to show verbatim). Genuinely
+unexpected failures still surface the global-handler `500` shape.
+
 For phone self-add (writes need an owner/admin session):
 - POST `/vpn/peers` with `{ deviceLabel: "<deviceDisplayName>" }`
 - Response includes `conf` (wg-quick INI, returned **ONCE** — the private key is in
@@ -514,6 +525,7 @@ types on the same stream — render or ignore as needed:
 | `tool_call` | `{ id, name, args }` | The model invoked an MCP tool |
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
+| `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
 
 Native clients should detect end-of-stream on `event: done` /

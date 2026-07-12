@@ -732,3 +732,70 @@ class TestStreamingProvider503Path:
         # No rebuild needed — the semaphore object is the same instance.
         assert provider._sema is sema_before
         assert provider._sema_size == 2
+
+
+# ---------------------------------------------------------------------------
+# WARP-1284 (F1/F2) — list_models failure seam + metadata timeout
+# ---------------------------------------------------------------------------
+
+
+class TestListModelsFailureSeam:
+    """WARP-1284 F1 — list_models must RAISE on transport/HTTP failures.
+
+    The old code swallowed them into `return []`, which made the router's
+    degraded_providers classification dead code in production: a dead
+    Ollama was indistinguishable from an empty registry, so the setup
+    wizard showed "still downloading" for an unreachable AI service. The
+    router fan-out (list_all_models, the only production caller) already
+    handles the raise via asyncio.gather(return_exceptions=True)."""
+
+    BASE = "http://dead-ollama:11434"
+
+    @respx.mock
+    async def test_raises_on_connect_error(self):
+        respx.get(f"{self.BASE}/api/tags").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        provider = OllamaLocalProvider(base_url=self.BASE)
+        with pytest.raises(httpx.ConnectError):
+            await provider.list_models()
+
+    @respx.mock
+    async def test_raises_on_http_error(self):
+        respx.get(f"{self.BASE}/api/tags").mock(
+            return_value=httpx.Response(500, text="boom")
+        )
+        provider = OllamaLocalProvider(base_url=self.BASE)
+        with pytest.raises(httpx.HTTPStatusError):
+            await provider.list_models()
+
+    @respx.mock
+    async def test_genuinely_empty_tags_still_returns_empty_list(self):
+        """A REACHABLE Ollama with no model pulled yet (first boot) is the
+        one honest empty-list case — it must stay a plain [] (not degraded)."""
+        respx.get(f"{self.BASE}/api/tags").mock(
+            return_value=httpx.Response(200, json={"models": []})
+        )
+        provider = OllamaLocalProvider(base_url=self.BASE)
+        assert await provider.list_models() == []
+
+    async def test_tags_get_uses_short_metadata_timeout(self, monkeypatch):
+        """WARP-1284 F2 — /api/tags is a metadata call; it must NOT ride the
+        shared client's 300s chat read timeout. Degraded listings are never
+        TTL-cached, so a slow-not-down Ollama would otherwise pile hung
+        wizard/SWR polls onto the shared connection pool chat also uses."""
+        from providers.ollama_local import _TAGS_TIMEOUT_S
+
+        provider = OllamaLocalProvider(base_url=self.BASE)
+        captured: dict = {}
+
+        async def fake_get(url, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return httpx.Response(
+                200, json={"models": []}, request=httpx.Request("GET", url)
+            )
+
+        monkeypatch.setattr(provider.client, "get", fake_get)
+        await provider.list_models()
+        assert captured["timeout"] == _TAGS_TIMEOUT_S
+        assert _TAGS_TIMEOUT_S <= 5.0

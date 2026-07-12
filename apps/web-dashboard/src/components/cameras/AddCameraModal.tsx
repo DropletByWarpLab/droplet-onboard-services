@@ -44,18 +44,24 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
     // the card never sits flush against the screen edge on phones.
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className="absolute inset-0 backdrop-blur-sm"
+        style={{ background: "var(--scrim)" }}
+        onClick={onClose}
+      />
 
       {/* Modal */}
-      <div className="relative w-full max-w-md bg-[var(--color-surface-primary)] dp-material rounded-2xl shadow-xl">
+      <div className="card relative w-full max-w-md" style={{ padding: 0 }}>
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-separator">
-          <h2 className="type-title-3 text-label-primary">Add Camera</h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-full hover:bg-surface-secondary transition-colors"
-          >
-            <X size={20} className="text-label-secondary" />
+        <div
+          className="flex items-center justify-between p-4"
+          style={{ borderBottom: "1px solid var(--card-bd)" }}
+        >
+          <h2 className="type-title-3" style={{ color: "var(--text)" }}>
+            Add Camera
+          </h2>
+          <button onClick={onClose} className="icon-btn">
+            <X size={20} />
           </button>
         </div>
 
@@ -63,7 +69,10 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
           {/* Camera name */}
           <div>
-            <label className="type-footnote text-label-secondary font-medium block mb-1">
+            <label
+              className="type-footnote font-medium block mb-1"
+              style={{ color: "var(--text-muted)" }}
+            >
               Camera Name *
             </label>
             <input
@@ -71,11 +80,17 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
               value={name}
               onChange={(e) => setName(e.target.value.replace(/\s/g, "_"))}
               placeholder="front_door"
-              className="w-full px-3 py-2 rounded-lg bg-surface-secondary text-label-primary type-subheadline border border-separator focus:border-accent focus:outline-none"
+              className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={64}
             />
             {name && !nameValid && (
-              <p className="type-caption-2 text-system-red mt-1">
+              <p className="type-caption-2 mt-1" style={{ color: "var(--danger)" }}>
                 Letters, numbers, underscores, hyphens only
               </p>
             )}
@@ -83,7 +98,10 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
 
           {/* RTSP URL */}
           <div>
-            <label className="type-footnote text-label-secondary font-medium block mb-1">
+            <label
+              className="type-footnote font-medium block mb-1"
+              style={{ color: "var(--text-muted)" }}
+            >
               RTSP URL *
             </label>
             <input
@@ -91,10 +109,16 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
               value={rtspUrl}
               onChange={(e) => setRtspUrl(e.target.value)}
               placeholder="rtsp://192.168.100.101:554/stream1"
-              className="w-full px-3 py-2 rounded-lg bg-surface-secondary text-label-primary type-subheadline border border-separator focus:border-accent focus:outline-none font-mono text-sm"
+              className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)] font-mono text-sm"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
             {rtspUrl && !urlValid && (
-              <p className="type-caption-2 text-system-red mt-1">
+              <p className="type-caption-2 mt-1" style={{ color: "var(--danger)" }}>
                 Must start with rtsp:// or rtsps://
               </p>
             )}
@@ -103,7 +127,10 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
           {/* Optional fields */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="type-footnote text-label-secondary font-medium block mb-1">
+              <label
+                className="type-footnote font-medium block mb-1"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Manufacturer
               </label>
               <input
@@ -111,11 +138,20 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
                 value={manufacturer}
                 onChange={(e) => setManufacturer(e.target.value)}
                 placeholder="Reolink"
-                className="w-full px-3 py-2 rounded-lg bg-surface-secondary text-label-primary type-subheadline border border-separator focus:border-accent focus:outline-none"
+                className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
               />
             </div>
             <div>
-              <label className="type-footnote text-label-secondary font-medium block mb-1">
+              <label
+                className="type-footnote font-medium block mb-1"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Model
               </label>
               <input
@@ -123,14 +159,23 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="RLC-810A"
-                className="w-full px-3 py-2 rounded-lg bg-surface-secondary text-label-primary type-subheadline border border-separator focus:border-accent focus:outline-none"
+                className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
               />
             </div>
           </div>
 
           {/* Error */}
           {error && (
-            <p className="type-footnote text-system-red bg-system-red/10 rounded-lg px-3 py-2">
+            <p
+              className="type-footnote rounded-lg px-3 py-2"
+              style={{ color: "var(--danger)", background: "rgba(239,68,68,0.1)" }}
+            >
               {error}
             </p>
           )}
@@ -140,14 +185,14 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
             <button
               type="button"
               onClick={onClose}
-              className="dp-btn-secondary flex-1 py-2.5 rounded-lg type-subheadline"
+              className="btn ghost flex-1 type-subheadline"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!canSubmit}
-              className="dp-btn-primary flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg type-subheadline disabled:opacity-50"
+              className="btn primary flex-1 type-subheadline disabled:opacity-50"
             >
               {loading ? (
                 <Loader2 size={16} className="animate-spin" />

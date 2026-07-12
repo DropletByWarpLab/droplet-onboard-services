@@ -37,11 +37,21 @@ const fetchMatterCapabilitiesMock = vi.fn(async () => ({
   bleCommissioning: true,
 }));
 const commissionMatterDeviceMock = vi.fn();
+// WARP-1281: the step now also runs the commissionable-device browse while
+// scanning. Stub it healthy-and-empty — with the module mocked, a missing
+// export would make every browse throw, which (by design) trips the real
+// service-unavailable state and replaces the WARP-937 empty state this
+// suite exercises.
+const discoverMatterDevicesMock = vi.fn(async () => ({
+  devices: [],
+  count: 0,
+}));
 
 vi.mock("@/lib/api", () => ({
   fetchMatterDevices: () => fetchMatterDevicesMock(),
   fetchMatterCapabilities: () => fetchMatterCapabilitiesMock(),
   commissionMatterDevice: (code: string) => commissionMatterDeviceMock(code),
+  discoverMatterDevices: () => discoverMatterDevicesMock(),
 }));
 
 import { DiscoveryStep } from "./DiscoveryStep";

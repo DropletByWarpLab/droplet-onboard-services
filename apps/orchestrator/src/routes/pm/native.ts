@@ -464,7 +464,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
 
   router.delete("/pm/work-items/:id", requireRole(...WRITE), async (req, res, next) => {
     try {
-      await pm.deleteWorkItem(prisma, req.params.id);
+      await pm.deleteWorkItem(prisma, actor(req), req.params.id);
       res.json({ deleted: req.params.id });
     } catch (err) {
       if (mapServiceError(err, res)) return;

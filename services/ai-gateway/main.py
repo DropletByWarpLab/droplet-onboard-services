@@ -341,11 +341,19 @@ async def list_models():
     the shared/device key namespace rather than a per-user one — a user's own
     BYOK key only changes which CLOUD models their CHAT turns can reach, gated
     separately in /ai/chat (WARP-561) and the off-LAN allowlist (WARP-468).
+
+    WARP-1284: `degraded_providers` (additive) names providers whose
+    list_models() raised, so an empty `models` from a dead Ollama is
+    distinguishable from a genuine first-boot model pull. Degraded listings
+    are never TTL-cached (see ModelRegistry.get_models), so the signal
+    clears on the first healthy refresh.
     """
     if not model_registry or not provider_router:
         raise HTTPException(status_code=503, detail="Service not ready")
-    models = await model_registry.get_models(provider_router)
-    return ModelsResponse(models=models)
+    result = await model_registry.get_models(provider_router)
+    return ModelsResponse(
+        models=result.models, degraded_providers=result.degraded_providers
+    )
 
 
 # --- Chat (stateless) ---

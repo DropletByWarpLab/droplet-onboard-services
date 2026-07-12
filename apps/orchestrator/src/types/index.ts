@@ -125,6 +125,20 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   models: ModelInfo[];
+  // Additive (optional for back-compat) — WARP-1284.
+  //
+  // `degraded_providers`: set by the ai-gateway — names providers whose
+  // list_models() raised during the listing fan-out (empty when all
+  // answered). Without it an unreachable Ollama was indistinguishable
+  // from "no model pulled yet".
+  //
+  // `degraded`: stamped by the orchestrator's GET /llm/models on the
+  // forwarded response when the models list can't be trusted as complete
+  // (gateway unreachable, or the gateway reported its ollama provider
+  // degraded). Drives the setup wizard's honest "can't reach your AI
+  // service" state instead of the WARP-849 "still downloading" copy.
+  degraded_providers?: string[];
+  degraded?: boolean;
 }
 
 // WARP-311: legacy SessionInfo / SessionDetail / SessionListResponse /
