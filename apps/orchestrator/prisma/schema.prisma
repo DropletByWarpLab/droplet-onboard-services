@@ -1827,6 +1827,12 @@ enum DepartmentKind {
 
 /// WARP-1255: department provisioning lifecycle. Departments move through this
 /// state machine from creation (pending) → syncing (provisioning) → active (or failed).
+///
+/// WARP-1257: `failed` is the PROVISION-intent failure state; `archive_failed`
+/// is the ARCHIVE-intent failure state. The reconciler routes a failed row's
+/// retry on which of the two it is, so a transient NC error mid-archive is
+/// retried down the archive path (never silently re-provisioned back to active).
+/// Explicit-state-per-intent, not a guess derived from an overloaded `failed`.
 enum ProvisionState {
   pending
   provisioning
@@ -1834,15 +1840,22 @@ enum ProvisionState {
   failed
   archiving
   archived
+  archive_failed
 }
 
 /// WARP-1255: Nextcloud sync state for memberships and usage policies. Tracks
 /// whether the local Prisma row has been synced to NC (groups, permissions, quotas).
+///
+/// WARP-1257: `failed` is the SYNC-intent failure state; `remove_failed` is the
+/// REMOVAL-intent failure state. A membership removal that fails partway retries
+/// down the removal path (never silently re-synced, which would re-grant revoked
+/// access). Explicit-state-per-intent, not a guess derived from an overloaded `failed`.
 enum NcSyncState {
   pending
   synced
   failed
   removing
+  remove_failed
 }
 
 // User ↔ Scope many-to-many. A user can be bound to any subset of the
