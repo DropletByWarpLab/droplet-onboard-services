@@ -26,6 +26,10 @@ vi.mock("../config.js", () => ({
     // through (network.available = isSet(ROUTING_SERVICE_URL)).
     ROUTING_SERVICE_URL: "http://routing.test",
     AUTH_ENABLED: false,
+    // departments.ts (registered by createApp) derefs this at module scope to
+    // build RESERVED_NAMES; the real config zod-defaults it, so the mock must
+    // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     // camera-retention-purge.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
