@@ -232,7 +232,7 @@ Work that doesn't map to a single GTM milestone number but cuts across several. 
 
 ## Cross-cutting risks (from GTM §5)
 
-Each risk is reproduced from the GTM doc with severity, and mapped to the component in **this repo** that owns its mitigation. Risks that live entirely outside this repo are noted as such.
+Each risk is reproduced from the GTM doc with severity, and mapped to the component in **this repo** that owns its mitigation. Risks that live entirely outside this repo are noted as such. The OTA rows at the end come from the update-agent threat review (WARP-541), not the GTM doc.
 
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
@@ -246,6 +246,11 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 | Nextcloud dependency weight | — | — | `docker/docker-compose.yml`, `apps/orchestrator/src/middleware/auth.ts` | Current auth model couples to Nextcloud OCS; reconsider in M1.3 ADR. |
 | Conversation state ephemeral | — | — | `apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/sessions/` | M1.5. |
 | Single-threaded Ollama serving | — | — | `services/ai-gateway/scheduler.py` (queueing) | Partial — scheduler exists; true concurrency lives in inference-engine. |
+| OTA: cosign release-key leak → attacker signs a hostile release the whole fleet installs | Critical | Low | `apps/orchestrator/src/services/update-agent/verify.ts` (trust anchor), `scripts/lib/apply-update.sh` (WARP-244 image-signature gate at pull) | Single org-held keypair; custody/rotation is the WARP-244 key ceremony (still pending). Recovery path is an emergency release rotating `cosign.pub` — no in-band revocation exists yet. |
+| OTA: compose-socket escape — a compromised orchestrator uses `/var/run/docker.sock` for host root | Critical | Low | `docker/docker-compose.yml` (socket on orchestrator ONLY), `scripts/lib/apply-update.sh` + `update-agent/host-compose-runner.ts` (fixed subcommands, argv arrays, no shell) | The socket is root-equivalent by design; the fence is one audited helper with a fixed surface. Boxes without the mount (`DROPLET_OTA_APPLY_SCRIPT` empty) have no apply path at all. |
+| OTA: migration breaks mid-update — schema half-applied and rollback cannot restore it | High | Medium | `apps/orchestrator/scripts/migrate-and-start.sh` (WARP-573 guarded boot: advisory lock + pre-migrate snapshot), `update-agent/apply.ts` step 4 | Rollback deliberately does NOT restore the DB schema (migrations are additive by policy); the `pg_dump` snapshots in `backup/` are forensic/manual-recovery material only. |
+| OTA: self-update orphan — the orchestrator dies mid-self-swap and no process owns the verdict | High | Low | `scripts/lib/apply-update.sh` `recreate-self-detached` (detached helper survives the swap), `update-agent/apply.ts` `resumeInterruptedApply` boot hook | The `applying` row is an exact restart cursor (advance-only state machine, `update-agent/transitions.ts`); whichever orchestrator boots next writes committed/rolled_back/failed. |
+| OTA: backup disk fill — per-update backups + exited self-swap helpers accumulate until `/data` is full | Medium | Medium | `update-agent/purge-update-backups.ts` + `update-agent/purge-self-swap-helpers.ts` (daily 03:00 GC, 7-day retention) | GC only reaps TERMINAL updates (in-flight backups are the live rollback target) and captures helper logs before `rm`. A wedged dir logs and is retried next sweep — monitor `update.backup_purge_failed`. |
 
 ---
 

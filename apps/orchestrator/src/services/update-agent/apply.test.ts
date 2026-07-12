@@ -221,7 +221,7 @@ function createPrismaStub(opts: {
     _rows: () => rows,
     _statusWrites: () => statusWrites,
     findFirst: async (args: {
-      where?: { status?: string | { in: string[] }; gitSha?: string };
+      where?: { id?: string; status?: string | { in: string[] }; gitSha?: string };
       orderBy?: unknown;
     }) => {
       const statusMatch = (r: Row) => {
@@ -233,6 +233,7 @@ function createPrismaStub(opts: {
       const matches = rows.filter(
         (r) =>
           statusMatch(r) &&
+          (args.where?.id === undefined || r.id === args.where.id) &&
           (args.where?.gitSha === undefined || r.gitSha === args.where.gitSha),
       );
       matches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -253,6 +254,31 @@ function createPrismaStub(opts: {
         failureReason: row.failureReason,
       });
       return { ...row };
+    },
+    // WARP-541: the advance-only guard (transitions.ts) writes status via
+    // a CONDITIONAL updateMany ({ id, status: observed }) — mirror the
+    // Prisma contract (count of matched rows) and record status writes
+    // the same way `update` does, so the transition-ordering assertions
+    // keep working.
+    updateMany: async (args: {
+      where: { id?: string; status?: string };
+      data: { status?: string; failureReason?: string | null };
+    }) => {
+      let count = 0;
+      for (const row of rows) {
+        if (args.where.id !== undefined && row.id !== args.where.id) continue;
+        if (args.where.status !== undefined && row.status !== args.where.status) continue;
+        if (args.data.status !== undefined) row.status = args.data.status;
+        if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
+        row.updatedAt = new Date();
+        statusWrites.push({
+          id: row.id,
+          status: row.status,
+          failureReason: row.failureReason,
+        });
+        count += 1;
+      }
+      return { count };
     },
     create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason"> & { failureReason?: string | null } }) => {
       seq += 1;
@@ -458,6 +484,44 @@ describe("applyPendingUpdate (WARP-539)", () => {
     );
     // Everything runs the release digests.
     expect(runner.running).toEqual(DIGESTS);
+
+    // WARP-541 — the full per-step lifecycle is reconstructible from the
+    // structured events alone (canonical list: events.ts).
+    const infoEvents = logger.info.mock.calls.map(
+      (c) => (c[0] as { event?: string }).event,
+    );
+    expect(infoEvents).toEqual(
+      expect.arrayContaining([
+        "update.snapshot_taken",
+        "update.images_pulled",
+        "update.configs_staged",
+        "update.migrations_applied",
+        "update.apply_started",
+        "update.services_recreated",
+        "update.health_gate_passed",
+        "update.self_swap_started",
+        "update.resume_applying",
+        "update.committed",
+      ]),
+    );
+    // Payload spot-checks: content-free fields only (ids/shas/durations).
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.snapshot_taken",
+        deviceUpdateId: "du-1",
+        gitSha: GIT_SHA,
+        deployedServices: ["orchestrator", "web-dashboard", "device-identity-svc"],
+      }),
+      expect.any(String),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.health_gate_passed",
+        phase: "post_swap",
+        deviceUpdateId: "du-1",
+      }),
+      expect.any(String),
+    );
   });
 
   it("sabotaged orchestrator image reaches rolled_back with the PRIOR digests running", async () => {
@@ -584,6 +648,20 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(runner.calls).toContain("recreateServices(web-dashboard,device-identity-svc,previous)");
     expect(runner.calls.some((c) => c.startsWith("recreateSelfDetached"))).toBe(false);
     expect(runner.running).toEqual(PREVIOUS);
+    // WARP-541 — the failed gate and the healthy rollback re-gate are both
+    // explicit events, with the phase naming WHICH gate fired.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.health_gate_failed",
+        phase: "sidecars",
+        unhealthyService: "web-dashboard",
+      }),
+      expect.any(String),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.health_gate_passed", phase: "rollback" }),
+      expect.any(String),
+    );
   });
 
   it("rollback that ALSO fails health-gates → failed + degraded_health", async () => {

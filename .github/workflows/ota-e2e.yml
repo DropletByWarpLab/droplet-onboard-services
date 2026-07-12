@@ -1,0 +1,241 @@
+name: ota-e2e
+
+# =============================================================================
+# WARP-541 — OTA end-to-end on REAL hardware: apply a `beta-test` channel
+# release on a lab Pi 5 appliance through the production update agent
+# (poll → verify → stage → apply → health-gate → self-swap → commit), and
+# optionally prove auto-rollback with a deliberately-sabotaged release.
+#
+# NON-GATING by design: manual `workflow_dispatch` only, and this workflow
+# must NEVER be added to the branch-protection required checks — it needs
+# lab hardware that PRs cannot depend on. It exists to be run by a human
+# (or a scheduled lab job later) against a provisioned bench appliance.
+#
+# RUNNER: `[self-hosted, linux, ARM64, pi5]`. No workflow in this repo used
+# a self-hosted runner before this one, so there is no established label
+# convention — these labels are an ASSUMPTION to align with when the Pi 5
+# lab runner is registered (docker-build.yml's FIPS note anticipates an
+# arm64 self-hosted runner the same way).
+#
+# WHAT THE RUNNER BOX MUST ALREADY HAVE (the workflow preflights all of it
+# and fails loudly rather than faking green):
+#   - the droplet compose stack running (orchestrator + db up), onboarding
+#     wizard COMPLETED (ApplianceSetup ready — the apply path defers
+#     mid-wizard, by design);
+#   - OTA apply provisioned: DROPLET_OTA_APPLY_SCRIPT set on the
+#     orchestrator service + the compose socket / apply-update.sh mounts
+#     (docker/docker-compose.yml, orchestrator service, WARP-539 comments);
+#   - a `beta-test` channel release published (release.json + .sig signed
+#     by the box's baked-in trust anchor, images pushed by digest) at the
+#     `releases_url` passed to the dispatch;
+#   - for the rollback leg: a SECOND signed `beta-test` release whose
+#     sabotage is a service that fails its /health(z) gate (a sidecar
+#     gives the inline rollback; the orchestrator image gives the detached
+#     helper rollback — both must end `rolled_back`), served at
+#     `bad_releases_url`. Leave it empty and the leg is SKIPPED (shown as
+#     skipped, never faked).
+#
+# WHAT THIS ASSERTS (all against production state, no mocks):
+#   1. checkForUpdate verifies + tracks the release (DeviceUpdate row);
+#   2. applyWindowTick walks pending → verifying → applying → committed —
+#      verdict read from the DeviceUpdate AUDIT TABLE, because the
+#      orchestrator (and this workflow's exec session into it) is
+#      recreated mid-apply by the detached self-swap helper;
+#   3. every deployed service actually RUNS its manifest digest after
+#      commit (verify-running);
+#   4. (rollback leg) the sabotaged release ends `rolled_back` and the
+#      previously-committed digests are back in service.
+# Orchestrator logs (the WARP-541 `event: "update.*"` trail), the
+# DeviceUpdate table and self-swap helper logs are uploaded as artifacts.
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      releases_url:
+        description: >-
+          GitHub Releases `latest` API URL serving the signed beta-test
+          release (release.json + release.json.sig assets).
+        required: true
+        type: string
+      bad_releases_url:
+        description: >-
+          Optional: `latest` API URL serving the deliberately-sabotaged
+          beta-test release for the rollback leg. Empty = skip the leg.
+        required: false
+        default: ""
+        type: string
+
+# One hardware run at a time — two applies interleaving on the same
+# appliance would corrupt each other's rollback baseline.
+concurrency:
+  group: ota-e2e-lab-appliance
+  cancel-in-progress: false
+
+jobs:
+  apply-and-rollback:
+    runs-on: [self-hosted, linux, ARM64, pi5]
+    # A full apply pulls every release image on a Pi 5 over the lab uplink
+    # and sits out two ~2-minute health gates per leg.
+    timeout-minutes: 120
+    env:
+      RELEASES_URL: ${{ inputs.releases_url }}
+      BAD_RELEASES_URL: ${{ inputs.bad_releases_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Every step re-resolves container ids by compose-service label:
+      # the apply RECREATES containers (orchestrator included), so ids
+      # cached in $GITHUB_ENV would go stale mid-job.
+      - name: Preflight — appliance stack + OTA provisioning
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null || { echo "::error::docker not on PATH on this runner"; exit 1; }
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          db=$(docker ps -q --filter label=com.docker.compose.service=db | head -n1)
+          [ -n "$orch" ] || { echo "::error::no running orchestrator container — is the droplet stack up on this runner?"; exit 1; }
+          [ -n "$db" ] || { echo "::error::no running db container"; exit 1; }
+          script=$(docker exec "$orch" printenv DROPLET_OTA_APPLY_SCRIPT || true)
+          [ -n "$script" ] || { echo "::error::DROPLET_OTA_APPLY_SCRIPT is empty on the orchestrator — OTA apply is not provisioned on this box (WARP-539 socket + helper mounts)"; exit 1; }
+          state=$(docker exec "$db" psql -U droplet -d droplet -tA -c 'SELECT state FROM "ApplianceSetup" LIMIT 1' || true)
+          [ "$state" = "ready" ] || { echo "::error::ApplianceSetup.state is '${state:-<none>}' (needs 'ready') — the apply path defers mid-wizard by design"; exit 1; }
+          echo "preflight OK: orchestrator=$orch db=$db apply-script=$script"
+
+      - name: Point the device at the beta-test channel (autoApply on)
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          docker cp scripts/test/ota-e2e-drive.mjs "$orch":/app/apps/orchestrator/ota-e2e-drive.mjs
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs settings --channel beta-test --auto-apply true
+
+      - name: Discover + verify the beta-test release (poll tick)
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs check --releases-url "$RELEASES_URL" \
+            --expect pending_created,already_known | tee check.out
+          sha=$(sed -n 's/^GITSHA //p' check.out | head -n1)
+          [ -n "$sha" ] || { echo "::error::check reported no gitSha"; exit 1; }
+          echo "GIT_SHA=$sha" >> "$GITHUB_ENV"
+
+      - name: Apply (maintenance-window tick)
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          # The orchestrator swaps ITSELF last, killing this exec session
+          # with it — a non-zero exit here is expected on the happy path.
+          # The authoritative verdict is the audit-table poll in the next
+          # step; this step is a trigger plus best-effort progress log.
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs apply-window --releases-url "$RELEASES_URL" \
+            || echo "apply-window exec ended with $? (expected if the self-swap recreated the orchestrator)"
+
+      - name: Await verdict — DeviceUpdate must reach committed
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 2400))
+          while :; do
+            db=$(docker ps -q --filter label=com.docker.compose.service=db | head -n1)
+            status=$(docker exec "$db" psql -U droplet -d droplet -tA \
+              -c "SELECT status FROM \"DeviceUpdate\" WHERE \"gitSha\"='$GIT_SHA' ORDER BY \"createdAt\" DESC LIMIT 1" || true)
+            echo "$(date -u +%H:%M:%S) DeviceUpdate($GIT_SHA) status: ${status:-<unreadable>}"
+            case "$status" in
+              committed) echo "committed — apply succeeded"; break ;;
+              rolled_back|failed|rejected|superseded)
+                echo "::error::update ended '$status' (expected committed)"; exit 1 ;;
+            esac
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for a terminal DeviceUpdate status"; exit 1; }
+            sleep 15
+          done
+
+      - name: Assert the box RUNS the committed release digests
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          # The container was recreated by the swap — re-stage the driver.
+          docker cp scripts/test/ota-e2e-drive.mjs "$orch":/app/apps/orchestrator/ota-e2e-drive.mjs
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs verify-running --git-sha "$GIT_SHA"
+
+      # ── Rollback leg (skipped, never faked, when no bad release given) ──
+      - name: Rollback leg — discover the sabotaged release
+        if: ${{ inputs.bad_releases_url != '' }}
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs check --releases-url "$BAD_RELEASES_URL" \
+            --expect pending_created,already_known | tee badcheck.out
+          sha=$(sed -n 's/^GITSHA //p' badcheck.out | head -n1)
+          [ -n "$sha" ] || { echo "::error::bad-release check reported no gitSha"; exit 1; }
+          [ "$sha" != "$GIT_SHA" ] || { echo "::error::bad_releases_url serves the SAME gitSha as releases_url — that cannot exercise a rollback"; exit 1; }
+          echo "BAD_GIT_SHA=$sha" >> "$GITHUB_ENV"
+
+      - name: Rollback leg — apply must end rolled_back
+        if: ${{ inputs.bad_releases_url != '' }}
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs apply-window --releases-url "$BAD_RELEASES_URL" \
+            || echo "apply-window exec ended with $? (expected if the sabotage hit the self-swap)"
+          deadline=$((SECONDS + 2400))
+          while :; do
+            db=$(docker ps -q --filter label=com.docker.compose.service=db | head -n1)
+            status=$(docker exec "$db" psql -U droplet -d droplet -tA \
+              -c "SELECT status FROM \"DeviceUpdate\" WHERE \"gitSha\"='$BAD_GIT_SHA' ORDER BY \"createdAt\" DESC LIMIT 1" || true)
+            reason=$(docker exec "$db" psql -U droplet -d droplet -tA \
+              -c "SELECT COALESCE(\"failureReason\",'') FROM \"DeviceUpdate\" WHERE \"gitSha\"='$BAD_GIT_SHA' ORDER BY \"createdAt\" DESC LIMIT 1" || true)
+            echo "$(date -u +%H:%M:%S) DeviceUpdate($BAD_GIT_SHA) status: ${status:-<unreadable>} failureReason: ${reason:-—}"
+            case "$status" in
+              rolled_back) echo "rolled_back (failureReason=$reason) — auto-rollback worked"; break ;;
+              committed) echo "::error::the sabotaged release COMMITTED — the health gate did not catch it"; exit 1 ;;
+              failed|rejected|superseded)
+                echo "::error::sabotaged update ended '$status' (expected rolled_back — 'failed' means the rollback itself broke the box)"; exit 1 ;;
+            esac
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for the rollback verdict"; exit 1; }
+            sleep 15
+          done
+
+      - name: Rollback leg — previous (committed) digests restored
+        if: ${{ inputs.bad_releases_url != '' }}
+        run: |
+          set -euo pipefail
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          docker cp scripts/test/ota-e2e-drive.mjs "$orch":/app/apps/orchestrator/ota-e2e-drive.mjs
+          # After the rollback the box must be back on the GOOD release's
+          # digests — the baseline the bad apply snapshotted as "previous".
+          docker exec -w /app/apps/orchestrator "$orch" \
+            node ota-e2e-drive.mjs verify-running --git-sha "$GIT_SHA"
+
+      - name: Collect forensics (logs + audit table + helper containers)
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p ota-e2e-artifacts
+          orch=$(docker ps -q --filter label=com.docker.compose.service=orchestrator | head -n1)
+          db=$(docker ps -q --filter label=com.docker.compose.service=db | head -n1)
+          if [ -n "$orch" ]; then
+            docker logs --tail 10000 "$orch" > ota-e2e-artifacts/orchestrator.log 2>&1 || true
+            grep '"event":"update\.' ota-e2e-artifacts/orchestrator.log \
+              > ota-e2e-artifacts/update-events.log || true
+          fi
+          if [ -n "$db" ]; then
+            docker exec "$db" psql -U droplet -d droplet -c \
+              'SELECT id,status,channel,"releaseTag","gitSha","failureReason","createdAt","updatedAt" FROM "DeviceUpdate" ORDER BY "createdAt"' \
+              > ota-e2e-artifacts/device-update-table.txt 2>&1 || true
+          fi
+          for helper in $(docker ps -a --format '{{.Names}}' | grep '^droplet-ota-self-swap-' || true); do
+            docker logs "$helper" > "ota-e2e-artifacts/$helper.log" 2>&1 || true
+          done
+          ls -la ota-e2e-artifacts/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ota-e2e-logs
+          path: ota-e2e-artifacts/
+          if-no-files-found: warn
+          retention-days: 30

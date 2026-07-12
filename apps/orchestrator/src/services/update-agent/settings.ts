@@ -22,7 +22,11 @@
  * are strict (invalid input is refused loudly).
  */
 import type { PrismaClient } from "@prisma/client";
+import type pino from "pino";
 import cron from "node-cron";
+import { createLogger } from "../../lib/logger.js";
+
+const defaultLog = createLogger("update-agent");
 
 export const UPDATE_AGENT_SETTINGS_KEY = "update-agent.settings";
 
@@ -77,6 +81,7 @@ export async function getUpdateAgentSettings(
 export async function saveUpdateAgentSettings(
   prisma: PrismaClient,
   patch: Partial<UpdateAgentSettings>,
+  logger: pino.Logger = defaultLog,
 ): Promise<UpdateAgentSettings> {
   if (patch.channel !== undefined) {
     if (typeof patch.channel !== "string" || patch.channel.trim() === "") {
@@ -109,6 +114,20 @@ export async function saveUpdateAgentSettings(
     create: { key: UPDATE_AGENT_SETTINGS_KEY, valueJson: { ...next } },
     update: { valueJson: { ...next } },
   });
+
+  // WARP-541 audit event — these knobs steer what the box will install
+  // (channel) and when (window/autoApply), so a change is lifecycle
+  // signal, not chatter. Values are operator config, never secrets.
+  if (
+    next.channel !== current.channel ||
+    next.applyWindowCron !== current.applyWindowCron ||
+    next.autoApply !== current.autoApply
+  ) {
+    logger.info(
+      { event: "update.settings_changed", previous: current, next },
+      "update-agent settings changed",
+    );
+  }
 
   return next;
 }

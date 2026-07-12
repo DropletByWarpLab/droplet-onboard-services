@@ -45,6 +45,7 @@ import { createLogger } from "../../lib/logger.js";
 import { verifyAndParseRelease } from "./verify.js";
 import type { UpdateFailureReason } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
+import { supersedePendingUpdates } from "./transitions.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -114,6 +115,9 @@ export async function checkForUpdate(
 ): Promise<CheckForUpdateResult> {
   const log = opts.logger ?? defaultLog;
   const fetchImpl = opts.fetchImpl ?? fetch;
+
+  // Every-15-minutes chatter — debug, not info (WARP-541 level convention).
+  log.debug?.({ event: "update.check_started" }, "OTA release check started");
 
   // ── 1. discover the latest release ──
   let release: GithubLatestRelease;
@@ -199,6 +203,19 @@ export async function checkForUpdate(
       };
     }
     const manifest = verified.manifest;
+    // Debug: on a healthy box this fires every poll once a release exists
+    // (`update.pending_created` is the info-level "verified AND now
+    // tracked" event; this one exists so a failing channel/known gate is
+    // still attributable to a manifest that DID verify).
+    log.debug?.(
+      {
+        event: "update.manifest_verified",
+        gitSha: manifest.release.gitSha,
+        releaseTag: release.tag_name,
+        channel: manifest.release.channel,
+      },
+      "OTA release manifest passed the trust chain",
+    );
 
     // ── 4. channel gate ──
     const settings = await getUpdateAgentSettings(opts.prisma);
@@ -237,10 +254,9 @@ export async function checkForUpdate(
     const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
     const { supersededCount, created } = await opts.prisma.$transaction(
       async (tx) => {
-        const superseded = await tx.deviceUpdate.updateMany({
-          where: { status: "pending" },
-          data: { status: "superseded" },
-        });
+        // WARP-541: through the advance-only choke point (transitions.ts)
+        // — only `pending` rows can ever become `superseded`.
+        const superseded = await supersedePendingUpdates(tx, log);
         const row = await tx.deviceUpdate.create({
           data: {
             status: "pending",
@@ -253,7 +269,7 @@ export async function checkForUpdate(
             manifestJson: manifest,
           },
         });
-        return { supersededCount: superseded.count, created: row };
+        return { supersededCount: superseded, created: row };
       },
     );
 

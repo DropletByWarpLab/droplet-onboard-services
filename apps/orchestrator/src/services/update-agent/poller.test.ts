@@ -234,6 +234,20 @@ describe("checkForUpdate (WARP-538)", () => {
     });
     // The verified manifest is snapshotted for the WARP-539 apply step.
     expect((rows[0]!.manifestJson as { schemaVersion: number }).schemaVersion).toBe(1);
+    // WARP-541 — the check tick and the trust-chain pass are traceable
+    // (debug level: they fire on every poll, not just on new releases).
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.check_started" }),
+      expect.any(String),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.manifest_verified",
+        gitSha: "0123456789abcdef0123456789abcdef01234567",
+        channel: "stable",
+      }),
+      expect.any(String),
+    );
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.pending_created" }),
       expect.any(String),

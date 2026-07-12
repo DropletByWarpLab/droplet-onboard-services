@@ -7,8 +7,9 @@
  * read-your-writes roundtrip through one `update-agent.settings`
  * SystemFlag row.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import type pino from "pino";
 import {
   getUpdateAgentSettings,
   saveUpdateAgentSettings,
@@ -98,6 +99,32 @@ describe("update-agent settings (WARP-538)", () => {
     expect(await getUpdateAgentSettings(asPrisma(stub))).toEqual(
       DEFAULT_UPDATE_AGENT_SETTINGS,
     );
+  });
+
+  it("emits update.settings_changed on a real change, silent on a no-op save (WARP-541)", async () => {
+    const stub = createPrismaStub();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    await saveUpdateAgentSettings(
+      asPrisma(stub),
+      { channel: "beta-test" },
+      logger as never as pino.Logger,
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.settings_changed",
+        previous: expect.objectContaining({ channel: "stable" }),
+        next: expect.objectContaining({ channel: "beta-test" }),
+      }),
+      expect.any(String),
+    );
+    // Saving the identical values again is not a change — no event.
+    logger.info.mockClear();
+    await saveUpdateAgentSettings(
+      asPrisma(stub),
+      { channel: "beta-test" },
+      logger as never as pino.Logger,
+    );
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   it("keeps valid stored fields while defaulting the invalid ones", async () => {

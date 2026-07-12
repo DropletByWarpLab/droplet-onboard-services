@@ -74,6 +74,12 @@
  *     failed and the rollback restored a healthy previous state;
  *   - `degraded_health`     — rides `failed`: the rollback ALSO failed
  *     its health gate (WARP-538 convention: NOT a new enum value).
+ *
+ * OBSERVABILITY (WARP-541) — every stage emits a structured
+ * `event: "update.<stage>"` pino event (canonical list + payload rules:
+ * events.ts) and every status write funnels through the advance-only
+ * guard in transitions.ts, so the lifecycle is reconstructible from logs
+ * AND the DeviceUpdate audit table independently.
  */
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
@@ -87,6 +93,7 @@ import {
   type UpdateFailureReason,
 } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
+import { transitionDeviceUpdate } from "./transitions.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -260,13 +267,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function setStatus(
   prisma: PrismaClient,
+  log: pino.Logger,
   id: string,
   status: "verifying" | "applying" | "committed" | "rolled_back" | "failed" | "rejected",
   failureReason: string | null = null,
 ): Promise<void> {
   // Committed BEFORE the action the new status guards — this write IS the
-  // resumability contract.
-  await prisma.deviceUpdate.update({ where: { id }, data: { status, failureReason } });
+  // resumability contract. Routed through the WARP-541 advance-only choke
+  // point: a backwards transition (or a concurrently-moved row) throws
+  // instead of corrupting the audit table.
+  await transitionDeviceUpdate(prisma, { id, to: status, failureReason, logger: log });
 }
 
 /**
@@ -292,6 +302,66 @@ async function healthGate(
     if (!ok) return service.name;
   }
   return null;
+}
+
+/**
+ * healthGate + the WARP-541 pass/fail events. `phase` names WHICH gate
+ * this was (sidecars pre-swap, post_swap final gate, rollback re-gate) so
+ * one grep over `update.health_gate_*` reconstructs the whole verdict.
+ */
+async function runHealthGate(
+  services: ReleaseService[],
+  probe: HealthProbe,
+  gate: { attempts: number; intervalMs: number },
+  log: pino.Logger,
+  ctx: { deviceUpdateId: string; phase: "sidecars" | "post_swap" | "rollback" },
+): Promise<string | null> {
+  const startedAt = Date.now();
+  const unhealthy = await healthGate(services, probe, gate);
+  if (unhealthy === null) {
+    log.info(
+      {
+        event: "update.health_gate_passed",
+        deviceUpdateId: ctx.deviceUpdateId,
+        phase: ctx.phase,
+        services: services.map((s) => s.name),
+        durationMs: Date.now() - startedAt,
+      },
+      "OTA health gate passed",
+    );
+  } else {
+    log.warn(
+      {
+        event: "update.health_gate_failed",
+        deviceUpdateId: ctx.deviceUpdateId,
+        phase: ctx.phase,
+        unhealthyService: unhealthy,
+        durationMs: Date.now() - startedAt,
+      },
+      "OTA health gate failed",
+    );
+  }
+  return unhealthy;
+}
+
+/** recreateServices + the WARP-541 per-batch progress event. */
+async function recreateAndLog(
+  runner: ApplyRunner,
+  log: pino.Logger,
+  opts: { updateId: string; services: string[]; target: RecreateTarget },
+): Promise<void> {
+  const startedAt = Date.now();
+  await runner.recreateServices(opts);
+  log.info(
+    {
+      event: "update.services_recreated",
+      deviceUpdateId: opts.updateId,
+      services: opts.services,
+      target: opts.target,
+      durationMs: Date.now() - startedAt,
+    },
+    `OTA services recreated on the ${opts.target} refs`,
+  );
 }
 
 /**
@@ -445,14 +515,14 @@ export async function applyPendingUpdate(
 
   // ── pending → verifying (committed BEFORE any validation/side effect) ──
   if (row.status !== "verifying") {
-    await setStatus(prisma, row.id, "verifying");
+    await setStatus(prisma, log, row.id, "verifying");
   }
 
   // ── re-validate the snapshotted manifest (schema gates incl.
   //    minOrchestratorSchema — a schema-downgrade manifest dies here) ──
   const parsed = parseReleaseManifest(JSON.stringify(row.manifestJson));
   if (!parsed.ok) {
-    await setStatus(prisma, row.id, "rejected", parsed.failureReason);
+    await setStatus(prisma, log, row.id, "rejected", parsed.failureReason);
     log.warn(
       {
         event: "update.rejected",
@@ -475,7 +545,7 @@ export async function applyPendingUpdate(
   const configs = await fetchConfigsAsset(opts, row, manifest);
   if (!configs.ok) {
     if (configs.kind === "mismatch") {
-      await setStatus(prisma, row.id, "rejected", "configs_mismatch");
+      await setStatus(prisma, log, row.id, "rejected", "configs_mismatch");
       log.warn(
         {
           event: "update.rejected",
@@ -502,6 +572,7 @@ export async function applyPendingUpdate(
   const serviceNames = manifest.services.map((s) => s.name);
 
   // ── step 1: snapshot previous digests + configs + schema ──
+  const snapshotStartedAt = Date.now();
   const previousRefs = await runner.currentImageRefs(serviceNames);
   await runner.snapshot({ updateId: row.id, manifest, previousRefs });
 
@@ -512,13 +583,25 @@ export async function applyPendingUpdate(
   const sidecars = deployed.filter((s) => s.name !== SELF_SERVICE_NAME);
   const sidecarNames = sidecars.map((s) => s.name);
 
+  log.info(
+    {
+      event: "update.snapshot_taken",
+      deviceUpdateId: row.id,
+      gitSha: row.gitSha,
+      deployedServices: deployed.map((s) => s.name),
+      durationMs: Date.now() - snapshotStartedAt,
+    },
+    "OTA step 1 — previous digests + configs + schema snapshotted",
+  );
+
   // ── step 2: pull by digest, signature-gated (WARP-244) ──
+  const pullStartedAt = Date.now();
   try {
     await runner.pullImages(manifest.services);
   } catch (err) {
     if (isImageSignatureRefusal(err)) {
       const detail = imageSignatureRefusalDetail(err);
-      await setStatus(prisma, row.id, "rejected", "image_signature_failed");
+      await setStatus(prisma, log, row.id, "rejected", "image_signature_failed");
       log.warn(
         {
           event: "update.rejected",
@@ -540,14 +623,40 @@ export async function applyPendingUpdate(
     // before this change.
     throw err;
   }
+  log.info(
+    {
+      event: "update.images_pulled",
+      deviceUpdateId: row.id,
+      imageCount: manifest.services.length,
+      durationMs: Date.now() - pullStartedAt,
+    },
+    "OTA step 2 — release images pulled by digest",
+  );
   // ── step 3: stage configs ── step 4: migrate ──
   await runner.stageConfigs({ updateId: row.id, configsTar: configs.configsTar, manifest });
+  log.info(
+    {
+      event: "update.configs_staged",
+      deviceUpdateId: row.id,
+      configsSha256: manifest.configs.sha256,
+    },
+    "OTA step 3 — sha256-gated release configs staged",
+  );
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).
+  const migrateStartedAt = Date.now();
   await runner.migrateDeploy();
+  log.info(
+    {
+      event: "update.migrations_applied",
+      deviceUpdateId: row.id,
+      durationMs: Date.now() - migrateStartedAt,
+    },
+    "OTA step 4 — prisma migrate deploy ran for this build",
+  );
 
   // ── verifying → applying (committed BEFORE the first recreate) ──
-  await setStatus(prisma, row.id, "applying");
+  await setStatus(prisma, log, row.id, "applying");
   log.info(
     {
       event: "update.apply_started",
@@ -559,8 +668,15 @@ export async function applyPendingUpdate(
   );
 
   // ── step 5: recreate sidecars ── step 6: health-gate them ──
-  await runner.recreateServices({ updateId: row.id, services: sidecarNames, target: "release" });
-  const unhealthy = await healthGate(sidecars, probe, gate);
+  await recreateAndLog(runner, log, {
+    updateId: row.id,
+    services: sidecarNames,
+    target: "release",
+  });
+  const unhealthy = await runHealthGate(sidecars, probe, gate, log, {
+    deviceUpdateId: row.id,
+    phase: "sidecars",
+  });
   if (unhealthy !== null) {
     log.warn(
       { event: "update.rollback", deviceUpdateId: row.id, unhealthyService: unhealthy },
@@ -568,15 +684,18 @@ export async function applyPendingUpdate(
     );
     // ── step 8: inline rollback (this orchestrator was never swapped) ──
     await runner.restoreConfigs({ updateId: row.id });
-    await runner.recreateServices({
+    await recreateAndLog(runner, log, {
       updateId: row.id,
       services: sidecarNames,
       target: "previous",
     });
-    const stillUnhealthy = await healthGate(sidecars, probe, gate);
+    const stillUnhealthy = await runHealthGate(sidecars, probe, gate, log, {
+      deviceUpdateId: row.id,
+      phase: "rollback",
+    });
     if (stillUnhealthy !== null) {
       // ── step 9: rollback also failed ──
-      await setStatus(prisma, row.id, "failed", "degraded_health");
+      await setStatus(prisma, log, row.id, "failed", "degraded_health");
       log.error(
         {
           event: "update.failed",
@@ -588,7 +707,7 @@ export async function applyPendingUpdate(
       );
       return { outcome: "failed", deviceUpdateId: row.id };
     }
-    await setStatus(prisma, row.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, row.id, "rolled_back", "health_gate_failed");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: row.id, unhealthyService: unhealthy },
       "OTA update rolled back — previous digests restored and healthy",
@@ -629,7 +748,7 @@ export async function resumeInterruptedApply(
     if (!parsed.ok) {
       // Can't happen for a row that reached `applying` unless the DB was
       // hand-edited; fail the row loudly rather than guessing.
-      await setStatus(prisma, applying.id, "failed", parsed.failureReason);
+      await setStatus(prisma, log, applying.id, "failed", parsed.failureReason);
       log.error(
         { event: "update.failed", deviceUpdateId: applying.id, failureReason: parsed.failureReason },
         "OTA resume found an applying row with an unparseable manifest snapshot",
@@ -643,12 +762,25 @@ export async function resumeInterruptedApply(
     const runningTarget =
       self !== undefined && imageRefMatchesDigest(refs[SELF_SERVICE_NAME] ?? null, self.digest);
 
+    log.info(
+      {
+        event: "update.resume_applying",
+        deviceUpdateId: applying.id,
+        gitSha: applying.gitSha,
+        runningReleaseOrchestrator: runningTarget,
+      },
+      "OTA resume found an in-flight applying row — health-gating the running state",
+    );
+
     if (runningTarget) {
       // We ARE the new orchestrator — final gate over ALL services
       // (sidecars were gated pre-swap; this re-checks them plus self).
-      const unhealthy = await healthGate(deployed, probe, gate);
+      const unhealthy = await runHealthGate(deployed, probe, gate, log, {
+        deviceUpdateId: applying.id,
+        phase: "post_swap",
+      });
       if (unhealthy === null) {
-        await setStatus(prisma, applying.id, "committed", null);
+        await setStatus(prisma, log, applying.id, "committed", null);
         log.info(
           { event: "update.committed", deviceUpdateId: applying.id, gitSha: applying.gitSha },
           "OTA update committed — all services healthy on the release digests",
@@ -666,7 +798,7 @@ export async function resumeInterruptedApply(
         "OTA post-swap health gate failed — starting the detached full rollback",
       );
       await runner.restoreConfigs({ updateId: applying.id });
-      await runner.recreateServices({
+      await recreateAndLog(runner, log, {
         updateId: applying.id,
         services: deployed.filter((s) => s.name !== SELF_SERVICE_NAME).map((s) => s.name),
         target: "previous",
@@ -678,9 +810,12 @@ export async function resumeInterruptedApply(
     // Running the OLD image with an `applying` row → the detached helper
     // rolled the swap back (or it never landed). Gate the previous state
     // and write the verdict.
-    const unhealthy = await healthGate(deployed, probe, gate);
+    const unhealthy = await runHealthGate(deployed, probe, gate, log, {
+      deviceUpdateId: applying.id,
+      phase: "rollback",
+    });
     if (unhealthy !== null) {
-      await setStatus(prisma, applying.id, "failed", "degraded_health");
+      await setStatus(prisma, log, applying.id, "failed", "degraded_health");
       log.error(
         {
           event: "update.failed",
@@ -692,7 +827,7 @@ export async function resumeInterruptedApply(
       );
       return { outcome: "failed", deviceUpdateId: applying.id };
     }
-    await setStatus(prisma, applying.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, applying.id, "rolled_back", "health_gate_failed");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: applying.id, gitSha: applying.gitSha },
       "OTA update rolled back — previous digests restored and healthy",
