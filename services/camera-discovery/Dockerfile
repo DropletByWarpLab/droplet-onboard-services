@@ -7,15 +7,28 @@ FROM python:3.12-slim
 # and needs a C toolchain to compile from sdist. Install build deps, then
 # remove them after pip install to keep the image slim.
 # WARP-229 — also installs openssl + ca-certificates for the FIPS provider.
-RUN apt-get update && \
+# WARP-1065: BuildKit cache mounts — apt archives + lists persist across
+# rebuilds, so a layer-busted rebuild re-executes every instruction but skips
+# the re-downloads. docker-clean is dropped inside the mount scope so .debs
+# are actually retained; the mounts shadow both paths in the layer, so the
+# image stays as slim as the old `rm -rf /var/lib/apt/lists/*`. NOTE: a
+# blanket `docker build --no-cache` RESETS cache mounts (measured on engine
+# 29.5; moby/moby#41715) — the reflash runner must bust layers without that
+# flag for these mounts to pay off (see WARP-1065).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       gcc libc-dev python3-dev \
-      openssl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      openssl ca-certificates
 
 WORKDIR /app
 COPY services/camera-discovery/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
+# WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
+# cache lives in the mount, not the image).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt && \
     apt-get purge -y --auto-remove gcc libc-dev python3-dev
 COPY services/camera-discovery/ .
 

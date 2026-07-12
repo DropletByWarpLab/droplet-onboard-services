@@ -64,6 +64,7 @@ type Item = {
   extractorWarnings: string[];
   hasOriginalBytes: boolean;
   status: string;
+  ingestPolicy: string;
   failureReason: string | null;
   lastAttemptedAt: Date | null;
   recentAttemptCount: number;
@@ -113,6 +114,10 @@ vi.mock("@prisma/client", () => {
       indexing: "indexing",
       ready: "ready",
       failed: "failed",
+    },
+    BrainIngestPolicy: {
+      auto_embed: "auto_embed",
+      await_approval: "await_approval",
     },
   };
 });
@@ -174,6 +179,7 @@ function makeItem(overrides: Partial<Item> = {}): Item {
     extractorWarnings: [],
     hasOriginalBytes: true,
     status: "queued_for_transcription",
+    ingestPolicy: "auto_embed",
     failureReason: null,
     lastAttemptedAt: null,
     recentAttemptCount: 0,
@@ -263,5 +269,71 @@ describe("POST /api/files/brain/:itemId/transcribe-now", () => {
     expect(publishMock).toHaveBeenCalledTimes(1);
     // Failed → queued transition leaves the row reset for the worker.
     expect(itemStore.get("bmi-1")!.status).toBe("queued_for_transcription");
+  });
+
+  // WARP-905 — a held (ingestPolicy=await_approval) audio/video item must NOT
+  // be pushed through transcription + embedding by transcribe-now. The human
+  // approval gate owns that release (POST /approve, which itself drives the
+  // transcription worker). Without this gate, a direct API caller (or a
+  // stale-UI race) could bypass the hold entirely for audio/video uploads.
+  it("returns 409 awaiting_approval for a held (await_approval) audio item — does NOT index", async () => {
+    makeItem({
+      mimeType: "audio/wav",
+      status: "queued_for_transcription",
+      ingestPolicy: "await_approval",
+    });
+    const res = await request(app).post("/api/files/brain/bmi-1/transcribe-now");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("awaiting_approval");
+    expect(res.body.ingestPolicy).toBe("await_approval");
+    // Fail-closed: nothing is handed to the transcription worker.
+    expect(publishMock).not.toHaveBeenCalled();
+    // Policy is untouched — still held, dashboard keeps showing the gate.
+    expect(itemStore.get("bmi-1")!.ingestPolicy).toBe("await_approval");
+    expect(itemStore.get("bmi-1")!.status).toBe("queued_for_transcription");
+  });
+
+  it("returns 409 awaiting_approval for a held (await_approval) video item — does NOT index", async () => {
+    makeItem({
+      filename: "clip.mp4",
+      mimeType: "video/mp4",
+      status: "queued_for_transcription",
+      ingestPolicy: "await_approval",
+    });
+    const res = await request(app).post("/api/files/brain/bmi-1/transcribe-now");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("awaiting_approval");
+    expect(publishMock).not.toHaveBeenCalled();
+  });
+
+  it("still blocks a held item even when it is in the 'failed' state", async () => {
+    makeItem({
+      mimeType: "audio/wav",
+      status: "failed",
+      ingestPolicy: "await_approval",
+      recentAttemptCount: 1,
+      recentAttemptWindowStartedAt: new Date(Date.now() - 5 * 60 * 1000),
+    });
+    const res = await request(app).post("/api/files/brain/bmi-1/transcribe-now");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("awaiting_approval");
+    expect(publishMock).not.toHaveBeenCalled();
+    // The failed→queued reset must NOT happen for a held item.
+    expect(itemStore.get("bmi-1")!.status).toBe("failed");
+  });
+
+  it("still transcribes an approved (auto_embed) queued audio item", async () => {
+    makeItem({
+      mimeType: "audio/wav",
+      status: "queued_for_transcription",
+      ingestPolicy: "auto_embed",
+    });
+    const res = await request(app).post("/api/files/brain/bmi-1/transcribe-now");
+    expect(res.status).toBe(202);
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect(publishMock).toHaveBeenCalledWith(
+      "droplet/transcription/run-one",
+      { itemId: "bmi-1", userId: "alice" },
+    );
   });
 });

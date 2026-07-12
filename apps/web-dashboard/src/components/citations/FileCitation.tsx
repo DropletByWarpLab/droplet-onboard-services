@@ -37,7 +37,7 @@ export function FileCitation({ hit }: FileCitationProps): JSX.Element {
       <Icon size={12} className="flex-shrink-0" />
       <span className="truncate">{hit.filename}</span>
       {typeof hit.score === "number" && (
-        <span className="type-caption-2 text-label-tertiary flex-shrink-0">
+        <span className="type-caption-2 flex-shrink-0 text-[var(--text-muted)]">
           {relevancePct(hit.score)}%
         </span>
       )}
@@ -48,8 +48,8 @@ export function FileCitation({ hit }: FileCitationProps): JSX.Element {
     inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md
     type-caption-1 border transition-colors duration-150
     max-w-[18rem] truncate
-    bg-surface-secondary text-label-secondary border-separator
-    hover:bg-surface-tertiary hover:text-label-primary
+    bg-[var(--card-inner)] text-[var(--text-muted)] border-[var(--card-bd)]
+    hover:bg-[var(--hover)] hover:text-[var(--text)]
   `;
 
   if (!href) {
@@ -58,7 +58,7 @@ export function FileCitation({ hit }: FileCitationProps): JSX.Element {
         title={hit.chunkText}
         data-testid="file-card"
         data-citation-kind="file"
-        className={`${className} cursor-default hover:bg-surface-secondary hover:text-label-secondary`}
+        className={`${className} cursor-default hover:bg-[var(--card-inner)] hover:text-[var(--text-muted)]`}
       >
         {inner}
       </span>

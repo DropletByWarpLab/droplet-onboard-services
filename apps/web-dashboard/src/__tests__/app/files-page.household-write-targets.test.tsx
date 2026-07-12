@@ -20,7 +20,13 @@ import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/re
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
 
 const PERSONAL: FileSpace = { id: "personal", name: "My Files", root: "/" };
-const SHARED: FileSpace = { id: "shared", name: "Household", root: "/Household", kind: "household", state: "active" };
+const SHARED: FileSpace = {
+  id: "shared",
+  name: "Household",
+  root: "/Household",
+  kind: "household",
+  state: "active",
+};
 
 // Listing entries carry HOME-relative paths (WARP-1140) — in the shared
 // space the folder row for "Trips" reads "/Household/Trips".

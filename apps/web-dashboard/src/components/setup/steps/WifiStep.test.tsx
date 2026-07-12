@@ -3,9 +3,15 @@
  * dedicated Home Wi-Fi step and a web-address step. These tests
  * cover the Wi-Fi half: the WARP-808 disconnect warning, the optional/skippable
  * behaviour (WARP-809), and the calm error ladder (WARP-807) — all carried over
- * from the old InternetStep, adapted to the dedicated step (fields render
- * directly; there's no longer an "Add a Wi-Fi network" disclosure, and there
- * are no web-address fields here).
+ * from the old InternetStep, adapted to the dedicated step.
+ *
+ * WARP-817 reintroduced the "Add a Wi-Fi network" disclosure #509 originally
+ * shipped (removed by the #548 Wi-Fi/address split), now driven by the box's
+ * topology instead of a static collapsed default — see
+ * WifiStep.topology.test.tsx for the posture-driven default-expand coverage.
+ * `getNetworkTopology()` isn't mocked here, so it best-effort-resolves to null
+ * (no fetch mock in this file) and the fields stay at the collapsed default;
+ * tests that exercise the fields open the disclosure first.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -37,6 +43,8 @@ const saveCta = () =>
   screen.getByRole("button", { name: /save and continue|continue/i });
 const ssidInput = () => screen.getByPlaceholderText(/studio fotonia/i);
 const pwInput = () => screen.getByPlaceholderText(/wi-fi password/i);
+const openWifiDisclosure = () =>
+  fireEvent.click(screen.getByRole("button", { name: /add a wi-?fi network/i }));
 
 const DISCONNECT_RE = /disconnects every device/i;
 const RECONNECT_RE = /rejoin with the new name/i;
@@ -49,6 +57,7 @@ describe("WifiStep — disconnect warning (WARP-808)", () => {
 
   it("shows a disconnect + reconnect warning once a Wi-Fi name is entered", async () => {
     render(<WifiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    openWifiDisclosure();
     fireEvent.change(ssidInput(), { target: { value: "My Home Wi-Fi" } });
 
     const warning = await screen.findByText(DISCONNECT_RE);
@@ -58,6 +67,7 @@ describe("WifiStep — disconnect warning (WARP-808)", () => {
 
   it("announces the warning to assistive tech without interrupting (role=status / aria-live polite)", async () => {
     render(<WifiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    openWifiDisclosure();
     fireEvent.change(ssidInput(), { target: { value: "My Home Wi-Fi" } });
     await screen.findByText(DISCONNECT_RE);
 
@@ -67,8 +77,11 @@ describe("WifiStep — disconnect warning (WARP-808)", () => {
 });
 
 describe("WifiStep — optional / skippable (WARP-809)", () => {
-  it("shows the SSID + password fields directly (no disclosure) and an optional framing", () => {
+  it("shows the SSID + password fields once the disclosure is opened, with an optional framing", () => {
     render(<WifiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    // Collapsed by default (WARP-817) until opened.
+    expect(screen.queryByPlaceholderText(/studio fotonia/i)).not.toBeInTheDocument();
+    openWifiDisclosure();
     expect(ssidInput()).toBeInTheDocument();
     expect(pwInput()).toBeInTheDocument();
     // The reframe that stops implying box-as-router and offers coexistence.
@@ -113,6 +126,7 @@ describe("WifiStep — calm error ladder (WARP-807/808)", () => {
 
     const onComplete = vi.fn();
     render(<WifiStep onComplete={onComplete} onSkip={vi.fn()} />);
+    openWifiDisclosure();
     fireEvent.change(ssidInput(), { target: { value: "Studio Fotonia" } });
     fireEvent.change(pwInput(), { target: { value: "supersecret" } });
     fireEvent.click(saveCta());
@@ -132,6 +146,7 @@ describe("WifiStep — calm error ladder (WARP-807/808)", () => {
     const onComplete = vi.fn();
     const onSkip = vi.fn();
     render(<WifiStep onComplete={onComplete} onSkip={onSkip} />);
+    openWifiDisclosure();
     fireEvent.change(ssidInput(), { target: { value: "Studio Fotonia" } });
     fireEvent.change(pwInput(), { target: { value: "supersecret" } });
     fireEvent.click(saveCta());
@@ -155,6 +170,7 @@ describe("WifiStep — calm error ladder (WARP-807/808)", () => {
     );
     const onComplete = vi.fn();
     render(<WifiStep onComplete={onComplete} onSkip={vi.fn()} />);
+    openWifiDisclosure();
     fireEvent.change(ssidInput(), { target: { value: "Studio Fotonia" } });
     fireEvent.change(pwInput(), { target: { value: "supersecret" } });
     fireEvent.click(saveCta());

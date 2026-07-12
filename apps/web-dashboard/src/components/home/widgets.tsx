@@ -799,7 +799,13 @@ export function NotesWidget() {
  * data to users. See docs/feature-requests.md (FR-001…FR-004).
  */
 export const WIDGETS: Record<string, WidgetMeta> = {
-  chat:     { title: "Ask Droplet",   icon: Sparkles,     Comp: ChatWidget,     minW: 3, minH: 4, maxW: 12, maxH: 7, feature: true },
+  // WARP-648: the Home bento tile's chrome title is the visible label a user
+  // sees for the /chat destination on this surface (also shown in the
+  // "add widget" catalog). It must match the Sidebar nav label ("Ask AI") —
+  // one product noun for the one destination. The greeting copy and composer
+  // placeholder inside the widget are conversational hint text, not a
+  // destination label, so they're intentionally left as "Ask Droplet ...".
+  chat:     { title: "Ask AI",        icon: Sparkles,     Comp: ChatWidget,     minW: 3, minH: 4, maxW: 12, maxH: 7, feature: true },
   calendar: { title: "Calendar",      icon: Calendar,     Comp: CalendarWidget, minW: 3, minH: 3, maxW: 6,  maxH: 6 },
   status:   { title: "System status", icon: Network,      Comp: StatusWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 4 },
   files:    { title: "Recent files",  icon: Folder,       Comp: FilesWidget,    minW: 2, minH: 2, maxW: 6,  maxH: 6, scroll: true },

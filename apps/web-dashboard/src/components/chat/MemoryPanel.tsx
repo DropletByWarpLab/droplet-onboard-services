@@ -178,8 +178,8 @@ export function MemoryPanel() {
         title="What the assistant remembers"
         className={`p-1.5 rounded-sm transition-colors ${
           open
-            ? "text-accent bg-accent-subtle"
-            : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+            ? "text-[var(--brand)] bg-[var(--brand-subtle)]"
+            : "text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]"
         }`}
       >
         <Brain size={16} aria-hidden="true" />
@@ -190,16 +190,21 @@ export function MemoryPanel() {
         <div
           role="dialog"
           aria-label="Assistant memory"
-          className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 bg-surface-elevated dp-material rounded-lg shadow-lg border border-separator p-3"
+          className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          style={{
+            background: "var(--glass)",
+            border: "1px solid var(--card-bd)",
+            boxShadow: "var(--lift)",
+          }}
         >
-          <div className="type-caption-1 text-label-tertiary uppercase tracking-wider mb-2">
-            Assistant memory
+          <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
+            Assistant Memory
           </div>
 
           {facts === null ? (
-            <div className="type-footnote text-label-tertiary py-2">Loading…</div>
+            <div className="type-footnote py-2" style={{ color: "var(--text-muted)" }}>Loading…</div>
           ) : facts.length === 0 ? (
-            <div className="type-footnote text-label-tertiary py-2">
+            <div className="type-footnote py-2" style={{ color: "var(--text-muted)" }}>
               Nothing saved yet. Add a fact below, or ask the assistant to
               remember something — it will ask for your approval first.
             </div>
@@ -208,17 +213,21 @@ export function MemoryPanel() {
               {facts.map((fact) => (
                 <li
                   key={fact.id}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface-secondary"
+                  className="flex items-center gap-2 px-2 py-1.5 rounded-md"
+                  style={{ background: "var(--card-inner)" }}
                 >
-                  <span className="flex-none inline-flex h-5 px-1.5 items-center rounded-full type-caption-2 font-medium bg-accent-subtle text-accent">
+                  <span
+                    className="flex-none inline-flex h-5 px-1.5 items-center rounded-full type-caption-2 font-medium"
+                    style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
+                  >
                     {fact.category}
                   </span>
                   <span
-                    className={`type-footnote truncate flex-1 ${
-                      fact.active
-                        ? "text-label-primary"
-                        : "text-label-quaternary line-through"
-                    }`}
+                    className="type-footnote truncate flex-1"
+                    style={{
+                      color: fact.active ? "var(--text)" : "var(--text-faint)",
+                      textDecoration: fact.active ? "none" : "line-through",
+                    }}
                     title={fact.fact}
                   >
                     {fact.fact}
@@ -236,7 +245,7 @@ export function MemoryPanel() {
                       )
                     }
                     title="Who receives this fact"
-                    className="dp-input type-caption-2 h-6 w-24 flex-none"
+                    className="type-caption-2 h-6 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
                   >
                     {/* If the fact's current audience outranks the caller
                         (e.g. an admin viewing an owner-only fact), keep it
@@ -260,9 +269,8 @@ export function MemoryPanel() {
                     aria-checked={fact.active}
                     aria-label={`Active: ${fact.fact}`}
                     onClick={() => void handleToggle(fact)}
-                    className={`flex-none w-7 h-4 rounded-full transition-colors relative ${
-                      fact.active ? "bg-accent" : "bg-surface-tertiary"
-                    }`}
+                    className="flex-none w-7 h-4 rounded-full transition-colors relative"
+                    style={{ background: fact.active ? "var(--brand)" : "var(--inset)" }}
                   >
                     <span
                       aria-hidden="true"
@@ -275,7 +283,7 @@ export function MemoryPanel() {
                     type="button"
                     onClick={() => void handleDelete(fact)}
                     aria-label={`Forget: ${fact.fact}`}
-                    className="flex-none p-1 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10"
+                    className="flex-none p-1 rounded-sm text-[var(--text-muted)] hover:text-system-red hover:bg-system-red/10"
                   >
                     <Trash2 size={12} aria-hidden="true" />
                   </button>
@@ -284,7 +292,10 @@ export function MemoryPanel() {
             </ul>
           )}
 
-          <div className="flex items-center gap-1.5 pt-2 border-t border-separator">
+          <div
+            className="flex items-center gap-1.5 pt-2"
+            style={{ borderTop: "1px solid var(--card-bd)" }}
+          >
             <label className="sr-only" htmlFor="memory-category">
               Category
             </label>
@@ -294,7 +305,7 @@ export function MemoryPanel() {
               onChange={(e) =>
                 setCategory(e.target.value as MemoryFact["category"])
               }
-              className="dp-input type-footnote h-8 w-28 flex-none"
+              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
             >
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
@@ -312,7 +323,7 @@ export function MemoryPanel() {
                 setAudience(e.target.value as MemoryFact["audience"])
               }
               title="Who receives this fact"
-              className="dp-input type-footnote h-8 w-28 flex-none"
+              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
             >
               {audienceOptions.map((a) => (
                 <option key={a.value} value={a.value}>
@@ -331,13 +342,13 @@ export function MemoryPanel() {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="e.g. Prefers answers in French"
-              className="dp-input type-footnote h-8 flex-1 min-w-0"
+              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
             />
             <button
               type="button"
               onClick={() => void handleAdd()}
               disabled={busy || draft.trim().length === 0}
-              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote text-accent hover:bg-accent-subtle disabled:text-label-quaternary disabled:cursor-not-allowed transition-colors"
+              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
             >
               <Plus size={14} aria-hidden="true" /> Add
             </button>

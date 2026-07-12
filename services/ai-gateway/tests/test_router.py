@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from router import ProviderRouter
+from schemas import ModelInfo
 
 
 class TestProviderResolution:
@@ -106,3 +107,46 @@ class TestProviderResolution:
         provider = router.resolve_provider("llama3:8b", explicit_provider="nonexistent")
         # Falls through to prefix matching since nonexistent is not in _providers
         assert provider is router.ollama
+
+
+class TestListAllModelsDegradedSignal:
+    """WARP-1284 — list_all_models must NAME the providers whose
+    list_models() raised instead of silently swallowing the failure into a
+    shorter (possibly empty) list. The empty-list-with-no-signal behavior
+    made a dead Ollama indistinguishable from a first-boot model pull in
+    the setup wizard's AI step."""
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_names_provider_whose_listing_raised(self, mock_key):
+        router = ProviderRouter()
+        router.ollama.list_models = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+        result = await router.list_all_models()
+        assert result.models == []
+        assert result.degraded_providers == ["ollama"]
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_empty_degraded_list_when_all_providers_succeed(self, mock_key):
+        router = ProviderRouter()
+        router.ollama.list_models = AsyncMock(
+            return_value=[
+                ModelInfo(id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b")
+            ]
+        )
+        result = await router.list_all_models()
+        assert [m.id for m in result.models] == ["gpt-oss:20b"]
+        # Unkeyed cloud providers return [] rather than raising — a healthy
+        # single-box (no BYOK keys) must NOT report cloud providers degraded.
+        assert result.degraded_providers == []
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value="test-key")
+    async def test_partial_failure_keeps_surviving_providers_models(self, mock_key):
+        """A dead Ollama must not hide the keyed cloud catalogues — the
+        surviving providers' models still return, alongside the signal."""
+        router = ProviderRouter()
+        router.ollama.list_models = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await router.list_all_models()
+        assert result.degraded_providers == ["ollama"]
+        assert len(result.models) > 0
+        assert all(m.provider in ("anthropic", "openai") for m in result.models)

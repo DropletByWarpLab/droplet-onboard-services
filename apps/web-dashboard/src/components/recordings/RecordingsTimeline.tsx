@@ -183,10 +183,10 @@ export function RecordingsTimeline({
   }, [timeline, day]);
 
   return (
-    <div className="dp-card p-4">
+    <div className="card">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="type-subheadline text-label-primary font-medium">Timeline</h3>
-        <span className="type-caption-2 text-label-tertiary">
+        <h3 className="type-subheadline font-medium text-[color:var(--text)]">Timeline</h3>
+        <span className="type-caption-2 text-[color:var(--text-muted)]">
           {dayEntry?.events ?? 0} event{(dayEntry?.events ?? 0) === 1 ? "" : "s"} ·{" "}
           {dayEntry ? `${Math.round(dayEntry.duration / 60)} min recorded` : "no recordings"}
         </span>
@@ -197,7 +197,7 @@ export function RecordingsTimeline({
         {hours.map((h) => (
           <div
             key={`mark-${h.hour}`}
-            className="type-caption-2 text-label-quaternary"
+            className="type-caption-2 text-[color:var(--text-faint)]"
           >
             {h.hour % 6 === 0 ? String(h.hour).padStart(2, "0") : ""}
           </div>
@@ -221,9 +221,9 @@ export function RecordingsTimeline({
         {hours.map((h) => {
           const isSelected = selectedHour === h.hour;
           const dots = dotsByHour.get(h.hour) ?? [];
-          // Map motion 0..100 to one of five Tailwind opacity buckets so
-          // we get a visible heat-map without needing to expose the
-          // accent colour as an RGB triple in CSS variables.
+          // Map motion 0..100 to one of five brand-ramp buckets (var(--brand)
+          // mixed into the track colour at increasing strength) so we get a
+          // visible heat-map that stays on the indigo token ramp.
           const motionTier =
             h.motion === 0
               ? 0
@@ -235,11 +235,11 @@ export function RecordingsTimeline({
                     ? 3
                     : 4;
           const tierClass = [
-            "bg-surface-secondary hover:bg-surface-tertiary",
-            "bg-accent/15 hover:bg-accent/25",
-            "bg-accent/30 hover:bg-accent/40",
-            "bg-accent/55 hover:bg-accent/65",
-            "bg-accent/80 hover:bg-accent/90",
+            "bg-[var(--inset)] hover:bg-[var(--hover)]",
+            "bg-[color-mix(in_srgb,var(--brand)_15%,var(--inset))] hover:bg-[color-mix(in_srgb,var(--brand)_25%,var(--inset))]",
+            "bg-[color-mix(in_srgb,var(--brand)_30%,var(--inset))] hover:bg-[color-mix(in_srgb,var(--brand)_40%,var(--inset))]",
+            "bg-[color-mix(in_srgb,var(--brand)_55%,var(--inset))] hover:bg-[color-mix(in_srgb,var(--brand)_65%,var(--inset))]",
+            "bg-[color-mix(in_srgb,var(--brand)_80%,var(--inset))] hover:bg-[color-mix(in_srgb,var(--brand)_90%,var(--inset))]",
           ][motionTier];
           return (
             <button
@@ -248,7 +248,7 @@ export function RecordingsTimeline({
               aria-pressed={isSelected}
               aria-label={`Hour ${h.hour}: ${h.events} events`}
               className={`relative h-12 rounded-sm transition-colors ${
-                isSelected ? "ring-2 ring-accent z-10" : "ring-0"
+                isSelected ? "ring-2 ring-[var(--brand)] z-10" : "ring-0"
               } ${tierClass} ${h.events > 0 || h.motion > 0 ? "cursor-pointer" : ""}`}
             >
               {/* Event count chip */}
@@ -277,9 +277,10 @@ export function RecordingsTimeline({
           playheadFraction >= 0 &&
           playheadFraction <= 1 && (
             <div
-              className="absolute top-0 bottom-0 w-0.5 bg-system-orange pointer-events-none z-20"
+              className="absolute top-0 bottom-0 w-0.5 pointer-events-none z-20"
               style={{
                 left: `calc(${((selectedHour + playheadFraction) / 24) * 100}% - 1px)`,
+                background: "var(--brand)",
               }}
             />
           )}
@@ -292,16 +293,18 @@ export function RecordingsTimeline({
           selectionWidthFraction !== null &&
           selectionWidthFraction > 0 && (
             <div
-              className="absolute top-0 bottom-0 bg-system-orange/30 ring-2 ring-system-orange pointer-events-none z-15"
+              className="absolute top-0 bottom-0 pointer-events-none z-15"
               style={{
                 left: `${selectionLeftFraction * 100}%`,
                 width: `${selectionWidthFraction * 100}%`,
+                background: "color-mix(in srgb, var(--brand) 30%, transparent)",
+                boxShadow: "0 0 0 2px var(--brand)",
               }}
             />
           )}
       </div>
 
-      <p className="type-caption-1 text-label-tertiary mt-3">
+      <p className="type-caption-1 mt-3 text-[color:var(--text-muted)]">
         Click an hour to jump to it. Drag across the timeline to select a
         precise range to export. Esc cancels an in-progress drag.
       </p>

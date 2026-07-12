@@ -28,7 +28,7 @@
  */
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import request from "supertest";
-import { PrismaClient, User, Department, DepartmentMembership } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),

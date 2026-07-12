@@ -157,20 +157,23 @@ export function CameraGroupEditor({
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
       <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        className="absolute inset-0 backdrop-blur-sm"
+        style={{ background: "var(--scrim)" }}
         onClick={onClose}
       />
-      <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-[var(--color-surface-primary)] dp-material rounded-t-2xl sm:rounded-2xl">
-        <div className="sticky top-0 z-10 flex items-center justify-between p-4 border-b border-separator bg-[var(--color-surface-primary)]">
-          <h2 className="type-title-3 text-label-primary">
+      <div
+        className="card relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto !rounded-t-2xl sm:!rounded-2xl"
+        style={{ padding: 0 }}
+      >
+        <div
+          className="sticky top-0 z-10 flex items-center justify-between p-4"
+          style={{ borderBottom: "1px solid var(--card-bd)", background: "var(--card-bg)" }}
+        >
+          <h2 className="type-title-3" style={{ color: "var(--text)" }}>
             {isEdit ? "Edit group" : "New camera group"}
           </h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-full hover:bg-surface-secondary transition-colors"
-            aria-label="Close"
-          >
-            <X size={20} className="text-label-secondary" />
+          <button onClick={onClose} className="icon-btn" aria-label="Close">
+            <X size={20} />
           </button>
         </div>
 
@@ -178,7 +181,10 @@ export function CameraGroupEditor({
           <div className="p-4 space-y-4">
             <div className="grid grid-cols-[auto_1fr] gap-3">
               <label className="block">
-                <span className="type-caption-2 text-label-tertiary block mb-1">
+                <span
+                  className="type-caption-2 block mb-1"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   Icon
                 </span>
                 <input
@@ -188,11 +194,20 @@ export function CameraGroupEditor({
                   onBlur={commitNameOrIcon}
                   placeholder="🏠"
                   maxLength={4}
-                  className="w-14 h-10 text-center text-xl rounded-lg border border-separator bg-surface-secondary focus:border-accent focus:outline-none"
+                  className="w-14 h-10 text-center text-xl outline-none focus:border-[var(--brand)]"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                 />
               </label>
               <label className="block">
-                <span className="type-caption-2 text-label-tertiary block mb-1">
+                <span
+                  className="type-caption-2 block mb-1"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   Name
                 </span>
                 <input
@@ -203,18 +218,30 @@ export function CameraGroupEditor({
                   placeholder="Front of house"
                   maxLength={60}
                   required
-                  className="w-full h-10 px-3 rounded-lg border border-separator bg-surface-secondary type-subheadline text-label-primary focus:border-accent focus:outline-none"
+                  className="w-full h-10 px-3 type-subheadline outline-none focus:border-[var(--brand)]"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   autoFocus
                 />
               </label>
             </div>
 
             <div>
-              <h3 className="type-caption-2 text-label-tertiary mb-2">
+              <h3
+                className="type-caption-2 mb-2"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Cameras in this group
               </h3>
               {sortedCameras.length === 0 ? (
-                <p className="type-footnote text-label-tertiary py-3">
+                <p
+                  className="type-footnote py-3"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   No cameras configured yet.
                 </p>
               ) : (
@@ -232,14 +259,21 @@ export function CameraGroupEditor({
               )}
             </div>
 
-            {err && <p className="type-footnote text-system-red">{err}</p>}
+            {err && (
+              <p className="type-footnote" style={{ color: "var(--danger)" }}>
+                {err}
+              </p>
+            )}
           </div>
 
-          <div className="sticky bottom-0 flex items-center justify-end gap-2 p-3 border-t border-separator bg-[var(--color-surface-primary)]">
+          <div
+            className="sticky bottom-0 flex items-center justify-end gap-2 p-3"
+            style={{ borderTop: "1px solid var(--card-bd)", background: "var(--card-bg)" }}
+          >
             <button
               type="button"
               onClick={onClose}
-              className="dp-btn-secondary px-3 py-2 rounded-lg type-subheadline"
+              className="btn ghost type-subheadline"
             >
               {isEdit ? "Done" : "Cancel"}
             </button>
@@ -247,7 +281,7 @@ export function CameraGroupEditor({
               <button
                 type="submit"
                 disabled={saving || !name.trim()}
-                className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg type-subheadline"
+                className="btn primary type-subheadline"
               >
                 {saving ? (
                   <Loader2 size={16} className="animate-spin" />
@@ -277,24 +311,34 @@ function MemberRow({
 }) {
   return (
     <li>
-      <label className="flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-surface-secondary cursor-pointer transition-colors">
+      <label className="flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-[var(--hover)] cursor-pointer transition-colors">
         <input
           type="checkbox"
           checked={checked}
           onChange={onToggle}
           disabled={saving}
-          className="h-4 w-4 accent-accent"
+          className="h-4 w-4 accent-[var(--brand)]"
         />
         {/* WARP-1153: min-w-0 lets the flex item shrink so a long camera name
             truncates instead of bleeding past the sheet edge (the sheet only
             scrolls vertically). */}
-        <span className="flex-1 min-w-0 type-subheadline text-label-primary truncate">
+        <span
+          className="flex-1 min-w-0 type-subheadline truncate"
+          style={{ color: "var(--text)" }}
+        >
           {camera.displayName}
         </span>
         {saving && (
-          <Loader2 size={14} className="text-label-tertiary animate-spin" />
+          <Loader2
+            size={14}
+            className="animate-spin"
+            style={{ color: "var(--text-muted)" }}
+          />
         )}
-        <span className="type-caption-2 text-label-tertiary capitalize">
+        <span
+          className="type-caption-2 capitalize"
+          style={{ color: "var(--text-muted)" }}
+        >
           {camera.status}
         </span>
       </label>

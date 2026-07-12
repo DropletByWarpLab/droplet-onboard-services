@@ -106,8 +106,8 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
         title="Pinned context for this conversation"
         className={`p-1.5 rounded-sm transition-colors ${
           open
-            ? "text-accent bg-accent-subtle"
-            : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+            ? "text-[var(--brand)] bg-[var(--brand-subtle)]"
+            : "text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]"
         }`}
       >
         <Pin size={16} aria-hidden="true" />
@@ -118,16 +118,21 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
         <div
           role="dialog"
           aria-label="Pinned context"
-          className="absolute right-0 mt-1 w-80 max-w-[85vw] z-20 bg-surface-elevated dp-material rounded-lg shadow-lg border border-separator p-3"
+          className="absolute right-0 mt-1 w-80 max-w-[85vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          style={{
+            background: "var(--glass)",
+            border: "1px solid var(--card-bd)",
+            boxShadow: "var(--lift)",
+          }}
         >
-          <div className="type-caption-1 text-label-tertiary uppercase tracking-wider mb-2">
-            Context for this conversation
+          <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
+            Context For This Conversation
           </div>
 
           {pins === null ? (
-            <div className="type-footnote text-label-tertiary py-2">Loading…</div>
+            <div className="type-footnote py-2" style={{ color: "var(--text-muted)" }}>Loading…</div>
           ) : pins.length === 0 ? (
-            <div className="type-footnote text-label-tertiary py-2">
+            <div className="type-footnote py-2" style={{ color: "var(--text-muted)" }}>
               No pinned context yet. Pin a folder or file and the assistant
               will prefer it when searching your documents.
             </div>
@@ -138,21 +143,22 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                 return (
                   <li
                     key={pin.id}
-                    className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface-secondary"
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md"
+                    style={{ background: "var(--card-inner)" }}
                   >
                     <Icon
                       size={14}
                       aria-hidden="true"
-                      className="flex-none text-label-tertiary"
+                      className="flex-none text-[var(--text-muted)]"
                     />
-                    <span className="type-footnote text-label-primary truncate flex-1">
+                    <span className="type-footnote truncate flex-1 text-[var(--text)]">
                       {pin.ref}
                     </span>
                     <button
                       type="button"
                       onClick={() => void handleRemove(pin)}
                       aria-label={`Remove ${pin.ref}`}
-                      className="flex-none p-1 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-tertiary"
+                      className="flex-none p-1 rounded-sm text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]"
                     >
                       <X size={12} aria-hidden="true" />
                     </button>
@@ -162,7 +168,10 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
             </ul>
           )}
 
-          <div className="flex items-center gap-1.5 pt-2 border-t border-separator">
+          <div
+            className="flex items-center gap-1.5 pt-2"
+            style={{ borderTop: "1px solid var(--card-bd)" }}
+          >
             <label className="sr-only" htmlFor="pin-kind">
               Kind
             </label>
@@ -170,7 +179,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
               id="pin-kind"
               value={kind}
               onChange={(e) => setKind(e.target.value as ContextPin["kind"])}
-              className="dp-input type-footnote h-8 w-24 flex-none"
+              className="type-footnote h-8 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
             >
               {ADDABLE_KINDS.map((k) => (
                 <option key={k} value={k}>
@@ -189,14 +198,14 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="/share/projects/…"
-              className="dp-input type-footnote h-8 flex-1 min-w-0"
+              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
             />
             <button
               type="button"
               onClick={() => void handleAdd()}
               disabled={busy || ref.trim().length === 0}
               aria-label="Add pin"
-              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote text-accent hover:bg-accent-subtle disabled:text-label-quaternary disabled:cursor-not-allowed transition-colors"
+              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
             >
               <Plus size={14} aria-hidden="true" /> Add
             </button>

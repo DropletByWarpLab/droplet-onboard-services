@@ -9,8 +9,10 @@ vi.mock("next/link", () => ({
 }));
 
 const getBrainMemoryItemsMock = vi.fn();
+const approveBrainItemMock = vi.fn();
 vi.mock("@/lib/api", () => ({
   getBrainMemoryItems: () => getBrainMemoryItemsMock(),
+  approveBrainItem: (...args: any[]) => approveBrainItemMock(...args),
 }));
 
 const authFetchMock = vi.fn();
@@ -25,6 +27,7 @@ describe("BrainMemoryTab", () => {
     cleanup();
     getBrainMemoryItemsMock.mockReset();
     authFetchMock.mockReset();
+    approveBrainItemMock.mockReset();
   });
 
   it("shows the persona-on-tone empty state when the brain route is unavailable", async () => {
@@ -96,6 +99,64 @@ describe("BrainMemoryTab", () => {
     expect(
       await screen.findByRole("status")
     ).toHaveTextContent(/Delete will be online once/);
+  });
+
+  it("surfaces an 'Awaiting approval' affordance for a held item (WARP-905)", async () => {
+    getBrainMemoryItemsMock.mockResolvedValue({
+      items: [
+        {
+          id: "held-1",
+          filename: "contract.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 2048,
+          uploadedAt: "2026-04-30T10:00:00Z",
+          status: "indexing",
+          ingestPolicy: "await_approval",
+        },
+      ],
+    });
+    render(<BrainMemoryTab />);
+    expect(await screen.findByTestId("brain-awaiting-approval")).toHaveTextContent(
+      /Awaiting approval/,
+    );
+    expect(screen.getByTestId("brain-approve")).toBeInTheDocument();
+    // The "Indexing" status pill is suppressed while the item is held.
+    expect(screen.queryByText("Indexing")).not.toBeInTheDocument();
+  });
+
+  it("approves a held item and swaps to the status pill (WARP-905)", async () => {
+    getBrainMemoryItemsMock.mockResolvedValue({
+      items: [
+        {
+          id: "held-1",
+          filename: "contract.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 2048,
+          uploadedAt: "2026-04-30T10:00:00Z",
+          status: "indexing",
+          ingestPolicy: "await_approval",
+        },
+      ],
+    });
+    approveBrainItemMock.mockResolvedValue({
+      itemId: "held-1",
+      status: "indexing",
+      ingestPolicy: "auto_embed",
+    });
+    render(<BrainMemoryTab />);
+    const approveBtn = await screen.findByTestId("brain-approve");
+    fireEvent.click(approveBtn);
+    await waitFor(() => {
+      expect(approveBrainItemMock).toHaveBeenCalledWith("held-1");
+    });
+    // Optimistically released: the awaiting-approval affordance is gone and the
+    // status pill ("Indexing") takes over.
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("brain-awaiting-approval"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Indexing")).toBeInTheDocument();
   });
 
   it("surfaces a friendly 'coming soon' message when export returns 404", async () => {

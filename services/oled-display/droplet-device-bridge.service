@@ -67,20 +67,36 @@ Environment=BRIDGE_PORT=9090
 # an operator can re-pin the bind via the env file below (loaded last).
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
-# WARP-808 follow-up: the hostapd Wi-Fi write (droplet-set-hostapd.sh, shelled
-# by POST /openwrt/wifi/hostapd) runs INSIDE this unit's sandbox — User=droplet
-# + ProtectSystem=strict make its default target /etc/default/droplet-openwrt-
-# attach unwritable (mktemp EROFS — the setup wizard's Home Wi-Fi save failed
-# with exactly that on the shipping box). Point the write at the bridge's own
-# StateDirectory instead; the attach script's customer_ap_creds block parses
-# ONLY DROPLET_AP_SSID/DROPLET_AP_PSK out of that file with hard validation
-# (NOT an EnvironmentFile — drop-in ordering would clobber it, and a
-# droplet-writable file must never inject arbitrary env into a root unit), so
-# a customer Wi-Fi write overrides provisioning defaults without root. A
-# factory reset wipes the StateDirectory AND /etc/droplet/ap-psk, so the AP
-# returns to the /etc/default SSID with a freshly generated per-box PSK.
-# The restart half of the write goes through polkit (50-droplet-device-
-# bridge.rules), not privilege escalation: NoNewPrivileges stays true.
+# WARP-843: the customer Wi-Fi write (droplet-set-hostapd.sh, shelled by POST
+# /openwrt/wifi/hostapd — and its guest sibling droplet-set-guest-wifi.sh) runs
+# INSIDE this unit's sandbox (User=droplet + ProtectSystem=strict +
+# NoNewPrivileges). It writes the customer SSID/PSK/guest keys to THIS unit's
+# own StateDirectory (/var/lib/droplet-bridge/openwrt-attach.env — droplet-owned
+# 0700), which is ALREADY writable to the bridge, so the write succeeds with NO
+# carve-out of the read-only /etc namespace. That is what fixes the 422/EROFS
+# the wizard's Home Wi-Fi save hit — the bridge never has to touch root-owned
+# /etc/default at all.
+#
+# INVARIANT (a hard security boundary — do NOT "simplify" it away): this is a
+# DROPLET-WRITABLE file, so it is DELIBERATELY NOT an `EnvironmentFile=` of the
+# ROOT droplet-openwrt-attach.service. An EnvironmentFile loads EVERY key, so a
+# compromised bridge could inject e.g. AP_PSK_FILE=/root/.ssh/authorized_keys
+# and have resolve_ap_psk() write it AS ROOT (privilege escalation). Instead the
+# attach script parses ONLY the whitelisted DROPLET_AP_SSID/PSK +
+# DROPLET_GUEST_SSID/PSK/ENABLED out of it, with the same control-char + length
+# validation the write scripts enforce (the customer_ap_creds /
+# customer_guest_creds blocks in /usr/local/sbin/droplet-openwrt-attach), and
+# ignores every other key.
+#
+# The re-apply is closed by the root-owned droplet-openwrt-attach.path unit,
+# which watches THIS StateDirectory file and restarts the attach service via
+# the reapply relay (regenerate /etc/hostapd.conf + respawn via the
+# HOSTAPD_CHANGED gate). NO polkit grant, NO privilege for the droplet user —
+# this superseded the PR #551 polkit-restart route (which never worked without
+# polkitd JS-rules support), NOT the PR #551 file split, which stays intact.
+# A factory reset wipes /var/lib/droplet-bridge (these customer keys) AND
+# /etc/droplet/ap-psk, so the AP returns to the /etc/default provisioning SSID
+# with a freshly generated per-box PSK.
 Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env
 # Operator-managed runtime config, loaded LAST so it overrides the inline
 # defaults above (BRIDGE_BIND, OPENWRT_*, etc.). Created by `setup.sh` with
@@ -122,6 +138,14 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # append:/var/log/... needs that path writable; StateDirectory above is
 # handled automatically.
 ReadWritePaths=/var/log/droplet-device-bridge.log
+# WARP-843: the customer Wi-Fi writes (droplet-set-hostapd.sh /
+# droplet-set-guest-wifi.sh) land in this unit's own StateDirectory
+# (/var/lib/droplet-bridge/openwrt-attach.env), which systemd already makes
+# read-write for the service — so NO /etc carve-out is needed. Keeping the
+# customer creds OUT of /etc/default is deliberate: /etc/default/droplet-
+# openwrt-attach stays root-owned operator/hardware config and is the ROOT
+# attach service's EnvironmentFile, and a droplet-writable file must never be a
+# root EnvironmentFile (see the DROPLET_HOSTAPD_ENV_FILE note above).
 # WARP-985: the FQDN + box-name write-backs must upsert <repo>/.env — POST
 # /host/public-fqdn execs droplet-set-public-fqdn.sh, which mktemp's a sibling
 # next to .env before the atomic mv, so the repo DIRECTORY (not just the file)

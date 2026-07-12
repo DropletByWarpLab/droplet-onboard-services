@@ -89,7 +89,14 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
         disabled={disabled}
         onChange={(e) => emit(e.target.value, time)}
         // WARP-943: min-w-0 let flexbox shrink below MM/DD/YYYY+icon; 8.5rem floor keeps the year visible.
-        className="dp-input flex-1 min-w-[8.5rem]"
+        className="flex-1 min-w-[8.5rem] outline-none focus:border-[var(--brand)]"
+        style={{
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-input)",
+          color: "var(--text)",
+          padding: "6px 10px",
+        }}
       />
       <select
         id={timeId}
@@ -97,7 +104,14 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
         value={time}
         disabled={disabled}
         onChange={(e) => emit(date, e.target.value)}
-        className="dp-input w-auto shrink-0"
+        className="w-auto shrink-0 outline-none focus:border-[var(--brand)]"
+        style={{
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-input)",
+          color: "var(--text)",
+          padding: "6px 10px",
+        }}
       >
         {/* A blank placeholder slot while no time is chosen yet. */}
         {!time && <option value="" />}

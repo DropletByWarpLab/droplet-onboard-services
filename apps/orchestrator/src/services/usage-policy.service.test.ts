@@ -178,6 +178,62 @@ describe("upsertUsagePolicy", () => {
     expect(pushed).toBe(true); // already synced from before; unaffected
     expect(policies.get("u1")!.maxUploadSizeMb).toBe(250);
   });
+
+  it("creating a first-ever policy with ONLY maxUploadSizeMb defaults storageQuotaBytes to the system/global default (the user's current NC quota), marks it synced, and never pushes an unrequested quota", async () => {
+    // Regression: a maxUploadSizeMb-only PUT that CREATES the row must not
+    // leave it {storageQuotaBytes: null, quotaSyncState: "pending"} — the
+    // 5-minute reconciler would then silently push "none" (unlimited) to
+    // this user's real Nextcloud account, an action the admin never made.
+    users.set("u1", { id: "u1", username: "alice", nextcloudUsername: "alice" });
+    // Alice's account was provisioned with the system/global default quota.
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 1_000_000,
+      free: 4_999_000_000,
+      total: 5_000_000_000,
+      quota: 5_000_000_000,
+    });
+
+    const { policy, pushed } = await upsertUsagePolicy(
+      prisma as PrismaClient,
+      "u1",
+      "owner-1",
+      { maxUploadSizeMb: 250 },
+    );
+
+    // Quota was never supplied → never push one the admin didn't set.
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    // ...and the row must NOT be left `pending`, or the reconciler picks it
+    // up and pushes an (unrequested) quota next tick.
+    expect(policy.quotaSyncState).toBe("synced");
+    // storageQuotaBytes defaults to the system/global default (the user's
+    // current NC quota) — never null, which would mean "unlimited".
+    expect(policy.storageQuotaBytes).toBe(5_000_000_000n);
+    expect(policy.maxUploadSizeMb).toBe(250);
+    expect(pushed).toBe(true);
+  });
+
+  it("a partial update (maxUploadSizeMb only) on an EXISTING row leaves storageQuotaBytes unchanged and never snapshots or pushes to NC", async () => {
+    users.set("u1", { id: "u1", username: "alice", nextcloudUsername: "alice" });
+    policies.set("u1", {
+      userId: "u1",
+      storageQuotaBytes: 9_000_000_000n,
+      quotaSyncState: "synced",
+      maxUploadSizeMb: null,
+      updatedBy: "owner-0",
+      updatedAt: new Date(),
+    });
+
+    const { policy } = await upsertUsagePolicy(prisma as PrismaClient, "u1", "owner-1", {
+      maxUploadSizeMb: 500,
+    });
+
+    expect(policy.storageQuotaBytes).toBe(9_000_000_000n); // untouched
+    expect(policy.maxUploadSizeMb).toBe(500);
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    // The current-NC-quota snapshot is a CREATE-only default — an update of
+    // an existing row must not re-read it.
+    expect(ncGetUserQuotaAdminMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("getUsagePolicyWithUsage", () => {
