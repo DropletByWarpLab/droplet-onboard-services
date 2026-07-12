@@ -53,6 +53,16 @@ INTERNAL_CA_SERVICES=(
   # WARP-233: Postgres server TLS — the compose `db` service stages this
   # bundle as its server cert (docker-compose.yml db.command).
   db
+  # WARP-1061: host-side (non-compose) client identities. These never serve;
+  # they present client certs to the orchestrator/routing listeners when
+  # DROPLET_INTERNAL_TLS=1. Paths are read straight from the repo's
+  # data/secrets/service-tls/<name>/ by the host units/scripts:
+  #   egress-audit  → droplet-egress-audit.service (services/egress-audit)
+  #   device-bridge → droplet-device-bridge.service (services/oled-display/
+  #                   device-bridge.py) + droplet-shutdown-screen.sh
+  #   host-admin    → operator CLIs (scripts/lib/device-identity.sh,
+  #                   scripts/verify.sh)
+  egress-audit device-bridge host-admin
 )
 # Host-network services are dialled as host.docker.internal (multi-box/dev)
 # or the droplet_default bridge-gateway IP (single-box) — extra SANs.
