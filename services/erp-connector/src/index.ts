@@ -80,3 +80,35 @@ export {
   type ConnectorConfig,
   type IntrospectionResult,
 } from "./connector.js";
+
+// WARP-1294 — dual-track official-REST-API provider (Patterson Eaglesoft
+// Innovation Connection). Same Connector interface as the SQL connector.
+export {
+  EaglesoftApiConnector,
+  DEFAULT_API_HTTPS_PORT,
+  type EaglesoftApiConfig,
+  type EaglesoftApiDeps,
+} from "./api-connector.js";
+
+export {
+  KNOWN_ROUTE_SKELETON,
+  requiredRouteOps,
+  isRouteDiscovered,
+  routeMapFingerprint,
+  RouteNotDiscoveredError,
+  type EaglesoftApiRouteMap,
+  type RouteSpec,
+  type AuthRouteSpec,
+  type HttpVerb,
+} from "./api-route-map.js";
+
+export {
+  authenticate,
+  apiRequest,
+  buildBaseUrl,
+  blockedSecretResolver,
+  EaglesoftApiError,
+  type SecretResolver,
+  type ResolvedCredentials,
+  type ApiTransport,
+} from "./api-auth.js";

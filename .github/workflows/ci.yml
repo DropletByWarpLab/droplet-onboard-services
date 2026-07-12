@@ -62,6 +62,7 @@ jobs:
           - orchestrator
           - web-dashboard
           - matter-controller
+          - erp-connector
     steps:
       - uses: actions/checkout@v7
 
@@ -174,6 +175,18 @@ jobs:
       - name: Test @droplet/web-dashboard
         if: matrix.suite == 'web-dashboard'
         run: npm run -w @droplet/web-dashboard test
+
+      # WARP-1294: the erp-connector package's own vitest suite (schema-map,
+      # read/write registries, and the dual-track EaglesoftApiConnector) ran in
+      # NO workflow before this — every prior job built it (tsc) but never ran
+      # `test`, so its unit coverage was invisible to CI. Give it a real leg.
+      - name: Build @droplet/erp-connector
+        if: matrix.suite == 'erp-connector'
+        run: npm run -w @droplet/erp-connector build
+
+      - name: Test @droplet/erp-connector
+        if: matrix.suite == 'erp-connector'
+        run: npm run -w @droplet/erp-connector test
 
   python:
     name: python / ${{ matrix.service }} pytest
