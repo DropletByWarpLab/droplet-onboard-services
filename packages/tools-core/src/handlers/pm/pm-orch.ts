@@ -105,11 +105,25 @@ export async function callOrch<T = unknown>(
   body?: unknown,
 ): Promise<T> {
   const http = ctx.http.orchestrator;
-  const opts = { headers: { Accept: "application/json" } };
+
+  // WARP-887: the old Promise.race fired the 8s timeout but never cancelled the
+  // in-flight request, so a slow orchestrator leaked an open socket per pm_*
+  // call (the agent loop fires several pm_* tools per turn). On the deadline we
+  // now do BOTH: reject the race (a self-enforcing 504 that settles callOrch
+  // even if a transport ignored the signal — preserving the old guarantee) AND
+  // abort the request so the socket is actually released. reject() runs BEFORE
+  // abort() so the race settles on the 504, not the transport's AbortError,
+  // keeping the error type + handler mapping (404 → PM_WORK_ITEM_NOT_FOUND,
+  // else → PM_API_ERROR) byte-identical to before.
+  const controller = new AbortController();
+  const opts = { headers: { Accept: "application/json" }, signal: controller.signal };
 
   let timerId: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timerId = setTimeout(() => reject(new OrchPmError("orchestrator timeout", 504)), ORCH_TIMEOUT_MS);
+    timerId = setTimeout(() => {
+      reject(new OrchPmError("orchestrator timeout", 504));
+      controller.abort();
+    }, ORCH_TIMEOUT_MS);
   });
 
   const callPromise = (async (): Promise<Response> => {
@@ -124,6 +138,9 @@ export async function callOrch<T = unknown>(
         return http.patch(path, body, opts);
     }
   })().finally(() => clearTimeout(timerId));
+  // Once the timeout wins the race, the request's post-abort rejection is moot —
+  // swallow it so a late AbortError can't surface as an unhandled rejection.
+  callPromise.catch(() => {});
 
   const res = await Promise.race([callPromise, timeoutPromise]);
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;

@@ -166,6 +166,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
       return internalFetch(joinUrl(base, path, opts?.params), {
         method: "GET",
         headers: injectAuth(opts?.headers),
+        signal: opts?.signal, // WARP-887: honour caller-supplied abort deadlines
       });
     },
     async post(path, body, opts) {
@@ -175,6 +176,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
         method: "POST",
         headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: opts?.signal, // WARP-887
       });
     },
     async patch(path, body, opts) {
@@ -184,12 +186,14 @@ function createHttpClient(target: HttpTarget): HttpClient {
         method: "PATCH",
         headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: opts?.signal, // WARP-887
       });
     },
     async delete(path, opts) {
       return internalFetch(joinUrl(base, path), {
         method: "DELETE",
         headers: injectAuth(opts?.headers),
+        signal: opts?.signal, // WARP-887
       });
     },
   };
