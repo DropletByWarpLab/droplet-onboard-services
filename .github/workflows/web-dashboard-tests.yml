@@ -1,7 +1,12 @@
 name: web-dashboard-tests
 
-# Vitest for apps/web-dashboard. Path-filtered so only dashboard-relevant
-# changes trigger a run.
+# Typecheck (tsc --noEmit) + vitest + next build for apps/web-dashboard.
+# Path-filtered so only dashboard-relevant changes trigger a run. This is the
+# fast per-service mirror of the ci.yml node/web-dashboard leg — that leg feeds
+# the required `ci-summary` check (ci.yml runs on every PR); this workflow just
+# gives quicker targeted signal on dashboard-only changes.
+# WARP-1296: added the tsc + next build steps — vitest strips types via esbuild,
+# so type/build regressions were shipping green (WARP-1261/#1007, WARP-1267/#1026).
 
 on:
   # Re-enabled 2026-06-10: Actions minutes are flowing again (docker-build's
@@ -29,8 +34,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  vitest:
+  checks:
     runs-on: ubuntu-latest
+    # next build is the heavy leg; 20 min gives cold-cache headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -50,5 +57,22 @@ jobs:
       - name: Lint dashboard class names
         run: bash scripts/check-dashboard-classes.sh
 
+      # WARP-1296: vitest transforms via esbuild and never typechecks, so
+      # dashboard type regressions shipped green (WARP-1261/#1007 dropped
+      # `available` from FileSpace and broke SpaceSwitcher.tsx). Enforce the
+      # compile-time contract — mirrors the orchestrator's WARP-1011 gate.
+      - name: Typecheck (tsc --noEmit)
+        working-directory: apps/web-dashboard
+        run: npx tsc --noEmit
+
       - name: Run vitest
         run: npm run -w @droplet/web-dashboard test
+
+      # WARP-1296: `next build` catches breakage tsc/vitest alone miss —
+      # Next route/page contract violations and production bundling / module
+      # resolution (e.g. the auth-policy .js->.ts webpack alias). Heaviest
+      # step, runs last.
+      - name: Build (next build)
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run -w @droplet/web-dashboard build
