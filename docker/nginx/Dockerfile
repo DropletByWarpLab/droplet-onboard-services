@@ -55,7 +55,16 @@ COPY docker/nginx/docker-entrypoint-fips.sh   /docker-entrypoint.d/00-fips-profi
 COPY docker/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.default.conf
 COPY docker/nginx/internal-scheme.mtls.conf    /etc/nginx/internal-scheme.mtls.conf
 COPY docker/nginx/docker-entrypoint-internal-tls.sh /docker-entrypoint.d/01-internal-scheme.sh
-RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh && \
+# Warning-free droplet.local: the canonical-host render script (start +
+# exec'd by tls-reload.sh on every cert swap), its entrypoint slot, the baked
+# OFF default (so `nginx -t` and a bare run are well-formed pre-entrypoint),
+# and the plain-HTTP status page the OFF variant serves.
+COPY docker/nginx/render-canonical-host.sh            /usr/local/bin/render-canonical-host.sh
+COPY docker/nginx/docker-entrypoint-canonical-host.sh /docker-entrypoint.d/02-canonical-host.sh
+COPY docker/nginx/canonical-host.off.conf /etc/nginx/canonical-host.active.conf
+COPY docker/nginx/tls-status/index.html               /usr/share/nginx/tls-status/index.html
+RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh \
+             /docker-entrypoint.d/02-canonical-host.sh /usr/local/bin/render-canonical-host.sh && \
     # Default the active profile/scheme to the OFF posture so `nginx -t` and
     # a bare run before the entrypoints have selected are well-formed.
     ln -sf /etc/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.active.conf && \
@@ -87,6 +96,24 @@ RUN set -eu; \
       nginx -t -c /tmp/test-nginx.conf; \
     done; \
     rm -rf /etc/nginx/service-tls; \
+    # Warning-free droplet.local: both canonical-host variants must parse.
+    # OFF = the baked default; ON = a real render against a mini-CA leaf.
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/ca.key -out /tmp/ca.crt \
+      -subj /CN=TestCA -days 1 >/dev/null 2>&1; \
+    openssl req -newkey rsa:2048 -nodes -keyout /tmp/l.key -out /tmp/l.csr \
+      -subj /CN=leaf >/dev/null 2>&1; \
+    printf 'subjectAltName=DNS:test-box.droplet-us.com\n' > /tmp/san.cnf; \
+    openssl x509 -req -in /tmp/l.csr -CA /tmp/ca.crt -CAkey /tmp/ca.key -CAcreateserial \
+      -days 1 -extfile /tmp/san.cnf -out /tmp/l.crt >/dev/null 2>&1; \
+    DROPLET_LAN_DNS_AUTHORITY=1 DROPLET_CANONICAL_CERT=/tmp/l.crt \
+      DROPLET_CANONICAL_OUT=/tmp/ch-on.conf /usr/local/bin/render-canonical-host.sh; \
+    grep -q 'test-box.droplet-us.com' /tmp/ch-on.conf; \
+    for ch in /etc/nginx/canonical-host.active.conf /tmp/ch-on.conf; do \
+      printf 'events{}\nhttp{\n resolver 127.0.0.11 valid=10s ipv6=off;\n include %s;\n}\n' "$ch" > /tmp/test-nginx.conf; \
+      nginx -t -c /tmp/test-nginx.conf; \
+    done; \
+    rm -f /tmp/ca.key /tmp/ca.crt /tmp/ca.srl /tmp/l.key /tmp/l.csr /tmp/l.crt /tmp/san.cnf /tmp/ch-on.conf; \
+    echo "canonical-host self-test OK — OFF + ON variants render and parse"; \
     rm -f /tmp/t.key /tmp/t.crt /tmp/test-nginx.conf; \
     echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"; \
     echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"
