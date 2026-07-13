@@ -49,10 +49,13 @@ export interface SearchByVectorParams {
   /** Nextcloud username — the per-user RBAC boundary. */
   userId: string;
   /**
-   * WARP-1140: extra index owners to search IN ADDITION to `userId`. The one
-   * production caller passes the `__household__` sentinel (the shared
-   * groupfolder corpus) after confirming the requesting user actually has the
-   * shared space mounted — membership is checked by the caller, never here.
+   * WARP-1140: extra index owners to search IN ADDITION to `userId`. Two
+   * caller classes today: the Files search route passes the `__household__`
+   * sentinel (shared groupfolder corpus) after confirming the requesting user
+   * actually has the shared space mounted, and the `/knowledge` search route
+   * passes the caller's `User.id` UUID (WARP-1014 dual-shape reads — brain
+   * chunks are UUID-keyed post-WARP-493). Membership/identity is checked by
+   * the caller, never here.
    */
   additionalUserIds?: string[];
   /** Embedding vector. Length must match `FileContentChunk.embedding` (384 for all-MiniLM-L6-v2). */

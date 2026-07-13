@@ -65,22 +65,23 @@ file-indexer's transcription worker can ENOENT a queued pre-fix item
 and mark it `failed` — recoverable via the transcribe-now retry once
 the orchestrator is up.
 
-**Deferred gaps (known, deliberate — do not "fix" ad hoc):**
+**Deferred gaps — CLOSED by
+[WARP-1014](https://warp-lab.atlassian.net/browse/WARP-1014)
+(dual-shape reads).** Both cross-source retrieval surfaces now scope
+`FileContentChunk` by BOTH keys (`userId IN (<username>, <User.id UUID>)`):
 
-- `/api/files/knowledge/{recent,search}` (`routes/files-knowledge.ts`)
-  still scope `FileContentChunk` by `req.user.username`, so brain-sourced
-  chunks drop out of the knowledge surface post-cutover (chat attachment
-  inlining is unaffected — it reads by `brainItemId`).
-- MCP `search_content` receives the username as `_meta.userId`
-  (`routes/llm.ts` toolCallContext), so its pgvector scope likewise
-  misses UUID-keyed brain chunks while still covering watcher chunks.
+- `/api/files/knowledge/{recent,search}` reads both shapes off
+  `req.user` (`routes/files-knowledge.ts::chunkOwnerKeys`).
+- MCP `search_content` keeps the username-keyed `_meta.userId` contract;
+  the mcp-server resolves the counterpart key at the query site
+  (`services/mcp-server/src/chunk-owner.ts` — also covers the HTTP
+  transport, whose `claims.sub` is UUID-shaped).
 
-Both need one decision — dual-shape reads vs unifying the watcher key —
-tracked in
-[WARP-1014](https://warp-lab.atlassian.net/browse/WARP-1014), the
-files-knowledge/search_content brain-visibility follow-up. Flipping
-either alone breaks the (still username-keyed) watcher rows: the
-mirror-image regression.
+The rejected alternative (unifying the watcher on UUIDs) would have
+flipped `services/file-indexer/watcher.py` + the `(username, path)`
+delete bookkeeping in `db.py` for no read-side gain — nextcloud-watcher
+rows stay username-keyed by design. No migration; reads accept both
+shapes indefinitely.
 
 **Verification on a deployed device.**
 

@@ -96,6 +96,29 @@ describe("searchByVector", () => {
     });
     expect(hits).toEqual([]);
   });
+
+  // WARP-1014 dual-shape reads lean on the WARP-1140 multi-owner
+  // predicate: `additionalUserIds` expands to `IN` with one bind
+  // parameter per id, and later params (limit here) shift positions
+  // accordingly. Pin it so a predicate refactor can't silently drop the
+  // UUID arm (brain chunks would vanish from /knowledge again).
+  it("expands additionalUserIds to a parameterized IN list", async () => {
+    const prisma = buildFakePrisma([[]]);
+    await searchByVector(prisma, {
+      userId: "alice",
+      additionalUserIds: ["6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f"],
+      vector: [0.1],
+      limit: 5,
+      minSimilarity: 0.25,
+    });
+    const [sql, ...params] = (
+      prisma.$queryRawUnsafe as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    expect(sql).toMatch(/"userId"\s+IN\s+\(\$1,\s*\$2\)/);
+    expect(params[0]).toBe("alice");
+    expect(params[1]).toBe("6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f");
+    expect(params[2]).toBe(5); // limit shifted to $3
+  });
 });
 
 describe("listRecent", () => {

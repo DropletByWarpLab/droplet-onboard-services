@@ -194,9 +194,11 @@ describe("files-knowledge routes", () => {
       // BigInt id must be serialised as string (JSON can't encode BigInt).
       expect(typeof first.id).toBe("string");
 
-      // userId must always be filtered to the authed user
+      // userId must always be filtered to the authed user. WARP-1014:
+      // the filter is dual-shape (`in` list) — with the dev stub both
+      // shapes are "dev", so the deduped list has one entry.
       const args = findManyMock.mock.calls[0][0];
-      expect(args.where.userId).toBe("dev");
+      expect(args.where.userId).toEqual({ in: ["dev"] });
       expect(args.take).toBe(50);
       expect(args.orderBy).toEqual({ indexedAt: "desc" });
     });
@@ -402,8 +404,134 @@ describe("files-knowledge routes", () => {
       expect(Array.isArray(res.body.hits)).toBe(true);
       expect(res.body.hits[0].path).toBe("/Documents/notes.txt");
       // userId must always pin to the authed user (RBAC, spec §12).
+      // WARP-1014: with the dev stub id === username, so no additional
+      // owner key is passed.
       const callArgs = searchByVectorSpy.mock.calls[0][1];
       expect(callArgs.userId).toBe("dev");
+      expect(callArgs.additionalUserIds).toBeUndefined();
+    });
+  });
+
+  // ──────────────────────────────────────────
+  // WARP-1014 — dual-shape reads after the WARP-493 UUID cutover.
+  // Brain-sourced FileContentChunk rows are keyed by the local User.id
+  // UUID; nextcloud-watcher rows stay username-keyed by design. Both
+  // routes must scope by BOTH keys or brain chunks vanish from the
+  // knowledge surface. These cases run against a router-level app whose
+  // identity has id ≠ username (the production shape) — the full-app
+  // suite above only exercises the dev stub where both are "dev".
+  // ──────────────────────────────────────────
+  describe("WARP-1014 — dual-shape reads (username + User.id UUID)", () => {
+    const UUID = "6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f";
+    let dualApp: import("express").Express;
+
+    beforeAll(async () => {
+      const express = (await import("express")).default;
+      const { createFilesKnowledgeRouter } = await import(
+        "../routes/files-knowledge.js"
+      );
+      const prisma = new PrismaClient();
+      const _app = express();
+      _app.use((req, _res, next) => {
+        (req as { user?: { id: string; username: string } }).user = {
+          id: UUID,
+          username: "alice",
+        };
+        next();
+      });
+      _app.use("/api", createFilesKnowledgeRouter(prisma));
+      dualApp = _app;
+    });
+
+    beforeEach(() => {
+      // The module-level spies accumulate calls across the whole file;
+      // clear so `.mock.calls[0]` is THIS suite's call.
+      searchByVectorSpy.mockClear();
+      embedSpy.mockClear();
+    });
+
+    it("scopes /recent to both the username and the UUID, surfacing brain + nextcloud rows side by side", async () => {
+      findManyMock.mockResolvedValueOnce([
+        {
+          id: 7n,
+          userId: UUID, // brain rows are UUID-keyed post-WARP-493
+          ncFileId: 0,
+          path: "/Brain/upload.pdf",
+          chunkIdx: 0,
+          text: "brain chunk",
+          indexedAt: new Date("2026-07-02T10:00:00Z"),
+          source: "brain",
+          brainItemId: "bmi-7",
+        },
+        {
+          id: 8n,
+          userId: "alice", // watcher rows stay username-keyed by design
+          ncFileId: 42,
+          path: "/Documents/notes.txt",
+          chunkIdx: 0,
+          text: "watcher chunk",
+          indexedAt: new Date("2026-07-01T10:00:00Z"),
+          source: "nextcloud",
+        },
+      ]);
+
+      const res = await request(dualApp).get("/api/files/knowledge/recent");
+      expect(res.status).toBe(200);
+      expect(res.body.items.map((i: { source: string }) => i.source)).toEqual([
+        "brain",
+        "nextcloud",
+      ]);
+
+      const args = findManyMock.mock.calls[0][0];
+      expect(args.where.userId).toEqual({ in: ["alice", UUID] });
+    });
+
+    it("keeps the dual-shape filter when a source filter is applied", async () => {
+      findManyMock.mockResolvedValueOnce([]);
+      const res = await request(dualApp).get(
+        "/api/files/knowledge/recent?source=brain",
+      );
+      expect(res.status).toBe(200);
+      const args = findManyMock.mock.calls[0][0];
+      expect(args.where.userId).toEqual({ in: ["alice", UUID] });
+      expect(args.where.source).toBe("brain");
+    });
+
+    it("passes the UUID as an additional index owner to searchHybrid on /search", async () => {
+      embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+      searchByVectorSpy.mockResolvedValueOnce([
+        {
+          path: "/Brain/upload.pdf",
+          score: 0.93,
+          snippet: "brain hit",
+          source: "brain",
+          chunkIdx: 0,
+          pageNumber: null,
+          brainItemId: "bmi-7",
+        },
+        {
+          path: "/Documents/notes.txt",
+          score: 0.88,
+          snippet: "watcher hit",
+          source: "nextcloud",
+          chunkIdx: 0,
+          pageNumber: null,
+          brainItemId: null,
+        },
+      ]);
+
+      const res = await request(dualApp).get(
+        "/api/files/knowledge/search?q=notes",
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.hits.map((h: { source: string }) => h.source)).toEqual([
+        "brain",
+        "nextcloud",
+      ]);
+
+      const callArgs = searchByVectorSpy.mock.calls[0][1];
+      expect(callArgs.userId).toBe("alice");
+      expect(callArgs.additionalUserIds).toEqual([UUID]);
     });
   });
 });

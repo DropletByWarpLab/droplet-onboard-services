@@ -30,10 +30,11 @@
  *
  * # RBAC
  *
- * Both routes pull `userId` from `req.user.username` (populated by the
- * auth middleware) and pass it as a hard `where.userId = <user>` filter
- * to every Prisma query. Cross-user retrieval is impossible by
- * construction. See spec §12.
+ * Both routes scope every Prisma query to the authed user's OWN chunk
+ * keys (`where.userId IN (<username>, <User.id UUID>)` — see
+ * `chunkOwnerKeys`). Both shapes come off `req.user` (populated by the
+ * auth middleware), never from the request, so cross-user retrieval is
+ * impossible by construction. See spec §12.
  */
 
 import { Router } from "express";
@@ -59,6 +60,33 @@ type SourceFilter = "nextcloud" | "brain";
 function parseSource(raw: unknown): SourceFilter | undefined {
   if (raw === "nextcloud" || raw === "brain") return raw;
   return undefined;
+}
+
+/**
+ * WARP-1014 — the authed user's FileContentChunk owner keys, BOTH shapes.
+ *
+ * The WARP-493 cutover left `FileContentChunk.userId` deliberately
+ * split by source: brain-sourced rows key on the local `User.id` UUID,
+ * while nextcloud-watcher rows stay keyed by Nextcloud username
+ * (`services/file-indexer/watcher.py` derives owners from filesystem
+ * paths — by design, do not "fix"). This surface spans both sources, so
+ * it reads with both keys: dual-shape reads (Option 1 of the WARP-493
+ * follow-up decision; precedent is the ChatSession transition note in
+ * `routes/llm.ts`). The rejected alternative — unifying the watcher on
+ * UUIDs — would push an auth-directory dependency into the indexer's
+ * path-derived bookkeeping for no read-side gain.
+ *
+ * Username first so the single-shape case (dev stub, service
+ * principals, id === username) keeps the historical binding order.
+ */
+function chunkOwnerKeys(user: { id?: string; username?: string }): string[] {
+  return [
+    ...new Set(
+      [user.username, user.id].filter(
+        (v): v is string => typeof v === "string" && v.length > 0,
+      ),
+    ),
+  ];
 }
 
 /** Truncate text to a fixed width — cheap snippet for list cards. */
@@ -230,7 +258,7 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // We retry without the column on those errors so the route
       // degrades gracefully on partial deploys.
       const baseWhere: Prisma.FileContentChunkWhereInput = {
-        userId: user.username,
+        userId: { in: chunkOwnerKeys(user) },
       };
       if (validBefore) baseWhere.indexedAt = { lt: validBefore };
       const fullWhere: Prisma.FileContentChunkWhereInput = source
@@ -356,8 +384,14 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // cached) `searchHybrid` / `rerankPassages` pass-through to the
       // RRF top-K so the dashboard stays usable.
       const rerankPipe = await buildRerankPipe();
+      // WARP-1014 dual-shape reads — the UUID rides as an additional
+      // index owner (WARP-1140 predicate) so brain-sourced chunks stay
+      // visible next to the username-keyed watcher chunks.
+      const [primaryOwnerKey, ...additionalOwnerKeys] = chunkOwnerKeys(user);
       const hits = await search.searchHybrid(prisma, {
-        userId: user.username,
+        userId: primaryOwnerKey,
+        additionalUserIds:
+          additionalOwnerKeys.length > 0 ? additionalOwnerKeys : undefined,
         vector,
         query: q,
         limit,

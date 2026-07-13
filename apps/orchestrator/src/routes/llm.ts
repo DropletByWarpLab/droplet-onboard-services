@@ -735,9 +735,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // that key or every attachment silently drops out post-cutover.
       // Deliberately separate from `userId` above: the username still
       // keys ChatSession persistence and the MCP `_meta.userId`
-      // contract (search_content's FileContentChunk scope spans the
-      // username-keyed nextcloud-watcher rows) until their own
-      // follow-up cutovers land.
+      // contract (nextcloud-watcher chunks are username-keyed by
+      // design). WARP-1014: the mcp-server resolves the UUID
+      // counterpart at the query site (`src/chunk-owner.ts`), so
+      // search_content's FileContentChunk scope spans BOTH key shapes
+      // without widening `_meta`.
       const brainOwnerId = (req as AuthedRequest).user?.id;
       // WARP-845: also forward the caller's role so role-scoped handlers
       // (memory_recall) can filter what the model may read.
