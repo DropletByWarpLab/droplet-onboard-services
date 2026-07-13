@@ -4,10 +4,13 @@ import type { PrivateEnhancement } from "./private-enhancement.js";
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
 export interface HttpClient {
-  get(path: string, opts?: { params?: Record<string, unknown>; headers?: Record<string, string> }): Promise<Response>;
-  post(path: string, body?: unknown, opts?: { headers?: Record<string, string> }): Promise<Response>;
-  patch(path: string, body?: unknown, opts?: { headers?: Record<string, string> }): Promise<Response>;
-  delete(path: string, opts?: { headers?: Record<string, string> }): Promise<Response>;
+  // WARP-887: `signal` lets callers (e.g. callOrch's 8s deadline) abort the
+  // in-flight request so a slow/unresponsive target doesn't leak an open
+  // socket. Optional + backward-compatible — callers without a deadline omit it.
+  get(path: string, opts?: { params?: Record<string, unknown>; headers?: Record<string, string>; signal?: AbortSignal }): Promise<Response>;
+  post(path: string, body?: unknown, opts?: { headers?: Record<string, string>; signal?: AbortSignal }): Promise<Response>;
+  patch(path: string, body?: unknown, opts?: { headers?: Record<string, string>; signal?: AbortSignal }): Promise<Response>;
+  delete(path: string, opts?: { headers?: Record<string, string>; signal?: AbortSignal }): Promise<Response>;
 }
 
 export interface MatterController {
