@@ -506,8 +506,38 @@ model DeviceClient {
   status        String   @default("active") // "active" | "revoked"
   createdAt     DateTime @default(now())
 
+  // ── WARP-1298: client-dispatched-actions metadata (ADR-014 §37–39, §③) ──
+  // Foundation columns for the desktop tool-host (WARP-350 epic). Additive
+  // and default-safe; the WS bridge, signature-verify, and tool catalog that
+  // consume them land in WARP-353/354. Romain chose this shape (Option B on
+  // WARP-352) on 2026-07-12 — the original WARP-352 model had no column for
+  // the client public key, which was the concrete blocker on WARP-353.
+
+  // WS-liveness heartbeat, distinct from the coarse `lastSeen` above. WARP-354
+  // catalog membership requires this to be within 90s (ADR-014 §37). Null until
+  // the client first connects to the WS bridge.
+  lastSeenWsAt     DateTime?
+  // Per-tool consent map ({ [tool]: "allow" | "confirm" | "block" }). DEFAULT-
+  // DENY (ADR-014 §③): empty map = nothing reachable until the user opts in per
+  // tool from the menu-bar AI-permissions surface. Pairing grants presence, not
+  // capability.
+  toolConsent      Json      @default("{}")
+  // Client family advertised at pair time: desktop_macos | desktop_windows |
+  // ios | android | web. Distinct from the existing deviceType/platform axes.
+  // Null until a pairing flow populates it (WARP-353+).
+  clientKind       String?
+  // Capability list the client declares at pair time. Default empty array.
+  toolCapabilities Json      @default("[]")
+  // The paired client's ed25519 public key (base64/hex wire form, stored as
+  // text). WARP-353 verifies `tool_response` signatures against it. @unique
+  // follows the VpnPeer.publicKey precedent: the key is the client identity,
+  // so a revoked client must not be able to re-pair its old key.
+  clientPublicKey  String?   @unique
+
   @@index([userId])
   @@index([status])
+  // WARP-354 catalog query: this user's rows with a recent WS heartbeat.
+  @@index([userId, lastSeenWsAt])
 }
 
 // ── WARP-217: Token-based user invitations ──
