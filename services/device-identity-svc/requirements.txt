@@ -1,4 +1,4 @@
-grpcio>=1.62.0
+grpcio>=1.82.1
 grpcio-tools>=1.81.1
 cryptography>=49.0.0
 click>=8.0.0
