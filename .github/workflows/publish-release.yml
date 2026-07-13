@@ -122,6 +122,12 @@ jobs:
           - service: routing
           - service: switch
           - service: camera-discovery
+          # WARP-970 coverage gate — keeps this list an exact mirror of
+          # ci.yml's python matrix; same requirements-dev.txt + bare-pytest
+          # shape as the legs above, no sysdeps.
+          - service: email-indexer
+          - service: ops-console
+          - service: fleet-agent
           - service: file-indexer
             # libpq for psycopg build, ffmpeg + libmagic for content sniffing
             # (mirrors file-indexer-tests.yml)

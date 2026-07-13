@@ -19,7 +19,14 @@ name: ci
 #     WARP-288 class lint + WARP-1296 tsc --noEmit / next build), matter-controller.
 #   - python 3.12 matrix: the gate-python service list from #786
 #     (ai-gateway, routing, switch, camera-discovery, file-indexer,
-#     voice-io, device-identity-svc), sysdeps and all.
+#     voice-io, device-identity-svc), sysdeps and all, plus the WARP-970
+#     coverage-gate additions (email-indexer, ops-console, fleet-agent) —
+#     their path-filtered workflows can't catch cross-cutting breakage, so
+#     they must also be legs of the one always-reporting check.
+#     Deliberately NOT a leg: services/rag-eval — eval tooling, not an
+#     appliance service; its two lanes run from the repo root with an
+#     ad-hoc dep set (see rag-eval-tests.yml) and stay path-filtered +
+#     main-push gated there.
 #
 # ── FOLLOW-UPS (intentionally NOT in this workflow's first PR) ──
 #   1. Retire the PR triggers on the per-service workflows once ci-summary
@@ -204,14 +211,20 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      # Exact mirror of gate-python in publish-release.yml (#786) — the
-      # python services with per-service test workflows.
+      # Exact mirror of gate-python in publish-release.yml (#786; both lists
+      # expanded together by WARP-970) — the python services with
+      # per-service test workflows.
       matrix:
         include:
           - service: ai-gateway
           - service: routing
           - service: switch
           - service: camera-discovery
+          # WARP-970 coverage gate — same requirements-dev.txt +
+          # bare-pytest shape as the legs above, no sysdeps.
+          - service: email-indexer
+          - service: ops-console
+          - service: fleet-agent
           - service: file-indexer
             # libpq for psycopg build, ffmpeg + libmagic for content sniffing
             # (mirrors file-indexer-tests.yml)
