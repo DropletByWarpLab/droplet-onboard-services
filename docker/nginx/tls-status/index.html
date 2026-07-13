@@ -39,15 +39,24 @@
   document.getElementById("continue").href = "https://" + location.host + "/";
   async function tick() {
     try {
-      const r = await fetch("/api/tls/status", { cache: "no-store" });
-      const s = await r.json();
-      if (s.redirectTo) { location.replace(s.redirectTo); return; }
-      if (s.hqConfigured === false) {
-        document.getElementById("airgap").style.display = "block";
-        document.getElementById("spinner").style.display = "none";
-        document.getElementById("msg").textContent =
-          "Automatic certificates are not available on this Droplet.";
+      const r = await fetch("/api/tls/status", { cache: "no-store", redirect: "manual" });
+      // The canonical redirect flipped ON mid-poll: :80 now 307s every path
+      // to the trusted FQDN (cross-origin to this page, so the body is
+      // unreadable). The opaque redirect IS the advance signal — reload so
+      // the top-level navigation follows the 307 to the padlocked FQDN.
+      if (r.type === "opaqueredirect") { location.reload(); return; }
+      if (r.ok) {
+        const s = await r.json();
+        if (s.redirectTo) { location.replace(s.redirectTo); return; }
+        if (s.hqConfigured === false) {
+          document.getElementById("airgap").style.display = "block";
+          document.getElementById("spinner").style.display = "none";
+          document.getElementById("msg").textContent =
+            "Automatic certificates are not available on this Droplet.";
+        }
       }
+      // !r.ok (e.g. 503 while the DB boots) = not an advance and NOT
+      // air-gapped — keep polling.
     } catch (e) { /* orchestrator still starting — keep polling */ }
     setTimeout(tick, 5000);
   }
