@@ -19,7 +19,22 @@ vi.mock("../services/file-reindex.service", () => ({
   INDEX_IN_PROGRESS: "INDEX_IN_PROGRESS",
 }));
 
-import { adminFilesRouter } from "./admin-files.js";
+// WARP-1271 (T19a): admin usage roster deps.
+const { ncGetUserQuotaAdminMock, gfListFoldersMock } = vi.hoisted(() => ({
+  ncGetUserQuotaAdminMock: vi.fn(),
+  gfListFoldersMock: vi.fn(),
+}));
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncGetUserQuotaAdmin: ncGetUserQuotaAdminMock,
+}));
+vi.mock("../services/nextcloud-groups.client.js", () => ({
+  gfListFolders: gfListFoldersMock,
+}));
+vi.mock("../services/department-provisioner.service.js", () => ({
+  adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
+}));
+
+import { adminFilesRouter, createAdminFilesUsageRouter } from "./admin-files.js";
 
 function mkApp(opts: {
   user?: { id: string; role?: string; lastMfaAt?: Date | null };
@@ -88,5 +103,174 @@ describe("POST /api/admin/files/:id/reindex", () => {
     const res = await request(app).post("/api/admin/files/f1/reindex");
     expect(res.status).toBe(500);
     expect(res.body.error).toBe("reindex_failed");
+  });
+});
+
+// ── WARP-1271 (T19a): GET /api/admin/files/usage ───────────────────────
+
+function mkUsagePrisma(opts: {
+  users?: Array<{
+    id: string;
+    displayName: string;
+    username: string;
+    nextcloudUsername: string | null;
+    usagePolicy?: { maxUploadSizeMb: number | null } | null;
+  }>;
+  departments?: Array<{ id: string; name: string; kind: string; ncGroupfolderId: number | null; quotaBytes: bigint | null }>;
+}) {
+  return {
+    user: { findMany: vi.fn().mockResolvedValue(opts.users ?? []) },
+    department: { findMany: vi.fn().mockResolvedValue(opts.departments ?? []) },
+  } as any;
+}
+
+function mkUsageApp(
+  prisma: ReturnType<typeof mkUsagePrisma>,
+  user: { id: string; role?: string } = { id: "owner-1", role: "owner" },
+) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as unknown as { user?: unknown }).user = user;
+    next();
+  });
+  app.use("/api/admin", createAdminFilesUsageRouter(prisma));
+  return app;
+}
+
+describe("GET /api/admin/files/usage", () => {
+  beforeEach(() => {
+    ncGetUserQuotaAdminMock.mockReset();
+    gfListFoldersMock.mockReset();
+  });
+
+  it("403 for a non-admin caller", async () => {
+    const app = mkUsageApp(mkUsagePrisma({}), { id: "u1", role: "family" });
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(403);
+  });
+
+  it("returns per-user rows with BigInt fields string-encoded", async () => {
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 4_000_000_000,
+      free: 1_000_000_000,
+      total: 5_000_000_000,
+      quota: 5_000_000_000,
+    });
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          { id: "u1", displayName: "Alice", username: "alice", nextcloudUsername: "alice" },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users).toEqual([
+      {
+        userId: "u1",
+        displayName: "Alice",
+        quota: "5000000000",
+        used: "4000000000",
+        free: "1000000000",
+        largestUploadMb: null,
+        lastActive: null,
+      },
+    ]);
+  });
+
+  it("returns the per-user upload-cap override from UserUsagePolicy", async () => {
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 4_000_000_000,
+      free: 1_000_000_000,
+      total: 5_000_000_000,
+      quota: 5_000_000_000,
+    });
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          {
+            id: "u1",
+            displayName: "Alice",
+            username: "alice",
+            nextcloudUsername: "alice",
+            usagePolicy: { maxUploadSizeMb: 2048 },
+          },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users[0].largestUploadMb).toBe(2048);
+  });
+
+  it("tolerates a per-user quota-read failure with an honest '—', never dropping the row or 500ing", async () => {
+    ncGetUserQuotaAdminMock.mockRejectedValue(new Error("nc down"));
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          { id: "u1", displayName: "Alice", username: "alice", nextcloudUsername: "alice" },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users).toEqual([
+      { userId: "u1", displayName: "Alice", quota: "—", used: "—", free: "—", largestUploadMb: null, lastActive: null },
+    ]);
+  });
+
+  it("a user with no Nextcloud account yet never calls the quota client", async () => {
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          { id: "u2", displayName: "NoNc", username: "nonc", nextcloudUsername: null },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users).toEqual([
+      { userId: "u2", displayName: "NoNc", quota: null, used: "—", free: null, largestUploadMb: null, lastActive: null },
+    ]);
+    expect(ncGetUserQuotaAdminMock).not.toHaveBeenCalled();
+  });
+
+  it("returns per-department rows from gfListFolders, BigInt quota string-encoded", async () => {
+    gfListFoldersMock.mockResolvedValue([
+      { id: 7, mountPoint: "Sales", groups: {}, quota: -3, size: 123_456, acl: true, manage: [] },
+    ]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        departments: [
+          { id: "d1", name: "Sales", kind: "DEPARTMENT", ncGroupfolderId: 7, quotaBytes: 999_999n },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.departments).toEqual([
+      { id: "d1", name: "Sales", kind: "DEPARTMENT", sizeBytes: "123456", quotaBytes: "999999" },
+    ]);
+  });
+
+  it("a department whose groupfolder id isn't discovered yet reports sizeBytes '—'", async () => {
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        departments: [
+          { id: "d1", name: "Sales", kind: "DEPARTMENT", ncGroupfolderId: null, quotaBytes: null },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.departments).toEqual([
+      { id: "d1", name: "Sales", kind: "DEPARTMENT", sizeBytes: "—", quotaBytes: null },
+    ]);
   });
 });

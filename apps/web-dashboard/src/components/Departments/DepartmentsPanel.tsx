@@ -1,0 +1,937 @@
+"use client";
+
+/**
+ * WARP-1270 (T18) — Surface B: the "Departments & teams" tab on /users.
+ *
+ * Design contract: TEAMS-DEPARTMENTS-FILES-ARCHITECTURE-BRIEF.md §3/§6 +
+ * the departments design packet (shared_brain content/brand/handoffs/
+ * departments/{DESIGN-BRIEF.md,prototype/dept.css,prototype/dept-data.jsx}).
+ * Ported class-by-class onto the existing droplet-shell idiom this page
+ * already uses (.card/.lrow/.badge/.meter/.chip/.ava/.dl — see
+ * components/shell/droplet-shell.css) rather than the prototype's raw
+ * dept.css, per the handoff's own instruction to match the app's styling,
+ * not copy the reference file.
+ *
+ * Rights are neutral, text-first chips (`.chip`, never `--role-*` — brief
+ * §1/§3, punch-list D-A..F). State chips DO use the system status ramp via
+ * `.badge`. Quota meter bands: green <80%, orange 80–95%, red >95%.
+ *
+ * Authorization mirrors the backend exactly, so no dead affordances render:
+ *   - Create department/team, archive/restore: owner/admin only
+ *     (routes/departments.ts `requireRole("owner","admin")`).
+ *   - Add member / change rights / remove member: owner/admin OR a
+ *     `manager` of THIS unit (`departmentManagerOrAdmin` — the
+ *     inherited-manager rule covers a parent department's manager on its
+ *     child teams).
+ *   - The unit list itself is already server-scoped (GET /api/departments):
+ *     owner/admin get everything incl. archived; everyone else gets only
+ *     units they hold a membership row in — the manager-delegation view
+ *     falls out of that for free, no extra client-side filtering needed.
+ */
+
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  Archive,
+  Building2,
+  Eye,
+  Home,
+  KeyRound,
+  Loader2,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Trash2,
+  UserPlus,
+  Users as UsersIcon,
+  type LucideIcon,
+} from "lucide-react";
+import type { Department, DepartmentDetail, DepartmentRight, RosterUser } from "@/lib/types";
+import {
+  listDepartments,
+  getDepartment,
+  createDepartment,
+  createTeam,
+  archiveDepartment,
+  restoreDepartment,
+  addDepartmentMember,
+  updateDepartmentMemberRight,
+  removeDepartmentMember,
+} from "@/lib/api";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
+import { Badge, Meter, type BadgeKind } from "@/components/shell/primitives";
+
+const RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
+const RIGHT_LABEL: Record<DepartmentRight, string> = {
+  reader: "Reader",
+  contributor: "Contributor",
+  manager: "Manager",
+};
+const RIGHT_ICON: Record<DepartmentRight, LucideIcon> = {
+  reader: Eye,
+  contributor: Pencil,
+  manager: KeyRound,
+};
+
+/** Verbatim copy (design brief §2–§5) — ships as-is. */
+const COPY = {
+  emptyDepts:
+    "No departments yet — create the first one to give a group of people their own file library.",
+  removeConfirm: (name: string, lib: string) =>
+    `Remove ${name} from ${lib}? They lose access to these files immediately.`,
+  householdTip: "Household access follows each person's role for now.",
+  archiveBody: "Files stay stored and admins can still retrieve them. Members lose access now.",
+  restoreBody: "Members regain access with the rights they had before it was archived.",
+  syncingShort: "Syncing…",
+  retrying: "Retrying",
+  noLimit: "No limit",
+};
+
+/** Bytes-decimal-string → a short human size ("13.2 GB"). Never fabricates
+ *  a value on bad input — falls back to an em dash. */
+function formatBytes(value: string | null | undefined): string {
+  if (value == null) return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let size = n;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`;
+}
+
+const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
+type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
+
+/** Quota band per the design brief: green <80%, orange 80–95%, red >95%. */
+function quotaBand(usedBytes: string | null, quotaBytes: string | null): "" | "ok" | "warn" | "danger" {
+  if (quotaBytes == null) return "";
+  const used = Number(usedBytes ?? 0);
+  const quota = Number(quotaBytes);
+  if (!Number.isFinite(used) || !Number.isFinite(quota) || quota <= 0) return "";
+  const pct = (used / quota) * 100;
+  if (pct > 95) return "danger";
+  if (pct >= 80) return "warn";
+  return "ok";
+}
+
+/** Client-side slug preview only — the server (nameToSlug in
+ *  routes/departments.ts) is the authoritative slug generator. */
+function slugPreview(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function StateChip({ state }: { state: Department["state"] }) {
+  const map: Record<Department["state"], { label: string; kind: BadgeKind; icon?: LucideIcon }> = {
+    active: { label: "Active", kind: "ok" },
+    pending: { label: "Setting up…", kind: "warn", icon: Loader2 },
+    provisioning: { label: "Setting up…", kind: "warn", icon: Loader2 },
+    failed: { label: "Needs attention", kind: "danger", icon: AlertTriangle },
+    archiving: { label: "Archiving…", kind: "warn", icon: Loader2 },
+    archived: { label: "Archived", kind: "muted", icon: Archive },
+  };
+  const { label, kind, icon: Icon } = map[state] ?? { label: state, kind: "muted" as BadgeKind };
+  return (
+    <Badge kind={kind}>
+      {Icon && (
+        <Icon
+          size={11}
+          aria-hidden="true"
+          className={Icon === Loader2 ? "animate-spin motion-reduce:animate-none" : undefined}
+        />
+      )}
+      {label}
+    </Badge>
+  );
+}
+
+function RightsChip({ right }: { right: DepartmentRight }) {
+  const Icon = RIGHT_ICON[right];
+  return (
+    <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px" }}>
+      <Icon size={12} aria-hidden="true" />
+      {RIGHT_LABEL[right]}
+    </span>
+  );
+}
+
+function Avatar({ name }: { name: string }) {
+  const initials = name
+    .split(" ")
+    .map((p) => p[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  return <span className="ava">{initials || "?"}</span>;
+}
+
+interface QuotaFormState {
+  value: string;
+  unit: StorageUnit;
+}
+
+function quotaToBytes(q: QuotaFormState): string | undefined {
+  const trimmed = q.value.trim();
+  if (!trimmed) return undefined;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return String(Math.round(n * STORAGE_UNIT_BYTES[q.unit]));
+}
+
+const fieldStyle: React.CSSProperties = {
+  background: "var(--surface)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--radius-input)",
+  color: "var(--text)",
+};
+
+// Inline equivalents of the shell's `.lrow .rt .nm` / `.sub` / `.rmeta`
+// text treatments (droplet-shell.css) for spots in this panel that render
+// that same row-title/sub-label/meta shape OUTSIDE an actual `.lrow`
+// ancestor — those class rules are descendant-scoped and wouldn't apply.
+const NM_STYLE: React.CSSProperties = {
+  display: "block",
+  fontSize: 13.5,
+  fontWeight: 500,
+  color: "var(--text)",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+const SUB_STYLE: React.CSSProperties = {
+  display: "block",
+  fontSize: 12,
+  color: "var(--text-muted)",
+  marginTop: 1,
+};
+const RMETA_STYLE: React.CSSProperties = {
+  fontSize: 12.5,
+  color: "var(--text-muted)",
+};
+
+export interface DepartmentsPanelProps {
+  /** Roster used to populate the "add member" picker — passed down so this
+   *  panel doesn't duplicate the /users page's own fetchUsers() call. */
+  people: RosterUser[];
+  /** True for owner/admin — gates create/archive/restore affordances that
+   *  the backend also gates to `requireRole("owner","admin")`. */
+  isAdminTier: boolean;
+}
+
+export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps) {
+  const { toast } = useToast();
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<DepartmentDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [savingUserId, setSavingUserId] = useState<string | null>(null);
+
+  const [addMemberUserId, setAddMemberUserId] = useState("");
+  const [addMemberRight, setAddMemberRight] = useState<DepartmentRight>("contributor");
+  const [addMemberBusy, setAddMemberBusy] = useState(false);
+
+  const [removeTarget, setRemoveTarget] = useState<{ userId: string; displayName: string } | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<Department | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<Department | null>(null);
+
+  // ── Create department / team modal state ──
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createParent, setCreateParent] = useState<Department | null>(null); // null = new department
+  const [createName, setCreateName] = useState("");
+  const [createDescription, setCreateDescription] = useState("");
+  const [createQuota, setCreateQuota] = useState<QuotaFormState>({ value: "", unit: "GB" });
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const createHeadingId = useId();
+  const createTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const newDeptTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const { departments: rows } = await listDepartments();
+      setDepartments(rows);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load departments");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const loadDetail = useCallback(async (id: string) => {
+    setDetailLoading(true);
+    try {
+      const d = await getDepartment(id);
+      setDetail(d);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load department detail");
+      setDetail(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedId) void loadDetail(selectedId);
+    else setDetail(null);
+  }, [selectedId, loadDetail]);
+
+  // Auto-select the first manageable unit once the list loads, so the
+  // detail pane isn't a dead placeholder on first render for the common
+  // case (one department, or a manager scoped to exactly one team).
+  useEffect(() => {
+    if (!loading && !selectedId && departments.length > 0) {
+      const first = departments.find((d) => d.kind !== "HOUSEHOLD") ?? departments[0];
+      if (first) setSelectedId(first.id);
+    }
+  }, [loading, departments, selectedId]);
+
+  const topLevelDepartments = useMemo(
+    () => departments.filter((d) => d.kind === "DEPARTMENT"),
+    [departments],
+  );
+  const teamsByParent = useMemo(() => {
+    const map = new Map<string, Department[]>();
+    for (const d of departments) {
+      if (d.kind !== "TEAM" || !d.parentId) continue;
+      if (!map.has(d.parentId)) map.set(d.parentId, []);
+      map.get(d.parentId)!.push(d);
+    }
+    return map;
+  }, [departments]);
+  const household = useMemo(() => departments.find((d) => d.kind === "HOUSEHOLD") ?? null, [departments]);
+
+  const selected = departments.find((d) => d.id === selectedId) ?? null;
+  const canManage = !!selected && (isAdminTier || selected.myRight === "manager");
+  const libraryLabel = selected?.name ?? "this library";
+
+  const availablePeople = useMemo(() => {
+    const memberIds = new Set((detail?.members ?? []).map((m) => m.userId));
+    return people.filter((p) => p.userId && !memberIds.has(p.userId));
+  }, [people, detail]);
+
+  // ── Create department / team ──
+  function openCreateDepartment() {
+    createTriggerRef.current = newDeptTriggerRef.current;
+    setCreateParent(null);
+    setCreateName("");
+    setCreateDescription("");
+    setCreateQuota({ value: "", unit: "GB" });
+    setCreateError(null);
+    setCreateOpen(true);
+  }
+
+  function openCreateTeam(parent: Department, trigger: HTMLButtonElement | null) {
+    createTriggerRef.current = trigger;
+    setCreateParent(parent);
+    setCreateName("");
+    setCreateDescription("");
+    setCreateQuota({ value: "", unit: "GB" });
+    setCreateError(null);
+    setCreateOpen(true);
+  }
+
+  const closeCreate = useCallback(() => {
+    if (createBusy) return;
+    setCreateOpen(false);
+  }, [createBusy]);
+
+  async function handleCreateSubmit() {
+    const name = createName.trim();
+    if (!name) {
+      setCreateError("Name is required.");
+      return;
+    }
+    setCreateBusy(true);
+    setCreateError(null);
+    // Optimistic: an interim "Setting up…" card appears via the reload
+    // below once the server responds with state=pending — the design
+    // brief's "optimistic row, honest state" (no fabricated active state).
+    try {
+      const payload = {
+        name,
+        description: createDescription.trim() || undefined,
+        quotaBytes: quotaToBytes(createQuota),
+      };
+      if (createParent) {
+        const { team } = await createTeam(createParent.id, payload);
+        setCreateOpen(false);
+        await reload();
+        setSelectedId(team.id);
+        toast(`${team.name} is setting up…`, "success");
+      } else {
+        const { department } = await createDepartment(payload);
+        setCreateOpen(false);
+        await reload();
+        setSelectedId(department.id);
+        toast(`${department.name} is setting up…`, "success");
+      }
+    } catch (err: any) {
+      setCreateError(err?.message || "Failed to create");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
+  // ── Rights / membership ──
+  async function handleRightChange(userId: string, right: DepartmentRight) {
+    if (!selected) return;
+    setSavingUserId(userId);
+    try {
+      await updateDepartmentMemberRight(selected.id, userId, right);
+      await loadDetail(selected.id);
+    } catch (err: any) {
+      toast(err?.message || "Failed to update rights", "error");
+    } finally {
+      setSavingUserId(null);
+    }
+  }
+
+  async function performRemoveMember() {
+    if (!selected || !removeTarget) return;
+    await removeDepartmentMember(selected.id, removeTarget.userId);
+    toast(`${removeTarget.displayName} removed from ${selected.name}.`, "success");
+    await loadDetail(selected.id);
+  }
+
+  async function handleAddMember() {
+    if (!selected || !addMemberUserId) return;
+    setAddMemberBusy(true);
+    try {
+      await addDepartmentMember(selected.id, addMemberUserId, addMemberRight);
+      setAddMemberUserId("");
+      setAddMemberRight("contributor");
+      await loadDetail(selected.id);
+    } catch (err: any) {
+      toast(err?.message || "Failed to add member", "error");
+    } finally {
+      setAddMemberBusy(false);
+    }
+  }
+
+  // ── Archive / restore ──
+  async function performArchive() {
+    if (!archiveTarget) return;
+    await archiveDepartment(archiveTarget.id);
+    toast(`${archiveTarget.name} archived.`, "success");
+    if (selectedId === archiveTarget.id) setSelectedId(null);
+    await reload();
+  }
+
+  async function performRestore() {
+    if (!restoreTarget) return;
+    await restoreDepartment(restoreTarget.id);
+    toast(`${restoreTarget.name} is being restored…`, "success");
+    await reload();
+  }
+
+  if (loading && departments.length === 0) {
+    return <div className="card empty">Loading departments…</div>;
+  }
+
+  if (!loading && departments.length === 0) {
+    return (
+      <div className="card">
+        <div className="empty">
+          <span className="ei">
+            <Building2 size={24} />
+          </span>
+          <span className="eh">No departments yet</span>
+          <span style={{ maxWidth: "42ch" }}>{COPY.emptyDepts}</span>
+          {isAdminTier && (
+            <button
+              ref={newDeptTriggerRef}
+              type="button"
+              className="btn primary"
+              onClick={openCreateDepartment}
+              style={{ marginTop: 8 }}
+            >
+              <Plus size={14} /> New department
+            </button>
+          )}
+        </div>
+        {renderCreateDialog()}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid" style={{ gridTemplateColumns: "380px 1fr", alignItems: "start" }} data-testid="departments-panel">
+      {/* ── Left column: department list ── */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="sect" style={{ marginTop: 0, justifyContent: "space-between" }}>
+          <h2>Departments</h2>
+          {isAdminTier && (
+            <button
+              ref={newDeptTriggerRef}
+              type="button"
+              className="btn ghost sm"
+              onClick={openCreateDepartment}
+              aria-label="New department"
+            >
+              <Plus size={13} /> New department
+            </button>
+          )}
+        </div>
+
+        {topLevelDepartments.map((dept) => {
+          const kids = teamsByParent.get(dept.id) ?? [];
+          const isOn = dept.id === selectedId;
+          return (
+            <div
+              key={dept.id}
+              className="card hover"
+              style={isOn ? { borderColor: "var(--brand)", boxShadow: "0 0 0 1px var(--brand)" } : undefined}
+            >
+              <button
+                type="button"
+                onClick={() => setSelectedId(dept.id)}
+                style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", textAlign: "left" }}
+                aria-pressed={isOn}
+              >
+                <span
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 10,
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "var(--brand-subtle)",
+                    color: "var(--brand)",
+                  }}
+                >
+                  <Building2 size={17} />
+                </span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={NM_STYLE}>{dept.name}</span>
+                  <span style={SUB_STYLE}>
+                    {dept.memberCount} {dept.memberCount === 1 ? "member" : "members"}
+                    {dept.teamCount > 0 ? ` · ${dept.teamCount} ${dept.teamCount === 1 ? "team" : "teams"}` : ""}
+                  </span>
+                </span>
+                <StateChip state={dept.state} />
+              </button>
+
+              {dept.quotaBytes && (
+                <div style={{ marginTop: 12 }} className="mono">
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-muted)", marginBottom: 5 }}>
+                    <span>{formatBytes(dept.usedBytes)} of {formatBytes(dept.quotaBytes)}</span>
+                  </div>
+                  <Meter
+                    pct={dept.usedBytes ? Math.min(100, (Number(dept.usedBytes) / Number(dept.quotaBytes)) * 100) : 0}
+                    kind={quotaBand(dept.usedBytes, dept.quotaBytes)}
+                  />
+                </div>
+              )}
+
+              {(kids.length > 0 || (isAdminTier && dept.state === "active")) && (
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--card-bd)" }}>
+                  {kids.map((team) => (
+                    <button
+                      key={team.id}
+                      type="button"
+                      onClick={() => setSelectedId(team.id)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        width: "100%",
+                        padding: "7px 8px",
+                        borderRadius: 8,
+                        fontSize: 13.5,
+                        textAlign: "left",
+                        color: team.id === selectedId ? "var(--brand)" : "var(--text)",
+                        fontWeight: team.id === selectedId ? 600 : 400,
+                        background: team.id === selectedId ? "var(--brand-subtle)" : "transparent",
+                      }}
+                    >
+                      <UsersIcon size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {team.name}
+                      </span>
+                      {team.state !== "active" && <StateChip state={team.state} />}
+                    </button>
+                  ))}
+                  {isAdminTier && dept.state === "active" && (
+                    <button
+                      type="button"
+                      onClick={(e) => openCreateTeam(dept, e.currentTarget)}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "7px 8px",
+                        borderRadius: 8,
+                        fontSize: 13,
+                        color: "var(--brand)",
+                        fontWeight: 500,
+                      }}
+                    >
+                      <Plus size={13} /> New team
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {household && (
+          <>
+            <div className="sect">
+              <h2>System</h2>
+            </div>
+            <div className="card" data-testid="household-card">
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 10,
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "var(--inset)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  <Home size={17} />
+                </span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={NM_STYLE}>{household.name}</span>
+                  <span style={SUB_STYLE}>
+                    {household.memberCount} {household.memberCount === 1 ? "member" : "members"}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(household.id)}
+                  className="btn ghost sm"
+                >
+                  View
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ── Right column: detail pane ── */}
+      <div className="card" style={{ minHeight: 420, padding: "22px 24px" }}>
+        {!selected ? (
+          <div className="empty">
+            <span className="ei">
+              <Building2 size={24} />
+            </span>
+            <span className="eh">Select a department or team</span>
+          </div>
+        ) : detailLoading && !detail ? (
+          <div className="empty">Loading…</div>
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 14, paddingBottom: 18, borderBottom: "1px solid var(--card-bd)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "0.35px" }}>{selected.name}</h2>
+                  <span className="chip" style={{ cursor: "default", fontWeight: 500, color: "var(--text)" }}>
+                    {selected.kind === "TEAM" ? "Team" : selected.kind === "HOUSEHOLD" ? "System" : "Department"}
+                  </span>
+                  <StateChip state={selected.state} />
+                  {selected.myRight && <RightsChip right={selected.myRight} />}
+                </div>
+                {selected.quotaBytes ? (
+                  <div style={{ marginTop: 14, maxWidth: 340 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--text-muted)", marginBottom: 5 }}>
+                      <span>{formatBytes(detail?.usedBytes ?? null)} of {formatBytes(selected.quotaBytes)}</span>
+                    </div>
+                    <Meter
+                      pct={
+                        detail?.usedBytes
+                          ? Math.min(100, (Number(detail.usedBytes) / Number(selected.quotaBytes)) * 100)
+                          : 0
+                      }
+                      kind={quotaBand(detail?.usedBytes ?? null, selected.quotaBytes)}
+                    />
+                  </div>
+                ) : (
+                  <div className="mono" style={{ ...SUB_STYLE, marginTop: 14 }}>
+                    {formatBytes(detail?.usedBytes ?? null)} used · {COPY.noLimit}
+                  </div>
+                )}
+              </div>
+
+              {isAdminTier && selected.kind !== "HOUSEHOLD" && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  {selected.state === "archived" ? (
+                    <button type="button" className="btn ghost sm" onClick={() => setRestoreTarget(selected)}>
+                      <RotateCcw size={13} /> Restore
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => setArchiveTarget(selected)}
+                    >
+                      <Archive size={13} /> Archive
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Member table */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "22px 0 10px" }}>
+              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Members</h3>
+              <span className="mono" style={RMETA_STYLE}>{detail?.members.length ?? 0}</span>
+            </div>
+
+            {selected.kind === "HOUSEHOLD" && (
+              <p style={{ ...SUB_STYLE, marginBottom: 10 }}>{COPY.householdTip}</p>
+            )}
+
+            <div className="rows">
+              {(detail?.members ?? []).map((m) => {
+                const saving = savingUserId === m.userId;
+                const disabled = selected.kind === "HOUSEHOLD" || !canManage || saving;
+                return (
+                  <div key={m.userId} className="lrow">
+                    <Avatar name={m.displayName} />
+                    <span className="rt">
+                      <span className="nm">{m.displayName}</span>
+                    </span>
+                    {(saving || m.syncState === "pending") && (
+                      <span className="rmeta" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                        <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                        {COPY.syncingShort}
+                      </span>
+                    )}
+                    {!saving && m.syncState === "failed" && (
+                      <span className="rmeta" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--brand)" }}>
+                        <AlertTriangle size={12} aria-hidden="true" />
+                        {COPY.retrying}
+                      </span>
+                    )}
+                    <select
+                      aria-label={`Rights for ${m.displayName}`}
+                      value={m.right}
+                      disabled={disabled}
+                      onChange={(e) => handleRightChange(m.userId, e.target.value as DepartmentRight)}
+                      className="dp-input"
+                      style={{ ...fieldStyle, width: "auto", height: 32, padding: "0 10px" }}
+                    >
+                      {RIGHTS.map((r) => (
+                        <option key={r} value={r}>
+                          {RIGHT_LABEL[r]}
+                        </option>
+                      ))}
+                    </select>
+                    {canManage && selected.kind !== "HOUSEHOLD" && (
+                      <button
+                        type="button"
+                        onClick={() => setRemoveTarget({ userId: m.userId, displayName: m.displayName })}
+                        aria-label={`Remove ${m.displayName} from ${selected.name}`}
+                        className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {(detail?.members ?? []).length === 0 && (
+                <div className="empty" style={{ padding: "24px 16px" }}>No members yet.</div>
+              )}
+            </div>
+
+            {canManage && selected.kind !== "HOUSEHOLD" && availablePeople.length > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--card-bd)" }}>
+                <select
+                  aria-label="Person to add"
+                  value={addMemberUserId}
+                  onChange={(e) => setAddMemberUserId(e.target.value)}
+                  className="dp-input"
+                  style={{ ...fieldStyle, flex: 1, height: 34, padding: "0 10px" }}
+                >
+                  <option value="">Add a person…</option>
+                  {availablePeople.map((p) => (
+                    <option key={p.userId!} value={p.userId!}>
+                      {p.displayName || p.id}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Rights for new member"
+                  value={addMemberRight}
+                  onChange={(e) => setAddMemberRight(e.target.value as DepartmentRight)}
+                  className="dp-input"
+                  style={{ ...fieldStyle, width: "auto", height: 34, padding: "0 10px" }}
+                >
+                  {RIGHTS.map((r) => (
+                    <option key={r} value={r}>
+                      {RIGHT_LABEL[r]}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn primary sm"
+                  onClick={handleAddMember}
+                  disabled={!addMemberUserId || addMemberBusy}
+                >
+                  <UserPlus size={13} /> Add
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {renderCreateDialog()}
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onConfirm={performRemoveMember}
+        onCancel={() => setRemoveTarget(null)}
+        title="Remove member?"
+        description={removeTarget ? COPY.removeConfirm(removeTarget.displayName, libraryLabel) : ""}
+        confirmLabel="Remove"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={archiveTarget !== null}
+        onConfirm={performArchive}
+        onCancel={() => setArchiveTarget(null)}
+        title={archiveTarget ? `Archive ${archiveTarget.name}?` : "Archive department?"}
+        description={COPY.archiveBody}
+        confirmLabel="Archive"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={restoreTarget !== null}
+        onConfirm={performRestore}
+        onCancel={() => setRestoreTarget(null)}
+        title={restoreTarget ? `Restore ${restoreTarget.name}?` : "Restore department?"}
+        description={COPY.restoreBody}
+        confirmLabel="Restore"
+        variant="neutral"
+      />
+    </div>
+  );
+
+  function renderCreateDialog() {
+    const headingLabel = createParent ? `New team in ${createParent.name}` : "New department";
+    return (
+      <Dialog
+        open={createOpen}
+        onClose={closeCreate}
+        triggerRef={createTriggerRef}
+        labelledBy={createHeadingId}
+        maxWidth="sm"
+      >
+        <div className="space-y-3">
+          <h2 id={createHeadingId} className="type-headline" style={{ color: "var(--text)" }}>
+            {headingLabel}
+          </h2>
+          <div>
+            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+              Name
+            </label>
+            <input
+              autoFocus
+              value={createName}
+              onChange={(e) => setCreateName(e.target.value)}
+              placeholder={createParent ? "Platform" : "Finance"}
+              className="w-full px-3 py-2.5 outline-none transition-colors"
+              style={fieldStyle}
+            />
+            {createName.trim() && (
+              <p className="dslug type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
+                <span className="mono">
+                  {createParent ? `${createParent.slug}-` : ""}
+                  <b style={{ color: "var(--brand)" }}>{slugPreview(createName)}</b>
+                </span>
+              </p>
+            )}
+          </div>
+          <div>
+            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+              Description (optional)
+            </label>
+            <input
+              value={createDescription}
+              onChange={(e) => setCreateDescription(e.target.value)}
+              className="w-full px-3 py-2.5 outline-none transition-colors"
+              style={fieldStyle}
+            />
+          </div>
+          <div>
+            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+              Storage quota (optional)
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                type="number"
+                min={0}
+                step="any"
+                inputMode="decimal"
+                value={createQuota.value}
+                onChange={(e) => setCreateQuota((q) => ({ ...q, value: e.target.value }))}
+                placeholder="No limit"
+                aria-label="Quota amount"
+                className="flex-1 px-3 py-2.5 outline-none transition-colors"
+                style={fieldStyle}
+              />
+              <select
+                value={createQuota.unit}
+                onChange={(e) => setCreateQuota((q) => ({ ...q, unit: e.target.value as StorageUnit }))}
+                aria-label="Quota unit"
+                className="px-2.5 py-2.5 outline-none transition-colors"
+                style={fieldStyle}
+              >
+                <option value="GB">GB</option>
+                <option value="TB">TB</option>
+              </select>
+            </div>
+          </div>
+          {createError && (
+            <p role="alert" className="type-footnote text-system-red">
+              {createError}
+            </p>
+          )}
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onClick={closeCreate} className="btn ghost" disabled={createBusy}>
+              Cancel
+            </button>
+            <button type="button" onClick={handleCreateSubmit} className="btn primary" disabled={createBusy}>
+              {createBusy ? "Creating…" : createParent ? "Create team" : "Create department"}
+            </button>
+          </div>
+        </div>
+      </Dialog>
+    );
+  }
+}

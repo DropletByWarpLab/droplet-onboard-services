@@ -81,6 +81,35 @@ function mkUser(role: Role, id = `user-${role}`): AuthUser {
 }
 
 /**
+ * Build a mock kind=HOUSEHOLD department row (mirrors the seed shape from
+ * WARP-1263). Household membership AND rights are immutable across all three
+ * verbs — see the HOUSEHOLD guards in routes/departments.ts (WARP-1263 PATCH,
+ * WARP-1295 POST/DELETE).
+ */
+function mkHouseholdDept() {
+  return {
+    id: "household-1",
+    name: "Household",
+    slug: "household",
+    kind: "HOUSEHOLD",
+    parentId: null,
+    state: "active",
+    quotaBytes: null,
+    ncGroupRw: "household",
+    ncGroupRo: null,
+    ncGroupfolderId: 1,
+    description: "Legacy household",
+    createdBy: "system",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    archivedAt: null,
+    aclVersion: 0,
+    provisionError: null,
+    syncError: null,
+  };
+}
+
+/**
  * Helper to create a mock Prisma client for testing.
  * Tracks created departments and teams in memory.
  */
@@ -233,6 +262,21 @@ function createMockPrisma(): PrismaClient & {
       }),
 
       deleteMany: vi.fn(async () => ({ count: 0 })),
+
+      // WARP-1270 (T18): the GET /api/departments list route now reads the
+      // caller's own memberships (myRight + non-admin scoping). Filters on
+      // whatever subset of {userId, departmentId} the caller's `where`
+      // supplies — every call site in departments.ts uses one or the other.
+      findMany: vi.fn(async (query?: any) => {
+        let results = Array.from(memberships.values());
+        if (query?.where?.userId) {
+          results = results.filter((m) => m.userId === query.where.userId);
+        }
+        if (query?.where?.departmentId) {
+          results = results.filter((m) => m.departmentId === query.where.departmentId);
+        }
+        return results;
+      }),
     },
 
     $transaction: vi.fn(async (fn: (tx: any) => Promise<any>) => {
@@ -649,6 +693,68 @@ describe("departments CRUD routes (WARP-1258)", () => {
       // Verify the membership was not changed
       const membership = prisma._memberships.get(memberId);
       expect(membership.right).toBe("contributor");
+    });
+  });
+
+  describe("POST /api/departments/:id/members — HOUSEHOLD guard (WARP-1295)", () => {
+    it("rejects adding a member to a HOUSEHOLD department", async () => {
+      const owner = mkUser("owner");
+      const app = buildDeptApp(prisma, owner);
+
+      const householdDept = mkHouseholdDept();
+      prisma._departments.set(householdDept.id, householdDept);
+
+      const membershipsBefore = prisma._memberships.size;
+
+      const res = await request(app)
+        .post(`/api/departments/${householdDept.id}/members`)
+        .send({
+          userId: "11111111-1111-1111-1111-111111111111",
+          right: "contributor",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("HOUSEHOLD_MEMBERSHIP_IMMUTABLE");
+      expect(res.body.error).toContain("Household");
+
+      // No membership row was created — the delete-then-re-add bypass of the
+      // WARP-1263 immutability invariant is closed.
+      expect(prisma._memberships.size).toBe(membershipsBefore);
+    });
+  });
+
+  describe("DELETE /api/departments/:id/members/:userId — HOUSEHOLD guard (WARP-1295)", () => {
+    it("rejects removing a member from a HOUSEHOLD department", async () => {
+      const owner = mkUser("owner");
+      const app = buildDeptApp(prisma, owner);
+
+      const householdDept = mkHouseholdDept();
+      prisma._departments.set(householdDept.id, householdDept);
+
+      // A role-driven household membership (seeded, syncState=synced).
+      const memberId = "household-family-1";
+      prisma._memberships.set(memberId, {
+        id: memberId,
+        departmentId: householdDept.id,
+        userId: "family-user",
+        right: "contributor",
+        syncState: "synced",
+        ncPermissionMask: 31,
+        grantedBy: "system",
+        grantedAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const res = await request(app).delete(
+        `/api/departments/${householdDept.id}/members/family-user`,
+      );
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("HOUSEHOLD_MEMBERSHIP_IMMUTABLE");
+      expect(res.body.error).toContain("Household");
+
+      // The membership was not removed.
+      expect(prisma._memberships.get(memberId)).toBeDefined();
     });
   });
 });

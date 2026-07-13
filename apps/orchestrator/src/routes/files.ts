@@ -31,8 +31,11 @@ import {
   ncDeleteShare,
   ncListSharedWithMe,
   ncListOutboundShares,
+  ncListMyShares,
+  ncGetShare,
   ncDirExists,
   NextcloudOcsError,
+  type ShareDetail,
 } from "../services/nextcloud.client.js";
 import {
   sendShareNotificationEmail,
@@ -64,16 +67,44 @@ import {
   resolveFileDepartment,
   upsertFileRegistryEntry,
 } from "../services/file-registry.service.js";
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 
 const logger = pino({ name: "files-route" });
 
 const CACHE_PREFIX = "files:list:";
 const CACHE_TTL = 10;
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: config.MAX_UPLOAD_SIZE_MB * 1024 * 1024 },
-});
+const MEMORY_STORAGE = multer.memoryStorage();
+
+/**
+ * WARP-1271 (T19a) — per-user upload cap. `UserUsagePolicy.maxUploadSizeMb`
+ * (when set) tightens `config.MAX_UPLOAD_SIZE_MB` for the authenticated
+ * caller; it can only shrink the ceiling, never raise it (min(), never a
+ * bypass). `Infinity` means "no policy override" — min() then resolves to
+ * the config default. One indexed `findUnique` per request (no cross-
+ * request cache — the brief's "cache per-request only" is naturally true
+ * here since this runs once per upload call, not per file).
+ */
+async function resolveUploadLimitMb(
+  prisma: PrismaClient,
+  userId: string | undefined,
+): Promise<number> {
+  if (!userId) return config.MAX_UPLOAD_SIZE_MB;
+  try {
+    const policy = await prisma.userUsagePolicy.findUnique({
+      where: { userId },
+      select: { maxUploadSizeMb: true },
+    });
+    const override = policy?.maxUploadSizeMb;
+    if (override != null && override > 0) {
+      return Math.min(config.MAX_UPLOAD_SIZE_MB, override);
+    }
+  } catch (err) {
+    logger.warn({ err, userId }, "upload: usage-policy lookup failed; using config default");
+  }
+  return config.MAX_UPLOAD_SIZE_MB;
+}
 
 /**
  * Resolve the Nextcloud credential for this request. For JWT sessions the
@@ -275,6 +306,54 @@ async function rootForSpace(prisma: PrismaClient, space: Space, requestedPath: s
 }
 
 /**
+ * WARP-1267 — active department/team mount names visible to this caller,
+ * used ONLY to extend the personal-root hide-filter below: Nextcloud mounts
+ * every groupfolder (Household, and now each dept/team) as a top-level entry
+ * inside the caller's own home, the same reason Household has always been
+ * hidden there (WARP-883) — without this, a dept/team library would show up
+ * TWICE in My Files once departments exist. Mirrors the visibility rule in
+ * GET /api/files/spaces (member OR owner/admin see-all).
+ */
+async function activeDeptMountNames(
+  prisma: PrismaClient,
+  userId: string,
+  isOwnerOrAdmin: boolean
+): Promise<string[]> {
+  // Best-effort: a Department lookup failure must never break the primary
+  // "list my files" request — fail open (nothing extra hidden) rather than
+  // 500, same posture as the sharedAvailable probe above.
+  try {
+    const depts = await prisma.department.findMany({
+      where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
+      select: {
+        name: true,
+        kind: true,
+        parentId: true,
+        memberships: { where: { userId }, select: { id: true } },
+      },
+    });
+
+    const names: string[] = [];
+    for (const dept of depts) {
+      if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
+      if (dept.kind === "TEAM" && dept.parentId) {
+        const parent = await prisma.department.findUnique({
+          where: { id: dept.parentId },
+          select: { name: true },
+        });
+        names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
+      } else {
+        names.push(dept.name);
+      }
+    }
+    return names;
+  } catch (err) {
+    logger.warn({ err, userId }, "activeDeptMountNames: department lookup failed; not hiding any dept mounts");
+    return [];
+  }
+}
+
+/**
  * WARP-938 (security): true iff `requested` is a home-relative path with no
  * `..` traversal segment.
  *
@@ -397,51 +476,124 @@ function unionContentAndNameHits(
 /**
  * WARP-1140 — index owner of shared "Household" (groupfolder) chunks.
  *
- * The file-indexer physically watches `__groupfolders/<id>/…` (groupfolder
+ * The file-indexer physically watches `__groupfolders/{id}/…` (groupfolder
  * content never lives under any user's home dir) and writes those chunks
  * under this sentinel userId with a `/<SHARED_FOLDER_NAME>/…` display path —
- * the same path each member sees in their own WebDAV home. Content search
- * includes this corpus only for users who actually have the shared space
- * mounted (see `householdSearchUserIds`). Must match the file-indexer's
- * `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
+ * the same path each member sees in their own WebDAV home. Must match the
+ * file-indexer's `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
  */
 const HOUSEHOLD_INDEX_USER = "__household__";
-/** Cache TTL for the per-user shared-space membership probe (seconds). */
-const HOUSEHOLD_MEMBER_TTL = 300;
 
 /**
- * WARP-1140 — resolve which FileContentChunk owners this request may search:
- * always the user's own corpus, plus the shared Household corpus iff the
- * shared groupfolder is mounted in THEIR home (same `ncDirExists` probe as
- * GET /api/files/spaces, cached to keep type-ahead search off WebDAV).
- *
- * Best-effort by design: any failure (no NC session, Nextcloud down) means
- * "personal only" — content search must keep its pre-WARP-1140 behaviour of
- * never failing just because the membership probe can't run.
+ * WARP-1264 — department chunk-corpus sentinel. The file-indexer emits
+ * chunks for a non-household groupfolder-backed department under this
+ * sentinel userId (services/file-indexer/watcher.py
+ * `_lookup_department_for_groupfolder`).
  */
-async function householdSearchUserIds(
+function deptSentinel(departmentId: string): string {
+  return `__dept_${departmentId}__`;
+}
+
+/** Corpus resolution result: the FileContentChunk `userId` list this caller
+ * may search, plus the max `aclVersion` across their visible departments
+ * (folded into the search cache key so a rights/membership change can never
+ * serve a stale cached result — see `deptSearchCorpora`). */
+interface DeptSearchCorpora {
+  corpora: string[];
+  aclVersion: number;
+}
+
+/**
+ * WARP-1264 — resolve which caller (local User id + role) this request
+ * acts as. For the trusted MCP service principal, swaps in the asserted NC
+ * user's LOCAL identity (same pattern as `middleware/space.ts`'s
+ * `_service:mcp` handling) — the service principal's own `role: "service"`
+ * must never be used for a department-membership decision. Returns null
+ * when no caller identity can be resolved (fail-closed → personal corpus
+ * only).
+ */
+async function resolveSearchCaller(
   req: Request,
+  prisma: PrismaClient,
+): Promise<{ id: string; role: string } | null> {
+  if (isMcpService(req)) {
+    const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!assertedNcUser) return null;
+    const localUser = await prisma.user.findUnique({
+      where: { nextcloudUsername: assertedNcUser },
+      select: { id: true, role: true },
+    });
+    return localUser ? { id: localUser.id, role: localUser.role } : null;
+  }
+  const id = req.user?.id;
+  const role = req.user?.role;
+  if (!id || !role) return null;
+  return { id, role };
+}
+
+/**
+ * WARP-1264 — resolve which FileContentChunk owners this request may
+ * search: always the user's own corpus, plus one `__dept_<uuid>__` sentinel
+ * per ACTIVE department the caller is visible into — owner/admin see ALL
+ * active departments (audited "see-all", same posture as
+ * `checkSpaceAccess`); everyone else sees only their own active
+ * `DepartmentMembership` rows.
+ *
+ * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
+ * among the caller's visible departments, BOTH the legacy `__household__`
+ * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
+ * under either form (old watcher builds vs. WARP-1264 builds) stays
+ * searchable without a reindex.
+ *
+ * No WebDAV probes — membership is read straight from Postgres (the
+ * `?space=` middleware's ONE-`findUnique`-per-space philosophy, but
+ * aggregated for the whole visible set in a single query here).
+ *
+ * Best-effort by design: any failure (no session, DB hiccup) means
+ * "personal only" — content search must never fail outright just because
+ * the corpus lookup can't run.
+ */
+async function deptSearchCorpora(
+  req: Request,
+  prisma: PrismaClient,
   user: string,
-): Promise<string[]> {
-  const cacheKey = `filesearch:household-member:${user}`;
+): Promise<DeptSearchCorpora> {
   try {
-    const cached = await cacheGet<boolean>(cacheKey);
-    if (cached !== null && cached !== undefined) {
-      return cached ? [user, HOUSEHOLD_INDEX_USER] : [user];
+    const caller = await resolveSearchCaller(req, prisma);
+    if (!caller) return { corpora: [user], aclVersion: 0 };
+
+    const isOwnerOrAdmin = caller.role === "owner" || caller.role === "admin";
+    type VisibleDept = { id: string; kind: string; aclVersion: number };
+    let depts: VisibleDept[];
+    if (isOwnerOrAdmin) {
+      depts = await prisma.department.findMany({
+        where: { state: "active" },
+        select: { id: true, kind: true, aclVersion: true },
+      });
+    } else {
+      const memberships = await prisma.departmentMembership.findMany({
+        where: { userId: caller.id, department: { state: "active" } },
+        select: { department: { select: { id: true, kind: true, aclVersion: true } } },
+      });
+      depts = memberships.map((m) => m.department);
     }
-    const isMember = await ncDirExists(
-      await getToken(req),
-      user,
-      SHARED_FOLDER_PATH,
-    );
-    await cacheSet(cacheKey, isMember, HOUSEHOLD_MEMBER_TTL);
-    return isMember ? [user, HOUSEHOLD_INDEX_USER] : [user];
+
+    const corpora = [user];
+    let aclVersion = 0;
+    for (const dept of depts) {
+      if (dept.aclVersion > aclVersion) aclVersion = dept.aclVersion;
+      if (dept.kind === "HOUSEHOLD") {
+        corpora.push(HOUSEHOLD_INDEX_USER);
+      }
+      corpora.push(deptSentinel(dept.id));
+    }
+    return { corpora, aclVersion };
   } catch (err) {
     logger.debug(
       { err },
-      "householdSearchUserIds: membership probe failed; personal corpus only",
+      "deptSearchCorpora: department lookup failed; personal corpus only",
     );
-    return [user];
+    return { corpora: [user], aclVersion: 0 };
   }
 }
 
@@ -1210,11 +1362,28 @@ export function createFilesRouter(
   );
 
   // ── Multer error handler ──
-  function handleUpload(req: Request, res: Response, next: NextFunction) {
-    upload.array("files", 20)(req, res, (err) => {
+  // WARP-1271 (T19a): the per-request file-size limit is resolved from the
+  // caller's UserUsagePolicy BEFORE constructing the multer instance —
+  // multer's `limits` are fixed at construction, so a per-user cap means a
+  // per-request multer(), not a shared module-level one. LIMIT_FILE_SIZE
+  // gets an honest 413 (was 400) naming the ACTUAL limit that applied,
+  // which may be tighter than config.MAX_UPLOAD_SIZE_MB.
+  async function handleUpload(req: Request, res: Response, next: NextFunction) {
+    const userId = (req as { user?: { id?: string } }).user?.id;
+    const limitMb = await resolveUploadLimitMb(prisma, userId);
+    const scopedUpload = multer({
+      storage: MEMORY_STORAGE,
+      limits: { fileSize: limitMb * 1024 * 1024 },
+    });
+    scopedUpload.array("files", 20)(req, res, (err) => {
       if (err instanceof MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(413).json({
+            error: `File too large (max ${limitMb}MB for your account)`,
+          });
+          return;
+        }
         const messages: Record<string, string> = {
-          LIMIT_FILE_SIZE: `File too large (max ${config.MAX_UPLOAD_SIZE_MB}MB)`,
           LIMIT_FILE_COUNT: "Too many files (max 20)",
           LIMIT_UNEXPECTED_FILE: 'Unexpected field name (use "files")',
         };
@@ -1279,12 +1448,22 @@ export function createFilesRouter(
       }
 
       const raw = await ncListFiles(await getToken(req), user, filePath);
-      // Hide the shared-folder mount from the personal home root only — a
-      // subfolder elsewhere (or inside the shared space) that happens to share
-      // the name must NOT be filtered.
-      const entries = isPersonalRoot
-        ? raw.filter((e) => e.name !== SHARED_FOLDER_NAME)
-        : raw;
+      // Hide the shared-folder AND any active dept/team groupfolder mount
+      // from the personal home root only (WARP-1267) — a subfolder elsewhere
+      // (or inside the shared/dept space itself) that happens to share the
+      // name must NOT be filtered.
+      let entries = raw;
+      if (isPersonalRoot) {
+        const userId = req.user?.id;
+        const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
+        const hideNames = new Set([SHARED_FOLDER_NAME]);
+        if (userId) {
+          for (const name of await activeDeptMountNames(prisma, userId, isOwnerOrAdmin)) {
+            hideNames.add(name);
+          }
+        }
+        entries = raw.filter((e) => !hideNames.has(e.name));
+      }
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
@@ -1351,7 +1530,12 @@ export function createFilesRouter(
       // state=active AND caller is owner/admin OR has membership.
       const isOwnerOrAdmin = req.user?.role === "owner" || req.user?.role === "admin";
 
-      let deptQuery = prisma.department.findMany({
+      // WARP-1267: memberships are ALWAYS selected (not gated on role) so the
+      // response can tell an admin-see-all visit ("I can see this because
+      // I'm an admin") apart from an actual membership ("I'm a member here")
+      // — the `isMember` flag the Files UI needs to drive the admin
+      // foreign-library banner (brief §2).
+      const deptQuery = prisma.department.findMany({
         where: {
           kind: { in: ["DEPARTMENT", "TEAM"] },
           state: "active",
@@ -1361,12 +1545,10 @@ export function createFilesRouter(
           name: true,
           parentId: true,
           kind: true,
-          memberships: isOwnerOrAdmin
-            ? false
-            : {
-                where: { userId },
-                select: { right: true },
-              },
+          memberships: {
+            where: { userId },
+            select: { right: true },
+          },
         },
         orderBy: { createdAt: "asc" },
       });
@@ -1374,14 +1556,19 @@ export function createFilesRouter(
       const depts = await deptQuery;
 
       for (const dept of depts) {
-        // Check membership: skip if not owner/admin and not a member.
-        if (!isOwnerOrAdmin) {
-          const membershipArray = (dept.memberships as any) || [];
-          if (membershipArray.length === 0) continue; // Not a member, skip.
-        }
+        const membershipArray = dept.memberships;
+        const isMember = membershipArray.length > 0;
+
+        // Not owner/admin and not a member → not visible, skip entirely.
+        if (!isOwnerOrAdmin && !isMember) continue;
 
         // Resolve the mount point: DEPARTMENT → name; TEAM → "Parent — Team".
+        // parentName is also threaded through for kind=TEAM so the dashboard
+        // can render the "<Department> / <Team>" breadcrumb crumb without a
+        // second lookup — the UI owns this hierarchy illusion since NC mounts
+        // team libraries flat (2026-07-11 amendment, ADR-029 §D-3).
         let mountName = dept.name;
+        let parentName: string | undefined;
         if (dept.kind === "TEAM" && dept.parentId) {
           const parent = await prisma.department.findUnique({
             where: { id: dept.parentId },
@@ -1389,11 +1576,16 @@ export function createFilesRouter(
           });
           if (parent) {
             mountName = `${parent.name} — ${dept.name}`;
+            parentName = parent.name;
           }
         }
 
-        const membershipArray = (dept.memberships as any) || [];
         const membershipRight = membershipArray[0]?.right;
+        // A member's own right always wins; an owner/admin visiting a
+        // library they're not a member of gets the implicit see-all right
+        // (they already short-circuit-pass `requireSpaceAccess` at manager
+        // level — §3.1) so the switcher can still show a rights chip.
+        const right = isMember ? membershipRight : isOwnerOrAdmin ? "manager" : undefined;
 
         spaces.push({
           id: `dept:${dept.id}`,
@@ -1401,7 +1593,9 @@ export function createFilesRouter(
           root: `/${mountName}`,
           kind: dept.kind === "TEAM" ? "team" : "department",
           state: "active",
-          right: isOwnerOrAdmin ? undefined : membershipRight,
+          right,
+          isMember,
+          ...(parentName ? { parentName } : {}),
         });
       }
 
@@ -1621,7 +1815,23 @@ export function createFilesRouter(
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
   // expireDate / password / note / shareWith). Callers that pass only `path`
   // get a public read-only link from the defaults.
-  router.post("/files/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // WARP-1269 (T17): `?space=`/body `space` threading for department/household
+  // content. Personal shares (no space, or `space: "personal"`) are
+  // COMPLETELY UNTOUCHED — same caller-token OCS call, same response, same
+  // audit row shape as before this ticket. A dept/household space requires
+  // `manager` right (requireSpaceAccess below) and, once past the gate, the
+  // OCS share is minted with the NC ADMIN credential (department members
+  // other than the manager themselves are not necessarily NC users with
+  // sharing rights on the groupfolder-mounted path) — never the caller's own
+  // token for that branch. On OCS success a `DepartmentShare` registry row is
+  // written for authz/audit on later PUT/DELETE and the "shared by me" list;
+  // on OCS failure no row is written and the error surfaces honestly.
+  router.post(
+    "/files/share",
+    requireRole("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "manager", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -1644,7 +1854,22 @@ export function createFilesRouter(
         return;
       }
 
-      const share = await ncCreateShareV2(await getToken(req), parsed.data.path, {
+      // WARP-938 (security): same traversal guard the other space-threaded
+      // write routes apply BEFORE the space prefix goes on — doubly
+      // important here since the dept branch below mints the share with the
+      // NC ADMIN credential, so a `..` escape would be a privilege
+      // escalation, not just a wrong-folder mistake.
+      if (!isSafeUserPath(parsed.data.path)) {
+        res.status(400).json({ error: "path must not contain '..' segments" });
+        return;
+      }
+
+      const space = resolveSpace(spaceQueryOrBody(req));
+      const targetPath = await rootForSpace(prisma, space, parsed.data.path);
+      const departmentId = req.spaceDepartmentId ?? null;
+      const shareToken = departmentId ? adminBasicToken() : await getToken(req);
+
+      const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
         permissions: parsed.data.permissions,
         expireDate: parsed.data.expireDate,
@@ -1652,6 +1877,18 @@ export function createFilesRouter(
         note: parsed.data.note,
         shareWith: parsed.data.shareWith,
       });
+
+      if (departmentId) {
+        await prisma.departmentShare.create({
+          data: {
+            departmentId,
+            ncShareId: share.id,
+            createdById: req.user!.id,
+            shareType: parsed.data.shareType,
+            path: parsed.data.path,
+          },
+        });
+      }
 
       // WARP-237: share creation is a mandatory-emit privileged action.
       // NEVER put the share password in refs.
@@ -1668,6 +1905,7 @@ export function createFilesRouter(
           shareWith: parsed.data.shareWith ?? null,
           expireDate: parsed.data.expireDate ?? null,
           passwordProtected: parsed.data.password !== undefined,
+          departmentId: departmentId ?? null,
         },
         actor: actorFromRequest(req),
       });
@@ -2389,6 +2627,59 @@ export function createFilesRouter(
     }
   });
 
+  /**
+   * WARP-1269 (T17): shared PUT/DELETE authz + credential resolution for
+   * `/files/share/:id`. A `shareId` with a `DepartmentShare` registry row
+   * was minted with the ADMIN credential (the manager-share path above) —
+   * mutating it must use that same credential, and the caller must be
+   * either the row's creator, an owner/admin, or a manager (own- or
+   * parent-department, via `departmentManagerOrAdmin`) of that department.
+   * A `shareId` with NO registry row is an ordinary personal share:
+   * completely unchanged from pre-T17 behavior — the caller's own token,
+   * no extra authz beyond the existing `requireRole` gate.
+   *
+   * On denial this writes the 403 response itself (audited via
+   * `recordAccessDenied`, matching the space-middleware convention) and
+   * returns `{ ok: false }`; callers MUST stop processing.
+   */
+  async function resolveShareMutationAuth(
+    req: Request,
+    res: Response,
+    shareId: number
+  ): Promise<
+    | { ok: true; token: string; deptRow: { departmentId: string } | null }
+    | { ok: false }
+  > {
+    const deptRow = await prisma.departmentShare.findUnique({
+      where: { ncShareId: shareId },
+      select: { departmentId: true, createdById: true },
+    });
+    if (!deptRow) {
+      return { ok: true, token: await getToken(req), deptRow: null };
+    }
+
+    const caller = req.user;
+    if (!caller) {
+      recordAccessDenied(req, "share-no-session");
+      res.status(403).json({ error: "Forbidden: no session" });
+      return { ok: false };
+    }
+
+    const isCreator = deptRow.createdById === caller.id;
+    const isPrivileged =
+      isCreator ||
+      caller.role === "owner" ||
+      caller.role === "admin" ||
+      (await departmentManagerOrAdmin(prisma, deptRow.departmentId, caller));
+    if (!isPrivileged) {
+      recordAccessDenied(req, "share-not-authorized");
+      res.status(403).json({ error: "Forbidden: not authorized to modify this share" });
+      return { ok: false };
+    }
+
+    return { ok: true, token: adminBasicToken(), deptRow: { departmentId: deptRow.departmentId } };
+  }
+
   // ── Update existing share (PUT /api/files/share/:id) ──
   router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
@@ -2420,7 +2711,10 @@ export function createFilesRouter(
         });
         return;
       }
-      const token = await getToken(req);
+
+      const auth = await resolveShareMutationAuth(req, res, shareId);
+      if (!auth.ok) return;
+      const { token } = auth;
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
@@ -2449,7 +2743,31 @@ export function createFilesRouter(
         res.status(400).json({ error: "Invalid share id" });
         return;
       }
-      await ncDeleteShare(await getToken(req), shareId);
+
+      const auth = await resolveShareMutationAuth(req, res, shareId);
+      if (!auth.ok) return;
+      const { token, deptRow } = auth;
+
+      await ncDeleteShare(token, shareId);
+
+      if (deptRow) {
+        // WARP-1269 (T17): keep the row for audit/"shared by me" history —
+        // revoke, don't delete.
+        await prisma.departmentShare.update({
+          where: { ncShareId: shareId },
+          data: { revokedAt: new Date() },
+        });
+        await recordActivity({
+          kind: "file",
+          severity: "info",
+          sourceIcon: "share-2",
+          what: "Share revoked",
+          sub: String(shareId),
+          refs: { shareId, departmentId: deptRow.departmentId },
+          actor: actorFromRequest(req),
+        });
+      }
+
       res.json({ deleted: shareId });
     } catch (err) {
       handleFileError(err, res, next);
@@ -2479,6 +2797,42 @@ export function createFilesRouter(
     try {
       const shares = await ncListOutboundShares(await getToken(req));
       res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next, { shares: [] });
+    }
+  });
+
+  // ── Shared-by-me outbox (GET /api/files/shared-by-me) ──
+  //
+  // WARP-1269 (T17): personal shares the caller owns (OCS, caller's own
+  // token, no path filter) UNION the caller's non-revoked `DepartmentShare`
+  // registry rows (admin-minted manager shares), each rehydrated to the same
+  // `ShareDetail` wire shape via the admin credential — the registry row
+  // itself only carries the id/department/audit fields, not live share
+  // state (permissions/expiry/password), so live OCS state is the source of
+  // truth for what's rendered. A department share whose live OCS record is
+  // gone (deleted directly in Nextcloud, out of band) is silently dropped
+  // rather than surfaced as a broken row.
+  router.get("/files/shared-by-me", async (req, res, next) => {
+    try {
+      const callerId = req.user?.id ?? "";
+      const [personalShares, deptRows] = await Promise.all([
+        ncListMyShares(await getToken(req)),
+        callerId
+          ? prisma.departmentShare.findMany({
+              where: { createdById: callerId, revokedAt: null },
+              select: { ncShareId: true },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const deptShares: ShareDetail[] = [];
+      for (const row of deptRows) {
+        const detail = await ncGetShare(adminBasicToken(), row.ncShareId);
+        if (detail) deptShares.push(detail);
+      }
+
+      res.json({ shares: [...personalShares, ...deptShares] });
     } catch (err) {
       handleFileError(err, res, next, { shares: [] });
     }
@@ -2590,18 +2944,24 @@ export function createFilesRouter(
         return;
       }
 
-      // WARP-1140: which chunk corpora this user may search — their own,
-      // plus the shared Household corpus when the shared space is mounted
-      // for them. Best-effort (personal-only on any probe failure) so this
-      // never introduces a new failure mode into search.
-      const searchUserIds = await householdSearchUserIds(req, user);
+      // WARP-1264: which chunk corpora this user may search — their own,
+      // plus one sentinel per ACTIVE department they're visible into
+      // (owner/admin see all). Best-effort (personal-only on any lookup
+      // failure) so this never introduces a new failure mode into search.
+      const { corpora: searchUserIds, aclVersion } = await deptSearchCorpora(
+        req,
+        prisma,
+        user,
+      );
       const additionalUserIds = searchUserIds.slice(1);
 
       // Check Redis cache first (60s TTL on identical queries). The mode is
       // part of the key so keyword/semantic/hybrid results never collide.
-      // WARP-1140: the corpus list is part of the key so a household
-      // membership change never serves the other scope's cached results.
-      const cacheKey = `filesearch:${mode}:${searchUserIds.join(",")}:${q}:${limit}`;
+      // WARP-1264: the corpus list AND the max aclVersion across the
+      // caller's visible departments are part of the key, so neither a
+      // membership change nor a rights change on an unchanged corpus set
+      // can ever serve a stale cached result.
+      const cacheKey = `filesearch:${mode}:v${aclVersion}:${searchUserIds.join(",")}:${q}:${limit}`;
       const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
       if (cached) {
         res.json({ results: cached });
@@ -2811,9 +3171,11 @@ export function createFilesRouter(
   router.get("/files/search/status", async (req, res, next) => {
     try {
       const user = getUser(req);
-      // WARP-1140: same corpus rule as content search — own chunks plus the
-      // Household corpus when the shared space is mounted for this user.
-      const searchUserIds = await householdSearchUserIds(req, user);
+      // WARP-1264: same corpus rule as content search — own chunks plus one
+      // sentinel per ACTIVE department the caller is visible into
+      // (owner/admin see all, an audited see-all consistent with
+      // `checkSpaceAccess`).
+      const { corpora: searchUserIds } = await deptSearchCorpora(req, prisma, user);
 
       // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
       // which reflects the latest init attempt; a hot reload from "down"

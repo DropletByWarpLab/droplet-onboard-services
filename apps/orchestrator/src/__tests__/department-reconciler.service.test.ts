@@ -18,6 +18,7 @@ const {
   gfSetQuotaMock,
   ncAddUserToGroupMock,
   ncRemoveUserFromGroupMock,
+  ncListGroupMembersMock,
   recordActivityMock,
 } = vi.hoisted(() => ({
   ncEnsureGroupMock: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +31,10 @@ const {
   gfSetQuotaMock: vi.fn().mockResolvedValue(undefined),
   ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
   ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
+  // WARP-1274 (T21): drift-overwrite reads actual NC group membership via
+  // ncListGroupMembers. Default empty — "no drift" — so every pre-existing
+  // spec in this file (none of which seed NC-side members) is unaffected.
+  ncListGroupMembersMock: vi.fn().mockResolvedValue([]),
   recordActivityMock: vi.fn().mockResolvedValue(null),
 }));
 
@@ -47,6 +52,7 @@ vi.mock("../services/nextcloud-groups.client.js", () => ({
   gfSetQuota: gfSetQuotaMock,
   ncAddUserToGroup: ncAddUserToGroupMock,
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
+  ncListGroupMembers: ncListGroupMembersMock,
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({
@@ -191,14 +197,30 @@ function buildPrisma(
       ),
     },
     departmentMembership: {
+      // Two call shapes share this mock:
+      //   1. sweepMemberships:            where: { syncState: { in: [...] } }
+      //   2. removeDriftedGroupMembers:   where: { departmentId, syncState: "synced" }
+      // (WARP-1274/T21 — the drift-overwrite pass added shape 2.)
       findMany: vi.fn(
         async ({
           where,
         }: {
-          where: { syncState: { in: string[] } };
+          where:
+            | { syncState: { in: string[] } }
+            | { departmentId: string; syncState: string };
         }) => {
+          if (typeof where.syncState === "string") {
+            const { departmentId, syncState } = where as {
+              departmentId: string;
+              syncState: string;
+            };
+            return [...memRows.values()]
+              .filter((m) => m.departmentId === departmentId && m.syncState === syncState)
+              .map((m) => ({ ...m }));
+          }
+          const { in: states } = where.syncState as { in: string[] };
           return [...memRows.values()]
-            .filter((m) => where.syncState.in.includes(m.syncState))
+            .filter((m) => states.includes(m.syncState))
             .map((m) => ({ ...m }));
         },
       ),
@@ -234,6 +256,15 @@ function buildPrisma(
         },
       ),
     },
+    // WARP-1271 (T19a): reconcileDepartments() also sweeps UserUsagePolicy
+    // rows (usage-policy-reconciler.service.ts) on the same tick. No fixture
+    // in this suite seeds any policy rows, so an empty list is the correct
+    // default — the sweep is a no-op that doesn't disturb the department/
+    // membership assertions below.
+    userUsagePolicy: {
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue({}),
+    },
   };
 }
 
@@ -250,6 +281,7 @@ beforeEach(() => {
   gfSetQuotaMock.mockResolvedValue(undefined);
   ncAddUserToGroupMock.mockResolvedValue(undefined);
   ncRemoveUserFromGroupMock.mockResolvedValue(undefined);
+  ncListGroupMembersMock.mockResolvedValue([]);
 });
 
 describe("reconcileDepartments — membership convergence", () => {

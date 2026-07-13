@@ -74,12 +74,8 @@ vi.mock("../services/file-search.service.js", () => ({
 // registered in createApp keeps its real client; override only ncSearchFiles
 // so we can observe the name-search arm without a live Nextcloud.
 // ─────────────────────────────────────────────────────────────────────────
-const { ncSearchFilesSpy, ncDirExistsSpy } = vi.hoisted(() => ({
+const { ncSearchFilesSpy } = vi.hoisted(() => ({
   ncSearchFilesSpy: vi.fn(),
-  // WARP-1140: the household-corpus membership probe (shared groupfolder
-  // mounted in this user's home?). Defaults false in beforeEach so the
-  // pre-WARP-1140 personal-only expectations hold unchanged.
-  ncDirExistsSpy: vi.fn(),
 }));
 
 vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
@@ -88,7 +84,6 @@ vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
   return {
     ...actual,
     ncSearchFiles: (...args: unknown[]) => ncSearchFilesSpy(...args),
-    ncDirExists: (...args: unknown[]) => ncDirExistsSpy(...args),
   };
 });
 
@@ -140,6 +135,11 @@ const { queryRawUnsafeMock } = vi.hoisted(() => ({
   queryRawUnsafeMock: vi.fn(),
 }));
 
+const { departmentFindManyMock, departmentMembershipFindManyMock } = vi.hoisted(() => ({
+  departmentFindManyMock: vi.fn(),
+  departmentMembershipFindManyMock: vi.fn(),
+}));
+
 vi.mock("@prisma/client", () => {
   const mockPrisma = {
     user: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -151,6 +151,12 @@ vi.mock("@prisma/client", () => {
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
     },
+    // WARP-1264: deptSearchCorpora. AUTH_ENABLED=false stubs req.user as
+    // role="owner" (see authMiddleware), so every test in this file drives
+    // the owner/admin branch — `department.findMany({state:"active"})` —
+    // never `departmentMembership.findMany`.
+    department: { findMany: departmentFindManyMock },
+    departmentMembership: { findMany: departmentMembershipFindManyMock },
     // Full-app suite: the module gate on the `/api/files` mount reads
     // ModuleSetting overrides. `[]` => registry defaults (files is
     // default-enabled) => gate passes.
@@ -200,10 +206,13 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     isGrpcAvailableSpy.mockReturnValue(true);
     // Default: no name matches — keep existing content-only specs unchanged.
     ncSearchFilesSpy.mockResolvedValue([]);
-    // Default: NOT a household member → personal corpus only (the
-    // pre-WARP-1140 behaviour every older spec was written against).
-    ncDirExistsSpy.mockReset();
-    ncDirExistsSpy.mockResolvedValue(false);
+    // Default: caller (dev/owner) is visible into NO active departments →
+    // personal corpus only (the pre-WARP-1264 behaviour every older spec
+    // was written against).
+    departmentFindManyMock.mockReset();
+    departmentMembershipFindManyMock.mockReset();
+    departmentFindManyMock.mockResolvedValue([]);
+    departmentMembershipFindManyMock.mockResolvedValue([]);
     resolveNcTokenSpy.mockReset();
     // Default: a valid NC session token is present (mirrors dev-mode).
     resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
@@ -334,25 +343,44 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     await request(app).get("/api/files/search/content?q=same&mode=keyword&limit=20");
     await request(app).get("/api/files/search/content?q=same&mode=semantic&limit=20");
 
-    // WARP-1140: the household membership probe adds its own cache traffic
-    // (`filesearch:household-member:…`), so filter down to the RESULT keys.
-    const resultGetKeys = cacheGetSpy.mock.calls
-      .map((c) => c[0] as string)
-      .filter((k) => !k.includes("household-member"));
-    const keywordGetKey = resultGetKeys.find((k) => k.includes(":keyword:"));
-    const semanticGetKey = resultGetKeys.find((k) => k.includes(":semantic:"));
+    const getKeys = cacheGetSpy.mock.calls.map((c) => c[0] as string);
+    const keywordGetKey = getKeys.find((k) => k.includes(":keyword:"));
+    const semanticGetKey = getKeys.find((k) => k.includes(":semantic:"));
     expect(keywordGetKey).toBeDefined();
     expect(semanticGetKey).toBeDefined();
     expect(keywordGetKey).not.toBe(semanticGetKey);
     // cacheSet keys must also differ
-    const resultSetKeys = cacheSetSpy.mock.calls
-      .map((c) => c[0] as string)
-      .filter((k) => !k.includes("household-member"));
-    const keywordSetKey = resultSetKeys.find((k) => k.includes(":keyword:"));
-    const semanticSetKey = resultSetKeys.find((k) => k.includes(":semantic:"));
+    const setKeys = cacheSetSpy.mock.calls.map((c) => c[0] as string);
+    const keywordSetKey = setKeys.find((k) => k.includes(":keyword:"));
+    const semanticSetKey = setKeys.find((k) => k.includes(":semantic:"));
     expect(keywordSetKey).toBeDefined();
     expect(semanticSetKey).toBeDefined();
     expect(keywordSetKey).not.toBe(semanticSetKey);
+  });
+
+  // ── WARP-1264: versioned cache key busts on an aclVersion bump ──────────
+  it("bumping aclVersion on a visible department changes the semantic cache key even though the corpus set is unchanged", async () => {
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "dept-1", kind: "DEPARTMENT", aclVersion: 1 },
+    ]);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([]);
+    await request(app).get("/api/files/search/content?q=vbump&mode=semantic");
+
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "dept-1", kind: "DEPARTMENT", aclVersion: 2 },
+    ]);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([]);
+    await request(app).get("/api/files/search/content?q=vbump&mode=semantic");
+
+    const getKeys = cacheGetSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((k) => k.includes(":semantic:") && k.includes(":vbump:"));
+    expect(getKeys).toHaveLength(2);
+    expect(getKeys[0]).not.toBe(getKeys[1]);
+    expect(getKeys[0]).toContain(":v1:");
+    expect(getKeys[1]).toContain(":v2:");
   });
 
   // ── 8. userId forwarded (IDOR isolation) ────────────────────────────────
@@ -477,10 +505,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     );
     // … but the degraded, content-only union must NOT be written to the 60s
     // cache, or it would serve stale results after Nextcloud recovers.
-    // (WARP-1140: ignore the household membership probe's own cache write.)
-    const resultSetKeys = cacheSetSpy.mock.calls
-      .map((c) => c[0] as string)
-      .filter((k) => !k.includes("household-member"));
+    const resultSetKeys = cacheSetSpy.mock.calls.map((c) => c[0] as string);
     expect(resultSetKeys).toHaveLength(0);
   });
 
@@ -566,8 +591,14 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     expect(sql).toContain(`"source" = 'nextcloud'`);
   });
 
-  it("includes the __household__ corpus in semantic search when the shared space is mounted", async () => {
-    ncDirExistsSpy.mockResolvedValue(true);
+  // WARP-1264: HOUSEHOLD is dual-sentinelled during rollout — both the
+  // legacy `__household__` sentinel AND its `__dept_<uuid>__` form ride
+  // along together so content indexed under either watcher build stays
+  // searchable without a reindex.
+  it("includes both household sentinel forms in semantic search when the caller is visible into the HOUSEHOLD department", async () => {
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 3 },
+    ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
     queryRawUnsafeMock.mockResolvedValueOnce([
       { path: "/Household/Trips/burrito.txt", score: 0.9, text: "burrito notes" },
@@ -583,21 +614,26 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     const args = queryRawUnsafeMock.mock.calls[0].slice(1);
     expect(args).toContain("dev");
     expect(args).toContain("__household__");
+    expect(args).toContain("__dept_hh-uuid__");
   });
 
-  it("includes the __household__ corpus in keyword search when the shared space is mounted", async () => {
-    ncDirExistsSpy.mockResolvedValue(true);
+  it("includes both household sentinel forms in keyword search when the caller is visible into the HOUSEHOLD department", async () => {
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 1 },
+    ]);
     searchByLexicalSpy.mockResolvedValueOnce([]);
 
     await request(app).get("/api/files/search/content?q=burrito&mode=keyword");
 
     const params = searchByLexicalSpy.mock.calls[0][1];
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(["__household__"]);
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
   });
 
-  it("includes the __household__ corpus in hybrid search when the shared space is mounted", async () => {
-    ncDirExistsSpy.mockResolvedValue(true);
+  it("includes both household sentinel forms in hybrid search when the caller is visible into the HOUSEHOLD department", async () => {
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 1 },
+    ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
     searchHybridSpy.mockResolvedValueOnce([]);
 
@@ -605,11 +641,25 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     const params = searchHybridSpy.mock.calls[0][1];
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(["__household__"]);
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
   });
 
-  it("degrades to the personal corpus when the membership probe fails (never a new failure mode)", async () => {
-    ncDirExistsSpy.mockRejectedValue(new Error("nextcloud down"));
+  // WARP-1264: owner/admin see ALL active departments — a non-household one
+  // surfaces only its `__dept_<uuid>__` form (no household sentinel).
+  it("includes a __dept_<uuid>__ sentinel for a non-household active department (owner sees all)", async () => {
+    departmentFindManyMock.mockResolvedValueOnce([
+      { id: "fin-uuid", kind: "DEPARTMENT", aclVersion: 2 },
+    ]);
+    searchByLexicalSpy.mockResolvedValueOnce([]);
+
+    await request(app).get("/api/files/search/content?q=budget&mode=keyword");
+
+    const params = searchByLexicalSpy.mock.calls[0][1];
+    expect(params.additionalUserIds).toEqual(["__dept_fin-uuid__"]);
+  });
+
+  it("degrades to the personal corpus when the department lookup fails (never a new failure mode)", async () => {
+    departmentFindManyMock.mockRejectedValue(new Error("db down"));
     searchByLexicalSpy.mockResolvedValueOnce([
       { path: "/Docs/a.txt", score: 0.9, snippet: "a", source: "nextcloud", chunkIdx: 0 },
     ]);
@@ -638,12 +688,14 @@ describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", 
     queryRawUnsafeMock.mockReset();
     cacheGetSpy.mockReset();
     cacheSetSpy.mockReset();
-    ncDirExistsSpy.mockReset();
+    departmentFindManyMock.mockReset();
+    departmentMembershipFindManyMock.mockReset();
     resolveNcTokenSpy.mockReset();
     cacheGetSpy.mockResolvedValue(null);
     cacheSetSpy.mockResolvedValue(undefined);
     isGrpcAvailableSpy.mockReturnValue(true);
-    ncDirExistsSpy.mockResolvedValue(false);
+    departmentFindManyMock.mockResolvedValue([]);
+    departmentMembershipFindManyMock.mockResolvedValue([]);
     resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
   });
 
@@ -699,8 +751,10 @@ describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", 
     expect(res.body).toMatchObject({ state: "indexing", pendingCount: 7 });
   });
 
-  it("counts the household corpus too when the shared space is mounted", async () => {
-    ncDirExistsSpy.mockResolvedValue(true);
+  it("counts both household sentinel forms too when the caller is visible into the HOUSEHOLD department", async () => {
+    departmentFindManyMock.mockResolvedValue([
+      { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 1 },
+    ]);
     queryRawUnsafeMock
       .mockResolvedValueOnce([{ count: BigInt(2), last: null }])
       .mockResolvedValueOnce([]);
@@ -708,14 +762,33 @@ describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", 
     const res = await request(app).get("/api/files/search/status");
 
     expect(res.status).toBe(200);
-    // Both probes bind the personal + household owners.
+    // Both probes bind the personal + dual-form household owners.
     expect(queryRawUnsafeMock.mock.calls[0].slice(1)).toEqual([
       "dev",
       "__household__",
+      "__dept_hh-uuid__",
     ]);
     expect(queryRawUnsafeMock.mock.calls[1].slice(1)).toEqual([
       "dev",
       "__household__",
+      "__dept_hh-uuid__",
+    ]);
+  });
+
+  it("counts a __dept_<uuid>__ sentinel for a non-household active department too (owner sees all)", async () => {
+    departmentFindManyMock.mockResolvedValue([
+      { id: "fin-uuid", kind: "DEPARTMENT", aclVersion: 1 },
+    ]);
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(1), last: null }])
+      .mockResolvedValueOnce([]);
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    expect(queryRawUnsafeMock.mock.calls[0].slice(1)).toEqual([
+      "dev",
+      "__dept_fin-uuid__",
     ]);
   });
 });

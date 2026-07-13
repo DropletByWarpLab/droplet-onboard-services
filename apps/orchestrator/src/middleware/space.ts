@@ -228,9 +228,9 @@ export async function checkSpaceAccess(
   if (caller.role === "owner" || caller.role === "admin") {
     const membership = await prisma.departmentMembership.findUnique({
       where: { departmentId_userId: { departmentId: dept.id, userId: caller.id } },
-      select: { id: true },
+      select: { id: true, syncState: true },
     });
-    if (!membership) {
+    if (!membership || membership.syncState === "removing") {
       // Audited see-all — an ALLOWED admin bypass, not a denial. Loud by
       // design (brief §3.5 tier 1).
       void recordActivity({
@@ -253,9 +253,16 @@ export async function checkSpaceAccess(
 
   const membership = await prisma.departmentMembership.findUnique({
     where: { departmentId_userId: { departmentId: dept.id, userId: caller.id } },
-    select: { right: true },
+    select: { right: true, syncState: true },
   });
-  if (!membership) {
+  // `removing` is a membership row that has committed its revocation intent
+  // (department-membership.service.ts's removeMembership tx) but has not yet
+  // been deleted — because the immediate NC push failed and the row is
+  // waiting for the reconciler's retry (brief §4: "Policy access dies at
+  // commit; byte access at the NC call"). Treating it as absent here is what
+  // makes that true: policy access is denied the instant the tx commits,
+  // regardless of how long the NC-side removal takes to converge.
+  if (!membership || membership.syncState === "removing") {
     recordAccessDenied(req, "space-not-member");
     return { allowed: false, status: 403, error: "Forbidden: not a member of this space" };
   }

@@ -74,6 +74,18 @@ vi.mock("../services/department-provisioner.service.js", () => ({
   DROPLET_ADMINS_GROUP: "droplet-admins",
 }));
 
+// WARP-1271 (T19a): PUT/GET /people/:id/usage route through the REAL
+// usage-policy.service.js, which calls these two Nextcloud client
+// functions — mock them so the suite never touches a real Nextcloud.
+const { ncUpdateUserMock, ncGetUserQuotaAdminMock } = vi.hoisted(() => ({
+  ncUpdateUserMock: vi.fn().mockResolvedValue(undefined),
+  ncGetUserQuotaAdminMock: vi.fn().mockResolvedValue({ used: 0, free: null, total: null, quota: null }),
+}));
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncUpdateUser: ncUpdateUserMock,
+  ncGetUserQuotaAdmin: ncGetUserQuotaAdminMock,
+}));
+
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
 
@@ -106,6 +118,7 @@ function seedUser(over: Partial<MockUser> = {}): MockUser {
 function createPrismaMock(initialRows: MockUser[] = []) {
   const rows = new Map<string, MockUser>(initialRows.map((u) => [u.id, u]));
   const scopeBindings = new Map<string, Set<string>>();
+  const usagePolicies = new Map<string, any>();
   // $transaction interactive form: just runs the callback with `this`
   // as the tx handle. WARP-480's last-owner invariant uses this shape
   // for the count + mutate pair; same mock idiom as
@@ -233,6 +246,45 @@ function createPrismaMock(initialRows: MockUser[] = []) {
             grantedBy: null,
             grantedAt: new Date(),
           }));
+        },
+      ),
+    },
+    // WARP-1271 (T19a): per-user usage settings.
+    userUsagePolicy: {
+      findUnique: vi.fn(async ({ where }: { where: { userId: string } }) => {
+        return usagePolicies.get(where.userId) ?? null;
+      }),
+      upsert: vi.fn(
+        async ({
+          where,
+          create,
+          update,
+        }: {
+          where: { userId: string };
+          create: Record<string, unknown>;
+          update: Record<string, unknown>;
+        }) => {
+          const existing = usagePolicies.get(where.userId);
+          const row = existing
+            ? { ...existing, ...update }
+            : { ...create, updatedAt: new Date() };
+          usagePolicies.set(where.userId, row);
+          return { ...row };
+        },
+      ),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { userId: string };
+          data: Record<string, unknown>;
+        }) => {
+          const existing = usagePolicies.get(where.userId);
+          if (!existing) throw new Error(`no policy for ${where.userId}`);
+          const row = { ...existing, ...data };
+          usagePolicies.set(where.userId, row);
+          return { ...row };
         },
       ),
     },
@@ -881,5 +933,150 @@ describe("WARP-480 self-action invariants", () => {
     expect(recordActivityMock.mock.calls[0][0].refs.targetUserId).toBe(
       "owner-2",
     );
+  });
+});
+
+// ── WARP-1271 (T19a): PUT/GET /api/people/:id/usage ───────────────────
+
+describe("PUT /api/people/:id/usage", () => {
+  beforeEach(() => {
+    ncUpdateUserMock.mockClear().mockResolvedValue(undefined);
+    ncGetUserQuotaAdminMock.mockClear();
+  });
+
+  it("owner+admin can upsert a target's usage policy (family → 403)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }),
+    ]);
+    const familyApp = buildApp(prisma, {
+      id: "fam-id",
+      username: "fam",
+      role: "family",
+    });
+    const denied = await request(familyApp)
+      .put("/api/people/u1/usage")
+      .send({ storageQuotaBytes: "1000000" });
+    // requireRole rejects before the handler runs.
+    expect(denied.status).toBe(403);
+
+    const ownerApp = buildApp(prisma);
+    const allowed = await request(ownerApp)
+      .put("/api/people/u1/usage")
+      .send({ storageQuotaBytes: "1000000" });
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.policy.storageQuotaBytes).toBe("1000000");
+    expect(allowed.body.policy.quotaSyncState).toBe("synced");
+    expect(ncUpdateUserMock).toHaveBeenCalledWith(
+      "basic:dGVzdDp0ZXN0",
+      "alice",
+      "quota",
+      "1000000 B",
+    );
+  });
+
+  it("400 when the body has neither field", async () => {
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+    const res = await request(app).put("/api/people/u1/usage").send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("400 on a malformed storageQuotaBytes (not a digit string)", async () => {
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .put("/api/people/u1/usage")
+      .send({ storageQuotaBytes: "not-a-number" });
+    expect(res.status).toBe(400);
+  });
+
+  it("404 for an unknown target user", async () => {
+    const prisma = createPrismaMock([]);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .put("/api/people/ghost/usage")
+      .send({ maxUploadSizeMb: 100 });
+    expect(res.status).toBe(404);
+  });
+
+  it("NC pushdown failure still returns 200 with quotaSyncState=failed (reconciler retries)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }),
+    ]);
+    ncUpdateUserMock.mockRejectedValueOnce(new Error("nc unreachable"));
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .put("/api/people/u1/usage")
+      .send({ storageQuotaBytes: "500" });
+    expect(res.status).toBe(200);
+    expect(res.body.policy.quotaSyncState).toBe("failed");
+  });
+
+  it("storageQuotaBytes: null clears the limit (pushes OCS 'none')", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }),
+    ]);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .put("/api/people/u1/usage")
+      .send({ storageQuotaBytes: null });
+    expect(res.status).toBe(200);
+    expect(res.body.policy.storageQuotaBytes).toBeNull();
+    expect(ncUpdateUserMock).toHaveBeenCalledWith(
+      "basic:dGVzdDp0ZXN0",
+      "alice",
+      "quota",
+      "none",
+    );
+  });
+});
+
+describe("GET /api/people/:id/usage", () => {
+  beforeEach(() => {
+    ncGetUserQuotaAdminMock.mockClear();
+  });
+
+  it("owner+admin can read a target's usage (family → 403)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }),
+    ]);
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 4_200_000,
+      free: null,
+      total: null,
+      quota: null,
+    });
+
+    const familyApp = buildApp(prisma, {
+      id: "fam-id",
+      username: "fam",
+      role: "family",
+    });
+    const denied = await request(familyApp).get("/api/people/u1/usage");
+    expect(denied.status).toBe(403);
+
+    const ownerApp = buildApp(prisma);
+    const res = await request(ownerApp).get("/api/people/u1/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toBeNull(); // never set
+    expect(res.body.usedBytes).toBe("4200000");
+  });
+
+  it("degrades to usedBytes:null when the NC quota read fails", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", nextcloudUsername: "alice" }),
+    ]);
+    ncGetUserQuotaAdminMock.mockRejectedValue(new Error("nc down"));
+    const app = buildApp(prisma);
+    const res = await request(app).get("/api/people/u1/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.usedBytes).toBeNull();
+  });
+
+  it("404 for an unknown target user", async () => {
+    const prisma = createPrismaMock([]);
+    const app = buildApp(prisma);
+    const res = await request(app).get("/api/people/ghost/usage");
+    expect(res.status).toBe(404);
   });
 });

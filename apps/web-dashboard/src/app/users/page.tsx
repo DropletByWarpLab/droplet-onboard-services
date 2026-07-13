@@ -14,9 +14,13 @@ import {
   Copy,
   RefreshCw,
   Link as LinkIcon,
+  Building2,
+  ChevronRight,
+  Loader2,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
+import { useWorkspace } from "@/lib/workspace";
 import {
   fetchUsers,
   createUser as apiCreateUser,
@@ -26,6 +30,10 @@ import {
   createInvite,
   listInvites,
   revokeInvite as apiRevokeInvite,
+  fetchUserUsage,
+  updateUserUsage,
+  fetchAdminFilesUsage,
+  listDepartments,
 } from "@/lib/api";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -36,12 +44,23 @@ import type {
   InviteRole,
   CreateUserRole,
   InviteCreateResponse,
+  AdminUsageUserRow,
+  Department,
+  DepartmentRight,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, type BadgeKind } from "@/components/shell/primitives";
+import { DepartmentsPanel } from "@/components/Departments/DepartmentsPanel";
+
+const DEPT_RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
+const DEPT_RIGHT_LABEL: Record<DepartmentRight, string> = {
+  reader: "Reader",
+  contributor: "Contributor",
+  manager: "Manager",
+};
 
 const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
   { label: "24 hours", hours: 24 },
@@ -79,6 +98,44 @@ function generateTempPassword(): string {
   return chars.join("");
 }
 
+// ── WARP-1271 (T19a): usage-settings display helpers ──
+
+/** Byte count (as a decimal string, per the ADR-029 §8 BigInt-string wire
+ *  contract) → a short human size ("4.1 GB"). `null`/unparseable → an em
+ *  dash — never a fabricated "0 B", which would read as "this user has no
+ *  data" rather than "we don't know". */
+function formatBytes(value: string | null | undefined): string {
+  if (value == null || value === "—") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let size = n;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`;
+}
+
+const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
+type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
+
+/** Bytes string → the {value, unit} pair the numeric+unit-select control
+ *  edits. Picks TB when the value divides evenly into TB and is at least
+ *  1 TB, else GB (rounded to 1 decimal) — a fresh policy always starts
+ *  from a whole-GB/TB value an admin typed, so this round-trips cleanly. */
+function bytesToUnitValue(bytes: string | null): { value: string; unit: StorageUnit } {
+  if (bytes == null) return { value: "", unit: "GB" };
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return { value: "", unit: "GB" };
+  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
+    return { value: String(n / STORAGE_UNIT_BYTES.TB), unit: "TB" };
+  }
+  return { value: String(Math.round((n / STORAGE_UNIT_BYTES.GB) * 10) / 10), unit: "GB" };
+}
+
 /**
  * Admin-only user management page. Non-admin callers get a 403 from the
  * orchestrator on fetchUsers; we detect that and show a friendly notice
@@ -92,6 +149,12 @@ function generateTempPassword(): string {
  */
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
+  const { isBusiness } = useWorkspace();
+  const isAdminTier = currentUser?.role === "owner" || currentUser?.role === "admin";
+  // WARP-1270 (T18): "People" / "Departments & teams" tab row — Business
+  // workspace only (design brief §3). Home mode never sees this tab; the
+  // People roster below is unconditionally the whole page in Home mode.
+  const [tab, setTab] = useState<"people" | "departments">("people");
   const [users, setUsers] = useState<RosterUser[]>([]);
   // DASH-001: self-identity compares the LOCAL user UUID (u.userId ↔
   // currentUser.id), never the Nextcloud username (u.id) against the local
@@ -116,6 +179,15 @@ export default function UsersPage() {
   const [inviteResult, setInviteResult] = useState<InviteCreateResponse | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
+
+  // WARP-1270 (T18) — invite modal "Add to a department" section (design
+  // brief §4): collapsed by default; a Map<departmentId, right> tracks
+  // which units are checked and each row's chosen right (default
+  // Contributor on check). Business-mode only; empty when there are no
+  // departments yet (the section simply doesn't render).
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [inviteDeptExpanded, setInviteDeptExpanded] = useState(false);
+  const [inviteDeptGrants, setInviteDeptGrants] = useState<Map<string, DepartmentRight>>(new Map());
 
   // Stable id used to wire up `aria-labelledby` on the invite dialog.
   const inviteHeadingId = useId();
@@ -161,9 +233,26 @@ export default function UsersPage() {
   const createHandoffPwRef = useRef<HTMLInputElement | null>(null);
 
   // Edit dialog state.
-  const [editing, setEditing] = useState<AuthUser | null>(null);
+  const [editing, setEditing] = useState<RosterUser | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editPassword, setEditPassword] = useState("");
+
+  // WARP-1271 (T19a): Usage section state — storage quota (numeric + unit,
+  // empty = no limit), upload cap (MB), and the read-only used-bytes meter.
+  const [editStorageValue, setEditStorageValue] = useState("");
+  const [editStorageUnit, setEditStorageUnit] = useState<StorageUnit>("GB");
+  const [editUploadCapMb, setEditUploadCapMb] = useState("");
+  const [editUsedBytes, setEditUsedBytes] = useState<string | null>(null);
+  const [editUsageLoading, setEditUsageLoading] = useState(false);
+  // WARP-1270 QA fix: transient sync-state text under the Usage fields —
+  // "Applying to storage…" while the PATCH is in flight, then "Applied"
+  // once the orchestrator confirms (design brief §4).
+  const [editUsageSyncText, setEditUsageSyncText] = useState<string | null>(null);
+
+  // WARP-1271 (T19a): roster "used / limit" column, keyed by local User.id.
+  // Sourced from the admin usage-roster endpoint (one call for every row,
+  // vs. N per-user calls) — best-effort, never blocks the roster itself.
+  const [usageRoster, setUsageRoster] = useState<Record<string, AdminUsageUserRow>>({});
 
   // WARP-291: ConfirmDialog targets for the three destructive flows that
   // used to hit `window.confirm()`. Storing the target object (not just a
@@ -200,6 +289,17 @@ export default function UsersPage() {
         // migrated yet, don't block the user list.
         setInvites([]);
       }
+      // WARP-1271 (T19a): the roster's "used / limit" column is best-effort
+      // — a failed fetch (e.g. Nextcloud unreachable) leaves the column
+      // blank rather than failing the whole page.
+      try {
+        const usage = await fetchAdminFilesUsage();
+        const byUserId: Record<string, AdminUsageUserRow> = {};
+        for (const row of usage.users) byUserId[row.userId] = row;
+        setUsageRoster(byUserId);
+      } catch {
+        setUsageRoster({});
+      }
     } catch (err: any) {
       if (String(err?.message ?? "").includes("403")) {
         setIsAdmin(false);
@@ -215,6 +315,17 @@ export default function UsersPage() {
     reload();
   }, [reload]);
 
+  // WARP-1270 (T18) — department list for the invite modal's "Add to a
+  // department" section. Business-mode only; best-effort (the invite
+  // modal's core email/role flow must not break if this fails — the
+  // section just doesn't render).
+  useEffect(() => {
+    if (!isBusiness || isAdmin !== true) return;
+    listDepartments()
+      .then((data) => setDepartments(data.departments || []))
+      .catch(() => setDepartments([]));
+  }, [isBusiness, isAdmin]);
+
   const resetInviteForm = () => {
     setInviteEmail("");
     setInviteDisplay("");
@@ -223,6 +334,8 @@ export default function UsersPage() {
     setInvitePhase("form");
     setInviteResult(null);
     setInviteCopied(false);
+    setInviteDeptExpanded(false);
+    setInviteDeptGrants(new Map());
   };
 
   const closeInvite = useCallback(() => {
@@ -351,11 +464,19 @@ export default function UsersPage() {
     }
     setInviteSubmitting(true);
     try {
+      const deptGrants =
+        inviteDeptGrants.size > 0
+          ? Array.from(inviteDeptGrants.entries()).map(([departmentId, right]) => ({
+              departmentId,
+              right,
+            }))
+          : undefined;
       const result = await createInvite({
         email,
         displayName: inviteDisplay.trim() || undefined,
         role: inviteRole,
         ttlHours: inviteTtlHours,
+        departments: deptGrants,
       });
       setInviteResult(result);
       setInvitePhase("share");
@@ -464,7 +585,7 @@ export default function UsersPage() {
     }
   };
 
-  const openEdit = (u: AuthUser) => {
+  const openEdit = (u: RosterUser) => {
     // Capture the activating element so we can restore focus on close —
     // each row has its own Edit button, so a single ref pinned to the
     // page root would land focus in the wrong place.
@@ -472,6 +593,32 @@ export default function UsersPage() {
     setEditing(u);
     setEditDisplayName(u.displayName || "");
     setEditPassword("");
+    setEditStorageValue("");
+    setEditStorageUnit("GB");
+    setEditUploadCapMb("");
+    setEditUsedBytes(null);
+    setEditUsageSyncText(null);
+
+    // WARP-1271 (T19a): usage settings key on the LOCAL User UUID
+    // (RosterUser.userId), not the Nextcloud username — rows without a
+    // matching local row (userId: null) have no usage policy surface yet.
+    if (u.userId) {
+      setEditUsageLoading(true);
+      fetchUserUsage(u.userId)
+        .then((usage) => {
+          const { value, unit } = bytesToUnitValue(usage.policy?.storageQuotaBytes ?? null);
+          setEditStorageValue(value);
+          setEditStorageUnit(unit);
+          setEditUploadCapMb(
+            usage.policy?.maxUploadSizeMb != null ? String(usage.policy.maxUploadSizeMb) : "",
+          );
+          setEditUsedBytes(usage.usedBytes);
+        })
+        .catch(() => {
+          // Best-effort — the rest of the Edit dialog still works.
+        })
+        .finally(() => setEditUsageLoading(false));
+    }
   };
 
   const closeEdit = useCallback(() => {
@@ -504,15 +651,58 @@ export default function UsersPage() {
       }
       patch.password = editPassword;
     }
-    if (!patch.displayName && !patch.password) {
+
+    // WARP-1271 (T19a): storage quota + upload cap. Empty storage value =
+    // "No limit" → storageQuotaBytes: null (explicit clear, not "unchanged"
+    // — the field is always sent when a userId exists, since the dialog
+    // always shows the current desired state, not a sparse diff).
+    let usagePatch: { storageQuotaBytes?: string | null; maxUploadSizeMb?: number | null } | null = null;
+    if (editing.userId) {
+      const trimmedStorage = editStorageValue.trim();
+      let storageQuotaBytes: string | null = null;
+      if (trimmedStorage) {
+        const n = Number(trimmedStorage);
+        if (!Number.isFinite(n) || n <= 0) {
+          setError("Storage limit must be a positive number.");
+          return;
+        }
+        storageQuotaBytes = String(Math.round(n * STORAGE_UNIT_BYTES[editStorageUnit]));
+      }
+      const trimmedUpload = editUploadCapMb.trim();
+      let maxUploadSizeMb: number | null = null;
+      if (trimmedUpload) {
+        const n = Number(trimmedUpload);
+        if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
+          setError("Upload cap must be a positive whole number of MB.");
+          return;
+        }
+        maxUploadSizeMb = n;
+      }
+      usagePatch = { storageQuotaBytes, maxUploadSizeMb };
+    }
+
+    if (!patch.displayName && !patch.password && !usagePatch) {
       closeEdit();
       return;
     }
     try {
-      await updateUser(editing.id, patch);
+      if (patch.displayName || patch.password) {
+        await updateUser(editing.id, patch);
+      }
+      if (usagePatch && editing.userId) {
+        // WARP-1270 QA fix: surface the sync-state transition under the
+        // Usage fields instead of closing the dialog silently — the box
+        // still has to push the quota to storage after this call resolves.
+        setEditUsageSyncText("Applying to storage…");
+        await updateUserUsage(editing.userId, usagePatch);
+        setEditUsageSyncText("Applied");
+        // Let "Applied" stay visible for a beat before the dialog closes.
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
       closeEdit();
       await reload();
     } catch (err: any) {
+      setEditUsageSyncText(null);
       setError(err?.message || "Failed to update user");
     }
   };
@@ -601,6 +791,49 @@ export default function UsersPage() {
         </div>
       )}
 
+      {/* WARP-1270 (T18) — "People" / "Departments & teams" tab row.
+          Business workspace only (design brief §3); Home mode never renders
+          this strip, so the People list below is unconditionally the whole
+          page there. Mirrors the /knowledge tabstrip pattern (same class
+          names, same WAI-ARIA tabs contract) already shipped on this page
+          shell. */}
+      {isBusiness && (
+        <div role="tablist" aria-label="Users view tabs" className="tabstrip">
+          <button
+            type="button"
+            role="tab"
+            id="users-tab-people"
+            aria-selected={tab === "people"}
+            aria-controls="users-panel-people"
+            tabIndex={tab === "people" ? 0 : -1}
+            onClick={() => setTab("people")}
+            className={"tab" + (tab === "people" ? " active" : "")}
+          >
+            <UsersIcon size={14} aria-hidden="true" />
+            People
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="users-tab-departments"
+            aria-selected={tab === "departments"}
+            aria-controls="users-panel-departments"
+            tabIndex={tab === "departments" ? 0 : -1}
+            onClick={() => setTab("departments")}
+            className={"tab" + (tab === "departments" ? " active" : "")}
+          >
+            <Building2 size={14} aria-hidden="true" />
+            Departments &amp; teams
+          </button>
+        </div>
+      )}
+
+      <div
+        role="tabpanel"
+        id="users-panel-people"
+        aria-labelledby="users-tab-people"
+        hidden={isBusiness && tab !== "people"}
+      >
       {/* User list */}
       <div className="card">
         {loading && users.length === 0 ? (
@@ -635,6 +868,19 @@ export default function UsersPage() {
                   )}
                 </span>
               </span>
+              {/* WARP-1271 (T19a): "used / limit" — mono, matches the
+                  identity sub-line's treatment. Blank (not "—") when the
+                  row has no local userId yet or the roster fetch failed;
+                  a bare em dash on every row would read as "everyone has
+                  no data", which is worse than showing nothing. */}
+              {u.userId && usageRoster[u.userId] && (
+                <span className="sub mono" style={{ color: "var(--text-faint)" }}>
+                  {formatBytes(usageRoster[u.userId]!.used)} /{" "}
+                  {usageRoster[u.userId]!.quota != null
+                    ? formatBytes(usageRoster[u.userId]!.quota)
+                    : "No limit"}
+                </span>
+              )}
               {/*
                 Row actions are always rendered (not opacity-gated on hover) so
                 they're discoverable on touch and reachable for keyboard-only
@@ -725,6 +971,20 @@ export default function UsersPage() {
             })}
             </div>
           </div>
+        </div>
+      )}
+      </div>
+
+      {isBusiness && (
+        <div
+          role="tabpanel"
+          id="users-panel-departments"
+          aria-labelledby="users-tab-departments"
+          hidden={tab !== "departments"}
+        >
+          {tab === "departments" && (
+            <DepartmentsPanel people={users} isAdminTier={isAdminTier} />
+          )}
         </div>
       )}
 
@@ -849,6 +1109,97 @@ export default function UsersPage() {
                       </select>
                     </div>
                   </div>
+
+                  {/* WARP-1270 (T18) — invite modal "Add to a department"
+                      (design brief §4). Collapsed by default; renders only
+                      in Business mode with at least one department to
+                      offer. Teams render indented under their parent
+                      department, mirroring the Departments tab's tree. */}
+                  {isBusiness && departments.length > 0 && (
+                    <div>
+                      {!inviteDeptExpanded ? (
+                        <button
+                          type="button"
+                          onClick={() => setInviteDeptExpanded(true)}
+                          className="type-caption-1"
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--brand)", fontWeight: 500, padding: "4px 0" }}
+                        >
+                          <ChevronRight size={13} aria-hidden="true" />
+                          Add to a department
+                        </button>
+                      ) : (
+                        <div>
+                          <div className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
+                            Add to departments and teams
+                          </div>
+                          <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-input)", overflow: "hidden" }}>
+                            {departments
+                              .filter((d) => d.kind !== "HOUSEHOLD")
+                              .map((d, i) => {
+                                const checked = inviteDeptGrants.has(d.id);
+                                const right = inviteDeptGrants.get(d.id) ?? "contributor";
+                                return (
+                                  <div
+                                    key={d.id}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 10,
+                                      padding: "10px 12px",
+                                      borderTop: i === 0 ? "none" : "1px solid var(--border)",
+                                      paddingLeft: d.kind === "TEAM" ? 30 : 12,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      id={`invite-dept-${d.id}`}
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        setInviteDeptGrants((prev) => {
+                                          const next = new Map(prev);
+                                          if (e.target.checked) next.set(d.id, "contributor");
+                                          else next.delete(d.id);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                    <label
+                                      htmlFor={`invite-dept-${d.id}`}
+                                      style={{ flex: 1, minWidth: 0, fontSize: 14, color: checked ? "var(--text)" : "var(--text-muted)" }}
+                                    >
+                                      {d.name}
+                                    </label>
+                                    <select
+                                      aria-label={`Rights in ${d.name}`}
+                                      value={right}
+                                      disabled={!checked}
+                                      onChange={(e) =>
+                                        setInviteDeptGrants((prev) => new Map(prev).set(d.id, e.target.value as DepartmentRight))
+                                      }
+                                      style={{
+                                        background: "var(--surface)",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: "var(--radius-input)",
+                                        color: "var(--text)",
+                                        padding: "4px 8px",
+                                        fontSize: 12.5,
+                                        opacity: checked ? 1 : 0.4,
+                                      }}
+                                    >
+                                      {DEPT_RIGHTS.map((r) => (
+                                        <option key={r} value={r}>
+                                          {DEPT_RIGHT_LABEL[r]}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div
                   className="flex items-center justify-end gap-2 px-4 py-3"
@@ -1297,6 +1648,105 @@ export default function UsersPage() {
                   <PasswordRulesChecklist password={editPassword} />
                 )}
               </div>
+
+              {/* WARP-1271 (T19a) — Usage section. Only meaningful for rows
+                  with a local User row (userId); the roster otherwise still
+                  lists Nextcloud-only accounts, but they have no local
+                  UsagePolicy surface to edit yet. */}
+              {editing.userId && (
+                <div className="pt-2" style={{ borderTop: "1px solid var(--card-bd)" }}>
+                  <div
+                    className="type-caption-1 mb-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Usage
+                  </div>
+                  <div className="space-y-2.5">
+                    <div>
+                      <label
+                        className="type-caption-1 mb-1.5 block"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        Storage limit
+                      </label>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          inputMode="decimal"
+                          value={editStorageValue}
+                          onChange={(e) => setEditStorageValue(e.target.value)}
+                          placeholder="No limit"
+                          aria-label="Storage limit"
+                          className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-input)",
+                            color: "var(--text)",
+                          }}
+                        />
+                        <select
+                          value={editStorageUnit}
+                          onChange={(e) => setEditStorageUnit(e.target.value as StorageUnit)}
+                          aria-label="Storage limit unit"
+                          className="px-2.5 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-input)",
+                            color: "var(--text)",
+                          }}
+                        >
+                          <option value="GB">GB</option>
+                          <option value="TB">TB</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label
+                        className="type-caption-1 mb-1.5 block"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        Upload cap (MB per file)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        inputMode="numeric"
+                        value={editUploadCapMb}
+                        onChange={(e) => setEditUploadCapMb(e.target.value)}
+                        placeholder="Device default"
+                        aria-label="Upload cap in megabytes"
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        style={{
+                          background: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "var(--radius-input)",
+                          color: "var(--text)",
+                        }}
+                      />
+                    </div>
+                    <div className="type-caption-1 mono" style={{ color: "var(--text-faint)" }}>
+                      {editUsageLoading ? "Loading usage…" : `${formatBytes(editUsedBytes)} used`}
+                    </div>
+                    {editUsageSyncText && (
+                      <div
+                        className="type-caption-1 mono"
+                        style={{ color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}
+                        role="status"
+                      >
+                        {editUsageSyncText === "Applying to storage…" && (
+                          <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                        )}
+                        {editUsageSyncText}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             <div
               className="flex items-center justify-end gap-2 px-4 py-3"
@@ -1305,12 +1755,14 @@ export default function UsersPage() {
               <button
                 onClick={closeEdit}
                 className="btn ghost"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 Cancel
               </button>
               <button
                 onClick={handleEditSave}
                 className="btn primary"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 <Check size={14} />
                 Save

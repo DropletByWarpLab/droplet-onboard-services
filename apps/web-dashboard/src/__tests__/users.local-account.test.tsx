@@ -47,6 +47,19 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
+// WARP-1270 (T18): the page now reads useWorkspace() unconditionally.
+// isBusiness: false keeps this Home-mode local-account flow unchanged
+// (no tab strip, no department-assignment section).
+vi.mock("@/lib/workspace", () => ({
+  useWorkspace: () => ({
+    workspaceType: "home",
+    isHome: true,
+    isBusiness: false,
+    setWorkspaceType: () => {},
+    homeVariant: "B",
+  }),
+}));
+
 vi.mock("qrcode.react", () => ({
   QRCodeSVG: ({ value }: { value: string }) => (
     <svg data-testid="invite-qr" data-value={value} />

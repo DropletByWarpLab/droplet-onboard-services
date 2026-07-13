@@ -248,10 +248,102 @@ describe("WARP-883 — Files spaces (My Files / Shared Household)", () => {
       expect(res.body.sharedAvailable).toBe(false);
     });
 
+    // WARP-1267 (T15) — isMember + parentName. AUTH_ENABLED is false for this
+    // whole file (config mock above), so every request runs as the fixed
+    // dev/owner principal (auth.ts:106) — isOwnerOrAdmin is always true here.
+    // That still exercises both branches of the isMember ternary: a
+    // department can independently report memberships=[] (not a member,
+    // owner see-all) or memberships=[{right}] (an actual membership row for
+    // "dev") regardless of role, which is exactly what these fields encode.
+    // A true non-admin "member only sees their own depts" pass needs a
+    // separate AUTH_ENABLED=true harness — out of scope for this ticket.
+    const prisma = new PrismaClient() as unknown as {
+      department: {
+        findMany: Mocked<any>;
+        findUnique: Mocked<any>;
+      };
+    };
+
+    it("isMember:true + the caller's own right when the caller has a membership row", async () => {
+      ncMock.ncDirExists.mockResolvedValue(true);
+      prisma.department.findMany.mockResolvedValueOnce([
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Finance",
+          parentId: null,
+          kind: "DEPARTMENT",
+          quotaBytes: null,
+          memberships: [{ right: "contributor" }],
+        },
+      ]);
+      const res = await request(app).get("/api/files/spaces").expect(200);
+      expect(res.body.spaces).toContainEqual(
+        expect.objectContaining({
+          id: "dept:11111111-1111-4111-8111-111111111111",
+          name: "Finance",
+          kind: "department",
+          state: "active",
+          right: "contributor",
+          isMember: true,
+        })
+      );
+    });
+
+    it("isMember:false + right:manager when an owner/admin sees a dept they're not a member of", async () => {
+      ncMock.ncDirExists.mockResolvedValue(true);
+      prisma.department.findMany.mockResolvedValueOnce([
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          name: "Legal",
+          parentId: null,
+          kind: "DEPARTMENT",
+          quotaBytes: null,
+          memberships: [], // "dev" holds no membership row on Legal
+        },
+      ]);
+      const res = await request(app).get("/api/files/spaces").expect(200);
+      expect(res.body.spaces).toContainEqual(
+        expect.objectContaining({
+          id: "dept:22222222-2222-4222-8222-222222222222",
+          name: "Legal",
+          kind: "department",
+          isMember: false,
+          right: "manager",
+        })
+      );
+    });
+
+    it("TEAM rows carry parentName + the flat 'Parent — Team' mount name", async () => {
+      ncMock.ncDirExists.mockResolvedValue(true);
+      const parentId = "33333333-3333-4333-8333-333333333333";
+      prisma.department.findMany.mockResolvedValueOnce([
+        {
+          id: "44444444-4444-4444-8444-444444444444",
+          name: "Platform",
+          parentId,
+          kind: "TEAM",
+          quotaBytes: null,
+          memberships: [{ right: "manager" }],
+        },
+      ]);
+      prisma.department.findUnique.mockResolvedValueOnce({ name: "Engineering" });
+      const res = await request(app).get("/api/files/spaces").expect(200);
+      expect(res.body.spaces).toContainEqual(
+        expect.objectContaining({
+          id: "dept:44444444-4444-4444-8444-444444444444",
+          name: "Platform",
+          kind: "team",
+          root: "/Engineering — Platform",
+          parentName: "Engineering",
+          isMember: true,
+          right: "manager",
+        })
+      );
+    });
+
     // TODO WARP-1261: add tests for:
-    // - Department rows appear when caller is a member
-    // - Department rows appear when caller is owner/admin (even non-member)
-    // - TEAM rows show "Parent — Team" naming
+    // - Department rows appear (only) when a non-admin caller is a member
+    //   (needs an AUTH_ENABLED=true harness — role is fixed to owner here)
     // - Inactive/pending/failed dept rows are excluded
     // - requireSpaceAccess middleware gates access by membership
   });

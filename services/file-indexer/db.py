@@ -327,6 +327,26 @@ def delete_chunks_for_file(nc_file_id: int) -> None:
         )
 
 
+def fetch_department_for_groupfolder(gf_id: int) -> Optional[dict]:
+    """WARP-1264: resolve a groupfolder id to its owning Department.
+
+    Returns ``{"id": ..., "kind": ..., "name": ...}`` or None when no
+    Department row references this groupfolder id — the caller (the
+    watcher's ``_lookup_department_for_groupfolder``) must skip the file
+    rather than guess a corpus for an unrecognized groupfolder.
+    """
+    with _db_lock, get_conn().cursor() as cur:
+        cur.execute(
+            'SELECT "id", "kind"::text, "name" FROM "Department" '
+            'WHERE "ncGroupfolderId" = %s',
+            (gf_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "kind": row[1], "name": row[2]}
+
+
 def delete_chunks_for_path(user_id: str, path: str) -> int:
     """Remove all chunks for a (userId, path) pair; returns rows deleted.
 

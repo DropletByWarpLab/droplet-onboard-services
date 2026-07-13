@@ -318,11 +318,104 @@ export interface FileSpace {
   kind?: string;
   /** Provision state (active, pending, failed, archiving, archived). */
   state?: string;
+  /**
+   * WARP-1267: true when the caller holds an actual membership row on this
+   * space. Owner/admin see every active department/team via see-all even
+   * without one — this flag is how the UI distinguishes "I'm a member here"
+   * from "I'm an admin visiting a library I don't belong to" (drives the
+   * admin foreign-library banner, brief §2). Undefined for personal/household.
+   */
+  isMember?: boolean;
+  /**
+   * WARP-1267: for kind='team' only — the parent department's display name.
+   * NC mounts team libraries flat; the dashboard owns the hierarchy illusion
+   * for the Files breadcrumb and the Spaces menu's nested team rows.
+   */
+  parentName?: string;
 }
 
 export interface FileSpacesResponse {
   sharedAvailable: boolean;
   spaces: FileSpace[];
+}
+
+// ── WARP-1270 (T18): Departments & teams tab, invite grants, company files ──
+
+/** One word per person per library (design brief §0.2) — neutral, text-first. */
+export type DepartmentRight = "reader" | "contributor" | "manager";
+
+export type DepartmentKind = "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
+
+export type DepartmentState =
+  | "pending"
+  | "provisioning"
+  | "active"
+  | "failed"
+  | "archiving"
+  | "archived";
+
+/** A row from GET /api/departments (list) or the `department` slice of
+ *  GET /api/departments/:id. BigInt fields are string-encoded. `myRight`
+ *  is the CALLER's own membership right on this unit, or null — never
+ *  derived from role (admin see-all is separate from holding a row). */
+export interface Department {
+  id: string;
+  name: string;
+  slug: string;
+  kind: DepartmentKind;
+  parentId: string | null;
+  description: string | null;
+  state: DepartmentState;
+  quotaBytes: string | null;
+  aclVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  memberCount: number;
+  teamCount: number;
+  myRight: DepartmentRight | null;
+  /** Best-effort bytes used, read from the discovered NC groupfolder (one
+   *  batch lookup for the whole list). Null on any read failure or before
+   *  discovery — never a fabricated 0. */
+  usedBytes: string | null;
+}
+
+export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
+
+/** One row of GET /api/departments/:id's `members` array — no email (the
+ *  member table doesn't need it and the column is encrypted-at-rest). */
+export interface DepartmentMember {
+  userId: string;
+  displayName: string;
+  right: DepartmentRight;
+  syncState: DepartmentSyncState;
+}
+
+export interface DepartmentDetail {
+  department: Department;
+  /** Best-effort bytes used, read from the discovered NC groupfolder.
+   *  Null on any read failure or before discovery — never a fabricated 0. */
+  usedBytes: string | null;
+  members: DepartmentMember[];
+  /** Child TEAM summaries, populated only when `department.kind` is DEPARTMENT. */
+  teams: Department[];
+}
+
+export interface CreateDepartmentPayload {
+  name: string;
+  description?: string;
+  /** Decimal-string bytes (BigInt wire contract). */
+  quotaBytes?: string;
+}
+
+/** GET /api/departments/:id/members row → membership-write payload. */
+export interface DepartmentMembership {
+  id: string;
+  departmentId: string;
+  userId: string;
+  right: DepartmentRight;
+  syncState: DepartmentSyncState;
+  ncPermissionMask: number | null;
 }
 
 export interface TrashItemInfo {
@@ -712,6 +805,59 @@ export interface InviteCreateRequest {
   displayName?: string;
   role?: InviteRole;
   ttlHours?: number;
+  /** WARP-1270 (T18) — optional department/team grants, converted to
+   *  DepartmentMembership rows at accept time (orchestrator WARP-1265). */
+  departments?: Array<{ departmentId: string; right?: DepartmentRight }>;
+}
+
+// ── WARP-1271 (T19a): per-user usage settings ──
+
+/** BigInt fields string-encoded (ADR-029 §8 wire contract). */
+export interface UsagePolicy {
+  userId: string;
+  storageQuotaBytes: string | null;
+  quotaSyncState: "pending" | "synced" | "failed" | "removing";
+  maxUploadSizeMb: number | null;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+/** GET /api/people/:id/usage response — `usedBytes` is display-only, read
+ *  live from Nextcloud; `null` when unknown (no NC account yet, or the read
+ *  failed) rather than a fabricated 0. */
+export interface UsageWithMeta {
+  policy: UsagePolicy | null;
+  usedBytes: string | null;
+}
+
+/** One row of GET /api/admin/files/usage's `users` array. `"—"` on any
+ *  field means the per-user quota read failed — render it verbatim, don't
+ *  treat it as a number. */
+export interface AdminUsageUserRow {
+  userId: string;
+  displayName: string;
+  quota: string | null;
+  used: string;
+  free: string | null;
+  /** WARP-1270 (T18) — UserUsagePolicy.maxUploadSizeMb override; null =
+   *  system default, no override set. */
+  largestUploadMb: number | null;
+  /** WARP-1270 (T18) — always null today (no per-user activity tracking
+   *  yet); render "—", never a fabricated date. */
+  lastActive: string | null;
+}
+
+export interface AdminUsageDepartmentRow {
+  id: string;
+  name: string;
+  kind: string;
+  sizeBytes: string;
+  quotaBytes: string | null;
+}
+
+export interface AdminFilesUsageResponse {
+  users: AdminUsageUserRow[];
+  departments: AdminUsageDepartmentRow[];
 }
 
 export interface InviteCreateResponse {

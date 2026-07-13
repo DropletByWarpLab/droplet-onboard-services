@@ -31,7 +31,20 @@ interface FileRowProps {
   onContextMenu: (x: number, y: number) => void;
   /** Called after a favorite toggle succeeds so the parent can refresh state. */
   onFavoriteChanged?: () => void;
+  /**
+   * WARP-1267 — false inside a `reader`-right department/team library. The
+   * per-row Delete affordance renders visible-but-disabled with the
+   * shipped reader-posture tooltip copy (design brief §2); Download stays
+   * enabled — readers can always view and download. Defaults true so every
+   * existing caller (My Files / Household, always writable) is unaffected.
+   */
+  canWrite?: boolean;
 }
+
+/** Verbatim copy (design brief §2) — ships as-is wherever a write action is
+ *  disabled for a reader-right space. */
+const READER_TOOLTIP =
+  "You can view and download here. Ask a manager for edit access.";
 
 function getFileIcon(file: FileEntryInfo) {
   if (file.isDirectory) return Folder;
@@ -87,6 +100,7 @@ export function FileRow({
   onCancelRename,
   onContextMenu,
   onFavoriteChanged,
+  canWrite = true,
 }: FileRowProps) {
   const isFavorited = favoritedPaths?.has(file.path) ?? false;
   const Icon = getFileIcon(file);
@@ -158,7 +172,7 @@ export function FileRow({
         // propagation but other transient focus states could let a
         // stray Backspace through.
         e.preventDefault();
-        onDelete();
+        if (canWrite) onDelete();
         return;
       }
       case "F10":
@@ -331,9 +345,16 @@ export function FileRow({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onDelete();
+            if (canWrite) onDelete();
           }}
-          className="p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
+          disabled={!canWrite}
+          title={canWrite ? undefined : READER_TOOLTIP}
+          aria-disabled={canWrite ? undefined : true}
+          className={`p-2.5 rounded-[var(--radius-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors ${
+            canWrite
+              ? "text-[color:var(--text-muted)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.12)]"
+              : "text-[color:var(--text-faint)] cursor-not-allowed"
+          }`}
           aria-label={`Delete ${file.name}`}
         >
           <Trash2 size={14} />

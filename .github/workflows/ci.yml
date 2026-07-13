@@ -16,7 +16,7 @@ name: ci
 #   - node matrix: tools-core + mcp-server, orchestrator (incl. Prisma
 #     db:generate + cosign for WARP-537's update-agent verify suite, #787,
 #     now on main and in orchestrator-tests.yml), web-dashboard (incl. the
-#     WARP-288 class lint), matter-controller.
+#     WARP-288 class lint + WARP-1296 tsc --noEmit / next build), matter-controller.
 #   - python 3.12 matrix: the gate-python service list from #786
 #     (ai-gateway, routing, switch, camera-discovery, file-indexer,
 #     voice-io, device-identity-svc), sysdeps and all.
@@ -145,9 +145,10 @@ jobs:
       # WARP-1011: vitest transforms via esbuild and never typechecks, so
       # compile-time contracts (e.g. the activity log's required
       # RecordParams.actor) were unenforced in CI. Runs after Prisma generate
-      # + workspace builds so tsc resolves the generated client. Dashboard tsc
-      # gating is deferred until its known pre-existing error is fixed
-      # (WARP-1005) — mirrors orchestrator-tests.yml.
+      # + workspace builds so tsc resolves the generated client. Mirrors
+      # orchestrator-tests.yml. (WARP-1296 later added the equivalent tsc
+      # --noEmit + next build gate to the web-dashboard leg below, once
+      # WARP-1005's pre-existing dashboard tsc error was fixed.)
       - name: Typecheck @droplet/orchestrator (tsc --noEmit)
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator typecheck
@@ -172,9 +173,31 @@ jobs:
         if: matrix.suite == 'web-dashboard'
         run: bash scripts/check-dashboard-classes.sh
 
+      # WARP-1296: same esbuild-strips-types gap WARP-1011 closed for the
+      # orchestrator — vitest never typechecks, so dashboard type regressions
+      # shipped green (WARP-1261/#1007 dropped `available` from FileSpace and
+      # broke SpaceSwitcher.tsx). tsc --noEmit enforces the compile-time
+      # contract. No Prisma/workspace pre-build needed: the dashboard's
+      # @droplet/* deps resolve from source. Mirrors web-dashboard-tests.yml.
+      - name: Typecheck @droplet/web-dashboard (tsc --noEmit)
+        if: matrix.suite == 'web-dashboard'
+        working-directory: apps/web-dashboard
+        run: npx tsc --noEmit
+
       - name: Test @droplet/web-dashboard
         if: matrix.suite == 'web-dashboard'
         run: npm run -w @droplet/web-dashboard test
+
+      # WARP-1296: `next build` catches breakage tsc/vitest alone miss — Next
+      # route/page contract violations and production bundling / module
+      # resolution (e.g. the auth-policy .js->.ts webpack alias in
+      # next.config.js). Heaviest dashboard step, runs last. Mirrors
+      # web-dashboard-tests.yml.
+      - name: Build @droplet/web-dashboard (next build)
+        if: matrix.suite == 'web-dashboard'
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run -w @droplet/web-dashboard build
 
       # WARP-1294: the erp-connector package's own vitest suite (schema-map,
       # read/write registries, and the dual-track EaglesoftApiConnector) ran in

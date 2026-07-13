@@ -42,8 +42,10 @@ import {
   gfSetGroupPermissions,
   ncAddUserToGroup,
   ncRemoveUserFromGroup,
+  ncListGroupMembers,
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
+import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("department-reconciler");
@@ -76,6 +78,11 @@ export interface ReconcileResult {
   membershipsSynced: number;
   membershipsFailed: number;
   membershipsRemoved: number;
+  // WARP-1271 (T19a): per-user usage-policy quota pushdown, swept on the
+  // same tick — see usage-policy-reconciler.service.ts.
+  usagePoliciesSwept: number;
+  usagePoliciesSynced: number;
+  usagePoliciesFailed: number;
 }
 
 /**
@@ -102,15 +109,104 @@ async function ensureAdminsAttached(
  * (which is idempotent end to end — ensure-group, find-or-create-folder,
  * set masks, set quota) so out-of-band NC edits get overwritten back to
  * the Prisma-desired state, and so a stale `ncGroupfolderId` left over
- * from an NC reinstall gets re-discovered by mount point.
+ * from an NC reinstall gets re-discovered by mount point. Returns the
+ * refreshed rw/ro group names too, so the caller can run the group-
+ * membership drift pass without a second round-trip.
  */
 async function reconcileActiveDepartment(
   prisma: PrismaClient,
   id: string,
-): Promise<boolean> {
+): Promise<{ active: boolean; ncGroupRw: string | null; ncGroupRo: string | null }> {
   await provisionDepartment(prisma, id);
-  const row = await prisma.department.findUnique({ where: { id } });
-  return row?.state === "active";
+  const row = await prisma.department.findUnique({
+    where: { id },
+    select: { state: true, ncGroupRw: true, ncGroupRo: true },
+  });
+  return {
+    active: row?.state === "active",
+    ncGroupRw: row?.ncGroupRw ?? null,
+    ncGroupRo: row?.ncGroupRo ?? null,
+  };
+}
+
+/**
+ * Drift-overwrite for department/team NC group MEMBERSHIP (ADR-029 §3.6
+ * bypass-path row "NC admin-UI out-of-band edits | Declared unsupported;
+ * reconciler overwrites within ≤5 min"). `reconcileActiveDepartment`
+ * above already re-converges the *group/folder/mask* shape; this closes
+ * the matching gap for *who is IN* the rw/ro groups: a user hand-added to
+ * `dept-<slug>` (or left behind by a bug) via the NC admin UI never gets
+ * orchestrator policy access — `checkSpaceAccess` only ever reads Prisma
+ * — but WOULD still get raw WebDAV/byte access through the groupfolder
+ * mount until something removes them NC-side. Prisma (`synced`
+ * memberships) is truth; anything `ncListGroupMembers` reports that isn't
+ * in the expected set gets removed.
+ *
+ * Only `syncState=synced` rows count as "should be a member": `pending`/
+ * `failed` rows haven't necessarily landed their NC add yet, so excluding
+ * them from "expected" is correct, not a bug — worst case this pass
+ * removes a straggling add and `sweepMemberships` re-adds it on the very
+ * next tick (a one-tick bounce, never a security hole). `removing` rows
+ * are mid-revocation and must never be treated as expected.
+ *
+ * HOUSEHOLD is never called with this (D-5: household rights convergence
+ * is explicit post-GA, per the sibling exclusion in `sweepMemberships`).
+ */
+async function removeDriftedGroupMembers(
+  prisma: PrismaClient,
+  adminToken: string,
+  departmentId: string,
+  ncGroupRw: string | null,
+  ncGroupRo: string | null,
+): Promise<number> {
+  if (!ncGroupRw && !ncGroupRo) return 0;
+
+  const synced = (await prisma.departmentMembership.findMany({
+    where: { departmentId, syncState: "synced" },
+    select: { userId: true, right: true },
+  })) as { userId: string; right: "reader" | "contributor" | "manager" }[];
+
+  const ncUsernameByUserId = new Map<string, string | null>();
+  for (const m of synced) {
+    if (ncUsernameByUserId.has(m.userId)) continue;
+    const user = await prisma.user.findUnique({
+      where: { id: m.userId },
+      select: { nextcloudUsername: true },
+    });
+    ncUsernameByUserId.set(m.userId, user?.nextcloudUsername ?? null);
+  }
+
+  const rwExpected = new Set<string>();
+  const roExpected = new Set<string>();
+  for (const m of synced) {
+    const ncUsername = ncUsernameByUserId.get(m.userId);
+    if (!ncUsername) continue;
+    (m.right === "reader" ? roExpected : rwExpected).add(ncUsername);
+  }
+
+  let removed = 0;
+  for (const [group, expected] of [
+    [ncGroupRw, rwExpected],
+    [ncGroupRo, roExpected],
+  ] as const) {
+    if (!group) continue;
+    const actual = await ncListGroupMembers(adminToken, group);
+    for (const member of actual) {
+      if (expected.has(member.id)) continue;
+      await ncRemoveUserFromGroup(adminToken, member.id, group);
+      removed += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Removed drifted NC group member (Prisma is truth)",
+        sub: `${member.id} · ${group}`,
+        refs: { departmentId, ncUsername: member.id, group },
+        actor: { type: "system" },
+      });
+    }
+  }
+  return removed;
 }
 
 /**
@@ -209,8 +305,18 @@ async function sweepDepartments(
       if (row.kind === "HOUSEHOLD") {
         await reconcileActiveHousehold(adminToken, row.ncGroupfolderId);
       } else {
-        const ok = await reconcileActiveDepartment(prisma, row.id);
-        if (!ok) stillFailed += 1;
+        const result = await reconcileActiveDepartment(prisma, row.id);
+        if (!result.active) {
+          stillFailed += 1;
+        } else {
+          await removeDriftedGroupMembers(
+            prisma,
+            adminToken,
+            row.id,
+            result.ncGroupRw,
+            result.ncGroupRo,
+          );
+        }
       }
     } catch (err) {
       logger.error({ err, id: row.id }, "active-department reconcile pass failed");
@@ -410,6 +516,7 @@ export async function reconcileDepartments(
 
   const deptResult = await sweepDepartments(prisma, adminToken);
   const memberResult = await sweepMemberships(prisma, adminToken);
+  const usageResult = await sweepUsagePolicies(prisma, adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -419,6 +526,9 @@ export async function reconcileDepartments(
     membershipsSynced: memberResult.synced,
     membershipsFailed: memberResult.failed,
     membershipsRemoved: memberResult.removed,
+    usagePoliciesSwept: usageResult.usagePoliciesSwept,
+    usagePoliciesSynced: usageResult.usagePoliciesSynced,
+    usagePoliciesFailed: usageResult.usagePoliciesFailed,
   };
 
   logger.debug(result, "department-reconciler tick complete");

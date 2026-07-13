@@ -671,6 +671,54 @@ export async function ncGetUserQuota(token: string): Promise<{
   }
 }
 
+/**
+ * WARP-1271 (T19a) — fetch an ARBITRARY user's storage quota via the admin
+ * credential. `ncGetUserQuota` above only reads the CALLER's own quota
+ * (`/cloud/user` resolves against the bearer's own session); the admin
+ * usage roster and the per-user usage-settings GET need someone ELSE's
+ * quota, which requires the admin-scoped single-user detail endpoint
+ * (`GET /cloud/users/{userid}`) — same OCS `quota` object shape as
+ * `/cloud/user`, just keyed by username instead of the token owner.
+ * Returns null on any failure (unknown user, NC unreachable, malformed
+ * response) — callers degrade to an honest "—" display, never a 500.
+ */
+export async function ncGetUserQuotaAdmin(
+  adminToken: string,
+  username: string
+): Promise<{
+  used: number;
+  free: number | null;
+  total: number | null;
+  quota: number | null;
+} | null> {
+  try {
+    const resp = await fetch(
+      ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}?format=json`),
+      { headers: ocsHeaders(adminToken) }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.ocs?.meta?.status !== "ok") return null;
+    const q = data?.ocs?.data?.quota ?? {};
+    // Nextcloud returns -3 for unlimited quota; surface that as null (same
+    // convention as ncGetUserQuota).
+    const parseNum = (v: unknown): number | null => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n) || n < 0) return null;
+      return n;
+    };
+    return {
+      used: parseNum(q.used) ?? 0,
+      free: parseNum(q.free),
+      total: parseNum(q.total),
+      quota: parseNum(q.quota),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function ncLoginWithCredentials(
   username: string,
   password: string
@@ -1420,6 +1468,49 @@ export async function ncListOutboundShares(token: string): Promise<ShareDetail[]
   const data = await resp.json();
   const records = data?.ocs?.data ?? [];
   return Array.isArray(records) ? records.map((r) => mapShareRecord(r)) : [];
+}
+
+/**
+ * List shares the current caller OWNS (no `path` filter — the OCS
+ * endpoint returns every share the acting credential minted when called
+ * without one). WARP-1269 (T17): used for the "shared by me" aggregate —
+ * called with the caller's own token for personal shares.
+ */
+export async function ncListMyShares(token: string): Promise<ShareDetail[]> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS list own shares failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map((r) => mapShareRecord(r)) : [];
+}
+
+/**
+ * Fetch a single share's live detail by id. Returns `null` on 404 (the
+ * share was deleted directly in Nextcloud, out of band from our
+ * `DepartmentShare` registry row) rather than throwing — callers
+ * reconciling a registry listing against live OCS state treat a missing
+ * share as "drop it from the list", not a hard failure. WARP-1269 (T17):
+ * used to source live details for admin-minted department shares (called
+ * with the admin credential, since the registry row's `createdById` may
+ * not be the OCS share owner from Nextcloud's point of view).
+ */
+export async function ncGetShare(
+  token: string,
+  shareId: number
+): Promise<ShareDetail | null> {
+  const url = ocsUrl(`/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`);
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error(`OCS get share failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.statuscode === 404) return null;
+  const record = Array.isArray(data?.ocs?.data) ? data.ocs.data[0] : data?.ocs?.data;
+  return record ? mapShareRecord(record) : null;
 }
 
 // ── WebDAV Move / Copy / Rename ──
