@@ -89,9 +89,21 @@ preserved via `$request_uri`.
 
 ### 2. ON/OFF decision — derived from the cert artifact
 
-Redirect is ON iff `docker/certs/droplet.crt` is **(a)** not
-self-issued, **(b)** unexpired, and **(c)** carries the FQDN in its
-SANs — checked with `openssl` at render time. The render lives in the
+Redirect is ON iff **all four** hold: **(a)** `docker/certs/droplet.crt`
+is not self-issued, **(b)** it is unexpired, **(c)** it carries the FQDN
+in its SANs — all checked with `openssl` at render time — and **(d)**
+the box owns the LAN's DNS, via an **explicit `.env` flag**
+(`DROPLET_LAN_DNS_AUTHORITY=1`, written once by `setup.sh` on shapes
+where the box is the router/DHCP/DNS — single-box — and `0` elsewhere;
+explicit column, never derived, per the repo's no-guessing rule).
+
+Condition (d) exists because the redirect target is only resolvable
+through the box's own dnsmasq (split-horizon; public NXDOMAIN), while
+`droplet.local` resolves via mDNS peer-to-peer regardless of the
+client's DNS server. On a dev/lab shape where the box sits behind an
+existing router, clients resolve `.local` but NOT the FQDN — a 307
+there would dead-end in a browser DNS error, strictly worse than
+today's warning. Those shapes keep today's behavior. The render lives in the
 host-side `scripts/lib/tls-reload.sh` (or a sibling it sources), which
 is already the single choke point every cert writer passes through:
 the self-signed bootstrap (`_generate_tls_cert`), the LE install path
@@ -192,6 +204,21 @@ users re-authenticate once on the FQDN.
 - **HSTS:** browsers ignore HSTS from untrusted connections, so the
   existing `Strict-Transport-Security` header cannot wedge `.local`
   clients; add a config comment saying so.
+- **Client with hardcoded third-party DNS** (user set 8.8.8.8 on their
+  laptop, on an otherwise normal single-box network): `.local` resolves
+  via mDNS, the FQDN doesn't → the 307 lands on a browser DNS error.
+  Self-inflicted and rare; recovery paths are the break-glass IP or
+  reverting their DNS override. A future smart interstitial (below)
+  would soften this.
+- **Initial-setup ordering:** there is no "before DNS is set" window on
+  the shipping shape. The box *is* the router: a client that can reach
+  `droplet.local` at all necessarily joined the box's network, whose
+  DHCP hands out the box's dnsmasq — which answers the FQDN from the
+  same host-record store. Cert (provisioned at bench) and DNS record
+  (registered at install, travels with the box) both pre-exist first
+  customer contact. If dnsmasq/mDNS are down entirely, `droplet.local`
+  doesn't resolve either — unreachable, same as today; break-glass IP
+  applies.
 - **Trust-script clients** (installed the self-signed cert): in the ON
   state the box serves the LE cert (single cert pair, and no CA can put
   `.local` in it), so an explicit `https://droplet.local` bookmark gets
@@ -223,5 +250,11 @@ users re-authenticate once on the FQDN.
 - Serving the full dashboard over plain HTTP (rejected, Foundation).
 - Client trust-onboarding UX beyond the status-page links (Approach C;
   revisit only if air-gapped installs become a real segment).
+- A "smart interstitial" replacing the bare 307 (tiny page that beacons
+  `https://<fqdn>` and redirects only on success, showing DNS guidance
+  otherwise). Would gracefully handle clients with hardcoded
+  third-party DNS; deliberately deferred — the explicit
+  `DROPLET_LAN_DNS_AUTHORITY` gate covers the deployment-shape version
+  of the problem, and the per-client version is rare + self-inflicted.
 - fleet-hq changes (issuance contract is untouched; WARP-979 name claim
   is its own coupled follow-up).
