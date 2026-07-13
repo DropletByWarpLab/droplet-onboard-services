@@ -40,6 +40,19 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
+// WARP-1270 (T18): the page now reads useWorkspace() unconditionally.
+// isBusiness: false keeps this Home-mode usage-settings flow unchanged
+// (no tab strip, no department-assignment section).
+vi.mock("@/lib/workspace", () => ({
+  useWorkspace: () => ({
+    workspaceType: "home",
+    isHome: true,
+    isBusiness: false,
+    setWorkspaceType: () => {},
+    homeVariant: "B",
+  }),
+}));
+
 vi.mock("qrcode.react", () => ({
   QRCodeSVG: ({ value }: { value: string }) => <svg data-testid="invite-qr" data-value={value} />,
 }));
@@ -194,6 +207,23 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
     expect(dialog.textContent).toMatch(/— used/);
+  });
+
+  it("shows the sync-state transition (Applying to storage… -> Applied) after save", async () => {
+    const dialog = await openEditDialog();
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
+      target: { value: "5" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByText("Applying to storage…")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(within(dialog).getByText("Applied")).toBeInTheDocument();
+    });
   });
 
   it("rejects a non-positive upload cap without saving", async () => {

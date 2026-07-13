@@ -17,9 +17,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
 
-// ── next/navigation — the page reads ?path= via useSearchParams ──
+// ── next/navigation — the page reads ?path= (and, WARP-1270, ?space=) via
+// useSearchParams. `let` so the WARP-1270 deep-link tests can point it at a
+// `?space=` query before rendering; reset in beforeEach below.
+let mockSearchParamsString = "";
 vi.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams(""),
+  useSearchParams: () => new URLSearchParams(mockSearchParamsString),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   usePathname: () => "/files",
 }));
@@ -144,6 +147,7 @@ beforeEach(() => {
   mockSpaces = [PERSONAL, SHARED];
   mockSharedAvailable = true;
   mockUser = { id: "u1", email: "family@example.com", role: "family" };
+  mockSearchParamsString = "";
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -309,5 +313,65 @@ describe("<FilesPage /> — team breadcrumb (WARP-1267)", () => {
     // Only one "Engineering" text node now — the active segmented tab label
     // itself — no extra prefix crumb duplicate.
     expect(screen.getAllByText("Engineering")).toHaveLength(1);
+  });
+});
+
+// WARP-1270 (T18) — `?space=` deep-link: the /admin/files "Open library"
+// jump navigates to /files?space=dept:<id> and this space becomes active on
+// arrival (design brief §5: "arrives on Surface A with the admin banner").
+describe("<FilesPage /> — ?space= deep-link (WARP-1270)", () => {
+  const FINANCE_DEPT: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "contributor",
+    isMember: true,
+  };
+
+  it("activates the space named in ?space= once spaces have loaded", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance";
+    render(<FilesPage />);
+    expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("ignores an unknown/stale space id — falls back to the default (My Files) rather than dead-ending", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Aarchived-long-ago";
+    render(<FilesPage />);
+    expect(screen.getByRole("tab", { name: /my files/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("no ?space= param leaves the default My Files space active", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "";
+    render(<FilesPage />);
+    expect(screen.getByRole("tab", { name: /my files/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("switching away from the deep-linked space manually still works (one-shot apply, not sticky)", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance";
+    render(<FilesPage />);
+    expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /my files/i }));
+    expect(screen.getByRole("tab", { name: /my files/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 });

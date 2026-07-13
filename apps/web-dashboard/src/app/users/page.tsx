@@ -14,9 +14,13 @@ import {
   Copy,
   RefreshCw,
   Link as LinkIcon,
+  Building2,
+  ChevronRight,
+  Loader2,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
+import { useWorkspace } from "@/lib/workspace";
 import {
   fetchUsers,
   createUser as apiCreateUser,
@@ -29,6 +33,7 @@ import {
   fetchUserUsage,
   updateUserUsage,
   fetchAdminFilesUsage,
+  listDepartments,
 } from "@/lib/api";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -40,12 +45,22 @@ import type {
   CreateUserRole,
   InviteCreateResponse,
   AdminUsageUserRow,
+  Department,
+  DepartmentRight,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, type BadgeKind } from "@/components/shell/primitives";
+import { DepartmentsPanel } from "@/components/Departments/DepartmentsPanel";
+
+const DEPT_RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
+const DEPT_RIGHT_LABEL: Record<DepartmentRight, string> = {
+  reader: "Reader",
+  contributor: "Contributor",
+  manager: "Manager",
+};
 
 const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
   { label: "24 hours", hours: 24 },
@@ -134,6 +149,12 @@ function bytesToUnitValue(bytes: string | null): { value: string; unit: StorageU
  */
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
+  const { isBusiness } = useWorkspace();
+  const isAdminTier = currentUser?.role === "owner" || currentUser?.role === "admin";
+  // WARP-1270 (T18): "People" / "Departments & teams" tab row — Business
+  // workspace only (design brief §3). Home mode never sees this tab; the
+  // People roster below is unconditionally the whole page in Home mode.
+  const [tab, setTab] = useState<"people" | "departments">("people");
   const [users, setUsers] = useState<RosterUser[]>([]);
   // DASH-001: self-identity compares the LOCAL user UUID (u.userId ↔
   // currentUser.id), never the Nextcloud username (u.id) against the local
@@ -158,6 +179,15 @@ export default function UsersPage() {
   const [inviteResult, setInviteResult] = useState<InviteCreateResponse | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
+
+  // WARP-1270 (T18) — invite modal "Add to a department" section (design
+  // brief §4): collapsed by default; a Map<departmentId, right> tracks
+  // which units are checked and each row's chosen right (default
+  // Contributor on check). Business-mode only; empty when there are no
+  // departments yet (the section simply doesn't render).
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [inviteDeptExpanded, setInviteDeptExpanded] = useState(false);
+  const [inviteDeptGrants, setInviteDeptGrants] = useState<Map<string, DepartmentRight>>(new Map());
 
   // Stable id used to wire up `aria-labelledby` on the invite dialog.
   const inviteHeadingId = useId();
@@ -214,6 +244,10 @@ export default function UsersPage() {
   const [editUploadCapMb, setEditUploadCapMb] = useState("");
   const [editUsedBytes, setEditUsedBytes] = useState<string | null>(null);
   const [editUsageLoading, setEditUsageLoading] = useState(false);
+  // WARP-1270 QA fix: transient sync-state text under the Usage fields —
+  // "Applying to storage…" while the PATCH is in flight, then "Applied"
+  // once the orchestrator confirms (design brief §4).
+  const [editUsageSyncText, setEditUsageSyncText] = useState<string | null>(null);
 
   // WARP-1271 (T19a): roster "used / limit" column, keyed by local User.id.
   // Sourced from the admin usage-roster endpoint (one call for every row,
@@ -281,6 +315,17 @@ export default function UsersPage() {
     reload();
   }, [reload]);
 
+  // WARP-1270 (T18) — department list for the invite modal's "Add to a
+  // department" section. Business-mode only; best-effort (the invite
+  // modal's core email/role flow must not break if this fails — the
+  // section just doesn't render).
+  useEffect(() => {
+    if (!isBusiness || isAdmin !== true) return;
+    listDepartments()
+      .then((data) => setDepartments(data.departments || []))
+      .catch(() => setDepartments([]));
+  }, [isBusiness, isAdmin]);
+
   const resetInviteForm = () => {
     setInviteEmail("");
     setInviteDisplay("");
@@ -289,6 +334,8 @@ export default function UsersPage() {
     setInvitePhase("form");
     setInviteResult(null);
     setInviteCopied(false);
+    setInviteDeptExpanded(false);
+    setInviteDeptGrants(new Map());
   };
 
   const closeInvite = useCallback(() => {
@@ -417,11 +464,19 @@ export default function UsersPage() {
     }
     setInviteSubmitting(true);
     try {
+      const deptGrants =
+        inviteDeptGrants.size > 0
+          ? Array.from(inviteDeptGrants.entries()).map(([departmentId, right]) => ({
+              departmentId,
+              right,
+            }))
+          : undefined;
       const result = await createInvite({
         email,
         displayName: inviteDisplay.trim() || undefined,
         role: inviteRole,
         ttlHours: inviteTtlHours,
+        departments: deptGrants,
       });
       setInviteResult(result);
       setInvitePhase("share");
@@ -542,6 +597,7 @@ export default function UsersPage() {
     setEditStorageUnit("GB");
     setEditUploadCapMb("");
     setEditUsedBytes(null);
+    setEditUsageSyncText(null);
 
     // WARP-1271 (T19a): usage settings key on the LOCAL User UUID
     // (RosterUser.userId), not the Nextcloud username — rows without a
@@ -634,11 +690,19 @@ export default function UsersPage() {
         await updateUser(editing.id, patch);
       }
       if (usagePatch && editing.userId) {
+        // WARP-1270 QA fix: surface the sync-state transition under the
+        // Usage fields instead of closing the dialog silently — the box
+        // still has to push the quota to storage after this call resolves.
+        setEditUsageSyncText("Applying to storage…");
         await updateUserUsage(editing.userId, usagePatch);
+        setEditUsageSyncText("Applied");
+        // Let "Applied" stay visible for a beat before the dialog closes.
+        await new Promise((resolve) => setTimeout(resolve, 700));
       }
       closeEdit();
       await reload();
     } catch (err: any) {
+      setEditUsageSyncText(null);
       setError(err?.message || "Failed to update user");
     }
   };
@@ -727,6 +791,49 @@ export default function UsersPage() {
         </div>
       )}
 
+      {/* WARP-1270 (T18) — "People" / "Departments & teams" tab row.
+          Business workspace only (design brief §3); Home mode never renders
+          this strip, so the People list below is unconditionally the whole
+          page there. Mirrors the /knowledge tabstrip pattern (same class
+          names, same WAI-ARIA tabs contract) already shipped on this page
+          shell. */}
+      {isBusiness && (
+        <div role="tablist" aria-label="Users view tabs" className="tabstrip">
+          <button
+            type="button"
+            role="tab"
+            id="users-tab-people"
+            aria-selected={tab === "people"}
+            aria-controls="users-panel-people"
+            tabIndex={tab === "people" ? 0 : -1}
+            onClick={() => setTab("people")}
+            className={"tab" + (tab === "people" ? " active" : "")}
+          >
+            <UsersIcon size={14} aria-hidden="true" />
+            People
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="users-tab-departments"
+            aria-selected={tab === "departments"}
+            aria-controls="users-panel-departments"
+            tabIndex={tab === "departments" ? 0 : -1}
+            onClick={() => setTab("departments")}
+            className={"tab" + (tab === "departments" ? " active" : "")}
+          >
+            <Building2 size={14} aria-hidden="true" />
+            Departments &amp; teams
+          </button>
+        </div>
+      )}
+
+      <div
+        role="tabpanel"
+        id="users-panel-people"
+        aria-labelledby="users-tab-people"
+        hidden={isBusiness && tab !== "people"}
+      >
       {/* User list */}
       <div className="card">
         {loading && users.length === 0 ? (
@@ -866,6 +973,20 @@ export default function UsersPage() {
           </div>
         </div>
       )}
+      </div>
+
+      {isBusiness && (
+        <div
+          role="tabpanel"
+          id="users-panel-departments"
+          aria-labelledby="users-tab-departments"
+          hidden={tab !== "departments"}
+        >
+          {tab === "departments" && (
+            <DepartmentsPanel people={users} isAdminTier={isAdminTier} />
+          )}
+        </div>
+      )}
 
       {/* Invite modal */}
       {showInvite && (
@@ -988,6 +1109,97 @@ export default function UsersPage() {
                       </select>
                     </div>
                   </div>
+
+                  {/* WARP-1270 (T18) — invite modal "Add to a department"
+                      (design brief §4). Collapsed by default; renders only
+                      in Business mode with at least one department to
+                      offer. Teams render indented under their parent
+                      department, mirroring the Departments tab's tree. */}
+                  {isBusiness && departments.length > 0 && (
+                    <div>
+                      {!inviteDeptExpanded ? (
+                        <button
+                          type="button"
+                          onClick={() => setInviteDeptExpanded(true)}
+                          className="type-caption-1"
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--brand)", fontWeight: 500, padding: "4px 0" }}
+                        >
+                          <ChevronRight size={13} aria-hidden="true" />
+                          Add to a department
+                        </button>
+                      ) : (
+                        <div>
+                          <div className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
+                            Add to departments and teams
+                          </div>
+                          <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-input)", overflow: "hidden" }}>
+                            {departments
+                              .filter((d) => d.kind !== "HOUSEHOLD")
+                              .map((d, i) => {
+                                const checked = inviteDeptGrants.has(d.id);
+                                const right = inviteDeptGrants.get(d.id) ?? "contributor";
+                                return (
+                                  <div
+                                    key={d.id}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 10,
+                                      padding: "10px 12px",
+                                      borderTop: i === 0 ? "none" : "1px solid var(--border)",
+                                      paddingLeft: d.kind === "TEAM" ? 30 : 12,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      id={`invite-dept-${d.id}`}
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        setInviteDeptGrants((prev) => {
+                                          const next = new Map(prev);
+                                          if (e.target.checked) next.set(d.id, "contributor");
+                                          else next.delete(d.id);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                    <label
+                                      htmlFor={`invite-dept-${d.id}`}
+                                      style={{ flex: 1, minWidth: 0, fontSize: 14, color: checked ? "var(--text)" : "var(--text-muted)" }}
+                                    >
+                                      {d.name}
+                                    </label>
+                                    <select
+                                      aria-label={`Rights in ${d.name}`}
+                                      value={right}
+                                      disabled={!checked}
+                                      onChange={(e) =>
+                                        setInviteDeptGrants((prev) => new Map(prev).set(d.id, e.target.value as DepartmentRight))
+                                      }
+                                      style={{
+                                        background: "var(--surface)",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: "var(--radius-input)",
+                                        color: "var(--text)",
+                                        padding: "4px 8px",
+                                        fontSize: 12.5,
+                                        opacity: checked ? 1 : 0.4,
+                                      }}
+                                    >
+                                      {DEPT_RIGHTS.map((r) => (
+                                        <option key={r} value={r}>
+                                          {DEPT_RIGHT_LABEL[r]}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div
                   className="flex items-center justify-end gap-2 px-4 py-3"
@@ -1520,6 +1732,18 @@ export default function UsersPage() {
                     <div className="type-caption-1 mono" style={{ color: "var(--text-faint)" }}>
                       {editUsageLoading ? "Loading usage…" : `${formatBytes(editUsedBytes)} used`}
                     </div>
+                    {editUsageSyncText && (
+                      <div
+                        className="type-caption-1 mono"
+                        style={{ color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}
+                        role="status"
+                      >
+                        {editUsageSyncText === "Applying to storage…" && (
+                          <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                        )}
+                        {editUsageSyncText}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1531,12 +1755,14 @@ export default function UsersPage() {
               <button
                 onClick={closeEdit}
                 className="btn ghost"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 Cancel
               </button>
               <button
                 onClick={handleEditSave}
                 className="btn primary"
+                disabled={editUsageSyncText === "Applying to storage…"}
               >
                 <Check size={14} />
                 Save

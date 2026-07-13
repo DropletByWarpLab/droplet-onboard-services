@@ -224,6 +224,23 @@ export default function FilesPage() {
     [space, fm]
   );
 
+  // WARP-1270 (T18) — deep-link a specific space via `?space=` (the
+  // /admin/files "Open library" jump, design brief §5: "arrives on Surface
+  // A with the admin banner"). Applies once, as soon as `spaces` has loaded
+  // and actually contains the requested id — a stale/unknown id (space
+  // archived, typo'd link) is silently ignored rather than dead-ending on
+  // an empty listing.
+  const appliedSpaceParamRef = useRef(false);
+  useEffect(() => {
+    if (appliedSpaceParamRef.current) return;
+    const requested = searchParams?.get("space");
+    if (!requested || spaces.length === 0) return;
+    appliedSpaceParamRef.current = true;
+    if (spaces.some((s) => s.id === requested)) {
+      handleSpaceChange(requested);
+    }
+  }, [searchParams, spaces, handleSpaceChange]);
+
   const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
   const favoritedPaths = useMemo(
     () => new Set(favoriteItems.map((f) => f.path)),
