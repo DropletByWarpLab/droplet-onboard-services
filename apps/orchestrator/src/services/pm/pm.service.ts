@@ -718,6 +718,41 @@ export async function deleteLabel(prisma: PrismaClient, labelId: string): Promis
 
 // ── Work items ───────────────────────────────────────────────────────────────
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Normalise a state name/slug for slug-tolerant comparison — lower-cased with
+ *  any run of spaces/underscores/hyphens collapsed to one underscore, so
+ *  "In Progress", "in progress" and "in_progress" all compare equal. */
+function slugifyStateName(s: string): string {
+  return s.trim().toLowerCase().replace(/[\s_-]+/g, "_");
+}
+
+/**
+ * WARP-888 (ADR-026): `?state=` accepts EITHER the native `PmState` UUID
+ * (current dashboard contract) OR the legacy Plane state name/slug (e.g.
+ * `in_progress`) that older mobile clients may still send — which otherwise
+ * changed semantics silently and returned an empty list. A UUID passes straight
+ * through (no DB hit — the common path is unaffected); a non-UUID is resolved
+ * against the project's `PmState.name` (exact / case-insensitive / slugified);
+ * a value that resolves to nothing is passed through unchanged (empty result,
+ * exactly as before) rather than erroring.
+ */
+async function resolveStateFilter(
+  prisma: PrismaClient,
+  projectId: string,
+  state: string,
+): Promise<string> {
+  if (UUID_RE.test(state)) return state;
+  const wanted = slugifyStateName(state);
+  const states = await prisma.pmState.findMany({
+    where: { projectId },
+    select: { id: true, name: true },
+  });
+  const match = states.find((s) => slugifyStateName(s.name) === wanted);
+  return match?.id ?? state;
+}
+
 export async function listWorkItems(
   prisma: PrismaClient,
   projectId: string,
@@ -736,7 +771,8 @@ export async function listWorkItems(
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const where: Prisma.PmWorkItemWhereInput = { projectId, isArchived: false };
-  if (filters.stateId) where.stateId = filters.stateId;
+  if (filters.stateId)
+    where.stateId = await resolveStateFilter(prisma, projectId, filters.stateId);
   if (filters.priority) where.priority = filters.priority;
   if (filters.parentId !== undefined) where.parentId = filters.parentId;
   if (filters.assignee) where.assignees = { some: { userId: filters.assignee } };
