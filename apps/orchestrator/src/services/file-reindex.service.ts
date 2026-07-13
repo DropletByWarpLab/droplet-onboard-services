@@ -28,6 +28,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 
 export interface ReindexFileParams {
   /** Opaque file identifier (Nextcloud fileId or BrainMemoryItem id). */
@@ -125,9 +126,11 @@ export function hashFileId(fileId: string): bigint {
 async function callFileIndexerReindex(
   fileId: string,
 ): Promise<{ chunksWritten: number }> {
-  const base = config.FILE_INDEXER_URL;
+  // WARP-1061: first-party mesh hop — present the orchestrator's client cert
+  // + dial https:// when DROPLET_INTERNAL_TLS=1 (identity when off).
+  const base = internalBaseUrl(config.FILE_INDEXER_URL);
   const url = `${base}/reindex/${encodeURIComponent(fileId)}`;
-  const resp = await fetch(url, { method: "POST" });
+  const resp = await internalFetch(url, { method: "POST" });
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`file-indexer returned ${resp.status}: ${body}`);

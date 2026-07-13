@@ -219,9 +219,18 @@ def main():
         try:
             import uvicorn
 
+            # WARP-1061: DROPLET_INTERNAL_TLS=1 serves the /data/service-tls
+            # bundle + REQUIRES a CA-signed client cert (the orchestrator's
+            # health probe / admin-reindex client presents one); unset/0
+            # keeps the plain-HTTP listener byte-identical to before.
+            from _shared.internal_tls import uvicorn_ssl_kwargs
+
             api = build_http_app()
             port = int(os.environ.get("FILE_INDEXER_HTTP_PORT", "8090"))
-            uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
+            uvicorn.run(
+                api, host="0.0.0.0", port=port, log_level="info",
+                **uvicorn_ssl_kwargs(),
+            )
         except Exception:
             logger.exception("file-indexer HTTP server failed to start")
             os._exit(1)

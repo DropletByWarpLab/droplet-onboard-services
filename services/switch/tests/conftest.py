@@ -22,3 +22,9 @@ os.environ.setdefault("ROUTING_SERVICE_TOKEN", "pytest-fake-routing-token")
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVICE_DIR))
+# WARP-1061 — main.py imports `_shared.internal_tls`. In-container the helper
+# is COPY'd to /app/_shared; in the repo it lives at services/_shared, so add
+# services/ to the path (same pattern as voice-io's conftest).
+_SERVICES_DIR = _SERVICE_DIR.parent
+if str(_SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVICES_DIR))

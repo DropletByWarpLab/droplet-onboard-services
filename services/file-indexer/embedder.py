@@ -44,10 +44,23 @@ def _get_stub():
         return _stub
 
     from grpc_generated import inference_pb2_grpc
-    _channel = grpc.insecure_channel(AI_GATEWAY_GRPC_URL)
+    _channel = _create_channel()
     _stub = inference_pb2_grpc.InferenceServiceStub(_channel)
     logger.info("gRPC stub created for %s", AI_GATEWAY_GRPC_URL)
     return _stub
+
+
+def _create_channel() -> grpc.Channel:
+    """WARP-1061 (hop 16, client half): dial ai-gateway :50051 per the
+    internal-mTLS contract. DROPLET_INTERNAL_TLS=1 → secure channel
+    presenting this service's /data/service-tls bundle with trust pinned to
+    the internal CA (the server REQUIRES the client cert); unset/0 → the
+    historical insecure channel, byte-identical to before."""
+    from _shared.internal_tls import enabled, grpc_channel_credentials
+
+    if enabled():
+        return grpc.secure_channel(AI_GATEWAY_GRPC_URL, grpc_channel_credentials())
+    return grpc.insecure_channel(AI_GATEWAY_GRPC_URL)
 
 
 def embed_texts(texts: list[str], model: str = EMBEDDING_MODEL) -> list[list[float]]:

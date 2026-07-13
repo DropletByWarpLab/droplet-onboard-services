@@ -51,6 +51,11 @@ from droplet_openwrt_sdk import DropletRouter, ConnectionLost, UbusError
 from middleware import with_fresh_request_id
 from request_context import get_request_id
 
+# WARP-1061 — internal mTLS: rewrite the orchestrator base URL to https:// and
+# present routing's client cert when DROPLET_INTERNAL_TLS=1 (identity when
+# off). Mirrors scheduler.py (the WARP-470 throughput sampler).
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger(__name__)
 
 EGRESS_SAMPLE_INTERVAL_SECONDS = int(
@@ -62,9 +67,9 @@ EGRESS_SAMPLE_INTERVAL_SECONDS = int(
 # localhost to match scheduler.py (same process, same host-network constraint);
 # a compose-service-name default silently fails DNS and drops every off-LAN
 # sample when ORCHESTRATOR_URL isn't explicitly set (NET-08).
-ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://localhost:3000"
-).rstrip("/")
+ORCHESTRATOR_URL = _internal_base_url(
+    os.environ.get("ORCHESTRATOR_URL", "http://localhost:3000").rstrip("/")
+)
 ORCHESTRATOR_SAMPLER_TOKEN = (
     os.environ.get("ORCHESTRATOR_SAMPLER_TOKEN") or ""
 ).strip()
@@ -186,7 +191,7 @@ async def _post_batch(deltas: dict[str, int]) -> None:
     if _rid:
         headers["x-request-id"] = _rid
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, **httpx_client_kwargs()) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/api/network/off-lan-sample-batch",
                 headers=headers,

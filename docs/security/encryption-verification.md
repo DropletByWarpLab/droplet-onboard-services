@@ -117,9 +117,9 @@ harness bugs.
 | `transit.redis.tls` (T-05) | PASS | WARP-234: TLS 1.3-only listener on 6380 (WARP-236 internal-CA `cache` leaf), authenticated PING as the ping-only `default` ACL user |
 | `transit.mqtt.plaintext-closed` (T-06) | PASS | WARP-235 landed: no 1883 listener — `docker/mosquitto.conf` is a single mTLS listener on :8883 |
 | `transit.mqtt.mtls-required` (T-07) | PASS | WARP-235 landed: `require_certificate true` — a certless publish is refused at the TLS handshake |
-| `transit.mesh.plain-http-refused` (T-08) | FAIL | probes `orchestrator:3000` + `ai-gateway:8000` — the hops WARP-236 mesh mTLS is meant to protect. Both still accept plain HTTP because `DROPLET_INTERNAL_TLS=1` is never set and the ai-gateway listener is unwired. (`mcp-server:9090` and `web-dashboard:3001` are deliberately NOT probed: they are by-design plain — JWT-gated / nginx user plane) |
+| `transit.mesh.plain-http-refused` (T-08) | FAIL (flag off) / PASS (flag on) | probes `orchestrator:3000` + `ai-gateway:8000` — the WARP-236 mesh hops. WARP-1061 wired both listeners end-to-end behind `DROPLET_INTERNAL_TLS`; the default posture is still `0` (plaintext), so a box whose operator hasn't flipped the knob keeps FAILing this check honestly. Enable per docs/security/internal-mtls.md → Runbook and the probe flips to PASS. (`mcp-server:9090` and `web-dashboard:3001` are deliberately NOT probed: they are by-design plain — JWT-gated / nginx user plane) |
 | `transit.edge.tls-policy` (T-09) | PASS | `docker/nginx/nginx.conf` — TLSv1.2/1.3 only, HIGH ciphers |
-| `transit.pcap.canary` (T-10) | FAIL | canary visible on the wire in the mesh HTTP hops — pg/redis/MQTT are all TLS (WARP-233/234/235); the dormant service-to-service mesh mTLS is the remaining exposure (see T-08) |
+| `transit.pcap.canary` (T-10) | FAIL (flag off) / PASS (flag on) | canary visible on the wire in the mesh HTTP hops — pg/redis/MQTT are all TLS (WARP-233/234/235); the mesh hops encrypt once `DROPLET_INTERNAL_TLS=1` is enabled (WARP-1061, see T-08) |
 
 A **fully stopped stack reads SKIP** (`container-not-running:<service>`) on
 every exec-based transit probe — never PASS. Start the stack before a

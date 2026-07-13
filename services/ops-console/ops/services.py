@@ -50,12 +50,13 @@ from typing import Any, Literal
 
 import httpx
 
-# WARP-236 — internal mTLS: rewrite first-party probe URLs to https:// and
-# present ops-console's client cert when DROPLET_INTERNAL_TLS=1. Third-party
-# probe targets (frigate :5000, web-dashboard) whose OPS_PROBE_* stay http://
-# are rewritten too when the flag is on and are documented as out-of-scope —
-# operators can point their OPS_PROBE_* at the real health path if a target
-# doesn't speak TLS.
+# WARP-236 / WARP-1061 — internal mTLS: rewrite MESH probe URLs to https://
+# and present ops-console's client cert when DROPLET_INTERNAL_TLS=1. Only the
+# first-party mTLS listeners are rewritten (_MESH_PROBES below); the exempt
+# plaintext targets — frigate :5000, web-dashboard :3001, nextcloud, and
+# mcp-server's JWT-gated :9090 — keep their http:// URLs even with the flag
+# on, so enabling mTLS never falsely marks them down. The client cert is
+# attached to the shared AsyncClient either way (harmless on plain HTTP).
 from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
 
 logger = logging.getLogger("ops.services")
@@ -71,6 +72,15 @@ _PROBE_TIMEOUT = httpx.Timeout(connect=1.5, read=3.0, write=3.0, pool=3.0)
 _SLOW_MS = 1500.0
 
 ProbeStatus = Literal["ok", "degraded", "down", "unknown"]
+
+# WARP-1061: registry names whose listeners are part of the internal-mTLS
+# mesh (they flip to TLS + required client certs when DROPLET_INTERNAL_TLS=1).
+# Everything else is a documented exemption and stays plaintext — see
+# docs/security/internal-mtls.md "Enforcement matrix".
+_MESH_PROBES = frozenset({
+    "orchestrator", "ai-gateway", "voice-io", "file-indexer",
+    "camera-discovery", "routing", "switch",
+})
 
 
 @dataclass
@@ -213,9 +223,13 @@ async def _probe_one(
             detail="no probe URL configured (likely not part of this profile)",
         )
 
-    # WARP-236: rewrite http://→https:// for the probe when internal mTLS is on
-    # (identity when off); the client already carries our cert.
-    url = _internal_base_url(url)
+    # WARP-236 / WARP-1061: rewrite http://→https:// when internal mTLS is on
+    # (identity when off) — but ONLY for mesh listeners. Exempt plaintext
+    # targets (frigate, web-dashboard, nextcloud, mcp-server) keep http://,
+    # otherwise flag-on would probe TLS against plain listeners and report
+    # every exempt service down. The client already carries our cert.
+    if name in _MESH_PROBES:
+        url = _internal_base_url(url)
     started = time.monotonic()
     try:
         resp = await client.get(url, timeout=_PROBE_TIMEOUT)

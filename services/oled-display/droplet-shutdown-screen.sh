@@ -39,10 +39,31 @@ if [ -f "$ENV_FILE" ]; then
   done
 fi
 
+# WARP-1061 — internal mTLS. The oled-display :8082 listener requires a
+# CA-signed client cert when DROPLET_INTERNAL_TLS=1; read the flag + the
+# host-issued `device-bridge` bundle paths from the same env file as the
+# bearer (install-device-bridge.sh mirrors them from the repo .env). Flag
+# off/absent keeps the plain-HTTP curl byte-identical to before. grep, not
+# source — a malformed line must not execute (same rationale as TOKEN).
+ITLS=""
+CERT=""; KEY=""; CA=""
+if [ -f "$ENV_FILE" ]; then
+  ITLS=$(grep -E '^DROPLET_INTERNAL_TLS=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  CERT=$(grep -E '^DROPLET_TLS_CERT=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  KEY=$(grep -E '^DROPLET_TLS_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  CA=$(grep -E '^DROPLET_TLS_CA=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+fi
+TLS_ARGS=""
+if [ "${DROPLET_INTERNAL_TLS:-$ITLS}" = "1" ]; then
+  URL=$(printf '%s' "$URL" | sed 's|^http://|https://|')
+  TLS_ARGS="--cacert $CA --cert $CERT --key $KEY"
+fi
+
 # POST the shutdown frame. -m bounds the whole operation so a wedged socket
 # can't hang teardown; --connect-timeout bounds the TCP connect specifically.
 # Everything is best-effort: failures are intentionally ignored.
-curl -fsS -m 5 --connect-timeout 2 \
+# shellcheck disable=SC2086  # TLS_ARGS is a deliberate word-split arg list
+curl -fsS -m 5 --connect-timeout 2 $TLS_ARGS \
   -X POST \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \

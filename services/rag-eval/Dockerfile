@@ -57,6 +57,8 @@ COPY services/rag-eval/*.py /opt/rag-eval/
 # package must live there.
 COPY services/_shared/__init__.py /opt/rag-eval/_shared/__init__.py
 COPY services/_shared/internal_tls.py /opt/rag-eval/_shared/internal_tls.py
+# WARP-1061: cert-presenting healthcheck client (see HEALTHCHECK below).
+COPY services/_shared/healthcheck.py /opt/rag-eval/_shared/healthcheck.py
 
 # /data/rag-eval is mounted from a named volume in the compose file; the
 # scheduler writes per-run JSON + a rolling baselines.candidate.json here.
@@ -76,7 +78,10 @@ EXPOSE 8090
 # restart (the filesystem is the source of truth for completed runs).
 # GWV-015: probe the real HTTP surface (:8090/health) so a wedged uvicorn or a
 # dead HTTP half is not reported healthy. python:3.11-slim has no curl.
+# WARP-1061: the shared cert-presenting client replaces the inline plain-HTTP
+# urlopen — a plaintext probe against the DROPLET_INTERNAL_TLS=1 listener
+# would flap this container unhealthy forever; it stays plain HTTP when off.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)" || exit 1
+  CMD python -m _shared.healthcheck 8090 /health || exit 1
 
 CMD ["python", "main.py"]

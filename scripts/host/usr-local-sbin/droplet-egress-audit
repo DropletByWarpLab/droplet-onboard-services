@@ -27,5 +27,17 @@ export DROPLET_EGRESS_ORCHESTRATOR_URL="${DROPLET_EGRESS_ORCHESTRATOR_URL:-http:
 export DROPLET_EGRESS_LOG_DIR="${DROPLET_EGRESS_LOG_DIR:-/var/lib/droplet/egress-audit}"
 export DROPLET_EGRESS_NETWORK="${DROPLET_EGRESS_NETWORK:-droplet_default}"
 
+# WARP-1061 — internal mTLS. Mirror the repo .env knob into the collector's
+# env (same grep pattern as the bearer above) and point the standard
+# DROPLET_TLS_* contract at the host-issued `egress-audit` bundle, which
+# lives in the repo's data/secrets tree next to the .env. sink.py builds an
+# SSL client context from these when the flag is 1; plain HTTP when 0.
+DROPLET_INTERNAL_TLS="$(grep -E '^DROPLET_INTERNAL_TLS=' "$DROPLET_ENV_FILE" | tail -n1 | cut -d= -f2-)"
+export DROPLET_INTERNAL_TLS="${DROPLET_INTERNAL_TLS:-0}"
+_droplet_repo_root="$(dirname "$DROPLET_ENV_FILE")"
+export DROPLET_TLS_CERT="${DROPLET_TLS_CERT:-$_droplet_repo_root/data/secrets/service-tls/egress-audit/cert.pem}"
+export DROPLET_TLS_KEY="${DROPLET_TLS_KEY:-$_droplet_repo_root/data/secrets/service-tls/egress-audit/key.pem}"
+export DROPLET_TLS_CA="${DROPLET_TLS_CA:-$_droplet_repo_root/data/secrets/service-tls/egress-audit/ca.pem}"
+
 install -d -m 0750 "$DROPLET_EGRESS_LOG_DIR"
 exec /usr/bin/python3 /usr/local/lib/droplet-egress-audit/collector.py

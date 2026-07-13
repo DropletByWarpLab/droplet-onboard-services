@@ -48,6 +48,24 @@ source "$SCRIPT_DIR/lib/docker.sh"
 _docker() { run_docker "$@"; }
 _docker_compose() { run_docker_compose "$@"; }
 
+# --- WARP-1061: internal-mTLS probe plumbing ---
+# When the .env sourced above carries DROPLET_INTERNAL_TLS=1, the first-party
+# listeners probed directly below (voice-io :8086 in-container, oled-display
+# :8082 on the host) serve TLS and REQUIRE a CA-signed client cert. The
+# in-container probe presents the service's own /data/service-tls bundle;
+# the host-side probe presents the host-issued `host-admin` bundle. Flag
+# off/absent keeps every probe byte-identical plain HTTP.
+if [ "${DROPLET_INTERNAL_TLS:-0}" = "1" ]; then
+  ITLS_SCHEME="https"
+  ITLS_CONTAINER_ARGS="--cacert /data/service-tls/ca.pem --cert /data/service-tls/cert.pem --key /data/service-tls/key.pem"
+  _itls_host_bundle="$REPO_ROOT/data/secrets/service-tls/host-admin"
+  ITLS_HOST_ARGS="--cacert $_itls_host_bundle/ca.pem --cert $_itls_host_bundle/cert.pem --key $_itls_host_bundle/key.pem"
+else
+  ITLS_SCHEME="http"
+  ITLS_CONTAINER_ARGS=""
+  ITLS_HOST_ARGS=""
+fi
+
 # --- Check runner ---
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -174,10 +192,10 @@ check "Nginx → AI Gateway" \
 if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
   check_warn "Voice orchestrator /health" \
     _docker exec droplet-voice-io-1 \
-      curl -sf -o /dev/null --max-time 5 http://localhost:8086/health
+      curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/health"
   check_warn "Voice orchestrator /audio/devices" \
     _docker exec droplet-voice-io-1 \
-      curl -sf -o /dev/null --max-time 5 http://localhost:8086/audio/devices
+      curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/audio/devices"
 fi
 
 # --- Status display service (oled-display) ---
@@ -190,7 +208,7 @@ fi
 # that don't need a local display.
 if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'oled-display-1$'; then
   check_warn "status display /health" \
-    curl -sf -o /dev/null --max-time 5 http://localhost:8082/health
+    curl -sf -o /dev/null --max-time 5 $ITLS_HOST_ARGS "$ITLS_SCHEME://localhost:8082/health"
 fi
 
 # --- .env file ---

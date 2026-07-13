@@ -25,6 +25,13 @@ os.environ.setdefault("ROUTING_SERVICE_TOKEN", "pytest-fake-token")
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVICE_DIR))
+# WARP-1061 — the samplers (scheduler.py, egress_meter.py, dns_block_meter.py)
+# import `_shared.internal_tls` at module level. In-container the helper is
+# COPY'd to /app/_shared (sibling of the source); in the repo it lives at
+# services/_shared, so add services/ to the path (voice-io precedent).
+_SERVICES_DIR = _SERVICE_DIR.parent
+if str(_SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVICES_DIR))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

@@ -362,6 +362,22 @@ if [[ -f "$REPO_ENV" ]]; then
     set_env_if_blank "ROUTING_SERVICE_TOKEN" "$ROUTING_SERVICE_TOKEN"
   fi
 
+  # WARP-1061 — internal mTLS. Mirror the knob UNCONDITIONALLY (not
+  # set_env_if_blank): a flag flip in the repo .env must propagate to the
+  # bridge on the next installer run or its orchestrator /api/health read
+  # silently breaks (scheme mismatch). The DROPLET_TLS_* paths point at the
+  # host-issued `device-bridge` bundle in the repo data/secrets tree; those
+  # use set_env_if_blank so an operator relocating certs keeps their paths.
+  if grep -qE '^#?[[:space:]]*DROPLET_INTERNAL_TLS=' "$ENV_FILE"; then
+    _set_env_kv "$ENV_FILE" "DROPLET_INTERNAL_TLS" "${DROPLET_INTERNAL_TLS:-0}"
+  else
+    printf '%s=%s\n' "DROPLET_INTERNAL_TLS" "${DROPLET_INTERNAL_TLS:-0}" >> "$ENV_FILE"
+  fi
+  log "set DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0} in $ENV_FILE"
+  set_env_if_blank "DROPLET_TLS_CERT" "$REPO_ROOT/data/secrets/service-tls/device-bridge/cert.pem"
+  set_env_if_blank "DROPLET_TLS_KEY"  "$REPO_ROOT/data/secrets/service-tls/device-bridge/key.pem"
+  set_env_if_blank "DROPLET_TLS_CA"   "$REPO_ROOT/data/secrets/service-tls/device-bridge/ca.pem"
+
   # Pairing-QR AP source (WARP-654). setup.sh --single-box records
   # DROPLET_AP_MODE=hostapd in the repo .env (scripts/lib/single-box.sh) because
   # the single-box host runs the Wi-Fi AP via hostapd, not a standalone UCI router.

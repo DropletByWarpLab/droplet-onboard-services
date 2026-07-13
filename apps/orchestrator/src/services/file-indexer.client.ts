@@ -8,10 +8,13 @@
  * search/indexing degrades gracefully, the appliance stays usable).
  */
 import { config } from "../config.js";
+// WARP-1061: first-party mesh hop — the probe presents the orchestrator's
+// client cert + dials https:// when DROPLET_INTERNAL_TLS=1 (identity off).
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 
 export async function healthCheck(): Promise<boolean> {
   try {
-    const res = await fetch(`${config.FILE_INDEXER_URL}/health`, {
+    const res = await internalFetch(`${internalBaseUrl(config.FILE_INDEXER_URL)}/health`, {
       signal: AbortSignal.timeout(4_000),
     });
     return res.ok;

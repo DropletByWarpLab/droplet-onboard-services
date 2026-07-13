@@ -14,6 +14,10 @@ on:
       - "tests/usb-luks-enroll.test.sh"
       # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
       - "tests/mosquitto-conf.test.sh"
+      # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
+      - "tests/internal-mtls-wiring.test.sh"
+      - "tests/nginx-internal-scheme.test.sh"
+      - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -30,6 +34,10 @@ on:
       - "tests/usb-luks-enroll.test.sh"
       # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
       - "tests/mosquitto-conf.test.sh"
+      # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
+      - "tests/internal-mtls-wiring.test.sh"
+      - "tests/nginx-internal-scheme.test.sh"
+      - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -57,6 +65,17 @@ jobs:
         # WARP-235: single :8883 mTLS listener, per-CN topic ACLs, generator/
         # tracked-file parity, shared-password retirement. Pure bash, no Docker.
         run: bash tests/mosquitto-conf.test.sh
+      - name: Run internal-mTLS wiring guards
+        # WARP-1061: setup writes the knob, compose mounts every mesh bundle +
+        # passes the knob where env_file is absent, images use the TLS-aware
+        # launcher/healthcheck, host installers deliver client certs. Pure
+        # bash + a functional migrate_env run, no Docker.
+        run: bash tests/internal-mtls-wiring.test.sh
+      - name: Run nginx internal-scheme unit tests
+        # WARP-1061: the default/mtls upstream-scheme variants, the
+        # entrypoint selector, and nginx.conf's first-party-only
+        # $internal_scheme legs. Pure bash, no Docker.
+        run: bash tests/nginx-internal-scheme.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean

@@ -103,6 +103,10 @@ RUN ( curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp
 # WARP-236 — shared internal-mTLS helper (same COPY pattern as other services).
 COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
+# WARP-1061: shared uvicorn launcher — serves the bundle + requires client
+# certs when DROPLET_INTERNAL_TLS=1, byte-identical plaintext when 0.
+COPY services/_shared/serve.py /app/_shared/serve.py
+COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
 
 # The service source.
 COPY services/voice-io/ /app/
@@ -121,7 +125,10 @@ EXPOSE 8086
 # from this; scripts/verify.sh and the dashboard's roll-up rely on
 # the same signal. Interval kept conservative (15 s) — checking the
 # in-process FastAPI is cheap, no need to hammer it.
+# WARP-1061: the shared cert-presenting client replaces the plain curl — a
+# plaintext probe against the DROPLET_INTERNAL_TLS=1 listener would flap
+# this container unhealthy forever; the client stays plain HTTP when off.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8086/health || exit 1
+    CMD python -m _shared.healthcheck 8086 /health || exit 1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8086", "--no-server-header"]
+CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8086", "--no-server-header"]

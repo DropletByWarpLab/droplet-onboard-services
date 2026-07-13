@@ -50,6 +50,30 @@ import scheduler_service
 from config import DISABLED, HTTP_HOST, HTTP_PORT, RESULTS_DIR
 
 
+def build_uvicorn_config(app):
+    """uvicorn.Config for the :8090 trigger server.
+
+    WARP-1061: merges ``uvicorn_ssl_kwargs()`` so DROPLET_INTERNAL_TLS=1
+    serves the /data/service-tls bundle and REQUIRES a CA-signed client cert
+    (the orchestrator's admin-rag-eval proxy presents one); unset/0 keeps
+    the plain-HTTP listener byte-identical to before. Split from ``_serve``
+    so the flag contract is unit-testable without binding a socket.
+    """
+    import uvicorn  # local import — only needed in service mode
+
+    from _shared.internal_tls import uvicorn_ssl_kwargs
+
+    return uvicorn.Config(
+        app,
+        host=HTTP_HOST,
+        port=HTTP_PORT,
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        # uvicorn manages SIGINT/SIGTERM; it returns from serve() cleanly.
+        access_log=False,
+        **uvicorn_ssl_kwargs(),
+    )
+
+
 async def _serve() -> None:
     """Run the AsyncIOScheduler + uvicorn HTTP server in one event loop.
 
@@ -76,15 +100,7 @@ async def _serve() -> None:
         sched = scheduler_service.build_scheduler()
 
     app = server.create_app()
-    config = uvicorn.Config(
-        app,
-        host=HTTP_HOST,
-        port=HTTP_PORT,
-        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
-        # uvicorn manages SIGINT/SIGTERM; it returns from serve() cleanly.
-        access_log=False,
-    )
-    uv_server = uvicorn.Server(config)
+    uv_server = uvicorn.Server(build_uvicorn_config(app))
     logger.info("rag-eval HTTP trigger server listening on %s:%d", HTTP_HOST, HTTP_PORT)
     try:
         await uv_server.serve()

@@ -29,6 +29,14 @@ from typing import Optional
 import httpx
 from fastapi import HTTPException
 
+# WARP-1061: the posture read is a first-party mesh hop. Without this, the
+# gate's plaintext GET dies at the transport layer the moment the
+# orchestrator's :3000 listener flips to mTLS — the read returns None, the
+# gate (correctly) fails closed, and EVERY cloud-LLM call 451s. Present the
+# gateway's own bundle + https:// when DROPLET_INTERNAL_TLS=1; identity when
+# off. Fail-closed semantics for genuine outages are unchanged.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger(__name__)
 
 # Cache TTL — short enough that flipping the toggle in the dashboard
@@ -37,9 +45,9 @@ logger = logging.getLogger(__name__)
 OFF_LAN_CACHE_TTL_SECONDS = float(
     os.environ.get("OFF_LAN_CACHE_TTL_SECONDS", "30")
 )
-ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://orchestrator:3000"
-).rstrip("/")
+ORCHESTRATOR_URL = _internal_base_url(
+    os.environ.get("ORCHESTRATOR_URL", "http://orchestrator:3000").rstrip("/")
+)
 AI_GATEWAY_SAMPLER_TOKEN = (
     os.environ.get("AI_GATEWAY_SAMPLER_TOKEN") or ""
 ).strip()
@@ -79,7 +87,7 @@ async def _fetch_off_lan_posture() -> Optional[bool]:
         )
         return None
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=3.0, **httpx_client_kwargs()) as client:
             resp = await client.get(
                 f"{ORCHESTRATOR_URL}/api/settings/off-lan",
                 headers={"Authorization": f"Bearer {AI_GATEWAY_SAMPLER_TOKEN}"},

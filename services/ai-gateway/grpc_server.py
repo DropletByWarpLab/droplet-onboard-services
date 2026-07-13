@@ -341,7 +341,24 @@ async def start_grpc_server(
     server = grpc_aio.server()
     servicer = InferenceServicer(provider_router, scheduler)
     inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
+    bind_grpc_port(server, port)
     await server.start()
     logger.info("gRPC server started on port %d", port)
     return server
+
+
+def bind_grpc_port(server, port: int) -> None:
+    """Bind :50051 per the internal-mTLS contract (WARP-1061, hop 16).
+
+    DROPLET_INTERNAL_TLS=1 → serve the /data/service-tls bundle and REQUIRE a
+    CA-signed client cert (file-indexer's embedder presents its own bundle
+    via grpc_channel_credentials). Unset/0 → the historical insecure port,
+    byte-identical to before. Split from start_grpc_server so the flag
+    contract is unit-testable without model/scheduler bring-up.
+    """
+    from _shared.internal_tls import enabled, grpc_server_credentials
+
+    if enabled():
+        server.add_secure_port(f"[::]:{port}", grpc_server_credentials())
+    else:
+        server.add_insecure_port(f"[::]:{port}")

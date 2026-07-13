@@ -91,6 +91,12 @@ services:
       # the SYSTEM OpenSSL 3, so the conf alone activates the provider.
       - DROPLET_FIPS_MODE=${DROPLET_FIPS_MODE:-0}
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      # WARP-1061: /docker-entrypoint.d/01-internal-scheme.sh keys the
+      # first-party upstream scheme on this knob — 0 (default) → plain
+      # `http://` proxy_pass exactly as before, 1 → `https://` + the
+      # proxy_ssl_* client-cert block against the orchestrator/ai-gateway
+      # mTLS listeners. Same selector pattern as the FIPS cipher profile.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
@@ -98,6 +104,11 @@ services:
       # ADR-023 cert-swap flow and ops muscle memory are unchanged.
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
+      # WARP-1061: the gateway's OWN internal-CA bundle (CN = "gateway") —
+      # internal-scheme.mtls.conf points proxy_ssl_certificate here so nginx
+      # presents a client cert on the orchestrator/ai-gateway upstream legs
+      # when DROPLET_INTERNAL_TLS=1. Inert (never read) when the knob is 0.
+      - ../data/secrets/service-tls/gateway:/etc/nginx/service-tls:ro
     depends_on:
       orchestrator:
         condition: service_started
@@ -404,12 +415,16 @@ services:
     # container when a HARD dependency (postgres) is lost.
     healthcheck:
       # `wget` isn't installed in the orchestrator image (only `node`).
-      # The original wget-based check has been silently failing forever
-      # — Docker has been reporting `(unhealthy)` regardless of actual
-      # service state. Use node directly since it's guaranteed present.
-      # Exits 0 on 2xx, 1 on any error (including 5xx body responses
-      # the orchestrator returns when it's truly degraded).
-      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/orchestrator/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      # WARP-1061: run the WARP-236 cert-presenting healthcheck client
+      # (dist/healthcheck.js — relative to the image WORKDIR
+      # /app/apps/orchestrator) instead of the old inline plain-HTTP
+      # `node -e fetch` one-liner: when DROPLET_INTERNAL_TLS=1 the :3000
+      # listener is HTTPS + requires a client cert, so a plain-HTTP probe
+      # would mark the container permanently unhealthy. The client is a
+      # no-op wrapper around the same fetch when the flag is off. Exits 0
+      # on 2xx, 1 on any error (including 5xx body responses the
+      # orchestrator returns when it's truly degraded).
+      test: ["CMD", "node", "dist/healthcheck.js"]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -1060,6 +1075,11 @@ services:
       - "8090"
     volumes:
       - rag-eval-data:/data/rag-eval
+      # WARP-1061: this service's internal-CA bundle (CN = "rag-eval").
+      # Server cert for the :8090 trigger server and client cert for the
+      # ragas runner's orchestrator search calls when DROPLET_INTERNAL_TLS=1
+      # (knob arrives via env_file); inert when 0.
+      - ../data/secrets/service-tls/rag-eval:/data/service-tls:ro
     extra_hosts:
       # So RAGAS_OLLAMA_URL can resolve `host.docker.internal` on Linux
       # the same way it does on macOS / WSL. Mirrors the pattern used by
@@ -1111,6 +1131,17 @@ services:
       # writes wlp14s0 (sourced from DROPLET_AP_IFACE) into .env on the single-box.
       - DROPLET_WIFI_SCAN_DEVICE=${DROPLET_WIFI_SCAN_DEVICE:-}
       - PORT=8080
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 flips the :8080 uvicorn listener to TLS +
+      # required client certs AND makes the samplers/meters present the
+      # bundle below on their orchestrator POSTs. 0 (default) = plaintext.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+    volumes:
+      # WARP-1061: this service's internal-CA bundle (CN = "routing", SANs
+      # include host.docker.internal + the single-box bridge-gateway IP for
+      # its host-network callers). Server cert for :8080 and client cert for
+      # the orchestrator samplers when DROPLET_INTERNAL_TLS=1; inert when 0.
+      - ../data/secrets/service-tls/routing:/data/service-tls:ro
     secrets:
       - openwrt_password
     restart: always
@@ -1183,10 +1214,21 @@ services:
       # the provider (then also add it to tests/integration/fips-stack).
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - DROPLET_FIPS_REQUIRED=false
+      # WARP-1061: internal mTLS. This container deliberately has NO
+      # env_file (matter.js MATTER_* auto-import minefield above), so the
+      # knob is passed explicitly. 1 flips the :8083 listener to HTTPS +
+      # required client certs (src/internal-tls.ts); 0 (default) = the
+      # plain node:http server, byte-identical to before.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     volumes:
       # Fabric continuity (WARP-850 requirement #2): the named volume
       # moves here from the orchestrator UNCHANGED.
       - matter-data:/data/matter-storage
+      # WARP-1061: this service's internal-CA bundle (CN =
+      # "matter-controller", SANs include host.docker.internal + the
+      # single-box bridge-gateway IP — it's a host-network listener dialled
+      # by the orchestrator). Inert when DROPLET_INTERNAL_TLS=0.
+      - ../data/secrets/service-tls/matter-controller:/data/service-tls:ro
       # WARP-1035 (closes the WARP-895 follow-up): per-box AP PSK for
       # BLE-first commissioning. Mount the DIRECTORY, never the file — if
       # /etc/droplet/ap-psk were bind-mounted directly and absent at
@@ -1251,6 +1293,11 @@ services:
       # image can honor; the FIPS boundary (the five provider images +
       # gateway) is asserted by tests/integration/fips-stack.test.sh.
       - DROPLET_FIPS_REQUIRED=false
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob
+      # is passed explicitly; orchestrator_client.py (already flag-gated)
+      # presents the bundle below and dials https:// when it's 1, and the
+      # :8086 uvicorn listener flips to TLS + required client certs.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     volumes:
       # WARP-235 decision-4 hardening: mount ONLY the Fernet key this service
       # reads (creds.py EMAIL_KEY_PATH), never the data/secrets ROOT — the
@@ -1328,6 +1375,11 @@ services:
       - SWITCH_PROVISION_TIMEOUT=${SWITCH_PROVISION_TIMEOUT:-30}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 flips the :8081 uvicorn listener to TLS +
+      # required client certs AND makes the routing cross-check client
+      # present the bundle below. 0 (default) = plaintext.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     # single-box bundles the managed switch so a plugged-in AP auto-provisions
     # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
     # `full` is the multi-box/explicit-managed shape.
@@ -1335,6 +1387,10 @@ services:
       # ADR-018 item 12: persist last_provisioned_at across container restarts.
       # provision_state.py writes to SWITCH_STATE_DIR (default /var/lib/droplet/switch).
       - switch-state:/var/lib/droplet/switch
+      # WARP-1061: this service's internal-CA bundle (CN = "switch"). Server
+      # cert for :8081 and client cert toward routing when
+      # DROPLET_INTERNAL_TLS=1; inert when 0.
+      - ../data/secrets/service-tls/switch:/data/service-tls:ro
     secrets:
       # ADR-018 T1: mounts at /run/secrets/switch_password (0600). Written by
       # scripts/setup.sh from the operator-supplied SWITCH_PASSWORD in .env.
@@ -1536,6 +1592,12 @@ services:
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
+      # WARP-1061: this service's internal-CA bundle (CN = "voice-io").
+      # Server cert for :8086 and client cert toward the orchestrator (llm.py
+      # is already flag-gated) when DROPLET_INTERNAL_TLS=1; inert when 0.
+      # NOTE: /data is the calibration volume above, so the bundle mounts at
+      # the same canonical path INSIDE it — Docker layers the two mounts.
+      - ../data/secrets/service-tls/voice-io:/data/service-tls:ro
       # WARP-1057 — DSP restart path. POST /voice/restart-processor execs
       # the vendor xvf_host CLI (`REBOOT 1` — the host watchdog's exact
       # heal) over raw USB. The whole host /usr/local/bin is bound
@@ -1781,10 +1843,20 @@ services:
       - LCD_HEIGHT=320
       - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
       - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 flips the :8082 uvicorn listener to TLS +
+      # required client certs (the orchestrator's display.client.ts and the
+      # host droplet-shutdown-screen.sh both present certs). 0 = plaintext.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     volumes:
       # Bind /dev so /dev/ttyACM* is visible in the container and survives
       # PyPortal re-enumeration (USB hotplug changes the minor number).
       - /dev:/dev:rw
+      # WARP-1061: this service's internal-CA bundle (CN = "oled-display",
+      # SANs include host.docker.internal + the single-box bridge-gateway IP
+      # — host-network listener dialled by the orchestrator). Inert when
+      # DROPLET_INTERNAL_TLS=0.
+      - ../data/secrets/service-tls/oled-display:/data/service-tls:ro
     # Scoped device access — just the USB ACM class (major 166) instead of
     # full `privileged: true`. Without the cgroup rule the kernel refuses
     # open() on /dev/ttyACM* with EPERM and the service falls back to sim
@@ -1858,6 +1930,14 @@ services:
       - OPS_PROBE_ROUTING=${OPS_PROBE_ROUTING:-}
       - OPS_PROBE_SWITCH=${OPS_PROBE_SWITCH:-}
       - OPS_PROBE_NEXTCLOUD=${OPS_PROBE_NEXTCLOUD:-}
+      # WARP-1061: internal mTLS. No env_file on this service, so the knob is
+      # passed explicitly; 1 makes the mesh probes (ops/services.py) present
+      # the bundle below and dial https://. The INBOUND :8087 listener stays
+      # plain HTTP deliberately — it is loopback-published for the operator's
+      # browser over an SSH/WireGuard tunnel, which cannot present internal
+      # client certs; the bearer token + loopback bind remain the gate
+      # (documented exemption in docs/security/internal-mtls.md).
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
     ports:
       # Bind to 127.0.0.1 only — the operator reaches it through an SSH
       # tunnel or (future) the WireGuard reverse tunnel. Never expose
@@ -1876,6 +1956,9 @@ services:
       # the compose-project label scoping in ops/docker_client.py
       # restrict what callers can ask for.
       - /var/run/docker.sock:/var/run/docker.sock
+      # WARP-1061: this service's internal-CA bundle (CN = "ops-console") —
+      # client cert for the mesh health probes when DROPLET_INTERNAL_TLS=1.
+      - ../data/secrets/service-tls/ops-console:/data/service-tls:ro
       # WARP-337: persistent audit log. Every /ops/* request lands
       # here as a JSONL line (timestamp, identity, method, path,
       # status, latency, optional detail). Mount the named volume

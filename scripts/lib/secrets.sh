@@ -588,6 +588,17 @@ AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 # authMiddleware sets req.user = _service:egress-audit.
 SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 
+# --- Internal service-to-service mTLS (WARP-236 plumbing, WARP-1061 wiring) ---
+# 0 (default) = every internal HTTP/gRPC hop speaks plaintext exactly as
+# before; 1 = first-party listeners (orchestrator :3000, the FastAPI/uvicorn
+# services, ai-gateway gRPC :50051, matter-controller :8083, nginx→upstream
+# legs) serve TLS and REQUIRE a CA-signed client cert, and every first-party
+# client presents its /data/service-tls bundle. Flip with care and only after
+# this setup run has issued the bundles (materialize_artifacts does), then
+# recreate the stack: docker compose up -d --force-recreate.
+# MQTT stays scheme-gated (mqtts://) independent of this knob (WARP-235).
+DROPLET_INTERNAL_TLS=0
+
 # --- Application ---
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
@@ -885,6 +896,11 @@ migrate_env() {
   # when --fips/--no-fips is passed; leaving them alone here keeps a re-run
   # without the flag a no-op on FIPS (never a silent enable/disable).
   _migrate_ensure_key DROPLET_FIPS_MODE 0
+
+  # WARP-1061: backfill the internal-mTLS knob (default OFF = plaintext,
+  # byte-identical posture to before). Append-if-missing only, so a box whose
+  # operator flipped it to 1 keeps that choice across setup re-runs.
+  _migrate_ensure_key DROPLET_INTERNAL_TLS 0
 
   # WARP-235: move existing installs from the shared-password plaintext broker
   # to the mTLS endpoint (single listener :8883; identity = client cert CN).

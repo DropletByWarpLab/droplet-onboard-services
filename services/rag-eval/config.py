@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# WARP-1061 — internal-mTLS scheme rewrite for the orchestrator base URL.
+from _shared.internal_tls import base_url as _internal_base_url
+
 # Where the scheduler writes per-run results and the rolling
 # baselines.candidate.json. Bind-mounted in compose so results survive
 # container restarts.
@@ -25,8 +28,11 @@ CRON_MINUTE = os.environ.get("RAG_EVAL_CRON_MINUTE", "0")
 
 # Orchestrator base URL on the internal Docker network. Default targets
 # the orchestrator container by service name.
-ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://orchestrator:3000"
+# WARP-1061 (hop 8) — rewritten to https:// when DROPLET_INTERNAL_TLS=1; the
+# ragas_runner.py subprocess this URL is handed to presents the rag-eval
+# bundle via its own _internal_tls_context() (identity when the flag is off).
+ORCHESTRATOR_URL = _internal_base_url(
+    os.environ.get("ORCHESTRATOR_URL", "http://orchestrator:3000")
 )
 
 # Judge LLM mode. "local" → Ollama on the appliance; "cloud" → OpenAI

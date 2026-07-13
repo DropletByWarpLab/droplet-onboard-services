@@ -49,10 +49,17 @@ COPY docker/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.default.
 COPY docker/nginx/cipher-profile.fips.conf    /etc/nginx/cipher-profile.fips.conf
 COPY docker/nginx/nginx.conf                  /etc/nginx/nginx.conf
 COPY docker/nginx/docker-entrypoint-fips.sh   /docker-entrypoint.d/00-fips-profile.sh
-RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh && \
-    # Default the active profile to modern so `nginx -t` and a bare run before
-    # the entrypoint has selected are well-formed.
-    ln -sf /etc/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.active.conf
+# WARP-1061: first-party upstream scheme variants + the selector that picks
+# one from DROPLET_INTERNAL_TLS at container start (same pattern as the
+# cipher profiles above). Default (unset/0) = plain http proxy_pass.
+COPY docker/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.default.conf
+COPY docker/nginx/internal-scheme.mtls.conf    /etc/nginx/internal-scheme.mtls.conf
+COPY docker/nginx/docker-entrypoint-internal-tls.sh /docker-entrypoint.d/01-internal-scheme.sh
+RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh && \
+    # Default the active profile/scheme to the OFF posture so `nginx -t` and
+    # a bare run before the entrypoints have selected are well-formed.
+    ln -sf /etc/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.active.conf && \
+    ln -sf /etc/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.active.conf
 
 # --- Build-time nginx-config self-test: both cipher profiles must parse -------
 # The full nginx.conf server block references TLS certs that don't exist in the
@@ -68,8 +75,21 @@ RUN set -eu; \
       printf 'events{}\nhttp{\n server{\n  listen 8443 ssl;\n  ssl_certificate /tmp/t.crt;\n  ssl_certificate_key /tmp/t.key;\n  include /etc/nginx/cipher-profile.%s.conf;\n  location / { return 200; }\n }\n}\n' "$prof" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
     done; \
+    # WARP-1061: both internal-scheme variants must parse too. The mtls
+    # variant's proxy_ssl_certificate paths are runtime volume mounts, so
+    # stage the throwaway pair at those paths for the parse check only.
+    mkdir -p /etc/nginx/service-tls; \
+    cp /tmp/t.crt /etc/nginx/service-tls/cert.pem; \
+    cp /tmp/t.key /etc/nginx/service-tls/key.pem; \
+    cp /tmp/t.crt /etc/nginx/service-tls/ca.pem; \
+    for scheme in default mtls; do \
+      printf 'events{}\nhttp{\n include /etc/nginx/internal-scheme.%s.conf;\n server{\n  listen 8080;\n  location / { set $upvar "localhost:1"; proxy_pass $internal_scheme://$upvar; }\n }\n}\n' "$scheme" > /tmp/test-nginx.conf; \
+      nginx -t -c /tmp/test-nginx.conf; \
+    done; \
+    rm -rf /etc/nginx/service-tls; \
     rm -f /tmp/t.key /tmp/t.crt /tmp/test-nginx.conf; \
-    echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"
+    echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"; \
+    echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"
 
 # nginx:1.27-bookworm already EXPOSEs 80/443 and ships the stock entrypoint that
 # runs /docker-entrypoint.d/*.sh before starting nginx — our profile-selector
