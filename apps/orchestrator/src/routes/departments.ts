@@ -766,10 +766,25 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           });
         }
 
+        const parsed = addMemberSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
         // WARP-1295: HOUSEHOLD department membership is immutable. Mirrors the
         // WARP-1263 PATCH guard so the role-driven household membership cannot
         // be mutated via any verb — without this, a delete-then-re-add on the
         // household bypasses the rights-immutability invariant.
+        //
+        // Placed AFTER schema validation (unlike the PATCH guard) so a
+        // malformed `userId` is still rejected at the zod layer before this
+        // handler ever touches Prisma — the (f2) pre-DB static gate in
+        // department-security-static-gates.suite.test.ts. `userId` is a body
+        // field here (UUID-validated) whereas PATCH takes it as a URL param,
+        // so PATCH has no equivalent pre-DB ordering constraint.
         const dept = await prisma.department.findUnique({
           where: { id: departmentId },
         });
@@ -778,14 +793,6 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
             error:
               "Cannot add members to the Household department (membership is role-driven)",
             code: "HOUSEHOLD_MEMBERSHIP_IMMUTABLE",
-          });
-        }
-
-        const parsed = addMemberSchema.safeParse(req.body);
-        if (!parsed.success) {
-          return res.status(400).json({
-            error: "Invalid request",
-            details: parsed.error.flatten(),
           });
         }
 
