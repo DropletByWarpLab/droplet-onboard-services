@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Droplet — securing your connection</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0b1020; color: #e7eaf3;
+         display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+  main { max-width: 34rem; padding: 2rem; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  .spinner { width: 2.5rem; height: 2.5rem; border: 3px solid #2a3354; border-top-color: #7aa2ff;
+             border-radius: 50%; margin: 0 auto 1.5rem; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #airgap { display: none; text-align: left; background: #141a33; border-radius: 8px;
+            padding: 1rem 1.25rem; margin-top: 1.5rem; font-size: .925rem; }
+  code { background: #1d2547; padding: .1rem .35rem; border-radius: 4px; }
+  a { color: #7aa2ff; }
+</style>
+</head>
+<body>
+<main>
+  <div class="spinner" id="spinner"></div>
+  <h1>Your Droplet is securing its connection…</h1>
+  <p id="msg">This page will move to your Droplet's trusted address automatically. Nothing to do.</p>
+  <div id="airgap">
+    <strong>This Droplet can't obtain a certificate automatically.</strong>
+    <p>If this box is intentionally offline (air-gapped), you have two options:</p>
+    <ol>
+      <li>Install the Droplet's certificate on this device once:
+        <code>./scripts/trust-droplet-cert.sh</code>
+        (Windows: <code>trust-droplet-cert.ps1</code>)</li>
+      <li><a id="continue" href="https://droplet.local/">Continue anyway</a> —
+        your browser will show a warning once.</li>
+    </ol>
+  </div>
+</main>
+<script>
+  document.getElementById("continue").href = "https://" + location.host + "/";
+  async function tick() {
+    try {
+      const r = await fetch("/api/tls/status", { cache: "no-store" });
+      const s = await r.json();
+      if (s.redirectTo) { location.replace(s.redirectTo); return; }
+      if (s.hqConfigured === false) {
+        document.getElementById("airgap").style.display = "block";
+        document.getElementById("spinner").style.display = "none";
+        document.getElementById("msg").textContent =
+          "Automatic certificates are not available on this Droplet.";
+      }
+    } catch (e) { /* orchestrator still starting — keep polling */ }
+    setTimeout(tick, 5000);
+  }
+  tick();
+</script>
+</body>
+</html>
