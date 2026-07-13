@@ -73,6 +73,7 @@ function createPrismaMock(initial: MockSettingRow[] = []) {
 
 // Hoisted import so each test imports the live seeder under test.
 import { seedWorkspaceSettings, WORKSPACE_SETTING_DEFAULTS } from "../services/workspace-settings.service.js";
+import { ALLOWED_ENUM_VALUES } from "../routes/settings.js";
 
 describe("seedWorkspaceSettings", () => {
   let prisma: ReturnType<typeof createPrismaMock>;
@@ -160,6 +161,40 @@ describe("seedWorkspaceSettings", () => {
     ]);
     for (const def of WORKSPACE_SETTING_DEFAULTS) {
       expect(allowed, `unknown type for key=${def.key}`).toContain(def.type);
+    }
+  });
+
+  // WARP-483 — the enum-validation invariant. Every `type: "enum"`
+  // default MUST have a matching entry in the route's
+  // ALLOWED_ENUM_VALUES allow-list. If it doesn't, `validateValue`'s
+  // enum branch silently falls through to "any string accepted" and
+  // the PATCH surface stops gating that key's values — a whole class
+  // of invalid writes would sail through unnoticed. This test locks
+  // the two tables together: shipping a new enum default without its
+  // allow-list entry (or deleting an entry an enum default relies on)
+  // fails CI here instead of in production.
+  it("every enum default has a matching ALLOWED_ENUM_VALUES entry", () => {
+    const enumDefaults = WORKSPACE_SETTING_DEFAULTS.filter(
+      (d) => d.type === "enum",
+    );
+    // Guard against a vacuous pass — if the filter ever yields nothing
+    // (e.g. the defaults are refactored away) this assertion makes the
+    // silence loud rather than green-by-accident.
+    expect(enumDefaults.length).toBeGreaterThan(0);
+
+    for (const def of enumDefaults) {
+      const allowed = ALLOWED_ENUM_VALUES[def.key];
+      expect(
+        allowed,
+        `enum default "${def.key}" has no ALLOWED_ENUM_VALUES entry — ` +
+          `its PATCH validation would accept any string`,
+      ).toBeDefined();
+      // The seeded default itself must be a member of its own allow-set.
+      expect(
+        allowed,
+        `enum default "${def.key}" value "${String(def.value)}" is not in ` +
+          `its own ALLOWED_ENUM_VALUES allow-list`,
+      ).toContain(def.value);
     }
   });
 });

@@ -70,7 +70,7 @@ function createPrismaMock(initial: MockSettingRow[] = []) {
   const rows = new Map<string, MockSettingRow>(
     initial.map((r) => [r.key, r]),
   );
-  return {
+  const mock: any = {
     rows,
     workspaceSetting: {
       findMany: vi.fn(
@@ -116,6 +116,22 @@ function createPrismaMock(initial: MockSettingRow[] = []) {
       ),
     },
   };
+  // WARP-483: PATCH applies its per-key writes inside one interactive
+  // $transaction. The mock runs the callback against the same client so
+  // `tx.workspaceSetting.update` is the very spy tests assert on, and
+  // snapshots/restores the row set on throw to emulate a real rollback —
+  // so "no partial write survives a mid-batch failure" is assertable.
+  mock.$transaction = vi.fn(async (fn: (tx: any) => Promise<unknown>) => {
+    const snapshot = new Map(rows);
+    try {
+      return await fn(mock);
+    } catch (err) {
+      rows.clear();
+      for (const [k, v] of snapshot) rows.set(k, v);
+      throw err;
+    }
+  });
+  return mock;
 }
 
 function buildApp(
@@ -389,6 +405,75 @@ describe("PATCH /api/settings/:section — RBAC + activity emission", () => {
       .send({ "workspace.nonexistent": "x" });
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/settings/:section — transactional writes (WARP-483)", () => {
+  it("applies a multi-key PATCH through a single interactive $transaction", async () => {
+    const prisma = createPrismaMock(SEED_ROWS);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/settings/workspace")
+      .send({
+        "workspace.name": "Cruceru Household",
+        "workspace.locale": "fr-FR",
+      });
+
+    expect(res.status).toBe(200);
+    // One transaction wraps the whole batch — not one per key, and not
+    // a bare sequence of un-transacted updates.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.workspaceSetting.update).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not open a transaction when nothing actually changes", async () => {
+    // Pure no-op PATCH (value equals current). No write, so no tx.
+    const prisma = createPrismaMock(SEED_ROWS);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/settings/workspace")
+      .send({ "workspace.name": "Droplet Home" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.workspaceSetting.update).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the whole batch when one key fails — no partial write, no audit rows", async () => {
+    const prisma = createPrismaMock(SEED_ROWS);
+    // Fail the SECOND write in the batch. Pre-483 the first key's row
+    // would already be committed AND its ActivityRow emitted before
+    // this throw ever fired, leaving the section half-updated.
+    let writes = 0;
+    prisma.workspaceSetting.update.mockImplementation(
+      async ({ where, data }: { where: { key: string }; data: { valueJson: unknown } }) => {
+        writes += 1;
+        if (writes === 2) throw new Error("db connection dropped mid-batch");
+        const existing = prisma.rows.get(where.key);
+        const merged = { ...existing, valueJson: data.valueJson };
+        prisma.rows.set(where.key, merged);
+        return merged;
+      },
+    );
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/settings/workspace")
+      .send({
+        "workspace.name": "Cruceru Household",
+        "workspace.locale": "fr-FR",
+      });
+
+    expect(res.status).toBe(500);
+    // Rollback restored the pre-transaction values — the first write
+    // must NOT have survived the failure of the second.
+    expect(prisma.rows.get("workspace.name")!.valueJson).toBe("Droplet Home");
+    expect(prisma.rows.get("workspace.locale")!.valueJson).toBe("en-US");
+    // Audit rows are emitted only after the commit — a rolled-back
+    // batch emits none (no phantom "Setting updated" for a lost write).
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });
 

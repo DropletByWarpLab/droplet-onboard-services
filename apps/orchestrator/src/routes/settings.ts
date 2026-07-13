@@ -80,7 +80,7 @@ type TypeLiteral = (typeof TYPE_VALUES)[number];
  * Operators tune those via PATCH at their own risk; the dashboard's
  * Settings UI is the canonical source for the visible choices.
  */
-const ALLOWED_ENUM_VALUES: Record<string, readonly string[]> = {
+export const ALLOWED_ENUM_VALUES: Record<string, readonly string[]> = {
   "workspace.locale": ["en-US", "en-GB", "fr-FR", "de-DE", "es-ES", "it-IT"],
   "workspace.default_scope": [
     "team",
@@ -562,46 +562,65 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
           }
         }
 
-        // All validation passed — apply each change in turn. For each
-        // key that genuinely changed, emit one ActivityRow.
-        const changed: string[] = [];
+        // All validation passed. First resolve the set of keys that
+        // genuinely change, applying the deep-equality short-circuit.
+        // JSON.stringify is good enough for the value-shapes this table
+        // carries (primitives + small objects). For SettingType.json
+        // payloads with deterministic key order this matches the
+        // dashboard's serializer.
+        const pending: Array<{
+          key: string;
+          prevValue: unknown;
+          nextValue: unknown;
+          type: string;
+        }> = [];
         for (const key of incomingKeys) {
           const row = byKey.get(key)!;
           const nextValue = body[key];
           const prevValue = row.valueJson;
-
-          // Deep-equality short-circuit. JSON.stringify is good
-          // enough for the value-shapes this table carries
-          // (primitives + small objects). For SettingType.json
-          // payloads with deterministic key order this matches the
-          // dashboard's serializer.
           if (JSON.stringify(prevValue) === JSON.stringify(nextValue)) {
             continue;
           }
+          pending.push({ key, prevValue, nextValue, type: row.type });
+        }
 
-          await prisma.workspaceSetting.update({
-            where: { key },
-            data: { valueJson: nextValue as any },
+        // Apply every changed key inside a single interactive
+        // transaction (WARP-483). Multi-key PATCH is all-or-nothing: a
+        // mid-write failure must not leave the section half-updated,
+        // which would ship the dashboard an inconsistent read on the
+        // next GET. ActivityRows are emitted only AFTER the commit —
+        // an audit entry must never outlive a write that rolled back.
+        if (pending.length > 0) {
+          await prisma.$transaction(async (tx) => {
+            for (const change of pending) {
+              await tx.workspaceSetting.update({
+                where: { key: change.key },
+                data: { valueJson: change.nextValue as any },
+              });
+            }
           });
+        }
 
+        const changed: string[] = [];
+        for (const change of pending) {
           await recordActivity({
             kind: "system",
             severity: "info",
             sourceIcon: "settings",
             what: "Setting updated",
-            sub: key,
+            sub: change.key,
             actor: actorFromRequest(req),
             refs: {
               actor,
-              key,
+              key: change.key,
               section,
-              type: row.type,
-              previousValue: prevValue,
-              nextValue,
+              type: change.type,
+              previousValue: change.prevValue,
+              nextValue: change.nextValue,
             },
           });
 
-          changed.push(key);
+          changed.push(change.key);
         }
 
         res.json({
