@@ -494,8 +494,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
+      //
+      // WARP-495: this is the canonical reasoning surface. `reasoning` (above)
+      // is our parsed, structured trace; strip the raw provider passthrough
+      // `reasoning_content` out of `...asst` so the same reasoning isn't exposed
+      // twice on `result.message` — a public /api/llm/chat wart that confuses
+      // downstream consumers. (Deferred follow-up: when ai-gateway gains real
+      // token-streaming, audit mid-loop reasoning extraction — WARP-495 part 2,
+      // since parseReasoningTrace only runs on this terminal, non-tool-call turn.)
+      const { reasoning_content: _reasoningContent, ...asstClean } = asst;
       const finalMessage: ChatMessage = {
-        ...asst,
+        ...asstClean,
         content: visible,
         ...(reasoning.fullReasoning != null
           ? { reasoning: reasoning.fullReasoning }

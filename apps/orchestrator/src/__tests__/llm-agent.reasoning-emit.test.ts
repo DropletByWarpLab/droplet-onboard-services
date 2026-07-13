@@ -174,5 +174,8 @@ describe("runAgent — reasoning_step emission", () => {
     expect(result.message.reasoning).toBe(
       "User asked for the capital of France.",
     );
+    // WARP-495: the raw provider passthrough is stripped from result.message —
+    // only our parsed `reasoning` is surfaced, not the duplicate `reasoning_content`.
+    expect(result.message).not.toHaveProperty("reasoning_content");
   });
 });
