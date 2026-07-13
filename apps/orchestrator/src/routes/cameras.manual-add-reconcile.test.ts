@@ -71,6 +71,10 @@ vi.mock("../services/frigate.client.js", () => ({
 
 vi.mock("../services/camera.service.js", () => ({
   getCameras: vi.fn(),
+  // WARP-1286 follow-up: reconcileFrigateCameras() now invalidates cameras:list,
+  // so the manual-add path (which reconciles) calls this — mock it or the call
+  // resolves to undefined and the add 500s.
+  invalidateCamerasCache: vi.fn(),
   getEventsFiltered: vi.fn(),
   getRecentEvents: vi.fn(),
   getRecordings: vi.fn(),

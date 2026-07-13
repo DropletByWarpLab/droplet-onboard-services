@@ -28,6 +28,7 @@ import {
   setReviewViewed,
   subscribeCameraEvents,
   isInitialized,
+  invalidateCamerasCache,
 } from "../services/camera.service.js";
 import {
   fetchSnapshot,
@@ -151,6 +152,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // must not fail the DB op; the prune is idempotent and the next mutation
   // retries it.
   async function reconcileFrigateCameras(): Promise<void> {
+    // WARP-1286 follow-up: every caller reaches here right after a DB mutation
+    // to the camera set (add/accept/reject/delete). Bust the 5s `cameras:list`
+    // cache centrally so a stale snapshot can't survive the mutation — a
+    // deleted/rejected camera resurrecting, or a freshly added one staying
+    // invisible, for up to CACHE_TTL. Runs before (and independently of) the
+    // best-effort Frigate prune below: a Frigate failure must not skip the
+    // invalidation, and `invalidateCamerasCache()` is itself non-throwing.
+    await invalidateCamerasCache();
     try {
       const all = await prisma.camera.findMany({ select: { name: true } });
       const removed = await syncCamerasFromDb(all.map((c) => c.name));
@@ -1607,6 +1616,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           }
           await disableDetection(name);
           await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
+          // WARP-1286 follow-up: disable_camera is Tier-2, so THIS confirm
+          // handler is the production disable path (the direct /disable route
+          // 202s and never runs inline). No reconcile here, so invalidate the
+          // list cache explicitly or the `enabled` flag stays stale for CACHE_TTL.
+          await invalidateCamerasCache();
           break;
         }
         case "camera_subnet_setup": {
@@ -1751,6 +1765,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         where: { name: req.params.name },
         data: { enabled: true },
       });
+      // WARP-1286 follow-up: enable runs inline (not Tier-2, no reconcile), so
+      // bust the list cache or the `enabled` flag stays stale for up to CACHE_TTL.
+      await invalidateCamerasCache();
       res.json({ status: "enabled", camera: req.params.name });
     } catch (err) {
       next(err);
@@ -1785,6 +1802,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         where: { name: req.params.name },
         data: { enabled: false },
       });
+      // WARP-1286 follow-up: defense-in-depth. disable_camera is Tier-2 so in
+      // production this branch is unreachable (the guard above 202s and the
+      // confirm handler executes); invalidate here too so every disable path is
+      // covered if the op is ever allowed inline.
+      await invalidateCamerasCache();
       res.json({ status: "disabled", camera: req.params.name });
     } catch (err) {
       next(err);

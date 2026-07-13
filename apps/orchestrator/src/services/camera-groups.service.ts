@@ -15,6 +15,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { invalidateCamerasCache } from "./camera.service.js";
 
 export interface GroupMemberDTO {
   /** Frigate-key for the camera; matches CameraInfo.name on the wire.
@@ -146,6 +147,16 @@ async function ensureCameraRows(
     });
     idByName.set(row.name, row.id);
   }
+  // WARP-1286 follow-up: these upserts can insert brand-new Camera rows (group
+  // membership survives a fresh install where no one clicked add-camera yet). A
+  // new row is invisible to getCameras()'s 5s `cameras:list` cache until it
+  // expires, and group writes don't pass through the router's
+  // reconcileFrigateCameras() closure — so bust the cache here at the source.
+  // Invalidated unconditionally rather than only-on-insert: telling an insert
+  // from a no-op upsert would need an extra pre-read that still races a
+  // concurrent delete, while over-invalidating a rare group edit costs at most
+  // one rebuild, throttled by the 5s TTL.
+  await invalidateCamerasCache();
   return idByName;
 }
 
