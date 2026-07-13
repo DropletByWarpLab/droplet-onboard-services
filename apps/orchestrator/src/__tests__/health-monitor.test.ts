@@ -66,9 +66,13 @@ import {
   classifyAggregate,
   runAllProbes,
   getAggregateHealth,
+  onHealthSnapshot,
   stopHealthMonitor,
   type ComponentHealth,
 } from "../services/health-monitor.service.js";
+import { AnalyticsAgent } from "../services/analytics/agent.js";
+import type { AnalyticsClient } from "../services/analytics/client.js";
+import { forwardHealthSnapshot } from "../services/analytics/service-health.js";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import { isRedisHealthy } from "../services/cache.service.js";
@@ -327,6 +331,182 @@ describe("runAllProbes (WARP-43)", () => {
     for (const r of results) {
       expect(r.latencyMs).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(r.latencyMs)).toBe(true);
+    }
+  });
+});
+
+/** All 8 components the probe set produces today (kept in one place so the
+ *  WARP-618 observer tests don't repeat the WARP-43 list assertions). */
+const ALL_COMPONENTS = [
+  "ai-gateway",
+  "display",
+  "file-indexer",
+  "nextcloud",
+  "postgres",
+  "redis",
+  "routing",
+  "storage",
+];
+
+describe("health snapshot observers (WARP-618)", () => {
+  const okPrisma = () =>
+    ({ $queryRaw: vi.fn().mockResolvedValue([]) }) as unknown as PrismaClient;
+
+  beforeEach(() => {
+    stubBridgePools([{ device: "md127", status: "active" }]);
+  });
+
+  afterEach(() => {
+    stopHealthMonitor();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("notifies a registered observer with the full per-component results of every poll", async () => {
+    const seen: ComponentHealth[][] = [];
+    const unsubscribe = onHealthSnapshot((components) =>
+      seen.push([...components]),
+    );
+    try {
+      await runAllProbes(okPrisma());
+      await runAllProbes(okPrisma());
+
+      expect(seen).toHaveLength(2);
+      expect(seen[0].map((c) => c.name).sort()).toEqual(ALL_COMPONENTS);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("unsubscribing stops further notifications", async () => {
+    const observer = vi.fn();
+    const unsubscribe = onHealthSnapshot(observer);
+    await runAllProbes(okPrisma());
+    unsubscribe();
+    await runAllProbes(okPrisma());
+
+    expect(observer).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing observer never breaks the poll — results still land in the cache", async () => {
+    const unsubscribe = onHealthSnapshot(() => {
+      throw new Error("observer bug");
+    });
+    try {
+      const results = await runAllProbes(okPrisma());
+      expect(results).toHaveLength(ALL_COMPONENTS.length);
+      expect(getAggregateHealth().components).toHaveLength(
+        ALL_COMPONENTS.length,
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe("health polls → fleet analytics, end to end (WARP-618)", () => {
+  const okPrisma = () =>
+    ({ $queryRaw: vi.fn().mockResolvedValue([]) }) as unknown as PrismaClient;
+
+  /** Real agent (stub wire client) subscribed exactly the way src/index.ts
+   *  wires it at boot; its metric/event seams spied so derivation is
+   *  observable while still delivering nothing (WARP-617 owns delivery). */
+  function attachAnalyticsHarness() {
+    const client = {
+      postHeartbeat: vi.fn(),
+      postMetrics: vi.fn(),
+      postEvents: vi.fn(),
+      postError: vi.fn(),
+    } as unknown as AnalyticsClient;
+    const agent = new AnalyticsAgent({ client });
+    const metric = vi.spyOn(agent, "metric");
+    const event = vi.spyOn(agent, "event");
+    const unsubscribe = onHealthSnapshot((snapshot) =>
+      forwardHealthSnapshot(snapshot, agent),
+    );
+    return { agent, metric, event, unsubscribe };
+  }
+
+  beforeEach(() => {
+    stubBridgePools([{ device: "md127", status: "active" }]);
+  });
+
+  afterEach(() => {
+    stopHealthMonitor();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("every poll enqueues exactly one service.health metric per component; steady state enqueues zero events", async () => {
+    const { metric, event, unsubscribe } = attachAnalyticsHarness();
+    try {
+      await runAllProbes(okPrisma());
+
+      expect(metric).toHaveBeenCalledTimes(ALL_COMPONENTS.length);
+      for (const call of metric.mock.calls) {
+        expect(call[0]).toBe("service.health");
+        expect(call[1]).toBe(1); // all probes healthy
+      }
+      const services = metric.mock.calls.map((c) => c[2]?.service).sort();
+      expect(services).toEqual(ALL_COMPONENTS);
+
+      // Second all-ok poll: metrics again, still not a single event.
+      await runAllProbes(okPrisma());
+      expect(metric).toHaveBeenCalledTimes(2 * ALL_COMPONENTS.length);
+      expect(event).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("a component flip emits exactly one transition event, holding down stays silent, recovery emits exactly one more", async () => {
+    const { event, unsubscribe } = attachAnalyticsHarness();
+    try {
+      await runAllProbes(okPrisma()); // baseline: all ok, no events
+
+      (isRedisHealthy as any)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false);
+      await runAllProbes(okPrisma()); // ok → down: one event
+      expect(event).toHaveBeenCalledTimes(1);
+      expect(event).toHaveBeenCalledWith({
+        type: "service.down",
+        severity: "error",
+        target: "redis",
+        payload: {
+          latencyMs: expect.any(Number),
+          error: "probe returned false",
+        },
+      });
+
+      await runAllProbes(okPrisma()); // still down: silent
+      expect(event).toHaveBeenCalledTimes(1);
+
+      await runAllProbes(okPrisma()); // down → ok: one more
+      expect(event).toHaveBeenCalledTimes(2);
+      expect(event).toHaveBeenLastCalledWith({
+        type: "service.up",
+        severity: "info",
+        target: "redis",
+        payload: { latencyMs: expect.any(Number) },
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("first-ever snapshot is a baseline: a component already down at boot reports metric 0 but no event", async () => {
+    const { metric, event, unsubscribe } = attachAnalyticsHarness();
+    try {
+      (isRedisHealthy as any).mockResolvedValueOnce(false);
+      await runAllProbes(okPrisma());
+
+      expect(event).not.toHaveBeenCalled();
+      expect(metric).toHaveBeenCalledWith("service.health", 0, {
+        service: "redis",
+      });
+    } finally {
+      unsubscribe();
     }
   });
 });

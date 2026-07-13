@@ -24,6 +24,7 @@ import {
 import {
   startHealthMonitor,
   stopHealthMonitor,
+  onHealthSnapshot,
 } from "./services/health-monitor.service.js";
 import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
@@ -103,6 +104,7 @@ import {
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
 import { initAnalytics } from "./services/analytics/index.js";
+import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
 
 const logger = createLogger("orchestrator");
@@ -307,6 +309,16 @@ async function main() {
   } catch (err) {
     logger.warn("Frigate NVR unavailable, camera features disabled");
   }
+
+  // WARP-618: service-onboard monitoring — bridge every health snapshot
+  // into the fleet-analytics agent (per-poll `service.health` metric +
+  // transition-only `service.*` events, both derived analytics-side).
+  // Subscribed BEFORE the monitor starts so the seeded first snapshot is
+  // observed and becomes the transition baseline (metrics only, no events).
+  // The monitor stays analytics-unaware — this generic observer is the only
+  // coupling — and the fail-open façade means a broken portal can never
+  // disturb health polling.
+  onHealthSnapshot((snapshot) => forwardHealthSnapshot(snapshot));
 
   // WARP-43: begin background polling of component health. Non-blocking —
   // the first snapshot is seeded immediately and the poller keeps running.
