@@ -609,7 +609,7 @@ Paginated list of work items (issues/tickets).
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
-- `state` (optional) — filter by state id.
+- `state` (optional) — filter by state. Accepts either the native `PmState` id (UUID) **or**, for backwards compatibility, the legacy Plane state name/slug (e.g. `in_progress` / `In Progress`), which is resolved to the matching state server-side (WARP-888). An unrecognised value yields an empty list rather than an error.
 - `assignee` (optional) — filter by assignee id.
 - `per_page` (optional) — 1..100, default 50.
 
