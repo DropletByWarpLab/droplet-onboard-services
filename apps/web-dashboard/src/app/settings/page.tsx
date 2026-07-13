@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ChevronRight,
+  DownloadCloud,
   Mic,
   Plus,
   Settings as SettingsIcon,
@@ -394,6 +395,31 @@ export default function SettingsPage() {
                 <span className="nm">Voice &amp; microphone</span>
                 <span className="sub">
                   Mic health, wake word, and guided calibration
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
+
+        {/* Software updates (WARP-540) — a single link row; the OTA status,
+            pending release, apply window, and history live on the dedicated
+            /settings/updates surface (same pattern as the Voice row). */}
+        <Sect title="Software updates" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <Link
+              href="/settings/updates"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <DownloadCloud size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Software updates</span>
+                <span className="sub">
+                  Current release, pending updates, and the apply window
                 </span>
               </span>
               <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
