@@ -1,0 +1,36 @@
+# macOS-only Compose override for the RAG integration test lane (WARP-226).
+#
+# Layered on top of docker-compose.yml + docker-compose.test.override.yml by
+# scripts/test-rag.sh ONLY when it detects a Darwin host. It is never used on
+# Linux (local dev, CI runners, or the Jetson appliance) and is not referenced
+# by the rag-tests GitHub Actions workflow.
+#
+# Why this exists:
+#   The base docker-compose.yml bind-mounts the host's /mnt/droplet (the USB-
+#   drive automount root, services/automount/) into the Nextcloud container at
+#   /host. On macOS, Docker Desktop's File Sharing allow-list rejects any /mnt
+#   path, so `docker compose up` aborts before the stack is healthy with:
+#
+#     Error response from daemon: mounts denied:
+#     The path /mnt/droplet is not shared from the host and is not known to Docker.
+#
+#   The USB-drive integration that mount provides is not exercised by any RAG
+#   integration test, so on macOS we drop it. Docker Compose merges a service's
+#   `volumes:` list by APPENDING, so the mount cannot be removed by omission —
+#   `!override` (a Compose merge-control YAML tag from the same family as the
+#   `!reset` this lane already relies on for `device-identity-svc.devices:
+#   !reset []` in docker-compose.test.override.yml) replaces the whole list
+#   with the volumes the test lane actually needs, minus the /mnt/droplet bind.
+#   Both tags require Compose 2.24+; every current Docker Desktop ships far
+#   newer, and the lane already can't run on older Compose because of `!reset`.
+#
+# Maintenance: if a NON-USB volume is added to the nextcloud service in
+# docker-compose.yml, mirror it here too, or it will be missing on macOS.
+services:
+  nextcloud:
+    volumes: !override
+      - nextcloud-data:/var/www/html
+      - ./nextcloud-skeleton:/skeleton:ro
+      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      - ./nextcloud/zz-redis-tls.config.php:/var/www/html/config/zz-redis-tls.config.php:ro
+      - ../data/secrets/service-tls/nextcloud:/data/service-tls:ro

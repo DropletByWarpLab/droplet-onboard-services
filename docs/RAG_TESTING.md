@@ -96,10 +96,16 @@ the `beforeAll` (compose up + Nextcloud bootstrap + 9 fixture
 uploads + indexing waits + transcribe-now triggers). Each individual
 `it()` runs in 30-120s.
 
-**macOS dev-machine note:** `./scripts/test-rag.sh` currently fails
-on macOS because Nextcloud's `/mnt/droplet` bind-mount hits Docker
-Desktop's File Sharing allow-list. Tracked in WARP-226. Workaround:
-trigger the `rag-tests` workflow on GitHub Actions (Linux) via:
+**macOS dev-machine note (WARP-226):** `./scripts/test-rag.sh` runs
+natively on macOS. Nextcloud's base `/mnt/droplet` bind-mount (the
+USB-drive automount root, unused by the RAG suite) would otherwise hit
+Docker Desktop's File Sharing allow-list and abort `compose up` with
+`mounts denied: … /mnt/droplet is not shared from the host`. On a Darwin
+host the runner automatically layers
+`docker/docker-compose.test.macos.yml`, which drops that mount via
+Compose `!override` — no manual Docker File Sharing config needed. Linux
+(CI runners + the Jetson appliance) keeps the mount untouched. You can
+still run the Linux `rag-tests` workflow instead if you prefer:
 
 ```bash
 gh workflow run rag-tests --ref <branch>
@@ -154,7 +160,7 @@ done
 7. Add the `it()` block for citation assertion. Use the audio flow as a template for deferred MIMEs, the email flow for sync MIMEs.
 8. If the extractor emits a structural separator (`--- Member: `, `--- Attachment: `, `--- Frame OCR ---`), add a sibling `it()` that scans the chunks for it — proves the extractor's code path actually fired.
 9. Add the new row to the table above and to the spec's flow inventory.
-10. Run `./scripts/test-rag.sh --only end-to-end` and confirm green (or trigger the `rag-tests` workflow if on macOS).
+10. Run `./scripts/test-rag.sh --only end-to-end` and confirm green (runs natively on macOS too, see the macOS note above; or trigger the `rag-tests` workflow).
 
 ### Why we loop on retrieval determinism
 
