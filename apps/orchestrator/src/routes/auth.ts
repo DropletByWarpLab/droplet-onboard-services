@@ -1702,6 +1702,39 @@ export function createPublicAuthRouter(
         householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
 
+      // ── WARP-490: single-use enforcement via compare-and-swap ──
+      // Two near-simultaneous POSTs to the same token both clear the
+      // isUsed() fast-path above before either write lands. The
+      // conditional updateMany (acceptedAt: null) is the atomic
+      // enforcement point: exactly one caller flips the row (count === 1)
+      // and proceeds to create the account; the other sees count === 0
+      // and 410s WITHOUT ever calling Nextcloud — so no duplicate NC
+      // user, no double-provision. Claiming BEFORE ncCreateUser (rather
+      // than after, as the pre-490 code did) is what actually closes the
+      // window; the old post-create update left both racers free to run
+      // ncCreateUser concurrently.
+      //
+      // Tradeoff: if ncCreateUser then fails, the invite stays claimed and
+      // the invitee must ask for a fresh one (POST
+      // /api/people/invites/:id/resend). That's the deliberate price of
+      // atomic single-use — a transient-failure auto-release would reopen
+      // a (smaller) version of the same race.
+      const acceptedFrom = getRequestIp(req);
+      const claim = await prisma.userInvite.updateMany({
+        where: { id: invite.id, acceptedAt: null },
+        data: {
+          acceptedAt: new Date(),
+          acceptedFrom: acceptedFrom ?? undefined,
+        },
+      });
+      if (claim.count === 0) {
+        res.status(410).json({
+          error: "This invite has already been used",
+          code: "USED",
+        });
+        return;
+      }
+
       try {
         await ncCreateUser(
           // Use the configured admin token from env. No request-bound NC
@@ -1727,20 +1760,9 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Mark the invite accepted BEFORE we issue cookies — this is the
-      // single-use enforcement point. A concurrent second POST will see
-      // acceptedAt non-null and 410. The DB unique-on-token + this
-      // single-row update keeps the race window small (Prisma's update is
-      // not transactional with the ncCreateUser call, but Nextcloud's
-      // own statuscode 102 catches the user-exists race).
-      const acceptedFrom = getRequestIp(req);
-      await prisma.userInvite.update({
-        where: { id: invite.id },
-        data: {
-          acceptedAt: new Date(),
-          acceptedFrom: acceptedFrom ?? undefined,
-        },
-      });
+      // The invite was already claimed atomically above (WARP-490 CAS)
+      // BEFORE we created the Nextcloud account, so there's nothing left
+      // to mark here — the single-use window is already closed.
 
       // Auto-login the invitee — same shape as /api/auth/login.
       // WARP-1051: the session role IS the canonical invite role. The old

@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
+import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -213,20 +214,44 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       sid: jwtPayload.sid,
     };
 
-    // WARP-247 grace path — sid-less access tokens predate session records.
-    // They are unforgeable without JWT_SECRET and self-expire in ≤15 min
-    // (ACCESS_TOKEN_TTL_SECONDS), so they exist only across the deploy
-    // boundary; their refresh token is refused at /auth/refresh (no sid),
-    // which forces one clean re-login per device. Tokens minted after this
-    // release ALWAYS carry a sid.
-    if (!jwtPayload.sid) {
-      req.user = user;
-      next();
-      return;
-    }
+    // The JWT signature is valid; the remaining checks (denylist + session
+    // record) are async, so run them in an IIFE and return. Any unexpected
+    // rejection lands in the catch as a 500 — the middleware never leaves
+    // the request hanging.
+    void (async () => {
+      try {
+        // WARP-490 — access-token denylist. A hard revocation (user deleted
+        // / offboarded) writes auth:denylist:user:<sub>; a still-valid
+        // signature must not outlive it. Checked BEFORE the session lookup
+        // so it ALSO catches sid-less grace-path tokens (which skip
+        // checkSession) and fires even if the session-record sweep raced or
+        // partially failed. Fails OPEN on a Redis error (isUserDenied →
+        // false), the same availability posture as checkSession below.
+        if (await isUserDenied(jwtPayload.sub)) {
+          if (cookieToken) {
+            res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          }
+          res.status(401).json({
+            error: "Session revoked",
+            code: "SESSION_EXPIRED",
+            reason: "revoked",
+          });
+          return;
+        }
 
-    checkSession(jwtPayload.sid)
-      .then((result) => {
+        // WARP-247 grace path — sid-less access tokens predate session
+        // records. They are unforgeable without JWT_SECRET and self-expire
+        // in ≤15 min (ACCESS_TOKEN_TTL_SECONDS), so they exist only across
+        // the deploy boundary; their refresh token is refused at
+        // /auth/refresh (no sid), which forces one clean re-login per
+        // device. Tokens minted after this release ALWAYS carry a sid.
+        if (!jwtPayload.sid) {
+          req.user = user;
+          next();
+          return;
+        }
+
+        const result = await checkSession(jwtPayload.sid);
         if (result.kind === "ok" || result.kind === "error") {
           // "error" = Redis unreachable → fail OPEN: the JWT itself is a
           // valid ≤15-min credential and a cache restart must not brick
@@ -248,11 +273,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
           code: "SESSION_EXPIRED",
           reason: result.kind === "expired" ? result.reason : "revoked",
         });
-      })
-      .catch((err) => {
+      } catch (err) {
         logger.error({ err }, "Session check failed");
         res.status(500).json({ error: "Authentication service error" });
-      });
+      }
+    })();
     return;
   }
 
@@ -303,6 +328,9 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
   // touch applies. Redis errors fail OPEN (same posture as the HTTP path).
   const jwtPayload = verifyAccessToken(token);
   if (jwtPayload) {
+    // WARP-490 — a revoked subject must not complete a WS upgrade either.
+    // Fails open on Redis error (isUserDenied → false), same as the HTTP path.
+    if (await isUserDenied(jwtPayload.sub)) return null;
     if (jwtPayload.sid) {
       const result = await checkSession(jwtPayload.sid);
       if (result.kind !== "ok" && result.kind !== "error") return null;

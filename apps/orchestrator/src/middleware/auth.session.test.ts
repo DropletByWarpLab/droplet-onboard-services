@@ -38,6 +38,14 @@ vi.mock("../services/session.service.js", () => ({
   checkSession: (...a: unknown[]) => checkSession(...a),
 }));
 
+// WARP-490 — the access-token denylist gate. Mocked at the service boundary
+// (like checkSession) so the middleware test doesn't reach into Redis. Default
+// "not denied" is set in beforeEach; the revocation tests flip it per-case.
+const isUserDenied = vi.fn();
+vi.mock("../services/auth-denylist.service.js", () => ({
+  isUserDenied: (...a: unknown[]) => isUserDenied(...a),
+}));
+
 import { authMiddleware, validateTokenForWs } from "./auth.js";
 
 const payloadWithSid = {
@@ -77,6 +85,10 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: subject is NOT revoked, so the denylist gate is transparent and
+  // the existing session-enforcement cases exercise exactly what they did
+  // before WARP-490. Revocation tests override this.
+  isUserDenied.mockResolvedValue(false);
 });
 
 describe("authMiddleware — WARP-247 session enforcement", () => {
@@ -179,6 +191,46 @@ describe("authMiddleware — WARP-247 session enforcement", () => {
     expect(checkSession).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledTimes(1);
   });
+
+  it("401s SESSION_EXPIRED/revoked BEFORE the session check when the subject is denylisted (WARP-490)", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    isUserDenied.mockResolvedValue(true);
+    const req = cookieReq();
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await flush();
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Session revoked",
+      code: "SESSION_EXPIRED",
+      reason: "revoked",
+    });
+    expect(res.clearCookie).toHaveBeenCalledWith("droplet_session", { path: "/" });
+    // The denylist short-circuits AHEAD of the session lookup.
+    expect(checkSession).not.toHaveBeenCalled();
+  });
+
+  it("denylist ALSO cuts off a legacy sid-less token — the grace path is gated too (WARP-490)", async () => {
+    const { sid: _sid, ...legacy } = payloadWithSid;
+    verifyAccessToken.mockReturnValue(legacy);
+    isUserDenied.mockResolvedValue(true);
+    const req = headerReq();
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await flush();
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "SESSION_EXPIRED", reason: "revoked" }),
+    );
+  });
 });
 
 describe("validateTokenForWs — WARP-247 session enforcement", () => {
@@ -197,5 +249,13 @@ describe("validateTokenForWs — WARP-247 session enforcement", () => {
     });
     const user = await validateTokenForWs("jwt-token");
     expect(user).toMatchObject({ id: "u-uuid-1", sid: "sid-abc" });
+  });
+
+  it("rejects a WS upgrade for a denylisted subject before the session check (WARP-490)", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    isUserDenied.mockResolvedValue(true);
+    const user = await validateTokenForWs("jwt-token");
+    expect(user).toBeNull();
+    expect(checkSession).not.toHaveBeenCalled();
   });
 });

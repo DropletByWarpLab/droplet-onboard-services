@@ -57,6 +57,18 @@ vi.mock("../services/session.service.js", () => ({
   revokeAllSessions: revokeAllSessionsMock,
 }));
 
+// WARP-490: DELETE /people/:id now ALSO denylists the removed user's access
+// tokens (immediate revocation of sid-less / already-issued tokens that the
+// session-record sweep alone wouldn't catch). Mock the denylist service so we
+// can assert the call without standing up Redis.
+const { denylistUserMock } = vi.hoisted(() => ({
+  denylistUserMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../services/auth-denylist.service.js", () => ({
+  denylistUser: denylistUserMock,
+  isUserDenied: vi.fn().mockResolvedValue(false),
+}));
+
 // WARP-1259 (T7): the role-change route syncs the box-wide `droplet-admins`
 // NC group on owner/admin promote/demote through the same code path that
 // already revokes sessions. Mock the NC calls so we can assert group-sync
@@ -325,6 +337,7 @@ function buildApp(
 beforeEach(() => {
   recordActivityMock.mockClear();
   revokeAllSessionsMock.mockClear();
+  denylistUserMock.mockClear();
   ncAddUserToGroupMock.mockClear();
   ncRemoveUserFromGroupMock.mockClear();
 });
@@ -746,6 +759,26 @@ describe("DELETE /api/people/:id", () => {
     expect(recorded.kind).toBe("auth");
     expect(recorded.refs.targetUserId).toBe("u1");
     expect(recorded.refs.actor).toBe("stefan");
+    // WARP-490 — deletion hard-revokes the removed user's live credentials:
+    // session records swept AND access tokens denylisted for the token TTL.
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u1");
+    expect(denylistUserMock).toHaveBeenCalledWith("u1", expect.any(Number));
+  });
+
+  it("does NOT revoke or denylist when the delete is refused (self / last-owner / OCS-owned)", async () => {
+    // A refused delete must leave the target's sessions untouched — otherwise
+    // a rejected self-delete or last-owner attempt would still log the owner
+    // out of their own box.
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", isLocal: false }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).delete("/api/people/u1");
+
+    expect(res.status).toBe(409);
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(denylistUserMock).not.toHaveBeenCalled();
   });
 
   it("refuses to delete an OCS-owned identity (isLocal=false)", async () => {
