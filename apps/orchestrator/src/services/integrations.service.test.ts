@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   createIntegrationsService,
   EAGLESOFT_PROVIDER,
+  EAGLESOFT_API_PROVIDER,
 } from "./integrations.service.js";
 import { ConnectorBlockedError } from "@droplet/erp-connector";
 
@@ -201,6 +202,29 @@ describe("integrations.service (WARP-1137, DB-independent)", () => {
       expect(result.reason).toBe("ERP_NOT_CONNECTED");
       // test() must not persist anything.
       expect(mock._state.connections.size).toBe(0);
+    });
+
+    it("connect(provider: eaglesoft-api) persists the API provider (dual-track)", async () => {
+      const result = await svc.connect({
+        host: "10.0.0.5",
+        provider: EAGLESOFT_API_PROVIDER,
+        secretRef: "secret://erp/eaglesoft-api/creds",
+      });
+      // The row is persisted under the API provider key (no migration — the
+      // provider column is free-form TEXT) and, like the SQL path, does NOT
+      // fake CONNECTED while the connector is blocked.
+      expect(result.provider).toBe("eaglesoft-api");
+      expect(result.status).not.toBe("CONNECTED");
+      const row = Array.from(mock._state.connections.values())[0]!;
+      expect(row.provider).toBe("eaglesoft-api");
+      // The API provider has no SQL droplet_ro account to surface.
+      expect(result.account).toBeNull();
+    });
+
+    it("connect() rejects an unknown provider", async () => {
+      await expect(
+        svc.connect({ host: "10.0.0.5", provider: "dentrix" }),
+      ).rejects.toThrow();
     });
   });
 

@@ -24,17 +24,14 @@
  */
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
-  EaglesoftConnector,
   ConnectorBlockedError,
   WRITE_COMMANDS,
   scheduleDayBounds,
-  DEFAULT_PORT,
-  DEFAULT_DATABASE_NAME,
   type Connector,
 } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
-import { EAGLESOFT_PROVIDER } from "./integrations.service.js";
+import { connectorForProvider, EAGLESOFT_PROVIDER } from "./erp-provider.js";
 
 const logger = createLogger("erp-service");
 
@@ -103,14 +100,18 @@ export interface ErpServiceDeps {
 }
 
 function defaultConnectorFor(conn: ConnRow): Connector {
-  return new EaglesoftConnector({
+  // Dual-track: build the connector for the row's persisted provider
+  // ("eaglesoft" → SQL Anywhere, "eaglesoft-api" → Patterson REST API). NOTE:
+  // eaglesoftRow() below currently resolves only the SQL "eaglesoft" row, so the
+  // "eaglesoft-api" branch is exercised by the factory tests today and reached
+  // from this call site once row-resolution is generalized to the API provider
+  // (a follow-up, with the live API read path). The pointer-only secretRef is
+  // dereferenced inside the connector (brief §7.4).
+  return connectorForProvider({
+    provider: conn.provider,
     host: conn.host ?? "",
-    port: DEFAULT_PORT,
-    serverName: conn.databaseName ?? DEFAULT_DATABASE_NAME,
-    databaseName: conn.databaseName ?? DEFAULT_DATABASE_NAME,
-    // Pointer only — dereferenced against the secret store when the live driver
-    // lands. Nothing here reads a cleartext password (brief §7.4).
-    readSecretRef: conn.secretRef ?? "",
+    databaseName: conn.databaseName ?? undefined,
+    secretRef: conn.secretRef ?? undefined,
   });
 }
 

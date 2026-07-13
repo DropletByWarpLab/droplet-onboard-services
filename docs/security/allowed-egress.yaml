@@ -264,6 +264,25 @@ entries:
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/services/sso-oidc.service.ts]
 
+  - id: eaglesoft-rest-api
+    kind: dynamic
+    service: erp-connector
+    config_key: IntegrationConnection.host (admin-configured, per-practice LAN)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Patterson Eaglesoft REST API (Innovation Connection; HTTPS :9888,
+      ASP.NET Web-API-2) on the practice LAN — the dual-track official-API ERP
+      provider (WARP-1294). LAN destination only, never off-box; no repo host
+      literal — the office server host comes from the connection row. The
+      Azure Service Bus relay is deliberately NOT used (LAN-only posture).
+      Carries practice PHI the operator connected, under the same on-box/BAA
+      posture as the direct-SQL provider.
+    ticket: WARP-1294
+    added: 2026-07-12
+    review_by: 2027-07-12
+    code_refs: [services/erp-connector/src/api-connector.ts, services/erp-connector/src/api-auth.ts, apps/orchestrator/src/services/erp-provider.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

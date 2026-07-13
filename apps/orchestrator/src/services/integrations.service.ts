@@ -23,14 +23,22 @@
  *  • Every writeEnabled flip writes an append-only `ErpAuditLog` row (§14).
  */
 import type { PrismaClient } from "@prisma/client";
-import { EaglesoftConnector, ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
+import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
+import {
+  connectorForProvider,
+  isKnownErpProvider,
+  EAGLESOFT_PROVIDER,
+  EAGLESOFT_API_PROVIDER,
+} from "./erp-provider.js";
 
 const logger = createLogger("integrations-service");
 
-/** The flagship provider key. The framework is N-provider; this ships #1. */
-export const EAGLESOFT_PROVIDER = "eaglesoft";
+// Provider keys + the dual-track connector factory now live in erp-provider.ts.
+// Re-exported here so existing importers (erp.service, tests) keep resolving
+// EAGLESOFT_PROVIDER from this module.
+export { EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER };
 
 /** The explicit lifecycle states (mirror of the Prisma `IntegrationStatus`
  *  enum). A provider with no row is reported as NOT_CONFIGURED — the explicit
@@ -82,6 +90,9 @@ export interface ConnectInput {
   scopes?: string[];
   /** Connect-time write opt-in — sets `writeEnabled` on the new connection. */
   enableWrites?: boolean;
+  /** Which ERP provider to connect ("eaglesoft" | "eaglesoft-api"). Defaults to
+   *  the direct-SQL Eaglesoft provider when omitted (dual-track, WARP-1294). */
+  provider?: string;
 }
 
 export interface TestResult {
@@ -101,18 +112,28 @@ export interface IntegrationsServiceDeps {
 /** Minimal Prisma surface this service needs (structural — tests pass a stub). */
 type IntegrationsPrisma = Pick<PrismaClient, "integrationConnection" | "erpAuditLog">;
 
-const DEFAULT_PORT = 2638;
 const DEFAULT_DATABASE_NAME = "PattersonPM";
 
-function defaultConnectorFor(_provider: string, input: ConnectInput): Connector {
-  return new EaglesoftConnector({
+/** Resolve the provider for a connect/test call. Defaults to the direct-SQL
+ *  Eaglesoft provider; an explicit but unknown value is rejected rather than
+ *  silently routed to a surprise transport. */
+function resolveProvider(provider: string | undefined): string {
+  if (provider === undefined) return EAGLESOFT_PROVIDER;
+  if (!isKnownErpProvider(provider)) {
+    throw ErpError.validation(`unknown ERP provider "${provider}"`);
+  }
+  return provider;
+}
+
+function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
+  // Dual-track selection lives in erp-provider.ts; the SQL branch is unchanged.
+  return connectorForProvider({
+    provider,
     host: input.host,
-    port: input.port ?? DEFAULT_PORT,
-    serverName: input.serverName ?? input.databaseName ?? DEFAULT_DATABASE_NAME,
-    databaseName: input.databaseName || DEFAULT_DATABASE_NAME,
-    // Pointer only — the connector resolves it against the secret store when
-    // the live driver lands. Nothing here dereferences a password.
-    readSecretRef: input.secretRef ?? "",
+    port: input.port,
+    serverName: input.serverName,
+    databaseName: input.databaseName,
+    secretRef: input.secretRef,
   });
 }
 
@@ -134,15 +155,15 @@ export function createIntegrationsService(
 ): IntegrationsService {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
 
-  /** The single Eaglesoft connection row, or null. Provider-scoped. */
-  async function findEaglesoftRow() {
+  /** The single connection row for a provider, or null. Provider-scoped. */
+  async function findRow(provider: string = EAGLESOFT_PROVIDER) {
     return prisma.integrationConnection.findFirst({
-      where: { provider: EAGLESOFT_PROVIDER },
+      where: { provider },
     });
   }
 
   function toDetail(
-    row: Awaited<ReturnType<typeof findEaglesoftRow>>,
+    row: Awaited<ReturnType<typeof findRow>>,
   ): IntegrationDetail {
     if (!row) {
       // Explicit constant — NOT derived from the absence of a row. The hub /
@@ -171,7 +192,10 @@ export function createIntegrationsService(
       databaseName: row.databaseName,
       schemaVersion: row.schemaVersion,
       schemaHash: row.schemaHash,
-      account: "droplet_ro",
+      // The dedicated read account is SQL-only; the API provider authenticates
+      // with a vendor key + an Eaglesoft Provider login, so there is no
+      // droplet_ro account to surface.
+      account: row.provider === EAGLESOFT_API_PROVIDER ? null : "droplet_ro",
       lastSyncedAt: lastSynced,
       lastHealthyAt: lastSynced,
     };
@@ -185,6 +209,7 @@ export function createIntegrationsService(
       // the hub always lists it (explicit NOT_CONFIGURED when no row exists).
       const providers = new Set<string>([
         EAGLESOFT_PROVIDER,
+        EAGLESOFT_API_PROVIDER,
         ...rows.map((r) => r.provider),
       ]);
       return Array.from(providers).map((provider) => {
@@ -199,17 +224,18 @@ export function createIntegrationsService(
     },
 
     async getEaglesoft() {
-      return toDetail(await findEaglesoftRow());
+      return toDetail(await findRow());
     },
 
     async connect(input) {
+      const provider = resolveProvider(input.provider);
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
-      const existing = await findEaglesoftRow();
+      const existing = await findRow(provider);
       const databaseName = input.databaseName || DEFAULT_DATABASE_NAME;
       // The backend owns the credential — mint a pointer if the client didn't
       // send one (the real secret is created during live provisioning).
-      const secretRef = input.secretRef ?? `${EAGLESOFT_PROVIDER}:pending`;
+      const secretRef = input.secretRef ?? `${provider}:pending`;
       // Honor the wizard's connect-time write opt-in (default off / read-only).
       const writeEnabled = !!input.enableWrites;
       const base = existing
@@ -225,7 +251,7 @@ export function createIntegrationsService(
           })
         : await prisma.integrationConnection.create({
             data: {
-              provider: EAGLESOFT_PROVIDER,
+              provider,
               status: "PROVISIONING",
               host: input.host,
               databaseName,
@@ -235,7 +261,7 @@ export function createIntegrationsService(
             },
           });
 
-      const connector = connectorFor(EAGLESOFT_PROVIDER, input);
+      const connector = connectorFor(provider, input);
       try {
         await connector.connect();
         await connector.introspect();
@@ -248,13 +274,13 @@ export function createIntegrationsService(
         return toDetail(connected);
       } catch (err) {
         if (err instanceof ConnectorBlockedError) {
-          // HONEST degradation: the connector cannot reach Eaglesoft because
-          // the SAP driver + copy DB are not present (WARP-1137 scope). We do
-          // NOT fake CONNECTED — the row stays PROVISIONING so the dashboard
-          // shows "connecting / driver pending", which is the truth.
+          // HONEST degradation: the connector can't reach the ERP yet (SQL:
+          // driver + copy DB absent; API: vendor creds + discovered /help routes
+          // absent). We do NOT fake CONNECTED — the row stays PROVISIONING so
+          // the dashboard shows the truth ("connecting").
           logger.info(
-            { provider: EAGLESOFT_PROVIDER },
-            "connect blocked (DB-independent slice): connector driver not available; status stays PROVISIONING",
+            { provider },
+            "connect blocked: connector not reachable / not yet wired; status stays PROVISIONING",
           );
           return toDetail(base);
         }
@@ -271,7 +297,8 @@ export function createIntegrationsService(
     },
 
     async test(input) {
-      const connector = connectorFor(EAGLESOFT_PROVIDER, input);
+      const provider = resolveProvider(input.provider);
+      const connector = connectorFor(provider, input);
       try {
         await connector.connect();
         await connector.health();
@@ -281,8 +308,13 @@ export function createIntegrationsService(
           return {
             ok: false,
             reason: "ERP_NOT_CONNECTED",
+            // Provider-accurate reason: the SQL and API tracks are blocked on
+            // different prerequisites, so don't tell an API operator they need
+            // a SQL Anywhere driver.
             message:
-              "not connected: the SAP SQL Anywhere driver + a copy of PattersonPM.db are required (walking-skeleton slice)",
+              provider === EAGLESOFT_API_PROVIDER
+                ? "not connected: Patterson vendor credentials + the discovered /help route map are required"
+                : "not connected: the SAP SQL Anywhere driver + a copy of PattersonPM.db are required",
           };
         }
         return {
@@ -296,7 +328,7 @@ export function createIntegrationsService(
     },
 
     async setWriteEnabled(enabled, ctx) {
-      const row = await findEaglesoftRow();
+      const row = await findRow();
       if (!row) throw ErpError.notConfigured(EAGLESOFT_PROVIDER);
 
       const updated = await prisma.integrationConnection.update({
@@ -320,7 +352,7 @@ export function createIntegrationsService(
     },
 
     async disconnect(ctx) {
-      const row = await findEaglesoftRow();
+      const row = await findRow();
       if (!row) return toDetail(null); // idempotent — nothing to disconnect
       const updated = await prisma.integrationConnection.update({
         where: { id: row.id },
