@@ -5,25 +5,58 @@ name: setup-e2e
 # by the setup script: preflight → secrets → image build. Catches
 # regressions in the setup flow itself, not just individual Dockerfiles
 # (which the docker-build workflow covers separately).
+#
+# SCOPE CAVEAT (WARP-971): this is a CI-runner gate over the setup/build
+# flow — it does NOT boot real hardware and never reaches `docker compose
+# up`, so it is not a live-box first-run test. A genuinely live-box gate
+# (real device, stack up, wizard exercised) remains open work and relates
+# to WARP-964's hardware-in-the-loop OTA harness and the self-hosted
+# ota-e2e.yml pattern (WARP-541 / PR #1016).
+#
+# TIME BUDGET (WARP-971, agreed as the gate budget): measured on recent
+# successful runs — ~16 min with a warm GHCR buildcache (the common case
+# since the cache-refresh fix, PR #989) and ~31 min cold. timeout-minutes
+# below stays at 60 purely as the hung-run bound.
 
 on:
   pull_request:
     paths:
+      # -- the setup flow itself --
       - "scripts/**"
       - "docker/docker-compose.yml"
       - "docker/docker-compose.build-cache.yml"
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
+      # -- first-run regression surfaces (WARP-971) --
+      # The orchestrator Dockerfile COPYs the whole app dir into the build
+      # context and `tsc` compiles src/**/* (tests included per tsconfig
+      # `include`), prisma/ feeds `db:generate`, and scripts/ + data/ ship
+      # in the image — so every file under the dir feeds the image build
+      # this workflow exercises. No "minus tests" carve-out exists that
+      # wouldn't skip files the build actually consumes.
+      - "apps/orchestrator/**"
+      # The first-run wizard surfaces of the web-dashboard. Its Dockerfile
+      # COPYs the app and runs the Next.js production build, so a wizard
+      # page/component that breaks the build breaks setup.sh's build phase.
+      # Deliberately NOT the whole dashboard: the rest of the UI is not a
+      # first-run surface and shouldn't trigger this heavy job.
+      - "apps/web-dashboard/src/app/setup/**"
+      - "apps/web-dashboard/src/components/setup/**"
   push:
     branches: [main]
     paths:
+      # Kept in lockstep with the pull_request paths above (same rationale)
+      # so main gets a post-merge canary for every gated surface.
       - "scripts/**"
       - "docker/docker-compose.yml"
       - "docker/docker-compose.build-cache.yml"
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
+      - "apps/orchestrator/**"
+      - "apps/web-dashboard/src/app/setup/**"
+      - "apps/web-dashboard/src/components/setup/**"
   workflow_dispatch:
 
 concurrency:
