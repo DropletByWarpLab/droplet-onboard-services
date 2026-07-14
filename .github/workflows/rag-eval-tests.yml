@@ -3,9 +3,9 @@ name: rag-eval-tests
 # Two lightweight pytest lanes, path-filtered:
 #   1. tests/retrieval-eval/ragas/test_aggregate.py — the offline runner's
 #      aggregation arithmetic (WARP-521). No Compose stack or Ollama.
-#   2. services/rag-eval/tests/ — the appliance eval service's pure-stdlib
-#      run-state logic (wired in by the WARP-970 CI-coverage gate: every
-#      service with a Dockerfile must have its suite on CI).
+#   2. services/rag-eval/tests/ — the appliance eval service's run-state
+#      logic and uvicorn TLS config (wired in by the WARP-970 CI-coverage
+#      gate: every service with a Dockerfile must have its suite on CI).
 # Neither lane installs ragas/torch — that heavy stack stays deferred; these
 # are purely unit-level tests.
 
@@ -50,11 +50,15 @@ jobs:
         # pyyaml + datasets: top-level imports in ragas_runner.py that must
         #   resolve when the module is imported (ragas itself is deferred and
         #   NOT installed here — that's the whole point of this lightweight lane).
-        # pytest: test runner. The services/rag-eval suite needs nothing else —
-        #   run_state.py is pure stdlib (its conftest handles sys.path).
+        # pytest: test runner.
+        # apscheduler + tzlocal + uvicorn: the services/rag-eval suite imports
+        #   main.py (WARP-1061 uvicorn TLS config tests), which pulls in
+        #   scheduler_service.py (apscheduler, tzlocal) and lazily uvicorn.
+        #   server.py's fastapi stack stays uninstalled — the app reaches
+        #   uvicorn.Config as the string "server:app", never imported.
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pyyaml datasets pytest
+          pip install pandas pyyaml datasets pytest apscheduler tzlocal uvicorn
 
       - name: Run pytest (ragas aggregate)
         run: pytest tests/retrieval-eval/ragas/test_aggregate.py -v
