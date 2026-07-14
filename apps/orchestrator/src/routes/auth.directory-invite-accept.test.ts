@@ -227,6 +227,28 @@ function createPrismaMock() {
       invites[idx] = { ...invites[idx], ...data };
       return invites[idx];
     }),
+    // WARP-490: compare-and-swap single-use claim the accept handler now uses
+    // (`updateMany({ where: { id, acceptedAt: null }, data: { acceptedAt } })`)
+    // BEFORE creating the Nextcloud user. The body is fully synchronous (no
+    // internal await), so two racing claims serialize in the event loop:
+    // whichever reaches it first flips acceptedAt (count 1); the second is
+    // filtered by the `acceptedAt: null` guard and returns count 0 — exactly
+    // the DB-level atomicity the real Prisma updateMany provides. Every test
+    // in this file accepts a fresh (acceptedAt === null) invite, so the claim
+    // wins (count 1) and the endpoint proceeds to 200; an already-accepted
+    // row would fall through to count 0 and the handler's 410 USED branch.
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      let count = 0;
+      for (let i = 0; i < invites.length; i += 1) {
+        const r = invites[i];
+        if (where?.id !== undefined && r.id !== where.id) continue;
+        if (where?.token !== undefined && r.token !== where.token) continue;
+        if (where?.acceptedAt === null && r.acceptedAt !== null) continue;
+        invites[i] = { ...r, ...data };
+        count += 1;
+      }
+      return { count };
+    }),
   };
   // PR #375 — the directory /auth/login route now consults the TOTP
   // second-factor gate before issuing a session: it reads
