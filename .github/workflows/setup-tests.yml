@@ -17,6 +17,7 @@ on:
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
+      - "tests/nginx-canonical-host.test.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -37,6 +38,7 @@ on:
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
+      - "tests/nginx-canonical-host.test.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -76,6 +78,11 @@ jobs:
         # entrypoint selector, and nginx.conf's first-party-only
         # $internal_scheme legs. Pure bash, no Docker.
         run: bash tests/nginx-internal-scheme.test.sh
+      - name: Run nginx canonical-host unit tests
+        # Warning-free droplet.local: render decisions (authority knob +
+        # cert-artifact gates), variant contents, nginx.conf/Dockerfile/
+        # compose wiring, tls-reload render hook. Pure bash, no Docker.
+        run: bash tests/nginx-canonical-host.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean

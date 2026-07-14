@@ -123,6 +123,20 @@ wait_for() {
   return 1
 }
 
+# --- Provisioning-bench cert helper (WARP-1300) ---
+# Warning-free droplet.local (spec §4): the provisioning bench must not box a
+# device that would greet its customer with a cert warning. Same artifact
+# checks render-canonical-host.sh uses: not self-issued + unexpired.
+_trusted_tls_cert_active() {
+  local cert="$REPO_ROOT/docker/certs/droplet.crt"
+  [ -f "$cert" ] || return 1
+  local subj iss
+  subj=$(openssl x509 -in "$cert" -noout -subject 2>/dev/null | sed 's/^subject=//') || return 1
+  iss=$(openssl x509 -in "$cert" -noout -issuer 2>/dev/null | sed 's/^issuer=//') || return 1
+  [ -n "$subj" ] && [ "$subj" != "$iss" ] || return 1
+  openssl x509 -checkend 0 -noout -in "$cert" >/dev/null 2>&1
+}
+
 # =============================================================================
 # Checks
 # =============================================================================
@@ -229,6 +243,15 @@ check "Docker secret: openwrt_password" \
 
 check "TLS certificate" \
   bash -c '[ -f "'"$REPO_ROOT/docker/certs/droplet.crt"'" ] && [ -f "'"$REPO_ROOT/docker/certs/droplet.key"'" ]' || true
+
+# WARP-1300: the provisioning bench must not box a device that would greet
+# its customer with a cert warning — hard-fail there; everywhere else (dev
+# boxes normally run on a self-signed bootstrap cert) it's a soft WARN.
+if [ "${DROPLET_PROVISIONING:-0}" = "1" ]; then
+  check "Publicly-trusted TLS cert (provisioning gate)" _trusted_tls_cert_active || true
+else
+  check_warn "Publicly-trusted TLS cert" _trusted_tls_cert_active
+fi
 
 # WARP-235: the MQTT password file is retired — the broker mounts its TLS
 # bundle (issued by the WARP-236 internal CA) and the per-CN topic ACL file.

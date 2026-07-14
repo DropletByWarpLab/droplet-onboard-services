@@ -97,6 +97,11 @@ services:
       # proxy_ssl_* client-cert block against the orchestrator/ai-gateway
       # mTLS listeners. Same selector pattern as the FIPS cipher profile.
       - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+      # Warning-free droplet.local: render-canonical-host.sh only turns the
+      # friendly-name → FQDN redirect ON when this box owns the LAN's
+      # DHCP/DNS (the split-horizon FQDN is unresolvable otherwise). Written
+      # 1 by scripts/lib/single-box.sh, absent/0 on every other shape.
+      - DROPLET_LAN_DNS_AUTHORITY=${DROPLET_LAN_DNS_AUTHORITY:-0}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)

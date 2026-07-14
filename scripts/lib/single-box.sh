@@ -772,6 +772,12 @@ EOF
   upsert_env OPENWRT_PORT        8181
   upsert_env OPENWRT_USERNAME    root
   upsert_env ROUTING_MODE        real
+  # Warning-free droplet.local: on the single-box shape this box IS the
+  # router — its dnsmasq answers the split-horizon FQDN for every DHCP
+  # client, so the gateway may 307 droplet.local → the trusted FQDN. On any
+  # other shape the FQDN is client-unresolvable and the knob stays 0 (compose
+  # default), keeping today's behavior. EXPLICIT, never derived.
+  upsert_env DROPLET_LAN_DNS_AUTHORITY 1
   # WARP-815 (K4): the routing service resolves the Wi-Fi scan radio from
   # DROPLET_WIFI_SCAN_DEVICE (the orchestrator no longer hardcodes wlan0 on the
   # wire). The single-box AP radio is phy0 → wlp14s0 inside the openwrt

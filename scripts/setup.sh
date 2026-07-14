@@ -620,22 +620,26 @@ main() {
   printf "\n"
   printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
   printf "\n"
-  printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
-  printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
-  printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
-  # ADR-023: surface the publicly-trusted per-device FQDN as the PRIMARY URL
-  # when it's known — the one address that works at home AND over the VPN with
-  # a green padlock and no per-client install. Read straight from .env; empty
-  # until the box has learned it from HQ on its first issuance run.
+  # ADR-023 / WARP-1300: surface the publicly-trusted per-device FQDN as the
+  # PRIMARY dashboard URL when it's known — the one address that works at
+  # home AND over the VPN with a green padlock and no per-client install.
+  # Read straight from .env; empty until the box has learned it from HQ on
+  # its first issuance run. Once known, droplet.local itself redirects here
+  # too (the single-box shape writes DROPLET_LAN_DNS_AUTHORITY=1, so the
+  # gateway 307s droplet.local/droplet-ai.local/droplet.lan/droplet-ai.lan
+  # to this FQDN — WARP-1300).
   _public_fqdn=""
   if [ -f "$REPO_ROOT/.env" ]; then
     _public_fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
   fi
   if [ -n "$_public_fqdn" ]; then
-    printf "\n"
-    printf "  ${_BOLD}Your one address, everywhere:${_RESET} ${_CYAN}https://%s${_RESET}\n" "$_public_fqdn"
-    printf "  Works at home AND over the VPN, with a trusted padlock — nothing to install.\n"
+    printf "  Dashboard:     ${_CYAN}https://%s${_RESET} (trusted — green padlock, works on LAN and over VPN)\n" "$_public_fqdn"
+    printf "  Shortcut:      type ${_CYAN}droplet.local${_RESET} in any browser on this network — it lands there\n"
+  else
+    printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
+    printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
   fi
+  printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
   printf "\n"
   printf "  ${_BOLD}About the browser padlock${_RESET}\n"
   printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"

@@ -61,6 +61,16 @@ reload_gateway_nginx() {
     return 0
   fi
 
+  # Warning-free droplet.local: re-render the canonical-host include from the
+  # freshly-written cert BEFORE reloading, so one reload picks up both the new
+  # cert and the matching redirect posture. Best-effort: a render failure
+  # (e.g. an older gateway image without the script) must never block serving
+  # the new cert — the entrypoint re-renders on the next container start.
+  if ! docker compose -f "$compose_file" exec -T gateway \
+       /usr/local/bin/render-canonical-host.sh >/dev/null 2>&1; then
+    log_warn "reload_gateway_nginx: canonical-host render failed — redirect posture unchanged (cert reload continues)"
+  fi
+
   if docker compose -f "$compose_file" exec -T gateway nginx -s reload 2>/dev/null; then
     log_info "reload_gateway_nginx: hot-reloaded gateway nginx with the new cert"
     return 0

@@ -93,6 +93,7 @@ import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
+import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -196,6 +197,10 @@ export function createApp(
   // only understands Bearer/cookie); anything that isn't a session-less
   // Basic request falls through to the protected session-path handler.
   app.use("/api", createDeviceSelfRevokeRouter(prisma));
+
+  // Warning-free droplet.local: the gateway's plain-HTTP status page polls
+  // this before any session exists — public, read-only, secret-free.
+  app.use("/api", createTlsStatusPublicRouter(prisma));
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
