@@ -36,6 +36,10 @@ write_off() {
 # trusted cert is installed (or this box doesn't own the LAN's DNS), so the
 # friendly names serve the plain-HTTP status page — NEVER a forced HTTPS
 # upgrade into the self-signed interstitial, and NEVER app content over HTTP.
+# The request host is only a lookup KEY against fixed literal hostnames;
+# the map's values are hardcoded literals — this IS the allowlist
+# remediation the rule recommends.
+# nosemgrep: generic.nginx.security.request-host-used.request-host-used
 map $host $canonical_target {
     default "";
 }
@@ -45,7 +49,14 @@ server {
     root /usr/share/nginx/tls-status;
     location = /api/tls/status {
         set $upstream_orchestrator "orchestrator:3000";
+        # The variable is the literal set one line up — no request data can
+        # reach it (same annotated pattern as the first-party legs in
+        # nginx.conf).
+        # nosemgrep: generic.nginx.security.dynamic-proxy-host.dynamic-proxy-host
         proxy_pass http://$upstream_orchestrator/api/tls/status;
+        # First-party Host passthrough to the orchestrator, identical to
+        # every gateway leg in nginx.conf.
+        # nosemgrep: generic.nginx.security.request-host-used.request-host-used
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
@@ -55,6 +66,9 @@ server {
 }
 server {
     listen 80 default_server;
+    # Host-preserving HTTPS upgrade — the redirect target is the host the
+    # client itself sent (pre-existing gateway behavior, moved from nginx.conf).
+    # nosemgrep: generic.nginx.security.request-host-used.request-host-used
     return 301 https://$host$request_uri;
 }
 EOF
@@ -89,6 +103,8 @@ esac
 
 {
   printf '# RENDERED by render-canonical-host.sh — DO NOT EDIT (redirect: ON -> https://%s)\n' "$target"
+  # The request host is only a lookup KEY against the fixed friendly-name literals.
+  # nosemgrep: generic.nginx.security.request-host-used.request-host-used
   printf 'map $host $canonical_target {\n'
   printf '    default            "";\n'
   for name in $FRIENDLY_NAMES; do
@@ -102,6 +118,8 @@ esac
   printf '        return 307 $canonical_target$request_uri;\n'
   printf '    }\n'
   printf '    # Non-friendly hosts (the FQDN itself, IPs): plain HTTPS upgrade.\n'
+  # Host-preserving upgrade — target host is the one the client sent.
+  # nosemgrep: generic.nginx.security.request-host-used.request-host-used
   printf '    return 301 https://$host$request_uri;\n'
   printf '}\n'
 } > "$OUT.tmp"
