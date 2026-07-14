@@ -111,11 +111,25 @@ function createPrismaMock() {
   const inviteDepartmentRows: any[] = [];
   let userCounter = 0;
   let counter = 0;
+  // WARP-490 test scaffolding: an armable one-shot barrier that holds the
+  // first N invite-by-token reads until all N have arrived, then releases
+  // them together. Lets a Promise.all() accept test deterministically put
+  // BOTH requests past the isUsed() snapshot check (acceptedAt still null)
+  // before either runs the compare-and-swap claim — the exact interleaving
+  // the CAS defends against. Without it the two supertest requests
+  // serialize and the second 410s on the isUsed() fast-path, never
+  // exercising (or testing) the claim itself.
+  let inviteReadGate:
+    | { need: number; seen: number; resolvers: Array<() => void> }
+    | null = null;
   return {
     rows,
     userRows,
     departmentRows,
     inviteDepartmentRows,
+    armInviteReadRace(need: number) {
+      inviteReadGate = { need, seen: 0, resolvers: [] };
+    },
     user: {
       upsert: vi.fn(async ({ where, create, update }: any) => {
         const idx = userRows.findIndex((u) => {
@@ -205,9 +219,25 @@ function createPrismaMock() {
         return row;
       }),
       findUnique: vi.fn(async ({ where }: any) => {
-        if (where?.token) return rows.find((r) => r.token === where.token) ?? null;
-        if (where?.id) return rows.find((r) => r.id === where.id) ?? null;
-        return null;
+        const row = where?.token
+          ? rows.find((r) => r.token === where.token) ?? null
+          : where?.id
+            ? rows.find((r) => r.id === where.id) ?? null
+            : null;
+        // Hold token reads at the armed barrier so racing accepts both
+        // observe the pre-claim (acceptedAt: null) snapshot together.
+        if (inviteReadGate && where?.token) {
+          await new Promise<void>((resolve) => {
+            const gate = inviteReadGate!;
+            gate.resolvers.push(resolve);
+            gate.seen += 1;
+            if (gate.seen >= gate.need) {
+              inviteReadGate = null; // one-shot; later reads pass straight through
+              gate.resolvers.forEach((r) => r());
+            }
+          });
+        }
+        return row;
       }),
       findMany: vi.fn(async ({ orderBy }: any = {}) => {
         const out = [...rows];
@@ -225,6 +255,25 @@ function createPrismaMock() {
         }
         rows[idx] = { ...rows[idx], ...data };
         return rows[idx];
+      }),
+      // WARP-490: compare-and-swap claim used by the accept handler
+      // (`updateMany({ where: { id, acceptedAt: null }, data: { acceptedAt } })`).
+      // The body is fully synchronous (no internal await), so two racing
+      // claims serialize in the event loop: whichever reaches it first
+      // flips acceptedAt (count 1); the second is filtered by the
+      // `acceptedAt: null` guard and returns count 0 — exactly the DB-
+      // level atomicity the real Prisma updateMany provides.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        let count = 0;
+        for (let i = 0; i < rows.length; i += 1) {
+          const r = rows[i];
+          if (where?.id !== undefined && r.id !== where.id) continue;
+          if (where?.token !== undefined && r.token !== where.token) continue;
+          if (where?.acceptedAt === null && r.acceptedAt !== null) continue;
+          rows[i] = { ...r, ...data };
+          count += 1;
+        }
+        return { count };
       }),
     },
     // WARP-1265: mock for userInviteDepartment queries (invite create + accept)
@@ -700,6 +749,45 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
       .send({ password: "Accept-secret123" });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/already exists/i);
+  });
+
+  it("concurrent accepts of the same token resolve to exactly one 200 + one 410 (WARP-490 CAS)", async () => {
+    // Two near-simultaneous POSTs race the single-use window. Pre-490 both
+    // cleared isUsed() before either write landed, so both could reach
+    // ncCreateUser (double-provision risk). The compare-and-swap on
+    // acceptedAt makes the claim atomic: exactly one caller wins (200 +
+    // one NC user created), the other 410s WITHOUT calling Nextcloud.
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const create = await request(app)
+      .post("/api/auth/invites")
+      .send({ email: "alice@warp.test", displayName: "Alice", role: "user" });
+    const token = create.body.token;
+
+    const publicApp = buildApp(prisma, null);
+    // Hold both requests at the invite read until they've BOTH observed the
+    // pending (acceptedAt: null) invite, so they genuinely race the claim
+    // rather than serializing through the isUsed() fast-path.
+    prisma.armInviteReadRace(2);
+    const [a, b] = await Promise.all([
+      request(publicApp)
+        .post(`/api/auth/invites/accept/${token}`)
+        .send({ password: "Accept-secret123" }),
+      request(publicApp)
+        .post(`/api/auth/invites/accept/${token}`)
+        .send({ password: "Accept-secret123" }),
+    ]);
+
+    // Exactly one winner, one loser — order is non-deterministic.
+    expect([a.status, b.status].sort()).toEqual([200, 410]);
+    const loser = a.status === 410 ? a : b;
+    expect(loser.body.code).toBe("USED");
+
+    // The loser never touched Nextcloud: exactly one NC user provisioned
+    // across both requests, and the invite is marked accepted exactly once.
+    expect(nc.ncCreateUser).toHaveBeenCalledTimes(1);
+    expect(prisma.rows).toHaveLength(1);
+    expect(prisma.rows[0].acceptedAt).not.toBeNull();
   });
 });
 

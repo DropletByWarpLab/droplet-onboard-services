@@ -176,6 +176,18 @@ describe("authMiddleware — service-principal bearer", () => {
   it("falls through to JWT when no service token matches", async () => {
     // JWT verifier returns a payload → middleware calls next() with the
     // JWT-derived user, not the service principal.
+    //
+    // WARP-490: this payload carries NO `sid`, so it takes the sid-less
+    // grace path. That branch USED to set req.user + call next()
+    // synchronously; it now runs INSIDE the middleware's async IIFE,
+    // behind an `await isUserDenied(sub)` denylist check (which itself
+    // awaits cacheGet). So next() is no longer called on the same tick —
+    // a single `await Promise.resolve()` flush observes the request before
+    // the grace path has resumed. Await the async settle via vi.waitFor so
+    // this still asserts the real contract (next() called once with the
+    // JWT-derived user) under the new execution order, rather than racing
+    // the microtask queue. isUserDenied fails open here (cacheGet mock →
+    // null → not denied), so the grace path proceeds exactly as before.
     verifyAccessToken.mockReturnValueOnce({
       sub: "alice",
       username: "alice",
@@ -189,10 +201,13 @@ describe("authMiddleware — service-principal bearer", () => {
     const next = vi.fn() as unknown as NextFunction;
 
     authMiddleware(req, res, next);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(next).toHaveBeenCalledTimes(1));
 
-    expect(next).toHaveBeenCalledTimes(1);
+    // The verifier ran exactly once (the JWT path, not the OCS fallback),
+    // and the grace path populated req.user from the JWT claims — not the
+    // service principal — with no 401 written.
     expect(verifyAccessToken).toHaveBeenCalledTimes(1);
+    expect((res as unknown as { statusCode: number }).statusCode).toBe(0);
     const user = (req as unknown as FakeReq).user as { id: string; role: string };
     expect(user.id).toBe("alice");
     expect(user.role).toBe("owner");

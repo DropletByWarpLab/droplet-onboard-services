@@ -263,6 +263,25 @@ function createPrismaMock(seed: UserRow[] = []) {
       invites[idx] = { ...invites[idx], ...data };
       return invites[idx];
     }),
+    // WARP-490: compare-and-swap single-use claim the accept handler runs
+    // BEFORE ncCreateUser (`updateMany({ where: { id, acceptedAt: null },
+    // data: { acceptedAt } })`). The seeded invite here is fresh
+    // (acceptedAt === null), so the claim wins (count 1) and the endpoint
+    // proceeds to mint the local UUID + 200. Mirrors the real Prisma
+    // updateMany atomicity: the `acceptedAt: null` guard filters an
+    // already-accepted row down to count 0 (the handler's 410 USED branch).
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      let count = 0;
+      for (let i = 0; i < invites.length; i += 1) {
+        const r = invites[i];
+        if (where?.id !== undefined && r.id !== where.id) continue;
+        if (where?.token !== undefined && r.token !== where.token) continue;
+        if (where?.acceptedAt === null && r.acceptedAt !== null) continue;
+        invites[i] = { ...r, ...data };
+        count += 1;
+      }
+      return { count };
+    }),
   };
   self._users = users;
   self._invites = invites;

@@ -30,6 +30,8 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { revokeAllSessions } from "../services/session.service.js";
+import { denylistUser } from "../services/auth-denylist.service.js";
+import { ACCESS_TOKEN_TTL_SECONDS } from "../services/jwt.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -672,6 +674,22 @@ export function createPeopleRouter(
             code: "LAST_OWNER_INVARIANT",
           });
         }
+
+        // WARP-490 — a deletion is a hard revocation, so kill the removed
+        // user's live credentials immediately rather than letting an
+        // already-issued access token ride out its ≤15-min TTL:
+        //   • revokeAllSessions deletes their session RECORDS (sid-carrying
+        //     access tokens 401 at the next request) and sweeps the WARP-116
+        //     refresh denylist — the same call the role/scope handlers make;
+        //     DELETE was the one mutation that had been missing it.
+        //   • denylistUser writes auth:denylist:user:<id> for the access-
+        //     token max-age so the middleware also rejects sid-LESS grace-
+        //     path tokens (which skip the session check) within that window;
+        //     the entry self-expires once no such token can still be valid.
+        // Both are best-effort (Redis errors are swallowed) — the row is
+        // already gone, so /auth/refresh fails closed regardless.
+        await revokeAllSessions(existing.id);
+        await denylistUser(existing.id, ACCESS_TOKEN_TTL_SECONDS);
 
         await recordActivity({
           kind: "auth",
