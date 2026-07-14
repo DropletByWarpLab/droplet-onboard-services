@@ -17,7 +17,7 @@ python-multipart==0.0.10  # FastAPI form-upload support (mic-test endpoint accep
 # `pip install -r requirements.txt` from a dev box still works.
 onnxruntime==1.20.1       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
 scipy==1.14.1             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
-huggingface_hub==0.27.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
+huggingface_hub==1.23.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
 tqdm==4.66.5              # Progress bar during model download
 pyyaml==6.0.2             # openWakeWord parses model config from YAML
 requests==2.32.3          # huggingface_hub's HTTP layer
