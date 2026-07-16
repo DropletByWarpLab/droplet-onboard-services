@@ -9,6 +9,7 @@ testable with synthetic signals.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from voice import audio_io
 from voice.audio_io import detect_tone
@@ -82,8 +83,12 @@ class _EchoFakeSd:
     class PortAudioError(Exception):
         pass
 
-    def __init__(self, reject_rates=(), default_out_rate=48000.0):
+    def __init__(self, reject_rates=(), default_out_rate=48000.0,
+                 reject_input_rates=()):
         self.reject_rates = set(reject_rates)
+        # Input-only rejections, ON TOP of the pair-wide reject_rates —
+        # models a 16 kHz-only mic next to a 48 kHz-only sink (WARP-1060).
+        self.reject_input_rates = set(reject_input_rates)
         self.default_out_rate = default_out_rate
         self.playrec_calls: list[dict] = []
 
@@ -100,6 +105,10 @@ class _EchoFakeSd:
     def check_input_settings(self, device=None, samplerate=None,
                              channels=None, dtype=None):
         self._check(samplerate)
+        if samplerate in self.reject_input_rates:
+            raise self.PortAudioError(
+                f"Invalid sample rate [PaErrorCode -9997]: {samplerate}",
+            )
 
     def query_devices(self, device=None):
         return {"default_samplerate": self.default_out_rate}
@@ -144,4 +153,38 @@ def test_echo_check_keeps_requested_rate_when_supported(monkeypatch):
     call = fake.playrec_calls[0]
     assert call["samplerate"] == 16000
     assert call["samples"] == 16000
+    assert result["heard"] is True
+
+
+# ── input side re-validated at the fallback rate (WARP-1060, R3) ────
+#
+# The fallback rate comes from the OUTPUT device's default; a 16 kHz-
+# only input next to a 48 kHz-only output has no shared full-duplex
+# rate. That must surface as AudioUnavailable (→ an honest 503 with an
+# explanation) rather than reaching playrec and failing with a bare
+# PortAudioError.
+
+def test_echo_check_raises_when_input_rejects_fallback_rate(monkeypatch):
+    fake = _EchoFakeSd(
+        reject_rates={16000},          # pair rejects the requested 16 kHz…
+        reject_input_rates={48000},    # …and the mic also rejects the 48 kHz fallback
+    )
+    monkeypatch.setattr(audio_io, "_sd", fake)
+    with pytest.raises(audio_io.AudioUnavailable, match="no supported sample rate"):
+        audio_io.echo_check(
+            duration_s=1.0, samplerate=16000, input_device=1, output_device=2,
+        )
+    # Never reached the hardware with a rate the pair can't do.
+    assert fake.playrec_calls == []
+
+
+def test_echo_check_fallback_still_works_when_input_accepts_it(monkeypatch):
+    # Output-driven fallback + an input that accepts it — unchanged
+    # behaviour from the F4 fix, now with the input explicitly probed.
+    fake = _EchoFakeSd(reject_rates={16000}, reject_input_rates={44100})
+    monkeypatch.setattr(audio_io, "_sd", fake)
+    result = audio_io.echo_check(
+        duration_s=1.0, samplerate=16000, input_device=1, output_device=2,
+    )
+    assert fake.playrec_calls[0]["samplerate"] == 48000
     assert result["heard"] is True

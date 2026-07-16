@@ -333,6 +333,63 @@ def test_concurrent_capture_answers_409(client, monkeypatch):
     assert resp3.status_code == 200
 
 
+# ── /audio/test-record joins the capture lock (WARP-1060) ───────────
+#
+# The ops/debug endpoint opens the same capture device as the wizard's
+# measure/echo-check, so it takes the same _capture_lock (409 when a
+# wizard capture is mid-flight) and maps PortAudioError to the same
+# retryable 503 instead of a raw 500.
+
+def test_test_record_answers_409_while_capture_lock_held(client, monkeypatch):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    monkeypatch.setattr(
+        main,
+        "measure_input_level",
+        lambda **kw: {"rms_dbfs": -50.0, "peak_dbfs": -30.0, "samples": 1},
+    )
+    assert main._capture_lock.acquire(blocking=False)
+    try:
+        resp = client.post("/audio/test-record")
+        assert resp.status_code == 409
+    finally:
+        main._capture_lock.release()
+    resp2 = client.post("/audio/test-record")
+    assert resp2.status_code == 200
+
+
+def test_test_record_holds_the_lock_against_a_measure(client, monkeypatch):
+    # Symmetric direction: while test-record is capturing, a wizard
+    # measure must see busy — proven by asserting the lock is held
+    # inside the mocked capture.
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+
+    def capture_asserting_lock_held(**kw):
+        assert not main._capture_lock.acquire(blocking=False)
+        return {"rms_dbfs": -50.0, "peak_dbfs": -30.0, "samples": 1}
+
+    monkeypatch.setattr(main, "measure_input_level", capture_asserting_lock_held)
+    resp = client.post("/audio/test-record")
+    assert resp.status_code == 200
+    # And the lock is released afterwards.
+    assert main._capture_lock.acquire(blocking=False)
+    main._capture_lock.release()
+
+
+def test_test_record_maps_portaudio_error_to_503(client, monkeypatch):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+
+    def boom(**kw):
+        raise main._PortAudioError("Device unavailable [PaErrorCode -9985]")
+
+    monkeypatch.setattr(main, "measure_input_level", boom)
+    resp = client.post("/audio/test-record")
+    assert resp.status_code == 503
+    assert "try again" in resp.json()["detail"].lower()
+    # The lock must not leak on the error path.
+    assert main._capture_lock.acquire(blocking=False)
+    main._capture_lock.release()
+
+
 # ── GET/POST /voice/calibration ─────────────────────────────────────
 
 def test_get_calibration_uncalibrated(client, cal_path):
