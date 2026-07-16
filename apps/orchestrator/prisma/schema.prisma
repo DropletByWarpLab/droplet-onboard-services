@@ -925,6 +925,10 @@ model FileContentChunk {
   // WARP-286: generated tsvector column for lexical (BM25-style) search.
   // Read-only from the app side; computed by Postgres on insert/update.
   // Declared as Unsupported() because Prisma has no first-class tsvector type.
+  // WARP-242: the generated expression NULLs the tsvector when
+  // sensitivity=sensitive — a tsvector over dcv1 ciphertext would index
+  // base64 garbage, and a plaintext-derived one would leak a stemmed
+  // positional bag-of-words into every pg_dump, gutting crypto-shred.
   text_tsv    Unsupported("tsvector")?
   /// WARP-233 @encrypted(aes-256-gcm, dek=brain:<brainItemId>) when
   /// sensitivity=sensitive: `text` holds a dcv1: blob; excluded from the
@@ -990,13 +994,25 @@ enum ChunkSensitivity {
 /// DEK — a whole-column logical key has no per-user crypto-shred story, so it
 /// is HKDF-derived instead (column-crypto.service.ts deriveEmailColumnKey).
 /// `wrappedDek` = base64(iv‖ct‖tag) of the raw 32-byte DEK sealed under the
-/// device doc-KEK (HKDF of DEVICE_SECRET_KEY) with AAD = keyId.
-/// Crypto-shred = DELETE the row: every ciphertext under that DEK is
-/// permanently unreadable. TPM-sealing the KEK is WARP-1033.
+/// device doc-KEK with AAD = keyId.
+///
+/// WARP-242 — keyed by (keyId, version) per the rotation design: a scheduled
+/// rotation mints version N+1 and re-encrypts the document's chunks in the
+/// background before deleting version N (rotation itself is a follow-up
+/// slice; today every row is version 1 and readers take the latest version).
+/// The doc-KEK is HKDF of the dedicated keyfile data/secrets/doc-kek.key —
+/// NOT DEVICE_SECRET_KEY, which travels inside every restic snapshot via .env
+/// and would make snapshots self-decrypting. The keyfile is excluded from the
+/// backup set (droplet-backup.sh), so crypto-shred — DELETE all versions for
+/// a keyId — holds even against restored backups: snapshots carry ciphertext
+/// chunks + wrapped DEKs but no KEK. TPM-sealing the KEK is WARP-1033.
 model DocumentEncryptionKey {
-  keyId      String   @id
+  keyId      String
+  version    Int      @default(1)
   wrappedDek String
   createdAt  DateTime @default(now())
+
+  @@id([keyId, version])
 }
 
 // ── WARP-203: Per-user brain memory ──

@@ -368,6 +368,14 @@ services:
       # would let this container mint arbitrary service identities.
       # (Single-file bind: setup.sh materializes audit.key before compose up.)
       - ../data/secrets/audit.key:/data/secrets/audit.key:ro
+      # WARP-242: doc-KEK master keyfile — wraps the per-document DEKs that
+      # encrypt brain chunks (decrypt-on-read lives in file-search.service /
+      # the chat attachment-context builder). Deliberately a keyfile and NOT
+      # an .env value: .env travels inside restic snapshots, the keyfile is
+      # excluded from the backup set (droplet-backup.sh) so crypto-shredding
+      # a DEK holds against restored backups. Single-file bind, same
+      # rationale as audit.key above. TPM-sealing is WARP-1033.
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
       # WARP-235/236: this service's own TLS bundle (cert+key+CA, CN =
       # "orchestrator") from the internal CA. The MQTT clients present it on
       # mqtts:// brokers; the DROPLET_TLS_* defaults point here.
@@ -525,6 +533,10 @@ services:
     volumes:
       # WARP-234/236: internal-TLS bundle — redis-tls.ts reads ca.pem.
       - ../data/secrets/service-tls/mcp-server:/data/service-tls:ro
+      # WARP-242: doc-KEK master keyfile — the standalone mcp-server
+      # decrypts encrypted brain chunks in its search_content results
+      # (see the orchestrator service's mount comment for the full story).
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
     restart: unless-stopped
     <<: *default-logging
     env_file:
@@ -976,6 +988,10 @@ services:
       # WARP-235: this service's own TLS bundle (CN = "file-indexer") for the
       # mqtts:// broker connection — identity is the cert CN, no password.
       - ../data/secrets/service-tls/file-indexer:/data/service-tls:ro
+      # WARP-242: doc-KEK master keyfile — the indexer mints each brain
+      # item's DEK at first chunk-write and encrypts chunk text before it
+      # lands in pgvector (see the orchestrator service's mount comment).
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
     env_file:
       - path: ../.env
         required: false

@@ -671,3 +671,139 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
     expect(out.map((h) => h.path).sort()).toEqual(["a", "b"]);
   });
 });
+
+// ── WARP-242: decrypt-on-read + crypto-shred ──
+//
+// End-to-end at the unit level: chunks encrypted under a real per-document
+// DEK (minted through document-key.service against an in-memory
+// DocumentEncryptionKey table) must decrypt on read; once the DEK is
+// crypto-shredded the SAME ciphertext must become unreadable and the hit
+// must be DROPPED — never surfaced as base64 garbage.
+import { searchByVector, decryptChunkRows, CHUNK_SNIPPET_CHARS } from "./file-search.service.js";
+import { encryptColumn, __setColumnCryptoKeyForTest } from "./column-crypto.service.js";
+import { getOrCreateDek, shredDocumentKey } from "./document-key.service.js";
+
+describe("WARP-242 decrypt-on-read + crypto-shred", () => {
+  __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
+
+  type DekRow = { keyId: string; version: number; wrappedDek: string };
+
+  /** Mock prisma: $queryRawUnsafe serves the chunk rows; the
+   *  documentEncryptionKey table is a live in-memory store so the real
+   *  mint/unwrap/shred code paths run. */
+  function mockPrisma(chunkRows: unknown[]) {
+    const deks: DekRow[] = [];
+    return {
+      $queryRawUnsafe: vi.fn(async () => chunkRows),
+      documentEncryptionKey: {
+        findFirst: async ({ where: { keyId } }: any) =>
+          deks.filter((r) => r.keyId === keyId).sort((a, b) => b.version - a.version)[0] ??
+          null,
+        create: async ({ data }: any) => {
+          deks.push(data);
+          return data;
+        },
+        findMany: async ({ where: { keyId } }: any) =>
+          deks.filter((r) => (keyId.in as string[]).includes(r.keyId)),
+        deleteMany: async ({ where: { keyId } }: any) => {
+          const ids: string[] = typeof keyId === "string" ? [keyId] : keyId.in;
+          for (let i = deks.length - 1; i >= 0; i--) {
+            if (ids.includes(deks[i]!.keyId)) deks.splice(i, 1);
+          }
+        },
+      },
+    } as never;
+  }
+
+  function encRow(itemId: string, blob: string) {
+    return {
+      source: "brain",
+      path: `/brain/${itemId}`,
+      chunkIdx: 0,
+      pageNumber: null,
+      brainItemId: itemId,
+      metadata: null,
+      snippet: blob,
+      score: 0.9,
+    };
+  }
+
+  it("decrypts encrypted brain hits and re-truncates to the snippet width", async () => {
+    const prisma = mockPrisma([]);
+    const dek = await getOrCreateDek(prisma as never, "brain:item1");
+    const longText = "secret attachment body ".repeat(30); // > snippet width
+    const blob = encryptColumn(dek, longText, "brain:item1");
+    (prisma as unknown as { $queryRawUnsafe: ReturnType<typeof vi.fn> }).$queryRawUnsafe =
+      vi.fn(async () => [encRow("item1", blob)]);
+
+    const hits = await searchByVector(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      limit: 10,
+      minSimilarity: 0,
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.snippet.startsWith("secret attachment body")).toBe(true);
+    expect(hits[0]!.snippet.length).toBeLessThanOrEqual(CHUNK_SNIPPET_CHARS);
+    expect(hits[0]!.snippet).not.toContain("dcv1:");
+  });
+
+  it("CRYPTO-SHRED: after the DEK is deleted, the ciphertext hit is dropped (unreadable)", async () => {
+    const prisma = mockPrisma([]);
+    const dek = await getOrCreateDek(prisma as never, "brain:item1");
+    const blob = encryptColumn(dek, "right-to-delete payload", "brain:item1");
+    (prisma as unknown as { $queryRawUnsafe: ReturnType<typeof vi.fn> }).$queryRawUnsafe =
+      vi.fn(async () => [encRow("item1", blob)]);
+
+    // Readable before the shred…
+    let hits = await searchByVector(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      limit: 10,
+      minSimilarity: 0,
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.snippet).toBe("right-to-delete payload");
+
+    // …unreadable after: same ciphertext rows, DEK gone.
+    await shredDocumentKey(prisma as never, "brain:item1");
+    hits = await searchByVector(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      limit: 10,
+      minSimilarity: 0,
+    });
+    expect(hits).toHaveLength(0);
+  });
+
+  it("plaintext rows pass through without touching the DEK table", async () => {
+    const prisma = {
+      $queryRawUnsafe: vi.fn(async () => [
+        { ...encRow("x", "plain snippet"), brainItemId: null, source: "nextcloud" },
+      ]),
+      // No documentEncryptionKey table at all — must not be needed.
+    } as never;
+    const hits = await searchByVector(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      limit: 10,
+      minSimilarity: 0,
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.snippet).toBe("plain snippet");
+  });
+
+  it("decryptChunkRows decrypts full text and drops rows whose DEK is missing", async () => {
+    const prisma = mockPrisma([]);
+    const dek = await getOrCreateDek(prisma as never, "brain:keep");
+    const keepBlob = encryptColumn(dek, "full readable body", "brain:keep");
+    const strayBlob = encryptColumn(dek, "shredded body", "brain:gone"); // no DEK row for brain:gone
+
+    const rows = await decryptChunkRows(prisma as never, [
+      { text: keepBlob, brainItemId: "keep", path: "/a" },
+      { text: strayBlob, brainItemId: "gone", path: "/b" },
+      { text: "already plaintext", brainItemId: null, path: "/c" },
+    ]);
+    expect(rows.map((r) => r.text)).toEqual(["full readable body", "already plaintext"]);
+  });
+});

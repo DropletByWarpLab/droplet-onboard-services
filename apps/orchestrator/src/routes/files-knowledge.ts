@@ -42,6 +42,7 @@ import { PrismaClient, type Prisma, type FileContentChunk } from "@prisma/client
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
+import { decryptChunkRows } from "../services/file-search.service.js";
 
 const logger = createLogger("files-knowledge-route");
 
@@ -294,7 +295,10 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
         }
       }
 
-      const items = rows.map(serializeChunk);
+      // WARP-242: brain rows hold dcv1 ciphertext at rest — decrypt before
+      // snippetting (unreadable rows are dropped by the shared helper).
+      const readable = await decryptChunkRows(prisma, rows);
+      const items = readable.map(serializeChunk);
       // Cursor for the next page — caller passes the last item's `indexedAt`
       // back as `?before=`. We expose it as `nextBefore` so clients don't
       // have to reach into the array.

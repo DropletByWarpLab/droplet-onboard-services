@@ -134,6 +134,17 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
+  // WARP-242: path to the doc-KEK master keyfile (raw 32 bytes, mode 0600,
+  // minted by scripts/setup.sh as data/secrets/doc-kek.key and single-file
+  // bind-mounted read-only). Deliberately a FILE and never an .env value:
+  // .env ships inside every restic snapshot, so a KEK carried there would
+  // make snapshots self-decrypting and per-document crypto-shred would not
+  // survive backups. The file is excluded from the backup set
+  // (droplet-backup.sh); TPM-sealing it is WARP-1033. Read lazily by
+  // column-crypto.service.ts at first encrypt/decrypt — fails closed with a
+  // pointer to setup.sh when missing.
+  DOC_KEK_PATH: z.string().default("/data/secrets/doc-kek.key"),
+
   // --- Matter (host-network sidecar client, WARP-850) ---
   //
   // DO NOT ADD NEW `MATTER_*` ENV VARS — ANYWHERE IN THE STACK.
