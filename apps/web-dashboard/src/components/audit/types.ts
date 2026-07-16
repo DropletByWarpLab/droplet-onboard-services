@@ -18,6 +18,7 @@ export const ACTIVITY_KINDS = [
   "auth",
   "tool_run",
   "system",
+  "voice",
 ] as const;
 
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
@@ -36,6 +37,7 @@ export const KIND_LABELS: Record<ActivityKind, string> = {
   auth: "Sign-in & accounts",
   tool_run: "Tool run",
   system: "System",
+  voice: "Voice",
 };
 
 /** WARP-181: who performed the action (null on pre-upgrade v1 rows). */

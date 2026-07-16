@@ -17,11 +17,14 @@ import { Mic, RefreshCw } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
 import { useVoiceSurfaceData } from "@/lib/hooks/useVoice";
+import { useVoiceActivity } from "@/lib/hooks/useVoiceActivity";
 
 const PAGE_SUB = "Microphone, wake word, and who Droplet recognizes.";
 
 export default function VoicePage() {
   const data = useVoiceSurfaceData();
+  // WARP-1058 — §3.4 feed (signed kind=voice rows; its own cadence).
+  const voiceActivity = useVoiceActivity();
 
   if (data.offline) {
     return (
@@ -59,6 +62,7 @@ export default function VoicePage() {
         unavailable={data.unavailable}
         loading={data.loading}
         noiseSustained={data.noiseSustained}
+        activity={voiceActivity.rows}
         onRefresh={data.refresh}
         onCalibrationApplied={data.onCalibrationApplied}
       />

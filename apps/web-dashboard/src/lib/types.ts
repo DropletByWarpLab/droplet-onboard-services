@@ -623,6 +623,24 @@ export interface VoiceCalibrationInfo {
   flags?: string[];
 }
 
+/**
+ * WARP-1058 — one row of the /voice "Recent voice activity" feed
+ * (§3.4). Sourced from `GET /api/activity?kind=voice&limit=5`; `what`
+ * is the §3.4 outcome copy ("Answered" / "Missed wake word" / …) the
+ * orchestrator wrote into the signed row, and `person` is the wake
+ * rows' attribution ("Guest" until voice enrollment lands) — absent on
+ * self-heal rows (§6.3: DSP wedge/recovery, processor restarts,
+ * calibration applies).
+ */
+export interface VoiceActivityItem {
+  id: string;
+  /** Epoch seconds (converted from the API's ISO timestamp). */
+  atS: number;
+  what: string;
+  severity: "ok" | "warn" | "err" | "info";
+  person: string | null;
+}
+
 /** Payload of the wizard's single write (`POST /api/voice/calibration`). */
 export interface VoiceCalibrationApply {
   input_gain?: number;
