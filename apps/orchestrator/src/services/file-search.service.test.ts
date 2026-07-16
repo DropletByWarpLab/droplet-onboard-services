@@ -688,12 +688,16 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
 
   type DekRow = { keyId: string; version: number; wrappedDek: string };
 
-  /** Mock prisma: $queryRawUnsafe serves the chunk rows; the
-   *  documentEncryptionKey table is a live in-memory store so the real
-   *  mint/unwrap/shred code paths run. */
-  function mockPrisma(chunkRows: unknown[]) {
+  /** Mock prisma: $queryRawUnsafe serves whatever is in the mutable
+   *  `chunkRows` array (push rows after minting DEKs — no mock
+   *  reassignment, which CI's tsc rejects); the documentEncryptionKey
+   *  table is a live in-memory store so the real mint/unwrap/shred code
+   *  paths run. */
+  function mockPrisma() {
     const deks: DekRow[] = [];
+    const chunkRows: unknown[] = [];
     return {
+      __chunkRows: chunkRows,
       $queryRawUnsafe: vi.fn(async () => chunkRows),
       documentEncryptionKey: {
         findFirst: async ({ where: { keyId } }: any) =>
@@ -712,7 +716,7 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
           }
         },
       },
-    } as never;
+    } as unknown as import("@prisma/client").PrismaClient & { __chunkRows: unknown[] };
   }
 
   function encRow(itemId: string, blob: string) {
@@ -729,12 +733,11 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
   }
 
   it("decrypts encrypted brain hits and re-truncates to the snippet width", async () => {
-    const prisma = mockPrisma([]);
-    const dek = await getOrCreateDek(prisma as never, "brain:item1");
+    const prisma = mockPrisma();
+    const dek = await getOrCreateDek(prisma, "brain:item1");
     const longText = "secret attachment body ".repeat(30); // > snippet width
     const blob = encryptColumn(dek, longText, "brain:item1");
-    (prisma as unknown as { $queryRawUnsafe: ReturnType<typeof vi.fn> }).$queryRawUnsafe =
-      vi.fn(async () => [encRow("item1", blob)]);
+    prisma.__chunkRows.push(encRow("item1", blob));
 
     const hits = await searchByVector(prisma, {
       userId: "u1",
@@ -749,11 +752,10 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
   });
 
   it("CRYPTO-SHRED: after the DEK is deleted, the ciphertext hit is dropped (unreadable)", async () => {
-    const prisma = mockPrisma([]);
-    const dek = await getOrCreateDek(prisma as never, "brain:item1");
+    const prisma = mockPrisma();
+    const dek = await getOrCreateDek(prisma, "brain:item1");
     const blob = encryptColumn(dek, "right-to-delete payload", "brain:item1");
-    (prisma as unknown as { $queryRawUnsafe: ReturnType<typeof vi.fn> }).$queryRawUnsafe =
-      vi.fn(async () => [encRow("item1", blob)]);
+    prisma.__chunkRows.push(encRow("item1", blob));
 
     // Readable before the shred…
     let hits = await searchByVector(prisma, {
@@ -766,7 +768,7 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
     expect(hits[0]!.snippet).toBe("right-to-delete payload");
 
     // …unreadable after: same ciphertext rows, DEK gone.
-    await shredDocumentKey(prisma as never, "brain:item1");
+    await shredDocumentKey(prisma, "brain:item1");
     hits = await searchByVector(prisma, {
       userId: "u1",
       vector: [1, 0, 0],
@@ -794,12 +796,12 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
   });
 
   it("decryptChunkRows decrypts full text and drops rows whose DEK is missing", async () => {
-    const prisma = mockPrisma([]);
-    const dek = await getOrCreateDek(prisma as never, "brain:keep");
+    const prisma = mockPrisma();
+    const dek = await getOrCreateDek(prisma, "brain:keep");
     const keepBlob = encryptColumn(dek, "full readable body", "brain:keep");
     const strayBlob = encryptColumn(dek, "shredded body", "brain:gone"); // no DEK row for brain:gone
 
-    const rows = await decryptChunkRows(prisma as never, [
+    const rows = await decryptChunkRows(prisma, [
       { text: keepBlob, brainItemId: "keep", path: "/a" },
       { text: strayBlob, brainItemId: "gone", path: "/b" },
       { text: "already plaintext", brainItemId: null, path: "/c" },
