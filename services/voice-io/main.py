@@ -20,6 +20,7 @@ import threading
 import time
 from typing import Literal, Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,7 @@ from voice.audio_io import (
     AudioUnavailable,
     echo_check,
     measure_input_level,
+    record,
     test_tone,
 )
 
@@ -41,6 +43,22 @@ except Exception:  # pragma: no cover — sounddevice absent on this host
     class _PortAudioError(Exception):
         """Stand-in when sounddevice isn't importable."""
 from voice.calibration import CalibrationStore
+from voice.speaker_id import (
+    MAX_TOTAL_LINES,
+    REQUIRED_LINES,
+    SPEAKER_MODEL_NAME,
+    USER_ID_RE,
+    EnrollmentSessions,
+    OnnxSpeakerEmbedder,
+    SpeakerIdUnavailable,
+    VoiceprintStore,
+    annotate_confusable,
+    assess_capture,
+    build_embedder_from_env,
+    confidence_word,
+    cosine,
+    match_against,
+)
 from voice.devices import (
     DeviceResolution,
     resolve_devices,
@@ -979,3 +997,412 @@ def voice_restart_processor() -> RestartProcessorResponse:
     finally:
         _restart_lock.release()
     return RestartProcessorResponse(**result)
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-1056 — per-person voiceprints (Flow B enrollment + matching)
+# ────────────────────────────────────────────────────────────────────
+#
+# Engine + stores live in voice/speaker_id.py (privacy invariants and
+# the personalize-never-authenticate HARD RULE are documented there).
+# These endpoints are reached ONLY through the orchestrator's
+# /api/voice/* proxy (owner/admin wall) — voice-io itself binds on the
+# internal Docker network. The orchestrator validates that `user_id`
+# names an EXISTING person before /speaker/enroll/start is ever called;
+# enrollment attaches a voiceprint to a person, it never creates one.
+
+# Capture windows: a scripted line reads in ~3–4 s (give it air), the
+# no-script verify utterance gets a little more.
+ENROLL_LINE_SECONDS = 5.0
+ENROLL_VERIFY_SECONDS = 6.0
+SPEAKER_MATCH_SECONDS = 4.0
+
+# Lazily-built embedder (model load itself is lazy inside). `None` after
+# building means the deps or baked weights are absent — endpoints answer
+# 503 speaker_model_unavailable. Tests inject via these module attrs.
+_speaker_embedder: Optional[OnnxSpeakerEmbedder] = None
+_speaker_embedder_built = False
+
+_enroll_sessions = EnrollmentSessions()
+
+_SPEAKER_UNAVAILABLE_DETAIL = (
+    "Speaker recognition isn't available on this Droplet — the "
+    "voice model isn't installed."
+)
+
+
+def _get_speaker_embedder() -> Optional[OnnxSpeakerEmbedder]:
+    global _speaker_embedder, _speaker_embedder_built
+    if not _speaker_embedder_built:
+        _speaker_embedder = build_embedder_from_env()
+        _speaker_embedder_built = True
+    return _speaker_embedder
+
+
+def _require_speaker_embedder() -> OnnxSpeakerEmbedder:
+    embedder = _get_speaker_embedder()
+    if embedder is None:
+        raise HTTPException(status_code=503, detail=_SPEAKER_UNAVAILABLE_DETAIL)
+    return embedder
+
+
+def _capture_speaker_pcm(seconds: float) -> np.ndarray:
+    """One mono enrollment/match capture off the picked input device.
+
+    Same coexistence posture as /audio/measure: sounddevice.rec under
+    the shared _capture_lock (never two overlapping captures on the hw
+    device), AudioUnavailable/PortAudio faults → operational 503s. The
+    returned PCM lives only for the embed call — never persisted.
+    """
+    r = _resolve()
+    if r.input_device is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No input device available. Plug in a USB mic or check the onboard mic jack.",
+        )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
+    try:
+        data = record(
+            duration_s=seconds,
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            device=r.input_device.index,
+        )
+    except AudioUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The microphone didn't respond (device busy or "
+                f"disconnected: {exc}). Check the mic and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
+    return data.reshape(-1)
+
+
+def _validated_user_id(user_id: str) -> str:
+    if not USER_ID_RE.match(user_id or ""):
+        raise HTTPException(status_code=400, detail="invalid user_id")
+    return user_id
+
+
+class SpeakerProfileInfo(BaseModel):
+    """One enrolled voiceprint, WITHOUT the embedding — the vector never
+    leaves this service (it isn't useful to the dashboard and shipping
+    it around would only widen the biometric-adjacent surface)."""
+
+    user_id: str
+    enrolled_at: float
+    updated_at: float
+    last_recognized_at: Optional[float] = None
+    # §5 step 3 honest fallback: enrollment saved but the no-script
+    # verify never matched — the profile row shows "Learning".
+    learning: bool = False
+    # §7.6 — the other enrolled user this voiceprint is hard to tell
+    # apart from (None when distinct).
+    confused_with: Optional[str] = None
+    lines: int = REQUIRED_LINES
+    voice_model: str = SPEAKER_MODEL_NAME
+
+
+class SpeakerProfilesResponse(BaseModel):
+    # False = enrollment can't run here (weights/deps absent); the
+    # dashboard disables its entry points instead of launching a wizard
+    # that cannot succeed (§7.2 rule).
+    speaker_model_available: bool
+    profiles: list[SpeakerProfileInfo]
+
+
+class EnrollStartRequest(BaseModel):
+    user_id: str
+
+
+class EnrollStartResponse(BaseModel):
+    session_id: str
+    lines_required: int
+
+
+class EnrollCaptureRequest(BaseModel):
+    session_id: str
+    # "Redo" for an already-captured line (0-based). Absent = append.
+    replace_index: Optional[int] = Field(default=None, ge=0)
+    seconds: Optional[float] = Field(default=None, ge=2.0, le=15.0)
+
+
+class EnrollCaptureResponse(BaseModel):
+    # "good" | "too_quiet" | "crosstalk" — the §5/§7.5 capture guard.
+    quality: str
+    captured: int
+    required: int
+
+
+class EnrollVerifyRequest(BaseModel):
+    session_id: str
+    seconds: Optional[float] = Field(default=None, ge=2.0, le=15.0)
+
+
+class EnrollVerifyResponse(BaseModel):
+    quality: str
+    matched: bool
+    # Plain word ("high" / "good") or null — NEVER a percentage or raw
+    # score (§5 step 3). The similarity stays server-side.
+    confidence: Optional[str] = None
+
+
+class EnrollCommitRequest(BaseModel):
+    session_id: str
+
+
+class EnrollCommitResponse(BaseModel):
+    saved: bool
+    profile: SpeakerProfileInfo
+
+
+class EnrollDiscardResponse(BaseModel):
+    discarded: bool
+
+
+class SpeakerMatchResponse(BaseModel):
+    """Who is speaking, for PERSONALIZATION only.
+
+    HARD RULE (brief §5, FEATURES.md §6): this result never
+    authenticates. It carries no session, token, role, or authority —
+    deliberately just an id + a plain confidence word. Any confirm-tier
+    action a recognized speaker asks for still routes to the
+    dashboard/phone for the explicit confirm; nothing in this service
+    (or its callers) may treat a voice match as an approval.
+    """
+
+    matched: bool
+    user_id: Optional[str] = None
+    confidence: Optional[str] = None
+
+
+class SpeakerProfileDeleteResponse(BaseModel):
+    deleted: bool
+
+
+def _profile_info(record: dict) -> SpeakerProfileInfo:
+    return SpeakerProfileInfo(
+        user_id=str(record["user_id"]),
+        enrolled_at=float(record.get("enrolled_at") or 0.0),
+        updated_at=float(record.get("updated_at") or 0.0),
+        last_recognized_at=record.get("last_recognized_at"),
+        learning=bool(record.get("learning", False)),
+        confused_with=record.get("confused_with"),
+        lines=int(record.get("lines", REQUIRED_LINES)),
+        voice_model=str(record.get("voice_model", SPEAKER_MODEL_NAME)),
+    )
+
+
+@app.get("/speaker/profiles", response_model=SpeakerProfilesResponse)
+def speaker_profiles() -> SpeakerProfilesResponse:
+    """Enrolled voiceprints (metadata only) + §7.6 confusability."""
+    records = VoiceprintStore().load_all()
+    annotate_confusable(records)
+    return SpeakerProfilesResponse(
+        speaker_model_available=_get_speaker_embedder() is not None,
+        profiles=[_profile_info(r) for r in records],
+    )
+
+
+@app.post("/speaker/enroll/start", response_model=EnrollStartResponse)
+def speaker_enroll_start(req: EnrollStartRequest) -> EnrollStartResponse:
+    """Open an enrollment session for an EXISTING person.
+
+    The orchestrator proxy has already verified the user row exists —
+    enrollment never creates a person (§3.3). Requires the embedder and
+    a mic now, so the dashboard fails fast instead of on line 1.
+    """
+    user_id = _validated_user_id(req.user_id)
+    _require_speaker_embedder()
+    r = _resolve()
+    if r.input_device is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No input device available. Plug in a USB mic or check the onboard mic jack.",
+        )
+    session = _enroll_sessions.create(user_id)
+    return EnrollStartResponse(
+        session_id=session.id, lines_required=REQUIRED_LINES,
+    )
+
+
+@app.post("/speaker/enroll/capture", response_model=EnrollCaptureResponse)
+def speaker_enroll_capture(req: EnrollCaptureRequest) -> EnrollCaptureResponse:
+    """Capture one scripted line: record → quality-guard → embed.
+
+    The PCM is dropped as soon as the embedding exists; a "too_quiet" /
+    "crosstalk" capture stores nothing (the wizard re-prompts with the
+    §5 / §7.5 copy).
+    """
+    embedder = _require_speaker_embedder()
+    session = _enroll_sessions.get(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="enrollment session not found")
+    replace = req.replace_index
+    if replace is not None and replace >= len(session.embeddings):
+        raise HTTPException(status_code=400, detail="replace_index out of range")
+    if replace is None and len(session.embeddings) >= MAX_TOTAL_LINES:
+        raise HTTPException(status_code=400, detail="enough lines captured")
+    pcm = _capture_speaker_pcm(req.seconds or ENROLL_LINE_SECONDS)
+    try:
+        embedding, quality = assess_capture(
+            pcm, lambda p: embedder.embed(p, SAMPLE_RATE),
+        )
+    except SpeakerIdUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if embedding is not None:
+        if replace is not None:
+            session.embeddings[replace] = embedding
+        else:
+            session.embeddings.append(embedding)
+    return EnrollCaptureResponse(
+        quality=quality,
+        captured=len(session.embeddings),
+        required=REQUIRED_LINES,
+    )
+
+
+@app.post("/speaker/enroll/verify", response_model=EnrollVerifyResponse)
+def speaker_enroll_verify(req: EnrollVerifyRequest) -> EnrollVerifyResponse:
+    """§5 step 3 — the no-script proof: capture anything, then check the
+    session's own voiceprint wins. `matched` requires BOTH a real match
+    against this enrollment's mean AND beating every OTHER enrolled
+    voiceprint — recognizing the new voice as a sibling is a mismatch,
+    not a pass. A too-quiet/crosstalk capture doesn't count as an
+    attempt (quality rides back so the wizard re-prompts)."""
+    embedder = _require_speaker_embedder()
+    session = _enroll_sessions.get(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="enrollment session not found")
+    if len(session.embeddings) < REQUIRED_LINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"need {REQUIRED_LINES} captured lines before verifying",
+        )
+    pcm = _capture_speaker_pcm(req.seconds or ENROLL_VERIFY_SECONDS)
+    try:
+        candidate, quality = assess_capture(
+            pcm, lambda p: embedder.embed(p, SAMPLE_RATE),
+        )
+    except SpeakerIdUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if candidate is None:
+        return EnrollVerifyResponse(quality=quality, matched=False)
+    sim_self = cosine(candidate, session.mean_embedding())
+    others = [
+        r
+        for r in VoiceprintStore().load_all()
+        if str(r.get("user_id")) != session.user_id
+    ]
+    _, best_other_sim = match_against(candidate, others)
+    word = confidence_word(sim_self)
+    matched = word is not None and sim_self > best_other_sim
+    session.verify_attempts += 1
+    if matched:
+        session.verify_matched = True
+    return EnrollVerifyResponse(
+        quality="good",
+        matched=matched,
+        confidence=word if matched else None,
+    )
+
+
+@app.post("/speaker/enroll/commit", response_model=EnrollCommitResponse)
+def speaker_enroll_commit(req: EnrollCommitRequest) -> EnrollCommitResponse:
+    """The ONE write of Flow B ("Save [Name]'s voice"): persist the mean
+    embedding as the person's voiceprint, then discard the session.
+
+    `learning` is server-derived (§5 step 3 honest fallback): the
+    session never passed a no-script verify → the profile row shows
+    "Learning" and improves via re-record — the client can't forge a
+    verified state. Re-recording keeps the original enrolled_at (the
+    row meta is "when this person was enrolled", not "last write").
+    """
+    session = _enroll_sessions.get(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="enrollment session not found")
+    if len(session.embeddings) < REQUIRED_LINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"need {REQUIRED_LINES} captured lines before saving",
+        )
+    store = VoiceprintStore()
+    existing = store.load(session.user_id)
+    now = time.time()
+    record_out = {
+        "user_id": session.user_id,
+        "embedding": [float(x) for x in session.mean_embedding()],
+        "lines": len(session.embeddings),
+        "enrolled_at": (existing or {}).get("enrolled_at") or now,
+        "updated_at": now,
+        "last_recognized_at": (
+            now if session.verify_matched
+            else (existing or {}).get("last_recognized_at")
+        ),
+        "learning": not session.verify_matched,
+        "voice_model": SPEAKER_MODEL_NAME,
+    }
+    store.save(record_out)
+    _enroll_sessions.discard(session.id)
+    return EnrollCommitResponse(saved=True, profile=_profile_info(record_out))
+
+
+@app.delete("/speaker/enroll/{session_id}", response_model=EnrollDiscardResponse)
+def speaker_enroll_discard(session_id: str) -> EnrollDiscardResponse:
+    """Cancel path — "Cancel deletes these recordings now". Idempotent
+    and deliberately error-free: the wizard's close paths fire it blind,
+    and the embeddings live only in RAM anyway."""
+    return EnrollDiscardResponse(discarded=_enroll_sessions.discard(session_id))
+
+
+@app.post("/speaker/match", response_model=SpeakerMatchResponse)
+def speaker_match() -> SpeakerMatchResponse:
+    """Capture a few seconds and identify the speaker — the on-box
+    matching primitive (the wake pipeline's personalization hook rides
+    this same logic in a follow-up ticket; wiring it into pipeline.py is
+    deliberately out of scope here). Response is words-only — see
+    SpeakerMatchResponse for the personalize-never-authenticate rule."""
+    embedder = _require_speaker_embedder()
+    store = VoiceprintStore()
+    records = store.load_all()
+    if not records:
+        return SpeakerMatchResponse(matched=False)
+    pcm = _capture_speaker_pcm(SPEAKER_MATCH_SECONDS)
+    try:
+        candidate, quality = assess_capture(
+            pcm, lambda p: embedder.embed(p, SAMPLE_RATE),
+        )
+    except SpeakerIdUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if candidate is None:
+        # Too quiet / crosstalk — an honest "not sure" (guest treatment),
+        # never a low-confidence guess.
+        return SpeakerMatchResponse(matched=False)
+    user_id, sim = match_against(candidate, records)
+    if user_id is None:
+        return SpeakerMatchResponse(matched=False)
+    store.touch_recognized(user_id)
+    return SpeakerMatchResponse(
+        matched=True, user_id=user_id, confidence=confidence_word(sim),
+    )
+
+
+@app.delete(
+    "/speaker/profiles/{user_id}",
+    response_model=SpeakerProfileDeleteResponse,
+)
+def speaker_profile_delete(user_id: str) -> SpeakerProfileDeleteResponse:
+    """Remove a voiceprint — IMMEDIATE and complete (§3.3 caption:
+    "deleted instantly when removed"). Synchronous file removal plus a
+    purge of any in-flight enrollment session for the same person;
+    idempotent so a retry after a timeout can't error."""
+    uid = _validated_user_id(user_id)
+    deleted = VoiceprintStore().delete(uid)
+    _enroll_sessions.discard_for_user(uid)
+    return SpeakerProfileDeleteResponse(deleted=deleted)
