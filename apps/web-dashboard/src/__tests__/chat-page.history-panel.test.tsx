@@ -179,15 +179,27 @@ describe("/chat page mounts the history panel", () => {
       { timeout: 10000 },
     );
 
-    // Click Try-again.
-    fireEvent.click(
-      screen.getByRole("button", { name: /try sending this message again/i }),
+    // Click Try-again until the retry engages (WARP-853). On starved CI
+    // workers this click intermittently no-oped (sendChat stayed at 0 for
+    // the full 10s window; runs 27303654088 / 27306872609 / 27309429060)
+    // while passing locally even under artificial CPU load — consistent
+    // with a late async settle re-rendering the chip between the query and
+    // the click, so the event lands on a detached node React never sees.
+    // Re-querying and re-clicking inside the poll makes the click land on
+    // the LIVE node deterministically; it can't double-fire because a
+    // successful retry synchronously drops the failed turn (the chip —
+    // and its button — unmount within the same act flush).
+    await waitFor(
+      () => {
+        const tryAgain = screen.queryByRole("button", {
+          name: /try sending this message again/i,
+        });
+        if (tryAgain) fireEvent.click(tryAgain);
+        // sendChat was called once, with the right replay shape.
+        expect(sendChatMock).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 10000 },
     );
-
-    // sendChat was called once, with the right replay shape.
-    await waitFor(() => expect(sendChatMock).toHaveBeenCalledTimes(1), {
-      timeout: 10000,
-    });
     const replay = sendChatMock.mock.calls[0][0].messages;
     expect(replay.at(-1)).toEqual({ role: "user", content: "what time is it" });
     // Slower CI runners need more than waitFor's 1s default for the
