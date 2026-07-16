@@ -10,8 +10,9 @@
  *   3. drift banner: max one, with the Recalibrate action;
  *   4. health strip: failing card exposes exactly one inline action;
  *      collapses to one explanatory card when no mic;
- *   5. no dead-end affordances: no "Add a voice" (WARP-1056), no
- *      "See all in Activity" (WARP-1058);
+ *   5. no dead-end affordances: "Add a voice" renders but stays
+ *      DISABLED until the profiles wiring says the box can enroll
+ *      (WARP-1056 §7.2); no "See all in Activity" (WARP-1058);
  *   6. §7.4 cancel-safety: closing the wizard mid-flow writes nothing
  *      and toasts "Calibration canceled — previous settings kept."
  *   7. WARP-1057 — the wedged-processor card's "Restart processor"
@@ -229,7 +230,7 @@ describe("VoiceSurface hero states (WARP-1055)", () => {
 });
 
 describe("VoiceSurface sections (WARP-1055)", () => {
-  it("profiles: header, guest line + privacy caption verbatim, NO Add a voice", () => {
+  it("profiles: header, guest line + privacy caption verbatim; Add a voice gated", () => {
     renderSurface();
     expect(screen.getByText("Who Droplet recognizes")).toBeInTheDocument();
     expect(
@@ -242,8 +243,10 @@ describe("VoiceSurface sections (WARP-1055)", () => {
         "Voiceprints are stored and matched on this box. They never leave your network and are deleted instantly when removed.",
       ),
     ).toBeInTheDocument();
-    // Flow B is WARP-1056 — no dead-end affordance.
-    expect(screen.queryByText("Add a voice")).toBeNull();
+    // WARP-1056 wired Flow B — but without the profiles wiring
+    // (speakerModelAvailable defaults false) the entry point stays
+    // DISABLED: §7.2, never launch a wizard that cannot succeed.
+    expect(screen.getByRole("button", { name: "Add a voice" })).toBeDisabled();
   });
 
   it("recent activity: renders the live last-wake row, no Activity deep link", () => {

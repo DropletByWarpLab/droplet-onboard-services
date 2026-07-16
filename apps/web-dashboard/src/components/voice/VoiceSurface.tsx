@@ -11,7 +11,6 @@
  * copy, which ships verbatim from the COPY table below.
  *
  * Deliberately absent (no dead-end affordances):
- *  - "Add a voice" / enrollment — Flow B is WARP-1056;
  *  - "See all in Activity" — the voice activity feed is WARP-1058.
  *
  * WARP-1057 wired the §7.3 processor card's "Restart processor" inline
@@ -19,18 +18,31 @@
  * /api/voice/restart-processor → watch the live status poll until
  * `input_flatlined` clears; after two failed restarts the card
  * escalates to the power-cycle copy + Get help.
+ *
+ * WARP-1056 wired §3.3 for real: profile rows + "Add a voice" + the
+ * Flow B EnrollmentWizard (entry points: the section button, a People
+ * row's "Add voice" deep-link via `initialEnrollUserId`, the §4-result
+ * post-calibration hook, and each row's "Re-record voice"). Entry
+ * points disable whenever the box can't enroll — model absent or mic
+ * broken (§7.2: never launch a wizard that cannot succeed).
  */
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, UserRound } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { useToast } from "@/components/Toast";
 import { measureVoiceLevel, restartVoiceProcessor } from "@/lib/api";
-import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
+import type {
+  VoiceCalibrationInfo,
+  VoiceProfileInfo,
+  VoiceStatusInfo,
+} from "@/lib/types";
 import { CalibrationWizard } from "./CalibrationWizard";
+import { EnrollmentWizard } from "./EnrollmentWizard";
 import { HealthStrip } from "./HealthStrip";
+import { VoiceProfilesSection } from "./VoiceProfilesSection";
 import { LiveMeter, StatusRing } from "./VoiceBits";
 import {
   deriveHealthChecks,
@@ -55,13 +67,6 @@ const COPY = {
   ctaFix: "Fix it",
   ctaRecalibrate: "Recalibrate",
   meterCap: "Live input · processed on this box",
-  profilesHeader: "Who Droplet recognizes",
-  profilesEmpty:
-    "No voices enrolled. Droplet answers everyone as a guest until it knows who's who.",
-  privacyProfiles:
-    "Voiceprints are stored and matched on this box. They never leave your network and are deleted instantly when removed.",
-  guestLine:
-    "Unrecognized voices are treated as guests — read-only answers, no personal data.",
   cancelToast: "Calibration canceled — previous settings kept.",
   activityEmpty: "No voice activity yet. Say 'Hey Droplet' to try it.",
   connecting: "Connecting to the microphone…",
@@ -102,6 +107,16 @@ export interface VoiceSurfaceProps {
   loading: boolean;
   /** Sustained room level above the calibrated floor (drift input). */
   noiseSustained: boolean;
+  /** WARP-1056 §3.3 — enrolled voiceprints; null while loading /
+   *  voice-io unreachable (renders the empty shell). Optional so the
+   *  surface still renders without the profiles wiring. */
+  profiles?: VoiceProfileInfo[] | null;
+  /** §7.2 gate — false disables every enrollment entry point. */
+  speakerModelAvailable?: boolean;
+  /** People-page deep-link (`/voice?enroll=<userId>`): open Flow B with
+   *  this person preselected. */
+  initialEnrollUserId?: string | null;
+  onProfilesChanged?: () => void;
   /** Epoch seconds — injectable for deterministic tests. */
   nowS?: number;
   onRefresh: () => void;
@@ -114,6 +129,10 @@ export function VoiceSurface({
   unavailable,
   loading,
   noiseSustained,
+  profiles = null,
+  speakerModelAvailable = false,
+  initialEnrollUserId = null,
+  onProfilesChanged,
   nowS,
   onRefresh,
   onCalibrationApplied,
@@ -122,6 +141,10 @@ export function VoiceSurface({
   const now = nowS ?? Math.floor(Date.now() / 1000);
 
   const [wizardOpen, setWizardOpen] = useState(false);
+  // WARP-1056 — Flow B. `enrollPreset` carries the person a deep-link /
+  // re-record picked; null lets the wizard preselect the signed-in user.
+  const [enrollOpen, setEnrollOpen] = useState(false);
+  const [enrollPreset, setEnrollPreset] = useState<string | null>(null);
   const [dspRetries, setDspRetries] = useState(0);
   const [wakeTestArmed, setWakeTestArmed] = useState(false);
   const wakeBaselineRef = useRef<number | null>(null);
@@ -254,12 +277,49 @@ export function VoiceSurface({
     setRestartConfirmOpen(true);
   }
 
-  function handleWizardClose(result: { applied: boolean }) {
+  function handleWizardClose(result: { applied: boolean; addVoice?: boolean }) {
     setWizardOpen(false);
     if (result.applied) {
       onCalibrationApplied();
+      // §4-result forward hook: "Add my voice" → Flow B, preselecting
+      // the signed-in user (the wizard's own default).
+      if (result.addVoice) {
+        setEnrollPreset(null);
+        setEnrollOpen(true);
+      }
     } else {
       toast(COPY.cancelToast, "info");
+    }
+  }
+
+  // WARP-1056 — People-row "Add voice" deep-link (/voice?enroll=<id>):
+  // open Flow B once with that person preselected, when enrollment can
+  // actually run here (§7.2 — never launch a wizard that cannot succeed).
+  const enrollLinkConsumedRef = useRef(false);
+  // Broken covers unavailable / no_mic / flatlined — a mic that can't
+  // capture real audio can't enroll a voice either.
+  const enrollmentAllowed = speakerModelAvailable && surface.kind !== "broken";
+  useEffect(() => {
+    if (!initialEnrollUserId || enrollLinkConsumedRef.current) return;
+    if (!enrollmentAllowed) return;
+    enrollLinkConsumedRef.current = true;
+    setEnrollPreset(initialEnrollUserId);
+    setEnrollOpen(true);
+  }, [initialEnrollUserId, enrollmentAllowed]);
+
+  function handleEnrollClose(result: { saved: boolean; name?: string }) {
+    setEnrollOpen(false);
+    setEnrollPreset(null);
+    if (result.saved) {
+      toast(
+        result.name
+          ? `Saved ${result.name}'s voice — stored on this box only.`
+          : "Voice saved — stored on this box only.",
+        "success",
+      );
+      onProfilesChanged?.();
+    } else {
+      toast("Voice enrollment canceled — nothing was saved.", "info");
     }
   }
 
@@ -462,22 +522,21 @@ export function VoiceSurface({
         onAction={(action) => void handleCheckAction(action)}
       />
 
-      {/* ── Voice profiles (§3.3 — enrollment lands with WARP-1056) ── */}
-      <section aria-labelledby="voice-profiles-h">
-        <div className="vsect-h">
-          <h2 id="voice-profiles-h">{COPY.profilesHeader}</h2>
-        </div>
-        <div className="vcard">
-          <div className="vempty">{COPY.profilesEmpty}</div>
-          <ul className="vrows">
-            <li className="vrow muted-line">
-              <UserRound size={15} aria-hidden="true" />
-              <span>{COPY.guestLine}</span>
-            </li>
-          </ul>
-        </div>
-        <p className="vcaption">{COPY.privacyProfiles}</p>
-      </section>
+      {/* ── Voice profiles (§3.3 — WARP-1056 Flow B) ── */}
+      <VoiceProfilesSection
+        profiles={profiles}
+        enrollmentAllowed={enrollmentAllowed}
+        nowS={now}
+        onAddVoice={() => {
+          setEnrollPreset(null);
+          setEnrollOpen(true);
+        }}
+        onReRecord={(userId) => {
+          setEnrollPreset(userId);
+          setEnrollOpen(true);
+        }}
+        onProfilesChanged={() => onProfilesChanged?.()}
+      />
 
       {/* ── Recent voice activity (§3.4 — full feed lands with WARP-1058) ── */}
       <section aria-labelledby="voice-activity-h">
@@ -505,7 +564,22 @@ export function VoiceSurface({
           open={wizardOpen}
           status={status}
           nowS={nowS}
+          // §4-result forward hook — only when no voice is enrolled yet
+          // and enrollment can actually run here.
+          enrollHook={enrollmentAllowed && (profiles?.length ?? 0) === 0}
           onClose={handleWizardClose}
+        />
+      )}
+
+      {/* ── Flow B (§5 — WARP-1056). Mounted only while open: the
+          wizard reads the auth context + fetches the roster, neither of
+          which the closed surface should pay for. ── */}
+      {enrollOpen && (
+        <EnrollmentWizard
+          open
+          profiles={profiles}
+          presetUserId={enrollPreset}
+          onClose={handleEnrollClose}
         />
       )}
 
