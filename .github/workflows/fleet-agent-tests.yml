@@ -7,11 +7,16 @@ on:
   pull_request:
     paths:
       - "services/fleet-agent/**"
+      # WARP-1025: the release_verify suite runs over the WARP-537 golden
+      # fixtures shared with the orchestrator's update-agent — regenerated
+      # fixtures must re-prove the Python port too.
+      - "apps/orchestrator/src/services/update-agent/__fixtures__/**"
       - ".github/workflows/fleet-agent-tests.yml"
   push:
     branches: [main]
     paths:
       - "services/fleet-agent/**"
+      - "apps/orchestrator/src/services/update-agent/__fixtures__/**"
       - ".github/workflows/fleet-agent-tests.yml"
   workflow_dispatch:
 
@@ -31,6 +36,13 @@ jobs:
         working-directory: services/fleet-agent
     steps:
       - uses: actions/checkout@v7
+
+      # WARP-1025: the release_verify/update_poll suites exec the REAL
+      # cosign binary over the WARP-537 golden fixtures — genuine
+      # cryptographic accept/reject, mirroring orchestrator-tests.yml. A
+      # missing binary FAILS those tests loudly, never skips.
+      - name: Install cosign (release_verify suite)
+        uses: sigstore/cosign-installer@v3
 
       - name: Set up Python
         uses: actions/setup-python@v6
