@@ -1,0 +1,46 @@
+name: shell-validation-tests
+
+# WARP-996 — hermetic pytest suites for the scripts/host + scripts/lib
+# shell-script validation guards (WARP-988 box-name, WARP-994 public-fqdn,
+# WARP-995 local-dns hostname). They live in scripts/test/pytest/ — a
+# deliberately conftest-free home with NO service-module import at collection
+# time — so these security guards run independently of any service's import
+# health (they previously sat under services/oled-display/tests/, whose
+# conftest imports the display module at collection, and ran in no workflow
+# at all: oled-display is ci-coverage-exempt as hardware-only).
+#
+# Bare python3 + pytest only: the suites drive bash in subprocesses and need
+# no service dependencies. Keep it that way — a requirements.txt appearing
+# here means a test stopped being hermetic.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/**"
+      - "scripts/lib/**"
+      - "scripts/test/pytest/**"
+      - ".github/workflows/shell-validation-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/**"
+      - "scripts/lib/**"
+      - "scripts/test/pytest/**"
+      - ".github/workflows/shell-validation-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: shell-validation-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-validation:
+    runs-on: ubuntu-latest
+    # Local subprocesses + tmpdirs only; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run shell-script validation tests
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pytest scripts/test/pytest/ -v
