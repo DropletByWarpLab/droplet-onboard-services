@@ -761,7 +761,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       value={m.right}
                       disabled={disabled}
                       onChange={(e) => handleRightChange(m.userId, e.target.value as DepartmentRight)}
-                      className="outline-none focus:border-[var(--brand)] transition-colors"
+                      className="outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                       style={{ ...fieldStyle, width: "auto", height: 32, padding: "0 10px" }}
                     >
                       {RIGHTS.map((r) => (
@@ -794,7 +794,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                   aria-label="Person to add"
                   value={addMemberUserId}
                   onChange={(e) => setAddMemberUserId(e.target.value)}
-                  className="outline-none focus:border-[var(--brand)] transition-colors"
+                  className="outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                   style={{ ...fieldStyle, flex: 1, height: 34, padding: "0 10px" }}
                 >
                   <option value="">Add a person…</option>
@@ -808,7 +808,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                   aria-label="Rights for new member"
                   value={addMemberRight}
                   onChange={(e) => setAddMemberRight(e.target.value as DepartmentRight)}
-                  className="outline-none focus:border-[var(--brand)] transition-colors"
+                  className="outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                   style={{ ...fieldStyle, width: "auto", height: 34, padding: "0 10px" }}
                 >
                   {RIGHTS.map((r) => (
