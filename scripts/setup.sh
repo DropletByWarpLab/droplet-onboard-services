@@ -613,6 +613,33 @@ main() {
     install_systemd_service
   fi
 
+  # --- Leave nothing stale on the box ---
+  # The .env safety copies secrets.sh writes mid-run (pre-migration backups,
+  # torn-file quarantines, staging strays) exist so an INTERRUPTED run can
+  # converge on the next attempt. Once the run reaches this point the live
+  # .env is authoritative — remove the copies so a green provision leaves
+  # zero artifacts (they carry the same device secrets as .env). An
+  # interrupted run never reaches this line, so the torn-write recovery in
+  # scripts/lib/secrets.sh keeps its backup to restore from.
+  # Carve-out: a --regenerate-env run KEEPS .env.bak.* — that backup is the
+  # documented recovery path when data volumes still hold the pre-rotation
+  # passwords (see scripts/README.md "What is NOT guaranteed").
+  if [ "$REGENERATE_ENV" != "true" ]; then
+    for _stale in "$REPO_ROOT"/.env.bak.*; do
+      [ -f "$_stale" ] || continue
+      rm -f "$_stale"
+      log_info "Removed $(basename "$_stale") (mid-run .env copy — run succeeded)"
+    done
+  fi
+  for _stale in "$REPO_ROOT"/.env.torn.* \
+                "$REPO_ROOT"/.env.tmp.* \
+                "$REPO_ROOT"/.env.migrate.* \
+                "$REPO_ROOT"/.env.upsert.*; do
+    [ -f "$_stale" ] || continue
+    rm -f "$_stale"
+    log_info "Removed $(basename "$_stale") (stale .env staging copy)"
+  done
+
   # --- Done ---
   # Lock is released by the EXIT trap set right after _acquire_lock.
 

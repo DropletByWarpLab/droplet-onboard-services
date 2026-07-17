@@ -251,7 +251,7 @@ generate_env() {
       cp "$newest_backup" "$restore_tmp"
       chmod 600 "$restore_tmp"
       mv "$restore_tmp" "$env_file"
-      log_success "Restored .env from $newest_backup (torn file kept at $torn_copy)"
+      log_success "Restored .env from $newest_backup (torn copy quarantined at $torn_copy until this run completes)"
       log_info "  migrate_env will backfill any keys added since that backup"
       log_divider
       return 0

@@ -216,8 +216,12 @@ host-level dump — it can't reach the sibling DB containers or the host disk.
 
 ### factory-reset safeguard
 
-`scripts/factory-reset.sh` runs `device-backup.sh` before it wipes anything.
-A failed safety backup aborts the reset; pass `--no-backup` to opt out.
+The pre-reset backup is OPT-IN since 2026-07-16 (a reset means a factory-new
+box — by default nothing is saved, and the accumulated tarballs under
+`/var/lib/droplet/backups` are removed as part of the wipe). Pass `--backup`
+to `scripts/factory-reset.sh` to run `device-backup.sh` before it wipes
+anything and keep the backups dir; a failed safety backup then aborts the
+reset. `--no-backup` is a deprecated no-op kept for automation back-compat.
 
 ### Drill / test
 
