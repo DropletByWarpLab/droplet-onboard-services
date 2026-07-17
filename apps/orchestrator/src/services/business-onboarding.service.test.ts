@@ -450,6 +450,24 @@ describe("commitOnboarding (§9.2)", () => {
     ]);
   });
 
+  // WARP-1280 boundary — the nudge reset lives on the settings-edit path
+  // (updateBusinessProfile), NOT here: completing an interview is its own
+  // lifecycle and the commit passes the nudge fields through untouched.
+  it("leaves reviewNudgeState untouched (the WARP-1280 reset is settings-only)", async () => {
+    const p = makePrisma({
+      onboardingState: "re_running",
+      interviewChatId: "conv-8",
+      reviewNudgeState: "due",
+      reviewDueAt: new Date("2026-07-01T00:00:00Z"),
+    });
+    const r = await commitOnboarding(asPrisma(p), "stefan", GOOD_PAYLOAD);
+    expect(r.state).toBe("completed");
+    expect(p._profile()).toMatchObject({
+      onboardingState: "completed",
+      reviewNudgeState: "due",
+    });
+  });
+
   it("re_running: supersedes ONLY prior onboarding facts", async () => {
     const p = makePrisma({
       onboardingState: "re_running",

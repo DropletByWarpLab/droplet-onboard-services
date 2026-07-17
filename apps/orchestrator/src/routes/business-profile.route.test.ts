@@ -337,6 +337,55 @@ describe("PATCH /api/business-profile — write, audit, transition (§12/§9.2)"
       .send({ customers: "Local families." });
     expect(res.status).toBe(200);
   });
+
+  // WARP-1280 — a nudged profile edited by the owner clears the nudge: the
+  // edit IS the review the nudge asked for. Before the fix nothing ever
+  // wrote reviewNudgeState back to "none", so the nudge stuck forever.
+  it("resets a due review nudge to none on an owner edit (WARP-1280)", async () => {
+    const prisma = makePrisma(
+      filled({
+        reviewNudgeState: "due",
+        reviewDueAt: new Date("2026-07-01T00:00:00Z"),
+      }),
+    );
+    const res = await request(buildApp(prisma, OWNER))
+      .patch("/api/business-profile")
+      .send({ goals: "Grow to 3 chairs." });
+    expect(res.status).toBe(200);
+    expect(prisma._row()!.reviewNudgeState).toBe("none");
+    // The response reflects the reset too — the dashboard must see the nudge
+    // disappear on the very PATCH that satisfied it, not on the next poll.
+    expect(res.body.reviewNudgeState).toBe("none");
+  });
+
+  it("resets a dismissed nudge to none on an owner edit (WARP-1280)", async () => {
+    const prisma = makePrisma(
+      filled({
+        reviewNudgeState: "dismissed",
+        reviewDismissedAt: new Date("2026-07-01T00:00:00Z"),
+      }),
+    );
+    const res = await request(buildApp(prisma, OWNER))
+      .patch("/api/business-profile")
+      .send({ whatWeDo: "We fix teeth, now with implants." });
+    expect(res.status).toBe(200);
+    expect(prisma._row()!.reviewNudgeState).toBe("none");
+  });
+
+  it("does NOT write the nudge reset on a rejected PATCH (validation failed)", async () => {
+    const prisma = makePrisma(
+      filled({
+        reviewNudgeState: "due",
+        reviewDueAt: new Date("2026-07-01T00:00:00Z"),
+      }),
+    );
+    const res = await request(buildApp(prisma, OWNER))
+      .patch("/api/business-profile")
+      .send({ whatWeDo: "x".repeat(601) });
+    expect(res.status).toBe(400);
+    // A rejected edit is not a review — the nudge stays due.
+    expect(prisma._row()!.reviewNudgeState).toBe("due");
+  });
 });
 
 describe("PATCH /api/business-profile — reject, never truncate (§8.1/§15)", () => {
