@@ -265,9 +265,15 @@ export function DrivesPanel() {
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setAdoptBusy(disk.name);
     try {
+      // WARP-1337: seed the post-wipe FS label from the name the card shows
+      // (the hardware model — an unmounted disk has no customer-typed name
+      // yet). The label becomes the mount tail, so the adopted drive never
+      // lands back on a GUID mount. Omitted when the bridge has no model.
+      const label = sanitizeFsLabel(disk.model);
       const token = await adoptDrive({
         device: disk.name,
         wipeMethod: "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([disk.name]),
       });
       setAdoptPending({
@@ -346,10 +352,14 @@ export function DrivesPanel() {
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setReclaimBusy(disk.name);
     try {
+      // WARP-1337: same FS-label seeding as adopt — the reclaimed drive comes
+      // back named instead of GUID-mounted.
+      const label = sanitizeFsLabel(disk.model);
       const token = await reclaimDrive({
         device: disk.name,
         md: disk.md,
         wipeMethod: "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([disk.name]),
       });
       setReclaimPending({

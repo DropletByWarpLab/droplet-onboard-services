@@ -47,6 +47,7 @@ vi.mock("@/lib/api", () => ({
   // because DrivesPanel imports helpers from StorageStep, whose module-level
   // imports must all resolve on the mocked module.
   adoptDrive: vi.fn(),
+  reclaimDrive: vi.fn(),
   confirmStorageCommand: vi.fn(),
   requestFormatPool: vi.fn(),
   fetchDrives: vi.fn(),
@@ -59,6 +60,7 @@ vi.mock("@/lib/api", () => ({
 import {
   updateDriveLabel,
   adoptDrive,
+  reclaimDrive,
   confirmStorageCommand,
   requestFormatPool,
 } from "@/lib/api";
@@ -341,6 +343,10 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
           device: "sdc",
           wipeMethod: "quick",
           confirmPhrase: "ERASE sdc",
+          // WARP-1337: the card's title (the hardware model) seeds the
+          // post-wipe FS label — sanitized to ^[A-Za-z0-9_-]{1,16}$ — so the
+          // adopted drive never mounts back onto a GUID tail.
+          label: "Samsung_T7",
         }),
       ),
     );
@@ -360,6 +366,49 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
   it("offers adopt for an empty (available) disk too", () => {
     setup({ disks: [makeDisk({ name: "sdd", state: "available", fstype: "", model: "" })] });
     expect(screen.getByRole("button", { name: /erase & adopt/i })).toBeInTheDocument();
+  });
+
+  // WARP-1337: a disk with no usable name must OMIT the label entirely — the
+  // orchestrator rejects an empty/invalid one, and a fabricated placeholder
+  // would defeat the GUID-guarded display fallback.
+  it("omits the fs label when the disk has no model to seed it from", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({ disks: [makeDisk({ name: "sdd", state: "available", fstype: "", model: "" })] });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    expect(
+      (adoptDrive as ReturnType<typeof vi.fn>).mock.calls[0][0].label,
+    ).toBeUndefined();
+  });
+
+  // WARP-1337: reclaim seeds the same sanitized label so the reclaimed drive
+  // comes back named, not GUID-mounted.
+  it("passes the sanitized fs label on reclaim too", async () => {
+    (reclaimDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    setup({
+      pools: [md127],
+      disks: [makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    await waitFor(() =>
+      expect(reclaimDrive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          device: "sda",
+          md: "md127",
+          label: "WD_Red_4TB",
+        }),
+      ),
+    );
   });
 
   it("routes a pool-member disk to the pool card — never an individual adopt", () => {

@@ -199,8 +199,11 @@ describe("DangerZoneSection — reformat flow (WARP-828)", () => {
 
     await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
     // WHOLE-disk name derived from /dev/sdb → "sdb" (already whole, no suffix).
+    // WARP-1337: the customer's displayName seeds the post-wipe FS label
+    // (sanitized to ^[A-Za-z0-9_-]{1,16}$) so the reformatted drive keeps its
+    // name instead of re-mounting on a GUID tail.
     expect(adoptDrive).toHaveBeenCalledWith(
-      expect.objectContaining({ device: "sdb", wipeMethod: "quick" }),
+      expect.objectContaining({ device: "sdb", wipeMethod: "quick", label: "Wedding_Photos" }),
     );
     await waitFor(() => expect(confirmStorageCommand).toHaveBeenCalledTimes(1));
     // The confirm MUST echo the service + resourceId from the minted token.
@@ -232,8 +235,10 @@ describe("DangerZoneSection — reformat flow (WARP-828)", () => {
     fireEvent.click(screen.getByRole("button", { name: /erase and reformat/i }));
 
     await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    // WARP-1337: no displayName → the existing FS label is preserved across
+    // the reformat.
     expect(adoptDrive).toHaveBeenCalledWith(
-      expect.objectContaining({ device: "nvme0n1" }),
+      expect.objectContaining({ device: "nvme0n1", label: "VAULT" }),
     );
   });
 

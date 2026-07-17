@@ -19,6 +19,8 @@ import {
   calculateRaidOptions,
   type RaidLevel,
 } from "@/components/setup/raid-calculator";
+// WARP-1337: sanitizer for the post-wipe FS label (^[A-Za-z0-9_-]{1,16}$).
+import { sanitizeFsLabel } from "@/components/FileManager/drive-display";
 
 /**
  * Wizard step — name the drives the box detected, and (optionally) combine
@@ -414,6 +416,22 @@ export function StorageStep({
     }
   }
 
+  // WARP-1337 — seed the post-wipe filesystem label from the best customer
+  // name we have for the disk: the name typed in THIS step's field, else the
+  // member's saved displayName, else its existing FS label (preserved across
+  // the wipe). The label becomes the mount tail, so an adopted drive never
+  // lands back on a GUID mount. Returns undefined (caller OMITS the label)
+  // when nothing usable survives sanitizing.
+  function fsLabelFor(disk: PhysicalDisk): string | undefined {
+    for (const m of disk.members) {
+      const label = sanitizeFsLabel(
+        names[m.uuid]?.trim() || m.displayName || m.label,
+      );
+      if (label) return label;
+    }
+    return undefined;
+  }
+
   // WARP-662 step 1 — adopt a previously-used DISK: request a confirm token
   // (does NOT wipe yet) and open the per-disk blast-radius dialog. The device
   // sent is the WHOLE disk; the host script refuses the OS disk regardless, and
@@ -430,9 +448,11 @@ export function StorageStep({
     setAdoptError(null);
     setAdoptBusy(name);
     try {
+      const label = fsLabelFor(disk);
       const token = await requestAdoptDrive({
         device: name,
         wipeMethod: adoptWipe[name] ?? "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([`/dev/${name}`]),
       });
       setAdoptPending({
@@ -480,10 +500,12 @@ export function StorageStep({
     setAdoptError(null);
     setAdoptBusy(name);
     try {
+      const label = fsLabelFor(disk);
       const token = await reclaimDrive({
         device: name,
         md: disk.md,
         wipeMethod: adoptWipe[name] ?? "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([`/dev/${name}`]),
       });
       setReclaimPending({
