@@ -40,6 +40,7 @@ try:
 except Exception:  # pragma: no cover — sounddevice absent on this host
     class _PortAudioError(Exception):
         """Stand-in when sounddevice isn't importable."""
+from voice.activity import ActivityReporter, build_reporter_from_env
 from voice.calibration import CalibrationStore
 from voice.devices import (
     DeviceResolution,
@@ -159,6 +160,12 @@ _pipeline: Optional[WakePipeline] = None
 # request thread. None until startup builds it (and always None under
 # LLM_URL=__mock__).
 _persona_fetcher: Optional[PersonaFetcher] = None
+
+# WARP-1058 — the activity-feed event reporter (voice → orchestrator
+# POST /api/voice/events). Module scope so shutdown can stop its POST
+# worker. None until startup builds it (and always None under
+# LLM_URL=__mock__).
+_activity_reporter: Optional[ActivityReporter] = None
 
 
 # Cached on first call; /audio/devices refreshes on demand.
@@ -281,11 +288,16 @@ async def startup() -> None:
     # case (DNS failures, dropped packets). Run them in a worker thread
     # so the FastAPI `/health` endpoint stays responsive within the
     # Dockerfile `HEALTHCHECK --start-period=10s` window.
-    global _pipeline, _persona_fetcher
+    global _pipeline, _persona_fetcher, _activity_reporter
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
         tts = build_tts_from_env()
+        # WARP-1058 — activity-feed event bridge (wake outcomes, missed
+        # wakes, DSP wedge/recovery → orchestrator /api/voice/events).
+        # Cheap to build (env read + a parked daemon thread); no I/O
+        # until the first event.
+        _activity_reporter = build_reporter_from_env()
         # WARP-1119 — build the persona fetcher FIRST so the same instance
         # is shared by the LLM's greeting path and /health's observability
         # fields. Prime it once off the event loop: the result is cached
@@ -328,6 +340,7 @@ async def startup() -> None:
             input_gain=VOICE_INPUT_GAIN,
             flatline_window_s=VOICE_FLATLINE_WINDOW_S,
             flatline_dbfs=VOICE_FLATLINE_DBFS,
+            activity_reporter=_activity_reporter,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -340,10 +353,13 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _pipeline
+    global _pipeline, _activity_reporter
     if _pipeline is not None:
         _pipeline.stop()
         _pipeline = None
+    if _activity_reporter is not None:
+        _activity_reporter.stop()
+        _activity_reporter = None
 
 
 # ────────────────────────────────────────────────────────────────────

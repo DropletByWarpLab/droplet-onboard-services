@@ -40,7 +40,8 @@ export type ActivityKindName =
   | "email"
   | "auth"
   | "tool_run"
-  | "system";
+  | "system"
+  | "voice";
 
 export type ActivitySeverityName = "ok" | "warn" | "err" | "info";
 

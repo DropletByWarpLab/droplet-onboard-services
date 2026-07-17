@@ -79,6 +79,7 @@ import type {
   VoiceEchoCheckResult,
   VoiceRestartResult,
   VoiceCalibrationModeResult,
+  VoiceActivityItem,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -5351,6 +5352,37 @@ export async function exitVoiceCalibrationMode(): Promise<VoiceCalibrationModeRe
   });
   if (!res.ok) await throwVoiceError(res, "Failed to exit calibration mode");
   return res.json();
+}
+
+// --- WARP-1058: recent voice activity (§3.4 feed) ---
+
+/**
+ * The /voice page's max-5 feed, from the generic signed activity
+ * surface filtered to kind=voice (the same rows the audit log's
+ * "See all in Activity" deep-link shows). `person` is lifted from the
+ * row's refs — present on wake rows ("Guest" until enrollment lands),
+ * absent on §6.3 self-heal rows.
+ */
+export async function fetchVoiceActivity(limit = 5): Promise<VoiceActivityItem[]> {
+  const res = await authFetch(`${BASE}/api/activity?kind=voice&limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to fetch voice activity");
+  const json = (await res.json()) as {
+    items: Array<{
+      id: string;
+      at: string;
+      what: string;
+      severity: VoiceActivityItem["severity"];
+      refs: Record<string, unknown> | null;
+    }>;
+  };
+  return json.items.map((item) => ({
+    id: item.id,
+    atS: Math.floor(new Date(item.at).getTime() / 1000),
+    what: item.what,
+    severity: item.severity,
+    person:
+      typeof item.refs?.person === "string" ? (item.refs.person as string) : null,
+  }));
 }
 
 // --- WARP-979: Secured / name-your-box ---

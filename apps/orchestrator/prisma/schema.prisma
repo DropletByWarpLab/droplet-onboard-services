@@ -2287,6 +2287,10 @@ enum ActivityKind {
   auth
   tool_run
   system
+  /// WARP-1058: voice events (wake detections, missed wakes, DSP
+  /// wedge/recovery, calibration applied, processor restarts) — the
+  /// /voice page's "Recent voice activity" feed filters on this.
+  voice
 }
 
 /// WARP-456: severity of an ActivityRow. Display-only; the dashboard

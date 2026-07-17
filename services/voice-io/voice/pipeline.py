@@ -69,6 +69,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from voice.activity import ActivityReporter
 from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
@@ -337,6 +338,18 @@ RMS_DBFS_FLOOR = -120.0            # reported dBFS for pure digital silence
                                    # (log10(0) is -inf; JSON can't carry it).
 _INT16_FULL_SCALE = 32768.0
 
+# Near-miss floor for the missed-wake feed row (WARP-1058). A frame
+# whose best score lands in [threshold * ratio, threshold) is someone
+# probably saying the wake word without clearing the gate — exactly the
+# "it didn't hear me" case §3.4's feed exists to make debuggable. Below
+# the ratio is ordinary room audio and emits nothing (the detector
+# scores every frame; without a floor the feed would drown in noise).
+# Ratio-of-threshold rather than absolute because the two engines'
+# score semantics differ (openWakeWord sigmoid ~0.3 gate vs Vosk
+# min-word-confidence ~0.7 gate). Misses are debounced on the same
+# `debounce_s` window as fires so one hesitant utterance = one row.
+WAKE_MISS_RATIO = 0.6
+
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
 # than an Enum because all reads cross thread boundaries + JSON, and
@@ -452,6 +465,7 @@ class WakePipeline:
         flatline_window_s: float = DEFAULT_FLATLINE_WINDOW_S,
         flatline_dbfs: float = DEFAULT_FLATLINE_DBFS,
         rms_window_frames: int = DEFAULT_RMS_WINDOW_FRAMES,
+        activity_reporter: Optional[ActivityReporter] = None,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -555,6 +569,13 @@ class WakePipeline:
         self._last_response_at: Optional[float] = None
         self._error_message: Optional[str] = None
         self._last_fire_at: float = 0.0  # debounce tracking
+        # WARP-1058 — activity-feed event emission. `report()` is
+        # non-blocking (bounded queue + background POST worker), so
+        # calling it from the frame handler is safe. None disables all
+        # emission (tests, __mock__ deployments).
+        self._activity_reporter = activity_reporter
+        self._last_miss_emit_at: float = 0.0  # missed-wake debounce
+        self._flatline_reported: bool = False  # dsp_wedge edge detector
         # Calibration mode (WARP-1059) — wall-clock expiry of the
         # wizard's suppression window; None = off. Deliberately
         # in-memory only: a restart must never come back deaf.
@@ -689,12 +710,67 @@ class WakePipeline:
 
     def _probe_loop(self) -> None:
         """Background thread: re-probe upstreams every
-        `upstream_probe_interval_s`. Exits when shutdown is set."""
+        `upstream_probe_interval_s`. Exits when shutdown is set.
+
+        Also the flatline edge-detector's clock (WARP-1058): the
+        `input_flatlined` flag is computed on status() reads, so this is
+        the one place inside voice-io that periodically observes it and
+        can emit the dsp_wedge / dsp_recovered transition events.
+        """
         while not self._shutdown.wait(self._upstream_probe_interval_s):
             try:
                 self._probe_upstreams()
             except Exception:  # pragma: no cover
                 logger.exception("upstream probe loop iteration crashed")
+            try:
+                self._check_flatline_transition()
+            except Exception:  # pragma: no cover
+                logger.exception("flatline transition check crashed")
+
+    # ──────────────────────────────────────────────────────────────
+    # Activity-feed emission (WARP-1058)
+    # ──────────────────────────────────────────────────────────────
+
+    def _emit_activity(
+        self,
+        type_: str,
+        *,
+        score: Optional[float] = None,
+        threshold: Optional[float] = None,
+        model: Optional[str] = None,
+    ) -> None:
+        """Best-effort event emission. Never raises and never blocks —
+        a broken reporter must not take down the wake loop."""
+        reporter = self._activity_reporter
+        if reporter is None:
+            return
+        try:
+            reporter.report(
+                type_,
+                at=time.time(),
+                score=score,
+                threshold=threshold,
+                model=model,
+            )
+        except Exception:  # pragma: no cover — defensive
+            logger.exception("activity reporter raised (event dropped)")
+
+    def _check_flatline_transition(self) -> None:
+        """Emit dsp_wedge / dsp_recovered on `input_flatlined` edges.
+
+        The flag itself is stateless (computed on every status() read);
+        this keeps a one-bit memory of the last observed value so each
+        wedge produces exactly ONE err row when it starts and one quiet
+        recovery row when audio flows again — §6.3 self-heal
+        transparency, not a row per probe tick.
+        """
+        flatlined = self.status().input_flatlined
+        if flatlined and not self._flatline_reported:
+            self._flatline_reported = True
+            self._emit_activity("dsp_wedge")
+        elif not flatlined and self._flatline_reported:
+            self._flatline_reported = False
+            self._emit_activity("dsp_recovered")
 
     # ──────────────────────────────────────────────────────────────
     # Speak — synthesize text + play through the speaker
@@ -1403,6 +1479,23 @@ class WakePipeline:
         # multi-model detectors but the data shape allows it.
         model, score = max(scores.items(), key=lambda kv: kv[1])
         if score < self._threshold:
+            # Near-miss (WARP-1058): probably the wake word, not loud /
+            # clear enough to clear the gate — the §3.4 "Missed wake
+            # word" feed row. Debounced like fires (one row per
+            # utterance) and suppressed during the wizard's calibration
+            # mode (its deliberate wake tests aren't misses).
+            if (
+                score >= self._threshold * WAKE_MISS_RATIO
+                and now - self._last_miss_emit_at >= self._debounce_s
+                and not self._calibration_mode_active(now)
+            ):
+                self._last_miss_emit_at = now
+                self._emit_activity(
+                    "wake_missed",
+                    score=score,
+                    threshold=self._threshold,
+                    model=model,
+                )
             return
 
         # Debounce.
@@ -1438,6 +1531,19 @@ class WakePipeline:
             self._on_wake(event)
         except Exception:
             logger.exception("wake callback raised")
+
+        # WARP-1058: with STT absent or down the interaction ends at the
+        # detection — record the honest outcome now. When STT is up the
+        # turn continues and _default_on_transcript resolves the final
+        # outcome (answered / ignored / heard) instead, so each wake
+        # produces exactly one feed row.
+        if self._stt is None or not self._stt_available:
+            self._emit_activity(
+                "wake_heard",
+                score=event.score,
+                threshold=self._threshold,
+                model=event.model_name,
+            )
 
     # ──────────────────────────────────────────────────────────────
     # STT capture path
@@ -1590,7 +1696,17 @@ class WakePipeline:
         default. Set it via the constructor if you want different
         behaviour (e.g. dashboard-driven dispatch in commit 8).
         """
+        # WARP-1058 — the turn's wake context for the outcome row. Read
+        # without the lock (GIL-atomic; same discipline as the other
+        # single-field reads on this thread).
+        wake_score = self._last_wake_score
+        wake_model = self._last_wake_model
         if not transcript:
+            # Wake fired but the capture heard nothing worth words.
+            self._emit_activity(
+                "wake_heard",
+                score=wake_score, threshold=self._threshold, model=wake_model,
+            )
             return
         if not transcript_is_actionable(transcript):
             # Residual false wakes (a phonetic near-collision on the TV —
@@ -1603,11 +1719,19 @@ class WakePipeline:
                 "transcript %r is a fragment, not a command — staying quiet",
                 transcript,
             )
+            self._emit_activity(
+                "wake_ignored",
+                score=wake_score, threshold=self._threshold, model=wake_model,
+            )
             return
         if self._llm is None or not self._llm_available:
             logger.info(
                 "transcript ready (LLM unavailable, not speaking): %r",
                 transcript,
+            )
+            self._emit_activity(
+                "wake_heard",
+                score=wake_score, threshold=self._threshold, model=wake_model,
             )
             return
         # Intent gate: short-circuit speculative tool calls on greetings,
@@ -1625,10 +1749,18 @@ class WakePipeline:
         except LLMUnavailable as exc:
             self._set_error(f"LLM call failed: {exc}")
             logger.warning("LLM call failed for transcript %r: %s", transcript, exc)
+            self._emit_activity(
+                "wake_heard",
+                score=wake_score, threshold=self._threshold, model=wake_model,
+            )
             return
 
         if not reply:
             logger.info("LLM returned empty reply for %r", transcript)
+            self._emit_activity(
+                "wake_heard",
+                score=wake_score, threshold=self._threshold, model=wake_model,
+            )
             return
 
         # Speak the reply. speak() handles its own state transitions +
@@ -1636,3 +1768,11 @@ class WakePipeline:
         result = self.speak(reply)
         if not result.get("ok"):
             logger.warning("speak after LLM reply failed: %s", result.get("error"))
+        # WARP-1058 — the §3.4 outcome row. "Answered" means the user
+        # actually HEARD a reply; a failed playback is honestly just
+        # "Heard the wake word" (the fault itself surfaces via
+        # error_message / health, not the feed).
+        self._emit_activity(
+            "wake_answered" if result.get("ok") else "wake_heard",
+            score=wake_score, threshold=self._threshold, model=wake_model,
+        )

@@ -53,6 +53,7 @@ const ACTIVITY_KINDS = [
   "auth",
   "tool_run",
   "system",
+  "voice",
 ] as const;
 
 /** WARP-181: mirrors the Prisma `ActivityActorType` enum verbatim. */

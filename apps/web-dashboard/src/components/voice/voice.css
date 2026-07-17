@@ -353,6 +353,16 @@
 .vact .what {
   color: var(--color-label-secondary);
 }
+/* §6.3 self-heal rows carry no speaker — muted em-dash placeholder. */
+.vact .who.sys {
+  color: var(--color-label-tertiary);
+  font-weight: 400;
+}
+/* §3.4 footer deep-link into the Activity surface (kind=voice). */
+.vact-foot {
+  padding: 10px 18px;
+  border-top: 1px solid var(--color-separator);
+}
 
 /* ── Skeletons (§7.8) ── */
 .vskel {

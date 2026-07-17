@@ -10,14 +10,17 @@
  *   3. drift banner: max one, with the Recalibrate action;
  *   4. health strip: failing card exposes exactly one inline action;
  *      collapses to one explanatory card when no mic;
- *   5. no dead-end affordances: no "Add a voice" (WARP-1056), no
- *      "See all in Activity" (WARP-1058);
+ *   5. no dead-end affordances: no "Add a voice" (WARP-1056);
  *   6. §7.4 cancel-safety: closing the wizard mid-flow writes nothing
  *      and toasts "Calibration canceled — previous settings kept."
  *   7. WARP-1057 — the wedged-processor card's "Restart processor"
  *      action: confirm dialog (~10 s outage warning) → restart call →
  *      success on flatline clear; two failed restarts escalate to the
  *      §7.3 power-cycle copy + Get help.
+ *   8. WARP-1058 — the §3.4 "Recent voice activity" feed: max 5 rows
+ *      (time mono · person-or-Guest · what happened), §6.3 self-heal
+ *      rows without a person, the kind=voice Activity deep-link, and
+ *      the §9 empty state verbatim.
  *
  * Proven RED first: VoiceSurface does not exist yet.
  */
@@ -43,10 +46,28 @@ vi.mock("@/lib/api", () => ({
   exitVoiceCalibrationMode: vi.fn(async () => ({ active: false })),
 }));
 
+// Real <a> for next/link (overrides the setup.ts string-template mock)
+// so the WARP-1058 deep-link's href is assertable via getByRole("link").
+// Same per-file pattern as projects/page.gating.test.tsx.
+vi.mock("next/link", () => ({
+  default: ({
+    children,
+    href,
+    ...props
+  }: {
+    children: React.ReactNode;
+    href: string;
+  }) => React.createElement("a", { href, ...props }, children),
+}));
+
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
 import { applyVoiceCalibration, restartVoiceProcessor } from "@/lib/api";
 import { ToastProvider } from "@/components/Toast";
-import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
+import type {
+  VoiceActivityItem,
+  VoiceCalibrationInfo,
+  VoiceStatusInfo,
+} from "@/lib/types";
 
 const restartMock = vi.mocked(restartVoiceProcessor);
 
@@ -92,6 +113,7 @@ function renderSurface(
     unavailable: false,
     loading: false,
     noiseSustained: false,
+    activity: [],
     nowS: NOW,
     onRefresh: vi.fn(),
     onCalibrationApplied: vi.fn(),
@@ -246,13 +268,64 @@ describe("VoiceSurface sections (WARP-1055)", () => {
     expect(screen.queryByText("Add a voice")).toBeNull();
   });
 
-  it("recent activity: renders the live last-wake row, no Activity deep link", () => {
-    renderSurface();
+  it("recent activity (WARP-1058): §3.4 rows — mono time · person-or-Guest · what", () => {
+    const rows: VoiceActivityItem[] = [
+      { id: "12", atS: NOW - 60, what: "Answered", severity: "info", person: "Guest" },
+      { id: "11", atS: NOW - 300, what: "Missed wake word", severity: "warn", person: "Guest" },
+      // §6.3 self-heal transparency: no person on system rows.
+      { id: "10", atS: NOW - 900, what: "Voice processor restarted", severity: "info", person: null },
+    ];
+    const { container } = renderSurface({ activity: rows });
     expect(screen.getByText("Recent voice activity")).toBeInTheDocument();
-    expect(screen.getByText("Guest")).toBeInTheDocument();
-    expect(screen.getByText("Answered")).toBeInTheDocument();
-    // WARP-1058 is NOT this PR.
+
+    // eslint-disable-next-line testing-library/no-node-access
+    const items = container.querySelectorAll(".vact li");
+    expect(items).toHaveLength(3);
+    // Row 1: time (mono class) · Guest · Answered.
+    expect(within(items[0] as HTMLElement).getByText("Answered")).toBeInTheDocument();
+    expect(within(items[0] as HTMLElement).getByText("Guest")).toBeInTheDocument();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect((items[0] as HTMLElement).querySelector(".t")).not.toBeNull();
+    // §3.4 outcome vocabulary rendered verbatim.
+    expect(screen.getByText("Missed wake word")).toBeInTheDocument();
+    // §6.3 self-heal row: muted em-dash instead of a person.
+    expect(
+      within(items[2] as HTMLElement).getByText("Voice processor restarted"),
+    ).toBeInTheDocument();
+    expect(within(items[2] as HTMLElement).getByText("—")).toBeInTheDocument();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect((items[2] as HTMLElement).querySelector(".who.sys")).not.toBeNull();
+  });
+
+  it("recent activity: caps at 5 rows and deep-links to kind=voice", () => {
+    const rows: VoiceActivityItem[] = Array.from({ length: 6 }, (_, i) => ({
+      id: String(20 - i),
+      atS: NOW - i * 60,
+      what: "Answered",
+      severity: "info" as const,
+      person: "Guest",
+    }));
+    const { container } = renderSurface({ activity: rows });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(container.querySelectorAll(".vact li")).toHaveLength(5);
+    const link = screen.getByRole("link", { name: /See all in Activity/ });
+    expect(link).toHaveAttribute("href", "/admin/audit?kind=voice");
+  });
+
+  it("recent activity: §9 empty state verbatim when there are no rows", () => {
+    renderSurface({ activity: [] });
+    expect(
+      screen.getByText("No voice activity yet. Say 'Hey Droplet' to try it."),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/See all in Activity/)).toBeNull();
+
+    // null (feed unavailable / still loading) renders the same way —
+    // the feed is supporting context, never an error card.
+    renderSurface({ activity: null });
+    expect(
+      screen.getAllByText("No voice activity yet. Say 'Hey Droplet' to try it.")
+        .length,
+    ).toBeGreaterThan(0);
   });
 
   it("health cards carry mono value + timestamp on the noise card", () => {
@@ -334,6 +407,7 @@ describe("VoiceSurface processor restart (WARP-1057, §7.3)", () => {
           unavailable={false}
           loading={false}
           noiseSustained={false}
+          activity={[]}
           nowS={NOW}
           onRefresh={onRefresh}
           onCalibrationApplied={vi.fn()}
