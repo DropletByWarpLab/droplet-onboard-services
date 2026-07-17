@@ -551,9 +551,44 @@ run_nextcloud_post_install_hook() {
     printf '%s\n' "$hook_out" | tail -20 >&2
     log_error "Setup continues; re-run the hook manually once Nextcloud is healthy:  $recover_cmd"
   fi
+
+  apply_file_indexer_nc_grants
   return 0
 }
 # <<< run_nextcloud_post_install_hook (WARP-990)
+
+apply_file_indexer_nc_grants() {
+  # WARP-1328: the file-indexer resolves Nextcloud file ids by reading
+  # oc_storages/oc_filecache directly (watcher.py _resolve_nc_file_id), but
+  # no grant was ever provisioned — and none CAN be baked into db-init:
+  # Nextcloud mints its own table-owner role at install time (oc_admin,
+  # oc_admin2, … — see the stale-DB guard above), so the tables only exist,
+  # with a nondeterministic owner, AFTER install. Apply the read grants here,
+  # on every setup run, as the bootstrap superuser — idempotent by nature.
+  # The grantee is the app role the indexer's derived NEXTCLOUD_DATABASE_URL
+  # connects as (WARP-1327); an operator overriding that env var must grant
+  # the override role equivalently (docs/ENVIRONMENT.md).
+  local app_role="${POSTGRES_USER:-droplet}"
+  log_info "Granting file-indexer read access to Nextcloud's oc_* lookup tables (WARP-1328)..."
+  local grant_out="" grant_rc=0
+  grant_out=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
+    psql -U "$app_role" -w -d nextcloud -v ON_ERROR_STOP=1 \
+      -c "GRANT CONNECT ON DATABASE nextcloud TO ${app_role}" \
+      -c "GRANT USAGE ON SCHEMA public TO ${app_role}" \
+      -c "GRANT SELECT ON public.oc_storages, public.oc_filecache TO ${app_role}" 2>&1) || grant_rc=$?
+  printf '%s\n' "$grant_out" >> "$LOG_FILE" 2>/dev/null || true
+  if [ "$grant_rc" -eq 0 ]; then
+    log_success "file-indexer oc_* read grants in place (role: ${app_role})"
+  else
+    # LOUD but non-fatal, same posture as the provisioning hook: without the
+    # grants every upload lands `failed / nc_file_id_unresolved` (WARP-1327).
+    log_error "Could not apply file-indexer oc_* grants (exit $grant_rc) — semantic indexing will fail with nc_file_id_unresolved until they are applied:"
+    printf '%s\n' "$grant_out" | tail -5 >&2
+  fi
+  return 0
+}
+# <<< apply_file_indexer_nc_grants (WARP-1328)
 
 # =============================================================================
 # Start
