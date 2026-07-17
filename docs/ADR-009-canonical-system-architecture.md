@@ -122,6 +122,16 @@ Two access paths for clients:
   Droplet's LAN IP. **No public TLS endpoint** on the orchestrator —
   the only inbound is via WG.
 
+> **Amended by ADR-023 + the 2026-07-13 warning-free-redirect design**
+> (`superpowers/specs/2026-07-13-droplet-local-warning-free-redirect-design.md`,
+> WARP-1301): the box's **canonical address is now its publicly-trusted
+> per-device FQDN** (`https://<box-name>.droplet-us.com`, split-horizon).
+> `droplet.local` survives only as the thing humans *type* — on the
+> single-box shape it 307-redirects to the FQDN, and over the VPN the FQDN
+> is the one URL that works (mDNS does not cross the tunnel). Every
+> *emitted* URL prints the FQDN. The "no public TLS endpoint / inbound only
+> via WG" posture above is unchanged.
+
 Native apps self-pair as WG peers on first launch (Phase 5 in
 droplet-ios/droplet-android). The web dashboard relies on the OS-level
 WG client; we don't ship a per-browser tunnel.

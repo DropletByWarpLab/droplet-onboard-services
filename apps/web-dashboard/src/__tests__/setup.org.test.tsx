@@ -36,6 +36,10 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 const postOrgMock = vi.fn();
+// WARP-1301 — the Org step itself now reads the box's trusted address
+// (DROPLET_PUBLIC_FQDN) via fetchVpnStatus for the workspace-URL preview, so
+// the mock is per-test overridable (default: no FQDN → .local fallback).
+const fetchVpnStatusMock = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -46,14 +50,11 @@ vi.mock("@/lib/api", async () => {
     patchSetupStep: vi.fn(async () => undefined),
     ...claimApiMocks(),
     postOrg: (input: unknown) => postOrgMock(input),
-    // The Address step (after org) reads its web address via fetchVpnStatus;
-    // keep it quiet so the advance assertion can see it.
+    // The Org step (WARP-1301) and the Address step (after org) read the box's
+    // web address via fetchVpnStatus; keep it quiet so assertions can see it.
     fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
     fetchDiscoveredCameras: vi.fn(async () => []),
-    fetchVpnStatus: vi.fn(async () => ({
-      configured: false,
-      endpointConfigured: false,
-    })),
+    fetchVpnStatus: () => fetchVpnStatusMock(),
     fetchModels: vi.fn(async () => ({ models: [] })),
   };
 });
@@ -99,6 +100,11 @@ function fillOrg({ name = "Acme HQ", slug = "acme" } = {}) {
 describe("setup Org step (PR #380)", () => {
   beforeEach(() => {
     postOrgMock.mockReset();
+    fetchVpnStatusMock.mockReset();
+    fetchVpnStatusMock.mockResolvedValue({
+      configured: false,
+      endpointConfigured: false,
+    });
   });
   afterEach(() => {
     vi.clearAllMocks();
@@ -129,6 +135,53 @@ describe("setup Org step (PR #380)", () => {
     expect(
       screen.getByText(/nothing is sent off the box/i),
     ).toBeInTheDocument();
+  });
+
+  // WARP-1301 (spec §5 FQDN-everywhere): the workspace-URL preview prints the
+  // box's trusted address when DROPLET_PUBLIC_FQDN is known, and only falls
+  // back to the droplet.local typing shortcut when it isn't.
+  describe("workspace URL host (WARP-1301)", () => {
+    it("prefixes the slug with the trusted FQDN when the box knows one", async () => {
+      fetchVpnStatusMock.mockResolvedValue({
+        configured: false,
+        endpointConfigured: false,
+        publicFqdn: "studio.droplet-us.com",
+      });
+      render(<SetupPage />);
+      await advanceToOrg();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByText("studio.droplet-us.com /")).toBeInTheDocument();
+      // The .local prefix must NOT be the previewed host anymore…
+      expect(screen.queryByText("droplet.local /")).not.toBeInTheDocument();
+      // …but the name survives in copy as the typing shortcut.
+      expect(screen.getByText(/droplet\.local/)).toBeInTheDocument();
+    });
+
+    it("falls back to the droplet.local shortcut when no FQDN is known", async () => {
+      fetchVpnStatusMock.mockResolvedValue({
+        configured: false,
+        endpointConfigured: false,
+        publicFqdn: null,
+      });
+      render(<SetupPage />);
+      await advanceToOrg();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByText("droplet.local /")).toBeInTheDocument();
+    });
+
+    it("keeps the .local fallback when the status read fails (best-effort)", async () => {
+      fetchVpnStatusMock.mockRejectedValue(new Error("orchestrator starting"));
+      render(<SetupPage />);
+      await advanceToOrg();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByText("droplet.local /")).toBeInTheDocument();
+    });
   });
 
   it("is NOT skippable — no skip control", async () => {

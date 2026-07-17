@@ -635,11 +635,14 @@ main() {
   if [ -n "$_public_fqdn" ]; then
     printf "  Dashboard:     ${_CYAN}https://%s${_RESET} (trusted — green padlock, works on LAN and over VPN)\n" "$_public_fqdn"
     printf "  Shortcut:      type ${_CYAN}droplet.local${_RESET} in any browser on this network — it lands there\n"
+    # WARP-1301 (redirect-design spec §5): every emitted URL prints the FQDN
+    # once it's known — .local survives only as the thing humans type.
+    printf "  API:           ${_CYAN}https://%s/api/health${_RESET}\n" "$_public_fqdn"
   else
     printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
     printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
+    printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
   fi
-  printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
   printf "\n"
   printf "  ${_BOLD}About the browser padlock${_RESET}\n"
   printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"

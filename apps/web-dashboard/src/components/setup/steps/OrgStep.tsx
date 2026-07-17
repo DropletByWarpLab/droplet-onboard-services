@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
-import { postOrg, OrgError } from "@/lib/api";
+import { fetchVpnStatus, postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+import { LAN_FALLBACK_HOST } from "@/lib/box-identity";
 
 /**
  * Wizard step — Org (PR #380, slots AFTER account:
@@ -23,7 +24,9 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * Structure (mirrors the WizOrg design):
  *   - Logo dropzone (dashed accent tile, OPTIONAL) beside the workspace-name
  *     input.
- *   - URL slug input with a `droplet.local /` prefix.
+ *   - URL slug input prefixed with the box's trusted address (WARP-1301,
+ *     redirect-design spec §5): `https://<DROPLET_PUBLIC_FQDN>` when known,
+ *     falling back to the `droplet.local` typing shortcut when not.
  *   - Time zone / industry / company size selects.
  *   - A footnote stating industry + size pick LOCAL smart defaults only and
  *     NOTHING is sent off the box (FEATURES §10 privacy guarantee).
@@ -139,6 +142,31 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
   const [tz, setTz] = useState(TIME_ZONES[0].value);
   const [industry, setIndustry] = useState(INDUSTRIES[0].value);
   const [size, setSize] = useState(COMPANY_SIZES[1].value);
+
+  // WARP-1301 (redirect-design spec §5, FQDN-everywhere): every emitted URL
+  // prints the box's trusted address — `droplet.local` survives only as the
+  // thing humans type. fetchVpnStatus is the dashboard's view of
+  // DROPLET_PUBLIC_FQDN (same read the Address step uses; CT-public, safe for
+  // any authenticated user). Best-effort on purpose: until the box learns its
+  // FQDN from HQ — or if the read fails while services boot — the preview
+  // falls back to the LAN typing shortcut, which is today's behavior.
+  const [fqdn, setFqdn] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await fetchVpnStatus();
+        const trimmed = (s.publicFqdn ?? "").trim();
+        if (!cancelled && trimmed) setFqdn(trimmed);
+      } catch {
+        // Keep the .local fallback — the preview must never block the step.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const displayHost = fqdn ?? LAN_FALLBACK_HOST;
 
   const [logoName, setLogoName] = useState<string | null>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
@@ -338,7 +366,9 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           </div>
         </div>
 
-        {/* Workspace URL (slug) with the droplet.local / prefix */}
+        {/* Workspace URL (slug), prefixed with the box's trusted address —
+            falling back to the droplet.local typing shortcut until the FQDN
+            is known (WARP-1301). */}
         {/* WARP-820: fluid inter-section gaps so the form fits without scroll. */}
         <label htmlFor="org-slug" className="mt-[clamp(10px,2vh,16px)] block">
           <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
@@ -351,7 +381,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
             ].join(" ")}
           >
             <span className="type-subheadline whitespace-nowrap text-label-tertiary">
-              droplet.local /
+              {displayHost} /
             </span>
             <input
               id="org-slug"
@@ -430,8 +460,26 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
         <LearnMoreCard helpAnchor="workspace">
           <p>
             Your workspace is the single &ldquo;company brain&rdquo; everyone you
-            invite shares. The URL — <span className="font-mono">droplet.local
-            /your-workspace</span> — only resolves on your own network.
+            invite shares.{" "}
+            {fqdn ? (
+              <>
+                It lives at{" "}
+                <span className="font-mono">https://{fqdn}/your-workspace</span>{" "}
+                — your Droplet&rsquo;s secure address.{" "}
+                <span className="font-mono">droplet.local</span> is the shortcut
+                you can type on your own network; it lands you on the same
+                address.
+              </>
+            ) : (
+              <>
+                The URL — <span className="font-mono">droplet.local
+                /your-workspace</span> — only resolves on your own network. Once
+                your Droplet finishes securing its connection, links use its
+                trusted address instead, and{" "}
+                <span className="font-mono">droplet.local</span> stays as the
+                shortcut you type.
+              </>
+            )}
           </p>
           <p>
             Industry and company size never leave the appliance. They just let
