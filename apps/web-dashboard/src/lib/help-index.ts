@@ -34,7 +34,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "privacy",
     title: "What is Droplet & how privacy works",
     summary:
-      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-home control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. On your home network, your devices reach the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service — away-from-home access arrives with the secure relay, coming soon.",
+      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-device control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. On your office network, your devices reach the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service — away-from-office access arrives with the secure relay, coming soon.",
     keywords: ["privacy", "what is droplet", "local ai", "local", "private", "on device", "on-device", "no cloud", "data", "security", "gpu", "hardware", "offline"],
   },
   {
@@ -48,8 +48,8 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "workspace",
     title: "Your workspace",
     summary:
-      "A workspace is the shared home for everyone who uses this Droplet — your files, conversations, devices, and people all live inside it. Most homes need just one. The workspace name is what people see; the short web address (the slug) is used in links. You can rename the workspace later from Settings.",
-    keywords: ["workspace", "organization", "tenant", "home", "rename", "slug", "name", "address"],
+      "A workspace is the shared space for everyone who uses this Droplet — your files, conversations, devices, and people all live inside it. Most organizations need just one. The workspace name is what people see; the short web address (the slug) is used in links. You can rename the workspace later from Settings.",
+    keywords: ["workspace", "organization", "tenant", "company", "rename", "slug", "name", "address"],
   },
   {
     id: "roles",
@@ -62,15 +62,15 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "extenders",
     title: "Wi-Fi extenders",
     summary:
-      "If parts of your home are out of the Droplet's Wi-Fi range, add a Droplet extender to widen coverage. Plug it in on the same network and it shows up on the Network page for one-tap approval, usually within about 30 seconds. To approve one, open Network in the sidebar, find the pending extender, and tap Approve. It joins your Droplet's Wi-Fi and starts relaying right away — no separate app or account needed.",
+      "If parts of your office are out of the Droplet's Wi-Fi range, add a Droplet extender to widen coverage. Plug it in on the same network and it shows up on the Network page for one-tap approval, usually within about 30 seconds. To approve one, open Network in the sidebar, find the pending extender, and tap Approve. It joins your Droplet's Wi-Fi and starts relaying right away — no separate app or account needed.",
     keywords: ["extender", "wifi extender", "mesh", "coverage", "range", "repeater", "network", "approve"],
   },
   {
     id: "internet",
     title: "Your box's web address",
     summary:
-      "Your Droplet has its own secure web address — the name you gave it during setup — and it works across your home network, with a padlock and nothing to install. There's nothing to sign up for and no address to type in. Away-from-home access arrives with the secure relay — coming soon; when it lands you'll open the Droplet app, turn on Connect, and use the same address you use at home. No dynamic DNS, no subdomain or token, and no changes to your home router.",
-    keywords: ["web address", "domain", "remote access", "connect", "away from home", "hostname", "url"],
+      "Your Droplet has its own secure web address — the name you gave it during setup — and it works across your office network, with a padlock and nothing to install. There's nothing to sign up for and no address to type in. Away-from-office access arrives with the secure relay — coming soon; when it lands you'll open the Droplet app, turn on Connect, and use the same address you use at the office. No dynamic DNS, no subdomain or token, and no changes to your office router.",
+    keywords: ["web address", "domain", "remote access", "connect", "away from the office", "hostname", "url"],
   },
   {
     id: "storage",
@@ -91,7 +91,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     title: "Remote Access (WireGuard VPN)",
     summary:
       "Remote Access uses WireGuard, a modern open-source VPN. Each device gets its own private key and the key never goes through any cloud service. Add a device, name it, and scan the QR code with the WireGuard app to connect. Revoke a device to stop its access immediately — the lost-phone case, or to rotate a key. The Add a device button needs the box's web address ready first, which happens automatically.",
-    keywords: ["vpn", "wireguard", "remote", "remote access", "tunnel", "qr code", "revoke", "rotate key", "away from home"],
+    keywords: ["vpn", "wireguard", "remote", "remote access", "tunnel", "qr code", "revoke", "rotate key", "away from the office"],
   },
   {
     id: "ai",
@@ -102,10 +102,10 @@ export const HELP_INDEX: readonly HelpEntry[] = [
   },
   {
     id: "devices",
-    title: "Smart home devices",
+    title: "Smart devices",
     summary:
-      "The Droplet speaks Matter, the smart-home protocol most new devices support. Pair a Matter light, switch, sensor, or thermostat and it appears on the Devices page. To pair, scan the QR code on the device — the pairing key is exchanged over your local Wi-Fi with no cloud account. Unpair from the device's detail panel.",
-    keywords: ["smart home", "matter", "device", "devices", "light", "switch", "sensor", "thermostat", "pair", "unpair", "automation"],
+      "The Droplet speaks Matter, the smart-device protocol most new devices support. Pair a Matter light, switch, sensor, or thermostat and it appears on the Devices page. To pair, scan the QR code on the device — the pairing key is exchanged over your local Wi-Fi with no cloud account. Unpair from the device's detail panel.",
+    keywords: ["smart devices", "matter", "device", "devices", "light", "switch", "sensor", "thermostat", "pair", "unpair", "automation"],
   },
   {
     id: "files",

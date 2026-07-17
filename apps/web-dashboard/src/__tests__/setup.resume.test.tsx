@@ -116,7 +116,7 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
       screen.queryByRole("button", { name: /get started/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getAllByText(/set up your home wi-fi/i).length,
+      screen.getAllByText(/set up your wi-fi/i).length,
     ).toBeGreaterThan(0);
   });
 
@@ -187,7 +187,7 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
       screen.queryByRole("button", { name: /get started/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getAllByText(/set up your home wi-fi/i).length,
+      screen.getAllByText(/set up your wi-fi/i).length,
     ).toBeGreaterThan(0);
   });
 

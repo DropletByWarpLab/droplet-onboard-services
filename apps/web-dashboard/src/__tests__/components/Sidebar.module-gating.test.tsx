@@ -47,13 +47,9 @@ vi.mock("@/lib/theme", () => ({
 
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: "home" as const,
-    setWorkspaceType: vi.fn(),
-    isHome: true,
-    isBusiness: false,
-    homeVariant: "B" as const,
+    workspaceType: "business" as const,
+    isBusiness: true,
   }),
-  getHomeVariant: () => "B" as const,
 }));
 
 vi.mock("next/navigation", async () => {

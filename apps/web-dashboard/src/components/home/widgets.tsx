@@ -400,7 +400,7 @@ function StatusWidget({ w, h }: WidgetProps) {
   const stats: [LucideIcon, string, string, string, string][] = [
     [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
     [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
-    [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart-home online", "var(--success)"],
+    [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart devices online", "var(--success)"],
     [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
     voiceRow,
   ];
@@ -817,7 +817,7 @@ export const WIDGETS: Record<string, WidgetMeta> = {
 // Feature-flagged widgets (no backend yet — default OFF).
 const GATED_WIDGETS: Array<[boolean, string, WidgetMeta]> = [
   [FEATURES.homeActivity,    "activity", { title: "Activity",      icon: ActivityIcon, Comp: ActivityWidget, minW: 3, minH: 3, maxW: 6, maxH: 7, scroll: true }],
-  [FEATURES.homeScenes,      "scenes",   { title: "Smart home",    icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
+  [FEATURES.homeScenes,      "scenes",   { title: "Smart devices", icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
   [FEATURES.homeAutomations, "tools",    { title: "Automations",   icon: Wrench,       Comp: ToolsWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
   [FEATURES.homeTasks,       "tasks",    { title: "Tasks",         icon: Check,        Comp: TasksWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
 ];

@@ -1,8 +1,9 @@
 /**
  * WARP-1270 (T18) — Sidebar "Company files" entry (/admin/files).
  *
- * Business-only, owner/admin only — mirrors the server-side
+ * Owner/admin only — mirrors the server-side
  * `requireRole("owner","admin")` gate on GET /api/admin/files/usage.
+ * (WARP-1341: the build is business-only, so there is no workspace gate.)
  * Mock setup mirrors Sidebar.module-gating.test.tsx.
  */
 import { describe, it, expect, vi } from "vitest";
@@ -31,16 +32,11 @@ vi.mock("@/lib/theme", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
-let workspaceIsBusiness = true;
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: workspaceIsBusiness ? ("business" as const) : ("home" as const),
-    setWorkspaceType: vi.fn(),
-    isHome: !workspaceIsBusiness,
-    isBusiness: workspaceIsBusiness,
-    homeVariant: "C" as const,
+    workspaceType: "business" as const,
+    isBusiness: true,
   }),
-  getHomeVariant: () => "C" as const,
 }));
 
 vi.mock("next/navigation", async () => {
@@ -76,8 +72,7 @@ function desktopAside(): HTMLElement {
 }
 
 describe("<Sidebar> Company files entry", () => {
-  it("shows for an owner in Business mode", () => {
-    workspaceIsBusiness = true;
+  it("shows for an owner", () => {
     authRole = "owner";
     render(<Sidebar />);
     const aside = desktopAside();
@@ -86,8 +81,7 @@ describe("<Sidebar> Company files entry", () => {
     ).toHaveAttribute("href", "/admin/files");
   });
 
-  it("shows for an admin in Business mode", () => {
-    workspaceIsBusiness = true;
+  it("shows for an admin", () => {
     authRole = "admin";
     render(<Sidebar />);
     const aside = desktopAside();
@@ -96,17 +90,8 @@ describe("<Sidebar> Company files entry", () => {
     ).toHaveAttribute("href", "/admin/files");
   });
 
-  it("is absent for a non-admin role even in Business mode", () => {
-    workspaceIsBusiness = true;
+  it("is absent for a non-admin role", () => {
     authRole = "family";
-    render(<Sidebar />);
-    const aside = desktopAside();
-    expect(within(aside).queryByRole("link", { name: /company files/i })).toBeNull();
-  });
-
-  it("is absent entirely in Home mode, regardless of role", () => {
-    workspaceIsBusiness = false;
-    authRole = "owner";
     render(<Sidebar />);
     const aside = desktopAside();
     expect(within(aside).queryByRole("link", { name: /company files/i })).toBeNull();

@@ -492,16 +492,16 @@ export function DiscoveryStep({
               } ready to pair`
             : serviceUnavailable
               ? // WARP-1281: don't claim we're scanning while the
-                // smart-home subsystem is demonstrably down — the body
+                // smart-device subsystem is demonstrably down — the body
                 // shows the service-unavailable state (same wording).
-                "Smart home isn't available right now"
+                "Device discovery isn't available right now"
               : // WARP-937: don't claim we're still "scanning" once polling
                 // has stopped with nothing found — the body shows a
                 // no-devices empty state, so the subtitle should match
                 // instead of contradicting it.
                 scanPhase === "stopped"
-                ? "No smart home devices found yet"
-                : "Scanning your network for smart home devices..."
+                ? "No smart devices found yet"
+                : "Scanning your network for smart devices..."
       }
       primary={{ label: "Continue", onClick: handleFinish, showArrow: true }}
       skip={{ label: "Skip for now", onClick: handleFinish }}
@@ -653,10 +653,10 @@ export function DiscoveryStep({
               aria-hidden="true"
             />
             <p className="type-headline text-label-primary mb-1">
-              Smart home isn&apos;t available right now
+              Device discovery isn&apos;t available right now
             </p>
             <p className="type-subheadline text-label-secondary max-w-sm">
-              The Droplet&apos;s smart-home service may still be starting up.{" "}
+              The Droplet&apos;s smart-device service may still be starting up.{" "}
               {scanPhase === "stopped"
                 ? "Scan again in a moment, or continue and add devices later from the Devices page."
                 : "We'll keep checking in the background — you can also continue and add devices later from the Devices page."}
@@ -717,7 +717,7 @@ export function DiscoveryStep({
                 Device discovery didn&apos;t find any devices
               </p>
               <p className="type-subheadline text-label-secondary max-w-sm">
-                Make sure your smart home devices are powered on and in pairing
+                Make sure your smart devices are powered on and in pairing
                 mode, then scan again. You can also enter a pairing code below,
                 or add devices later from the Devices page.
               </p>

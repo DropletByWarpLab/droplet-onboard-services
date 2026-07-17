@@ -2926,17 +2926,18 @@ model OffLanEgressSample {
   @@index([channel, ts(sort: Desc)])
 }
 
-/// ADR-007 + ADR-009: workspace type for this Droplet — Home (single
-/// person / household) vs Business (multi-role with Roles matrix,
-/// Groups, Sessions, full People, Plan/Billing).
+/// ADR-007 + ADR-009: workspace type for this Droplet. Business is the
+/// multi-role IA (Roles matrix, Groups, Sessions, full People,
+/// Plan/Billing).
 ///
 /// Singleton row pinned to `id = 1`. The dashboard's WorkspaceProvider
 /// hydrates from `/api/settings/workspace`; only the setup wizard and
 /// owner-only POST to `/api/settings/workspace` can flip it.
 ///
-/// Defaults to HOME if the row doesn't exist yet — matches the
-/// localStorage fallback already in
-/// `apps/web-dashboard/src/lib/workspace.tsx`.
+/// WARP-1341: this build ships business-only — BUSINESS is the default
+/// and the only reachable value (the wizard and the owner POST both
+/// refuse "home"). HOME stays in the enum solely so pre-migration rows
+/// deserialize; the 20260717 migration flips them to BUSINESS.
 enum WorkspaceType {
   HOME
   BUSINESS
@@ -2946,7 +2947,7 @@ model Workspace {
   // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
   // path use a fixed primary key + prisma upsert without inventing one.
   id            Int           @id @default(1)
-  type          WorkspaceType @default(HOME)
+  type          WorkspaceType @default(BUSINESS)
   /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
   /// Surfaced in the chrome workspace pill + setup wizard.
   displayName   String?
