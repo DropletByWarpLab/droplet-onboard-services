@@ -287,7 +287,24 @@ interface DriveWithLabel extends BridgeDrive {
   displayName: string | null;
   icon: string | null;
   notes: string | null;
+  /** WARP-1339: bare md array name (e.g. "md127" — the exact join key the
+   *  /storage/pools payload's `device` field carries, WITHOUT the /dev/
+   *  prefix this drive's own `device` has) when this mounted filesystem
+   *  lives on an md node or a partition of one. The dashboard joins on it
+   *  to render ONE pooled entry instead of pool card + anonymous GUID
+   *  drive tile. `null` (explicit — clients branch on the field, never on
+   *  its absence) for a standalone drive. The drive is NEVER dropped
+   *  server-side: it is the pool's only fs-level capacity/browse source,
+   *  and tools-core's list_drives stays an honest annotated list. */
+  pool: string | null;
 }
+
+/** WARP-1339: md node (/dev/md127) or a partition of one (/dev/md127p1).
+ *  Capture group 1 is the bare array name — a PARTITION is tagged with its
+ *  ARRAY's name, since /storage/pools only ever names the array. Anchored so
+ *  /dev/md127p1 can never tag as md12 (same pitfall the dashboard's
+ *  poolHasMountedFs matcher guards). */
+const MD_DEVICE_RE = /^\/dev\/(md\d+)(?:p\d+)?$/;
 
 const updateDriveSchema = z.object({
   displayName: z.string().trim().min(1).max(64).optional(),
@@ -435,6 +452,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
+          // WARP-1339: annotate (never drop) the mounted md filesystem with
+          // its bare array name so the dashboard can merge it into the pool
+          // card instead of rendering it twice.
+          pool: MD_DEVICE_RE.exec(d.device)?.[1] ?? null,
         };
       });
 
