@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 import { SafetyChip } from "@/components/email/SafetyChip";
-import { ToggleSwitch } from "@/components/smart-home/ToggleSwitch";
+import { Sect, Toggle } from "@/components/shell/primitives";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import {
@@ -38,8 +38,10 @@ import { buildGreeting, PRESET_TILES } from "@/lib/persona-preview";
  * same <section>.
  *
  * Copy is VERBATIM from the design brief §9 — sentence case, no emoji, no
- * exclamation marks. Tokens only (dp-card, type-*, text-label-*, accent,
- * separator); counters are mono.
+ * exclamation marks. Indigo shell tokens only (.card / .btn primary / shell
+ * Toggle / Sect + the indigo CSS vars, system-red for errors); counters are
+ * mono. The serif preview capsules keep `type-display` (Instrument Serif) per
+ * the personality design brief — WARP-1344.
  */
 
 const CUSTOM_INSTRUCTIONS_CAP = 1200;
@@ -154,17 +156,22 @@ export function PersonalityCard() {
 
   return (
     <section className="mb-10">
-      <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
-        Workspace
-      </h2>
+      <Sect title="Workspace" />
 
-      <div className="dp-card p-4 space-y-4">
+      <div className="card space-y-4">
         {/* Head */}
         <div className="flex items-start gap-2.5">
-          <Sparkles size={16} className="text-label-secondary mt-0.5" aria-hidden />
+          <Sparkles
+            size={16}
+            className="mt-0.5"
+            style={{ color: "var(--text-muted)" }}
+            aria-hidden
+          />
           <div>
-            <p className="type-headline text-label-primary">AI personality</p>
-            <p className="type-footnote text-label-secondary mt-0.5">
+            <p className="type-headline" style={{ color: "var(--text)" }}>
+              AI personality
+            </p>
+            <p className="type-footnote mt-0.5" style={{ color: "var(--text-muted)" }}>
               How Droplet talks — on this dashboard and on voice. It never
               changes what stays private.
             </p>
@@ -172,7 +179,7 @@ export function PersonalityCard() {
         </div>
 
         {loadFailed ? (
-          <p className="type-footnote text-label-secondary">
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
             Couldn’t load personality settings — refresh to try again.
           </p>
         ) : saved === null ? null : (
@@ -196,16 +203,21 @@ export function PersonalityCard() {
                       touch();
                     }}
                     className={`text-left rounded-lg border p-3 transition-colors duration-200 ease-smooth
-                      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
-                      ${on ? "border-accent ring-1 ring-accent bg-accent-subtle/40" : "border-separator hover:border-label-quaternary"}`}
+                      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]
+                      ${on ? "border-[var(--brand)] ring-1 ring-[var(--brand)] bg-[var(--brand-subtle)]" : "border-[var(--border)] hover:border-[var(--text-faint)]"}`}
                   >
-                    <span className="block type-subheadline text-label-primary">
+                    <span className="block type-subheadline" style={{ color: "var(--text)" }}>
                       {t.name}
                     </span>
-                    <span className="block type-footnote text-label-secondary mt-0.5">
+                    <span className="block type-footnote mt-0.5" style={{ color: "var(--text-muted)" }}>
                       {t.desc}
                     </span>
-                    <span className="block bg-accent-subtle rounded-md px-2.5 py-1.5 mt-2 type-display text-[15px] leading-snug text-label-primary">
+                    {/* Serif preview capsule — type-display (Instrument Serif) is
+                        spec'd by the personality design brief and stays. */}
+                    <span
+                      className="block bg-[var(--brand-subtle)] rounded-md px-2.5 py-1.5 mt-2 type-display text-[15px] leading-snug"
+                      style={{ color: "var(--text)" }}
+                    >
                       {t.preview(firstName)}
                     </span>
                   </button>
@@ -216,11 +228,13 @@ export function PersonalityCard() {
             {/* Traits row */}
             <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
               <div className="flex items-center gap-2.5">
-                <span className="type-footnote text-label-secondary">Replies:</span>
+                <span className="type-footnote" style={{ color: "var(--text-muted)" }}>
+                  Replies:
+                </span>
                 <div
                   role="radiogroup"
                   aria-label="Reply length"
-                  className="inline-flex rounded-lg bg-surface-secondary p-0.5"
+                  className="inline-flex rounded-lg bg-[var(--inset)] p-0.5"
                 >
                   {VERBOSITY_OPTIONS.map((o) => {
                     const on = verbosity === o.value;
@@ -235,8 +249,8 @@ export function PersonalityCard() {
                           touch();
                         }}
                         className={`px-3 py-1.5 min-h-[32px] rounded-md type-footnote transition-colors duration-200 ease-smooth
-                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
-                          ${on ? "bg-surface-primary text-label-primary shadow-sm font-medium" : "text-label-secondary"}`}
+                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]
+                          ${on ? "bg-[var(--card-bg)] text-[var(--text)] shadow-sm font-medium" : "text-[var(--text-muted)]"}`}
                       >
                         {o.label}
                       </button>
@@ -244,18 +258,18 @@ export function PersonalityCard() {
                   })}
                 </div>
               </div>
-              {/* The canonical design-system switch (smart-home/ToggleSwitch)
-                  — reused, not re-drawn, so on-state color and thumb motion
-                  stay cohesive with every other toggle on the dashboard. */}
+              {/* The shell Toggle primitive (droplet-shell .sw) — reused, not
+                  re-drawn, so the brand on-state color and thumb motion stay
+                  cohesive with every other indigo-shell toggle (WARP-1344). */}
               <span className="flex items-center gap-2.5">
-                <span className="type-footnote text-label-secondary">
+                <span className="type-footnote" style={{ color: "var(--text-muted)" }}>
                   Use first names
                 </span>
-                <ToggleSwitch
+                <Toggle
                   on={useFirstNames}
                   ariaLabel="Use first names"
-                  onToggle={() => {
-                    setUseFirstNames((v) => !v);
+                  onChange={(next) => {
+                    setUseFirstNames(next);
                     touch();
                   }}
                 />
@@ -267,11 +281,15 @@ export function PersonalityCard() {
               <div className="flex items-center justify-between mb-1.5">
                 <label
                   htmlFor="persona-custom-instructions"
-                  className="type-footnote text-label-secondary"
+                  className="type-footnote"
+                  style={{ color: "var(--text-muted)" }}
                 >
                   Custom instructions
                 </label>
-                <span className="font-mono type-caption-1 text-label-tertiary">
+                <span
+                  className="font-mono type-caption-1"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   {custom.length}/{CUSTOM_INSTRUCTIONS_CAP}
                 </span>
               </div>
@@ -281,7 +299,13 @@ export function PersonalityCard() {
                 value={custom}
                 maxLength={CUSTOM_INSTRUCTIONS_CAP}
                 placeholder='Anything else about how Droplet should communicate — e.g. “Always give the numbers first.”'
-                className="dp-input resize-y"
+                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors resize-y"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 onChange={(e) => {
                   setCustom(e.target.value);
                   touch();
@@ -289,14 +313,19 @@ export function PersonalityCard() {
               />
             </div>
 
-            {/* Live preview — serif capsule, re-renders as controls change */}
+            {/* Live preview — serif capsule (type-display stays per the
+                personality design brief), re-renders as controls change */}
             <div>
-              <p className="flex items-center gap-1 type-caption-1 text-label-tertiary mb-1.5">
+              <p
+                className="flex items-center gap-1 type-caption-1 mb-1.5"
+                style={{ color: "var(--text-muted)" }}
+              >
                 <Sparkles size={12} aria-hidden /> Preview
               </p>
               <p
                 data-testid="persona-live-preview"
-                className="bg-accent-subtle rounded-lg px-3.5 py-2.5 type-display text-[17px] leading-snug text-label-primary"
+                className="bg-[var(--brand-subtle)] rounded-lg px-3.5 py-2.5 type-display text-[17px] leading-snug"
+                style={{ color: "var(--text)" }}
               >
                 {previewLine}
               </p>
@@ -310,13 +339,16 @@ export function PersonalityCard() {
 
             {/* Footer — write chip + dirty-gated Save (§10: the Save click
                 is the confirmation) */}
-            <div className="flex items-center justify-between gap-2 pt-3 border-t border-separator">
+            <div
+              className="flex items-center justify-between gap-2 pt-3"
+              style={{ borderTop: "1px solid var(--card-bd)" }}
+            >
               <SafetyChip safety="Write · confirm" />
               <button
                 type="button"
                 onClick={handleSave}
                 disabled={!dirty || saving}
-                className="dp-btn-primary type-subheadline !min-h-[40px] disabled:opacity-50 disabled:pointer-events-none"
+                className="btn primary type-subheadline !min-h-[40px]"
               >
                 {saving ? "Saving…" : "Save"}
               </button>

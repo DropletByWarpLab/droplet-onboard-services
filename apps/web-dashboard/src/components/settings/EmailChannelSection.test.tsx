@@ -39,6 +39,14 @@ beforeEach(() => {
 });
 
 describe("EmailChannelSection", () => {
+  it("renders the group header via the shell Sect pattern — sentence case, no uppercase eyebrow (WARP-1344)", async () => {
+    render(<EmailChannelSection />);
+    const heading = screen.getByRole("heading", { name: "Outbound email" });
+    expect(heading.className).not.toMatch(/uppercase/);
+    expect(heading.closest(".sect")).not.toBeNull();
+    await waitFor(() => expect(getEmailChannel).toHaveBeenCalled());
+  });
+
   it("loads and renders the current config", async () => {
     getEmailChannel.mockResolvedValueOnce({
       ...baseCfg,

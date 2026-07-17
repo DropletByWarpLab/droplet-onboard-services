@@ -205,4 +205,31 @@ describe("PersonalityCard", () => {
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(fetchPersona).not.toHaveBeenCalled();
   });
+
+  // WARP-1344 — indigo shell conversion. The card renders the shell idiom
+  // (.card surface, shell Toggle) instead of the retired dp-* / green-toggle
+  // language.
+  it("renders the indigo shell card, not the retired dp-card (WARP-1344)", async () => {
+    const { container } = render(<PersonalityCard />);
+    await screen.findByRole("button", { name: "Save" });
+    expect(container.querySelector(".dp-card")).toBeNull();
+    expect(container.querySelector(".card")).not.toBeNull();
+  });
+
+  it("renders the first-names switch as the shell Toggle (brand accent), not the legacy green ToggleSwitch (WARP-1344)", async () => {
+    render(<PersonalityCard />);
+    const sw = await screen.findByRole("switch", { name: /use first names/i });
+    // Shell Toggle = .sw with .on when checked (ON color = var(--brand));
+    // the legacy smart-home ToggleSwitch painted bg-system-green when on.
+    expect(sw.className).not.toMatch(/bg-system-green/);
+    expect(sw).toHaveClass("sw");
+    expect(sw).toHaveClass("on");
+  });
+
+  it("renders the group header via the shell Sect pattern — sentence case, no uppercase eyebrow (WARP-1344)", async () => {
+    render(<PersonalityCard />);
+    const heading = await screen.findByRole("heading", { name: "Workspace" });
+    expect(heading.className).not.toMatch(/uppercase/);
+    expect(heading.closest(".sect")).not.toBeNull();
+  });
 });
