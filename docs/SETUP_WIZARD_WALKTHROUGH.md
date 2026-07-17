@@ -358,10 +358,11 @@ Subtitle:  Scan this QR code with the WireGuard app on your phone.
 │ 4. Tap the toggle to Connect. You'll see a    │
 │    little VPN icon in your status bar.        │
 │                                               │
-│ Once connected, you can reach your Droplet    │
-│ from anywhere — type `droplet.local` or your  │
-│ box's address `<name>.droplet-us.com` in your │
-│ browser.                                      │
+│ Once connected, open your box's secure        │
+│ address `https://<name>.droplet-us.com` in    │
+│ your browser — the same one you use at home.  │
+│ (Names like `droplet.local` only work at      │
+│ home, not over the tunnel.)                   │
 ╰───────────────────────────────────────────────╯
 ```
 

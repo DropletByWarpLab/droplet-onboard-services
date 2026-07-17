@@ -218,8 +218,12 @@ on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
 5. **A client can associate, get a DHCP lease, and resolve the local name.**
    From a phone/laptop: join the `Droplet` SSID with the per-box PSK
    (`sudo cat /etc/droplet/ap-psk`). Confirm it gets a `192.168.20.x` lease
-   (`docker exec droplet-openwrt cat /tmp/dhcp.leases`) and that
-   `https://droplet.local/` loads the dashboard (DNAT to the gateway container).
+   (`docker exec droplet-openwrt cat /tmp/dhcp.leases`) and that typing
+   `droplet.local` loads the dashboard (DNAT to the gateway container).
+   With a publicly-trusted cert installed the address bar ends on the box's
+   canonical `https://<box-name>.droplet-us.com` with a green padlock
+   (WARP-1301 — `droplet.local` is the typing shortcut, not the canonical
+   address); pre-issuance it serves the plain-HTTP TLS status page instead.
 
 6. **`routerConnected` is honest — the dashboard shows ONLINE, not OFFLINE.**
    ```bash
