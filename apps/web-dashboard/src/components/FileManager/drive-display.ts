@@ -69,6 +69,21 @@ export function drivePoolName(d: PoolJoinSource): string | null {
 }
 
 /**
+ * WARP-827 / WARP-1338 — deep link into the existing Nextcloud-backed file
+ * browser at the volume's registered path. The automount service (and, as of
+ * WARP-1338, droplet-storage-pool.sh at pool_format/adopt/reclaim time)
+ * registers each volume as external storage at `/<mount-tail>` — the host
+ * mount's last path segment — so the drive's contents are browsable at that
+ * path with the user's own account (reuse, no new endpoint). FilesPage reads
+ * `?path=` on mount. Shared by DrivesPanel cards and VolumesPanel tiles so
+ * the target can never drift between the two surfaces.
+ */
+export function driveContentsHref(d: { mount: string }): string {
+  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
+  return `/files?path=${encodeURIComponent(`/${tail}`)}`;
+}
+
+/**
  * WARP-1339 — the mounted filesystem backing a pool: the drives-list entry
  * whose device is the pool's md node (or a partition of it). This is the
  * pool's ONLY fs-level capacity/browse source (ADR-019 — real usable

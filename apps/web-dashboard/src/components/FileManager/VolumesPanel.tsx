@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { HardDrive, Layers } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
@@ -11,7 +12,10 @@ import type { DriveInfo, PoolInfo } from "@/lib/types";
 // WARP-1339: pools and drives were two UNJOINED lists, so a mounted pool
 // surfaced here solely as an anonymous GUID drive tile. The shared join
 // helpers merge the mounted md filesystem into ONE pooled tile instead.
+// WARP-1338: tiles deep-link into the file browser via the SAME
+// driveContentsHref the Storage page's cards use — one target, no drift.
 import {
+  driveContentsHref,
   driveDisplayName,
   drivePoolName,
   isPoolBackedDevice,
@@ -40,8 +44,12 @@ function meterKind(p: number): "" | "warn" | "danger" {
 }
 
 /** One volume tile — shared by the pooled and standalone shapes (same card
- *  chrome, meter and byte row; only icon + title differ). Deliberately
- *  non-clickable in this PR — WARP-1338 adds the browse links on top. */
+ *  chrome, meter and byte row; only icon + title differ). WARP-1338: the
+ *  whole tile is clickable into the file browser at the volume's registered
+ *  path, via a stretched link — an absolutely-positioned anchor over the
+ *  `relative` card. The tile has no other interactive children, so nothing
+ *  ever nests inside the anchor; hover tints the title with the brand color
+ *  (150 ms, matching the DriveCard title affordance). */
 function VolumeTile({
   name,
   icon,
@@ -53,10 +61,13 @@ function VolumeTile({
 }) {
   const p = pct(d);
   return (
-    <div role="listitem" className="card">
+    <div role="listitem" className="card relative group">
       <div className="card-h">
         <span className="ci">{icon}</span>
-        <span className="ct" title={name}>
+        <span
+          className="ct transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+          title={name}
+        >
           {name}
         </span>
         <span className="cm">{formatBytes(d.free_bytes)} free</span>
@@ -76,6 +87,13 @@ function VolumeTile({
         <span style={{ color: "var(--text)" }}>{formatBytes(d.used_bytes)}</span>
         <span>of {formatBytes(d.size_bytes)}</span>
       </div>
+
+      <Link
+        href={driveContentsHref(d)}
+        aria-label={`Open ${name}`}
+        className="absolute inset-0 focus-visible:outline-none focus-visible:ring-2"
+        style={{ borderRadius: "inherit" }}
+      />
     </div>
   );
 }

@@ -159,6 +159,26 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
       expect.stringContaining("/files?path=%2Fphotos-ab12cd34"),
     );
   });
+
+  // WARP-1338 (c): the whole card is the click target — the title link
+  // carries an absolutely-positioned overlay spanning the (relative) card —
+  // while the rename control stays functional ABOVE it. Never a button
+  // nested inside an anchor.
+  it("stretches the drive link across the whole card (WARP-1338)", () => {
+    setup({ drives: [makeDrive()] });
+    const link = screen.getByRole("link", { name: /open/i });
+    const overlay = link.querySelector('[aria-hidden="true"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay!.className).toMatch(/absolute/);
+    expect(overlay!.className).toMatch(/inset-0/);
+    expect(document.querySelector("a button")).toBeNull();
+  });
+
+  it("keeps the Rename control clickable above the stretched link (WARP-1338)", () => {
+    setup({ drives: [makeDrive()] });
+    fireEvent.click(screen.getByRole("button", { name: /rename/i }));
+    expect(screen.getByLabelText("Drive name")).toBeInTheDocument();
+  });
 });
 
 describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {

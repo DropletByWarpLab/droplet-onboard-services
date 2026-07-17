@@ -82,8 +82,18 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
+// WARP-1338 — `let` bindings so the failed-listing tests can hand the page a
+// listing error (the WebDAV 404 an unregistered drive deep-link hits). Read
+// at call time; reset in beforeEach below.
+let mockFiles: FileEntryInfo[] = FILES;
+let mockFilesError: unknown = undefined;
 vi.mock("@/lib/hooks/useFiles", () => ({
-  useFiles: () => ({ files: FILES, error: undefined, isLoading: false, refresh: vi.fn() }),
+  useFiles: () => ({
+    files: mockFilesError ? [] : mockFiles,
+    error: mockFilesError,
+    isLoading: false,
+    refresh: vi.fn(),
+  }),
 }));
 
 vi.mock("@/lib/hooks/useFavorites", () => ({
@@ -148,6 +158,8 @@ beforeEach(() => {
   mockSharedAvailable = true;
   mockUser = { id: "u1", email: "family@example.com", role: "family" };
   mockSearchParamsString = "";
+  mockFiles = FILES;
+  mockFilesError = undefined;
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -166,6 +178,39 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
   it("renders the file list rows", () => {
     render(<FilesPage />);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
+  });
+});
+
+// WARP-1338 — a FAILED listing must never masquerade as an empty folder.
+// A drive tile deep-links to /files?path=/<mount-tail>; when the drive isn't
+// registered in Nextcloud the WebDAV listing 404s, and the page used to
+// ignore the useFiles error entirely — rendering the false "This folder is
+// empty" over what is actually a broken browse chain.
+describe("<FilesPage /> — failed listing is distinct from empty (WARP-1338)", () => {
+  it("renders the drive-not-connected state (not 'empty') when a deep-linked listing fails", () => {
+    mockSearchParamsString = "path=%2Fpool-cafef00d";
+    mockFilesError = new Error("Request failed with status 404");
+    render(<FilesPage />);
+    expect(
+      screen.getByText(/isn't connected to the file browser yet/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a generic couldn't-load state at the root (not 'empty') on error", () => {
+    mockFilesError = new Error("network down");
+    render(<FilesPage />);
+    expect(screen.getByText(/couldn't load your files/i)).toBeInTheDocument();
+    expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the honest empty state when the listing succeeds with zero entries", () => {
+    mockFiles = [];
+    render(<FilesPage />);
+    expect(screen.getByText(/this folder is empty/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/isn't connected to the file browser/i)
+    ).not.toBeInTheDocument();
   });
 });
 

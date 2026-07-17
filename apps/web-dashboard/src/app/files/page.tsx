@@ -209,7 +209,11 @@ export default function FilesPage() {
     if (shareFile) loadExistingShares(shareFile.path);
   }, [shareFile, loadExistingShares]);
 
-  const { files, isLoading, refresh } = useFiles(currentPath, space);
+  // WARP-1338: destructure the listing error too — a failed WebDAV listing
+  // (e.g. the 404 a drive tile deep-link hits before the drive is registered
+  // in Nextcloud) must render as a distinct failure state, never masquerade
+  // as the false "This folder is empty".
+  const { files, isLoading, error: listingError, refresh } = useFiles(currentPath, space);
   const fm = useFileManager(currentPath);
 
   // WARP-883 — switch space: jump to that space's root and clear selection so
@@ -888,6 +892,37 @@ export default function FilesPage() {
                   style={{ color: "var(--text-muted)" }}
                 >
                   Loading...
+                </div>
+              ) : listingError ? (
+                /* WARP-1338 — failed listing ≠ empty folder. A deep-linked
+                   drive path that 404s means the drive isn't registered in
+                   the file browser (yet); at the root it's a plain load
+                   failure. Either way: honest copy + a retry, never the
+                   false "This folder is empty". */
+                <div
+                  className="flex flex-col items-center justify-center h-48 px-6 text-center"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  <p className="type-subheadline mb-1">
+                    {currentPath === "/"
+                      ? "We couldn't load your files"
+                      : "This drive isn't connected to the file browser yet"}
+                  </p>
+                  <p
+                    className="type-caption-1 mb-3"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    {currentPath === "/"
+                      ? "Something interrupted the connection. Try again in a moment."
+                      : "Its files will show up here once it finishes connecting. Try again in a moment."}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => refresh()}
+                  >
+                    Try again
+                  </button>
                 </div>
               ) : files.length === 0 ? (
                 <div
