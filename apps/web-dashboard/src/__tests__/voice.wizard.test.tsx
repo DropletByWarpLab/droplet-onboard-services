@@ -348,6 +348,46 @@ describe("CalibrationWizard (WARP-1055)", () => {
     ).toBeInTheDocument();
   });
 
+  it("buttons use the indigo shell idiom — no legacy dp-btn tokens (WARP-1345)", async () => {
+    // The wizard's Dialog portals to document.body but carries the
+    // `droplet-shell` scope on its backdrop, so the shell `btn` classes
+    // resolve. Fail-state retries are quiet; the confirm/result actions
+    // are primary-weight. Legacy `dp-btn-*` / `type-*` must be gone.
+    measureMock.mockResolvedValue({
+      rms_dbfs: -20,
+      peak_dbfs: -10,
+      duration_s: 5,
+    });
+    renderWizard();
+    const tryAgain = await screen.findByRole(
+      "button",
+      { name: "Try again" },
+      { timeout: 3000 },
+    );
+    expect(tryAgain).toHaveClass("btn", "ghost");
+    expect(tryAgain.className).not.toMatch(/dp-btn|type-/);
+    expect(document.body.innerHTML).not.toContain("dp-btn");
+  });
+
+  it("confirm + result primaries are shell primary buttons (WARP-1345)", async () => {
+    mockHealthyMeasurements();
+    applyMock.mockResolvedValue({ calibrated: true });
+    const { rerender, onClose } = renderWizard();
+    await driveWakeHits(rerender, onClose, 3);
+    await screen.findByText("Confirm and apply", undefined, { timeout: 5000 });
+
+    const apply = screen.getByRole("button", { name: "Apply calibration" });
+    expect(apply).toHaveClass("btn", "primary");
+    expect(apply.className).not.toMatch(/dp-btn|type-/);
+
+    fireEvent.click(apply);
+    await screen.findByText("Calibrated", undefined, { timeout: 3000 });
+    const done = screen.getByRole("button", { name: "Done" });
+    expect(done).toHaveClass("btn", "primary");
+    expect(done.className).not.toMatch(/dp-btn|type-/);
+    expect(document.body.innerHTML).not.toContain("dp-btn");
+  });
+
   it("closing while the apply is in flight is ignored — the write lands (review F3)", async () => {
     mockHealthyMeasurements();
     let resolveApply: (v: unknown) => void = () => {};

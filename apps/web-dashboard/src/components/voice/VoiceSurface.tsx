@@ -363,7 +363,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaFirstRun}
@@ -374,7 +374,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-secondary type-subheadline"
+          className="btn ghost"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaRecalibrate}
@@ -385,7 +385,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaFix}
@@ -400,7 +400,7 @@ export function VoiceSurface({
         </Link>
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={onRefresh}
         >
           Check again
@@ -446,7 +446,7 @@ export function VoiceSurface({
             <span className="txt">{surface.banner}</span>
             <button
               type="button"
-              className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5"
+              className="btn primary sm"
               onClick={() => setWizardOpen(true)}
             >
               {COPY.ctaRecalibrate}
