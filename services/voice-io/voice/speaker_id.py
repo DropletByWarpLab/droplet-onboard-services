@@ -49,6 +49,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -206,12 +207,20 @@ class OnnxSpeakerEmbedder:
                 "onnxruntime not loaded — speaker embedding unavailable",
             )
         if self._session is None:
-            self._session = _ort.InferenceSession(
-                self.model_path, providers=["CPUExecutionProvider"],
-            )
+            try:
+                self._session = _ort.InferenceSession(
+                    self.model_path, providers=["CPUExecutionProvider"],
+                )
+            except Exception as exc:  # corrupt weights, bad SPEAKER_MODEL_PATH, etc.
+                raise SpeakerIdUnavailable(
+                    f"failed to load speaker model at {self.model_path}: {exc}",
+                ) from exc
             logger.info("speaker model loaded: %s", self.model_path)
         feats = compute_fbank(pcm16, samplerate)[None].astype(np.float32)
-        (out,) = self._session.run(None, {"x": feats})
+        try:
+            (out,) = self._session.run(None, {"x": feats})
+        except Exception as exc:  # onnxruntime raises its own Fail/RuntimeException types
+            raise SpeakerIdUnavailable(f"speaker embedding inference failed: {exc}") from exc
         return l2_normalize(out[0])
 
 
@@ -448,33 +457,44 @@ class EnrollmentSessions:
     def __init__(self, ttl_s: float = SESSION_TTL_S) -> None:
         self._ttl_s = ttl_s
         self._sessions: dict[str, EnrollmentSession] = {}
+        # FastAPI runs sync `def` endpoints in a threadpool, so two requests
+        # can straddle the TTL boundary concurrently. Guard every mutation
+        # (and the purge-then-read sequence) with one re-entrant lock so a
+        # purge racing a get/discard can never raise KeyError on an
+        # already-removed session.
+        self._lock = threading.RLock()
 
     def _purge(self) -> None:
-        deadline = time.time() - self._ttl_s
-        for sid in [
-            sid
-            for sid, s in self._sessions.items()
-            if s.created_at < deadline
-        ]:
-            del self._sessions[sid]
+        with self._lock:
+            deadline = time.time() - self._ttl_s
+            for sid in [
+                sid
+                for sid, s in self._sessions.items()
+                if s.created_at < deadline
+            ]:
+                self._sessions.pop(sid, None)
 
     def create(self, user_id: str) -> EnrollmentSession:
-        self._purge()
-        session = EnrollmentSession(user_id)
-        self._sessions[session.id] = session
-        return session
+        with self._lock:
+            self._purge()
+            session = EnrollmentSession(user_id)
+            self._sessions[session.id] = session
+            return session
 
     def get(self, session_id: str) -> Optional[EnrollmentSession]:
-        self._purge()
-        return self._sessions.get(session_id)
+        with self._lock:
+            self._purge()
+            return self._sessions.get(session_id)
 
     def discard(self, session_id: str) -> bool:
         """Drop a session (cancel path). Idempotent."""
-        return self._sessions.pop(session_id, None) is not None
+        with self._lock:
+            return self._sessions.pop(session_id, None) is not None
 
     def discard_for_user(self, user_id: str) -> None:
         """Removing a voiceprint also kills any in-flight re-record."""
-        for sid in [
-            sid for sid, s in self._sessions.items() if s.user_id == user_id
-        ]:
-            del self._sessions[sid]
+        with self._lock:
+            for sid in [
+                sid for sid, s in self._sessions.items() if s.user_id == user_id
+            ]:
+                self._sessions.pop(sid, None)

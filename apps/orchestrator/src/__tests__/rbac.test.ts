@@ -240,6 +240,19 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
 
+  // WARP-1056: voiceprint enrollment — owner+admin only, same posture as
+  // the sibling voice-assistant proxy above. Enrollment captures and
+  // stores biometric embeddings, so this is deliberately not open to
+  // family/guest, and `service` is denied everywhere (voice-io never
+  // initiates enrollment on its own).
+  { method: "get", path: "/api/voice/profiles", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/enroll/start", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/enroll/capture", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/enroll/verify", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/enroll/commit", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/voice/enroll/abc", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/voice/profiles/abc", allowed: ["owner", "admin"] },
+
   // ── llm sessions (own) ── ──
   // POST /llm/chat: includes `service` because voice-io's principal
   //   posts here (see `services/voice-io/voice/llm.py` — the comment

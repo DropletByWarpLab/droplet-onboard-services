@@ -389,6 +389,9 @@ export function EnrollmentWizard({
 
   function requestClose() {
     if (saving) return; // the write is in flight — never close under it
+    if (starting) return; // start-session request is in flight — closing now
+    // would race the response and leave an orphaned on-box session with
+    // nothing to cancel (sessionRef.current is still null until it resolves).
     const sid = sessionRef.current;
     if (sid) {
       // "Cancel deletes these recordings now." — best-effort; the box's
@@ -707,7 +710,7 @@ export function EnrollmentWizard({
             type="button"
             className="close"
             aria-label="Close"
-            disabled={saving}
+            disabled={saving || starting}
             onClick={requestClose}
           >
             ×
