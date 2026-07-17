@@ -82,6 +82,52 @@ describe("WARP-471 — models page payload", () => {
     expect(payload.cloudSpendUsd).toBe(0);
   });
 
+  // ── WARP-1289 — honest degraded signal (same blindspot WARP-1284 fixed
+  //    for the wizard): an empty local list from a DOWN gateway must carry
+  //    `degraded: true`, never masquerade as "no local models". ──
+
+  it("flags degraded when ai-gateway is unreachable (WARP-1289)", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const payload = await getModelsPagePayload();
+    expect(payload.local).toEqual([]);
+    expect(payload.degraded).toBe(true);
+  });
+
+  it("flags degraded when the gateway reports its ollama provider failed (WARP-1289)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [],
+      degraded_providers: ["ollama"],
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.local).toEqual([]);
+    expect(payload.degraded).toBe(true);
+  });
+
+  it("does NOT flag degraded for a cloud-only provider failure (WARP-1289)", async () => {
+    // Parity with GET /api/llm/models: only ollama serves LOCAL models, so a
+    // cloud provider erroring during the gateway's listing fan-out does not
+    // impugn the local list.
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "1", provider: "ollama", name: "llama3.1:70b", context_window: 131072 },
+      ],
+      degraded_providers: ["openai"],
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.local).toHaveLength(1);
+    expect(payload.degraded).toBe(false);
+  });
+
+  it("healthy listing reports degraded: false (WARP-1289)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "1", provider: "ollama", name: "llama3.1:70b", context_window: 131072 },
+      ],
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.degraded).toBe(false);
+  });
+
   it("placeholder fields return safe defaults (gpu null, avg latency 0)", async () => {
     listModelsMock.mockResolvedValue({ models: [] });
     const payload = await getModelsPagePayload();
@@ -102,6 +148,30 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.body.local).toHaveLength(1);
     expect(res.body.cloud).toHaveLength(3);
     expect(res.body.gpu).toBeNull();
+  });
+
+  it("serves a degraded payload UNCACHED so it self-heals (WARP-1289)", async () => {
+    // Mirror of the WARP-1284 rule on /api/llm/models: never cache the
+    // degraded fallback — the next request retries the gateway so the page
+    // recovers the moment the AI service is reachable again.
+    const { cacheSet } = await import("../services/cache.service.js");
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(true);
+    expect(res.body.local).toEqual([]);
+    expect(vi.mocked(cacheSet)).not.toHaveBeenCalled();
+  });
+
+  it("caches a healthy payload (WARP-1289 leaves the happy path alone)", async () => {
+    const { cacheSet } = await import("../services/cache.service.js");
+    listModelsMock.mockResolvedValue({ models: [] });
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(false);
+    expect(vi.mocked(cacheSet)).toHaveBeenCalledTimes(1);
   });
 
   it("PATCH /api/models 404s — read-only enforcement", async () => {

@@ -99,15 +99,25 @@ export default function ModelsPage() {
 
   const { local, cloud, gpu, avgLatencyMs, cloudSpendUsd } = data;
   const localEmpty = local.length === 0;
-  const statusLabel = localEmpty
-    ? "Local models unavailable"
-    : local.length === 1
-      ? "1 local model"
-      : `${local.length} local models`;
+  // WARP-1289 — the orchestrator's honesty flag: the local list can't be
+  // trusted as complete (ai-gateway unreachable, or its Ollama provider
+  // failed during listing). Same pattern as the wizard's WARP-1284
+  // model-degraded note: never render "no local models" for an outage.
+  const degraded = data.degraded === true;
+  const statusLabel = degraded
+    ? "AI service unreachable"
+    : localEmpty
+      ? "Local models unavailable"
+      : local.length === 1
+        ? "1 local model"
+        : `${local.length} local models`;
 
   return (
     <div>
-      {chrome({ tone: localEmpty ? "warn" : "ok", label: statusLabel })}
+      {chrome({
+        tone: degraded || localEmpty ? "warn" : "ok",
+        label: statusLabel,
+      })}
 
       <div className="p-6 space-y-8">
         {/* Intro — sets the read-only, local-first framing. */}
@@ -142,7 +152,28 @@ export default function ModelsPage() {
             </span>
           </div>
 
-          {localEmpty ? (
+          {localEmpty && degraded ? (
+            /* WARP-1289 — outage state: the AI service didn't answer, so we
+             * genuinely don't know what's installed. Distinct copy from the
+             * "no local models" empty state below — an outage must never
+             * read as "you have no models". */
+            <div className="dp-card text-center py-10">
+              <ServerCrash
+                size={28}
+                className="mx-auto text-label-quaternary mb-3"
+                aria-hidden
+              />
+              <h3 className="type-subheadline text-label-primary font-medium mb-1">
+                Can’t reach your AI service
+              </h3>
+              <p className="type-footnote text-label-tertiary max-w-md mx-auto">
+                We couldn’t reach your Droplet’s AI service to read its model
+                list, so we can’t show your local models right now. They’re
+                still on the box — this page refreshes automatically and will
+                show them again as soon as the service responds.
+              </p>
+            </div>
+          ) : localEmpty ? (
             <div className="dp-card text-center py-10">
               <ServerCrash
                 size={28}
@@ -158,11 +189,24 @@ export default function ModelsPage() {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {local.map((m) => (
-                <LocalModelCard key={m.name} model={m} />
-              ))}
-            </div>
+            <>
+              {degraded && (
+                /* WARP-1289 — the gateway answered but its local provider
+                 * errored mid-listing: the list below may be incomplete. */
+                <p
+                  className="type-footnote text-label-tertiary mb-3"
+                  role="status"
+                >
+                  We couldn’t fully reach your AI service — some local models
+                  may be missing from this list. It refreshes automatically.
+                </p>
+              )}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {local.map((m) => (
+                  <LocalModelCard key={m.name} model={m} />
+                ))}
+              </div>
+            </>
           )}
         </section>
 

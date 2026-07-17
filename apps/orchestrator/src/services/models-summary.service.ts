@@ -63,6 +63,16 @@ export interface ModelsPagePayload {
   gpu: GpuInfo | null;
   avgLatencyMs: number;
   cloudSpendUsd: number;
+  /**
+   * WARP-1289 — honesty flag, mirroring WARP-1284's `degraded` on
+   * GET /api/llm/models: true when `local` can't be trusted as complete
+   * because the ai-gateway was unreachable OR the gateway reported its
+   * local Ollama provider raised during the listing fan-out
+   * (`degraded_providers`). An empty `local` WITH `degraded` means
+   * "can't reach the AI service right now", NOT "no model pulled yet" —
+   * the Models page renders the two differently.
+   */
+  degraded: boolean;
 }
 
 /**
@@ -87,9 +97,18 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   // Local list — best-effort. If ai-gateway is unavailable we still
   // render the page (empty local list + the cloud placeholders) so the
   // dashboard doesn't dead-end on the Models tab during an outage.
+  //
+  // WARP-1289: but never SILENTLY — an unreachable gateway (or a gateway
+  // whose local Ollama provider raised during the listing fan-out, per
+  // WARP-1284's `degraded_providers`) sets `degraded: true` so the page
+  // can say "can't reach your AI service" instead of "no local models".
+  // A cloud-only provider failure does NOT degrade: only ollama serves
+  // local models (same rule as GET /api/llm/models).
   let local: LocalModelInfo[] = [];
+  let degraded = false;
   try {
     const resp = await aiGateway.listModels();
+    degraded = resp.degraded_providers?.includes("ollama") ?? false;
     local = resp.models.map((m) => ({
       name: m.name,
       family: inferFamily(m.name),
@@ -103,6 +122,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     }));
   } catch {
     local = [];
+    degraded = true;
   }
 
   // Cloud list — three providers per FEATURES.md §2.11. All
@@ -127,5 +147,6 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // Cloud spend: sum over OffLanEgressSample where channel =
     // cloud_model_escape. E2 dependency; placeholder 0.
     cloudSpendUsd: 0,
+    degraded,
   };
 }

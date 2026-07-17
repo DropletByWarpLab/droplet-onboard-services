@@ -256,6 +256,14 @@ export interface ModelsPagePayload {
   gpu: ModelsGpuInfo | null;
   avgLatencyMs: number;
   cloudSpendUsd: number;
+  /** WARP-1289 (additive; optional so an older orchestrator that predates
+   *  the flag still parses): true when `local` can't be trusted as complete —
+   *  the orchestrator couldn't reach the ai-gateway, or the gateway reported
+   *  its local Ollama provider failed during listing. An empty `local` WITH
+   *  `degraded` means "can't reach the AI service right now", NOT "no local
+   *  models" — the page renders the two differently (same honesty pattern
+   *  as the wizard's WARP-1284 model-degraded note). */
+  degraded?: boolean;
 }
 
 // WARP-311: legacy session types removed alongside the orchestrator
