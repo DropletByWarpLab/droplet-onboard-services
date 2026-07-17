@@ -302,6 +302,16 @@ const updatePoolSchema = z.object({
   notes: z.string().trim().max(512).nullable().optional(),
 });
 
+/** WARP-1337: optional customer-facing name accepted at pool CREATE time, so a
+ *  new pool is born named instead of waiting for a later PATCH rename. Same
+ *  constraint as the rename schema. Zod-parsed BEFORE any prisma call (pre-DB
+ *  gate); the name rides in the confirm-token params and is seeded into the
+ *  StoragePool row only after the bridge reports the create succeeded — it is
+ *  never forwarded to the host script (which has no such parameter). */
+const createPoolNameSchema = z.object({
+  displayName: z.string().trim().min(1).max(64).optional(),
+});
+
 /**
  * GET /api/storage — return the authenticated user's Nextcloud storage quota.
  *
@@ -813,9 +823,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     resourceId: string,
     params: Record<string, unknown>,
   ) {
+    // WARP-1337: pool_create may carry the owner's chosen displayName in its
+    // confirm-token params. It is orchestrator-side seeding only — the host
+    // script has no such parameter — so split it off before the bridge call.
+    const { displayName, ...bridgeParams } = params as Record<string, unknown> & {
+      displayName?: unknown;
+    };
     try {
       const { ok, body } = await bridgePoolCommand(service, {
-        ...params,
+        ...bridgeParams,
         device: resourceId,
       });
       if (!ok) {
@@ -826,6 +842,33 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           ok: false,
           error: (body.error as string) || "The storage service refused this operation.",
         });
+      }
+      if (service === "pool_create" && typeof displayName === "string" && displayName.trim()) {
+        // Seed the customer-facing name the moment the pool exists, keyed by
+        // its md device — same row PATCH /storage/pools/:device upserts.
+        // `level` was validated against VALID_LEVELS when the token was
+        // minted; re-check before writing the enum column. A failed seed must
+        // NOT fail the response: the pool WAS created on the host, and the
+        // owner can still name it via the rename flow.
+        const level = bridgeParams.level;
+        if (typeof level === "string" && VALID_LEVELS.has(level)) {
+          try {
+            await prisma.storagePool.upsert({
+              where: { device: resourceId },
+              create: {
+                device: resourceId,
+                displayName: displayName.trim(),
+                level: level as $Enums.ArrayLevel,
+              },
+              update: { displayName: displayName.trim() },
+            });
+          } catch (err) {
+            logger.warn(
+              { err, device: resourceId },
+              "Pool created but seeding its StoragePool displayName failed",
+            );
+          }
+        }
       }
       return res.json({ ok: true, status: "ok", operation: service, device: resourceId, ...body });
     } catch (err) {
@@ -946,6 +989,17 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   // POST /api/storage/pools — create a pool (DESTRUCTIVE).
   router.post("/storage/pools", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      // WARP-1337: zod-validate the optional displayName FIRST — before the
+      // evaluate step below reaches prisma (pre-DB static gate: prisma calls
+      // only after zod parsing).
+      const parsedName = createPoolNameSchema.safeParse(req.body ?? {});
+      if (!parsedName.success) {
+        return res.status(400).json({
+          error: "Invalid displayName",
+          details: parsedName.error.flatten(),
+        });
+      }
+      const { displayName } = parsedName.data;
       const { device, level, members, confirmPhrase } = req.body || {};
       if (!validMdDevice(device)) {
         return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
@@ -969,7 +1023,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         prisma,
         "pool_create",
         device,
-        { level, members, confirm_phrase: confirmPhrase ?? "" },
+        {
+          level,
+          members,
+          confirm_phrase: confirmPhrase ?? "",
+          // WARP-1337: carried through the confirm token for the post-create
+          // StoragePool seed; stripped before the bridge call (executeStorageOp).
+          ...(displayName ? { displayName } : {}),
+        },
         req.user?.id,
       );
     } catch (err) {
