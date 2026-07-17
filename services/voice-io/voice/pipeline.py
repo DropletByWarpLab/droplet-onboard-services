@@ -324,6 +324,11 @@ DEFAULT_FLATLINE_DBFS = -70.0      # frames below this count as "no signal".
                                    # A healthy capture chain's noise floor is
                                    # ≈ -60…-50 dBFS; a wedged DSP emits exact
                                    # zeros (floor) or ±1-count dither (≈ -90).
+                                   # Tuned in the EFFECTIVE (post-gain) domain;
+                                   # frames are tracked pre-gain (WARP-1055),
+                                   # so the compare compensates by
+                                   # 20·log10(input_gain) — see
+                                   # _track_input_level (WARP-1060).
                                    # Env: VOICE_FLATLINE_DBFS.
 DEFAULT_RMS_WINDOW_FRAMES = 25     # rolling-RMS window ≈ 2 s of 80 ms frames —
                                    # smooth enough for a wizard level meter,
@@ -1244,6 +1249,19 @@ class WakePipeline:
             else RMS_DBFS_FLOOR
         )
         now = time.time()
+        # Gain-compensated flatline gate (WARP-1060, R1 from the WARP-1055
+        # review). The threshold is tuned against the EFFECTIVE signal the
+        # detector hears, but the frame here is RAW (pre-gain) — on a box
+        # with input_gain > 1 a healthy chain whose raw self-noise sits
+        # below the un-compensated -70 dBFS would read as "no signal" and
+        # false-flag the DSP wedge after a quiet flatline window. Shift the
+        # gate down by the gain (20·log10) so the margin includes the boost.
+        # Wedge semantics survive: ±1-count dither is ≈ -90 dBFS, still
+        # below the shifted gate at any realistic calibrated gain (×8 →
+        # gate ≈ -88). Unlocked read of _input_gain matches _on_frame.
+        flatline_gate = (
+            self._flatline_dbfs - 20.0 * math.log10(self._input_gain)
+        )
         with self._lock:
             self._input_rms_dbfs = rolling_dbfs
             if self._audio_watch_started_at is None:
@@ -1251,7 +1269,7 @@ class WakePipeline:
                 # session normally sets this at stream-open; this covers
                 # direct _on_frame use (tests) without special-casing.
                 self._audio_watch_started_at = now
-            if frame_dbfs > self._flatline_dbfs:
+            if frame_dbfs > flatline_gate:
                 self._last_audio_at = now
 
     def _on_frame(self, frame: np.ndarray) -> None:

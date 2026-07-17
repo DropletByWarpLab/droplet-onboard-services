@@ -729,6 +729,20 @@ def audio_test_tone(duration_s: float = 1.0, frequency_hz: float = 440.0) -> Tes
     )
 
 
+# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
+# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
+# interleaved buffers); a second concurrent measure answers 409 so the
+# dashboard can tell "busy, retry" apart from "device broken" (503).
+# threading.Lock works because these endpoints are sync `def`s — FastAPI
+# runs each in its own threadpool thread. /audio/test-record opens the
+# same capture device, so it holds the same lock (WARP-1060).
+_capture_lock = threading.Lock()
+
+_CAPTURE_BUSY_DETAIL = (
+    "Another microphone measurement is already running — try again in a few seconds."
+)
+
+
 @app.post("/audio/test-record", response_model=TestRecordResponse)
 def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
     """Record a short clip from the picked input + report level.
@@ -748,6 +762,8 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
         raise HTTPException(
             status_code=400, detail="duration_s must be between 0.1 and 10.0",
         )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
         result = measure_input_level(
             duration_s=duration_s,
@@ -757,25 +773,25 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
         )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        # Same operational-fault mapping as /audio/measure (WARP-1060):
+        # device busy / unplugged / rate-rejected is a retryable 503,
+        # never a raw 500 relayed to the dashboard.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The microphone didn't respond (device busy or "
+                f"disconnected: {exc}). Check the mic and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
     return TestRecordResponse(
         rms_dbfs=result["rms_dbfs"],
         peak_dbfs=result["peak_dbfs"],
         samples=result["samples"],
         duration_s=duration_s,
     )
-
-
-# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
-# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
-# interleaved buffers); a second concurrent measure answers 409 so the
-# dashboard can tell "busy, retry" apart from "device broken" (503).
-# threading.Lock works because these endpoints are sync `def`s — FastAPI
-# runs each in its own threadpool thread.
-_capture_lock = threading.Lock()
-
-_CAPTURE_BUSY_DETAIL = (
-    "Another microphone measurement is already running — try again in a few seconds."
-)
 
 
 @app.post("/audio/measure", response_model=MeasureResponse)
