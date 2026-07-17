@@ -122,6 +122,21 @@ class MissingNcTokenError extends Error {
 }
 
 /**
+ * WARP-582 — a request that reaches a files handler without an authenticated
+ * username must be refused with 401 (fail-closed), never run as anyone else
+ * and never surface as a 500 invariant crash. Historically getUser() was
+ * `req.user?.username || "admin"` — the ORCH-007 fail-open where a missing
+ * user silently ran every file op as the Nextcloud admin; #944 made it throw,
+ * and this sentinel pins the thrown shape to a 401 in handleFileError.
+ */
+class MissingAuthUserError extends Error {
+  constructor() {
+    super("Authenticated user required — please log in again");
+    this.name = "MissingAuthUserError";
+  }
+}
+
+/**
  * WARP-861 — the MCP file tools call these routes with the service
  * bearer (SERVICE_TOKEN_MCP → `_service:mcp`) plus the per-user
  * Nextcloud credential the agent loop threads via `_meta.ncToken`:
@@ -158,7 +173,9 @@ function getUser(req: Request): string {
   const username = req.user?.username;
   // authMiddleware guarantees req.user on these routes; an absent username is
   // an invariant break, not a legitimate "admin" default (ORCH-007 fail-open).
-  if (!username) throw new Error("authenticated user required");
+  // WARP-582: typed sentinel → handleFileError maps it to 401 (re-auth), so
+  // the fail-closed refusal never degrades or surfaces as a 500.
+  if (!username) throw new MissingAuthUserError();
   return username;
 }
 
@@ -634,6 +651,14 @@ function handleFileError(
     return;
   }
   if (err instanceof MissingNcTokenError) {
+    res.status(401).json({ error: err.message });
+    return;
+  }
+  // WARP-582 — missing authenticated user is a 401 (fail-closed re-auth
+  // prompt), never an admin fallback and never a 500. Ordered BEFORE the
+  // degrade branches so a read endpoint can't swallow it into an empty
+  // listing.
+  if (err instanceof MissingAuthUserError) {
     res.status(401).json({ error: err.message });
     return;
   }
