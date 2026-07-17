@@ -847,9 +847,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         // Seed the customer-facing name the moment the pool exists, keyed by
         // its md device — same row PATCH /storage/pools/:device upserts.
         // `level` was validated against VALID_LEVELS when the token was
-        // minted; re-check before writing the enum column. A failed seed must
-        // NOT fail the response: the pool WAS created on the host, and the
-        // owner can still name it via the rename flow.
+        // minted; re-check before writing the enum column. The update branch
+        // writes level too (code review): pool_delete leaves the row behind,
+        // so recreating the same md device at a DIFFERENT RAID level lands
+        // here — without the refresh the row keeps the deleted pool's stale
+        // level. A failed seed must NOT fail the response: the pool WAS
+        // created on the host, and the owner can still name it via the
+        // rename flow.
         const level = bridgeParams.level;
         if (typeof level === "string" && VALID_LEVELS.has(level)) {
           try {
@@ -860,7 +864,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
                 displayName: displayName.trim(),
                 level: level as $Enums.ArrayLevel,
               },
-              update: { displayName: displayName.trim() },
+              update: {
+                displayName: displayName.trim(),
+                level: level as $Enums.ArrayLevel,
+              },
             });
           } catch (err) {
             logger.warn(

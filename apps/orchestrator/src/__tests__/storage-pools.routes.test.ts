@@ -427,6 +427,47 @@ describe("POST /api/storage/pools — optional displayName seeding (WARP-1337)",
     expect(list.body.pools[0].displayName).toBe("Family Vault");
   });
 
+  // Code review (WARP-1337): pool_delete leaves the StoragePool row behind, so
+  // a RECREATE of the same md device at a different RAID level hits the
+  // upsert's update branch — which must refresh `level` too, not just
+  // displayName, or the row keeps the deleted pool's stale level forever
+  // (GET reads level from the live bridge, but the DB column must not lie).
+  it("refreshes a stale level when the pool is recreated at a different RAID level", async () => {
+    const prisma = createPrismaMock();
+    // Stale row from a pool that was deleted on the host: raid5, old name.
+    prisma.pools.set("md0", {
+      device: "md0",
+      displayName: "Old Vault",
+      level: "raid5",
+      status: "none",
+      notes: null,
+    });
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sdb"],
+        confirmPhrase: "ERASE sda sdb",
+        displayName: "Family Vault",
+      });
+    expect(create.status).toBe(202);
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: create.body.confirmationToken,
+        service: "pool_create",
+        resourceId: "md0",
+      });
+    expect(confirm.status).toBe(200);
+    expect(prisma.pools.get("md0")).toMatchObject({
+      device: "md0",
+      displayName: "Family Vault",
+      level: "raid1",
+    });
+  });
+
   it("never forwards displayName to the bridge (host script has no such param)", async () => {
     const prisma = createPrismaMock();
     const bridge = bridgePoolsResponse([]);
