@@ -221,7 +221,7 @@ entries:
     kind: egress
     service: orchestrator
     destination:
-      hosts: [fleet-hq.droplet-us.com]
+      hosts: [droplet-fleet-hq.rjouffret.workers.dev, fleet-hq.droplet-us.com]
       ports: [443]
       protocol: https
     phase: runtime
@@ -232,7 +232,13 @@ entries:
       .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
       self-provisions its publicly-trusted cert with zero hand-patching;
       still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
-      before the default host became a repo literal.
+      before the default host became a repo literal. The default is the LIVE
+      HQ Worker (droplet-fleet-hq.rjouffret.workers.dev) — the vanity name
+      fleet-hq.droplet-us.com was allowlisted + baked before it was ever
+      bound in DNS (NXDOMAIN), dead-ending issuance on every fresh flash; it
+      stays allowlisted here so the production-cutover flip
+      (droplet-fleet-hq docs/HQ-CUTOVER-RUNBOOK.md) is a default swap, not an
+      egress change.
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
