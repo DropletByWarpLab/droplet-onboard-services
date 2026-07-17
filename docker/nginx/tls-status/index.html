@@ -42,12 +42,15 @@
       const r = await fetch("/api/tls/status", { cache: "no-store", redirect: "manual" });
       // The canonical redirect flipped ON mid-poll: :80 now 307s every path
       // to the trusted FQDN (cross-origin to this page, so the body is
-      // unreadable). The opaque redirect IS the advance signal — reload so
-      // the top-level navigation follows the 307 to the padlocked FQDN.
+      // unreadable). The opaque redirect is the ONLY advance signal — reload
+      // so the top-level navigation follows the 307 to the padlocked FQDN.
+      // (WARP-1302: never navigate off the JSON payload. The 307 is gated on
+      // DROPLET_LAN_DNS_AUTHORITY; the payload isn't — on shapes where this
+      // box doesn't own the LAN's DNS the FQDN is publicly NXDOMAIN and a
+      // payload-driven hop would strand the client on a DNS error.)
       if (r.type === "opaqueredirect") { location.reload(); return; }
       if (r.ok) {
         const s = await r.json();
-        if (s.redirectTo) { location.replace(s.redirectTo); return; }
         if (s.hqConfigured === false) {
           document.getElementById("airgap").style.display = "block";
           document.getElementById("spinner").style.display = "none";
