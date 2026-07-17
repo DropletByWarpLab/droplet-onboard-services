@@ -38,6 +38,7 @@ import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
 import {
   buildConfirmPhrase,
   friendlyAdoptError,
+  wholeDiskName,
 } from "@/components/setup/steps/StorageStep";
 import {
   levelLabel,
@@ -265,6 +266,17 @@ export function DrivesPanel() {
     return drives.some((d) => re.test(d.device));
   };
 
+  // Code review (WARP-1337): the collision snapshot for a seeded FS label —
+  // every mounted volume's label/tail EXCEPT those on the target disk itself,
+  // which the wipe is about to erase (their names can't collide with the new
+  // mount). Same member derivation as StorageStep's reclaimDisks and the
+  // Danger zone's reformat, so all three destructive flows agree.
+  function takenNamesExcluding(disk: DiskInfo): string[] {
+    return takenVolumeNames(
+      drives.filter((d) => (d.parent_disk || wholeDiskName(d.device)) !== disk.name),
+    );
+  }
+
   async function handleStartAdopt(disk: DiskInfo) {
     if (disk.state !== "foreign" && disk.state !== "available") return;
     destructiveTriggerRef.current =
@@ -275,13 +287,13 @@ export function DrivesPanel() {
       // (the hardware model — an unmounted disk has no customer-typed name
       // yet). The label becomes the mount tail, so the adopted drive never
       // lands back on a GUID mount. Omitted when the bridge has no model.
-      // Code review: uniquified against the mounted volumes' labels/tails —
-      // the host script's raw mount would stack an identical label over the
-      // existing mount (2× the same model is the realistic trigger); the
-      // serial tail disambiguates.
+      // Code review: uniquified against the OTHER mounted volumes' labels/
+      // tails — the host script's raw mount would stack an identical label
+      // over the existing mount (2× the same model is the realistic trigger);
+      // the serial tail disambiguates.
       const label = uniqueFsLabel(
         sanitizeFsLabel(disk.model),
-        takenVolumeNames(drives),
+        takenNamesExcluding(disk),
         disk.serial,
       );
       const token = await adoptDrive({
@@ -368,10 +380,13 @@ export function DrivesPanel() {
     try {
       // WARP-1337: same FS-label seeding as adopt — the reclaimed drive comes
       // back named instead of GUID-mounted — with the same shadow-mount
-      // collision guard (code review).
+      // collision guard and own-volume exclusion (code review). The pool's
+      // OWN mounted fs still counts: its device is the md node, whose parent
+      // is never this member disk, so it stays in the taken set (reclaiming
+      // one member leaves the array's mount alive).
       const label = uniqueFsLabel(
         sanitizeFsLabel(disk.model),
-        takenVolumeNames(drives),
+        takenNamesExcluding(disk),
         disk.serial,
       );
       const token = await reclaimDrive({

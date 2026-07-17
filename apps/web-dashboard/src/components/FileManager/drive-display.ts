@@ -23,8 +23,12 @@ const UUID_TAIL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 /** vfat-style volume serial (e.g. B0C1-D2E3) — a machine id, not a name. */
 const HEX_SERIAL_TAIL = /^[0-9a-f]{4}-[0-9a-f]{4}$/i;
 
-/** Machine-generated "drive-<hex>" / "pool-<hex>" mount tails. */
-const PREFIXED_HEX_TAIL = /^(?:drive|pool)-[0-9a-f]{4,}$/i;
+/** Machine-generated "drive-<hex>" / "pool-<hex>" mount tails. Dashed hex
+ *  segments are part of the shape: droplet-automount.sh names an unlabeled
+ *  volume `drive-<first-8-UUID-chars>`, and a vfat UUID is XXXX-XXXX, so the
+ *  tail comes out as e.g. "drive-B0C1-D2E" (code review, WARP-1337). A human
+ *  "drive-…"/"pool-…" name survives — any non-hex segment breaks the match. */
+const PREFIXED_HEX_TAIL = /^(?:drive|pool)-[0-9a-f]{2,}(?:-[0-9a-f]{1,8})*$/i;
 
 /** True when a mount tail is machine-generated and must never be shown as a
  *  volume's title (home-user persona, ADR-002). */
@@ -94,7 +98,12 @@ export function sanitizeFsLabel(name: string | null | undefined): string | undef
     .replace(/[^A-Za-z0-9_-]/g, "")
     .replace(/_{2,}/g, "_")
     .replace(/^[_-]+|[_-]+$/g, "")
-    .slice(0, 16);
+    .slice(0, 16)
+    // The cap can cut mid-word and re-introduce a trailing separator
+    // ("Samsung SSD 870 EVO" → "Samsung_SSD_870_") — strip it again. Never
+    // empties the result: the pre-slice strip guarantees a non-separator
+    // first character (code review, WARP-1337).
+    .replace(/[_-]+$/, "");
   return cleaned || undefined;
 }
 

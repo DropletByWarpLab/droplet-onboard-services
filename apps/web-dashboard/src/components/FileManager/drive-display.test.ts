@@ -85,6 +85,17 @@ describe("driveDisplayName — GUID tails are never rendered (WARP-1337 AC1)", (
     expect(driveDisplayName(vol({ mount: "/mnt/droplet/B0C1-D2E3" }))).toBe("Drive");
   });
 
+  // Code review (WARP-1337): droplet-automount.sh names an unlabeled volume
+  // `drive-<first-8-UUID-chars>`. A vfat UUID is XXXX-XXXX, so the tail comes
+  // out with an EMBEDDED dash — e.g. "drive-B0C1-D2E" — which the original
+  // guard missed and would have rendered as "Drive B0C1 D2E".
+  it("renders the generic for the automount's dashed unlabeled-vfat shape", () => {
+    expect(driveDisplayName(vol({ mount: "/mnt/droplet/drive-B0C1-D2E" }))).toBe("Drive");
+    expect(
+      driveDisplayName(vol({ mount: "/mnt/droplet/pool-b0c1-d2e" }), { poolBacked: true }),
+    ).toBe("Storage pool");
+  });
+
   it("still renders 'Drive' when everything is empty", () => {
     expect(driveDisplayName(vol({ mount: "/" }))).toBe("Drive");
   });
@@ -106,10 +117,22 @@ describe("isMachineTail", () => {
     expect(isMachineTail("pool-1a2b")).toBe(true);
   });
 
+  // Code review (WARP-1337): the automount's unlabeled-vfat tail embeds a
+  // dash (drive-<first-8-of-XXXX-XXXX> → "drive-B0C1-D2E").
+  it("flags the automount's dashed hex tails too", () => {
+    expect(isMachineTail("drive-B0C1-D2E")).toBe(true);
+    expect(isMachineTail("drive-b0c1-d2e3")).toBe(true);
+    expect(isMachineTail("pool-1a2b-3c")).toBe(true);
+  });
+
   it("does not flag human names", () => {
     expect(isMachineTail("wedding-photos")).toBe(false);
     expect(isMachineTail("Cameras")).toBe(false);
     expect(isMachineTail("nvr")).toBe(false);
+    // drive-/pool- prefixed HUMAN names keep rendering: a non-hex segment
+    // breaks the machine-id shape.
+    expect(isMachineTail("drive-backup")).toBe(false);
+    expect(isMachineTail("pool-media-two")).toBe(false);
   });
 });
 
@@ -156,6 +179,14 @@ describe("sanitizeFsLabel (WARP-1337 AC4)", () => {
 
   it("caps at 16 characters", () => {
     expect(sanitizeFsLabel("A Very Long Drive Name Indeed")!.length).toBeLessThanOrEqual(16);
+  });
+
+  // Code review (WARP-1337): the 16-char cap used to run AFTER the
+  // trailing-separator strip, so a truncation could re-introduce one
+  // ("Samsung SSD 870 EVO" → "Samsung_SSD_870_"). Contract-legal but ugly.
+  it("never leaves a trailing separator after the 16-char truncation", () => {
+    expect(sanitizeFsLabel("Samsung SSD 870 EVO")).toBe("Samsung_SSD_870");
+    expect(sanitizeFsLabel("Samsung-SSD-870-EVO")).toBe("Samsung-SSD-870");
   });
 
   it("returns undefined when nothing usable remains (caller omits the label)", () => {

@@ -420,6 +420,40 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
     );
   });
 
+  // Code review (WARP-1337): the wipe erases the TARGET disk's own volumes,
+  // so their labels/mount tails are not collisions — a drive re-adopted while
+  // a stale snapshot still lists its auto-mounted partition must keep its
+  // clean model-seeded label, not burn an unnecessary serial suffix.
+  // (StorageStep's fsLabelFor and the Danger zone's reformat already exclude
+  // the target disk; the panel mirrors them.)
+  it("does not suffix against the target disk's OWN mounted volumes on adopt", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({
+      // The target disk's own partition, still listed under its model-seeded
+      // label — erased by the adopt wipe, so NOT a collision.
+      drives: [
+        makeDrive({
+          device: "/dev/sdd1",
+          mount: "/mnt/droplet/Samsung_T7",
+          label: "Samsung_T7",
+          uuid: "U-T7-OWN",
+        }),
+      ],
+      disks: [makeDisk({ name: "sdd", model: "Samsung T7", serial: "S6XNNS0T123456B" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() =>
+      expect(adoptDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sdd", label: "Samsung_T7" }),
+      ),
+    );
+  });
+
   // WARP-1337: reclaim seeds the same sanitized label so the reclaimed drive
   // comes back named, not GUID-mounted.
   it("passes the sanitized fs label on reclaim too", async () => {
