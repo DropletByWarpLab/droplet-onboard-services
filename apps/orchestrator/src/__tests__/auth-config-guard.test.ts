@@ -18,16 +18,39 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
  */
 describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
   const STRONG_SECRET = "x".repeat(64);
-  const ORIGINAL = {
+  // WARP-580 (part 2) — device/service secrets a PRODUCTION boot must carry
+  // non-empty. Mirrors PRODUCTION_REQUIRED_SECRET_KEYS in config.ts (asserted
+  // below); scripts/setup.sh generates every one of these into .env.
+  const REQUIRED_SECRET_KEYS = [
+    "DEVICE_SECRET_KEY",
+    "SERVICE_TOKEN_SWITCH",
+    "SERVICE_TOKEN_AI_GATEWAY",
+    "SERVICE_TOKEN_VOICE",
+    "SERVICE_TOKEN_MCP",
+    "SERVICE_TOKEN_EMAIL",
+    "SERVICE_TOKEN_EGRESS_AUDIT",
+  ] as const;
+  const ORIGINAL: Record<string, string | undefined> = {
     NODE_ENV: process.env.NODE_ENV,
     AUTH_ENABLED: process.env.AUTH_ENABLED,
     JWT_SECRET: process.env.JWT_SECRET,
+    ...Object.fromEntries(REQUIRED_SECRET_KEYS.map((k) => [k, process.env[k]])),
   };
 
-  const restore = (key: keyof typeof ORIGINAL) => {
+  const restore = (key: string) => {
     const v = ORIGINAL[key];
     if (v === undefined) delete process.env[key];
     else process.env[key] = v;
+  };
+
+  /** Make a production parse pass its secret gates (strong JWT + every
+   *  required device/service secret non-empty). Individual cases then knock
+   *  out the one key they exercise. */
+  const setProductionSecrets = () => {
+    process.env.JWT_SECRET = STRONG_SECRET;
+    for (const key of REQUIRED_SECRET_KEYS) {
+      process.env[key] = `test-${key.toLowerCase()}-0123456789abcdef`;
+    }
   };
 
   beforeEach(() => {
@@ -35,9 +58,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
   });
 
   afterEach(() => {
-    restore("NODE_ENV");
-    restore("AUTH_ENABLED");
-    restore("JWT_SECRET");
+    for (const key of Object.keys(ORIGINAL)) restore(key);
     vi.resetModules();
   });
 
@@ -91,7 +112,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
     it("force-ENABLES auth in production even with AUTH_ENABLED=false", async () => {
       process.env.AUTH_ENABLED = "false";
       process.env.NODE_ENV = "production";
-      process.env.JWT_SECRET = STRONG_SECRET; // prod also needs a strong secret to parse
+      setProductionSecrets(); // prod also needs strong/non-empty secrets to parse
       const { config } = await import("../config.js");
       expect(config.AUTH_ENABLED).toBe(true);
     });
@@ -112,7 +133,7 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
 
     it("accepts a strong secret in production", async () => {
       process.env.NODE_ENV = "production";
-      process.env.JWT_SECRET = STRONG_SECRET;
+      setProductionSecrets();
       const { config } = await import("../config.js");
       expect(config.JWT_SECRET).toBe(STRONG_SECRET);
     });
@@ -122,6 +143,69 @@ describe("WARP-580 — fail-closed auth + JWT secret strength guard", () => {
       delete process.env.JWT_SECRET;
       const { config } = await import("../config.js");
       expect(config.JWT_SECRET).toBe("dev-jwt-secret-do-not-use-in-production");
+    });
+  });
+
+  // WARP-580 (part 2) — production boot must fail fast, with a message naming
+  // the offending keys, when any device/service secret is empty or the
+  // .env.example placeholder. setup.sh generates all of them, so a provisioned
+  // box is unaffected; dev/test (non-production) keep their empty defaults.
+  describe("device/service secret emptiness guard (production)", () => {
+    it("exports the required-keys list and it covers every SERVICE_TOKEN_* schema key", async () => {
+      const { PRODUCTION_REQUIRED_SECRET_KEYS } = await import("../config.js");
+      expect([...PRODUCTION_REQUIRED_SECRET_KEYS].sort()).toEqual(
+        [...REQUIRED_SECRET_KEYS].sort(),
+      );
+    });
+
+    it("findEmptyProductionSecrets flags empty, whitespace, and placeholder values", async () => {
+      const { findEmptyProductionSecrets } = await import("../config.js");
+      const good = Object.fromEntries(
+        REQUIRED_SECRET_KEYS.map((k) => [k, "a-real-generated-secret-value"]),
+      );
+      expect(findEmptyProductionSecrets(good)).toEqual([]);
+      expect(
+        findEmptyProductionSecrets({ ...good, DEVICE_SECRET_KEY: "" }),
+      ).toEqual(["DEVICE_SECRET_KEY"]);
+      expect(
+        findEmptyProductionSecrets({ ...good, SERVICE_TOKEN_MCP: "   " }),
+      ).toEqual(["SERVICE_TOKEN_MCP"]);
+      // The `.env.example` placeholder is as bad as empty.
+      expect(
+        findEmptyProductionSecrets({ ...good, DEVICE_SECRET_KEY: "change-me" }),
+      ).toEqual(["DEVICE_SECRET_KEY"]);
+    });
+
+    it("rejects an empty DEVICE_SECRET_KEY in production at config load", async () => {
+      process.env.NODE_ENV = "production";
+      setProductionSecrets();
+      process.env.DEVICE_SECRET_KEY = "";
+      await expect(import("../config.js")).rejects.toThrow(/DEVICE_SECRET_KEY/);
+    });
+
+    it("rejects an empty service token in production and names every missing key", async () => {
+      process.env.NODE_ENV = "production";
+      setProductionSecrets();
+      delete process.env.SERVICE_TOKEN_VOICE;
+      process.env.SERVICE_TOKEN_EMAIL = "";
+      await expect(import("../config.js")).rejects.toThrow(
+        /SERVICE_TOKEN_VOICE.*SERVICE_TOKEN_EMAIL|SERVICE_TOKEN_EMAIL.*SERVICE_TOKEN_VOICE/s,
+      );
+    });
+
+    it("boots in production when every required secret is non-empty", async () => {
+      process.env.NODE_ENV = "production";
+      setProductionSecrets();
+      const { config } = await import("../config.js");
+      expect(config.DEVICE_SECRET_KEY).not.toBe("");
+    });
+
+    it("tolerates empty device/service secrets outside production (dev/test ergonomics)", async () => {
+      process.env.NODE_ENV = "development";
+      for (const key of REQUIRED_SECRET_KEYS) delete process.env[key];
+      const { config } = await import("../config.js");
+      expect(config.DEVICE_SECRET_KEY).toBe("");
+      expect(config.SERVICE_TOKEN_VOICE).toBe("");
     });
   });
 });

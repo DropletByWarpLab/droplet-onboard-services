@@ -17,6 +17,48 @@ export function isWeakJwtSecret(s: string): boolean {
   return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
 }
 
+// WARP-580 (part 2) — device/service secrets a PRODUCTION boot must carry
+// non-empty. Their schema defaults are "" so dev laptops + the vitest suite
+// run with zero env setup, but on a shipped box an empty value means either a
+// torn/ancient .env or a hand-rolled deployment that skipped setup.sh — and
+// the failure would otherwise surface later as a mystery (unencryptable
+// device credentials, every service hop 401ing). scripts/lib/secrets.sh
+// generates ALL of these (generate_env for fresh installs, migrate_env
+// backfills upgrades), so a provisioned device always passes this gate.
+//
+// Scope: DEVICE_SECRET_KEY (the FIPS-sealed master encryption key) + every
+// SERVICE_TOKEN_* declared in the schema. Deliberately NOT the optional
+// integration secrets (ROUTING_SERVICE_TOKEN, DROPLET_SCIM_BEARER_TOKEN, …)
+// whose emptiness is a documented fail-closed feature posture.
+export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
+  "DEVICE_SECRET_KEY",
+  "SERVICE_TOKEN_SWITCH",
+  "SERVICE_TOKEN_AI_GATEWAY",
+  "SERVICE_TOKEN_VOICE",
+  "SERVICE_TOKEN_MCP",
+  "SERVICE_TOKEN_EMAIL",
+  "SERVICE_TOKEN_EGRESS_AUDIT",
+];
+
+// `.env.example` ships `change-me` for DEVICE_SECRET_KEY — a copy-pasted
+// example file must fail the gate exactly like an empty value would.
+const PLACEHOLDER_SECRET_VALUES: ReadonlySet<string> = new Set(["change-me"]);
+
+/**
+ * PURE — the subset of PRODUCTION_REQUIRED_SECRET_KEYS whose value in `env`
+ * is missing, empty/whitespace, or a known placeholder. Exported for tests.
+ */
+export function findEmptyProductionSecrets(
+  env: Record<string, unknown>,
+): string[] {
+  return PRODUCTION_REQUIRED_SECRET_KEYS.filter((key) => {
+    const v = env[key];
+    if (typeof v !== "string") return true;
+    const trimmed = v.trim();
+    return trimmed === "" || PLACEHOLDER_SECRET_VALUES.has(trimmed);
+  });
+}
+
 /**
  * WARP-580 — resolve the EFFECTIVE auth posture (fail-closed).
  *
@@ -815,6 +857,23 @@ const envForParse: NodeJS.ProcessEnv = {
 };
 
 const parsed = envSchema.parse(envForParse);
+
+// WARP-580 (part 2) — production boot dies loud, with an actionable message,
+// when any required device/service secret is empty. Runs at config load (the
+// first thing the orchestrator touches), so a misprovisioned box never gets
+// as far as serving a request with an empty master key or empty service
+// bearers. Non-production keeps the empty defaults (dev/test ergonomics).
+if (parsed.NODE_ENV === "production") {
+  const emptySecrets = findEmptyProductionSecrets(parsed);
+  if (emptySecrets.length > 0) {
+    throw new Error(
+      "Production boot requires non-empty device/service secrets; " +
+        `empty or placeholder: ${emptySecrets.join(", ")}. ` +
+        "scripts/setup.sh generates these into .env (re-run setup.sh — " +
+        "migrate_env backfills any keys added since this box was provisioned).",
+    );
+  }
+}
 
 // --- WARP-562: resolve the CORS origin allowlist ---
 // Comma-separated → trimmed, empties dropped. When the operator hasn't set
