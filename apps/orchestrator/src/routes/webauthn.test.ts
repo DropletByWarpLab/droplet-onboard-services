@@ -401,6 +401,65 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
+  it("verify: ?return=body from a native client (no browser markers) returns tokens in the body (WARP-582)", async () => {
+    const { prisma } = createPrismaMock({
+      users: [stefan],
+      credentials: [{ ...credential }],
+    });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: "mock-challenge-aaaaaaaaaaaaaaaaaaaaaa",
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 6 },
+    });
+
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify?return=body")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toEqual(expect.any(String));
+    expect(res.body.refreshToken).toEqual(expect.any(String));
+  });
+
+  it("verify: ?return=body from a BROWSER context (Origin present) issues the cookie session but NO body tokens (WARP-582)", async () => {
+    const { prisma } = createPrismaMock({
+      users: [stefan],
+      credentials: [{ ...credential }],
+    });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: "mock-challenge-aaaaaaaaaaaaaaaaaaaaaa",
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 6 },
+    });
+
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify?return=body")
+      .set("origin", "https://droplet-ai.local")
+      .set("sec-fetch-mode", "cors")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBeUndefined();
+    expect(res.body.refreshToken).toBeUndefined();
+    // The browser still gets its normal cookie session.
+    const decoded = sessionFromCookie(res);
+    expect(decoded.sub).toBe("u-uuid-stefan-7777");
+  });
+
   it("verify: directory-DEACTIVATED user is rejected (401), no session, even with a valid passkey (ORCH-02)", async () => {
     // Offboarded user: SCIM set active:false → directoryStatus DEACTIVATED, a
     // SOFT disable that retains the row AND the registered passkey. The

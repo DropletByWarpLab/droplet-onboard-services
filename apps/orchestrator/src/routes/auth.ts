@@ -93,6 +93,7 @@ import {
   isReservedUserId,
 } from "@droplet/auth-policy";
 import { createLogger } from "../lib/logger.js";
+import { browserMarkerHeader } from "../lib/browser-context.js";
 
 /** WARP-456: caller IP for auth audit rows. Uses Express's proxy-aware
  *  `req.ip` — `trust proxy` is set in app.ts, so behind the nginx gateway
@@ -1254,7 +1255,28 @@ export function createPublicAuthRouter(
       // body too. The cookies are STILL set so browsers behave
       // unchanged. No behavior change for any existing caller — the
       // body field is only added when the query param is present.
-      const wantBody = req.query.return === "body" || req.query.return === "body=1";
+      //
+      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
+      // must never receive tokens in the body (an XSS payload could read them
+      // where the httpOnly cookies are script-unreadable), so the opt-in is
+      // refused whenever the request carries a browser-only marker header
+      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
+      // every request they originate, and Sec-Fetch-*+Origin are forbidden
+      // header names page script cannot strip; see lib/browser-context.ts).
+      // The login itself still succeeds for a browser — it keeps its normal
+      // cookie-only session. The shipped native callers (droplet-android
+      // OkHttp, droplet-ios URLSession) send none of these headers;
+      // droplet-windows never uses ?return=body at all (its WebView2 runs
+      // the dashboard's ordinary cookie login).
+      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
+      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
+      if (wantBodyParam && browserMarker !== null) {
+        logger.warn(
+          { marker: browserMarker, username },
+          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
+        );
+      }
+      const wantBody = wantBodyParam && browserMarker === null;
       res.json({
         // WARP-824: surface the explicit forced-change flag so the dashboard
         // redirects an admin-created temp-password user to the change-password
