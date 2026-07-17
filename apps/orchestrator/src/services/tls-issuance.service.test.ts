@@ -480,6 +480,125 @@ describe("tls-issuance.service — requested_name (WARP-979)", () => {
   });
 });
 
+describe("tls-issuance.service — deferred name claim on the tick (WARP-980 follow-up)", () => {
+  it("claims a persisted-but-unclaimed name BEFORE ordering, so HQ honors requested_name on this very order", async () => {
+    // Seed fqdn is the opaque d-<hmac> name while DROPLET_BOX_NAME is set —
+    // the exact state of a box whose wizard-time claim fell back (HQ
+    // unreachable / not yet registered).
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient();
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, requestedName: "studio", hqConfigured: true }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.claimName).toHaveBeenCalledTimes(1);
+    expect(
+      (hq.claimName as ReturnType<typeof vi.fn>).mock.calls[0][0],
+    ).toMatchObject({ name: "studio" });
+    // The claim happened before the order was placed.
+    const claimOrder = (hq.claimName as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0];
+    const orderOrder = (hq.order as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0];
+    expect(claimOrder).toBeLessThan(orderOrder);
+    expect(
+      (hq.order as ReturnType<typeof vi.fn>).mock.calls[0][0],
+    ).toHaveProperty("requested_name", "studio");
+  });
+
+  it("does NOT claim when the seed fqdn already IS the chosen name (claim confirmed on an earlier tick/rename)", async () => {
+    const namedFqdn = "studio.droplet-us.com";
+    const store = makeStore({ fqdn: namedFqdn, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient();
+    const svc = createTlsIssuanceService(
+      makeDeps({
+        fqdn: namedFqdn,
+        store,
+        hq,
+        requestedName: "studio",
+        hqConfigured: true,
+      }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.claimName).not.toHaveBeenCalled();
+    expect(hq.order).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT claim when no name is configured", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient();
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, hqConfigured: true }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.claimName).not.toHaveBeenCalled();
+  });
+
+  it("a failed claim is NON-FATAL — warns and proceeds with the (opaque) issuance", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        // Exactly what hqFetch throws for the deployed HQ 409 (adapters.ts).
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"name taken"}',
+        );
+      }),
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const svc = createTlsIssuanceService(
+      makeDeps({
+        store,
+        hq,
+        requestedName: "studio",
+        logger,
+        hqConfigured: true,
+      }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.claimName).toHaveBeenCalledTimes(1);
+    // Issuance still ran to completion (opaque fallback).
+    expect(hq.order).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "studio" }),
+      expect.stringContaining("deferred name claim did not confirm"),
+    );
+  });
+
+  it("attempts the claim at most once per tick — the self-provision retry does not re-drive it", async () => {
+    const hq = makeNotInRegistryHqClient();
+    const store = makeStore();
+    const svc = createTlsIssuanceService(
+      makeDeps({
+        fqdn: FQDN,
+        store,
+        hq,
+        requestedName: "studio",
+        provisionToken: "tok-1",
+        hqConfigured: true,
+      }),
+    );
+
+    await svc.runOnce();
+
+    // Three challenge fetches: the claim attempt (404s while unregistered —
+    // non-fatal, claim marked attempted), issueOrRenew's own (404 → triggers
+    // self-provision), and the successful retry. The retry does NOT re-enter
+    // the claim (at-most-once per tick), so claimName is never reached this
+    // tick — the NEXT tick claims against the now-registered device.
+    expect(hq.challenge).toHaveBeenCalledTimes(3);
+    expect(hq.claimName).not.toHaveBeenCalled();
+    expect(hq.order).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("tls-issuance.service — failure handling", () => {
   it("HQ unreachable keeps the current cert, sets LE_RENEW_FAILED, logs a warning, does NOT throw", async () => {
     const store = makeStore({
