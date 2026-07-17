@@ -86,8 +86,13 @@ describe("/projects module-capability gating", () => {
     expect(
       screen.getByText(/projects isn't enabled on this droplet/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/an owner or admin can turn it on/i)).toBeInTheDocument();
-    // Permanent condition — no Retry affordance, no scary server-error copy.
+    // WARP-1306: the mocked caller is an OWNER, so the state offers the real
+    // enable path instead of the bystander copy (role split covered in
+    // ProjectsDisabled.test.tsx).
+    expect(
+      screen.getByRole("button", { name: /turn on projects/i }),
+    ).toBeInTheDocument();
+    // No Retry affordance, no scary server-error copy.
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
     expect(screen.queryByText(/server error/i)).toBeNull();
     expect(screen.queryByText(/try again/i)).toBeNull();

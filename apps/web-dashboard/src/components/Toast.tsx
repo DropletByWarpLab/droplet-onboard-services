@@ -50,7 +50,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const toast = useCallback((message: string, type: ToastType = "error") => {
     const id = ++nextId;
-    setToasts((prev) => [...prev, { id, message, type }]);
+    // WARP-1306 — don't stack an identical twin. Error toasts persist until
+    // dismissed (WCAG 2.2.1), so a repeated failure (e.g. re-submitting the
+    // Projects New-project dialog against a disabled module) used to pile up
+    // duplicates of the same message. An identical (message, type) already on
+    // screen means the user is already told; adding a copy is pure noise.
+    setToasts((prev) =>
+      prev.some((t) => t.message === message && t.type === type)
+        ? prev
+        : [...prev, { id, message, type }],
+    );
   }, []);
 
   const icons = {
