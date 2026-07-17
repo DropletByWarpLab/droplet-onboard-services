@@ -23,6 +23,7 @@ import {
   sanitizeFsLabel,
   takenVolumeNames,
   uniqueFsLabel,
+  volumeCrumbLabel,
 } from "./drive-display";
 
 const GUID_MOUNT = "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08";
@@ -343,5 +344,66 @@ describe("uniqueFsLabel — never seed a label another volume carries", () => {
       ...Array.from({ length: 8 }, (_, i) => `Samsung_T7_${i + 2}`),
     ];
     expect(uniqueFsLabel("Samsung_T7", exhausted, "S6XNNS0T123456B")).toBeUndefined();
+  });
+});
+
+// =====================================================================
+// WARP-1338 (UX review) — breadcrumb first-segment label. A volume deep-link
+// lands on /files?path=/<mount-tail>; for the live box's legacy pool that
+// tail is the FULL fs UUID, and BreadcrumbNav rendered it raw as the
+// current-folder crumb — re-introducing the exact GUID-as-primary-label the
+// WARP-1337 chain exists to prevent, one click after the GUID-guarded tile.
+// =====================================================================
+describe("volumeCrumbLabel — GUID never the location label (WARP-1338 UX review)", () => {
+  const GUID = "a0f10a84-7116-46a7-a3e3-5e00ea1c7d08";
+  const poolDrive = {
+    device: "/dev/md127",
+    mount: `/mnt/droplet/${GUID}`,
+    label: "",
+    displayName: null,
+  };
+
+  it("maps a legacy GUID pool tail through the pool's display chain", () => {
+    expect(
+      volumeCrumbLabel(GUID, [poolDrive], [{ device: "md127", displayName: "Family Vault" }]),
+    ).toBe("Family Vault");
+  });
+
+  it("says 'Storage pool' for a nameless pool — never the GUID", () => {
+    expect(volumeCrumbLabel(GUID, [poolDrive], [{ device: "md127", displayName: null }])).toBe(
+      "Storage pool",
+    );
+  });
+
+  it("still says 'Storage pool' for a pool-backed drive missing from the pools payload", () => {
+    expect(volumeCrumbLabel(GUID, [poolDrive], [])).toBe("Storage pool");
+  });
+
+  it("maps a standalone drive tail through the shared display chain", () => {
+    expect(
+      volumeCrumbLabel(
+        "photos-ab12cd34",
+        [
+          {
+            device: "/dev/sdb1",
+            mount: "/mnt/droplet/photos-ab12cd34",
+            label: "TOSHIBA EXT",
+            displayName: "Family Photos",
+          },
+        ],
+        [],
+      ),
+    ).toBe("Family Photos");
+  });
+
+  it("humanizes an UNMATCHED machine tail (drives payload still loading / dead link)", () => {
+    expect(volumeCrumbLabel(GUID, [], [])).toBe("Drive");
+    expect(volumeCrumbLabel("pool-cafef00d", [], [])).toBe("Storage pool");
+    expect(volumeCrumbLabel("drive-ab12cd34", [], [])).toBe("Drive");
+  });
+
+  it("returns undefined for a human folder segment — real folder names render raw", () => {
+    expect(volumeCrumbLabel("Documents", [], [])).toBeUndefined();
+    expect(volumeCrumbLabel("Documents", [poolDrive], [])).toBeUndefined();
   });
 });

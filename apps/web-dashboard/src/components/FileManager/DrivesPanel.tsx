@@ -1097,7 +1097,12 @@ function DriveCard({
           <button
             onClick={onEject}
             disabled={ejecting}
-            className="btn ghost sm disabled:opacity-60"
+            // `relative` lifts the control above the stretched title link's
+            // inset overlay (WARP-1338) — same treatment as Rename. Without
+            // it the positioned overlay paints over this static button and
+            // clicking Eject silently navigates to /files instead (UX
+            // review finding).
+            className="relative btn ghost sm disabled:opacity-60"
           >
             {ejecting ? "Ejecting…" : "Eject"}
           </button>

@@ -136,6 +136,48 @@ export function driveDisplayName(
 }
 
 /**
+ * WARP-1338 (UX review) — friendly label for the FIRST breadcrumb segment on
+ * the Files screen. A volume deep-link lands on /files?path=/<mount-tail>;
+ * for the live box's legacy pool that tail is the FULL fs UUID, and rendering
+ * it raw as the current-folder crumb re-introduces the exact
+ * GUID-as-primary-label the WARP-1337 chain exists to prevent — one click
+ * after the GUID-guarded tile.
+ *
+ * Resolution: match the segment against the known volumes' mount tails and
+ * run the SAME display chain the tiles/cards use (pool displayName leads for
+ * a pool-backed volume, mirroring VolumesPanel's pooled-tile naming). An
+ * UNMATCHED machine tail (drives payload still loading, dead link) still
+ * humanizes to the generic — "Storage pool" for pool-<hex>, else "Drive" —
+ * rather than leaking the GUID. A human segment returns undefined so real
+ * folder names keep rendering raw.
+ */
+export function volumeCrumbLabel(
+  segment: string,
+  drives: ReadonlyArray<DriveNameSource & PoolJoinSource>,
+  pools: ReadonlyArray<{ device: string; displayName?: string | null }>,
+): string | undefined {
+  for (const d of drives) {
+    const tail = d.mount.split("/").filter(Boolean).pop();
+    if (!tail || tail !== segment) continue;
+    const md = drivePoolName(d);
+    const pool = md ? pools.find((p) => p.device === md) : undefined;
+    if (pool) {
+      // Pool's OWN displayName leads; the backing drive's label / GUID-guarded
+      // tail back it up (same shape as VolumesPanel's pooled tile).
+      return driveDisplayName(
+        { mount: d.mount, label: d.label, displayName: pool.displayName },
+        { poolBacked: true },
+      );
+    }
+    return driveDisplayName(d, { poolBacked: isPoolBackedDevice(d.device) || !!md });
+  }
+  if (isMachineTail(segment)) {
+    return /^pool-/i.test(segment) ? "Storage pool" : "Drive";
+  }
+  return undefined;
+}
+
+/**
  * WARP-1337 AC4 — sanitize a customer-facing name into a filesystem label the
  * orchestrator's adopt/reclaim routes accept (^[A-Za-z0-9_-]{1,16}$). The
  * label seeds the post-wipe mount tail, so a named drive never lands back on

@@ -14,7 +14,7 @@
  * (ReferenceError) before the hoist fix and PASSES after.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
 
 // ── next/navigation — the page reads ?path= (and, WARP-1270, ?space=) via
@@ -96,6 +96,30 @@ vi.mock("@/lib/hooks/useFiles", () => ({
   }),
 }));
 
+// WARP-1338 (UX review) — the page feeds the breadcrumb the same volume
+// display chain the tiles use (useDrives/usePools), so a deep-linked GUID
+// mount tail is never the location label. `let` bindings, reset below.
+let mockDrives: unknown[] = [];
+let mockPools: unknown[] = [];
+vi.mock("@/lib/hooks/useDrives", () => ({
+  useDrives: () => ({
+    drives: mockDrives,
+    disks: [],
+    isLoading: false,
+    bridgeError: undefined,
+    refresh: vi.fn(),
+  }),
+}));
+vi.mock("@/lib/hooks/usePools", () => ({
+  usePools: () => ({
+    pools: mockPools,
+    isLoading: false,
+    error: undefined,
+    bridgeError: undefined,
+    refresh: vi.fn(),
+  }),
+}));
+
 vi.mock("@/lib/hooks/useFavorites", () => ({
   useFavorites: () => ({ items: [], error: undefined, isLoading: false, refresh: vi.fn() }),
 }));
@@ -160,6 +184,8 @@ beforeEach(() => {
   mockSearchParamsString = "";
   mockFiles = FILES;
   mockFilesError = undefined;
+  mockDrives = [];
+  mockPools = [];
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -211,6 +237,102 @@ describe("<FilesPage /> — failed listing is distinct from empty (WARP-1338)", 
     expect(
       screen.queryByText(/isn't connected to the file browser/i)
     ).not.toBeInTheDocument();
+  });
+
+  // UX review (WARP-1338): the not-connected copy is keyed to the CAUSE (the
+  // 404 an unregistered drive actually hits — fetchFiles embeds the status in
+  // the thrown message), not merely to being below root. A transient blip
+  // deep inside a healthy, registered drive must never claim the drive
+  // "isn't connected".
+  it("shows the generic couldn't-load copy for a non-404 failure below root", () => {
+    mockSearchParamsString = "path=%2Fpool-cafef00d";
+    mockFilesError = new Error("Failed to fetch files: 500");
+    render(<FilesPage />);
+    expect(screen.getByText(/couldn't load your files/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/isn't connected to the file browser/i)
+    ).not.toBeInTheDocument();
+  });
+
+  // UX review (WARP-1338): the failed listing appears asynchronously after
+  // load — announce it (role="alert", matching the PoolAlarmBanner
+  // precedent) instead of updating the region silently.
+  it("announces the failed listing to assistive tech (role=alert)", () => {
+    mockSearchParamsString = "path=%2Fpool-cafef00d";
+    mockFilesError = new Error("Failed to fetch files: 404");
+    render(<FilesPage />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /isn't connected to the file browser yet/i
+    );
+  });
+});
+
+// UX review (WARP-1338) — clicking the GUID-guarded "Storage pool" tile must
+// not land the user on a breadcrumb whose primary location label is the raw
+// fs-UUID mount tail (the live box's legacy pool mounts — exactly the volumes
+// WARP-1337 established "GUIDs are never the primary label" for). The page
+// maps a first-segment volume match through the shared display chain.
+describe("<FilesPage /> — breadcrumb never shows a GUID mount tail (WARP-1338 UX review)", () => {
+  const GUID = "a0f10a84-7116-46a7-a3e3-5e00ea1c7d08";
+  const poolDrive = {
+    device: "/dev/md127",
+    mount: `/mnt/droplet/${GUID}`,
+    label: "",
+    uuid: "U-POOL-1",
+    size_bytes: 4_000_000_000_000,
+    used_bytes: 1_000_000_000_000,
+    free_bytes: 3_000_000_000_000,
+    mounted: true,
+    bus: "disk",
+    removable: false,
+    displayName: null,
+    icon: null,
+    notes: null,
+  };
+
+  it("labels a deep-linked legacy GUID pool crumb through the shared display chain", () => {
+    mockSearchParamsString = `path=%2F${GUID}`;
+    mockDrives = [poolDrive];
+    mockPools = [
+      { device: "md127", level: "raid1", status: "active", members: ["sda", "sdb"], displayName: null },
+    ];
+    render(<FilesPage />);
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(within(nav).getByText("Storage pool")).toBeInTheDocument();
+    expect(within(nav).queryByText(GUID)).not.toBeInTheDocument();
+  });
+
+  it("uses the pool's own display name when the customer has named it", () => {
+    mockSearchParamsString = `path=%2F${GUID}`;
+    mockDrives = [poolDrive];
+    mockPools = [
+      { device: "md127", level: "raid1", status: "active", members: ["sda", "sdb"], displayName: "Family Vault" },
+    ];
+    render(<FilesPage />);
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(within(nav).getByText("Family Vault")).toBeInTheDocument();
+    expect(within(nav).queryByText(GUID)).not.toBeInTheDocument();
+  });
+
+  it("humanizes the GUID crumb even before the drives payload arrives", () => {
+    mockSearchParamsString = `path=%2F${GUID}`;
+    render(<FilesPage />);
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(within(nav).queryByText(GUID)).not.toBeInTheDocument();
+    expect(within(nav).getByText("Drive")).toBeInTheDocument();
+  });
+
+  it("keeps real folder crumbs raw below the volume segment", () => {
+    mockSearchParamsString = `path=${encodeURIComponent(`/${GUID}/Photos`)}`;
+    mockDrives = [poolDrive];
+    mockPools = [
+      { device: "md127", level: "raid1", status: "active", members: ["sda", "sdb"], displayName: null },
+    ];
+    render(<FilesPage />);
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(within(nav).getByText("Storage pool")).toBeInTheDocument();
+    expect(within(nav).getByText("Photos")).toBeInTheDocument();
+    expect(within(nav).queryByText(GUID)).not.toBeInTheDocument();
   });
 });
 

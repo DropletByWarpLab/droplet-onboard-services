@@ -179,6 +179,32 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
     fireEvent.click(screen.getByRole("button", { name: /rename/i }));
     expect(screen.getByLabelText("Drive name")).toBeInTheDocument();
   });
+
+  // UX review (WARP-1338): the inset-0 overlay is POSITIONED, so it paints
+  // above every static-positioned sibling in the card — a control without its
+  // own positioned class is silently occluded: mouse/touch clicks navigate to
+  // /files instead of firing the control (exactly how Eject broke; keyboard
+  // still reached it, making the modalities inconsistent). jsdom can't
+  // hit-test, and fireEvent.click bypasses occlusion — so assert the
+  // practical proxy: EVERY interactive control inside a card carrying the
+  // overlay must have a positioned class lifting it above the overlay.
+  it("positions every control in the card above the stretched overlay (WARP-1338 UX review)", () => {
+    // makeDrive() defaults are removable+mounted, so Eject renders too.
+    setup({ drives: [makeDrive()] });
+    const overlay = document.querySelector('a [aria-hidden="true"].absolute');
+    expect(overlay).not.toBeNull();
+    const card = overlay!.closest('[role="listitem"]');
+    expect(card).not.toBeNull();
+    const controls = Array.from(card!.querySelectorAll("button"));
+    expect(controls.length).toBeGreaterThanOrEqual(2); // Rename + Eject
+    for (const control of controls) {
+      expect(control.className).toMatch(/(?:^|\s)relative(?:\s|$)/);
+    }
+    // And Eject by name — the control the UX review caught occluded.
+    expect(screen.getByRole("button", { name: /eject/i }).className).toMatch(
+      /(?:^|\s)relative(?:\s|$)/,
+    );
+  });
 });
 
 describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
