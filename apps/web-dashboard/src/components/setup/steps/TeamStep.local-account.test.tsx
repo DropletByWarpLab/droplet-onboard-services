@@ -56,7 +56,9 @@ beforeEach(() => {
 async function openDialog() {
   render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
   // Wait for SSO discovery to settle so the initial paint is stable.
-  await screen.findByText(/Sync your directory/i);
+  // (WARP-1305: the settled no-directory card now reads "isn't available
+  // yet — … invite people by email below".)
+  await screen.findByText(/invite people by email below/i);
   fireEvent.click(screen.getByRole("button", { name: /create (a )?local account/i }));
   return screen.getByRole("dialog");
 }

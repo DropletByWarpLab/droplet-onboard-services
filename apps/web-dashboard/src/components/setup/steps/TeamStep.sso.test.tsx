@@ -48,8 +48,12 @@ describe("TeamStep SSO control is honest (connectivity audit D1)", () => {
     getEnabledSsoProviders.mockResolvedValue([]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    // Informational card still present (the SSO option is explained)…
-    expect(await screen.findByText(/Sync your directory/i)).toBeInTheDocument();
+    // Informational card still present (WARP-1305: it now reads as an honest
+    // "isn't available yet" note rather than a "Sync your directory instead"
+    // affordance — see TeamStep.directory-sync-unavailable.test.tsx)…
+    expect(
+      await screen.findByText(/invite people by email below/i),
+    ).toBeInTheDocument();
     // …but the inert no-op button is gone.
     expect(
       screen.queryByRole("button", { name: /connect sso/i }),
@@ -74,7 +78,9 @@ describe("TeamStep SSO control is honest (connectivity audit D1)", () => {
     getEnabledSsoProviders.mockRejectedValue(new Error("offline"));
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    expect(await screen.findByText(/Sync your directory/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/invite people by email below/i),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /connect sso/i }),
     ).not.toBeInTheDocument();

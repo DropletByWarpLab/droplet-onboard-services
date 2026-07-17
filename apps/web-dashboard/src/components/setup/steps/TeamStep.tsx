@@ -194,7 +194,7 @@ export function TeamStep({
   //
   // Three states, to avoid a copy FLASH on first paint: `null` = discovery
   // still in flight (neutral copy, no synced chip), `[]` = resolved with no
-  // directory configured (the local-first "Sync your directory instead" note),
+  // directory configured (the honest WARP-1305 "isn't available yet" note),
   // `[...]` = resolved with provider(s) connected ("Directory sync is on").
   const [ssoProviders, setSsoProviders] = useState<string[] | null>(null);
   useEffect(() => {
@@ -372,7 +372,7 @@ export function TeamStep({
     <StepShell
       current="team"
       title="Bring in your team"
-      subtitle="Invite people now or sync your whole directory. Roles map to what the AI is allowed to do on their behalf."
+      subtitle="Invite people and choose their roles — they map to what the AI is allowed to do on their behalf."
       primary={{
         label: invites.length > 0 ? "Send invites & continue" : "Continue",
         onClick: onComplete,
@@ -383,17 +383,37 @@ export function TeamStep({
           gap so the SSO card + invite row + pending list fit without scroll.
           Three-state, flash-free: while discovery is in flight (`ssoLoading`)
           the card shows neutral "Checking…" copy with no synced chip, so a box
-          that HAS a directory never momentarily shows "Sync your directory
-          instead" before flipping to "Directory sync is on". */}
-      <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-[clamp(16px,3vh,24px)]">
-        <Users size={20} className="flex-shrink-0 text-accent" />
+          that HAS a directory never momentarily shows the not-available note
+          before flipping to "Directory sync is on".
+
+          WARP-1305 — the not-connected state must not read as an affordance.
+          The old "Sync your directory instead" headline (accent styling, verb
+          phrase) invited a click, but there is no directory-sync setup flow
+          anywhere in the product (SSO providers are provisioned out-of-band;
+          the dashboard has no configure surface) — QA clicked it and filed
+          the dead end. Per the walkthrough-honesty pattern the card now says
+          plainly that directory sync isn't available yet, in muted (non-CTA)
+          styling, and points at the invite path that DOES work. The accent
+          treatment is reserved for the truthful connected state. */}
+      <div
+        data-testid="directory-sync-panel"
+        className={`flex items-center gap-3.5 rounded-xl border px-4 py-3.5 mb-[clamp(16px,3vh,24px)] ${
+          ssoConnected
+            ? "border-accent/20 bg-accent-subtle"
+            : "border-separator bg-surface-secondary"
+        }`}
+      >
+        <Users
+          size={20}
+          className={`flex-shrink-0 ${ssoConnected ? "text-accent" : "text-label-tertiary"}`}
+        />
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">
             {ssoLoading
               ? "Directory sync"
               : ssoConnected
                 ? "Directory sync is on"
-                : "Sync your directory instead"}
+                : "Directory sync isn’t available yet"}
           </p>
           <p className="type-caption-1 text-label-tertiary mt-0.5">
             {ssoLoading
@@ -402,7 +422,7 @@ export function TeamStep({
                 ? `Your directory is mirrored over SSO (${ssoProviders
                     .map(ssoProviderName)
                     .join(", ")}) — all on the LAN. New people sign in with your provider.`
-                : "Mirror Google Workspace, Microsoft Entra, or Okta over SSO (OIDC) — stays on the LAN."}
+                : "Google Workspace, Microsoft Entra, and Okta sync (SSO) is coming — for now, invite people by email below."}
           </p>
         </div>
         {ssoConnected && (
@@ -564,10 +584,24 @@ export function TeamStep({
           files, and chat, and a <span className="font-semibold">Guest</span> is
           scoped to their own sessions.
         </p>
+        {/* WARP-1305 — honesty in the learn-more too: only describe SSO as an
+            instruction when a directory is actually connected. Otherwise the
+            paragraph explains what's coming without inviting a dead action. */}
         <p>
-          Prefer to bring everyone in at once? Connect your identity provider
-          over SSO and Droplet mirrors your directory — all on your own network,
-          nothing sent off the box.
+          {ssoConnected ? (
+            <>
+              Your identity provider is connected over SSO, so Droplet mirrors
+              your directory — all on your own network, nothing sent off the
+              box.
+            </>
+          ) : (
+            <>
+              Directory sync — mirroring your identity provider (Google
+              Workspace, Microsoft Entra, or Okta) over SSO — isn&rsquo;t
+              available yet. When it lands, everyone comes in at once, all on
+              your own network.
+            </>
+          )}
         </p>
       </LearnMoreCard>
 
