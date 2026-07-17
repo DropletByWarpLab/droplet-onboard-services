@@ -190,6 +190,8 @@ describe("setup flow → done state", () => {
 
     // PR #380 — we're now on `org`. Name the workspace + continue to
     // `twofactor` (account → org → twofactor → internet).
+    // WARP-1325 — the Home/Business pick is required (no preselection).
+    fireEvent.click(screen.getByRole("radio", { name: /my business/i }));
     fireEvent.change(screen.getByLabelText(/workspace name/i), {
       target: { value: "Acme HQ" },
     });

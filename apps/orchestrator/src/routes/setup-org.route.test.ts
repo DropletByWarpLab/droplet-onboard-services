@@ -189,6 +189,60 @@ describe("POST /api/setup/org (PR #380)", () => {
     expect(ws.size ?? null).toBeNull();
   });
 
+  // ── WARP-1325 — the ADR-007 §2 Home/Business pick ──────────────────────
+  describe("WARP-1325 — workspaceType pick", () => {
+    it("persists type BUSINESS on a business pick (pre-auth first run → setBy setup-wizard)", async () => {
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send({ ...VALID_BODY, workspaceType: "business" });
+      expect(res.status).toBe(200);
+      const ws = prisma._workspace()!;
+      expect(ws.type).toBe("BUSINESS");
+      expect(ws.setBy).toBe("setup-wizard");
+    });
+
+    it("persists type HOME on a home pick", async () => {
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send({ ...VALID_BODY, workspaceType: "home" });
+      expect(res.status).toBe(200);
+      expect(prisma._workspace()!.type).toBe("HOME");
+    });
+
+    it("records the authenticated owner as setBy when the POST rides a session", async () => {
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .set("Cookie", "droplet_session=valid-session")
+        .send({ ...VALID_BODY, workspaceType: "business" });
+      expect(res.status).toBe(200);
+      expect(prisma._workspace()!.setBy).toBe("owner");
+    });
+
+    it("stays 200 without the pick and does NOT clobber a stored type (legacy body)", async () => {
+      prisma._seedWorkspace({
+        id: 1,
+        slug: "acme",
+        displayName: "Acme HQ",
+        type: "BUSINESS",
+        orgConfigured: true,
+      });
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send(VALID_BODY);
+      expect(res.status).toBe(200);
+      expect(prisma._workspace()!.type).toBe("BUSINESS");
+    });
+
+    it("400s a workspaceType outside home|business", async () => {
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send({ ...VALID_BODY, workspaceType: "office" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("ORG_FIELDS_REQUIRED");
+      expect(prisma._workspace()).toBeNull();
+    });
+  });
+
   // ── ORCH-04: auth gate on a claimed appliance ──────────────────────────
   describe("ORCH-04 — auth gate once the appliance is claimed", () => {
     it("rejects an unauthenticated POST once the appliance is `ready` (401, no write)", async () => {

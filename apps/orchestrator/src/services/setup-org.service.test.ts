@@ -208,3 +208,61 @@ describe("setup-org.service — persistOrg", () => {
     expect(stored.orgConfigured).toBe(true);
   });
 });
+
+// ── WARP-1325 — the ADR-007 §2 Home/Business pick ──
+//
+// The org step is the ONLY place a fresh install ever states what kind of
+// workspace this is. Before this, nothing set `Workspace.type`, so every
+// install stayed at the `HOME` schema default and the Business-gated surfaces
+// (Departments & teams, WARP-1270) were permanently unreachable.
+describe("setup-org.service — persistOrg workspace type (WARP-1325)", () => {
+  let prisma: Mock;
+  beforeEach(() => {
+    prisma = createPrismaMock();
+  });
+
+  const base = { name: "Acme HQ", slug: "acme", tz: "America/New_York" };
+
+  it("persists type BUSINESS on a business pick, stamping setBy/setAt", async () => {
+    await persistOrg(prisma as never, { ...base, workspaceType: "business" });
+    const stored = prisma._row()!;
+    expect(stored.type).toBe("BUSINESS");
+    // Pre-auth first run — the step itself is the recorded actor.
+    expect(stored.setBy).toBe("setup-wizard");
+    expect(stored.setAt).toBeInstanceOf(Date);
+  });
+
+  it("persists type HOME on a home pick", async () => {
+    await persistOrg(prisma as never, { ...base, workspaceType: "home" });
+    expect(prisma._row()!.type).toBe("HOME");
+  });
+
+  it("records the session owner as setBy when provided", async () => {
+    await persistOrg(prisma as never, {
+      ...base,
+      workspaceType: "business",
+      setBy: "owner",
+    });
+    expect(prisma._row()!.setBy).toBe("owner");
+  });
+
+  it("does NOT touch a stored pick when the field is absent (legacy caller)", async () => {
+    // An older dashboard bundle re-submits the org form without the pick —
+    // the stored BUSINESS type must survive, not get clobbered back to HOME.
+    prisma._seed({
+      id: 1,
+      slug: "acme",
+      displayName: "Acme HQ",
+      type: "BUSINESS",
+      orgConfigured: true,
+    });
+    await persistOrg(prisma as never, base);
+    expect(prisma._row()!.type).toBe("BUSINESS");
+  });
+
+  it("leaves type to the schema default when creating without a pick", async () => {
+    await persistOrg(prisma as never, base);
+    // No `type` key in the create payload — the DB default (HOME) applies.
+    expect(prisma._row()!.type).toBeUndefined();
+  });
+});

@@ -90,6 +90,8 @@ async function advanceThroughOrg() {
     await Promise.resolve();
     await Promise.resolve();
   });
+  // WARP-1325 — the Home/Business pick is required (no preselection).
+  fireEvent.click(screen.getByRole("radio", { name: /my business/i }));
   fireEvent.change(screen.getByLabelText(/workspace name/i), {
     target: { value: "Acme HQ" },
   });

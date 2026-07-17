@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
+import { AlertCircle, Briefcase, ChevronDown, House, ImageUp } from "lucide-react";
 import { fetchVpnStatus, postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -85,6 +85,35 @@ const INDUSTRIES: ReadonlyArray<{ value: string; label: string }> = [
   { value: "other", label: "Other" },
 ];
 
+/**
+ * WARP-1325 — the ADR-007 §2 first-run Home/Business pick. This is the ONLY
+ * place a fresh install ever states what kind of workspace this is; the pick
+ * gates which IA the dashboard renders (Business unlocks Departments & teams
+ * per WARP-1270, the roles matrix, and the advanced network view). Explicit —
+ * no preselection — per the no-guessing rule: a wrong silent default would
+ * strand a business in Home mode (the exact WARP-1325 field failure) or dump
+ * a household into RBAC surfaces it should never see.
+ */
+const WORKSPACE_KINDS: ReadonlyArray<{
+  value: "home" | "business";
+  label: string;
+  blurb: string;
+  icon: typeof House;
+}> = [
+  {
+    value: "home",
+    label: "My home",
+    blurb: "A private brain for your household.",
+    icon: House,
+  },
+  {
+    value: "business",
+    label: "My business",
+    blurb: "Departments, teams, and roles for your company.",
+    icon: Briefcase,
+  },
+];
+
 /** Company-size buckets. LOCAL smart-default hints only. */
 const COMPANY_SIZES: ReadonlyArray<{ value: string; label: string }> = [
   { value: "1-10", label: "1–10 people" },
@@ -137,6 +166,11 @@ function SelectField({
 }
 
 export function OrgStep({ onComplete }: { onComplete: () => void }) {
+  // WARP-1325 — no default: the customer must state Home vs Business.
+  const [workspaceKind, setWorkspaceKind] = useState<
+    "home" | "business" | null
+  >(null);
+  const [kindError, setKindError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [tz, setTz] = useState(TIME_ZONES[0].value);
@@ -236,7 +270,12 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
   const handleContinue = useCallback(async () => {
     setFormError(null);
     setSlugError(null);
+    setKindError(null);
 
+    if (!workspaceKind) {
+      setKindError("Choose whether this Droplet runs your home or your business.");
+      return;
+    }
     if (!name.trim()) {
       setFormError("Give your workspace a name.");
       return;
@@ -256,6 +295,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
         tz,
         industry,
         size,
+        workspaceType: workspaceKind,
       });
       onComplete();
     } catch (err) {
@@ -271,7 +311,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       }
       setSubmitting(false);
     }
-  }, [name, normalizedSlug, tz, industry, size, onComplete]);
+  }, [workspaceKind, name, normalizedSlug, tz, industry, size, onComplete]);
 
   return (
     <StepShell
@@ -293,8 +333,69 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           (fits desktop with no scrollbar; a viewport too short scrolls the whole
           panel), and the help card auto-collapses on short viewports. */}
       <>
+        {/* WARP-1325 — Home/Business pick (ADR-007 §2). First field: it gates
+            which IA everything after renders. Card-radio treatment mirrors the
+            Storage step's RAID picker (same classes, same WAI-ARIA contract). */}
+        <div>
+          <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
+            Who is this Droplet for?
+          </span>
+          <div
+            role="radiogroup"
+            aria-label="Workspace kind"
+            className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+          >
+            {WORKSPACE_KINDS.map((kind) => {
+              const selected = workspaceKind === kind.value;
+              const Icon = kind.icon;
+              return (
+                <button
+                  key={kind.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-label={`${kind.label} — ${kind.blurb}`}
+                  onClick={() => {
+                    setWorkspaceKind(kind.value);
+                    setKindError(null);
+                  }}
+                  className={`flex items-center gap-3 rounded-[10px] border px-3 py-2.5 text-left motion-safe:transition-colors ${
+                    selected
+                      ? "border-accent bg-accent/5"
+                      : "border-separator hover:border-accent/40"
+                  }`}
+                >
+                  <Icon
+                    size={17}
+                    className={selected ? "text-accent" : "text-label-tertiary"}
+                    aria-hidden
+                  />
+                  <span className="min-w-0">
+                    <span className="type-subheadline block text-label-primary">
+                      {kind.label}
+                    </span>
+                    <span className="type-caption-1 block text-label-tertiary">
+                      {kind.blurb}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {kindError && (
+            <p
+              role="alert"
+              className="type-caption-1 text-system-red mt-1.5 flex items-start gap-1.5"
+            >
+              <AlertCircle size={13} className="mt-px flex-shrink-0" />
+              <span>{kindError}</span>
+            </p>
+          )}
+        </div>
+
         {/* Logo tile + workspace name */}
-        <div className="flex items-start gap-4">
+        {/* WARP-820: fluid inter-section gaps so the form fits without scroll. */}
+        <div className="mt-[clamp(10px,2vh,16px)] flex items-start gap-4">
           <div className="flex-shrink-0">
             <button
               type="button"

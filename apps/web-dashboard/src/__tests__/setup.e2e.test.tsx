@@ -332,6 +332,8 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
 
     // 3b. Org (PR #380) → name the workspace + reserve the slug → continue.
     // Org slots directly after account (account → org → twofactor → internet).
+    // WARP-1325 — the Home/Business pick is required (no preselection).
+    fireEvent.click(screen.getByRole("radio", { name: /my business/i }));
     fireEvent.change(screen.getByLabelText(/workspace name/i), {
       target: { value: "Acme HQ" },
     });

@@ -23,7 +23,7 @@
  *     `slug IS NULL` (CLAUDE.md no-guessing rule; WARP-218 / ClaimCodeState
  *     precedent).
  */
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, WorkspaceType, type PrismaClient } from "@prisma/client";
 
 /** The fixed primary key of the workspace singleton. Mirrors the
  *  `Workspace.id = 1` convention `settings-workspace.ts` already uses. */
@@ -132,6 +132,20 @@ export interface OrgInput {
   /** Stored logo path (the upload itself is handled separately; this is the
    *  on-NVMe path the dashboard renders). Optional — the logo is optional. */
   logoPath?: string | null;
+  /**
+   * WARP-1325 — the ADR-007 §2 first-run Home/Business pick ("Phase 4"),
+   * finally wired: the wizard's org step is the only place a fresh install
+   * ever states what kind of workspace this is, and without it the singleton
+   * stays at the `HOME` default forever — leaving every Business surface
+   * (Departments & teams, WARP-1270) permanently unreachable. Optional so a
+   * legacy caller (older dashboard bundle mid-update) keeps today's behavior:
+   * absent → `Workspace.type` is NOT touched.
+   */
+  workspaceType?: "home" | "business" | null;
+  /** Who made the Home/Business pick — mirrored onto `Workspace.setBy` the
+   *  same way `settings-workspace.ts` records its owner. Null → the wizard
+   *  ran pre-auth (first-run) and we record the step itself. */
+  setBy?: string | null;
 }
 
 /** What the route returns to the wizard on success. */
@@ -175,6 +189,22 @@ export async function persistOrg(
     throw new SlugTakenError(slug);
   }
 
+  // The Home/Business pick (ADR-007 §2). Applied on BOTH upsert branches when
+  // present; when absent the spread is empty and `Workspace.type` keeps its
+  // current value (update) or the schema `HOME` default (create) — an older
+  // dashboard POSTing the pre-WARP-1325 body must not clobber a stored pick.
+  const typeFields =
+    input.workspaceType === "business" || input.workspaceType === "home"
+      ? {
+          type:
+            input.workspaceType === "business"
+              ? WorkspaceType.BUSINESS
+              : WorkspaceType.HOME,
+          setBy: input.setBy ?? "setup-wizard",
+          setAt: new Date(),
+        }
+      : {};
+
   try {
     await prisma.workspace.upsert({
       where: { id: WORKSPACE_SINGLETON_ID },
@@ -187,6 +217,7 @@ export async function persistOrg(
         size: input.size ?? null,
         logoPath: input.logoPath ?? null,
         orgConfigured: true,
+        ...typeFields,
       },
       update: {
         displayName: input.name,
@@ -199,6 +230,7 @@ export async function persistOrg(
         size: input.size ?? null,
         logoPath: input.logoPath ?? null,
         orgConfigured: true,
+        ...typeFields,
       },
     });
   } catch (err) {

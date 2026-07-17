@@ -130,6 +130,11 @@ const orgSchema = z.object({
   industry: z.string().max(80).optional(),
   size: z.string().max(40).optional(),
   logo: z.string().max(512).optional(),
+  // WARP-1325 — ADR-007 §2: "at first-run setup the user picks Home or
+  // Business". Same wire shape as POST /api/settings/workspace. Optional so
+  // an older dashboard bundle's org POST (no pick) stays a 200 and leaves
+  // `Workspace.type` untouched instead of failing the wizard mid-update.
+  workspaceType: z.enum(["home", "business"]).optional(),
 });
 
 /**
@@ -695,6 +700,11 @@ export function createSetupRouter(
         industry: body.industry ?? null,
         size: body.size ?? null,
         logoPath: body.logo ?? null,
+        // WARP-1325 — the Home/Business pick. `setBy` records the session
+        // owner when the org POST rides the account step's cookie; on a
+        // pre-auth first run persistOrg stamps "setup-wizard".
+        workspaceType: body.workspaceType ?? null,
+        setBy: session?.username ?? null,
       });
 
       // Advance the resumable wizard. Best-effort: a failure to persist the

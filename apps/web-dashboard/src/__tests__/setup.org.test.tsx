@@ -87,8 +87,10 @@ async function advanceToOrg() {
   });
 }
 
-/** Fill the required workspace name + slug on the org step. */
-function fillOrg({ name = "Acme HQ", slug = "acme" } = {}) {
+/** Fill the required workspace name + slug on the org step, and make the
+ *  WARP-1325 Home/Business pick (required, no preselection). */
+function fillOrg({ name = "Acme HQ", slug = "acme", kind = /my business/i } = {}) {
+  fireEvent.click(screen.getByRole("radio", { name: kind }));
   fireEvent.change(screen.getByLabelText(/workspace name/i), {
     target: { value: name },
   });

@@ -1111,6 +1111,10 @@ export interface OrgInput {
   size?: string;
   /** On-NVMe logo path (optional). */
   logo?: string;
+  /** WARP-1325 — the ADR-007 §2 first-run Home/Business pick. Required from
+   *  the wizard: it decides which IA the dashboard renders (Business gates
+   *  Departments & teams, roles, and the advanced network view). */
+  workspaceType: "home" | "business";
 }
 
 /** PR #380 — POST /api/setup/org result. */
