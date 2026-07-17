@@ -80,7 +80,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
       expect(screen.getByText(/web address not ready yet/i)).toBeInTheDocument(),
     );
@@ -103,7 +103,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
       expect(screen.getByText(/off · tap to connect this device/i)).toBeInTheDocument(),
     );
@@ -116,10 +116,31 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     // The one-shot dialog: heading + private-key warning; switch reports on.
     await screen.findByText(/scan to connect/i);
     expect(screen.getByText(/the private key is shown once/i)).toBeInTheDocument();
+    // WARP-993 honesty gate: no offLanReachable on the create response ⇒
+    // never promise "from anywhere".
+    expect(screen.getByText(/on your home network/i)).toBeInTheDocument();
+    expect(screen.queryByText(/from anywhere/i)).not.toBeInTheDocument();
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
     expect(
       screen.getByText(/on · 1 connected device$/i),
     ).toBeInTheDocument();
+  });
+
+  it("promises 'from anywhere' only when the create response says off-LAN is reachable", async () => {
+    mockFetchVpnStatus.mockResolvedValue(READY);
+    mockCreateVpnPeer.mockResolvedValue({ ...CREATED, offLanReachable: true });
+    mockFetchVpnPeers.mockResolvedValue({ peers: [MY_PEER] });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
+    await waitFor(() =>
+      expect(screen.getByText(/off · tap to connect this device/i)).toBeInTheDocument(),
+    );
+    fireEvent.click(sw);
+
+    await screen.findByText(/scan to connect/i);
+    expect(screen.getByText(/from anywhere/i)).toBeInTheDocument();
   });
 
   it("shows the secure address and reports on when active peers exist", async () => {
@@ -128,7 +149,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
     expect(screen.getByText(/on · 2 connected devices/i)).toBeInTheDocument();
     expect(
@@ -143,7 +164,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
 
     // Nothing revoked until the confirm.
@@ -162,7 +183,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
     expect(sw).toHaveAttribute("aria-disabled", "true");
 
@@ -177,7 +198,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     render(<RemoteAccessWidget {...SIZE} />);
 
-    const sw = await screen.findByRole("switch", { name: /turn on remote access/i });
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
       expect(screen.getByText(/off · tap to connect this device/i)).toBeInTheDocument(),
     );

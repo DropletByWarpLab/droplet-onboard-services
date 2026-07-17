@@ -1019,13 +1019,18 @@
 .droplet-home .w-remote-link:hover {
   text-decoration: underline;
 }
+/* Same light/dark red idiom as .timeline-ico.err — --danger is a fill token
+   and its dark ramp (#7f1d1d) fails contrast as text on the card. */
 .droplet-home .w-remote-err {
   display: flex;
   align-items: flex-start;
   gap: 6px;
   font-size: 11.5px;
-  color: var(--danger);
+  color: #b91c1c;
   margin-top: 6px;
+}
+.dark .droplet-home .w-remote-err {
+  color: #fca5a5;
 }
 .droplet-home .w-remote-err svg {
   flex-shrink: 0;

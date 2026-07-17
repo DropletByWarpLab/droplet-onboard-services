@@ -57,6 +57,7 @@ import {
   Thermometer,
   Video,
   Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
@@ -896,7 +897,9 @@ export function RemoteAccessWidget(_: WidgetProps) {
       setConfirmOff(false);
       await load();
     } catch (e) {
-      setConfirmOff(false);
+      // Partial revocation is possible — refetch so the count is honest, then
+      // re-throw so the ConfirmDialog stays open for retry (its contract).
+      await load();
       setError(translateError(e, "vpn"));
       throw e;
     }
@@ -954,7 +957,8 @@ export function RemoteAccessWidget(_: WidgetProps) {
         role="switch"
         aria-checked={on || submitting}
         aria-disabled={inert || undefined}
-        aria-label="Turn on remote access"
+        aria-label="Remote access"
+        aria-describedby="w-remote-sub"
         tabIndex={0}
         onClick={flip}
         onKeyDown={(e) => {
@@ -969,7 +973,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
         </span>
         <span className="dn">
           <div className="nm">Droplet VPN</div>
-          <div className="sb">{sub}</div>
+          <div className="sb" id="w-remote-sub">{sub}</div>
         </span>
         <span className="w-toggle">
           <span className="ball" />
@@ -983,7 +987,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
           <span className="ph">your secure address</span>
         )}
         <a className="w-remote-link" href="/remote-access">
-          Remote Access
+          Remote access
           <ArrowUpRight size={12} />
         </a>
       </div>
@@ -1001,6 +1005,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
           onClose={() => setCreated(null)}
           labelledBy="w-remote-qr-title"
           maxWidth="md"
+          flush
         >
           <div>
             <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
@@ -1010,6 +1015,14 @@ export function RemoteAccessWidget(_: WidgetProps) {
               >
                 Scan to connect
               </h3>
+              <button
+                onClick={() => setCreated(null)}
+                className="p-1 text-label-tertiary hover:text-label-primary"
+                aria-label="Close"
+                type="button"
+              >
+                <X size={18} />
+              </button>
             </div>
             <div className="p-5 space-y-4">
               <ol className="type-footnote text-label-secondary list-decimal pl-5 space-y-1">
@@ -1029,7 +1042,13 @@ export function RemoteAccessWidget(_: WidgetProps) {
                       status?.publicFqdn ?? undefined,
                     )}
                   </strong>{" "}
-                  in the browser — that&rsquo;s your Droplet from anywhere.
+                  in the browser —{" "}
+                  {/* WARP-993: only promise "from anywhere" when the minted
+                      conf is actually routable off-LAN (echoed on the create
+                      response; missing ⇒ stay honest). */}
+                  {created.offLanReachable === true
+                    ? "that’s this Droplet from anywhere."
+                    : "that’s this Droplet on your home network."}
                 </li>
               </ol>
               <div className="flex justify-center">
@@ -1086,7 +1105,12 @@ export function RemoteAccessWidget(_: WidgetProps) {
         onConfirm={disconnect}
         onCancel={() => setConfirmOff(false)}
         title="Turn off remote access?"
-        description="Your devices will be disconnected immediately and the WireGuard config on each of them will stop working. You can reconnect any time with one tap."
+        description={
+          "Your devices will be disconnected immediately and the WireGuard config on each of them will stop working. You can reconnect any time with one tap." +
+          (peers.length > mine.length
+            ? " Other members’ devices stay connected."
+            : "")
+        }
         confirmLabel="Turn off"
         variant="destructive"
       />
