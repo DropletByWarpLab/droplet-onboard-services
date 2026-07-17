@@ -226,6 +226,18 @@ describe("PersonalityCard", () => {
     expect(sw).toHaveClass("on");
   });
 
+  it("gives the custom-instructions textarea a live focus ring — the ring idiom, not the dead focus:border defeated by the inline border (WARP-1344)", async () => {
+    render(<PersonalityCard />);
+    const field = await screen.findByLabelText(/custom instructions/i);
+    // The inline style border (style={{ border: ... }}) always beats a
+    // focus:border-* class, and a bare outline-none removes the UA fallback —
+    // keyboard focus must instead paint the same ring the preset tiles and
+    // verbosity segments use (WCAG 2.4.7).
+    expect(field.className).toMatch(/focus:ring-2/);
+    expect(field.className).toMatch(/focus:ring-\[var\(--brand\)\]/);
+    expect(field.className).not.toMatch(/focus:border-\[var\(--brand\)\]/);
+  });
+
   it("renders the group header via the shell Sect pattern — sentence case, no uppercase eyebrow (WARP-1344)", async () => {
     render(<PersonalityCard />);
     const heading = await screen.findByRole("heading", { name: "Workspace" });
