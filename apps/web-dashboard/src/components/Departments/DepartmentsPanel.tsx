@@ -220,6 +220,29 @@ const RMETA_STYLE: React.CSSProperties = {
   color: "var(--text-muted)",
 };
 
+// Shell typography for the create dialog (WARP-1347 — indigo idiom, no
+// legacy `type-*` utilities). Metrics mirror the old `type-headline` /
+// `type-caption-1` / `type-footnote` classes 1:1 so the visual hierarchy
+// is unchanged.
+const DIALOG_HEADING_STYLE: React.CSSProperties = {
+  margin: 0,
+  fontSize: 17,
+  lineHeight: "22px",
+  fontWeight: 600,
+  letterSpacing: "-0.41px",
+  color: "var(--text)",
+};
+const FIELD_LABEL_STYLE: React.CSSProperties = {
+  fontSize: 12,
+  lineHeight: "16px",
+  color: "var(--text-muted)",
+};
+const FOOTNOTE_STYLE: React.CSSProperties = {
+  fontSize: 13,
+  lineHeight: "18px",
+  letterSpacing: "-0.08px",
+};
+
 export interface DepartmentsPanelProps {
   /** Roster used to populate the "add member" picker — passed down so this
    *  panel doesn't duplicate the /users page's own fetchUsers() call. */
@@ -738,7 +761,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       value={m.right}
                       disabled={disabled}
                       onChange={(e) => handleRightChange(m.userId, e.target.value as DepartmentRight)}
-                      className="dp-input"
+                      className="outline-none focus:border-[var(--brand)] transition-colors"
                       style={{ ...fieldStyle, width: "auto", height: 32, padding: "0 10px" }}
                     >
                       {RIGHTS.map((r) => (
@@ -752,7 +775,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                         type="button"
                         onClick={() => setRemoveTarget({ userId: m.userId, displayName: m.displayName })}
                         aria-label={`Remove ${m.displayName} from ${selected.name}`}
-                        className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                        className="p-2.5 rounded-sm text-[var(--text-faint)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
                       >
                         <Trash2 size={14} />
                       </button>
@@ -771,7 +794,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                   aria-label="Person to add"
                   value={addMemberUserId}
                   onChange={(e) => setAddMemberUserId(e.target.value)}
-                  className="dp-input"
+                  className="outline-none focus:border-[var(--brand)] transition-colors"
                   style={{ ...fieldStyle, flex: 1, height: 34, padding: "0 10px" }}
                 >
                   <option value="">Add a person…</option>
@@ -785,7 +808,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                   aria-label="Rights for new member"
                   value={addMemberRight}
                   onChange={(e) => setAddMemberRight(e.target.value as DepartmentRight)}
-                  className="dp-input"
+                  className="outline-none focus:border-[var(--brand)] transition-colors"
                   style={{ ...fieldStyle, width: "auto", height: 34, padding: "0 10px" }}
                 >
                   {RIGHTS.map((r) => (
@@ -853,11 +876,11 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
         maxWidth="sm"
       >
         <div className="space-y-3">
-          <h2 id={createHeadingId} className="type-headline" style={{ color: "var(--text)" }}>
+          <h2 id={createHeadingId} style={DIALOG_HEADING_STYLE}>
             {headingLabel}
           </h2>
           <div>
-            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
               Name
             </label>
             <input
@@ -869,7 +892,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
               style={fieldStyle}
             />
             {createName.trim() && (
-              <p className="dslug type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
+              <p className="dslug mt-1.5" style={FIELD_LABEL_STYLE}>
                 <span className="mono">
                   {createParent ? `${createParent.slug}-` : ""}
                   <b style={{ color: "var(--brand)" }}>{slugPreview(createName)}</b>
@@ -878,7 +901,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             )}
           </div>
           <div>
-            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
               Description (optional)
             </label>
             <input
@@ -889,7 +912,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             />
           </div>
           <div>
-            <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
               Storage quota (optional)
             </label>
             <div className="flex gap-1.5">
@@ -918,7 +941,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             </div>
           </div>
           {createError && (
-            <p role="alert" className="type-footnote text-system-red">
+            <p role="alert" className="text-system-red" style={FOOTNOTE_STYLE}>
               {createError}
             </p>
           )}
