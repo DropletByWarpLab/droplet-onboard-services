@@ -34,10 +34,12 @@ export function orgApiMocks() {
 
 /**
  * Walk the rendered Org step → internet. Assumes the account step's "Create
- * Account" click already landed us on Org. Fills the required workspace name +
- * URL slug, clicks "Continue", and lets the persist resolve.
+ * Account" click already landed us on Org. Makes the WARP-1325 Home/Business
+ * pick (required, no preselection), fills the required workspace name + URL
+ * slug, clicks "Continue", and lets the persist resolve.
  */
 export async function passOrgStep() {
+  fireEvent.click(screen.getByRole("radio", { name: /my business/i }));
   fireEvent.change(screen.getByLabelText(/workspace name/i), {
     target: { value: "Acme HQ" },
   });
