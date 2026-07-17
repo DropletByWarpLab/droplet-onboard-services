@@ -51,16 +51,29 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
   it("does NOT append the dev origin in production", async () => {
     delete process.env.CORS_ALLOWED_ORIGINS;
     process.env.NODE_ENV = "production";
-    // production also requires a strong JWT_SECRET; set one so config parses.
-    const prevJwt = process.env.JWT_SECRET;
-    process.env.JWT_SECRET = "x".repeat(64);
+    // production also requires a strong JWT_SECRET + non-empty device/service
+    // secrets (WARP-580); set them so config parses.
+    const SECRET_KEYS = [
+      "JWT_SECRET",
+      "DEVICE_SECRET_KEY",
+      "SERVICE_TOKEN_SWITCH",
+      "SERVICE_TOKEN_AI_GATEWAY",
+      "SERVICE_TOKEN_VOICE",
+      "SERVICE_TOKEN_MCP",
+      "SERVICE_TOKEN_EMAIL",
+      "SERVICE_TOKEN_EGRESS_AUDIT",
+    ];
+    const prev = Object.fromEntries(SECRET_KEYS.map((k) => [k, process.env[k]]));
+    for (const k of SECRET_KEYS) process.env[k] = "x".repeat(64);
     try {
       const { config } = await import("../config.js");
       expect(config.corsAllowedOrigins).not.toContain("http://localhost:3001");
       expect(config.corsAllowedOrigins).toContain("https://droplet-ai.local");
     } finally {
-      if (prevJwt === undefined) delete process.env.JWT_SECRET;
-      else process.env.JWT_SECRET = prevJwt;
+      for (const k of SECRET_KEYS) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k] as string;
+      }
     }
   });
 });
