@@ -10,6 +10,15 @@ import { config } from "../config.js";
  * secrets: cert lifecycle state, the (CT-public) FQDN, and whether HQ
  * issuance is configured at all (drives the page's air-gapped branch).
  * Mounted in app.ts BEFORE authMiddleware, like the other public routers.
+ *
+ * WARP-1302: the payload deliberately carries NO navigation target. The FQDN
+ * is split-horizon (public-NXDOMAIN) and only resolvable where the box owns
+ * the LAN's DNS — a shape fact the orchestrator cannot see (compose wires
+ * DROPLET_LAN_DNS_AUTHORITY to the gateway only). The advance signal is
+ * nginx's canonical-host 307, which IS authority-gated (spec §2(d)): the
+ * status page's poll surfaces it as an opaqueredirect and reloads. A
+ * payload-driven redirect here would send authority=0 clients to a DNS
+ * dead-end.
  */
 export function createTlsStatusPublicRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -22,13 +31,12 @@ export function createTlsStatusPublicRouter(prisma: PrismaClient): Router {
       res.json({
         state,
         fqdn,
-        redirectTo: state === "LE_ISSUED" && fqdn ? `https://${fqdn}/` : null,
         hqConfigured: Boolean(config.HQ_ISSUANCE_URL),
       });
     } catch {
       // The page treats any non-advance answer as "keep polling" — degrade
       // without leaking error internals onto an unauthenticated surface.
-      res.status(503).json({ state: "UNKNOWN", fqdn: null, redirectTo: null, hqConfigured: false });
+      res.status(503).json({ state: "UNKNOWN", fqdn: null, hqConfigured: false });
     }
   });
 

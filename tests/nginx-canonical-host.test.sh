@@ -140,6 +140,23 @@ else
   fail "OFF variant server blocks are wrong"
 fi
 
+# 10) WARP-1302: the status page advances ONLY on nginx's authority-gated 307
+#     (fetch sees it as an opaqueredirect → reload). It must NOT navigate off
+#     the payload: the orchestrator can't see DROPLET_LAN_DNS_AUTHORITY, so a
+#     payload-driven location.replace() to the FQDN would DNS-dead-end every
+#     authority=0 shape (the FQDN is split-horizon, public-NXDOMAIN).
+page="$NGINX_DIR/tls-status/index.html"
+if grep -q 'opaqueredirect' "$page" && grep -q 'location.reload' "$page"; then
+  pass "status page keeps the opaqueredirect auto-advance (single-box path)"
+else
+  fail "status page lost the opaqueredirect auto-advance"
+fi
+if ! grep -q 'redirectTo' "$page" && ! grep -q 'location.replace' "$page"; then
+  pass "status page has no payload-driven FQDN navigation (authority=0 safe)"
+else
+  fail "status page still navigates off the /api/tls/status payload"
+fi
+
 # --- Wiring checks (fail until Tasks 3-4 land; listed here so one file guards
 # --- the whole feature) -------------------------------------------------------
 conf="$NGINX_DIR/nginx.conf"
