@@ -118,7 +118,12 @@ describe("setup AI step — model still downloading (WARP-849 AC1)", () => {
     render(<AiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await flushMicrotasks();
     expect(fetchModelsMock).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("model-downloading")).toBeInTheDocument();
+    // WARP-1287 — a rejected fetch no longer masquerades as the WARP-849
+    // downloading state (the backend never answered, so "your model is
+    // still downloading" was unverifiable). The honest fetch-failed note
+    // renders instead; the poll behavior below is unchanged.
+    expect(screen.getByTestId("model-fetch-failed")).toBeInTheDocument();
+    expect(screen.queryByTestId("model-downloading")).not.toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(8_000);
