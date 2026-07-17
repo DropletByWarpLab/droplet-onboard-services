@@ -5721,6 +5721,33 @@ export async function fetchAppCapabilities(): Promise<AppCapabilities> {
   return res.json();
 }
 
+/**
+ * Toggle a user-facing module on/off (WARP-1306) — the owner/admin enable
+ * path behind the honest "module off" states (e.g. ProjectsDisabled). PATCH
+ * /api/admin/modules/:id is owner/admin-gated server-side (403
+ * `admin_required` otherwise); callers gate the affordance on the caller's
+ * role and treat this as the action, never the authority.
+ */
+export async function setAppModuleEnabled(
+  moduleId: string,
+  enabled: boolean,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/admin/modules/${encodeURIComponent(moduleId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(
+      body.message || `Failed to update the module: ${res.status}`,
+    );
+  }
+}
+
 // --- WARP-825: Settings Danger Zone — factory reset ---
 
 /** Lifecycle of a factory-reset job, mirroring the orchestrator ResetJobStatus
