@@ -883,6 +883,12 @@ EOF
   # persists an operator override INTO this file anyway, so file and env
   # can't diverge on a healthy box.
   upsert_env DROPLET_MATTER_WIFI_PSK_FILE /etc/droplet/ap-psk
+  # WARP-1363: same file-first pattern for the SSID. The env SSID above is
+  # written once at setup and goes stale on an AP rename (claim / wizard
+  # Wi-Fi save) — droplet-openwrt-attach persists the LIVE SSID to
+  # /etc/droplet/ap-ssid on every attach, and the sidecar re-reads it per
+  # commission, so a renamed AP can never strand Matter commissioning.
+  upsert_env DROPLET_MATTER_WIFI_SSID_FILE /etc/droplet/ap-ssid
   # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
   # as the three host services above: the orchestrator's config default is
   # http://host.docker.internal:9090 (docker0), exactly the default WARP-806

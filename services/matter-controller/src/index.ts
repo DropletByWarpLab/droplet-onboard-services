@@ -61,6 +61,7 @@ async function main() {
     // WARP-895: Wi-Fi credentials for BLE-first commissioning (empty ⇒
     // on-network-only). Resolved per-commission inside the core.
     wifiSsid: config.DROPLET_MATTER_WIFI_SSID,
+    wifiSsidFile: config.DROPLET_MATTER_WIFI_SSID_FILE,
     wifiPsk: config.DROPLET_MATTER_WIFI_PSK,
     wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
     regulatoryCountryCode: config.DROPLET_MATTER_REGULATORY_COUNTRY,
@@ -90,6 +91,7 @@ async function main() {
     // /capabilities answers wifiProvisioning from the identical inputs.
     wifiOptions: {
       wifiSsid: config.DROPLET_MATTER_WIFI_SSID,
+      wifiSsidFile: config.DROPLET_MATTER_WIFI_SSID_FILE,
       wifiPsk: config.DROPLET_MATTER_WIFI_PSK,
       wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
     },
