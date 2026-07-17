@@ -201,6 +201,47 @@ describe("<ModelsPage /> (WARP-836)", () => {
     // Cloud rows still render in the degraded state.
     expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
   });
+
+  // ── WARP-1289 — honest degraded state (same pattern as the wizard's
+  //    WARP-1284 model-degraded note): an empty local list WITH
+  //    `degraded: true` means "can't reach the AI service", and must NOT
+  //    render as "no local models". ──
+
+  it("renders the AI-service-unreachable state when degraded + empty local (WARP-1289)", () => {
+    ready({ local: [], degraded: true });
+    render(<ModelsPage />);
+    expect(
+      screen.getByRole("heading", { name: /can’t reach your ai service/i }),
+    ).toBeInTheDocument();
+    // The genuine-empty copy must NOT show — that's the exact dishonesty
+    // this ticket removes.
+    expect(
+      screen.queryByRole("heading", { name: /no local models/i }),
+    ).not.toBeInTheDocument();
+    // The rest of the page still renders (KPIs + cloud).
+    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
+  });
+
+  it("keeps the genuine-empty copy when local is [] and NOT degraded (WARP-1289)", () => {
+    ready({ local: [], degraded: false });
+    render(<ModelsPage />);
+    expect(
+      screen.getByRole("heading", { name: /no local models/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /can’t reach your ai service/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an incomplete-list note when degraded but some models still listed (WARP-1289)", () => {
+    ready({ degraded: true }); // fixture keeps one local model
+    render(<ModelsPage />);
+    // The card still renders…
+    expect(screen.getByText("llama3.1:70b")).toBeInTheDocument();
+    // …with an honest note that the list may be incomplete.
+    expect(screen.getByText(/may be missing/i)).toBeInTheDocument();
+  });
 });
 
 // ── One-model rule (architecture-guard #13) — status-only, NO mutations ──
@@ -226,6 +267,16 @@ describe("<ModelsPage /> one-model-rule guardrail (WARP-836)", () => {
     const buttons = screen.queryAllByRole("button");
     for (const b of buttons) {
       expect(b).not.toHaveTextContent(FORBIDDEN_MUTATION);
+    }
+  });
+
+  it("exposes no mutation controls in the AI-service-unreachable state (WARP-1289)", () => {
+    ready({ local: [], degraded: true });
+    render(<ModelsPage />);
+    const buttons = screen.queryAllByRole("button");
+    for (const b of buttons) {
+      expect(b).not.toHaveTextContent(FORBIDDEN_MUTATION);
+      expect(b.getAttribute("aria-label") ?? "").not.toMatch(FORBIDDEN_MUTATION);
     }
   });
 

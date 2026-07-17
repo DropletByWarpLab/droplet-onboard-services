@@ -34,7 +34,13 @@ export function createModelsRouter(): Router {
           return;
         }
         const payload = await getModelsPagePayload();
-        await cacheSet(MODELS_PAGE_CACHE_KEY, payload, MODELS_PAGE_CACHE_TTL);
+        // WARP-1289: never cache a degraded payload (same rule as
+        // GET /api/llm/models under WARP-1284) — the next request retries
+        // the gateway so the page self-heals the moment the AI service is
+        // reachable again, instead of pinning "unreachable" for a TTL.
+        if (!payload.degraded) {
+          await cacheSet(MODELS_PAGE_CACHE_KEY, payload, MODELS_PAGE_CACHE_TTL);
+        }
         res.json(payload);
       } catch (err) {
         next(err);
