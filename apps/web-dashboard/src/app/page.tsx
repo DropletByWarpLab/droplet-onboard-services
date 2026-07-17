@@ -70,27 +70,27 @@ const DIRECTIONS: Record<DensityKey, Density> = {
 const DEFAULTS: Record<DensityKey, LayoutItem[]> = {
   balanced: [
     { id: "chat", w: 8, h: 5 }, { id: "calendar", w: 4, h: 3 }, { id: "status", w: 4, h: 2 },
-    { id: "activity", w: 4, h: 3 }, { id: "files", w: 4, h: 3 }, { id: "cameras", w: 4, h: 3 },
-    { id: "tasks", w: 3, h: 3 }, { id: "scenes", w: 3, h: 3 }, { id: "models", w: 3, h: 3 },
-    { id: "tools", w: 3, h: 3 }, { id: "notes", w: 12, h: 2 },
+    { id: "remote", w: 4, h: 2 }, { id: "activity", w: 4, h: 3 }, { id: "files", w: 4, h: 3 },
+    { id: "cameras", w: 4, h: 3 }, { id: "tasks", w: 3, h: 3 }, { id: "scenes", w: 3, h: 3 },
+    { id: "models", w: 3, h: 3 }, { id: "tools", w: 3, h: 3 }, { id: "notes", w: 12, h: 2 },
   ],
   dense: [
     { id: "chat", w: 6, h: 5 }, { id: "status", w: 3, h: 2 }, { id: "calendar", w: 3, h: 5 },
-    { id: "models", w: 3, h: 2 }, { id: "cameras", w: 4, h: 3 }, { id: "activity", w: 4, h: 4 },
-    { id: "files", w: 4, h: 4 }, { id: "tasks", w: 3, h: 2 }, { id: "tools", w: 3, h: 2 },
-    { id: "scenes", w: 3, h: 2 }, { id: "notes", w: 12, h: 2 },
+    { id: "remote", w: 3, h: 2 }, { id: "models", w: 3, h: 2 }, { id: "cameras", w: 4, h: 3 },
+    { id: "activity", w: 4, h: 4 }, { id: "files", w: 4, h: 4 }, { id: "tasks", w: 3, h: 2 },
+    { id: "tools", w: 3, h: 2 }, { id: "scenes", w: 3, h: 2 }, { id: "notes", w: 12, h: 2 },
   ],
   airy: [
     { id: "chat", w: 7, h: 5 }, { id: "calendar", w: 5, h: 5 }, { id: "activity", w: 4, h: 3 },
     { id: "tasks", w: 4, h: 3 }, { id: "scenes", w: 4, h: 3 }, { id: "status", w: 6, h: 2 },
-    { id: "notes", w: 6, h: 2 },
+    { id: "remote", w: 6, h: 2 }, { id: "notes", w: 6, h: 2 },
   ],
 };
 
 const ADD_SIZE: Record<string, { w: number; h: number }> = {
-  chat: { w: 6, h: 5 }, calendar: { w: 3, h: 4 }, status: { w: 3, h: 2 }, activity: { w: 4, h: 3 },
-  files: { w: 3, h: 3 }, scenes: { w: 3, h: 3 }, cameras: { w: 4, h: 3 }, models: { w: 3, h: 3 },
-  tools: { w: 3, h: 3 }, tasks: { w: 3, h: 3 }, notes: { w: 3, h: 2 },
+  chat: { w: 6, h: 5 }, calendar: { w: 3, h: 4 }, status: { w: 3, h: 2 }, remote: { w: 3, h: 2 },
+  activity: { w: 4, h: 3 }, files: { w: 3, h: 3 }, scenes: { w: 3, h: 3 }, cameras: { w: 4, h: 3 },
+  models: { w: 3, h: 3 }, tools: { w: 3, h: 3 }, tasks: { w: 3, h: 3 }, notes: { w: 3, h: 2 },
 };
 
 const LS = "droplet-home-bento-v1-";

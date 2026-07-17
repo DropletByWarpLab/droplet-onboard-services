@@ -971,3 +971,63 @@
 .droplet-home .w-notes-new svg {
   color: var(--brand);
 }
+
+/* ---------- Remote access (Connect toggle, WARP-1351) ---------- */
+.droplet-home .w-remote {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.droplet-home .w-remote .w-dev[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.7;
+}
+.droplet-home .w-remote-addr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--card-bd);
+  min-width: 0;
+}
+.droplet-home .w-remote-addr .addr {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.droplet-home .w-remote-addr .ph {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.droplet-home .w-remote-link {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--brand);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.droplet-home .w-remote-link:hover {
+  text-decoration: underline;
+}
+.droplet-home .w-remote-err {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--danger);
+  margin-top: 6px;
+}
+.droplet-home .w-remote-err svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
