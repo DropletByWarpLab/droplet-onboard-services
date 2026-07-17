@@ -40,6 +40,10 @@ export function isPoolBackedDevice(device: string | null | undefined): boolean {
 }
 
 export interface DriveNameSource {
+  /** Path whose TAIL is the last-resort fallback name — the mount point for
+   *  the Files/Storage panels; the setup wizard passes the device path
+   *  instead (its tail, e.g. "sdb1", is the honest pre-mount disambiguator).
+   *  Machine-generated tails are guarded against either way. */
   mount: string;
   /** FS-provided label from the bridge (e.g. "TOSHIBA EXT"). */
   label?: string | null;
@@ -78,6 +82,13 @@ export function driveDisplayName(
 export function sanitizeFsLabel(name: string | null | undefined): string | undefined {
   if (!name) return undefined;
   const cleaned = name
+    // Transliterate before stripping: the server contract is ASCII-only, but
+    // an accented letter should survive as its base letter ("Média" →
+    // "Media"), not vanish ("Mdia"). NFKD splits the diacritic off as a
+    // combining mark (\p{M}), which is then dropped before the invalid-char
+    // strip below can take the whole letter with it.
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .trim()
     .replace(/\s+/g, "_")
     .replace(/[^A-Za-z0-9_-]/g, "")
@@ -85,4 +96,65 @@ export function sanitizeFsLabel(name: string | null | undefined): string | undef
     .replace(/^[_-]+|[_-]+$/g, "")
     .slice(0, 16);
   return cleaned || undefined;
+}
+
+/**
+ * Code review (WARP-1337) — every name the host could mount a volume under,
+ * from the caller's current drives snapshot: the FS label AND the mount tail
+ * of each volume. This is the "taken" set uniqueFsLabel() checks a seeded
+ * label against. Callers EXCLUDE the volume(s) the wipe is about to erase
+ * (their labels/mounts vanish with the wipe, so they can't collide).
+ */
+export function takenVolumeNames(
+  volumes: ReadonlyArray<{ mount?: string | null; label?: string | null }>,
+): string[] {
+  const names: string[] = [];
+  for (const v of volumes) {
+    const tail = (v.mount ?? "").split("/").filter(Boolean).pop();
+    if (tail) names.push(tail);
+    if (v.label) names.push(v.label);
+  }
+  return names;
+}
+
+/**
+ * Code review (WARP-1337) — shadow-mount guard for seeded FS labels.
+ *
+ * droplet-storage-pool.sh mounts an adopted/reclaimed drive at
+ * /mnt/droplet/<LABEL> via a raw host_mount with NO busy-target guard, so
+ * seeding a label another volume already carries STACKS the new mount over
+ * the old one — shadowing it until reboot, with writes meant for drive A
+ * silently landing on drive B. (Two identical-model drives adopted in one
+ * session — 2× "Samsung T7" — is the realistic home-NAS trigger.) The ticket
+ * forbids changing the host script, so the guard lives caller-side: when the
+ * sanitized candidate collides (case-insensitively — vfat uppercases labels)
+ * with the taken set, suffix it with the disk serial's tail (else a numeric
+ * bump), truncating the base to keep the ^[A-Za-z0-9_-]{1,16}$ contract. If
+ * nothing collision-free fits, return undefined — the caller OMITS the label
+ * and the fs-UUID mount keeps the path unique (the udev automount already
+ * uniquifies on reboot; this closes the same-session window).
+ */
+export function uniqueFsLabel(
+  candidate: string | undefined,
+  taken: Iterable<string>,
+  serialHint?: string | null,
+): string | undefined {
+  if (!candidate) return undefined;
+  const used = new Set<string>();
+  for (const name of taken) used.add(name.toLowerCase());
+  if (!used.has(candidate.toLowerCase())) return candidate;
+
+  const suffixes: string[] = [];
+  const serialTail = sanitizeFsLabel(serialHint)?.slice(-4);
+  if (serialTail) suffixes.push(serialTail);
+  for (let n = 2; n <= 9; n++) suffixes.push(String(n));
+
+  for (const suffix of suffixes) {
+    const tail = `_${suffix}`;
+    const base = candidate.slice(0, 16 - tail.length).replace(/[_-]+$/, "");
+    if (!base) continue;
+    const next = `${base}${tail}`;
+    if (!used.has(next.toLowerCase())) return next;
+  }
+  return undefined;
 }

@@ -19,6 +19,8 @@ import {
   isMachineTail,
   isPoolBackedDevice,
   sanitizeFsLabel,
+  takenVolumeNames,
+  uniqueFsLabel,
 } from "./drive-display";
 
 const GUID_MOUNT = "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08";
@@ -140,8 +142,16 @@ describe("sanitizeFsLabel (WARP-1337 AC4)", () => {
   });
 
   it("strips invalid characters and trims", () => {
-    expect(sanitizeFsLabel("  Média & Films!  ")).toBe("Mdia_Films");
     expect(sanitizeFsLabel("VAULT")).toBe("VAULT");
+    expect(sanitizeFsLabel("Photos (2026)!")).toBe("Photos_2026");
+  });
+
+  // Code-review follow-up: the server contract is ASCII-only, but an accented
+  // letter should transliterate ("Média" → "Media"), not vanish ("Mdia").
+  it("transliterates accented letters instead of dropping them", () => {
+    expect(sanitizeFsLabel("  Média & Films!  ")).toBe("Media_Films");
+    expect(sanitizeFsLabel("Café Décor")).toBe("Cafe_Decor");
+    expect(sanitizeFsLabel("Übung")).toBe("Ubung");
   });
 
   it("caps at 16 characters", () => {
@@ -154,5 +164,94 @@ describe("sanitizeFsLabel (WARP-1337 AC4)", () => {
     expect(sanitizeFsLabel("!!!")).toBeUndefined();
     expect(sanitizeFsLabel(null)).toBeUndefined();
     expect(sanitizeFsLabel(undefined)).toBeUndefined();
+  });
+});
+
+// =====================================================================
+// Code review (WARP-1337) — label-collision shadow-mount guard.
+//
+// droplet-storage-pool.sh mounts an adopted/reclaimed drive at
+// /mnt/droplet/<LABEL> via a raw host_mount with NO busy-target guard: seeding
+// a label another volume already carries STACKS the new mount over the old
+// one, shadowing it until reboot — writes meant for drive A silently land on
+// drive B. Two identical-model drives adopted in one session (2× Samsung T7 →
+// both "Samsung_T7") is the realistic home-NAS trigger. The fix is
+// caller-side (the ticket forbids touching the host script): before seeding,
+// check the current volume snapshot and suffix (short serial / numeric bump)
+// or omit the label when it's already carried.
+// =====================================================================
+
+describe("takenVolumeNames — the collision snapshot", () => {
+  it("collects both FS labels and mount tails", () => {
+    expect(
+      takenVolumeNames([
+        { mount: "/mnt/droplet/Samsung_T7", label: "Samsung_T7" },
+        { mount: "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08", label: "" },
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        "Samsung_T7",
+        "a0f10a84-7116-46a7-a3e3-5e00ea1c7d08",
+      ]),
+    );
+  });
+
+  it("skips empty mounts and labels", () => {
+    expect(takenVolumeNames([{ mount: "", label: "" }, { mount: "/" }])).toEqual([]);
+  });
+});
+
+describe("uniqueFsLabel — never seed a label another volume carries", () => {
+  const TAKEN = ["Samsung_T7", "wedding", "TOSHIBA"];
+
+  it("returns the candidate unchanged when nothing collides", () => {
+    expect(uniqueFsLabel("Family_Photos", TAKEN)).toBe("Family_Photos");
+  });
+
+  it("passes undefined through (nothing to uniquify)", () => {
+    expect(uniqueFsLabel(undefined, TAKEN)).toBeUndefined();
+  });
+
+  it("suffixes a colliding label with the short serial tail", () => {
+    expect(uniqueFsLabel("Samsung_T7", TAKEN, "S6XNNS0T123456B")).toBe(
+      "Samsung_T7_456B",
+    );
+  });
+
+  it("compares case-insensitively (vfat uppercases labels; paths are the hazard)", () => {
+    expect(uniqueFsLabel("SAMSUNG_T7", TAKEN, "S6XNNS0T123456B")).toBe(
+      "SAMSUNG_T7_456B",
+    );
+    expect(uniqueFsLabel("Wedding", TAKEN, "AB12")).toBe("Wedding_AB12");
+  });
+
+  it("falls back to a numeric bump when there is no serial hint", () => {
+    expect(uniqueFsLabel("Samsung_T7", TAKEN)).toBe("Samsung_T7_2");
+    expect(uniqueFsLabel("Samsung_T7", [...TAKEN, "Samsung_T7_2"])).toBe(
+      "Samsung_T7_3",
+    );
+  });
+
+  it("keeps every suffixed result inside the ^[A-Za-z0-9_-]{1,16}$ contract", () => {
+    const out = uniqueFsLabel("Sixteen_Chars_AB", ["Sixteen_Chars_AB"], "S123456789");
+    expect(out).toBeTruthy();
+    expect(out!).toMatch(/^[A-Za-z0-9_-]{1,16}$/);
+    // The base is truncated to make room — never a >16-char label.
+    expect(out).toBe("Sixteen_Cha_6789");
+  });
+
+  it("skips a serial-suffixed name that is ALSO taken", () => {
+    expect(
+      uniqueFsLabel("Samsung_T7", [...TAKEN, "Samsung_T7_456B"], "S6XNNS0T123456B"),
+    ).toBe("Samsung_T7_2");
+  });
+
+  it("returns undefined when nothing collision-free fits (caller omits; fs-UUID mount stays unique)", () => {
+    const exhausted = [
+      "Samsung_T7",
+      "Samsung_T7_456B",
+      ...Array.from({ length: 8 }, (_, i) => `Samsung_T7_${i + 2}`),
+    ];
+    expect(uniqueFsLabel("Samsung_T7", exhausted, "S6XNNS0T123456B")).toBeUndefined();
   });
 });

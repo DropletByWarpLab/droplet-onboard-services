@@ -49,7 +49,13 @@ import {
 // GUID-guarded mount tail) lives in ONE shared helper now, used by this panel
 // and VolumesPanel alike — the private per-panel copies drifted (VolumesPanel's
 // never consulted displayName and rendered raw fs-UUID tails).
-import { driveDisplayName, isPoolBackedDevice, sanitizeFsLabel } from "./drive-display";
+import {
+  driveDisplayName,
+  isPoolBackedDevice,
+  sanitizeFsLabel,
+  takenVolumeNames,
+  uniqueFsLabel,
+} from "./drive-display";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
 function fmtBytes(bytes: number): string {
@@ -269,7 +275,15 @@ export function DrivesPanel() {
       // (the hardware model — an unmounted disk has no customer-typed name
       // yet). The label becomes the mount tail, so the adopted drive never
       // lands back on a GUID mount. Omitted when the bridge has no model.
-      const label = sanitizeFsLabel(disk.model);
+      // Code review: uniquified against the mounted volumes' labels/tails —
+      // the host script's raw mount would stack an identical label over the
+      // existing mount (2× the same model is the realistic trigger); the
+      // serial tail disambiguates.
+      const label = uniqueFsLabel(
+        sanitizeFsLabel(disk.model),
+        takenVolumeNames(drives),
+        disk.serial,
+      );
       const token = await adoptDrive({
         device: disk.name,
         wipeMethod: "quick",
@@ -353,8 +367,13 @@ export function DrivesPanel() {
     setReclaimBusy(disk.name);
     try {
       // WARP-1337: same FS-label seeding as adopt — the reclaimed drive comes
-      // back named instead of GUID-mounted.
-      const label = sanitizeFsLabel(disk.model);
+      // back named instead of GUID-mounted — with the same shadow-mount
+      // collision guard (code review).
+      const label = uniqueFsLabel(
+        sanitizeFsLabel(disk.model),
+        takenVolumeNames(drives),
+        disk.serial,
+      );
       const token = await reclaimDrive({
         device: disk.name,
         md: disk.md,

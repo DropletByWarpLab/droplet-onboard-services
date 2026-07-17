@@ -19,8 +19,14 @@ import {
   calculateRaidOptions,
   type RaidLevel,
 } from "@/components/setup/raid-calculator";
-// WARP-1337: sanitizer for the post-wipe FS label (^[A-Za-z0-9_-]{1,16}$).
-import { sanitizeFsLabel } from "@/components/FileManager/drive-display";
+// WARP-1337: sanitizer for the post-wipe FS label (^[A-Za-z0-9_-]{1,16}$),
+// its shadow-mount collision guard, and the ONE shared display-name chain.
+import {
+  driveDisplayName,
+  sanitizeFsLabel,
+  takenVolumeNames,
+  uniqueFsLabel,
+} from "@/components/FileManager/drive-display";
 
 /**
  * Wizard step — name the drives the box detected, and (optionally) combine
@@ -373,6 +379,13 @@ export function StorageStep({
       p.disk.startsWith("/dev/") ? p.disk : `/dev/${p.disk}`,
     );
     try {
+      // WARP-1337 AC3 note (code review): requestCreatePool ACCEPTS an
+      // optional displayName (the confirmed create seeds the StoragePool row
+      // with it), but the wizard deliberately does not pass one yet — AC5
+      // forbids restructuring this step's UI, and the pool-name input ships
+      // with the follow-up naming tickets. When that lands, OMIT the field
+      // entirely for empty input (displayName: "" is a zod 400), mirroring
+      // the label-omission pattern in fsLabelFor above.
       const token = await requestCreatePool({
         // md device name is owner-agnostic — first pool is md0 on a fresh box
         // (the host script + bridge are authoritative; this is the request).
@@ -422,12 +435,20 @@ export function StorageStep({
   // the wipe). The label becomes the mount tail, so an adopted drive never
   // lands back on a GUID mount. Returns undefined (caller OMITS the label)
   // when nothing usable survives sanitizing.
+  //
+  // Code review: the label is uniquified against the OTHER mounted volumes'
+  // labels/tails — the host script's raw mount at /mnt/droplet/<LABEL> would
+  // stack a duplicate over the existing mount (shadow mount). This disk's own
+  // filesystems are excluded from the check: the wipe erases them, so
+  // re-adopting a drive under its own current name is not a collision.
   function fsLabelFor(disk: PhysicalDisk): string | undefined {
+    const own = new Set<DriveInfo>(disk.members);
+    const taken = takenVolumeNames(drives.filter((d) => !own.has(d)));
     for (const m of disk.members) {
       const label = sanitizeFsLabel(
         names[m.uuid]?.trim() || m.displayName || m.label,
       );
-      if (label) return label;
+      if (label) return uniqueFsLabel(label, taken, disk.disk);
     }
     return undefined;
   }
@@ -1174,13 +1195,18 @@ export function friendlyAdoptError(err: unknown): string {
   return "We couldn't reclaim that drive right now. Try again in a moment.";
 }
 
-/** Customer-facing drive name: friendly displayName, then FS label, then the
- *  device tail — never a bare device path on its own. Mirrors DrivesPanel. */
+/** Customer-facing drive name for the wizard's rows + confirm dialogs — the
+ *  SHARED WARP-1337 chain (displayName → label → tail), so this can't drift
+ *  from DrivesPanel/VolumesPanel again (code review). The DEVICE path feeds
+ *  the tail fallback here (its tail, e.g. "sdb1", is the honest short
+ *  disambiguator the reclaim rows already print — a setup-time mount can be
+ *  transient); the shared helper GUID-guards it either way. */
 function driveName(d: DriveInfo): string {
-  const tail = d.device.split("/").filter(Boolean).pop() ?? "";
-  const raw = (d.displayName || d.label || tail).replace(/[-_]+/g, " ").trim();
-  if (!raw) return "Drive";
-  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+  return driveDisplayName({
+    mount: d.device,
+    label: d.label,
+    displayName: d.displayName,
+  });
 }
 
 function formatBytes(bytes: number): string {

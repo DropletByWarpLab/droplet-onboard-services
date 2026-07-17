@@ -242,6 +242,50 @@ describe("DangerZoneSection — reformat flow (WARP-828)", () => {
     );
   });
 
+  // Code review (WARP-1337): the host script mounts at /mnt/droplet/<LABEL>
+  // with no busy-target guard — seeding a label a volume on ANOTHER disk
+  // already carries would stack the new mount over it (shadow mount). The
+  // reformat must suffix the colliding label; the drive's OWN label/mount
+  // (erased by the wipe) must not count as a collision — the whole-disk test
+  // above pins that side (VAULT reformats to plain "VAULT" over its own
+  // /mnt/droplet/vault mount).
+  it("suffixes the seeded label when a volume on another disk already carries it", async () => {
+    const base = feed();
+    base.drives.push({
+      device: "/dev/sdd1",
+      mount: "/mnt/droplet/Wedding_Photos",
+      label: "Wedding_Photos",
+      uuid: "U-CLASH",
+      size_bytes: 1_000_000_000_000,
+      used_bytes: 1e11,
+      free_bytes: 9e11,
+      mounted: true,
+      displayName: null,
+      removable: true,
+    });
+    fetchDrives.mockResolvedValue(base);
+    adoptDrive.mockResolvedValueOnce({
+      status: "confirmation_required",
+      confirmationToken: "tok-abc",
+      service: "drive_adopt",
+      resourceId: "sdb",
+    });
+    confirmStorageCommand.mockResolvedValueOnce({ ok: true });
+
+    render(<DangerZoneSection />);
+    const picker = await screen.findByLabelText(/choose a drive/i);
+    fireEvent.change(picker, { target: { value: "U-WED" } });
+    fireEvent.click(screen.getByRole("button", { name: /reformat this drive/i }));
+    const input = await screen.findByLabelText(/type .*to confirm/i);
+    fireEvent.change(input, { target: { value: "Wedding Photos" } });
+    fireEvent.click(screen.getByRole("button", { name: /erase and reformat/i }));
+
+    await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    expect(adoptDrive).toHaveBeenCalledWith(
+      expect.objectContaining({ device: "sdb", label: "Wedding_Phot_sdb" }),
+    );
+  });
+
   it("does not call confirmStorageCommand if the mint (adopt) fails", async () => {
     adoptDrive.mockRejectedValueOnce(new Error("403"));
     render(<DangerZoneSection />);

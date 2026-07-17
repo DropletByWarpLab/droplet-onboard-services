@@ -386,6 +386,40 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
     ).toBeUndefined();
   });
 
+  // Code review (WARP-1337): the host script mounts at /mnt/droplet/<LABEL>
+  // with no busy-target guard — seeding a label another mounted volume already
+  // carries would STACK the new mount over it (shadow mount; writes land on
+  // the wrong drive). Adopting the second of two identical-model drives must
+  // therefore suffix the label (short serial tail) instead of reusing it.
+  it("suffixes the seeded label when a mounted volume already carries it (shadow-mount guard)", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({
+      // The FIRST Samsung T7, adopted earlier this session, already mounted
+      // under its model-seeded label.
+      drives: [
+        makeDrive({
+          device: "/dev/sdc1",
+          mount: "/mnt/droplet/Samsung_T7",
+          label: "Samsung_T7",
+          uuid: "U-T7-1",
+        }),
+      ],
+      // The SECOND, identical-model T7 the owner now adopts.
+      disks: [makeDisk({ name: "sdd", model: "Samsung T7", serial: "S6XNNS0T123456B" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() =>
+      expect(adoptDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sdd", label: "Samsung_T7_456B" }),
+      ),
+    );
+  });
+
   // WARP-1337: reclaim seeds the same sanitized label so the reclaimed drive
   // comes back named, not GUID-mounted.
   it("passes the sanitized fs label on reclaim too", async () => {
@@ -407,6 +441,37 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
           md: "md127",
           label: "WD_Red_4TB",
         }),
+      ),
+    );
+  });
+
+  // Code review (WARP-1337): the reclaim path carries the same shadow-mount
+  // guard as adopt — a colliding model-seeded label gets the serial suffix.
+  it("suffixes the reclaim label too when a mounted volume already carries it", async () => {
+    (reclaimDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    setup({
+      pools: [md127],
+      drives: [
+        makeDrive({
+          device: "/dev/sdc1",
+          mount: "/mnt/droplet/WD_Red_4TB",
+          label: "WD_Red_4TB",
+          uuid: "U-WD-1",
+        }),
+      ],
+      disks: [
+        makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB", serial: "WX91A2B3C4D5" }),
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    await waitFor(() =>
+      expect(reclaimDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sda", label: "WD_Red_4TB_C4D5" }),
       ),
     );
   });
