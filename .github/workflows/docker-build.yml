@@ -13,7 +13,11 @@ name: docker-build
 #   build           — matrix, one image per runner. Layer cache lives at
 #                     ghcr.io/<repo>/buildcache:<image>; PRs read it, pushes
 #                     to main rebuild every image and refresh it (post-merge,
-#                     so their wall-clock blocks nobody). Each built image is
+#                     so their wall-clock blocks nobody). The orchestrator
+#                     image is additionally smoke-booted (WARP-1246): a
+#                     require() of dist/index.js inside the image proves the
+#                     runtime stage's COPY set actually resolves at boot.
+#                     Each built image is
 #                     Trivy-scanned (WARP-243): HIGH/CRITICAL vulns with a fix
 #                     available fail the job unless triaged in .trivyignore.
 #                     The Trivy lane needs the image loaded into the daemon
@@ -370,6 +374,37 @@ jobs:
           tags: droplet-ci/${{ matrix.image }}:scan
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
+
+      # WARP-1246: smoke-boot the orchestrator image. Build + Trivy never
+      # EXECUTE the runtime stage, so a broken run-stage COPY set ships green:
+      # PR #965's image built fine while node_modules/@droplet/erp-connector
+      # dangled (its dist/ was never COPY'd into the run stage) and the
+      # container crash-looped at boot. dist/index.js guards main() behind
+      # `require.main === module` (it emits CommonJS — see the comment at the
+      # bottom of apps/orchestrator/src/index.ts), so require()ing it resolves
+      # the FULL top-level import graph — generated Prisma client, every
+      # @droplet/* workspace symlink, every service module — without starting
+      # the server or needing Postgres/Redis/MQTT. That is exactly the
+      # missing-runtime-file / unresolvable-top-level-import class, in
+      # seconds. The real entrypoint (scripts/migrate-and-start.sh) is not
+      # bootable here: it hard-exits without a reachable DATABASE_URL before
+      # ever loading node code, so it can't see this bug class without infra.
+      #   - runs from the image's WORKDIR (/app/apps/orchestrator) with the
+      #     image's own env, `node` overriding the CMD;
+      #   - --network=none: module resolution needs no network, so the check
+      #     stays hermetic and can't hang on a stray connect;
+      #   - explicit process.exit(0) so a module-scope timer can never hold
+      #     the process open; `timeout 120` bounds the step regardless
+      #     (measured: the require walk is seconds-fast on Linux).
+      # Verified failure mode: hiding services/erp-connector/dist reproduces
+      # #965 — MODULE_NOT_FOUND, exit 1, step fails.
+      - name: Smoke-boot orchestrator (resolve top-level import graph)
+        if: matrix.image == 'orchestrator'
+        run: |
+          set -eu
+          timeout 120 docker run --rm --network=none \
+            droplet-ci/orchestrator:scan \
+            node -e "require('./dist/index.js'); console.log('smoke-boot OK: top-level import graph resolved'); process.exit(0)"
 
       # WARP-243: image vulnerability gate — DETERMINISTIC by construction.
       #
