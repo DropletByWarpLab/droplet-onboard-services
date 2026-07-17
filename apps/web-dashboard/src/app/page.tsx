@@ -287,11 +287,36 @@ export default function DashboardPage() {
   useEffect(() => {
     const d = window.localStorage.getItem(LS + "dir") as DensityKey | null;
     setDir(d && DIRECTIONS[d] ? d : "balanced");
-    setLayouts({
+    const loaded: Record<DensityKey, LayoutItem[]> = {
       balanced: loadLayout("balanced"),
       dense: loadLayout("dense"),
       airy: loadLayout("airy"),
-    });
+    };
+    // WARP-1351 one-time migration: saved boards predating the Remote-access
+    // widget get it inserted once. The FLAG (not the widget's presence) guards
+    // re-runs, so removing the widget from the board afterwards sticks.
+    const MIGR = LS + "migr-remote";
+    if (WIDGETS.remote && !window.localStorage.getItem(MIGR)) {
+      (Object.keys(loaded) as DensityKey[]).forEach((k) => {
+        if (loaded[k].some((it) => it.id === "remote")) return;
+        loaded[k] = fillGaps(
+          [...loaded[k], { id: "remote", ...ADD_SIZE.remote }],
+          DIRECTIONS[k].cols,
+          WIDGETS,
+        );
+        try {
+          window.localStorage.setItem(LS + k, JSON.stringify(loaded[k]));
+        } catch {
+          /* ignore */
+        }
+      });
+      try {
+        window.localStorage.setItem(MIGR, "1");
+      } catch {
+        /* ignore */
+      }
+    }
+    setLayouts(loaded);
   }, []);
 
   useEffect(() => {
