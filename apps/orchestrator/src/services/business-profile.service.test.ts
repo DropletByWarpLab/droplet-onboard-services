@@ -322,6 +322,41 @@ describe("updateBusinessProfile", () => {
     expect(row.whatWeDo).toBe("We fix teeth.");
     expect(row.lastSource).toBe("settings");
   });
+
+  // WARP-1280 — the review nudge asks the owner to refresh the profile; the
+  // refresh itself must therefore clear the nudge. This is the arm-1 "reset
+  // to none by a later profile write" contract the nudge cron already
+  // documents (business-review-nudge.service.ts) — before this fix NO code
+  // path ever wrote "none", so a nudged profile stayed nudged forever.
+  it("resets reviewNudgeState to none as part of the same write (WARP-1280)", async () => {
+    const prisma = {
+      businessProfile: {
+        upsert: vi.fn(
+          async ({
+            update,
+          }: {
+            where: { id: string };
+            create: Partial<BusinessProfileRow>;
+            update: Partial<BusinessProfileRow>;
+          }) => ({
+            ...EMPTY_PROFILE,
+            onboardingState: "completed",
+            reviewNudgeState: "due",
+            ...update,
+          }),
+        ),
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const row = await updateBusinessProfile(prisma as any, {
+      goals: "Grow to 3 chairs.",
+      lastSource: "settings",
+    });
+    const call = prisma.businessProfile.upsert.mock.calls[0][0];
+    // The reset rides the SAME upsert (no separate write to race a cron tick).
+    expect(call.update).toMatchObject({ reviewNudgeState: "none" });
+    expect(row.reviewNudgeState).toBe("none");
+  });
 });
 
 describe("markProfileCompletedFromManualFill — atomic conditional transition (§9.2)", () => {

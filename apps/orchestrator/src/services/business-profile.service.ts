@@ -288,6 +288,19 @@ export interface BusinessProfileUpdate {
  * whose singleton was never seeded still succeeds. The route layer owns zod
  * validation (per-field length REJECT), content hygiene, and the audit row;
  * this is the persistence primitive.
+ *
+ * WARP-1280 — the update ALSO resets `reviewNudgeState` to `none`: the review
+ * nudge asks the owner to refresh the profile, so the refresh itself clears
+ * it (the arm-1 "reset to none by a later profile write" contract in
+ * business-review-nudge.service.ts — previously no code path ever wrote
+ * `none`, so a nudged profile stayed nudged forever). The reset rides the
+ * same upsert (never a second write a cron tick could interleave), keeps the
+ * `reviewDueAt`/`reviewDismissedAt` timestamps as history (§5-2: state is
+ * the enum, never derived from timestamps), and deliberately does NOT extend
+ * to the interview-commit path (commitOnboarding), which owns its own
+ * lifecycle. Race-safe against the nudge cron by timestamps: this write
+ * bumps `updatedAt`, so neither cron arm can re-fire until the profile goes
+ * stale again.
  */
 export async function updateBusinessProfile(
   prisma: BusinessProfileCapablePrisma,
@@ -296,7 +309,7 @@ export async function updateBusinessProfile(
   const row = await prisma.businessProfile.upsert({
     where: { id: BUSINESS_PROFILE_SINGLETON_ID },
     create: { id: BUSINESS_PROFILE_SINGLETON_ID, ...patch },
-    update: patch,
+    update: { ...patch, reviewNudgeState: "none" },
   });
   return row as unknown as BusinessProfileRow;
 }
