@@ -45,6 +45,11 @@ import {
   poolStatusBadge,
   worstPoolAlarm,
 } from "./pool-display";
+// WARP-1337: the display-name chain (override → displayName → label →
+// GUID-guarded mount tail) lives in ONE shared helper now, used by this panel
+// and VolumesPanel alike — the private per-panel copies drifted (VolumesPanel's
+// never consulted displayName and rendered raw fs-UUID tails).
+import { driveDisplayName, isPoolBackedDevice, sanitizeFsLabel } from "./drive-display";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
 function fmtBytes(bytes: number): string {
@@ -55,17 +60,12 @@ function fmtBytes(bytes: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-// Customer-facing name: friendly displayName, then FS label, then the mount
-// tail — never the raw device path, since the target user is non-technical.
-// `override` lets the card show an optimistic just-typed name before the
-// hook's data refetches.
+// Customer-facing name: friendly displayName, then FS label, then the
+// GUID-guarded mount tail — never the raw device path or a machine id, since
+// the target user is non-technical. `override` lets the card show an
+// optimistic just-typed name before the hook's data refetches.
 function driveName(d: DriveInfo, override?: string | null): string {
-  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const raw = (override || d.displayName || d.label || tail)
-    .replace(/[-_]+/g, " ")
-    .trim();
-  if (!raw) return "Drive";
-  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+  return driveDisplayName(d, { override, poolBacked: isPoolBackedDevice(d.device) });
 }
 
 // Customer-facing pool name: the owner's displayName, else a generic label —

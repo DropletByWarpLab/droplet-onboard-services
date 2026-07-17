@@ -127,6 +127,23 @@ describe("DrivesPanel — no raw device path (WARP-827 AC3/AC6)", () => {
     setup();
     expect(screen.getByText("USB")).toBeInTheDocument();
   });
+
+  // WARP-1337 — the shared display-name helper guards the mount-tail fallback:
+  // a volume with no displayName/label mounted at /mnt/droplet/<fs-uuid> must
+  // title as the friendly generic, never the GUID.
+  it("never renders a GUID mount tail as the card title (WARP-1337)", () => {
+    setup({
+      drives: [
+        makeDrive({
+          mount: "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08",
+          label: "",
+          displayName: null,
+        }),
+      ],
+    });
+    expect(screen.queryByText(/a0f10a84/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Drive")).toBeInTheDocument();
+  });
 });
 
 describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
