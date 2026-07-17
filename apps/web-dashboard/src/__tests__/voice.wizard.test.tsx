@@ -18,6 +18,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+/* WARP-1345 UX review — §8 hit targets + dark-mode primary ink. jsdom
+   doesn't cascade external stylesheets (the PreviewPane.hit-targets
+   precedent asserts the component class and documents the CSS-driven
+   size), so the CSS side of both contracts is pinned at the source,
+   the darkmode-dropdown.test.ts mechanism. */
+const voiceCss = readFileSync(
+  resolve(__dirname, "../components/voice/voice.css"),
+  "utf8",
+);
 
 vi.mock("@/lib/api", () => ({
   measureVoiceLevel: vi.fn(),
@@ -365,8 +377,56 @@ describe("CalibrationWizard (WARP-1055)", () => {
       { timeout: 3000 },
     );
     expect(tryAgain).toHaveClass("btn", "ghost");
+    // §8 — wizard actions are never the shell's 30px `sm` variant.
+    expect(tryAgain).not.toHaveClass("sm");
     expect(tryAgain.className).not.toMatch(/dp-btn|type-/);
     expect(document.body.innerHTML).not.toContain("dp-btn");
+  });
+
+  it("wizard actions clear the §8 ≥44px hit-target floor (WARP-1345)", async () => {
+    // Component side: the fail-state retry is a shell `btn` (never `sm`),
+    // so the scoped voice.css rule below attaches to it — the same
+    // class-presence mechanism as PreviewPane.hit-targets.test.tsx.
+    measureMock.mockResolvedValue({
+      rms_dbfs: -20,
+      peak_dbfs: -10,
+      duration_s: 5,
+    });
+    renderWizard();
+    const tryAgain = await screen.findByRole(
+      "button",
+      { name: "Try again" },
+      { timeout: 3000 },
+    );
+    expect(tryAgain).toHaveClass("btn");
+    expect(tryAgain).not.toHaveClass("sm");
+
+    // CSS side: the shell's `.btn` is 36px tall (droplet-shell.css); the
+    // voice canon (DESIGN-BRIEF §8) hard-specs ≥44px for all wizard
+    // actions, matching `.vtext-btn`'s documented floor. One scoped rule
+    // — no per-callsite overrides (banned by voice.css's own comment).
+    const rule = voiceCss.match(/\.voice-wizard \.btn\s*\{([^}]*)\}/);
+    expect(rule, "voice.css must scope `.voice-wizard .btn`").not.toBeNull();
+    expect(rule![1]).toMatch(/min-height:\s*44px/);
+  });
+
+  it("dark-mode primary ink is overridden for /voice only (WARP-1345, interim until WARP-1358)", () => {
+    // droplet-shell.css hardcodes `color:#fff` on `.btn.primary`, but the
+    // dark `--brand` is the light indigo #818cf8 → 2.98:1 (WCAG 1.4.3
+    // fail). Interim, scoped fix: dark ink (#1d1d1f via --color-on-accent,
+    // ≈5.6:1 on #818cf8) under the two voice containers. The
+    // exact-selector match doubles as the no-leak guard — every selector
+    // in the rule is `.dark .voice-*`-scoped, so nothing outside the
+    // voice surface / wizard can pick it up. Root fix (shell-wide
+    // --on-brand token) is WARP-1358; this pin dies with it.
+    const rule = voiceCss.match(
+      /\.dark \.voice-surface \.btn\.primary,\s*\.dark \.voice-wizard \.btn\.primary\s*\{([^}]*)\}/,
+    );
+    expect(
+      rule,
+      "voice.css must dark-scope the voice primary ink under .voice-surface/.voice-wizard",
+    ).not.toBeNull();
+    expect(rule![1]).toMatch(/color:\s*var\(--color-on-accent\)/);
   });
 
   it("confirm + result primaries are shell primary buttons (WARP-1345)", async () => {
