@@ -74,10 +74,18 @@ ENV PYTHONPATH=/app
 # both. /dev/tpm0 access (real backend in production) is granted via the
 # `tss` group on the host; runtime grouping wiring is a Compose-side
 # concern.
+#
+# WARP-1248: no USER directive — a bind mount shadows the chown below
+# whenever dockerd auto-creates a missing host source (root:root 0755 on
+# every fresh CI runner; the EK-cert write then crash-loops the sidecar).
+# entrypoint.sh starts as root, fixes ownership of the two mounted dirs,
+# and drops to `droplet` via setpriv before exec'ing the service.
 RUN groupadd -r droplet && useradd -r -g droplet -d /app droplet && \
     mkdir -p /var/run/droplet /var/lib/droplet/tpm && \
     chown -R droplet:droplet /app /var/run/droplet /var/lib/droplet/tpm
 
-USER droplet
+COPY services/device-identity-svc/entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "main.py"]

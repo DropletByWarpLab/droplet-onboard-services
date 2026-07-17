@@ -150,6 +150,10 @@ jobs:
               - "docker/nginx/**"
               - "services/_shared/fips_selftest.py"
               - "packages/fips-selftest/**"
+              # WARP-1248: the sidecar is part of the booted set and its image
+              # now owns the bind-mount ownership fix — image changes must pay
+              # the stack boot instead of regressing it silently.
+              - "services/device-identity-svc/**"
               - "tests/integration/fips-stack.test.sh"
               - ".github/workflows/test-fips.yml"
 
