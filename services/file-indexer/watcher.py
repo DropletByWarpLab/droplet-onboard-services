@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileDeletedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
@@ -379,6 +379,19 @@ class IndexHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._schedule(event.src_path)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        # WARP-1359: Nextcloud WebDAV writes are atomic — the upload lands as
+        # `<name>.ocTransferId….part` (create event filtered by
+        # _is_ignored_basename), then a rename moves it onto the final path.
+        # That rename is the ONLY event a brand-new file ever produces, so it
+        # must index the destination. For a genuine rename the source path's
+        # index must also go, or its chunks linger under the old path.
+        if not _is_ignored_basename(os.path.basename(event.src_path)):
+            self.on_deleted(FileDeletedEvent(event.src_path))
+        self._schedule(event.dest_path)
 
     def on_deleted(self, event):
         if event.is_directory:
