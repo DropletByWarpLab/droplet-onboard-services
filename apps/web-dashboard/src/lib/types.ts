@@ -999,6 +999,13 @@ export interface DriveInfo {
   displayName?: string | null;
   icon?: string | null;
   notes?: string | null;
+  /** WARP-1339: bare md array name (e.g. "md127" — PoolInfo.device's exact
+   *  join key) when this mounted filesystem lives on an md node or a
+   *  partition of one; `null` for a standalone drive. The panels merge a
+   *  pool-backed drive INTO its pool's card/tile instead of rendering it as
+   *  an anonymous GUID drive. Absent on an older orchestrator — callers fall
+   *  back to the anchored md-device matcher (drivePoolName). */
+  pool?: string | null;
 }
 
 /** WARP-174: response shape for PATCH /api/storage/drives/:uuid. */

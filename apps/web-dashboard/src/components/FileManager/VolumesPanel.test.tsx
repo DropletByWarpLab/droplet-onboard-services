@@ -11,10 +11,15 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import type { DriveInfo } from "@/lib/types";
+import type { DriveInfo, PoolInfo } from "@/lib/types";
 
 const useDrivesMock = vi.fn();
 vi.mock("@/lib/hooks/useDrives", () => ({ useDrives: () => useDrivesMock() }));
+
+// WARP-1339: the panel now consumes pools too, to merge the mounted md
+// filesystem into ONE pooled tile instead of an anonymous GUID drive tile.
+const usePoolsMock = vi.fn();
+vi.mock("@/lib/hooks/usePools", () => ({ usePools: () => usePoolsMock() }));
 
 import { VolumesPanel } from "./VolumesPanel";
 
@@ -35,9 +40,15 @@ function makeDrive(overrides: Partial<DriveInfo> = {}): DriveInfo {
   };
 }
 
-function setup(drives: DriveInfo[]) {
+function setup(drives: DriveInfo[], pools: PoolInfo[] = []) {
   useDrivesMock.mockReturnValue({
     drives,
+    isLoading: false,
+    bridgeError: undefined,
+    refresh: vi.fn(),
+  });
+  usePoolsMock.mockReturnValue({
+    pools,
     isLoading: false,
     bridgeError: undefined,
     refresh: vi.fn(),
@@ -73,5 +84,85 @@ describe("VolumesPanel — customer-facing names (WARP-1337 AC2)", () => {
   it("still falls back to the FS label before the mount tail", () => {
     setup([makeDrive({ label: "TOSHIBA EXT" })]);
     expect(screen.getByText("TOSHIBA EXT")).toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-1339 — the main Files screen renders ONE tile per pool (the merge
+// shape was previously tested nowhere): the mounted md filesystem's bytes
+// under the pool's name, with the plain tiles keeping only standalone
+// drives. Tiles stay non-clickable in this PR — WARP-1338 adds links.
+// =====================================================================
+describe("VolumesPanel — one pooled tile (WARP-1339 AC3)", () => {
+  const TIB = 1024 ** 4;
+  const pool: PoolInfo = {
+    device: "md127",
+    level: "raid1",
+    status: "active",
+    members: ["sdb", "sdc"],
+    displayName: null,
+    notes: null,
+  };
+  const mdDrive = () =>
+    makeDrive({
+      device: "/dev/md127",
+      pool: "md127",
+      mount: `/mnt/droplet/${GUID}`,
+      label: "",
+      uuid: "U-POOL-FS",
+      size_bytes: 4 * TIB,
+      used_bytes: 1 * TIB,
+      free_bytes: 3 * TIB,
+    });
+
+  it("renders ONE 'Storage pool' tile with the md filesystem's bytes — GUID never rendered", () => {
+    setup([mdDrive()], [pool]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("Storage pool")).toBeInTheDocument();
+    // Real fs-level bytes from the matched md drive (ADR-019).
+    expect(screen.getByText("3.0 TB free")).toBeInTheDocument();
+    expect(screen.getByText("1.0 TB")).toBeInTheDocument();
+    expect(screen.getByText(/of 4\.0 TB/)).toBeInTheDocument();
+    // The GUID never leaks — not as text, not via the title attribute.
+    expect(screen.queryByText(new RegExp(GUID.slice(0, 8), "i"))).not.toBeInTheDocument();
+    expect(document.querySelector(`[title*="${GUID.slice(0, 8)}"]`)).toBeNull();
+  });
+
+  it("titles the pooled tile with the owner's pool displayName when set", () => {
+    setup([mdDrive()], [{ ...pool, displayName: "Family Vault" }]);
+    expect(screen.getByText("Family Vault")).toBeInTheDocument();
+    expect(screen.queryByText("Storage pool")).not.toBeInTheDocument();
+  });
+
+  it("keeps tiles non-clickable in this PR (WARP-1338 adds links on top)", () => {
+    setup([mdDrive()], [pool]);
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("keeps standalone drives as plain tiles alongside the pooled tile", () => {
+    setup(
+      [
+        mdDrive(),
+        makeDrive({
+          device: "/dev/sda1",
+          uuid: "U-2",
+          mount: "/mnt/droplet/photos",
+          displayName: "Family Photos",
+        }),
+      ],
+      [pool],
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByText("Family Photos")).toBeInTheDocument();
+    expect(screen.getByText("Storage pool")).toBeInTheDocument();
+  });
+
+  it("falls back to a plain (GUID-guarded) drive tile when the pools payload lacks the pool", () => {
+    // Degraded /storage/pools fetch: dropping the drive with no pool tile to
+    // merge into would lose the volume from the Files screen entirely.
+    setup([mdDrive()], []);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("Storage pool")).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(GUID.slice(0, 8), "i"))).not.toBeInTheDocument();
   });
 });

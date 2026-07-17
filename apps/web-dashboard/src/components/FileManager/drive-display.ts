@@ -43,6 +43,52 @@ export function isPoolBackedDevice(device: string | null | undefined): boolean {
   return !!device && /^\/dev\/md\d+(p\d+)?$/.test(device);
 }
 
+/** WARP-1339: md node (/dev/md127) or a partition of one (/dev/md127p1);
+ *  capture group 1 is the BARE array name — the /storage/pools join key.
+ *  Anchored so /dev/md127p1 can never resolve to md12 (the same prefix-match
+ *  pitfall DrivesPanel's poolHasMountedFs matcher guards). */
+const MD_DEVICE_RE = /^\/dev\/(md\d+)(?:p\d+)?$/;
+
+/** The volume fields the WARP-1339 pool↔drive join needs. */
+export interface PoolJoinSource {
+  device: string;
+  /** Orchestrator's explicit annotation (bare md array name, or null for a
+   *  standalone drive). Absent on an older orchestrator. */
+  pool?: string | null;
+}
+
+/**
+ * WARP-1339 — bare md array name ("md127") backing a mounted drive, or null
+ * for a standalone drive. Prefers the orchestrator's explicit `pool`
+ * annotation; falls back to the anchored md-device matcher so the merge
+ * still happens against an older orchestrator that predates the field.
+ */
+export function drivePoolName(d: PoolJoinSource): string | null {
+  if (d.pool) return d.pool;
+  return MD_DEVICE_RE.exec(d.device)?.[1] ?? null;
+}
+
+/**
+ * WARP-1339 — the mounted filesystem backing a pool: the drives-list entry
+ * whose device is the pool's md node (or a partition of it). This is the
+ * pool's ONLY fs-level capacity/browse source (ADR-019 — real usable
+ * capacity, never a fabricated raw-member sum). The join key is normalized
+ * here: `poolDevice` is the BARE array name the pools payload carries
+ * ("md127"), while drive devices carry the /dev/ prefix. Prefers the md node
+ * itself over a partition when both are mounted. Returns undefined when the
+ * pool backs no mounted filesystem (created-but-never-formatted).
+ */
+export function poolBackingDrive<D extends PoolJoinSource>(
+  poolDevice: string,
+  drives: readonly D[],
+): D | undefined {
+  // Defensive: only bare md names are valid join keys (they also feed a
+  // constructed template below — never build it from an arbitrary string).
+  if (!/^md\d+$/.test(poolDevice)) return undefined;
+  const matches = drives.filter((d) => drivePoolName(d) === poolDevice);
+  return matches.find((d) => d.device === `/dev/${poolDevice}`) ?? matches[0];
+}
+
 export interface DriveNameSource {
   /** Path whose TAIL is the last-resort fallback name — the mount point for
    *  the Files/Storage panels; the setup wizard passes the device path
