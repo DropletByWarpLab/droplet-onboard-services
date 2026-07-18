@@ -733,6 +733,75 @@ class TestReconcile:
         assert not any(c.startswith("docker") for c in cmds), cmds
         assert "disabled" in logged, logged
 
+    def test_seeds_trusted_list_for_mounted_md_pool(self, tmp_path):
+        # WARP-1338 review: the add-path blanket-trusts /dev/md* only to keep
+        # pools created BEFORE pool_format seeded trusted.list from flipping
+        # read-only on reboot. Reconcile must converge those legacy pools onto
+        # explicit trusted.list membership (grep-guarded, idempotent) — the
+        # prerequisite for a follow-up that drops the blanket md rule.
+        proc, _cmds, logged = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"})
+        assert proc.returncode == 0, proc.stderr
+        tlist = tmp_path / "state" / "trusted.list"
+        assert tlist.exists(), logged
+        assert tlist.read_text(encoding="utf-8").split() == \
+            ["mdpool-uuid-1234"], tlist.read_text(encoding="utf-8")
+        # Idempotent: a second boot's reconcile must not duplicate the entry.
+        proc2, _c2, _l2 = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"})
+        assert proc2.returncode == 0, proc2.stderr
+        assert tlist.read_text(encoding="utf-8").split() == \
+            ["mdpool-uuid-1234"], tlist.read_text(encoding="utf-8")
+
+    def test_seeds_md_pool_trust_even_without_nc_opt_in(self, tmp_path):
+        # Trust is a mount-time property, not a registration one: a box that
+        # never opted into Nextcloud auto-register still converges its legacy
+        # pool onto trusted.list (the reconcile's registration half stays a
+        # no-op there).
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"},
+            extra_env={"NEXTCLOUD_AUTO_REGISTER": ""})
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("docker") for c in cmds), cmds
+        tlist = tmp_path / "state" / "trusted.list"
+        assert tlist.exists() and "mdpool-uuid-1234" in \
+            tlist.read_text(encoding="utf-8").split(), cmds
+
+    def test_prunes_dangling_host_registrations(self, tmp_path):
+        # WARP-1338 review: the udev remove path deregisters only on a LIVE
+        # remove event. A drive unplugged while the box was off — or a legacy
+        # pool renamed to the automount <label>-<short-uuid> derivation on its
+        # first post-upgrade boot — leaves a registration whose /host/<tail>
+        # no longer exists: a dead GUID-named folder in every user's Files
+        # root. Reconcile must prune /host/-datadir entries whose tail is no
+        # longer mounted (that is exactly the state the remove handler would
+        # have deregistered), and must leave BOTH still-mounted /host entries
+        # AND non-/host external storages alone.
+        dead = "9a8b7c6d-0e1f-2a3b-4c5d-6e7f8090a0b0"
+        nc_list = tmp_path / "nc-list.json"
+        nc_list.write_text(
+            '[{"mount_point":"\\/pool-cafef00d",'
+            '"datadir":"\\/host\\/pool-cafef00d","mount_id":3},'
+            '{"mount_point":"\\/' + dead + '",'
+            '"datadir":"\\/host\\/' + dead + '","mount_id":9},'
+            '{"mount_point":"\\/other",'
+            '"datadir":"\\/media\\/other","mount_id":5}]\n',
+            encoding="utf-8")
+        proc, cmds, logged = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            extra_env={"STUB_NC_LIST": _posix(nc_list)})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        # The dangling GUID tail is deregistered…
+        assert "files_external:delete -y 9" in joined, joined
+        assert "pruning" in logged and dead in logged, logged
+        # …the mounted pool registration and the non-/host storage are NOT.
+        assert "files_external:delete -y 3" not in joined, joined
+        assert "files_external:delete -y 5" not in joined, joined
+
     def test_gives_up_cleanly_when_nextcloud_never_answers(self, tmp_path):
         # Boot race: the container may not answer occ within the bounded wait
         # — the oneshot must exit 0 (no failed unit) and register nothing;

@@ -503,6 +503,36 @@ case "$ACTION" in
     # Eligibility mirrors the add-path trust gate: md-pool filesystems
     # (owner-created via the confirm-gated pool flow), enrolled LUKS mappers,
     # and trusted.list'd plain drives — never an untrusted hot-plugged stick.
+    #
+    # WARP-1338 review — trust-list convergence for legacy md pools. The
+    # add-path blanket-trusts /dev/md* only to cover pools created BEFORE
+    # pool_format started seeding trusted.list; that blanket rule is itself
+    # a residual supply-chain gap (mdadm's incremental-assembly udev rules
+    # will auto-assemble a hot-plugged disk carrying a crafted md
+    # superblock, and md nodes match the automount rule — WARP-936). Seed
+    # trusted.list from every mounted md source here so live boxes converge
+    # onto explicit membership — the prerequisite for a follow-up that
+    # tightens md trust to trusted.list/pool-state and drops the blanket
+    # rule. Runs BEFORE the Nextcloud opt-in gate below: trust is a
+    # mount-time property, not a registration one. Grep-guarded append —
+    # idempotent across boots — and best-effort (never a failed unit).
+    for m in "$MOUNT_BASE"/*; do
+      [ -d "$m" ] || continue
+      mountpoint -q "$m" || continue
+      src="$(findmnt -n -o SOURCE "$m" 2>/dev/null | head -1 || true)"
+      case "$src" in
+        /dev/md*)
+          md_uuid="$(blkid -o value -s UUID "$src" 2>/dev/null | head -1 || true)"
+          md_uuid="${md_uuid//$'\n'/}"
+          if [ -n "$md_uuid" ] \
+             && ! grep -qxF "$md_uuid" "${STATE_DIR}/trusted.list" 2>/dev/null; then
+            printf '%s\n' "$md_uuid" >> "${STATE_DIR}/trusted.list" 2>/dev/null \
+              && log "reconcile: seeded trusted.list with md-pool uuid $md_uuid" \
+              || true
+          fi
+          ;;
+      esac
+    done
     if [ "$NEXTCLOUD_AUTO_REGISTER" != "1" ]; then
       log "reconcile: nextcloud auto-register disabled (set NEXTCLOUD_AUTO_REGISTER=1 in /etc/droplet/automount.env)"
       exit 0
@@ -547,6 +577,32 @@ case "$ACTION" in
         log "reconcile: skip untrusted mount $name"
       fi
     done
+    # WARP-1338 review — prune dangling /host/<tail> registrations. The udev
+    # remove path deregisters only on a LIVE remove event, so a drive
+    # unplugged while the box was off — or a legacy pool renamed to the
+    # automount <label>-<short-uuid> derivation on its first post-upgrade
+    # boot — leaves an unscoped external mount whose datadir no longer
+    # exists: a dead GUID-named folder in every user's Files root. An
+    # unmounted tail is exactly the state the remove handler would have
+    # deregistered, so pruning it here preserves the deregister-on-remove
+    # invariant. Only OUR /host/-datadir entries are considered; any other
+    # files_external storage is left alone. Runs after the register loop so
+    # a renamed pool converges in one pass (new tail registered above, old
+    # tail pruned here). occ's json escapes slashes — normalize before the
+    # match, same as nextcloud_add's idempotency check.
+    { nc_occ files_external:list --output=json 2>/dev/null | tr -d '\\' \
+        | grep -oE '"datadir":"/host/[^"]+"' || true; } \
+      | while IFS= read -r dd; do
+          tail="${dd#*\"datadir\":\"/host/}"
+          tail="${tail%\"}"
+          [ -n "$tail" ] || continue
+          case "$tail" in */*) continue ;; esac   # defensive: never nested
+          if mountpoint -q "$MOUNT_BASE/$tail"; then
+            continue
+          fi
+          log "reconcile: pruning dangling registration $tail (no longer mounted)"
+          nextcloud_remove "$tail" || true
+        done
     ;;
 
   *)
