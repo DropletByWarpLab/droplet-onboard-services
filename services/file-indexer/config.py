@@ -15,6 +15,12 @@ NEXTCLOUD_DATA_ROOT = os.environ.get("NEXTCLOUD_DATA_ROOT", "/data/nextcloud/dat
 # ai-gateway gRPC endpoint for embedding
 AI_GATEWAY_GRPC_URL = os.environ.get("AI_GATEWAY_GRPC_URL", "localhost:50051")
 
+# WARP-242: doc-KEK master keyfile (raw 32 bytes, minted by setup.sh as
+# data/secrets/doc-kek.key and single-file bind-mounted read-only). The KEK
+# that wraps per-document DEKs derives from this file — never from .env,
+# which travels inside restic snapshots (see column_crypto.py).
+DOC_KEK_PATH = os.environ.get("DOC_KEK_PATH", "/data/secrets/doc-kek.key")
+
 # Embedding model (must match the pgvector column dimension — 384 for MiniLM)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 

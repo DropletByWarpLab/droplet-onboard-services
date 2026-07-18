@@ -49,8 +49,9 @@ source of truth).
 | Postgres data dir | docker volume under `/data/docker` (LUKS data LV) |
 | Nextcloud data dir | docker volume under `/data/docker` |
 | file-indexer / brain pgvector | docker volume under `/data/docker` |
+| Brain chunk text (chat attachments) | **column-level** AES-256-GCM under per-document DEKs (WARP-242, below) — on top of the LUKS layer |
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
-| `data/secrets` (audit signing key) | `/data/droplet/secrets` (symlinked) |
+| `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
 | Hot-plugged USB drives | per-drive LUKS2 under `/mnt/droplet/<usb>` |
 | Off-box backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254) |
 
@@ -67,6 +68,67 @@ from an earlier copy of the same file, and it is a no-op against copy-on-write /
 log-structured filesystems (the appliance root is ext4, where it is effective).
 For a guaranteed-clean decommission use crypto-shred (destroy the LUKS/TPM keys)
 rather than relying on free-space overwrite — see `docs/security/crypto-shred.md`.
+
+## Per-document chunk encryption + crypto-shred (WARP-242)
+
+Brain-memory chunks (chat-attachment content, `FileContentChunk` rows with
+`source='brain'`) are additionally encrypted at the **column** level so a
+single document can be made unrecoverable without touching the rest of the
+corpus — the GDPR right-to-delete / HIPAA-disposal path.
+
+**Key hierarchy.**
+
+```
+data/secrets/doc-kek.key   raw 32 bytes, minted by setup.sh, mode 0600,
+   │                       EXCLUDED from restic backups (droplet-backup.sh)
+   └─ HKDF(info="doc-kek") → doc-KEK
+        └─ wraps per-document DEKs (AAD = keyId), one per brain item,
+           minted by the file-indexer at first chunk-write and stored in
+           DocumentEncryptionKey keyed (keyId, version); keyId = brain:<itemId>
+             └─ AES-256-GCM encrypts each chunk's `text` (dcv1 blob,
+                AAD = keyId); decrypt-on-read in the orchestrator/mcp-server
+                before results reach the LLM context or dashboard
+```
+
+**Why the KEK is a dedicated keyfile, not `DEVICE_SECRET_KEY`:** `.env`
+travels inside every restic snapshot, so a KEK derived from it would make
+each snapshot self-decrypting — deleting a DEK would delete nothing an
+attacker (or an operator restore) couldn't recover. With the keyfile excluded
+from the backup set, snapshots carry ciphertext chunks + *wrapped* DEKs and
+no way to unwrap them off-box.
+
+**Deleting a document** (`DELETE /api/files/brain/:itemId`, and the per-user
+purge on user-delete) deletes its chunks, its on-disk originals, **and every
+version of its DEK**. After that:
+
+- Live DB: nothing left.
+- Off-box / exfiltrated snapshots: ciphertext that can never be decrypted
+  (no KEK anywhere in the repo). This is the crypto-shred guarantee.
+- **On-box restore window:** a snapshot restored onto the SAME box (KEK still
+  on disk) can resurrect documents deleted after that snapshot was taken,
+  until retention (`restic forget --prune`) ages the snapshot out. Bounded,
+  documented, and the standard GDPR posture for backup media.
+- **Restore to NEW hardware:** everything except brain chunks recovers; brain
+  chunks are permanently unreadable (the keyfile never left the old box).
+  This is the deliberate trade-off for the shred guarantee.
+
+**Scope decision (owner-ratified via the WARP-242 audit):** Nextcloud-sourced
+chunks stay plaintext-in-Postgres (inside LUKS). Their source files ship in
+the same snapshots via the `nextcloud-data` volume tar, so chunk-level shred
+could never deliver right-to-delete for them — deleting a Nextcloud file
+already deletes its chunks (`delete_chunks_for_file`), and its recoverability
+window is governed by backup retention, same as the file itself. Brain
+content is different: its ONLY backup copy is the pg_dump, so per-document
+shred is real there. Full lexical (BM25) search is preserved for the
+Nextcloud corpus; encrypted brain chunks are vector-search-only (their
+generated `text_tsv` is NULL — a plaintext-derived tsvector would leak a
+stemmed bag-of-words into every dump).
+
+**Known boundary:** the per-item `extracted.txt` side file (plaintext, on the
+LUKS-encrypted brain-memory volume, deleted with the item, never in restic)
+is disk-level-protected only. TPM-sealing the doc-KEK keyfile is WARP-1033;
+scheduled DEK rotation (version N+1 + background re-encrypt) is a follow-up
+slice — the schema is already keyed `(keyId, version)` for it.
 
 ## Boot flow
 

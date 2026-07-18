@@ -11,11 +11,11 @@ import base64
 import pytest
 
 from column_crypto import (
-    ENC_PREFIX, derive_doc_kek, generate_dek, wrap_dek, unwrap_dek,
-    encrypt_text, decrypt_text, is_encrypted,
+    ENC_PREFIX, derive_doc_kek, load_doc_kek, generate_dek, wrap_dek,
+    unwrap_dek, encrypt_text, decrypt_text, is_encrypted,
 )
 
-TEST_KEY_B64 = base64.b64encode(bytes([7] * 32)).decode()
+TEST_KEY = bytes([7] * 32)
 
 
 def test_round_trip_and_prefix():
@@ -27,12 +27,43 @@ def test_round_trip_and_prefix():
 
 
 def test_wrap_binds_key_id():
-    kek = derive_doc_kek(TEST_KEY_B64)
+    kek = derive_doc_kek(TEST_KEY)
     dek = generate_dek()
     wrapped = wrap_dek(kek, dek, "brain:abc123")
     assert unwrap_dek(kek, wrapped, "brain:abc123") == dek
     with pytest.raises(Exception):
         unwrap_dek(kek, wrapped, "brain:OTHER")
+
+
+def test_chunk_aad_binds_ciphertext_to_key_id():
+    # WARP-242: chunk text is sealed with AAD = the DEK's keyId; decrypting
+    # with a different (or missing) AAD must fail GCM authentication.
+    dek = generate_dek()
+    blob = encrypt_text(dek, "chunk body", aad="brain:item1")
+    assert decrypt_text(dek, blob, aad="brain:item1") == "chunk body"
+    with pytest.raises(Exception):
+        decrypt_text(dek, blob, aad="brain:OTHER")
+    with pytest.raises(Exception):
+        decrypt_text(dek, blob)
+
+
+def test_load_doc_kek_reads_keyfile_and_matches_derive(tmp_path):
+    # WARP-242: the KEK derives from the raw 32-byte keyfile; the loader and
+    # the pure derivation must agree, and lockstep with the TS module is
+    # preserved because both HKDF over the same salt/info.
+    key_file = tmp_path / "doc-kek.key"
+    key_file.write_bytes(TEST_KEY)
+    assert load_doc_kek(str(key_file)) == derive_doc_kek(TEST_KEY)
+
+
+def test_load_doc_kek_fails_closed():
+    with pytest.raises(RuntimeError):
+        load_doc_kek("/nonexistent/doc-kek.key")
+
+
+def test_derive_doc_kek_rejects_short_key():
+    with pytest.raises(ValueError):
+        derive_doc_kek(b"short")
 
 
 def test_wire_format_layout():

@@ -263,7 +263,15 @@ if [ "$FULL" = "1" ]; then
 fi
 
 log_info "restic backup (tag: $TAG) → $RESTIC_REPOSITORY"
-restic backup --tag "$TAG" "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" "${BACKUP_PATHS[@]}"
+# WARP-242: the doc-KEK master keyfile must NEVER enter a snapshot. Every
+# snapshot already carries .env + the pg_dump (wrapped per-document DEKs);
+# adding the KEK would make snapshots self-decrypting and crypto-shredding a
+# DEK would no longer hold against backups. Excluding it means a restore
+# onto NEW hardware cannot decrypt brain chunks (documented trade-off:
+# docs/security/at-rest-encryption.md).
+restic backup --tag "$TAG" \
+  --exclude "$REPO_ROOT/data/secrets/doc-kek.key" \
+  "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" "${BACKUP_PATHS[@]}"
 log_success "snapshot created (tag: $TAG)"
 
 # --- Phase 5: retention -------------------------------------------------------
