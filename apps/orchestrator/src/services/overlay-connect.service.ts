@@ -22,6 +22,9 @@
  *     cron-runtime's `scheduleInterval` in index.ts. Each tick is one bounded
  *     iteration that fails closed (throws) so the runtime's backoff/logging
  *     handles transient HQ/bridge errors.
+ *   - Punch telemetry (WARP-1389): box-side counters on the Analytics.metric
+ *     surface + an HQ-side D1 success-rate recipe are documented in
+ *     docs/overlay-connect-punch-telemetry.md.
  */
 import { createHash } from "node:crypto";
 import type { DeviceIdentityClient } from "./device-identity.client.js";
@@ -119,6 +122,34 @@ export interface OverlayPeerOps {
     description: string;
   }): Promise<void>;
   remove(p: { interface: string; publicKey: string }): Promise<void>;
+  /** WARP-1389 — per-peer runtime `latest handshake` epoch (seconds; 0/absent =
+   *  never handshook). The idle-expiry sweep uses it to classify a torn-down
+   *  overlay peer as a punch success (handshook) or failure (never handshook).
+   *  Production reads it from the routing peer list (openwrt.listVpnPeers). */
+  listHandshakes?(iface: string): Promise<Record<string, number>>;
+}
+
+/**
+ * WARP-1389 — the box-side metric surface. Shaped as the orchestrator's existing
+ * `Analytics.metric` (services/analytics) so production passes the real
+ * `analytics` proxy verbatim; the sink is fail-open + currently buffered (inert
+ * until WARP-617), exactly like `recordService`'s `metric()` calls. Opt-in
+ * observability only — the labels below carry NO packet contents and NO client
+ * IPs, only coarse outcome + NAT class.
+ */
+export interface OverlayMetricSink {
+  metric(name: string, value: number, labels?: Record<string, string>): void;
+}
+
+const noopMetrics: OverlayMetricSink = { metric() {} };
+
+/** Coarse NAT class derivable from the box's OWN observed mapping: if the STUN
+ *  reflexive port equals the WireGuard listen port (51820) the upstream NAT is
+ *  port-preserving (punch-friendly); otherwise it rewrote the port
+ *  (symmetric-ish, punch-hostile). No client data — the box's own mapping only. */
+export function natClassFromBoxEndpoint(boxEndpoint: string): string {
+  const port = boxEndpoint.slice(boxEndpoint.lastIndexOf(":") + 1);
+  return port === "51820" ? "port_preserving" : "symmetric";
 }
 
 export interface OverlayVpnPeerRow {
@@ -174,6 +205,9 @@ export interface OverlayConnectDeps {
   /** Allocate the next free tunnel IP for a NEW overlay peer (production wires
    *  this to vpn.service.allocatePeerIp). Only called on first sight of a key. */
   allocateIp: () => Promise<string>;
+  /** WARP-1389 — box-side punch telemetry. Defaults to a no-op sink; production
+   *  passes the real `analytics` proxy. */
+  metrics?: OverlayMetricSink;
   now?: () => Date;
   logger?: OverlayLogger;
   fetchImpl?: typeof fetch;
@@ -372,10 +406,25 @@ export async function installOrRefreshOverlayPeer(
   let row: OverlayVpnPeerRow;
   let assignedIp: string;
   if (existing) {
-    assignedIp = existing.assignedIp;
+    // Reconnect-reliability guard (QA): reactivating a previously-REVOKED row
+    // reuses its old assignedIp. If that IP was handed to another ACTIVE peer
+    // during the idle window, flipping this row back to 'active' with the same
+    // IP violates the partial-unique-active-IP index (P2002) and the tick
+    // throws — the phone can't reconnect until manual cleanup. So: if the stored
+    // IP is no longer free among active peers, re-allocate a fresh one via the
+    // same allocation path the normal mint uses. (A same-key active refresh is
+    // NOT a clash — the holder is this very row, excluded below.)
+    const activeOnIp = await prisma.vpnPeer.findMany({
+      where: { status: "active", assignedIp: existing.assignedIp },
+    });
+    const ipTaken = activeOnIp.some(
+      (r) => r.publicKey !== offer.clientPublicKey,
+    );
+    assignedIp = ipTaken ? await deps.allocateIp() : existing.assignedIp;
     row = await prisma.vpnPeer.update({
       where: { publicKey: offer.clientPublicKey },
       data: {
+        assignedIp,
         kind: "overlay",
         status: "active",
         mode: "away",
@@ -450,6 +499,13 @@ export async function runOverlayConnectTick(
   const boxEndpoint = await probeBoxEndpoint(deps);
   await answerOverlaySession(deps, offer.sessionId, boxEndpoint);
   await installOrRefreshOverlayPeer(deps, offer);
+  // WARP-1389 — one punch ATTEMPT recorded, tagged with the coarse NAT class the
+  // box's own observed mapping implies (port-preserving vs symmetric). The
+  // succeeded/failed split is settled later by the idle-expiry sweep from the
+  // peer's real wg handshake.
+  (deps.metrics ?? noopMetrics).metric("overlay.punch.attempted", 1, {
+    nat_class: natClassFromBoxEndpoint(boxEndpoint),
+  });
   logger.info(
     { sessionId: offer.sessionId, boxEndpoint },
     "overlay-connect: overlay peer installed/refreshed",
@@ -464,12 +520,19 @@ export async function runOverlayConnectTick(
  * EXPLICIT state only: `kind = 'overlay' AND status = 'active' AND
  * lastSessionAt < cutoff` — never derived from a NULL. Removes the router peer,
  * then marks the row revoked. Returns the count expired.
+ *
+ * WARP-1389 — this is also where the punch outcome is settled: reading each
+ * torn-down peer's real wg `latest handshake` (the SAME peer status this sweep
+ * reads to decide teardown), a peer that ever handshook is a punch SUCCESS; one
+ * that expired without a handshake is a FAILURE. Counters go on the box metric
+ * surface (no client data, coarse outcome only).
  */
 export async function expireIdleOverlayPeers(
   deps: OverlayConnectDeps,
 ): Promise<number> {
   const { config, prisma } = deps;
   const logger = deps.logger ?? noopLogger;
+  const metrics = deps.metrics ?? noopMetrics;
   const now = deps.now?.() ?? new Date();
   const cutoff = new Date(now.getTime() - config.idleExpiryHours * 3_600_000);
   const stale = await prisma.vpnPeer.findMany({
@@ -479,6 +542,17 @@ export async function expireIdleOverlayPeers(
       lastSessionAt: { lt: cutoff },
     },
   });
+  if (stale.length === 0) return 0;
+  // One read of the live per-peer handshake state (0/absent = never handshook).
+  const handshakes = deps.peers.listHandshakes
+    ? await deps.peers.listHandshakes(config.vpnInterface).catch((err) => {
+        logger.warn(
+          { err },
+          "overlay-connect: could not read peer handshakes — outcome telemetry skipped this sweep",
+        );
+        return null;
+      })
+    : null;
   let expired = 0;
   for (const row of stale) {
     try {
@@ -491,6 +565,15 @@ export async function expireIdleOverlayPeers(
         data: { status: "revoked", revokedAt: now },
       });
       expired += 1;
+      // Settle the punch outcome from the peer's real handshake. Only emitted
+      // when handshake data was actually read (never guessed).
+      if (handshakes) {
+        const shook = (handshakes[row.publicKey] ?? 0) > 0;
+        metrics.metric(
+          shook ? "overlay.punch.succeeded" : "overlay.punch.failed",
+          1,
+        );
+      }
     } catch (err) {
       logger.warn(
         { err, publicKey: row.publicKey },

@@ -1965,6 +1965,38 @@ class VPNApi:
             })
         return peers
 
+    def peer_handshakes(self, interface: str = "wg0") -> dict[str, int]:
+        """WARP-1389 — best-effort per-peer runtime `latest handshake` epoch
+        (seconds), keyed by public_key, for the overlay punch-success telemetry.
+
+        Sourced from the PERMITTED ubus read ``network.interface.<iface> status``
+        (luci-proto-wireguard populates ``data.peers[].latest_handshake`` on many
+        builds). This deliberately AVOIDS ``file.exec`` / ``wg show`` — the
+        droplet-ai rpcd ACL denies file.exec on purpose (see the acl.d note), and
+        telemetry must never motivate widening that grant.
+
+        Degrades to ``{}`` on any absence/error and OMITS peers that never
+        handshook — the caller treats missing data as UNKNOWN (skips the
+        success/fail metric), never a fabricated 0. Read-only.
+        """
+        try:
+            status = self._r._call(f"network.interface.{interface}", "status")
+        except Exception:  # noqa: BLE001 — telemetry read, never fatal
+            return {}
+        data = status.get("data") if isinstance(status, dict) else None
+        peers = data.get("peers") if isinstance(data, dict) else None
+        if not isinstance(peers, list):
+            return {}
+        out: dict[str, int] = {}
+        for p in peers:
+            if not isinstance(p, dict):
+                continue
+            pk = p.get("public_key")
+            hs = p.get("latest_handshake")
+            if isinstance(pk, str) and isinstance(hs, (int, float)) and hs > 0:
+                out[pk] = int(hs)
+        return out
+
     def delete_peer(self, interface: str, public_key: str) -> int:
         """Delete every peer section matching `public_key`. Returns the count.
 

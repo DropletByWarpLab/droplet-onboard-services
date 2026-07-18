@@ -1480,12 +1480,27 @@ def vpn_status(interface: str = "wg0"):
 
 @app.get("/vpn/peers")
 def vpn_list_peers(interface: str = "wg0"):
-    """List peers configured on the interface. Empty list if none."""
+    """List peers configured on the interface. Empty list if none.
+
+    WARP-1389: each peer is enriched with `latest_handshake` (runtime epoch secs,
+    0 = never/unknown) from the permitted ubus interface-status read, so the
+    orchestrator's overlay sweep can classify a torn-down peer as a punch
+    success/failure. Best-effort: unavailable handshake data leaves 0.
+    """
     try:
         r = get_router()
         if not r.vpn.interface_exists(interface):
             raise HTTPException(status_code=404, detail=f"VPN interface '{interface}' not configured")
-        return {"interface": interface, "peers": r.vpn.list_peers(interface)}
+        peers = r.vpn.list_peers(interface)
+        try:
+            hs = r.vpn.peer_handshakes(interface)
+        except Exception:  # noqa: BLE001 — telemetry enrichment never fails the list
+            hs = {}
+        if not isinstance(hs, dict):
+            hs = {}
+        for p in peers:
+            p["latest_handshake"] = int(hs.get(p.get("public_key", ""), 0) or 0)
+        return {"interface": interface, "peers": peers}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

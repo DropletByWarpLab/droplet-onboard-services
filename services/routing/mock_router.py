@@ -377,6 +377,9 @@ class _MockVpn:
         # Flat peer list — tagged by interface so list/delete can filter.
         self._peers: list[dict[str, Any]] = []
         self._section_counter = 0
+        # WARP-1389 — settable per-peer runtime `latest handshake` epoch (secs),
+        # keyed by public_key. Tests set this to simulate a peer that punched.
+        self._handshakes: dict[str, int] = {}
 
     @staticmethod
     def generate_keypair() -> tuple[str, str]:
@@ -446,6 +449,12 @@ class _MockVpn:
             if not (p["interface"] == interface and p["public_key"] == public_key)
         ]
         return before - len(self._peers)
+
+    def peer_handshakes(self, interface: str = "wg0") -> dict[str, int]:
+        """WARP-1389 — per-peer runtime `latest handshake` epoch (secs) for peers
+        on `interface`. Mirrors the real VPNApi read; tests seed `_handshakes`."""
+        keys = {p["public_key"] for p in self._peers if p["interface"] == interface}
+        return {k: v for k, v in self._handshakes.items() if k in keys}
 
     def setup_firewall(self, interface: str = "wg0", listen_port: int = 51820) -> None:
         logger.info("mock: VPN setup_firewall iface=%s port=%s — no-op", interface, listen_port)

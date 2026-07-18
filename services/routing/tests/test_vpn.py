@@ -527,6 +527,45 @@ class TestVpnOverlayPeerEndpoint:
         assert resp.status_code == 422
 
 
+class TestVpnPeerHandshakeEnrichment:
+    """WARP-1389 — GET /vpn/peers enriches each peer with `latest_handshake`
+    (runtime epoch, 0 = never/unknown) for the overlay punch-success telemetry."""
+
+    def test_list_peers_carries_latest_handshake_zero_by_default(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        vpn_client.post(
+            "/vpn/peers/overlay",
+            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            headers=AUTH,
+        )
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1
+        # Field present, 0 when the peer has not handshook.
+        assert match[0]["latest_handshake"] == 0
+
+    def test_list_peers_reflects_a_real_handshake(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        vpn_client.post(
+            "/vpn/peers/overlay",
+            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            headers=AUTH,
+        )
+        # Simulate the peer completing a handshake (punch succeeded).
+        main.router_instance.vpn._handshakes[pub] = 1_784_000_000
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert match[0]["latest_handshake"] == 1_784_000_000
+
+    def test_peer_handshakes_scopes_to_known_peers(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        # A handshake for a pubkey with no peer section must not leak into the list.
+        main.router_instance.vpn._handshakes["GHOSTKEY"] = 999
+        assert main.router_instance.vpn.peer_handshakes("wg0") == {}
+
+
 class TestVpnEndpointsRequireRouter:
     def test_setup_503_when_disconnected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(main, "router_instance", None)

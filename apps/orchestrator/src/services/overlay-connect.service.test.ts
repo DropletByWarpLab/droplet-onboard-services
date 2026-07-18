@@ -128,10 +128,14 @@ function makePrisma(seed: OverlayVpnPeerRow[] = []) {
   return prisma;
 }
 
-function makePeers() {
+function makePeers(handshakes?: Record<string, number>) {
   const installed: unknown[] = [];
   const removed: unknown[] = [];
-  const peers = {
+  const peers: {
+    install: (p: unknown) => Promise<void>;
+    remove: (p: unknown) => Promise<void>;
+    listHandshakes?: (iface: string) => Promise<Record<string, number>>;
+  } = {
     install: async (p: unknown) => {
       installed.push(p);
     },
@@ -139,7 +143,22 @@ function makePeers() {
       removed.push(p);
     },
   };
+  if (handshakes) {
+    peers.listHandshakes = async () => handshakes;
+  }
   return { peers, installed, removed };
+}
+
+/** Captures every analytics.metric(name, value, labels) call — the REAL box
+ *  metric surface (Analytics.metric shape), not a stub of the service. */
+function makeMetrics() {
+  const calls: Array<{ name: string; value: number; labels?: Record<string, string> }> = [];
+  const metrics = {
+    metric: (name: string, value: number, labels?: Record<string, string>) => {
+      calls.push({ name, value, labels });
+    },
+  };
+  return { metrics, calls };
 }
 
 const FIXED_NOW = new Date("2026-07-18T12:00:00.000Z");
@@ -203,18 +222,29 @@ describe("runOverlayConnectTick — offer → stun-probe → answer → peer ins
       return jsonResponse(500, { error: "unexpected url " + call.url });
     });
 
+    const { metrics, calls: metricCalls } = makeMetrics();
     const deps: OverlayConnectDeps = {
       config: baseConfig(),
       identity,
       prisma,
       peers,
       allocateIp: async () => "10.13.13.9",
+      metrics,
       now: () => FIXED_NOW,
       fetchImpl,
     };
 
     const result = await runOverlayConnectTick(deps);
     expect(result).toBe("connected");
+
+    // 0. WARP-1389 — one punch ATTEMPT recorded on the real metric surface,
+    //    tagged port_preserving because the observed STUN port (51820) equals
+    //    the wg listen port.
+    expect(metricCalls).toContainEqual({
+      name: "overlay.punch.attempted",
+      value: 1,
+      labels: { nat_class: "port_preserving" },
+    });
 
     // 1. Poll — exact HQ URL + PoP body + signed message.
     const poll = calls.find((c) => c.url.endsWith("/api/overlay/poll"))!;
@@ -387,6 +417,90 @@ describe("runOverlayConnectTick — offer → stun-probe → answer → peer ins
       endpoint: "203.0.113.50:5000",
     });
   });
+
+  it("re-allocates a fresh IP when a revoked peer's old IP is now held by an active peer (reconnect-reliability)", async () => {
+    const { identity } = makeIdentity();
+    const { peers, installed } = makePeers();
+    // The revoked row for our returning phone still stores 10.13.13.5 …
+    // … but that IP was handed to a DIFFERENT active peer during the idle window.
+    const prisma = makePrisma([
+      { id: "vp-mine", publicKey: "PHONEWGPUBKEY", assignedIp: "10.13.13.5", status: "revoked", kind: "overlay" },
+      { id: "vp-other", publicKey: "OTHERACTIVEKEY", assignedIp: "10.13.13.5", status: "active", kind: "overlay" },
+    ]);
+    const allocateIp = vi.fn(async () => "10.13.13.42"); // the reused allocation path
+    const { impl: fetchImpl } = makeFetch((call) => {
+      if (call.url.endsWith("/api/overlay/poll")) {
+        return jsonResponse(200, {
+          session_id: "sess-3",
+          client_endpoint: "203.0.113.77:6000",
+          client_public_key: "PHONEWGPUBKEY",
+        });
+      }
+      if (call.url.endsWith("/host/stun-probe")) {
+        return jsonResponse(200, { ip: "203.0.113.7", port: 51820 });
+      }
+      if (call.url.endsWith("/api/overlay/answer")) {
+        return jsonResponse(200, { status: "box_acked" });
+      }
+      return jsonResponse(500, {});
+    });
+    const deps: OverlayConnectDeps = {
+      config: baseConfig(),
+      identity,
+      prisma,
+      peers,
+      allocateIp,
+      now: () => FIXED_NOW,
+      fetchImpl,
+    };
+    // Must NOT throw (the P2002 collision the guard prevents).
+    await expect(runOverlayConnectTick(deps)).resolves.toBe("connected");
+    expect(allocateIp).toHaveBeenCalledTimes(1); // re-allocated instead of reusing
+    const mine = prisma.rows.find((r) => r.publicKey === "PHONEWGPUBKEY")!;
+    expect(mine.assignedIp).toBe("10.13.13.42");
+    expect(mine.status).toBe("active");
+    // The active holder of the old IP is untouched.
+    expect(prisma.rows.find((r) => r.publicKey === "OTHERACTIVEKEY")!.assignedIp).toBe("10.13.13.5");
+    // Router peer installed with the FRESH IP.
+    expect(installed[0]).toMatchObject({ allowedIps: ["10.13.13.42/32"], endpoint: "203.0.113.77:6000" });
+  });
+
+  it("labels the punch symmetric when the observed STUN port != 51820", async () => {
+    const { identity } = makeIdentity();
+    const { peers } = makePeers();
+    const prisma = makePrisma();
+    const { metrics, calls: metricCalls } = makeMetrics();
+    const { impl: fetchImpl } = makeFetch((call) => {
+      if (call.url.endsWith("/api/overlay/poll")) {
+        return jsonResponse(200, {
+          session_id: "s",
+          client_endpoint: "1.2.3.4:5",
+          client_public_key: "K",
+        });
+      }
+      if (call.url.endsWith("/host/stun-probe")) {
+        // Port rewritten by a symmetric NAT (not the wg listen port).
+        return jsonResponse(200, { ip: "203.0.113.7", port: 40000 });
+      }
+      if (call.url.endsWith("/api/overlay/answer")) return jsonResponse(200, {});
+      return jsonResponse(500, {});
+    });
+    await runOverlayConnectTick({
+      config: baseConfig(),
+      identity,
+      prisma,
+      peers,
+      allocateIp: async () => "10.13.13.9",
+      metrics,
+      now: () => FIXED_NOW,
+      fetchImpl,
+    });
+    expect(metricCalls).toContainEqual({
+      name: "overlay.punch.attempted",
+      value: 1,
+      labels: { nat_class: "symmetric" },
+    });
+  });
 });
 
 // --- pollOverlaySession guards --------------------------------------------
@@ -459,6 +573,57 @@ describe("expireIdleOverlayPeers", () => {
     expect(prisma.rows.find((r) => r.publicKey === "STALE")!.status).toBe("revoked");
     expect(prisma.rows.find((r) => r.publicKey === "FRESH")!.status).toBe("active");
     expect(prisma.rows.find((r) => r.publicKey === "STATIC")!.status).toBe("active");
+  });
+
+  it("WARP-1389: settles punch outcome from the peer handshake (succeeded vs failed)", async () => {
+    const stale = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const prisma = makePrisma([
+      { id: "a", publicKey: "SHOOK", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+      { id: "b", publicKey: "NEVER", assignedIp: "10.0.0.3", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = stale;
+    (prisma.rows[1] as Record<string, unknown>).lastSessionAt = stale;
+    // SHOOK punched (has a real handshake epoch); NEVER never handshook.
+    const { peers, removed } = makePeers({ SHOOK: 1_784_000_000 });
+    const { metrics, calls } = makeMetrics();
+    const expired = await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      metrics,
+      now: () => FIXED_NOW,
+    });
+    expect(expired).toBe(2);
+    expect(removed).toHaveLength(2);
+    expect(calls).toContainEqual({ name: "overlay.punch.succeeded", value: 1, labels: undefined });
+    expect(calls).toContainEqual({ name: "overlay.punch.failed", value: 1, labels: undefined });
+    // Exactly one of each — no double counting.
+    expect(calls.filter((c) => c.name === "overlay.punch.succeeded")).toHaveLength(1);
+    expect(calls.filter((c) => c.name === "overlay.punch.failed")).toHaveLength(1);
+  });
+
+  it("WARP-1389: skips outcome telemetry when handshake data is unavailable (never guesses)", async () => {
+    const stale = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const prisma = makePrisma([
+      { id: "a", publicKey: "P", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = stale;
+    const { peers } = makePeers(); // no listHandshakes → data unavailable
+    const { metrics, calls } = makeMetrics();
+    await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      metrics,
+      now: () => FIXED_NOW,
+    });
+    // Peer still expired, but NO success/fail metric fabricated.
+    expect(prisma.rows[0].status).toBe("revoked");
+    expect(calls.filter((c) => c.name.startsWith("overlay.punch"))).toHaveLength(0);
   });
 });
 

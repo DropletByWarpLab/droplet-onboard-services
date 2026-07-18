@@ -111,7 +111,7 @@ import {
   migrateBrainMemoryDirectoryLayout,
 } from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
-import { initAnalytics } from "./services/analytics/index.js";
+import { initAnalytics, analytics } from "./services/analytics/index.js";
 import { forwardHealthSnapshot } from "./services/analytics/service-health.js";
 import { createLogger } from "./lib/logger.js";
 
@@ -540,8 +540,19 @@ async function main() {
         remove: async (p) => {
           await openwrt.deleteVpnPeer(p);
         },
+        // WARP-1389 — real per-peer runtime handshake, read from the routing
+        // peer list (permitted ubus read; 0 when unknown), so the idle-expiry
+        // sweep can settle each torn-down peer as a punch success/failure.
+        listHandshakes: async (iface) => {
+          const peers = await openwrt.listVpnPeers(iface);
+          return Object.fromEntries(
+            peers.map((p) => [p.public_key, p.latest_handshake ?? 0]),
+          );
+        },
       },
       allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
+      // WARP-1389 — box-side punch telemetry on the real analytics surface.
+      metrics: analytics,
       logger: createLogger("overlay-connect"),
     };
     cronRuntime.scheduleInterval(

@@ -982,6 +982,9 @@ export type VpnPeerWire = {
   description: string;
   endpoint_host: string;
   persistent_keepalive: string;
+  // WARP-1389 — runtime `latest handshake` epoch (seconds; 0 = never/unknown),
+  // enriched by the routing /vpn/peers read. Absent on older routing builds.
+  latest_handshake?: number;
 };
 
 export type VpnSetupResponse = VpnInterfaceInfo & {
