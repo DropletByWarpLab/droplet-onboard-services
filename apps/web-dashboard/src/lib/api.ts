@@ -5754,6 +5754,36 @@ export async function fetchAppCapabilities(): Promise<AppCapabilities> {
 }
 
 /**
+ * WARP-1368 — Settings → Features panel. Mirrors the orchestrator's
+ * ModulesView (services/modules.service.ts): every registry module with its
+ * two orthogonal axes (deploy-time `available`, operator `enabled`) plus the
+ * derived `effective`. `core` modules are never toggleable.
+ */
+export interface AppModuleState {
+  id: string;
+  label: string;
+  description: string;
+  category: "workspace" | "operations";
+  core: boolean;
+  available: boolean;
+  enabled: boolean;
+  effective: boolean;
+}
+
+export interface AppModulesView {
+  businessType: string | null;
+  modules: AppModuleState[];
+}
+
+/** Full module states for the Settings Features panel (any signed-in role may
+ *  read; the PATCH below is the admin-only half). */
+export async function fetchAppModules(): Promise<AppModulesView> {
+  const res = await authFetch(`${BASE}/api/modules`);
+  if (!res.ok) throw new Error(`Failed to fetch modules: ${res.status}`);
+  return res.json();
+}
+
+/**
  * Toggle a user-facing module on/off (WARP-1306) — the owner/admin enable
  * path behind the honest "module off" states (e.g. ProjectsDisabled). PATCH
  * /api/admin/modules/:id is owner/admin-gated server-side (403
