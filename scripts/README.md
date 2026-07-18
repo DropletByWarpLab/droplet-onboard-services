@@ -128,7 +128,12 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   left by an older setup version is detected on re-run (generated header
   present but core keys missing / truncated last line) and recovered:
   restored from the newest complete `.env.bak.*` when one exists, otherwise
-  regenerated fresh with a loud warning. Docker secret files and the audit
+  regenerated fresh with a loud warning. The mid-run `.env` copies exist
+  ONLY for this convergence: a setup run that completes successfully removes
+  its `.env.bak.*` / `.env.torn.*` / staging strays on the way out, so a
+  green provision leaves nothing stale on the box (exception: a
+  `--regenerate-env` run keeps its `.env.bak.*` — that backup is the
+  documented recovery path below). Docker secret files and the audit
   signing key were already staged+renamed; the TLS cert/key pair is now also
   verified to *match* — a torn self-signed pair is restored from the
   `.bootstrap` trust anchor (or regenerated) instead of being kept forever.
@@ -159,8 +164,8 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   hand-edited version is kept as `.env.torn.*`).
 - **No automatic pre-update backup yet.** A setup.sh re-run does not snapshot
   the box first. The building blocks exist — scheduled restic backups
-  (WARP-254, `scripts/lib/backup.sh`) and the pre-reset full-device backup in
-  `factory-reset.sh` (WARP-570) — but wiring an automatic pre-update snapshot
+  (WARP-254, `scripts/lib/backup.sh`) and the opt-in pre-reset full-device
+  backup in `factory-reset.sh` (`--backup`, WARP-570) — but wiring an automatic pre-update snapshot
   into the re-run path is deliberately deferred to the OTA work (WARP-534/179),
   which owns the update transaction (snapshot → apply → verify → rollback).
   Until then: `sudo /usr/local/sbin/droplet-backup.sh` before a risky update

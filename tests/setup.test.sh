@@ -1756,6 +1756,59 @@ else
   fail "factory-reset.sh does not wipe all .env staging/torn siblings (.env.{torn,tmp,migrate,upsert}.*)"
 fi
 
+# (12) BLOCKING (rjouffret WARP-1309 review): the end-of-run "leave nothing
+# stale" sweep in setup.sh runs under `set -euo pipefail`. `rm -f` swallows a
+# missing file but a REAL removal failure (e.g. a root-owned .env.bak.* an
+# earlier privileged run left that a later non-root run cannot unlink) still
+# returns non-zero. As a standalone statement — not in an && / || chain — that
+# non-zero triggers `set -e` and aborts the whole script AFTER a good provision
+# but BEFORE the "Setup Complete" banner, flipping a green provision to a
+# reported failure: the exact inverse of what WARP-1309 guarantees. Every
+# `rm -f "$_stale"` in the sweep must therefore be abort-guarded (`|| true`).
+SETUP_SH="$REPO_ROOT_REAL/scripts/setup.sh"
+T12_SWEEP="$(awk '/Leave nothing stale on the box/{f=1} /--- Done ---/{f=0} f' "$SETUP_SH")"
+T12_TOTAL=$(printf '%s\n' "$T12_SWEEP" | grep -c 'rm -f "\$_stale"' || true)
+T12_GUARDED=$(printf '%s\n' "$T12_SWEEP" | grep 'rm -f "\$_stale"' | grep -c '|| true' || true)
+if [ "$T12_TOTAL" -ge 2 ] && [ "$T12_TOTAL" = "$T12_GUARDED" ]; then
+  pass "setup.sh stale-sweep rm -f calls are abort-guarded (|| true) under set -e"
+else
+  fail "setup.sh stale-sweep has $T12_TOTAL rm -f but only $T12_GUARDED guarded — a failed cleanup rm aborts AFTER provision, before 'Setup Complete'"
+fi
+
+# (13) Regression lock for the sweep's pattern coverage (rjouffret WARP-1309
+# finding #2). Every .env staging pattern the sweep removes carries the SAME
+# device secrets as .env, so each must have a real writer AND must stay covered
+# — a future "simplify" pass must not trim a pattern that an interrupted run
+# can actually strand. Writers (all stage to a `.$$`/`.<epoch>` sibling then
+# rename, leaving the sibling on interruption):
+#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_file.torn.$(date +%s)")
+#   .env.tmp.*     -> secrets.sh atomic .env write             ("$env_write_target.tmp.$$")
+#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_file.migrate.$$")
+#   .env.upsert.*  -> secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
+SECRETS_SH="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
+SINGLEBOX_SH="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+T13_OK=true
+# pattern -> the literal writer idiom that stages onto a "$var<idiom>" sibling
+# (writers prefix with $env_file/$target/$env_write_target, so the ".env." form
+# never appears at the write site — match the distinctive suffix instead).
+T13_check() {
+  local pat="$1" idiom="$2"
+  # (a) the end-of-run sweep removes this secrets-bearing pattern
+  printf '%s\n' "$T12_SWEEP" | grep -qF "$pat" || { T13_OK=false; T13_MISS="$pat (not swept)"; }
+  # (b) a real writer that can strand it exists in secrets.sh or single-box.sh
+  grep -qF "$idiom" "$SECRETS_SH" || grep -qF "$idiom" "$SINGLEBOX_SH" \
+    || { T13_OK=false; T13_MISS="$pat (no writer producing $idiom)"; }
+}
+T13_check '.env.torn.'    '.torn.$(date'
+T13_check '.env.tmp.'     '.tmp.$$'
+T13_check '.env.migrate.' '.migrate.$$'
+T13_check '.env.upsert.'  '.upsert.$$'
+if [ "$T13_OK" = "true" ]; then
+  pass "setup.sh sweep covers every staging pattern that has a real writer (.env.{torn,tmp,migrate,upsert}.*)"
+else
+  fail "setup.sh sweep / writer mismatch for ${T13_MISS:-?} — either an uncovered secrets-bearing stray or a dead pattern"
+fi
+
 # =============================================================================
 # Phase 12: prepare_and_build build-list parity with docker-compose.yml
 # =============================================================================
