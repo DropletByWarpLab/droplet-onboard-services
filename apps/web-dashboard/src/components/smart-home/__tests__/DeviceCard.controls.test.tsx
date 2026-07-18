@@ -13,7 +13,7 @@
  *   - a media player dispatches the playback verbs.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { DeviceCard } from "../DeviceCard";
 import type { MatterDevice } from "@/lib/types";
 
@@ -50,6 +50,21 @@ describe("DeviceCard control widgets (WARP-897)", () => {
     expect(onCommand).toHaveBeenCalledWith("42", "set_color_temperature", {
       kelvin: 2700,
     });
+  });
+
+  it("renders the color wheel and dispatches hue/saturation from keyboard steering", async () => {
+    render(<DeviceCard device={device()} onCommand={onCommand} />);
+    const wheel = screen.getByRole("slider", { name: "Color" });
+    // currentHue 212 raw -> 300 deg; ArrowRight steps hue +5, ArrowDown sat -5.
+    fireEvent.keyDown(wheel, { key: "ArrowRight" });
+    fireEvent.keyDown(wheel, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(onCommand).toHaveBeenCalledWith("42", "set_color", {
+        hue: 305,
+        saturation: 95,
+      }),
+    );
+    expect(wheel).toHaveAttribute("aria-valuetext", expect.stringContaining("saturated"));
   });
 
   it("hides color controls for a plain on/off light", () => {
