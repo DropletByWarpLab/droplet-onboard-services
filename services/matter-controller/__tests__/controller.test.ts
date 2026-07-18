@@ -39,6 +39,17 @@ function fakeEndpoint(overrides: Record<string, unknown> = {}) {
     },
     commands: {
       onOff: { on: vi.fn(), off: vi.fn(), toggle: vi.fn() },
+      colorControl: {
+        moveToHueAndSaturation: vi.fn(),
+        moveToColorTemperature: vi.fn(),
+      },
+      windowCovering: {
+        upOrOpen: vi.fn(),
+        downOrClose: vi.fn(),
+        stopMotion: vi.fn(),
+        goToLiftPercentage: vi.fn(),
+      },
+      mediaPlayback: { play: vi.fn(), pause: vi.fn(), stop: vi.fn() },
     },
     ...overrides,
   };
@@ -431,6 +442,86 @@ describe("createMatterControllerCore", () => {
       await expect(core.sendCommand("1", "warp_drive")).rejects.toThrow(
         /unknown command/i,
       );
+    });
+
+    // WARP-1371: the market-common device command surface. Each case pins the
+    // cluster routing AND the UX->Matter unit conversion.
+    describe("device command surface (WARP-1371)", () => {
+      async function ep(command: string, data?: Record<string, unknown>) {
+        const node = fakeNode();
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        await core.sendCommand("1", command, data);
+        return node.parts.get(1) as ReturnType<typeof fakeEndpoint>;
+      }
+
+      it("set_color converts degrees/percent to Matter 0-254 hue/sat", async () => {
+        const e = await ep("set_color", { hue: 300, saturation: 100 });
+        expect(e.commands.colorControl.moveToHueAndSaturation).toHaveBeenCalledWith({
+          hue: 212,
+          saturation: 254,
+          transitionTime: 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+      });
+
+      it("set_color_temperature converts kelvin to clamped mireds", async () => {
+        const e = await ep("set_color_temperature", { kelvin: 2700 });
+        expect(e.commands.colorControl.moveToColorTemperature).toHaveBeenCalledWith(
+          expect.objectContaining({ colorTemperatureMireds: 370 }),
+        );
+      });
+
+      it("set_color_temperature clamps out-of-band mireds", async () => {
+        const e = await ep("set_color_temperature", { mireds: 9000 });
+        expect(e.commands.colorControl.moveToColorTemperature).toHaveBeenCalledWith(
+          expect.objectContaining({ colorTemperatureMireds: 500 }),
+        );
+      });
+
+      it("cover motion commands invoke the WindowCovering cluster as void", async () => {
+        const e1 = await ep("open_cover");
+        expect(e1.commands.windowCovering.upOrOpen).toHaveBeenCalledWith(undefined);
+        const e2 = await ep("close_cover");
+        expect(e2.commands.windowCovering.downOrClose).toHaveBeenCalledWith(undefined);
+        const e3 = await ep("stop_cover");
+        expect(e3.commands.windowCovering.stopMotion).toHaveBeenCalledWith(undefined);
+      });
+
+      it("set_cover_position inverts percent-open into lift hundredths-closed", async () => {
+        const e = await ep("set_cover_position", { position: 25 });
+        expect(e.commands.windowCovering.goToLiftPercentage).toHaveBeenCalledWith({
+          liftPercent100thsValue: 7500,
+        });
+      });
+
+      it("set_fan_speed writes percentSetting; set_fan_mode maps the enum", async () => {
+        // Fan speed/mode are attribute WRITES — mock the cluster client the
+        // same way the set_hvac_mode tests do.
+        const setAttribute = vi.fn().mockResolvedValue(undefined);
+        const fanEndpoint = fakeEndpoint({
+          getClusterClient: () => ({ setAttribute }),
+        });
+        const node = fakeNode({ parts: new Map([[1, fanEndpoint]]) });
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+
+        await core.sendCommand("1", "set_fan_speed", { percent: 60 });
+        expect(setAttribute).toHaveBeenCalledWith("percentSetting", 60);
+        await core.sendCommand("1", "set_fan_mode", { mode: "auto" });
+        expect(setAttribute).toHaveBeenCalledWith("fanMode", 5);
+        await expect(
+          core.sendCommand("1", "set_fan_mode", { mode: "turbo" }),
+        ).rejects.toThrow(/unsupported fan mode/i);
+      });
+
+      it("media verbs invoke MediaPlayback as void", async () => {
+        const e1 = await ep("play_media");
+        expect(e1.commands.mediaPlayback.play).toHaveBeenCalledWith(undefined);
+        const e2 = await ep("pause_media");
+        expect(e2.commands.mediaPlayback.pause).toHaveBeenCalledWith(undefined);
+        const e3 = await ep("stop_media");
+        expect(e3.commands.mediaPlayback.stop).toHaveBeenCalledWith(undefined);
+      });
     });
   });
 

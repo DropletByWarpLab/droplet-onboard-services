@@ -402,6 +402,114 @@ export function createMatterControllerCore(
         return { status: "ok" };
       }
 
+      // WARP-1371: color-capable lights (ColorControl 0x0300). Hue arrives in
+      // UX degrees (0-360) and saturation in percent; Matter wants 0-254 for
+      // both (spec 3.2.7). A light without hue/sat support rejects the invoke
+      // and the raw matter.js error surfaces (honesty contract) rather than a
+      // fabricated ok.
+      case "set_color": {
+        const hueDeg = Number(data?.hue ?? 0);
+        const satPct = Number(data?.saturation ?? 100);
+        const hue = Math.round(((((hueDeg % 360) + 360) % 360) / 360) * 254);
+        const saturation = Math.round(
+          (Math.min(Math.max(satPct, 0), 100) / 100) * 254,
+        );
+        await invokeClusterCommand(endpoint, "colorControl", "moveToHueAndSaturation", {
+          hue,
+          saturation,
+          transitionTime: data?.transition_time ?? 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: tunable-white lights. Accepts UX kelvin (preferred) or raw
+      // mireds; clamped to the 153-500 mired band virtually every retail bulb
+      // supports (6500K-2000K).
+      case "set_color_temperature": {
+        let mireds = Number(data?.mireds ?? 0);
+        if (!mireds) {
+          const kelvin = Number(data?.kelvin ?? 2700);
+          mireds = Math.round(1_000_000 / Math.min(Math.max(kelvin, 2000), 6500));
+        }
+        mireds = Math.min(Math.max(Math.round(mireds), 153), 500);
+        await invokeClusterCommand(endpoint, "colorControl", "moveToColorTemperature", {
+          colorTemperatureMireds: mireds,
+          transitionTime: data?.transition_time ?? 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: window coverings (WindowCovering 0x0102). The June audit
+      // proved the old path (onOff toggle) always 500s on a real cover —
+      // these are the cluster commands a blind actually implements. The
+      // motion commands are VOID requests (WARP-1366 payload rule applies).
+      case "open_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "upOrOpen");
+        return { status: "ok" };
+
+      case "close_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "downOrClose");
+        return { status: "ok" };
+
+      case "stop_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "stopMotion");
+        return { status: "ok" };
+
+      // UX position is percent OPEN (100 = fully open); Matter lift is
+      // hundredths-of-percent CLOSED (10000 = fully closed) — invert.
+      case "set_cover_position": {
+        const positionPct = Math.min(Math.max(Number(data?.position ?? 100), 0), 100);
+        await invokeClusterCommand(endpoint, "windowCovering", "goToLiftPercentage", {
+          liftPercent100thsValue: Math.round((100 - positionPct) * 100),
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: fans (FanControl 0x0202). Speed is an attribute write, not
+      // a command — percentSetting (0-100) with fanMode auto-derived by the
+      // device; explicit modes map to the FanModeEnum.
+      case "set_fan_speed": {
+        const percent = Math.min(Math.max(Math.round(Number(data?.percent ?? 100)), 0), 100);
+        await writeClusterAttribute(endpoint, "fanControl", "percentSetting", percent);
+        return { status: "ok" };
+      }
+
+      case "set_fan_mode": {
+        // Matter FanModeEnum (spec 4.4.6.1): 0 Off, 1 Low, 2 Medium, 3 High,
+        // 4 On, 5 Auto.
+        const FAN_MODES: Record<string, number> = {
+          off: 0,
+          low: 1,
+          medium: 2,
+          high: 3,
+          on: 4,
+          auto: 5,
+        };
+        const mode = FAN_MODES[String(data?.mode ?? "")];
+        if (mode === undefined)
+          throw new Error(`Unsupported fan mode: ${String(data?.mode ?? "")}`);
+        await writeClusterAttribute(endpoint, "fanControl", "fanMode", mode);
+        return { status: "ok" };
+      }
+
+      // WARP-1371: media players (MediaPlayback 0x0506) — the three verbs
+      // every speaker/display supports. All VOID requests.
+      case "play_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "play");
+        return { status: "ok" };
+
+      case "pause_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "pause");
+        return { status: "ok" };
+
+      case "stop_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "stop");
+        return { status: "ok" };
+
       case "set_temperature": {
         const temp = Number(data?.temperature ?? 21);
         const mode = Number(data?.mode ?? 0); // 0=heat, 1=cool
