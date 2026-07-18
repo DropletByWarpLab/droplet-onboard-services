@@ -93,8 +93,8 @@ describe("FeaturesCard", () => {
     expect(
       screen.getByText("Pair and control Matter smart-home devices."),
     ).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Operations" })).toBeInTheDocument();
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Operations")).toBeInTheDocument();
   });
 
   it("pins core modules as always on with no switch", async () => {
@@ -103,7 +103,7 @@ describe("FeaturesCard", () => {
 
     expect(screen.getByText("Always on")).toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: "Ask AI enabled" }),
+      screen.queryByRole("switch", { name: "Ask AI" }),
     ).not.toBeInTheDocument();
   });
 
@@ -111,7 +111,7 @@ describe("FeaturesCard", () => {
     render(<FeaturesCard />);
     await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
 
-    const sw = screen.getByRole("switch", { name: "Email enabled" });
+    const sw = screen.getByRole("switch", { name: "Email" });
     expect(sw).toBeDisabled();
     expect(
       screen.getByText("Not installed on this Droplet"),
@@ -122,7 +122,7 @@ describe("FeaturesCard", () => {
     render(<FeaturesCard />);
     await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
 
-    const sw = screen.getByRole("switch", { name: "Devices enabled" });
+    const sw = screen.getByRole("switch", { name: "Devices" });
     expect(sw).toHaveAttribute("aria-checked", "false");
     fireEvent.click(sw);
 
@@ -139,7 +139,7 @@ describe("FeaturesCard", () => {
     render(<FeaturesCard />);
     await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
 
-    const sw = screen.getByRole("switch", { name: "Devices enabled" });
+    const sw = screen.getByRole("switch", { name: "Devices" });
     fireEvent.click(sw);
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
@@ -150,14 +150,16 @@ describe("FeaturesCard", () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
-  it("shows the load-failed line when GET /api/modules fails", async () => {
+  it("shows the load-failed line with an inline retry that reloads", async () => {
     fetchAppModules.mockRejectedValueOnce(new Error("boom"));
     render(<FeaturesCard />);
     await waitFor(() =>
-      expect(
-        screen.getByText("Couldn't load features — refresh to try again."),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("Couldn't load features.")).toBeInTheDocument(),
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(fetchAppModules).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Devices")).toBeInTheDocument();
   });
 
   it("renders nothing for family/guest", () => {
