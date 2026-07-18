@@ -16,7 +16,12 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/droplet-automount.sh add   /dev/%I
 ExecStop=/usr/local/bin/droplet-automount.sh remove /dev/%I
-TimeoutStartSec=30
+# WARP-1361: the md add path is hot on every boot and can legitimately spend
+# ~10 s in the assembly settle loop, wait on the per-device lock while the
+# reconcile-spawned add finishes, and run the occ registration. The old 30 s
+# killed the oneshot mid-add on large pools — the fs stayed mounted but
+# state_add/registration were skipped and the unit failed every boot.
+TimeoutStartSec=300
 TimeoutStopSec=30
 # Pass known-good PATH so docker/blkid/mount are found when run from udev.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

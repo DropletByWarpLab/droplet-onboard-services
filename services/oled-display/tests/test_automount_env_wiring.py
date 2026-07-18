@@ -73,6 +73,21 @@ class TestUnitWiring:
         text = POOL_APPLY_UNIT.read_text(encoding="utf-8")
         assert f"EnvironmentFile=-{ENV_PATH}" in text, text
 
+    def test_automount_unit_start_timeout_covers_settle_and_registration(self):
+        # WARP-1361 review: the md add path is hot on every boot and can
+        # legitimately spend ~10 s in the assembly settle loop plus the occ
+        # registration (and now waits on the per-device lock while the
+        # reconcile-spawned add finishes). TimeoutStartSec=30 killed the
+        # oneshot mid-add on large pools — the fs stayed mounted but
+        # state_add/Nextcloud registration were skipped and the unit failed
+        # on every boot.
+        text = UNIT.read_text(encoding="utf-8")
+        m = re.search(r"^TimeoutStartSec=(\d+)$", text, re.M)
+        assert m, text
+        assert int(m.group(1)) >= 120, (
+            "droplet-automount@.service TimeoutStartSec is too small for the "
+            "boot-time md settle + registration path: %s" % m.group(0))
+
     def test_no_unit_declares_a_nonroot_user_for_the_env_file(self):
         # These are root units by design (mount/mdadm need root). If someone
         # later adds User=droplet AND keeps the EnvironmentFile, the LPE
