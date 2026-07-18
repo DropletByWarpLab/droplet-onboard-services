@@ -1,10 +1,10 @@
-import { Building2, ChevronRight, Home } from "lucide-react";
+import { Building2, ChevronRight, FolderOpen } from "lucide-react";
 
 interface BreadcrumbNavProps {
   path: string;
   onNavigate: (path: string) => void;
   /**
-   * WARP-1267 — a non-navigating crumb rendered before "Home", used for team
+   * WARP-1267 — a non-navigating crumb rendered before "My files", used for team
    * spaces: the department name prefixes the breadcrumb ("Engineering /
    * Platform / …") even though Nextcloud mounts the team library flat — the
    * dashboard owns this hierarchy illusion (ADR-029 §D-3).
@@ -29,11 +29,11 @@ export function BreadcrumbNav({ path, onNavigate, prefixCrumb }: BreadcrumbNavPr
       )}
       <button
         onClick={() => onNavigate("/")}
-        aria-label="Home"
+        aria-label="My files"
         className="flex items-center gap-1 type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors flex-shrink-0 min-h-[28px]"
       >
-        <Home size={14} aria-hidden="true" />
-        <span>Home</span>
+        <FolderOpen size={14} aria-hidden="true" />
+        <span>My files</span>
       </button>
 
       {segments.map((segment, idx) => {

@@ -61,7 +61,7 @@ interface Density {
 }
 
 const DIRECTIONS: Record<DensityKey, Density> = {
-  balanced: { label: "Balanced", cols: 12, gap: 16, rowH: 96, desc: "Comfortable spacing. The default home.", cells: 6 },
+  balanced: { label: "Balanced", cols: 12, gap: 16, rowH: 96, desc: "Comfortable spacing. The default view.", cells: 6 },
   dense: { label: "Dense", cols: 12, gap: 12, rowH: 78, desc: "Tighter grid — more on screen at once.", cells: 9 },
   airy: { label: "Airy", cols: 12, gap: 22, rowH: 104, desc: "Generous spacing — calmer, larger cards.", cells: 4 },
 };
@@ -206,7 +206,7 @@ function SettingsModal({
             <span className="dh-set-ico"><LayoutGrid size={15} /></span>
             <div>
               <div className="t">Display density</div>
-              <div className="d">Choose how much information fits on screen. Applies to the Home board.</div>
+              <div className="d">Choose how much information fits on screen. Applies to the Overview board.</div>
             </div>
           </div>
           <div className="dh-density" role="radiogroup" aria-label="Display density">
@@ -383,7 +383,7 @@ export default function DashboardPage() {
     return (
       <div className="droplet-home dh-mobile">
         <AmbientLayer />
-        <h1 className="sr-only">Droplet Home</h1>
+        <h1 className="sr-only">Droplet Overview</h1>
         <div className="dh-m-greet">
           <div className="g">{greeting}{firstName && <b>, {firstName}</b>}</div>
           <div className="d">{dateStr.toLowerCase()} · {host}</div>
@@ -397,7 +397,7 @@ export default function DashboardPage() {
   return (
     <div className={"droplet-home" + (editMode ? " editing" : "")}>
       <AmbientLayer />
-      <h1 className="sr-only">Droplet Home</h1>
+      <h1 className="sr-only">Droplet Overview</h1>
 
       <div className="dh-top">
         <div className="dh-greet">

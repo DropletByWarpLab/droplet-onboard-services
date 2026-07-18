@@ -1,16 +1,16 @@
 /**
  * WARP-1270 (T18) — "People" / "Departments & teams" tab on the Users page
- * (design brief §3/§4), Business-mode only.
+ * (design brief §3/§4). WARP-1341: business-only build, so the tab strip is
+ * always present.
  *
  * Covers:
- *   - Tab strip absence in Home mode (Business-gated display, brief §3).
- *   - Tab strip presence + switching in Business mode.
+ *   - Tab strip presence + switching.
  *   - Invite modal's collapsed "Add to a department" section, expand, and
  *     the multi-select payload it feeds createInvite (brief §4).
  *
  * DepartmentsPanel itself (list/detail/rights/create/archive) has its own
- * dedicated test file — this file only covers the /users page's tab-gating
- * and invite-modal-extension seam.
+ * dedicated test file — this file only covers the /users page's tab
+ * behaviour and invite-modal-extension seam.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -58,14 +58,11 @@ vi.mock("qrcode.react", () => ({
   QRCodeSVG: ({ value }: { value: string }) => <svg data-testid="invite-qr" data-value={value} />,
 }));
 
-let isBusiness = false;
+// WARP-1341: business-only build — useWorkspace() is a static context.
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: isBusiness ? "business" : "home",
-    isHome: !isBusiness,
-    isBusiness,
-    setWorkspaceType: () => {},
-    homeVariant: "C",
+    workspaceType: "business",
+    isBusiness: true,
   }),
 }));
 
@@ -91,7 +88,6 @@ const FINANCE = {
 };
 
 beforeEach(() => {
-  isBusiness = false;
   fetchUsersMock.mockReset();
   listInvitesMock.mockReset();
   createInviteMock.mockReset();
@@ -102,19 +98,8 @@ beforeEach(() => {
   listDepartmentsMock.mockResolvedValue({ departments: [FINANCE] });
 });
 
-describe("Users page — Departments & teams tab gating", () => {
-  it("Home mode: no tab strip renders at all", async () => {
-    isBusiness = false;
-    render(<UsersPage />);
-    await waitFor(() => {
-      expect(screen.getByText("Alice")).toBeInTheDocument();
-    });
-    expect(screen.queryByRole("tablist", { name: /users view tabs/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /departments/i })).not.toBeInTheDocument();
-  });
-
-  it("Business mode: tab strip renders with People active by default, switching shows the Departments panel", async () => {
-    isBusiness = true;
+describe("Users page — Departments & teams tab", () => {
+  it("tab strip renders with People active by default, switching shows the Departments panel", async () => {
     getDepartmentMock.mockResolvedValue({
       department: FINANCE,
       usedBytes: null,
@@ -146,18 +131,7 @@ describe("Users page — Departments & teams tab gating", () => {
 });
 
 describe("Users page — invite modal 'Add to a department' (design brief §4)", () => {
-  it("is collapsed by default and absent entirely in Home mode", async () => {
-    isBusiness = false;
-    render(<UsersPage />);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /invite user/i })).toBeInTheDocument(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /invite user/i }));
-    expect(screen.queryByText(/add to a department/i)).not.toBeInTheDocument();
-  });
-
-  it("Business mode: expands to a checkbox row per department, feeding the invite payload", async () => {
-    isBusiness = true;
+  it("expands to a checkbox row per department, feeding the invite payload", async () => {
     createInviteMock.mockResolvedValueOnce({
       token: "x".repeat(43),
       url: "http://droplet.local/invite/" + "x".repeat(43),
@@ -198,7 +172,6 @@ describe("Users page — invite modal 'Add to a department' (design brief §4)",
   });
 
   it("does not send a departments array when nothing is checked", async () => {
-    isBusiness = true;
     createInviteMock.mockResolvedValueOnce({
       token: "y".repeat(43),
       url: "http://droplet.local/invite/" + "y".repeat(43),

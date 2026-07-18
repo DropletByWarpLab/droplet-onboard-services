@@ -27,6 +27,10 @@ vi.mock("@/lib/api", () => ({
   createInvite: (...a: any[]) => createInviteMock(...a),
   listInvites: (...a: any[]) => listInvitesMock(...a),
   revokeInvite: (...a: any[]) => revokeInviteMock(...a),
+  // WARP-1341: the Users page fetches departments for the invite modal's
+  // "Add to a department" section on mount (admin-gated). No departments
+  // here, so that section stays absent — matching the flow under test.
+  listDepartments: vi.fn().mockResolvedValue({ departments: [] }),
   // The page now renders inside <ShellPage>, whose status chip pulls the
   // device + health hooks. Stub them so the wholesale api mock keeps these
   // callable (otherwise SWR receives an undefined fetcher and throws).
@@ -46,17 +50,13 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
-// WARP-1270 (T18): the page now reads useWorkspace() unconditionally (the
-// "People" / "Departments & teams" tab strip gate). These tests exercise
-// the Home-mode invite flow, so isBusiness: false — matches every prior
-// assertion here (no tab strip, no department-assignment section).
+// WARP-1341: business-only build — useWorkspace() is a static context.
+// These tests exercise the invite flow; the department-assignment section
+// stays absent because there are no departments (see listDepartments mock).
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: "home",
-    isHome: true,
-    isBusiness: false,
-    setWorkspaceType: () => {},
-    homeVariant: "B",
+    workspaceType: "business",
+    isBusiness: true,
   }),
 }));
 

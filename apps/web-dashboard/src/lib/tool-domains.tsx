@@ -3,7 +3,7 @@
  *
  * The orchestrator emits machine domain slugs (`smart-home`, `pm`, …).
  * ADR-002 (home-user persona) says the dashboard speaks plain language,
- * not installer jargon — so a domain renders as "Smart home", "Projects",
+ * not installer jargon — so a domain renders as "Smart devices", "Projects",
  * not "smart-home" / "pm". Unknown slugs fall back to a title-cased label
  * and a generic icon, so a freshly-added domain never breaks the page;
  * it just renders un-prettied until this map catches up.
@@ -35,7 +35,7 @@ interface DomainMeta {
 const DOMAIN_META: Record<string, DomainMeta> = {
   network: { label: "Network", icon: Network },
   files: { label: "Files", icon: FolderOpen },
-  "smart-home": { label: "Smart home", icon: Heater },
+  "smart-home": { label: "Smart devices", icon: Heater },
   cameras: { label: "Cameras", icon: Camera },
   switch: { label: "Switch", icon: SwitchIcon },
   calendar: { label: "Calendar", icon: Calendar },

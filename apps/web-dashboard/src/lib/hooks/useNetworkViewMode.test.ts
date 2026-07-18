@@ -3,14 +3,14 @@ import { act, renderHook } from "@testing-library/react";
 import { useNetworkViewMode, personaDefaultMode } from "@/lib/hooks/useNetworkViewMode";
 
 describe("personaDefaultMode", () => {
-  it("Business → advanced, Home → simple", () => {
+  it("business → advanced, non-business → simple", () => {
     expect(personaDefaultMode(true)).toBe("advanced");
     expect(personaDefaultMode(false)).toBe("simple");
   });
 });
 
 describe("useNetworkViewMode", () => {
-  it("defaults to simple for a Home install", () => {
+  it("defaults to simple when isBusiness is false", () => {
     const { result } = renderHook(({ b }) => useNetworkViewMode(b), {
       initialProps: { b: false },
     });

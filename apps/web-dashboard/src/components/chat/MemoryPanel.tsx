@@ -37,7 +37,7 @@ const CATEGORIES: MemoryFact["category"][] = [
 const AUDIENCES: { value: MemoryFact["audience"]; label: string }[] = [
   { value: "owner", label: "Owners" },
   { value: "admin", label: "Admins+" },
-  { value: "family", label: "Household" },
+  { value: "family", label: "Team" },
   { value: "guest", label: "Everyone" },
 ];
 

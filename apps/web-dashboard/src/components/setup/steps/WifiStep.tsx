@@ -15,18 +15,18 @@ import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
- * Wizard step — "Set up your home Wi-Fi" (Onboarding-Flow redesign,
+ * Wizard step — "Set up your Wi-Fi" (Onboarding-Flow redesign,
  * WIFI-ADDRESS-THEME-HANDOFF §1a).
  *
  * The old single "Internet" step mixed two unrelated things — the LOCAL Wi-Fi
  * the box broadcasts and the secure address the box gives itself that powers
  * REMOTE access. Customers conflated them, so the redesign splits them into two
- * ordered steps. This is the first half: the local home network only. The
+ * ordered steps. This is the first half: the local network only. The
  * secure address is now its own `address` step (`AddressStep.tsx`).
  *
  * The Wi-Fi the box can broadcast is OPTIONAL (WARP-809): the Droplet always
  * runs its own local network for connected gear (switch, cameras); broadcasting
- * a joinable Wi-Fi is opt-in, and many homes keep the box on an existing
+ * a joinable Wi-Fi is opt-in, and many sites keep the box on an existing
  * network. So this step is fully skippable — leaving the fields blank writes
  * nothing and the box stays reachable either way.
  *
@@ -35,9 +35,9 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * WIFI-ADDRESS-THEME-HANDOFF split (#548) gave Wi-Fi the whole step to itself
  * and rendered the fields directly instead. This reintroduces the disclosure,
  * now driven by the box's deployment posture instead of a static default: most
- * customers plug the Droplet into an existing home router (DOWNSTREAM_ROUTER)
+ * customers plug the Droplet into an existing office router (DOWNSTREAM_ROUTER)
  * and never need to broadcast a second Wi-Fi, so the fields stay collapsed for
- * them; a box that IS the home's router (PRIMARY_ROUTER) needs this step, so it
+ * them; a box that IS the site's router (PRIMARY_ROUTER) needs this step, so it
  * opens expanded. `getNetworkTopology()` (`@/lib/api`) is best-effort — a
  * `null` (unreachable/error/UNKNOWN) leaves the fields collapsed, the same
  * degrade-safe default WARP-809 shipped. Manual disclosure always stays
@@ -123,7 +123,7 @@ export function WifiStep({
   }
 
   /**
-   * Push the Home Wi-Fi config to the router. SSID first (Tier 1, applies
+   * Push the Wi-Fi config to the router. SSID first (Tier 1, applies
    * immediately), then the password (Tier 2). If the password POST resolves to
    * a 202 `confirmation_required`, auto-confirm — the "Save and continue" click
    * is the consent — and poll the operation until it leaves the pending state.
@@ -238,8 +238,8 @@ export function WifiStep({
   return (
     <StepShell
       current="wifi"
-      title="Set up your home Wi-Fi"
-      subtitle="Your Droplet can broadcast its own Wi-Fi network for your phones, laptops, and TVs to join. This is local to your home — separate from reaching the box over the internet (that's the next step)."
+      title="Set up your Wi-Fi"
+      subtitle="Your Droplet can broadcast its own Wi-Fi network for your phones, laptops, and TVs to join. This is local to your office — separate from reaching the box over the internet (that's the next step)."
       primary={{
         label: ssid.trim() ? "Save and continue" : "Continue",
         loadingLabel: "Saving…",
@@ -271,7 +271,7 @@ export function WifiStep({
               setWifiExpanded((open) => !open);
             }}
             aria-expanded={wifiExpanded}
-            aria-controls="home-wifi-fields"
+            aria-controls="droplet-wifi-fields"
             className="flex items-center gap-2 w-full text-left type-subheadline text-label-primary rounded-md px-1 py-1.5 transition-colors duration-200 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             <ChevronRight
@@ -285,7 +285,7 @@ export function WifiStep({
           </button>
 
           {wifiExpanded && (
-            <div id="home-wifi-fields" className="space-y-4">
+            <div id="droplet-wifi-fields" className="space-y-4">
               <div>
                 <label className="type-subheadline text-label-secondary block mb-1.5">
                   Network name (SSID)
@@ -429,17 +429,17 @@ export function WifiStep({
 
         <LearnMoreCard helpAnchor="internet">
           <p>
-            <strong>Home Wi-Fi is optional.</strong> Your Droplet always runs a
+            <strong>Wi-Fi is optional.</strong> Your Droplet always runs a
             local network for connected gear (your switch, cameras). If
             you&rsquo;d also like it to broadcast its own Wi-Fi for devices to
             join, name it here with a password of 8 characters or more. Already
-            on a home network? Skip this — your Droplet stays reachable either
-            way.
+            on an office network? Skip this — your Droplet stays reachable
+            either way.
           </p>
           <p>
             This is a <strong>local</strong> setting — the name and password your
             devices use to get online, exactly like joining any Wi-Fi. It has
-            nothing to do with reaching the box from outside your home; that&rsquo;s
+            nothing to do with reaching the box from outside your office; that&rsquo;s
             the internet address on the next step.
           </p>
         </LearnMoreCard>

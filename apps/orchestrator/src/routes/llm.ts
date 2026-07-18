@@ -1282,17 +1282,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
 
         // WARP-1120 §8/§9.1 — the role-filtered business block, composed fresh
-        // each request and ONLY while the workspace is a BUSINESS box. A box
-        // re-typed to HOME injects nothing even with a committed profile, so we
-        // short-circuit BEFORE reading (and create-on-read materialising) the
-        // profile. composeBusinessBlock role-filters and gates on type again
+        // each request. WARP-1341: business-only build — a missing singleton
+        // row resolves to BUSINESS (a stale pre-migration HOME row still
+        // short-circuits, matching the migration that removes them).
+        // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
-          const workspaceType = (workspace?.type ?? "HOME") as WorkspaceTypeName;
+          const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
               role,

@@ -1,7 +1,7 @@
 /**
  * WARP-993 — ProductTour remote-access beat: honest away-from-home gating.
  *
- * The tour's remote beat used to promise "the same address at home and away"
+ * The tour's remote beat used to promise "the same address in the office and away"
  * unconditionally, and upgraded to the FQDN/green-padlock story on
  * `publicFqdn` alone. But the FQDN is split-horizon only (ADR-023 §3 — no
  * public A record): until the ADR-025 relay lands, that address is a dead end
@@ -75,7 +75,7 @@ describe("ProductTour — remote beat honesty (WARP-993)", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: /remote access/i }),
     ).toBeInTheDocument();
-    expect(screen.queryAllByText(/home and away/i)).toHaveLength(0);
+    expect(screen.queryAllByText(/office and away/i)).toHaveLength(0);
     expect(screen.queryAllByText(/anywhere/i)).toHaveLength(0);
     expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
   });
@@ -91,8 +91,8 @@ describe("ProductTour — remote beat honesty (WARP-993)", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: /remote access/i }),
     ).toBeInTheDocument();
-    // No away promise, no "trusted at home AND away" address-bar motif.
-    expect(screen.queryAllByText(/home and away/i)).toHaveLength(0);
+    // No away promise, no "trusted in the office AND away" address-bar motif.
+    expect(screen.queryAllByText(/office and away/i)).toHaveLength(0);
     expect(screen.queryAllByText(/anywhere/i)).toHaveLength(0);
     expect(screen.queryByText("casa.droplet-us.com")).not.toBeInTheDocument();
     expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
@@ -107,7 +107,7 @@ describe("ProductTour — remote beat honesty (WARP-993)", () => {
     gotoRemoteBeat();
 
     expect(
-      await screen.findByText(/home and away/i),
+      await screen.findByText(/office and away/i),
     ).toBeInTheDocument();
     expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
   });
@@ -124,7 +124,7 @@ describe("ProductTour — remote beat honesty (WARP-993)", () => {
       await screen.findByText("casa.droplet-us.com"),
     ).toBeInTheDocument();
     expect(
-      screen.queryAllByText(/home and away/i).length,
+      screen.queryAllByText(/office and away/i).length,
     ).toBeGreaterThan(0);
     expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
   });
