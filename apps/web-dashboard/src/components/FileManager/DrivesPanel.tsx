@@ -52,7 +52,9 @@ import {
 // never consulted displayName and rendered raw fs-UUID tails).
 import {
   driveDisplayName,
+  drivePoolName,
   isPoolBackedDevice,
+  poolBackingDrive,
   sanitizeFsLabel,
   takenVolumeNames,
   uniqueFsLabel,
@@ -265,6 +267,23 @@ export function DrivesPanel() {
     const re = new RegExp(`^/dev/${pool.device}(p\\d+)?$`);
     return drives.some((d) => re.test(d.device));
   };
+
+  // WARP-1339 — ONE pooled entry instead of pool card + anonymous GUID drive
+  // tile. The mounted md filesystem is merged INTO its pool's card (it is the
+  // pool's only fs-level capacity/browse source — ADR-019 real usable
+  // capacity, never a fabricated raw-member sum) and excluded from the drives
+  // grid below. The join key is the orchestrator's `pool` annotation (bare
+  // array name), with the anchored md-device matcher as the older-orchestrator
+  // fallback (drivePoolName). Only drives whose DEVICE is the md node are
+  // hidden — a dropped member disk lives in `disks` (state pool_member) and
+  // keeps its Available-drives card + Reclaim action untouched. When the pools
+  // payload lacks the matching pool (degraded /storage/pools fetch), the md
+  // drive stays in the grid: hiding it with no pool card to merge into would
+  // lose the volume entirely.
+  const standaloneDrives = drives.filter((d) => {
+    const md = drivePoolName(d);
+    return !md || !pools.some((p) => p.device === md);
+  });
 
   // Code review (WARP-1337): the collision snapshot for a seeded FS label —
   // every mounted volume's label/tail EXCEPT those on the target disk itself,
@@ -579,6 +598,10 @@ export function DrivesPanel() {
                 key={p.device}
                 pool={p}
                 isAdmin={isAdmin}
+                // WARP-1339: the mounted md filesystem backing this pool —
+                // its real used/size/free meter + browse link render on the
+                // pool card itself (one pooled entry).
+                backingDrive={poolBackingDrive(p.device, drives)}
                 // WARP-936: a pool whose md device backs no mounted filesystem
                 // was created but never formatted+mounted — give the owner the
                 // gated way forward. Failed pools get support copy, not a
@@ -603,7 +626,7 @@ export function DrivesPanel() {
         >
           Drives
         </h3>
-        {drives.length === 0 ? (
+        {standaloneDrives.length === 0 ? (
           <div className="card flex items-start gap-3">
             <span
               className="flex-none h-10 w-10 flex items-center justify-center"
@@ -636,7 +659,7 @@ export function DrivesPanel() {
             role="list"
             aria-label="Mounted drives"
           >
-            {drives.map((d) => (
+            {standaloneDrives.map((d) => (
               <DriveCard
                 key={d.uuid || d.mount || d.device}
                 drive={d}
@@ -1165,6 +1188,7 @@ function PoolAlarmBanner({
 function PoolCard({
   pool,
   isAdmin = false,
+  backingDrive,
   canFormat = false,
   formatting = false,
   onFormat,
@@ -1172,6 +1196,12 @@ function PoolCard({
 }: {
   pool: PoolInfo;
   isAdmin?: boolean;
+  /** WARP-1339: the mounted md filesystem backing this pool (the drives-list
+   *  entry whose device is the pool's md node / a partition of it). Supplies
+   *  the REAL fs-level used/size/free meter (ADR-019 usable capacity — never
+   *  a fabricated raw-member sum) and the browse deep-link. Absent for a
+   *  created-but-never-formatted pool. */
+  backingDrive?: DriveInfo;
   /** WARP-936: true when the pool's md device backs no mounted filesystem —
    *  created but never formatted+mounted. Admin-gated by the caller. */
   canFormat?: boolean;
@@ -1183,6 +1213,7 @@ function PoolCard({
   const { toast } = useToast();
   const badge = poolStatusBadge(pool.status);
   const memberCount = pool.members.length;
+  const usedPct = backingDrive ? usagePct(backingDrive) : 0;
 
   // Inline rename — mirrors DriveCard (WARP-827). Optimistic name shown until
   // the pools list refetches; rolled back on failure. Focus returns to the
@@ -1288,13 +1319,38 @@ function PoolCard({
             </div>
           ) : (
             <div className="flex items-center gap-2 flex-wrap">
-              <h4
-                className="truncate"
-                style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
-                title={name}
-              >
-                {name}
-              </h4>
+              {backingDrive ? (
+                // WARP-1339: the pool's contents are the mounted md
+                // filesystem's — deep-link into the existing file browser at
+                // its mount tail, exactly like a DriveCard title (reuse, no
+                // new endpoint).
+                <Link
+                  href={driveContentsHref(backingDrive)}
+                  className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
+                  style={{ borderRadius: "var(--radius-input)" }}
+                  aria-label={`Open ${name}`}
+                >
+                  <h4
+                    className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                    style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                    title={name}
+                  >
+                    {name}
+                  </h4>
+                  <FolderOpen
+                    className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                    style={{ color: "var(--text-muted)" }}
+                  />
+                </Link>
+              ) : (
+                <h4
+                  className="truncate"
+                  style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                  title={name}
+                >
+                  {name}
+                </h4>
+              )}
               <HwTag>{levelLabel(pool.level)}</HwTag>
               {isAdmin && (
                 <button
@@ -1317,6 +1373,28 @@ function PoolCard({
         </div>
         {!editing && <Badge kind={poolBadgeKind(pool.status)}>{badge.label}</Badge>}
       </div>
+
+      {/* WARP-1339: the pool's REAL usable capacity — the mounted md
+          filesystem's fs-level bytes (ADR-019), same meter idiom as a
+          DriveCard. No meter for a never-formatted pool: there is no
+          filesystem to measure, and a raw-member sum would be a fiction. */}
+      {backingDrive && (
+        <div className="mt-4">
+          <div
+            className="flex items-baseline justify-between tabular-nums mb-1.5"
+            style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}
+          >
+            <span>
+              <span style={{ color: "var(--text)" }}>
+                {fmtBytes(backingDrive.used_bytes)}
+              </span>{" "}
+              of {fmtBytes(backingDrive.size_bytes)}
+            </span>
+            <span>{fmtBytes(backingDrive.free_bytes)} free</span>
+          </div>
+          <Meter pct={usedPct} kind={meterKind(usedPct)} />
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-2 flex-wrap">
         <HwTag upper={false}>

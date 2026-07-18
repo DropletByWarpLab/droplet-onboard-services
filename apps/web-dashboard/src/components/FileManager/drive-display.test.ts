@@ -16,8 +16,10 @@
 import { describe, it, expect } from "vitest";
 import {
   driveDisplayName,
+  drivePoolName,
   isMachineTail,
   isPoolBackedDevice,
+  poolBackingDrive,
   sanitizeFsLabel,
   takenVolumeNames,
   uniqueFsLabel,
@@ -133,6 +135,63 @@ describe("isMachineTail", () => {
     // breaks the machine-id shape.
     expect(isMachineTail("drive-backup")).toBe(false);
     expect(isMachineTail("pool-media-two")).toBe(false);
+  });
+});
+
+// =====================================================================
+// WARP-1339 — the pool↔drive join. Pools and drives were two UNJOINED
+// lists at every layer, so a mounted pool rendered twice (PoolCard +
+// anonymous GUID drive tile). These helpers own the normalized join key:
+// the pools payload names arrays BARE ("md127") while drives carry
+// "/dev/md127".
+// =====================================================================
+describe("drivePoolName (WARP-1339)", () => {
+  it("prefers the orchestrator's explicit pool annotation", () => {
+    expect(drivePoolName({ device: "/dev/md127", pool: "md127" })).toBe("md127");
+    // The annotation is authoritative even when the device shape is exotic
+    // (e.g. a dm-mapped node the regex can't see through).
+    expect(drivePoolName({ device: "/dev/dm-0", pool: "md127" })).toBe("md127");
+  });
+
+  it("falls back to the anchored md-device matcher for an older orchestrator", () => {
+    expect(drivePoolName({ device: "/dev/md127" })).toBe("md127");
+    expect(drivePoolName({ device: "/dev/md127p1" })).toBe("md127");
+  });
+
+  it("returns null for standalone drives (explicit null and absent field alike)", () => {
+    expect(drivePoolName({ device: "/dev/sda1", pool: null })).toBeNull();
+    expect(drivePoolName({ device: "/dev/sda1" })).toBeNull();
+    expect(drivePoolName({ device: "/dev/nvme0n1p2" })).toBeNull();
+  });
+});
+
+describe("poolBackingDrive (WARP-1339)", () => {
+  const mdDrive = { device: "/dev/md127", pool: "md127", mount: "/mnt/droplet/pool" };
+  const mdPart = { device: "/dev/md127p1", pool: "md127", mount: "/mnt/droplet/pool-p1" };
+  const plain = { device: "/dev/sda1", pool: null, mount: "/mnt/droplet/data" };
+
+  it("joins the bare pool name against the /dev/-prefixed drive device", () => {
+    expect(poolBackingDrive("md127", [plain, mdDrive])).toBe(mdDrive);
+  });
+
+  it("prefers the md node itself over a partition of it", () => {
+    expect(poolBackingDrive("md127", [mdPart, mdDrive])).toBe(mdDrive);
+    // A partitioned-only pool still resolves to its partition's filesystem.
+    expect(poolBackingDrive("md127", [plain, mdPart])).toBe(mdPart);
+  });
+
+  it("returns undefined when the pool backs no mounted filesystem", () => {
+    expect(poolBackingDrive("md127", [plain])).toBeUndefined();
+    expect(poolBackingDrive("md127", [])).toBeUndefined();
+  });
+
+  it("never lets md12 grab md127's drives (anchored, not prefix, matching)", () => {
+    expect(poolBackingDrive("md12", [mdDrive, mdPart])).toBeUndefined();
+  });
+
+  it("joins via the regex fallback when the orchestrator predates the annotation", () => {
+    const legacy = { device: "/dev/md127", mount: "/mnt/droplet/pool" };
+    expect(poolBackingDrive("md127", [legacy])).toBe(legacy);
   });
 });
 
