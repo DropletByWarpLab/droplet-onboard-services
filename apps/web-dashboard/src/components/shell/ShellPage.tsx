@@ -19,8 +19,7 @@
 import type { ReactNode } from "react";
 import useSWR from "swr";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
-import { useDevice } from "@/lib/hooks/useDevice";
-import { boxDisplayHost } from "@/lib/box-identity";
+import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
 import { resolveHealthCopy } from "@/app/health-copy";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { Phead } from "./primitives";
@@ -33,15 +32,15 @@ import "./droplet-shell.css";
 import "@/components/home/home-bento.css";
 
 function ShellStatusChip() {
-  const { device } = useDevice();
   const { data } = useSWR<SystemHealth>("/api/orchestrator/health", fetchSystemHealth, {
     refreshInterval: 15_000,
   });
   const status = data?.status ?? "unknown";
   const copy = resolveHealthCopy(status);
-  // WARP-992: canonical display identity — masks a leaked container-id
-  // hostname (stale Device row) and covers the not-yet-loaded state.
-  const host = boxDisplayHost(device?.hostname);
+  // WARP-992 + WARP-1342: canonical display identity — masks a leaked
+  // container-id hostname and upgrades the droplet.local fallback to the
+  // issued per-device FQDN (the address that also works over the VPN).
+  const host = useBoxAddress();
   return (
     <span className={"pt-chip is-" + status}>
       <span className="dot" />

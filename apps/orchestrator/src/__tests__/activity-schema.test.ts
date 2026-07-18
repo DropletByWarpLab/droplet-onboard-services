@@ -42,6 +42,8 @@ describe("Prisma ActivityRow schema", () => {
     expect(ActivityKind.auth).toBe("auth");
     expect(ActivityKind.tool_run).toBe("tool_run");
     expect(ActivityKind.system).toBe("system");
+    // WARP-1058 — voice events (wake / DSP / calibration / restarts).
+    expect(ActivityKind.voice).toBe("voice");
   });
 
   it("exposes the canonical ActivitySeverity enum values", () => {

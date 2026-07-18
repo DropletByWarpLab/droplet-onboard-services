@@ -117,8 +117,8 @@ export default function RemoteAccessPage() {
       title="Remote Access"
       sub={
         offLanReachable
-          ? "Connect your phone or laptop to your home network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
-          : "Connect your phone or laptop to your Droplet over your home network. Add a device, scan the QR code in the WireGuard app, and you’re in. Away-from-home access arrives with the secure relay — coming soon."
+          ? "Connect your phone or laptop to your office network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
+          : "Connect your phone or laptop to your Droplet over your office network. Add a device, scan the QR code in the WireGuard app, and you’re in. Away-from-office access arrives with the secure relay — coming soon."
       }
       actions={addAction}
     >
@@ -229,16 +229,16 @@ function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
           {offLanReachable ? (
             <>
               Remote access is automatic. Your Droplet has its own secure web address — the same one
-              works at home and away, with a padlock and nothing to install. When you&rsquo;re out,
+              works in the office and away, with a padlock and nothing to install. When you&rsquo;re out,
               open the Droplet app and turn on <strong>Connect</strong>, then open that address in your
-              browser. No dynamic DNS, no subdomain or token, and no changes to your home router.
+              browser. No dynamic DNS, no subdomain or token, and no changes to your office router.
             </>
           ) : (
             <>
-              Your Droplet has its own secure web address — it works across your home network,
-              with a padlock and nothing to install. Away-from-home access arrives with the
+              Your Droplet has its own secure web address — it works across your office network,
+              with a padlock and nothing to install. Away-from-office access arrives with the
               secure relay — coming soon. No dynamic DNS, no subdomain or token, and no changes
-              to your home router.
+              to your office router.
             </>
           )}
         </p>
@@ -248,7 +248,7 @@ function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
         <div className="grid c2">
           <Stat label="Web address" value={address} />
           <Stat
-            label="Away from home"
+            label="Away from the office"
             value={
               offLanReachable
                 ? "Turn on Connect in the app"
@@ -518,32 +518,32 @@ function AddDeviceDialog({
                 in the browser —{" "}
                 {offLanReachable
                   ? "that’s your Droplet from anywhere."
-                  : "that’s your Droplet on your home network."}
+                  : "that’s your Droplet on your office network."}
               </li>
             </ol>
             <p className="type-caption-1 text-label-tertiary">
               {offLanReachable ? (
                 publicFqdn ? (
                   <>
-                    This is the same address you use at home — it works on your
-                    Wi-Fi <em>and</em> over the tunnel, with a secure padlock and
-                    nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
+                    This is the same address you use at the office — it works on
+                    your Wi-Fi <em>and</em> over the tunnel, with a secure padlock
+                    and nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
                     tunnel can&rsquo;t loop back, and you don&rsquo;t need it
                     there.)
                   </>
                 ) : (
                   <>
-                    Test it away from home (cellular works) — on this
+                    Test it away from the office (cellular works) — on this
                     Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
                     you don&rsquo;t need it there. Names like{" "}
-                    <span className="font-mono">droplet.local</span> only work at
-                    home, not over the tunnel.
+                    <span className="font-mono">droplet.local</span> only work on
+                    the office network, not over the tunnel.
                   </>
                 )
               ) : (
                 <>
-                  This works while you&rsquo;re on your home network.
-                  Away-from-home access arrives with the secure relay — coming
+                  This works while you&rsquo;re on your office network.
+                  Away-from-office access arrives with the secure relay — coming
                   soon; this device will be ready for it.
                 </>
               )}

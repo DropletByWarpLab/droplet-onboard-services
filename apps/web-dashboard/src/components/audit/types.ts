@@ -18,24 +18,26 @@ export const ACTIVITY_KINDS = [
   "auth",
   "tool_run",
   "system",
+  "voice",
 ] as const;
 
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
 
 export type ActivitySeverity = "ok" | "warn" | "err" | "info";
 
-/** Home-user labels for the wire enum. */
+/** Customer-facing labels for the wire enum. */
 export const KIND_LABELS: Record<ActivityKind, string> = {
   chat: "Chat",
   tool_call: "Tool call",
   file: "Files",
   camera: "Cameras",
   network: "Network",
-  smart_home: "Smart home",
+  smart_home: "Smart devices",
   email: "Email",
   auth: "Sign-in & accounts",
   tool_run: "Tool run",
   system: "System",
+  voice: "Voice",
 };
 
 /** WARP-181: who performed the action (null on pre-upgrade v1 rows). */

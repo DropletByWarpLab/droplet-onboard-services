@@ -280,10 +280,18 @@ export default function UpdatesSettingsPage() {
             className="card border border-system-red/40 bg-system-red/5"
             style={{ padding: 16, marginBottom: 16 }}
           >
-            <p className="type-subheadline text-system-red flex items-center gap-2">
+            <p
+              className="text-system-red flex items-center gap-2"
+              style={{ fontSize: 15, lineHeight: "20px" }}
+            >
               <AlertTriangle size={16} /> Update status unavailable
             </p>
-            <p className="type-footnote text-label-secondary mt-1">{loadError}</p>
+            <p
+              className="mt-1"
+              style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+            >
+              {loadError}
+            </p>
             <button onClick={load} className="btn ghost sm" style={{ marginTop: 10 }} type="button">
               <RefreshCw size={13} /> Retry
             </button>
@@ -291,7 +299,9 @@ export default function UpdatesSettingsPage() {
         )}
 
         {loading && !status && !loadError && (
-          <p className="type-footnote text-label-tertiary px-1">Loading update status…</p>
+          <p className="px-1" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            Loading update status…
+          </p>
         )}
 
         {status && !loadError && (
@@ -303,10 +313,16 @@ export default function UpdatesSettingsPage() {
                 className="card border border-system-red/40 bg-system-red/5"
                 style={{ padding: 16, marginBottom: 16 }}
               >
-                <p className="type-subheadline text-system-red flex items-center gap-2">
+                <p
+                  className="text-system-red flex items-center gap-2"
+                  style={{ fontSize: 15, lineHeight: "20px" }}
+                >
                   <AlertTriangle size={16} /> Appliance health is degraded
                 </p>
-                <p className="type-footnote text-label-secondary mt-1">
+                <p
+                  className="mt-1"
+                  style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                >
                   The last update failed and rolling back did not restore full health
                   {status.lastVerdict?.releaseTag
                     ? ` (release ${status.lastVerdict.releaseTag})`
@@ -322,7 +338,10 @@ export default function UpdatesSettingsPage() {
             <div className="card" style={{ padding: 16, marginBottom: 16 }}>
               {status.current ? (
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <span className="type-headline text-label-primary font-mono">
+                  <span
+                    className="font-mono"
+                    style={{ fontSize: 17, fontWeight: 600, color: "var(--text)" }}
+                  >
                     {shortSha(status.current.gitSha)}
                   </span>
                   {status.current.releaseTag && (
@@ -332,17 +351,18 @@ export default function UpdatesSettingsPage() {
                     href={`${COMMIT_URL_BASE}${status.current.gitSha}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="type-footnote text-accent inline-flex items-center gap-1"
+                    className="text-accent inline-flex items-center gap-1"
+                    style={{ fontSize: 13 }}
                   >
                     View commit on GitHub <ExternalLink size={12} />
                   </a>
-                  <span className="type-caption-1 text-label-tertiary w-full">
+                  <span className="w-full" style={{ fontSize: 12, color: "var(--text-muted)" }}>
                     Built {fmtDate(status.current.builtAt)} · applied{" "}
                     {fmtDate(status.current.updatedAt)} · {status.current.channel} channel
                   </span>
                 </div>
               ) : (
-                <p className="type-footnote text-label-secondary">
+                <p style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}>
                   No over-the-air update has been applied yet — this box is running the
                   software it shipped with.
                 </p>
@@ -360,10 +380,11 @@ export default function UpdatesSettingsPage() {
                 </button>
                 {checkResult && (
                   <span
-                    className={
-                      "type-footnote " +
-                      (checkResult.ok ? "text-label-secondary" : "text-system-red")
-                    }
+                    className={checkResult.ok ? undefined : "text-system-red"}
+                    style={{
+                      fontSize: 13,
+                      color: checkResult.ok ? "var(--text-muted)" : undefined,
+                    }}
                   >
                     {checkResult.text}
                   </span>
@@ -377,7 +398,10 @@ export default function UpdatesSettingsPage() {
                 <Sect title="Pending release" />
                 <div className="card" style={{ padding: 16, marginBottom: 16 }}>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                    <span className="type-headline text-label-primary font-mono">
+                    <span
+                      className="font-mono"
+                      style={{ fontSize: 17, fontWeight: 600, color: "var(--text)" }}
+                    >
                       {shortSha(status.pending.gitSha)}
                     </span>
                     {status.pending.releaseTag && (
@@ -390,7 +414,10 @@ export default function UpdatesSettingsPage() {
 
                   {status.pending.status === "pending" ? (
                     <>
-                      <p className="type-footnote text-label-secondary mt-2 flex items-center gap-1.5">
+                      <p
+                        className="mt-2 flex items-center gap-1.5"
+                        style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                      >
                         <Clock size={13} />
                         {status.settings.autoApply
                           ? windowLabel
@@ -399,12 +426,17 @@ export default function UpdatesSettingsPage() {
                           : "Automatic apply is off — this release waits until you apply it."}
                       </p>
                       {applyStarted && !inFlight && (
-                        <p className="type-footnote text-label-secondary mt-2">
+                        <p
+                          className="mt-2"
+                          style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                        >
                           Apply started. Services will restart; this page keeps refreshing.
                         </p>
                       )}
                       {applyError && (
-                        <p className="type-footnote text-system-red mt-2">{applyError}</p>
+                        <p className="text-system-red mt-2" style={{ fontSize: 13 }}>
+                          {applyError}
+                        </p>
                       )}
                       <div className="flex flex-wrap items-center gap-2 mt-3">
                         <button
@@ -443,7 +475,9 @@ export default function UpdatesSettingsPage() {
                           </>
                         )}
                         {!status.applyAvailable && (
-                          <span className="type-caption-1 text-label-tertiary">
+                          <span
+                            style={{ fontSize: 12, lineHeight: "16px", color: "var(--text-muted)" }}
+                          >
                             Applying isn&rsquo;t available on this box — the host update
                             helper isn&rsquo;t provisioned, so releases are tracked but
                             never installed from here.
@@ -451,14 +485,20 @@ export default function UpdatesSettingsPage() {
                         )}
                       </div>
                       {confirmSkip && (
-                        <p className="type-caption-1 text-label-tertiary mt-2">
+                        <p
+                          className="mt-2"
+                          style={{ fontSize: 12, lineHeight: "16px", color: "var(--text-muted)" }}
+                        >
                           A skipped release won&rsquo;t be offered again until a newer
                           one is published.
                         </p>
                       )}
                     </>
                   ) : (
-                    <p className="type-footnote text-label-secondary mt-2">
+                    <p
+                      className="mt-2"
+                      style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                    >
                       Update in progress — services may restart and this page may briefly
                       lose its connection. It refreshes automatically every few seconds.
                     </p>
@@ -475,7 +515,8 @@ export default function UpdatesSettingsPage() {
                   <div className="flex flex-col gap-1.5">
                     <label
                       htmlFor="apply-window-time"
-                      className="type-caption-1 text-label-secondary px-0.5"
+                      className="px-0.5"
+                      style={{ fontSize: 12, color: "var(--text-muted)" }}
                     >
                       Apply updates daily at
                     </label>
@@ -484,14 +525,21 @@ export default function UpdatesSettingsPage() {
                       type="time"
                       value={applyTime}
                       onChange={(e) => setApplyTime(e.target.value)}
-                      className="dp-input"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                   </div>
                 ) : (
                   <div className="flex flex-col gap-1.5">
                     <label
                       htmlFor="apply-window-cron"
-                      className="type-caption-1 text-label-secondary px-0.5"
+                      className="px-0.5"
+                      style={{ fontSize: 12, color: "var(--text-muted)" }}
                     >
                       Apply window (cron)
                     </label>
@@ -499,13 +547,29 @@ export default function UpdatesSettingsPage() {
                       id="apply-window-cron"
                       value={rawCron}
                       onChange={(e) => setRawCron(e.target.value)}
-                      className="dp-input font-mono"
+                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+                      style={{
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius-input)",
+                        color: "var(--text)",
+                      }}
                     />
                   </div>
                 )}
                 <div className="flex flex-col gap-1.5">
-                  <span className="type-caption-1 text-label-secondary px-0.5">Channel</span>
-                  <span className="dp-input flex items-center text-label-tertiary">
+                  <span className="px-0.5" style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    Channel
+                  </span>
+                  <span
+                    className="w-full px-3 py-2.5 flex items-center"
+                    style={{
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-input)",
+                      color: "var(--text-muted)",
+                    }}
+                  >
                     {status.settings.channel}
                   </span>
                 </div>
@@ -522,9 +586,15 @@ export default function UpdatesSettingsPage() {
                   onChange={(e) => setAutoApply(e.target.checked)}
                   className="mt-0.5 h-4 w-4 rounded-sm accent-accent"
                 />
-                <span className="type-footnote text-label-secondary leading-snug">
+                <span
+                  className="leading-snug"
+                  style={{ fontSize: 13, color: "var(--text-muted)" }}
+                >
                   Apply pending updates automatically during the window
-                  <span className="block text-label-tertiary type-caption-1 mt-0.5">
+                  <span
+                    className="block mt-0.5"
+                    style={{ fontSize: 12, lineHeight: "16px", color: "var(--text-muted)" }}
+                  >
                     Off = updates are only tracked; you apply each one yourself from this
                     page.
                   </span>
@@ -532,10 +602,15 @@ export default function UpdatesSettingsPage() {
               </label>
 
               {settingsError && (
-                <p className="type-footnote text-system-red mt-3">{settingsError}</p>
+                <p className="text-system-red mt-3" style={{ fontSize: 13 }}>
+                  {settingsError}
+                </p>
               )}
               {settingsSavedAt && !settingsError && (
-                <p className="type-footnote text-system-green mt-3 flex items-center gap-1">
+                <p
+                  className="text-system-green mt-3 flex items-center gap-1"
+                  style={{ fontSize: 13 }}
+                >
                   <Check size={14} /> Saved
                 </p>
               )}
@@ -549,7 +624,7 @@ export default function UpdatesSettingsPage() {
                 >
                   {savingSettings ? "Saving…" : "Save"}
                 </button>
-                <span className="type-caption-1 text-label-tertiary">
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
                   A changed window takes effect after the box&rsquo;s next restart.
                 </span>
               </div>
@@ -560,9 +635,9 @@ export default function UpdatesSettingsPage() {
             <div className="card" style={{ padding: 16 }}>
               {history && history.length > 0 ? (
                 <div className="overflow-x-auto">
-                  <table className="w-full type-caption-1">
+                  <table className="w-full" style={{ fontSize: 12, lineHeight: "16px" }}>
                     <thead>
-                      <tr className="text-label-tertiary text-left">
+                      <tr className="text-left" style={{ color: "var(--text-muted)" }}>
                         <th className="font-medium pb-2 pr-4">Release</th>
                         <th className="font-medium pb-2 pr-4">Commit</th>
                         <th className="font-medium pb-2 pr-4">Status</th>
@@ -572,8 +647,8 @@ export default function UpdatesSettingsPage() {
                     </thead>
                     <tbody>
                       {history.map((row) => (
-                        <tr key={row.id} className="border-t border-separator/60">
-                          <td className="py-2 pr-4 text-label-primary">
+                        <tr key={row.id} style={{ borderTop: "1px solid var(--card-bd)" }}>
+                          <td className="py-2 pr-4" style={{ color: "var(--text)" }}>
                             {row.releaseTag ?? "—"}
                           </td>
                           <td className="py-2 pr-4">
@@ -591,10 +666,13 @@ export default function UpdatesSettingsPage() {
                               {STATUS_BADGE[row.status].label}
                             </Badge>
                           </td>
-                          <td className="py-2 pr-4 text-label-tertiary font-mono">
+                          <td
+                            className="py-2 pr-4 font-mono"
+                            style={{ color: "var(--text-muted)" }}
+                          >
                             {row.failureReason ?? "—"}
                           </td>
-                          <td className="py-2 text-label-tertiary">
+                          <td className="py-2" style={{ color: "var(--text-muted)" }}>
                             {fmtDate(row.createdAt)}
                           </td>
                         </tr>
@@ -603,7 +681,7 @@ export default function UpdatesSettingsPage() {
                   </table>
                 </div>
               ) : (
-                <p className="type-footnote text-label-secondary">
+                <p style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}>
                   No releases have been tracked on this box yet. History fills in once
                   the update agent sees its first published release.
                 </p>

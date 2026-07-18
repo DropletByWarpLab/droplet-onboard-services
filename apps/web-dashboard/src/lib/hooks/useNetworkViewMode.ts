@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type NetworkViewMode = "simple" | "advanced";
 
-/** Persona default for the Network Simple/Advanced view: Business installs open
- *  on Advanced (full OpenWrt surface), Home installs on Simple. */
+/** Persona default for the Network Simple/Advanced view: Business installs
+ *  open on Advanced (full OpenWrt surface). WARP-1341: `isBusiness` is now
+ *  statically true, so Advanced is the effective default. */
 export function personaDefaultMode(isBusiness: boolean): NetworkViewMode {
   return isBusiness ? "advanced" : "simple";
 }
@@ -13,12 +14,8 @@ export function personaDefaultMode(isBusiness: boolean): NetworkViewMode {
 /**
  * Simple ⟷ Advanced view mode for the Network page (WARP-612).
  *
- * `isBusiness` from `useWorkspace()` can resolve *asynchronously* — the
- * workspace type lazy-inits from localStorage and is then hydrated from the
- * orchestrator after first paint — so a plain `useState(persona default)`
- * captures a stale "home" value and a Business install would wrongly stick on
- * Simple. This hook re-syncs the persona default whenever `isBusiness` resolves,
- * but never clobbers an explicit user choice: once the user picks a mode, that
+ * Re-syncs the persona default if `isBusiness` ever changes, but never
+ * clobbers an explicit user choice: once the user picks a mode, that
  * choice wins for the session.
  */
 export function useNetworkViewMode(isBusiness: boolean) {

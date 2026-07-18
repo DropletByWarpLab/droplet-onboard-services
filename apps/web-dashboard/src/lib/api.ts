@@ -79,6 +79,12 @@ import type {
   VoiceEchoCheckResult,
   VoiceRestartResult,
   VoiceCalibrationModeResult,
+  VoiceProfilesResult,
+  VoiceEnrollStartResult,
+  VoiceEnrollCaptureResult,
+  VoiceEnrollVerifyResult,
+  VoiceEnrollCommitResult,
+  VoiceActivityItem,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -1211,6 +1217,28 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Cert-lifecycle snapshot from the PUBLIC tls-status route (ADR-023 §3,
+ *  WARP-1302). Carries no secrets — state, the CT-public FQDN, and whether
+ *  HQ issuance is configured at all. */
+export interface TlsStatus {
+  state: string;
+  fqdn: string | null;
+  hqConfigured: boolean;
+}
+
+export async function fetchTlsStatus(): Promise<TlsStatus> {
+  // Public endpoint (no auth) — the same payload the gateway's plain-HTTP
+  // status page polls. WARP-1342: dashboard chrome reads `fqdn` to upgrade
+  // the identity chip off the droplet.local fallback.
+  const res = await fetch(`${BASE}/api/tls/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch TLS status: ${res.status}`);
   }
   return res.json();
 }
@@ -5355,6 +5383,124 @@ export async function exitVoiceCalibrationMode(): Promise<VoiceCalibrationModeRe
   });
   if (!res.ok) await throwVoiceError(res, "Failed to exit calibration mode");
   return res.json();
+}
+
+// --- WARP-1056: per-person voiceprints (Flow B enrollment) ---
+
+/** §3.3 listing — enrolled voiceprints + whether the box can enroll. */
+export async function fetchVoiceProfiles(): Promise<VoiceProfilesResult> {
+  const res = await authFetch(`${BASE}/api/voice/profiles`);
+  if (!res.ok) await throwVoiceError(res, "Failed to fetch voice profiles");
+  return res.json();
+}
+
+/** Open a Flow B session for an EXISTING person (the orchestrator 404s
+ *  `person_not_found` otherwise — enrollment never creates a person). */
+export async function startVoiceEnrollment(
+  userId: string,
+): Promise<VoiceEnrollStartResult> {
+  const res = await authFetch(`${BASE}/api/voice/enroll/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't start voice enrollment");
+  return res.json();
+}
+
+/**
+ * Capture one scripted line on the BOX mic (§5 step 2). Blocks
+ * server-side for the ~5 s recording window — the wizard shows the
+ * listening ring meanwhile. `replaceIndex` is the per-line "Redo".
+ */
+export async function captureVoiceEnrollmentLine(
+  sessionId: string,
+  replaceIndex?: number,
+): Promise<VoiceEnrollCaptureResult> {
+  const body: { sessionId: string; replaceIndex?: number } = { sessionId };
+  if (replaceIndex !== undefined) body.replaceIndex = replaceIndex;
+  const res = await authFetch(`${BASE}/api/voice/enroll/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Voice capture failed");
+  return res.json();
+}
+
+/** §5 step 3 — "One more time, no script." Captures + matches on-box. */
+export async function verifyVoiceEnrollment(
+  sessionId: string,
+): Promise<VoiceEnrollVerifyResult> {
+  const res = await authFetch(`${BASE}/api/voice/enroll/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Voice check failed");
+  return res.json();
+}
+
+/** The ONE write of Flow B ("Save [Name]'s voice"). */
+export async function commitVoiceEnrollment(
+  sessionId: string,
+): Promise<VoiceEnrollCommitResult> {
+  const res = await authFetch(`${BASE}/api/voice/enroll/commit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't save the voice profile");
+  return res.json();
+}
+
+/** Cancel path — "Cancel deletes these recordings now" (discards the
+ *  in-memory session on the box immediately; idempotent). */
+export async function cancelVoiceEnrollment(sessionId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/voice/enroll/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't discard the enrollment");
+}
+
+/** Remove a voiceprint — immediate and complete on the box (§10
+ *  destructive Write; callers gate it behind the red confirm). */
+export async function removeVoiceProfile(userId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/voice/profiles/${userId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't remove the voice profile");
+}
+
+// --- WARP-1058: recent voice activity (§3.4 feed) ---
+
+/**
+ * The /voice page's max-5 feed, from the generic signed activity
+ * surface filtered to kind=voice (the same rows the audit log's
+ * "See all in Activity" deep-link shows). `person` is lifted from the
+ * row's refs — present on wake rows ("Guest" until enrollment lands),
+ * absent on §6.3 self-heal rows.
+ */
+export async function fetchVoiceActivity(limit = 5): Promise<VoiceActivityItem[]> {
+  const res = await authFetch(`${BASE}/api/activity?kind=voice&limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to fetch voice activity");
+  const json = (await res.json()) as {
+    items: Array<{
+      id: string;
+      at: string;
+      what: string;
+      severity: VoiceActivityItem["severity"];
+      refs: Record<string, unknown> | null;
+    }>;
+  };
+  return json.items.map((item) => ({
+    id: item.id,
+    atS: Math.floor(new Date(item.at).getTime() / 1000),
+    what: item.what,
+    severity: item.severity,
+    person:
+      typeof item.refs?.person === "string" ? (item.refs.person as string) : null,
+  }));
 }
 
 // --- WARP-979: Secured / name-your-box ---

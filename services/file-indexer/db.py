@@ -83,6 +83,7 @@ def upsert_chunk(
     page_number: Optional[int] = None,
     warnings: Optional[list[str]] = None,
     metadata: Optional[dict] = None,
+    sensitivity: str = "standard",
 ) -> None:
     """Insert or update a single chunk + embedding.
 
@@ -102,6 +103,12 @@ def upsert_chunk(
     per-chunk metadata: today the `chain[]` recursion breadcrumb (email +
     archive) and `subtitle_source` (video). Future extractors extend the
     dict without needing a schema change.
+
+    WARP-242 adds `sensitivity`: brain writers pass "sensitive" together
+    with a dcv1-encrypted `text` (the column is the POLICY marker; the
+    dcv1: prefix is the FORMAT marker). The generated text_tsv column
+    auto-NULLs for sensitive rows, keeping ciphertext out of the lexical
+    index. Default "standard" keeps the Nextcloud watcher path untouched.
     """
     metadata_value = json.dumps(metadata) if metadata is not None else None
     # IDX-01: hold _db_lock for the cursor's lifetime so concurrent threads
@@ -112,9 +119,9 @@ def upsert_chunk(
             INSERT INTO "FileContentChunk"
                 ("userId", "ncFileId", "path", "chunkIdx", "text", "embedding",
                  "indexedAt", "source", "brainItemId", "pageNumber", "warnings",
-                 "metadata")
+                 "metadata", "sensitivity")
             VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(), %s::"FileContentSource",
-                    %s, %s, %s, %s::jsonb)
+                    %s, %s, %s, %s::jsonb, %s::"ChunkSensitivity")
             ON CONFLICT ("ncFileId", "chunkIdx")
             DO UPDATE SET
                 "path"        = EXCLUDED."path",
@@ -125,7 +132,8 @@ def upsert_chunk(
                 "brainItemId" = EXCLUDED."brainItemId",
                 "pageNumber"  = EXCLUDED."pageNumber",
                 "warnings"    = EXCLUDED."warnings",
-                "metadata"    = EXCLUDED."metadata"
+                "metadata"    = EXCLUDED."metadata",
+                "sensitivity" = EXCLUDED."sensitivity"
             """,
             (
                 user_id,
@@ -139,6 +147,7 @@ def upsert_chunk(
                 page_number,
                 warnings or [],
                 metadata_value,
+                sensitivity,
             ),
         )
 

@@ -121,8 +121,12 @@ export function BusinessProfileCard() {
       <div className="flex items-start gap-2.5">
         <Building2 size={18} className="text-label-secondary mt-0.5" aria-hidden />
         <div>
-          <p className="type-headline text-label-primary">Business profile</p>
-          <p className="type-footnote text-label-secondary">{SUB_LINE}</p>
+          <p className="type-headline" style={{ color: "var(--text)" }}>
+            Business profile
+          </p>
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
+            {SUB_LINE}
+          </p>
         </div>
       </div>
 
@@ -160,7 +164,9 @@ export function BusinessProfileCard() {
               </span>
             </div>
           ))}
-          <p className="type-footnote text-label-secondary">{IN_FLIGHT_LINE}</p>
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
+            {IN_FLIGHT_LINE}
+          </p>
           <button
             type="button"
             onClick={() => void openInterview(false)}
@@ -200,7 +206,9 @@ export function BusinessProfileCard() {
             </div>
           ))}
           {filled && meta && (
-            <p className="type-footnote text-label-tertiary">{meta}</p>
+            <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
+              {meta}
+            </p>
           )}
           {filled && (
             <button
@@ -228,7 +236,7 @@ export function BusinessProfileCard() {
           </span>
           <a
             href="/chat"
-            className="type-footnote text-label-secondary hover:text-label-primary"
+            className="type-footnote text-[var(--text-muted)] hover:text-[var(--text)]"
           >
             Manage remembered facts →
           </a>

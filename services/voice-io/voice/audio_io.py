@@ -221,6 +221,12 @@ def _resolve_duplex_samplerate(
     NEVER pass on such hardware, forcing the user into "Skip this
     check" forever. Falls back to the output device's default rate
     (48 kHz when even that can't be queried).
+
+    The fallback is re-validated on the INPUT side too (WARP-1060, R3
+    from the WARP-1055 review): full-duplex playrec needs ONE rate both
+    ends accept, so a 16 kHz-only input + 48 kHz-only output pair has no
+    usable rate — raise AudioUnavailable with the honest explanation
+    instead of letting playrec fail with a bare PortAudioError.
     """
     try:
         _sd.check_output_settings(
@@ -242,6 +248,17 @@ def _resolve_duplex_samplerate(
             "echo check: device pair rejects %d Hz (%s); using %d Hz",
             samplerate, exc, target,
         )
+        try:
+            _sd.check_input_settings(
+                device=input_device, samplerate=target, channels=1,
+                dtype="float32",
+            )
+        except Exception as input_exc:
+            raise AudioUnavailable(
+                f"echo check: input device rejects the fallback rate "
+                f"{target} Hz too ({input_exc}) — the mic/speaker pair "
+                f"shares no supported sample rate for a full-duplex check",
+            ) from input_exc
         return target
 
 

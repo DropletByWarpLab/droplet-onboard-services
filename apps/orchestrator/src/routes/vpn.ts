@@ -308,7 +308,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         if (!homeHost) {
           return res.status(503).json({
             error:
-              "The box couldn't determine its home-facing LAN IP for a direct (home) connection. It's assigned by your router (DHCP), so it can't be guessed — retry once the box is fully online, or set WIREGUARD_HOME_ENDPOINT_HOST in .env to pin it.",
+              "The box couldn't determine its LAN-facing IP for a direct (on-site) connection. It's assigned by your router (DHCP), so it can't be guessed — retry once the box is fully online, or set WIREGUARD_HOME_ENDPOINT_HOST in .env to pin it.",
           });
         }
         confEndpointHost = homeHost;

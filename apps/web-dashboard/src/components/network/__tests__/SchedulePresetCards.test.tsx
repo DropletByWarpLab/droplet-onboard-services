@@ -13,7 +13,7 @@ describe("SchedulePresetCards", () => {
     );
     expect(screen.getByText("Bedtime")).toBeInTheDocument();
     expect(screen.getByText("School hours")).toBeInTheDocument();
-    expect(screen.getByText("Homework mode")).toBeInTheDocument();
+    expect(screen.getByText("Focus mode")).toBeInTheDocument();
   });
 
   it("clicking Use preset on Bedtime calls onUseRecurring with the Bedtime preset", () => {

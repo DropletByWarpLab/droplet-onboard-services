@@ -130,11 +130,11 @@ describe("setup wizard — persisted resume pointer is monotonic (PR #518)", () 
     render(<SetupPage />);
 
     // Jump back to an earlier reached step via the rail. Onboarding-Flow
-    // redesign — the old "Internet" rail row is now "Home Wi-Fi" (`wifi`,
+    // redesign — the old "Internet" rail row is now "Wi-Fi" (`wifi`,
     // idx 5). A backward jump must not persist anything; in particular it must
     // not write the `internet` SetupStep that `wifi`/`address` map to (which
     // would lower the stored pointer below the resumed `vpn`).
-    const railJump = screen.getByRole("button", { name: "Go to Home Wi-Fi" });
+    const railJump = screen.getByRole("button", { name: "Go to Wi-Fi" });
     railJump.click();
 
     expect(patchSetupStepMock).not.toHaveBeenCalledWith("internet");

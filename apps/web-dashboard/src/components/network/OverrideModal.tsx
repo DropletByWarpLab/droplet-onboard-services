@@ -575,7 +575,7 @@ export function OverrideModal({
               type="text"
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="e.g. Homework help"
+              placeholder="e.g. Guest access"
               className="dp-input"
             />
           </div>
