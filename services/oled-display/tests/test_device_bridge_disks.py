@@ -84,6 +84,29 @@ _LSBLK_LIVE_BOX = {
     ]
 }
 
+# WARP-1336 — the HEALTHY live box shape: same sda+sdb raid1 members, but the
+# md127 array carries a MOUNTED ext4 filesystem (the pool works). The only
+# mounted descendant of each member is the array itself, so the members must
+# classify pool_member (Reclaim stays reachable) — never in_use.
+_POOL_MNT = "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08"
+_LSBLK_MOUNTED_POOL = {
+    "blockdevices": [
+        _disk("nvme0n1", 512_000_000_000, tran="nvme", model="Samsung 980",
+              children=[
+                  _part("nvme0n1p1", fstype="vfat", mountpoint="/boot/efi"),
+                  _part("nvme0n1p2", fstype="ext4", mountpoint="/"),
+              ]),
+        _disk("sda", TB, fstype="linux_raid_member", model="WDC WD20EARZ",
+              serial="WD-A",
+              children=[_part("md127", type_="raid1", fstype="ext4",
+                              mountpoint=_POOL_MNT)]),
+        _disk("sdb", TB, fstype="linux_raid_member", model="WDC WD20EARZ",
+              serial="WD-B",
+              children=[_part("md127", type_="raid1", fstype="ext4",
+                              mountpoint=_POOL_MNT)]),
+    ]
+}
+
 
 # ---------------------------------------------------------------------------
 # classify_disks — the pure classification layer
@@ -136,17 +159,79 @@ def test_mounted_disk_or_child_is_in_use(monkeypatch):
     assert [d["state"] for d in disks] == ["in_use", "in_use"]
 
 
-def test_in_use_wins_over_pool_member(monkeypatch):
-    # A raid member whose md is mounted is IN USE — never offered for adopt.
+def test_member_of_mounted_array_is_pool_member_with_md(monkeypatch):
+    # WARP-1336 — rewrite of the old test_in_use_wins_over_pool_member, which
+    # codified the bug: on a healthy box the pool filesystem IS mounted, and
+    # "mounted anywhere below the disk" made every member classify in_use
+    # with no `md`, so the dashboard's Reclaim affordance (gated on
+    # state==="pool_member" && md) was unreachable exactly when the pool
+    # worked. A mount on the md array a disk backs means the ARRAY is in use,
+    # not the disk: the member stays pool_member and names its array.
+    bridge = _load_bridge(monkeypatch)
+    disks = bridge.classify_disks(_LSBLK_MOUNTED_POOL, "nvme0n1")
+    by_name = {d["name"]: d for d in disks}
+    assert set(by_name) == {"sda", "sdb"}
+    for d in by_name.values():
+        assert d["state"] == "pool_member"
+        assert d["md"] == "md127"
+        assert d["md_mounted"] is True
+
+
+def test_mounted_array_member_stays_non_adoptable(monkeypatch):
+    # WARP-1336 guard — adopt eligibility must NOT widen. The dashboard offers
+    # plain "Erase & adopt" only for foreign/available; a pool member (mounted
+    # array or not) is routed to Reclaim, never adopt (wipefs on an md-held
+    # member fails EBUSY anyway).
+    bridge = _load_bridge(monkeypatch)
+    for tree in (_LSBLK_MOUNTED_POOL, _LSBLK_LIVE_BOX):
+        for d in bridge.classify_disks(tree, "nvme0n1"):
+            assert d["state"] not in ("foreign", "available")
+            assert d["state"] == "pool_member"
+
+
+def test_direct_or_plain_partition_mount_still_wins_as_in_use(monkeypatch):
+    # WARP-1336 — the carve-out covers ONLY mounts on the md array itself. A
+    # raid member whose OTHER (non-md) partition carries a mounted filesystem
+    # is genuinely in use; the md annotation still rides along so the
+    # member→array linkage survives the state.
     bridge = _load_bridge(monkeypatch)
     tree = {"blockdevices": [
-        _disk("sda", TB, fstype="linux_raid_member", children=[
-            _part("md0", type_="raid1", fstype="ext4",
-                  mountpoint="/mnt/droplet/pool"),
+        _disk("sda", TB, children=[
+            _part("sda1", fstype="linux_raid_member", children=[
+                _part("md0", type_="raid1", fstype="ext4",
+                      mountpoint="/mnt/droplet/pool"),
+            ]),
+            _part("sda2", fstype="ext4", mountpoint="/mnt/scratch"),
         ]),
     ]}
     disks = bridge.classify_disks(tree, "nvme0n1")
     assert disks[0]["state"] == "in_use"
+    assert disks[0]["md"] == "md0"
+    assert disks[0]["md_mounted"] is True
+
+
+def test_mounted_md_without_member_signature_stays_in_use(monkeypatch):
+    # Degenerate shape: an md descendant is mounted but the disk carries no
+    # linux_raid_member signature anywhere. Fail closed — in_use, never
+    # adoptable (and not pool_member: without the signature there is nothing
+    # drive_reclaim could --zero-superblock).
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdx", TB, children=[
+            _part("md9", type_="raid1", fstype="ext4",
+                  mountpoint="/mnt/droplet/odd"),
+        ]),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert disks[0]["state"] == "in_use"
+
+
+def test_unmounted_array_member_reports_md_mounted_false(monkeypatch):
+    # WARP-1336 — md_mounted lets the UI phrase reclaim copy honestly (a
+    # mounted array is live data; an unmounted one is leftover metadata).
+    bridge = _load_bridge(monkeypatch)
+    disks = bridge.classify_disks(_LSBLK_LIVE_BOX, "nvme0n1")
+    assert disks and all(d["md_mounted"] is False for d in disks)
 
 
 def test_tiny_devices_are_dropped(monkeypatch):
