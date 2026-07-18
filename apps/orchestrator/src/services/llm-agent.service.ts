@@ -489,12 +489,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           emit({ type: "reasoning_step", text: step });
         }
       }
-      // WARP-1331 — finalisation guard: never surface a blank answer, a
-      // bare tool-args JSON object, or harmony citation cruft to the
-      // customer. stop_reason stays "model_done" (WARP-1012 pattern: only
-      // the visible content changes, the trace keeps the real signal).
+      // WARP-1331 — finalisation guard: strip citation cruft; demote a
+      // bare tool-args JSON "answer" to empty. Empty completions get NO
+      // content_delta — WARP-854's error path (done error frame / FAILED
+      // turn) is the owner of that case.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
-      emit({ type: "content_delta", text: visible });
+      if (visible) emit({ type: "content_delta", text: visible });
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
@@ -792,13 +792,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   };
 }
 
-// WARP-1331 — the model_done finalisation guard's honest fallback. Blank
-// answers and bare tool-args JSON were reaching customers verbatim
-// (staging-suite runs 1–3: `{"path":"/Admin"}` as a final answer, empty
-// bubbles on R02/R10/R19).
-const EMPTY_ANSWER_FALLBACK =
-  "I wasn't able to put together an answer that time — please try asking again.";
-
+// WARP-1331 — model_done finalisation guard. Strips harmony citation
+// cruft and demotes bare tool-args JSON to an EMPTY completion. It never
+// invents prose: WARP-854 owns the empty-completion contract (done error
+// frame on stream, FAILED persisted turn) and an earlier fallback here
+// masked that signal — CI's WARP-854 tests are the pin.
 function sanitizeFinalContent(raw: string | null): string {
   // gpt-oss leaks harmony-style citation tokens (`【3†source=…】`) into
   // otherwise-correct answers — strip the tokens, keep the prose.
@@ -806,14 +804,15 @@ function sanitizeFinalContent(raw: string | null): string {
     .replace(/【[^】]*】/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
-  if (!stripped) return EMPTY_ANSWER_FALLBACK;
+  if (!stripped) return "";
   // A final answer that IS a bare JSON object/array is tool-call arguments
-  // the loop failed to route — never emit it as prose. Fenced or inline
-  // JSON inside a sentence doesn't parse here and passes through untouched.
+  // the loop failed to route — a failed turn, not prose. Empty routes it
+  // into the WARP-854 error path. Fenced or inline JSON inside a sentence
+  // doesn't parse here and passes through untouched.
   if (/^[[{]/.test(stripped)) {
     try {
       JSON.parse(stripped);
-      return EMPTY_ANSWER_FALLBACK;
+      return "";
     } catch {
       // Not valid JSON after all — treat as prose.
     }

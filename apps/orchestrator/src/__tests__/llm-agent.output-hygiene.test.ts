@@ -78,25 +78,25 @@ const REQ = {
 };
 
 describe("runAgent — finalize guard (WARP-1331)", () => {
-  it("replaces a blank final answer with honest fallback copy", async () => {
+  it("leaves an empty completion empty — WARP-854 owns that error path", async () => {
     const chat = vi.fn().mockResolvedValue(finalContent(""));
     const { deps, events } = makeDeps(chat);
     const result = await runAgent(deps, REQ);
     expect(result.stop_reason).toBe("model_done");
-    expect(asText(result.message.content).trim()).toBeTruthy();
-    // The customer-visible stream must carry the fallback too, not silence.
-    const delta = events.find((e) => e.type === "content_delta");
-    expect(delta).toBeDefined();
+    expect(asText(result.message.content).trim()).toBe("");
+    // No content_delta for an empty completion — the route layer rewrites
+    // it to a done error frame / FAILED turn (WARP-854 contract).
+    expect(events.find((e) => e.type === "content_delta")).toBeUndefined();
   });
 
-  it("never emits a bare tool-call JSON object as the final answer", async () => {
+  it("demotes a bare tool-call JSON final to empty (WARP-854 failed turn)", async () => {
     const chat = vi
       .fn()
       .mockResolvedValue(finalContent('{"path":"/Admin/IDs"}'));
     const { deps } = makeDeps(chat);
     const result = await runAgent(deps, REQ);
     expect(asText(result.message.content)).not.toContain('"path"');
-    expect(asText(result.message.content).trim()).toBeTruthy();
+    expect(asText(result.message.content).trim()).toBe("");
   });
 
   it("strips citation cruft but keeps the real answer", async () => {
