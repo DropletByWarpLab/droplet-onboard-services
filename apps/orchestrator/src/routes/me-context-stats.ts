@@ -63,6 +63,19 @@ function getUserId(req: Request): string | null {
   return user?.id ?? null;
 }
 
+/**
+ * WARP-1394 — Nextcloud-synced rows (`FileIndexStatus`, watcher-written
+ * `FileContentChunk`) are keyed by the NEXTCLOUD username, which the
+ * provisioning flow keeps equal to the local username (WARP-861 per-user
+ * token). The UUID never appears in those tables, so the aggregates take
+ * both keys. Falls back to the id for dev-shape callers that only stamp
+ * an id.
+ */
+function getNcUsername(req: Request): string | null {
+  const user = (req as Request & { user?: AuthedUser }).user;
+  return user?.username ?? user?.id ?? null;
+}
+
 function isCapHit(
   state: { windowStartedAt: Date | null; attemptCount: number },
   now: Date = new Date(),
@@ -98,7 +111,8 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const data = await getSummary(prisma, userId);
+      const ncUsername = getNcUsername(req) ?? userId;
+      const data = await getSummary(prisma, userId, ncUsername);
       res.setHeader("Cache-Control", "private, max-age=30");
       res.json(data);
     } catch (e) {
@@ -114,7 +128,8 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const data = await getFull(prisma, userId);
+      const ncUsername = getNcUsername(req) ?? userId;
+      const data = await getFull(prisma, userId, ncUsername);
       res.setHeader("Cache-Control", "private, max-age=60");
       res.json(data);
     } catch (e) {
@@ -130,7 +145,8 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const data = await getQueued(prisma, userId);
+      const ncUsername = getNcUsername(req) ?? userId;
+      const data = await getQueued(prisma, userId, ncUsername);
       res.setHeader("Cache-Control", "private, max-age=300");
       res.json({ items: data });
     } catch (e) {
@@ -146,7 +162,8 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const data = await getFailed(prisma, userId);
+      const ncUsername = getNcUsername(req) ?? userId;
+      const data = await getFailed(prisma, userId, ncUsername);
       res.setHeader("Cache-Control", "private, max-age=300");
       res.json({ items: data });
     } catch (e) {

@@ -142,6 +142,10 @@ export function FailedList({ items, onChange }: Props) {
                   </p>
                 )}
               </div>
+              {/* WARP-1394: the retry route flips BrainMemoryItem rows
+                  back to queued_for_transcription; synced failures are
+                  watcher-owned, so nextcloud rows carry no action. */}
+              {it.source !== "nextcloud" && (
               <button
                 type="button"
                 onClick={() => retry(it.id)}
@@ -156,6 +160,7 @@ export function FailedList({ items, onChange }: Props) {
                 )}
                 Retry
               </button>
+              )}
             </li>
           );
         })}
