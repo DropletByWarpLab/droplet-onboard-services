@@ -1221,6 +1221,7 @@ services:
       # bare MATTER_* name is one stray env_file away from matter.js's
       # auto-import minefield. single-box.sh sets SSID + an operator PSK.
       - DROPLET_MATTER_WIFI_SSID=${DROPLET_MATTER_WIFI_SSID:-}
+      - DROPLET_MATTER_WIFI_SSID_FILE=${DROPLET_MATTER_WIFI_SSID_FILE:-}
       - DROPLET_MATTER_WIFI_PSK=${DROPLET_MATTER_WIFI_PSK:-}
       - DROPLET_MATTER_WIFI_PSK_FILE=${DROPLET_MATTER_WIFI_PSK_FILE:-}
       - DROPLET_MATTER_REGULATORY_COUNTRY=${DROPLET_MATTER_REGULATORY_COUNTRY:-XX}
