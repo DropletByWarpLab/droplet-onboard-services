@@ -119,11 +119,16 @@ describe("Remote Access — home-mode mint (WARP-1391)", () => {
     await screen.findByText("casa.droplet-us.com");
 
     // The Add-device affordance is gated off — a home mint would 503.
-    expect(screen.getByRole("button", { name: /add device/i })).toBeDisabled();
-    // Honest guidance that the box is still discovering its home address.
+    const addBtn = screen.getByRole("button", { name: /add device/i });
+    expect(addBtn).toBeDisabled();
+    // Honest guidance that leads with the temporal gate (no "add one now" read
+    // next to a disabled button).
     expect(
-      screen.getByText(/still setting up its (home )?(web )?address/i),
+      screen.getByText(/once your home address is ready you.ll be able to add a device/i),
     ).toBeInTheDocument();
+    // a11y: the disabled button points screen-reader users at the WHY card.
+    expect(addBtn).toHaveAttribute("aria-describedby", "ra-home-guidance");
+    expect(document.getElementById("ra-home-guidance")).toBeInTheDocument();
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 

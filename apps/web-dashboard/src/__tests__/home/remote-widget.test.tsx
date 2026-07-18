@@ -38,6 +38,9 @@ const READY: VpnStatusInfo = {
   endpointConfigured: true,
   endpointHost: "warp-lab.droplet-us.com",
   publicFqdn: "warp-lab.droplet-us.com",
+  // WARP-1391: the one-tap mint is HOME mode, so the switch is only live once
+  // the box has discovered its home-facing LAN IP.
+  homeEndpointHost: "192.168.1.87",
   listenPort: 51820,
   peerCount: 0,
 };
@@ -110,7 +113,10 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     fireEvent.click(sw);
     await waitFor(() =>
-      expect(mockCreateVpnPeer).toHaveBeenCalledWith("This device"),
+      // WARP-1391: the one-tap mint sends HOME mode explicitly (Endpoint = box
+      // LAN IP), not the away-mode default that bakes a dead public-NXDOMAIN
+      // Endpoint.
+      expect(mockCreateVpnPeer).toHaveBeenCalledWith("This device", "home"),
     );
 
     // The one-shot dialog: heading + private-key warning; switch reports on.
@@ -206,5 +212,62 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     fireEvent.click(sw);
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(sw).toHaveAttribute("aria-checked", "false");
+  });
+});
+
+describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
+  it("mints HOME mode on the wire when the box has a discovered home endpoint", async () => {
+    mockFetchVpnStatus.mockResolvedValue(READY);
+    mockCreateVpnPeer.mockResolvedValue(CREATED);
+    mockFetchVpnPeers.mockResolvedValue({ peers: [MY_PEER] });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
+    await waitFor(() =>
+      expect(screen.getByText(/off · tap to connect this device/i)).toBeInTheDocument(),
+    );
+    fireEvent.click(sw);
+
+    // The component seam carries mode:"home"; the on-the-wire serialization of
+    // that arg into the POST body is proven in lib/api.vpn-create-peer.test.ts
+    // (real authFetch transport, per the WARP-1288 no-seam-mocked-dead-code
+    // lesson).
+    await waitFor(() =>
+      expect(mockCreateVpnPeer).toHaveBeenCalledWith("This device", "home"),
+    );
+  });
+
+  it("is inert and does NOT mint when homeEndpointHost is absent", async () => {
+    // Endpoint IS configured, but the box hasn't discovered its home LAN IP yet
+    // (field omitted) → a home mint would 503, so the switch must not fire one.
+    mockFetchVpnStatus.mockResolvedValue({ ...READY, homeEndpointHost: undefined });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
+    await waitFor(() =>
+      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+    );
+    expect(sw).toHaveAttribute("aria-disabled", "true");
+    // aria-describedby already points at the sub text, so SR users hear WHY.
+    expect(sw).toHaveAttribute("aria-describedby", "w-remote-sub");
+
+    fireEvent.click(sw);
+    expect(mockCreateVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("treats an explicit null homeEndpointHost as 'not reachable at home yet'", async () => {
+    mockFetchVpnStatus.mockResolvedValue({ ...READY, homeEndpointHost: null });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
+    await waitFor(() =>
+      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+    );
+    expect(sw).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(sw);
+    expect(mockCreateVpnPeer).not.toHaveBeenCalled();
   });
 });

@@ -101,6 +101,14 @@ export default function RemoteAccessPage() {
   // Missing field ⇒ treat as "not reachable at home yet" (never over-promise —
   // the WARP-993 offLanReachable convention). Only surfaced once status loads.
   const homeMintBlocked = Boolean(status) && !status?.homeEndpointHost;
+  // a11y: when "Add device" is disabled, point screen-reader users at the card
+  // that explains WHY (aria-describedby). endpointMissing takes precedence — its
+  // card renders instead of the home-address one (they never stack).
+  const disabledReasonId = endpointMissing
+    ? "ra-endpoint-guidance"
+    : homeMintBlocked
+      ? "ra-home-guidance"
+      : undefined;
   // WARP-993: only promise "from anywhere" when the endpoint is actually
   // routable from outside the home LAN. FQDN-only (split-horizon, no public
   // A record — ADR-023 §3) reports false until the ADR-025 relay lands.
@@ -112,6 +120,7 @@ export default function RemoteAccessPage() {
       className="btn primary"
       onClick={() => setShowAdd(true)}
       disabled={endpointMissing === true || homeMintBlocked}
+      aria-describedby={disabledReasonId}
       type="button"
     >
       <Plus size={15} />
@@ -144,7 +153,7 @@ export default function RemoteAccessPage() {
       )}
 
       {endpointMissing && (
-        <div className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
+        <div id="ra-endpoint-guidance" className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
@@ -166,16 +175,16 @@ export default function RemoteAccessPage() {
           no over-promise. Only shown when the endpoint itself IS ready, so this
           never stacks with the "Web address not ready yet" card above. */}
       {homeMintBlocked && !endpointMissing && (
-        <div className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
+        <div id="ra-home-guidance" className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
               <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Home address not ready yet</p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-                Your box is still setting up its home address on your network.
-                Adding a device works on your office Wi-Fi — the button lights up
-                automatically once that address is ready, with nothing to enter.
-                If this doesn’t clear on its own, restart the box.
+                Once your home address is ready you’ll be able to add a device —
+                it works on your office Wi-Fi, and the button turns on
+                automatically, with nothing to enter. If this doesn’t clear on
+                its own, restart the box.
               </p>
             </div>
           </div>
