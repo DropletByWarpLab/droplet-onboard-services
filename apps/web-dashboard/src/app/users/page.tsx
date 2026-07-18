@@ -17,7 +17,9 @@ import {
   Building2,
   ChevronRight,
   Loader2,
+  Mic,
 } from "lucide-react";
+import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
 import {
@@ -883,6 +885,22 @@ export default function UsersPage() {
                 clearing the ≥ 32 px floor in the ui-ux brief.
               */}
               <div className="flex items-center gap-0.5">
+                {/* WARP-1056 — §5 Flow B entry point: deep-links to the
+                    Voice page with this person preselected (the wizard
+                    itself lives on /voice; enrollment attaches a
+                    voiceprint to this EXISTING person). Local-directory
+                    rows only — a voiceprint is keyed by the local user
+                    id. */}
+                {u.userId && (
+                  <Link
+                    href={`/voice?enroll=${encodeURIComponent(u.userId)}`}
+                    aria-label={`Add voice for ${label}`}
+                    className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                    title="Add voice"
+                  >
+                    <Mic size={14} />
+                  </Link>
+                )}
                 <button
                   onClick={() => openEdit(u)}
                   aria-label={`Edit user ${label}`}

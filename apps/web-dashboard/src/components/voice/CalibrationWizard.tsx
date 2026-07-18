@@ -102,6 +102,7 @@ export function CalibrationWizard({
   open,
   status,
   nowS,
+  enrollHook = false,
   onClose,
 }: {
   open: boolean;
@@ -109,8 +110,12 @@ export function CalibrationWizard({
   status: VoiceStatusInfo | null;
   /** Epoch seconds "now" — injectable for deterministic tests. */
   nowS?: number;
+  /** WARP-1056 §4-result forward hook: when true (no voice enrolled yet
+   *  and enrollment is possible), the result screen offers "Add my
+   *  voice" — closing with `addVoice: true` hands off to Flow B. */
+  enrollHook?: boolean;
   /** applied=true only after the result screen (the write happened). */
-  onClose: (result: { applied: boolean }) => void;
+  onClose: (result: { applied: boolean; addVoice?: boolean }) => void;
 }) {
   const [step, setStep] = useState<Step>(1);
   const [phase, setPhase] = useState<Phase>("measuring");
@@ -129,6 +134,8 @@ export function CalibrationWizard({
   const [flags, setFlags] = useState<string[]>([]);
   const [applying, setApplying] = useState(false);
   const [applyFailed, setApplyFailed] = useState(false);
+  // §4-result enrollment hook — "Maybe later" hides the card for this run.
+  const [hookDismissed, setHookDismissed] = useState(false);
 
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const later = useCallback((fn: () => void, ms: number) => {
@@ -189,6 +196,7 @@ export function CalibrationWizard({
     setFlags([]);
     setApplying(false);
     setApplyFailed(false);
+    setHookDismissed(false);
   }, [open]);
 
   /* ── WARP-1059 · calibration mode brackets the whole session ── */
@@ -476,9 +484,18 @@ export function CalibrationWizard({
               <ZoneMeter
                 dbfs={status?.input_rms_dbfs ?? null}
                 zoneLabel={
-                  peakLocked && speechPeak != null
-                    ? `speech peak locked · ${speechPeak} dB`
-                    : "target zone — just speak normally"
+                  // WARP-1055 review tidy (deferred to WARP-1056): the
+                  // measured value inside the zone label is mono — the
+                  // instructional words stay in the UI font (§9
+                  // "measured values always mono").
+                  peakLocked && speechPeak != null ? (
+                    <>
+                      speech peak locked ·{" "}
+                      <span className="mono">{speechPeak} dB</span>
+                    </>
+                  ) : (
+                    "target zone — just speak normally"
+                  )
                 }
               />
               <p className="microcap">
@@ -670,6 +687,32 @@ export function CalibrationWizard({
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {/* §4-result forward hook (WARP-1056) — only when no voice is
+            enrolled yet; a quiet card, dismissable, never a nag. */}
+        {enrollHook && !hookDismissed && (
+          <div className="vhook">
+            <p className="vhook-copy">
+              Want Droplet to know it&apos;s you? Add your voice — it takes
+              about a minute.
+            </p>
+            <div className="vhook-actions">
+              <button
+                type="button"
+                className="vtext-btn"
+                onClick={() => setHookDismissed(true)}
+              >
+                Maybe later
+              </button>
+              <button
+                type="button"
+                className="dp-btn-secondary type-footnote"
+                onClick={() => onClose({ applied: true, addVoice: true })}
+              >
+                Add my voice
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -1609,7 +1609,9 @@ services:
     # applied mic calibration (voice/calibration.py, mounted at /data)
     # survives container restarts/recreates; factory-reset's volume sweep
     # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
-    # behaviour.
+    # behaviour. WARP-1056 — per-person voiceprints live on the same
+    # volume (/data/voiceprints, voice/speaker_id.py), so the sweep also
+    # deletes every voiceprint on reset.
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
@@ -2358,6 +2360,10 @@ volumes:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.
+  # WARP-1056 — the same volume (mounted at /data) also holds the
+  # per-person voiceprints (/data/voiceprints/<user>.json, biometric-
+  # adjacent, on-box only); the factory-reset sweep wiping it IS the
+  # "reset ⇒ every voiceprint deleted" guarantee.
   voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:

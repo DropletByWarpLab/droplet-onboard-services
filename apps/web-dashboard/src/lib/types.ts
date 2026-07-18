@@ -696,6 +696,65 @@ export interface VoiceCalibrationModeResult {
   expires_at?: number | null;
 }
 
+// --- WARP-1056: per-person voiceprints (Flow B enrollment) ---
+
+/**
+ * One enrolled voiceprint (`GET /api/voice/profiles`). Metadata ONLY —
+ * the embedding never leaves the box. `display_name` /
+ * `confused_with_name` are joined by the orchestrator from the local
+ * user directory; `learning` is the §5 step-3 honest fallback
+ * ("recognition isn't reliable yet — improves with use / re-record"),
+ * `confused_with` is the §7.6 hard-to-distinguish sibling.
+ */
+export interface VoiceProfileInfo {
+  user_id: string;
+  display_name: string | null;
+  enrolled_at: number;
+  updated_at: number;
+  last_recognized_at?: number | null;
+  learning: boolean;
+  confused_with?: string | null;
+  confused_with_name?: string | null;
+  lines: number;
+  voice_model: string;
+}
+
+/** `GET /api/voice/profiles` — §3.3 listing. `speaker_model_available`
+ *  false = the box can't enroll (weights absent): entry points disable
+ *  rather than launching a wizard that cannot succeed (§7.2 rule). */
+export interface VoiceProfilesResult {
+  speaker_model_available: boolean;
+  profiles: VoiceProfileInfo[];
+}
+
+/** `POST /api/voice/enroll/start` — a Flow B session on the box. */
+export interface VoiceEnrollStartResult {
+  session_id: string;
+  lines_required: number;
+}
+
+/** One scripted-line capture (`POST /api/voice/enroll/capture`).
+ *  `quality` is the §5/§7.5 capture guard verdict. */
+export interface VoiceEnrollCaptureResult {
+  quality: "good" | "too_quiet" | "crosstalk";
+  captured: number;
+  required: number;
+}
+
+/** The no-script proof (`POST /api/voice/enroll/verify`). Confidence is
+ *  a plain word — the wire carries no percentage, ever (§5 step 3). */
+export interface VoiceEnrollVerifyResult {
+  quality: "good" | "too_quiet" | "crosstalk";
+  matched: boolean;
+  confidence?: "high" | "good" | null;
+}
+
+/** `POST /api/voice/enroll/commit` — the ONE write of Flow B. */
+export interface VoiceEnrollCommitResult {
+  saved: boolean;
+  profile: VoiceProfileInfo;
+}
+
 // ── WARP-446: Coverage extender APs ──
 
 /** State machine values mirrored from the Prisma `ApDeviceStatus` enum.
