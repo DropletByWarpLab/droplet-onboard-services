@@ -557,6 +557,7 @@ run_nextcloud_post_install_hook() {
 }
 # <<< run_nextcloud_post_install_hook (WARP-990)
 
+# >>> apply_file_indexer_nc_grants (WARP-1328)
 apply_file_indexer_nc_grants() {
   # WARP-1328: the file-indexer resolves Nextcloud file ids by reading
   # oc_storages/oc_filecache directly (watcher.py _resolve_nc_file_id), but

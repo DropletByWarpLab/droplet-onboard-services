@@ -953,10 +953,13 @@ sed -n '/# >>> recover_nextcloud_autoinstall (WARP-1064)/,/# <<< recover_nextclo
   "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 sed -n '/# >>> run_nextcloud_post_install_hook (WARP-990)/,/# <<< run_nextcloud_post_install_hook (WARP-990)/p' \
   "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
+sed -n '/# >>> apply_file_indexer_nc_grants (WARP-1328)/,/# <<< apply_file_indexer_nc_grants (WARP-1328)/p' \
+  "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 
 if grep -q 'wait_for_nextcloud_installed()' "$NC_WORK/funcs.sh" \
    && grep -q 'recover_nextcloud_autoinstall()' "$NC_WORK/funcs.sh" \
-   && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh"; then
+   && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh" \
+   && grep -q 'apply_file_indexer_nc_grants()' "$NC_WORK/funcs.sh"; then
   pass "extracted the WARP-990 + WARP-1064 function bodies from compose.sh"
 else
   fail "could not extract the WARP-990/WARP-1064 function bodies — skipping behavioural asserts"
@@ -1005,6 +1008,15 @@ run_docker_compose() {
       fi
       return 1
       ;;
+    # WARP-1328: the file-indexer oc_* read-grant exec. Records argv; exit
+    # scriptable via $NC_STUB_STATE/grants_rc (default 0). MUST precede the
+    # generic psql arm below.
+    *"GRANT CONNECT"*)
+      n=$(( $(cat "$sd/grants_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/grants_calls"
+      printf '%s' "$*" > "$sd/grants_argv"
+      return "$(cat "$sd/grants_rc" 2>/dev/null || echo 0)"
+      ;;
     # WARP-1064: the recovery's stale-DB probe/recreate (psql in the db
     # service). Report "no stale schema" (empty stdout, rc 0).
     *" db psql"*|*"psql -U"*)
@@ -1043,6 +1055,7 @@ run_nc_case() {
   printf '%s' "$installed_after" > "$sd/installed_after"
   printf '%s' "$hook_rc" > "$sd/hook_rc"
   printf '%s' "${NC_RECOVERY_RC:-1}" > "$sd/recovery_rc"
+  printf '%s' "${NC_GRANTS_RC:-0}" > "$sd/grants_rc"
   printf '%s' "${NC_EP_SERVING_AFTER:-1}" > "$sd/ep_serving_after"
   NC_STUB_STATE="$sd" \
   NEXTCLOUD_OCC_READY_TRIES="${NC_TRIES:-8}" \
@@ -1102,6 +1115,29 @@ if printf '%s' "$NC_HOOK_ARGV" | grep -qF -- "-u 33" \
   pass "hook exec targets the nextcloud service as uid 33 at the mounted path"
 else
   fail "hook exec argv wrong (got: '${NC_HOOK_ARGV}')"
+fi
+
+# WARP-1328: the same bring-up must apply the file-indexer oc_* read grants.
+NC_GRANTS_CALLS="$(cat "$NC_WORK/state/grants_calls" 2>/dev/null || echo 0)"
+NC_GRANTS_ARGV="$(cat "$NC_WORK/state/grants_argv" 2>/dev/null || echo '')"
+if [ "$NC_GRANTS_CALLS" = "1" ]; then
+  pass "file-indexer oc_* grants applied exactly once per bring-up (WARP-1328)"
+else
+  fail "file-indexer oc_* grants exec'd ${NC_GRANTS_CALLS} times (expected exactly 1) — WARP-1328"
+fi
+if printf '%s' "$NC_GRANTS_ARGV" | grep -qF -- "-d nextcloud" \
+   && printf '%s' "$NC_GRANTS_ARGV" | grep -qF "GRANT USAGE ON SCHEMA public" \
+   && printf '%s' "$NC_GRANTS_ARGV" | grep -qF "GRANT SELECT ON public.oc_storages, public.oc_filecache"; then
+  pass "grants exec targets the nextcloud DB with schema USAGE + oc_* SELECT (WARP-1328)"
+else
+  fail "grants exec argv wrong (got: '${NC_GRANTS_ARGV}')"
+fi
+
+# WARP-1328: a failing grant exec must be loud-but-non-fatal, like the hook.
+if NC_GRANTS_RC=1 run_nc_case 1 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "grant failure is non-fatal to setup (WARP-1328)"
+else
+  fail "grant failure aborted the runner — must be non-fatal to setup (WARP-1328)"
 fi
 
 # (B5) Hook fails (exit 7) → NON-FATAL to setup (runner still exits 0) but
