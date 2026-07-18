@@ -36,7 +36,11 @@ _install_automount_env() {
 # Droplet automount -> Nextcloud external-storage registration (WARP-1338).
 # Loaded by ROOT units via EnvironmentFile= — keep this file root:root 0644,
 # never droplet-writable (WARP-843 root-unit LPE invariant).
-# Set NEXTCLOUD_AUTO_REGISTER=0 to opt out of auto-registering drives.
+# Set NEXTCLOUD_AUTO_REGISTER=0 to opt out of auto-registering HOT-PLUGGED
+# drives (the udev automount + boot-reconcile paths). Owner-confirmed
+# dashboard storage ops (pool format / drive adopt / drive reclaim) always
+# register — they ARE the deliberate "add mounts via the dashboard" path
+# this opt-out steers tighter deployments toward.
 NEXTCLOUD_AUTO_REGISTER=1
 NEXTCLOUD_CONTAINER=droplet-nextcloud-1
 ENV_EOF

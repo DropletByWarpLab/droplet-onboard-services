@@ -344,11 +344,21 @@ def _posix(p: Path) -> str:
 def _exec_run(operation: str, params: dict, tmp_path: Path,
               mounts: list[tuple[str, str]] | None = None,
               umount_fail: list[str] | None = None,
-              extra_env: dict | None = None):
-    """Run the script WITHOUT dry-run, against the stub toolchain."""
+              extra_env: dict | None = None,
+              stub_overrides: dict | None = None):
+    """Run the script WITHOUT dry-run, against the stub toolchain.
+
+    stub_overrides (same shape as test_automount_script.py's _run_add):
+    per-test stub bodies merged OVER _STUBS before writing. Every _STUBS
+    entry is rewritten on each call, so writing a stub file between two
+    _exec_run calls silently reverts — overrides must travel through here.
+    """
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir(exist_ok=True)
-    for name, body in _STUBS.items():
+    stubs = dict(_STUBS)
+    if stub_overrides:
+        stubs.update(stub_overrides)
+    for name, body in stubs.items():
         stub = stub_dir / name
         stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
                         encoding="utf-8", newline="\n")
@@ -758,29 +768,53 @@ def test_pool_format_labels_mounts_stable_name_seeds_trust_and_registers(tmp_pat
     assert reg_idx > mount_idx, cmds
 
 
+# Down-container docker stub: every `docker exec … php occ …` call fails, the
+# way a warming/absent Nextcloud container does. Passed via stub_overrides so
+# _exec_run's stub rewrite can't clobber it back to the success stub (the old
+# write-between-two-runs shape did exactly that and re-tested the SUCCESS path).
+_DOWN_DOCKER_STUB = (
+    "printf 'docker %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n"
+)
+
+
 def test_pool_format_registration_failure_is_nonfatal(tmp_path):
     # A warming/absent Nextcloud container must never fail a pool op that
     # already formatted + mounted — the boot reconcile converges it later.
     proc, cmds = _exec_run(
         "pool_format", {"device": "md0", "fstype": "ext4",
                         "confirm_phrase": "ERASE md0"},
-        tmp_path, extra_env={
-            **_pool_state_env(tmp_path),
-            # docker always fails (container down).
-        })
-    stub_dir = tmp_path / "stub-bin"
-    (stub_dir / "docker").write_text(
-        "#!/usr/bin/env bash\n"
-        "printf 'docker %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n",
-        encoding="utf-8", newline="\n")
-    os.chmod(stub_dir / "docker", 0o755)
-    proc, cmds = _exec_run(
-        "pool_format", {"device": "md0", "fstype": "ext4",
-                        "confirm_phrase": "ERASE md0"},
-        tmp_path, extra_env=_pool_state_env(tmp_path))
+        tmp_path, extra_env=_pool_state_env(tmp_path),
+        stub_overrides={"docker": _DOWN_DOCKER_STUB})
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout).get("ok") is True
     assert _first(cmds, "mount /dev/md0") >= 0, cmds
+    # The failing registration path was genuinely exercised (docker WAS
+    # called and failed) — not short-circuited before the docker exec…
+    assert _first(cmds, "docker exec") >= 0, cmds
+    # …and the script reported it as deferred-to-reconcile, not a failure.
+    assert "deferred" in proc.stderr, proc.stderr
+
+
+def test_pool_format_registers_even_when_hotplug_autoregister_opted_out(tmp_path):
+    # WARP-1338 review: NEXTCLOUD_AUTO_REGISTER scopes the HOT-PLUG paths
+    # (udev automount add + boot reconcile) only. The pool/adopt/reclaim ops
+    # are owner-confirmed dashboard operations — the very "add mounts via the
+    # dashboard instead" alternative the opt-out steers tighter deployments
+    # toward — so they register regardless of the flag (install.sh's env-file
+    # comment is scoped to match). Pin that deliberate behavior here.
+    proc, cmds = _exec_run(
+        "pool_format", {"device": "md0", "fstype": "ext4",
+                        "confirm_phrase": "ERASE md0"},
+        tmp_path, extra_env={
+            **_pool_state_env(tmp_path),
+            "NEXTCLOUD_AUTO_REGISTER": "0",
+        })
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    assert _first(
+        cmds,
+        "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /pool-cafef00d",
+    ) >= 0, cmds
 
 
 def test_adopt_mounts_at_automount_derived_name_and_registers(tmp_path):
