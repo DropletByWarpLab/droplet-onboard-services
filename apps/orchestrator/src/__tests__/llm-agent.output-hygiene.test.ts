@@ -65,6 +65,13 @@ function makeDeps(chat: ReturnType<typeof vi.fn>, callTool = vi.fn()) {
   return { deps, events };
 }
 
+
+// ChatMessage.content is `string | ContentBlock[]`; the agent loop always
+// finalises with a string — coerce for assertions without weakening types.
+function asText(content: unknown): string {
+  return typeof content === "string" ? content : JSON.stringify(content);
+}
+
 const REQ = {
   model: "gpt-oss:20b",
   messages: [{ role: "user" as const, content: "hi" }],
@@ -76,7 +83,7 @@ describe("runAgent — finalize guard (WARP-1331)", () => {
     const { deps, events } = makeDeps(chat);
     const result = await runAgent(deps, REQ);
     expect(result.stop_reason).toBe("model_done");
-    expect(result.message.content?.trim()).toBeTruthy();
+    expect(asText(result.message.content).trim()).toBeTruthy();
     // The customer-visible stream must carry the fallback too, not silence.
     const delta = events.find((e) => e.type === "content_delta");
     expect(delta).toBeDefined();
@@ -88,8 +95,8 @@ describe("runAgent — finalize guard (WARP-1331)", () => {
       .mockResolvedValue(finalContent('{"path":"/Admin/IDs"}'));
     const { deps } = makeDeps(chat);
     const result = await runAgent(deps, REQ);
-    expect(result.message.content).not.toContain('"path"');
-    expect(result.message.content?.trim()).toBeTruthy();
+    expect(asText(result.message.content)).not.toContain('"path"');
+    expect(asText(result.message.content).trim()).toBeTruthy();
   });
 
   it("strips citation cruft but keeps the real answer", async () => {
@@ -103,9 +110,9 @@ describe("runAgent — finalize guard (WARP-1331)", () => {
       );
     const { deps } = makeDeps(chat);
     const result = await runAgent(deps, REQ);
-    expect(result.message.content).toContain("HMKQ8Z2T4F");
-    expect(result.message.content).toContain("15:00");
-    expect(result.message.content).not.toContain("【");
+    expect(asText(result.message.content)).toContain("HMKQ8Z2T4F");
+    expect(asText(result.message.content)).toContain("15:00");
+    expect(asText(result.message.content)).not.toContain("【");
   });
 });
 
@@ -117,9 +124,9 @@ describe("runAgent — failure-copy tool names (WARP-1331)", () => {
     const { deps } = makeDeps(chat);
     const result = await runAgent(deps, { ...REQ, max_iter: 2 });
     expect(result.stop_reason).toBe("iteration_limit");
-    expect(result.message.content).not.toContain("memory_repay");
+    expect(asText(result.message.content)).not.toContain("memory_repay");
     // Still honest about the failure class.
-    expect(result.message.content).toMatch(/tool/i);
+    expect(asText(result.message.content)).toMatch(/tool/i);
   });
 
   it("still names a real registry tool that kept failing", async () => {
@@ -128,6 +135,6 @@ describe("runAgent — failure-copy tool names (WARP-1331)", () => {
     const { deps } = makeDeps(chat, callTool);
     const result = await runAgent(deps, { ...REQ, max_iter: 2 });
     expect(result.stop_reason).toBe("iteration_limit");
-    expect(result.message.content).toContain("search_content");
+    expect(asText(result.message.content)).toContain("search_content");
   });
 });
