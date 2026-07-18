@@ -6,10 +6,13 @@
 # Called as:
 #   droplet-automount.sh add    /dev/sda1
 #   droplet-automount.sh remove /dev/sda1
-#   droplet-automount.sh reconcile          (WARP-1338 — oneshot, boot-time:
-#                                            register already-mounted
+#   droplet-automount.sh reconcile          (WARP-1338/WARP-1361 — oneshot,
+#                                            boot-time: mount assembled-but-
+#                                            unmounted droplet pool arrays,
+#                                            then register already-mounted
 #                                            /mnt/droplet/* paths with
-#                                            Nextcloud; mounts nothing new)
+#                                            Nextcloud; never mounts foreign
+#                                            or untrusted media)
 #
 # Mount point convention: /mnt/droplet/<label>-<short-uuid> (human-friendly
 # but unambiguous). State file at /var/lib/droplet-automount/mounts.json
@@ -225,10 +228,16 @@ is_droplet_md() {
     return 0
   fi
   # Accept the shipping droplet-sys convention even when the box hostname
-  # has since changed — a renamed box must not orphan its own pool.
-  case "$md_home" in
-    droplet*) return 0 ;;
-  esac
+  # has since changed — a renamed box must not orphan its own pool. EXACTLY
+  # droplet-sys, never a droplet* prefix: "dropletnas" et al. are strangers.
+  # WARP-1361 review: the homehost signature is attacker-writable (a crafted
+  # superblock can claim droplet-sys:N or the box hostname) — it is a
+  # CONVENTION, not a security boundary. The planned follow-up tightens md
+  # trust to trusted.list / StoragePool state and drops this fallback once
+  # live boxes have converged (the reconcile seeds trusted.list every boot).
+  if [ "$md_home" = "droplet-sys" ]; then
+    return 0
+  fi
   return 1
 }
 
@@ -342,6 +351,20 @@ PYEOF
 
 case "$ACTION" in
   add)
+    # WARP-1361 review: per-device lock around the whole probe+mount+register
+    # section. The boot reconcile spawns `add` for an assembled-but-unmounted
+    # array while the udev coldplug add for the SAME node may still be inside
+    # its settle loop below — both paths are check-then-mount, so without a
+    # shared lock the loser can stack a duplicate mount and double-register
+    # the drive with Nextcloud (the duplicate class WARP-1338 fixed). Held on
+    # an inherited fd until this invocation exits; state_add's fd-9 flock
+    # (mounts.json) is unrelated and nests fine. The lock key is the device
+    # basename, charset-guarded (udev hands us /dev/%I, but never trust an
+    # argument as a path component).
+    lock_key="${DEVICE##*/}"
+    lock_key="${lock_key//[^A-Za-z0-9._-]/_}"
+    exec 8>>"${STATE_DIR}/.lock-dev-${lock_key}"
+    flock 8
     # Read filesystem metadata WITHOUT eval. `blkid -o export` returns
     # KEY=VALUE lines that used to be fed to `eval`; a crafted LABEL with
     # embedded newlines + shell metacharacters would execute as root via
@@ -439,7 +462,10 @@ case "$ACTION" in
       # so a reboot must NEVER rename it (the generic derivation below would
       # move it to drive-<short-uuid>). New pools are labeled ("pool") at
       # mkfs time and take the stable <label>-<short-uuid> name.
-      NAME="$UUID"
+      # WARP-1361 review: same charset guard as the label path — blkid UUIDs
+      # are hex+dashes today (byte-identical through this guard), but blkid
+      # output is never trusted as a path component.
+      NAME="${UUID//[^A-Za-z0-9._-]/-}"
       log "$BACKING_DEVICE is an unlabeled md pool filesystem — keeping its legacy mount name $NAME"
     else
       LABEL="${LABEL:-drive}"
@@ -531,6 +557,26 @@ case "$ACTION" in
     if mountpoint -q "$MOUNT" && \
        [ "$(findmnt -n -o SOURCE "$MOUNT" 2>/dev/null)" = "$DEVICE" ]; then
       log "$DEVICE already mounted at $MOUNT"
+      # WARP-1361 review: "already mounted" is not enough — a pool that came
+      # up read-only earlier (auto-read-only array mounted ro by a previous
+      # boot, or a manual ro mount) would be left ro forever, exactly the
+      # state AC2 exists to prevent. If this drive has earned rw, verify the
+      # live mount agrees and flip it in place.
+      if [ "$RW_MODE" = "rw" ]; then
+        cur_opts="$(findmnt -n -o OPTIONS "$MOUNT" 2>/dev/null | head -1 || true)"
+        case ",${cur_opts}," in
+          *,ro,*)
+            log "$MOUNT is mounted read-only but $DEVICE is trusted rw — remounting read-write"
+            if is_md_node "$DEVICE"; then
+              mdadm --readwrite "$DEVICE" 2>/dev/null \
+                || log "mdadm --readwrite $DEVICE failed (retrying the remount anyway)"
+            fi
+            mount -o remount,rw "$MOUNT" 2>/dev/null \
+              && log "remounted $MOUNT read-write" \
+              || log "rw remount failed for $MOUNT — leaving it read-only"
+            ;;
+        esac
+      fi
     else
       # Permissive options for FAT/exFAT/NTFS (common on USB drives).
       # ext4/xfs/btrfs will reject `uid=` options, so branch.
@@ -559,7 +605,25 @@ case "$ACTION" in
               exit 1
             fi
           fi
-          [ "$RW_MODE" = "rw" ] && chown -R 1000:1000 "$MOUNT" 2>/dev/null || true
+          # WARP-1361 review: NEVER recursive on an md pool — this path is
+          # hot on every boot now, and (a) a recursive chown over a
+          # terabyte-scale pool exceeds the unit's TimeoutStartSec, so
+          # systemd kills the oneshot mid-add (fs mounted, but state_add +
+          # registration skipped and the unit fails every boot); (b) it
+          # flips the ownership of files Nextcloud wrote as uid 33 through
+          # the /mnt/droplet -> /host bind, breaking uploads after reboot.
+          # The mount root alone is what the droplet user needs to create
+          # top-level entries (pool_format never chowns the fresh fs — this
+          # covers the first mount too). Plain drives keep the recursive
+          # chown: that path runs on plug events only, and FAT-family media
+          # never reaches here (uid= mount options above).
+          if [ "$RW_MODE" = "rw" ]; then
+            if is_md_node "$BACKING_DEVICE"; then
+              chown 1000:1000 "$MOUNT" 2>/dev/null || true
+            else
+              chown -R 1000:1000 "$MOUNT" 2>/dev/null || true
+            fi
+          fi
           ;;
       esac
       log "mounted $DEVICE ($TYPE, label=$LABEL, trust=$TRUST) -> $MOUNT"
@@ -625,8 +689,10 @@ case "$ACTION" in
     # every ELIGIBLE already-mounted /mnt/droplet/* path with Nextcloud.
     # Pool mounts are created by droplet-storage-pool.sh (not this script),
     # and mounts on a fleet-upgraded box predate registration entirely —
-    # this converges them WITHOUT mounting anything new (so it is not the
-    # install-time drive sweep the installer deliberately avoids).
+    # this converges them. Since WARP-1361 the md loop below is the ONE
+    # mounting exception: assembled-but-unmounted DROPLET pool arrays only —
+    # never the install-time whole-drive sweep the installer deliberately
+    # avoids, and never foreign/untrusted media.
     # Idempotent: nextcloud_add short-circuits on an existing registration.
     # Eligibility mirrors the add-path trust gate: md-pool filesystems
     # (owner-created via the confirm-gated pool flow), enrolled LUKS mappers,
@@ -661,10 +727,18 @@ case "$ACTION" in
     for md_dev in "$DEV_DIR"/md*; do
       [ -e "$md_dev" ] || continue                 # glob miss
       md_base="$(basename "$md_dev")"
+      # WARP-1361 review (AC4): every skip says why — these two continues
+      # were the only silent ones. log() is printf/logger --, so echoing a
+      # crafted name back is safe.
       case "$md_base" in
-        *[!a-z0-9]*) continue ;;                   # never a crafted name
+        *[!a-z0-9]*)                               # never a crafted name
+          log "reconcile: skip $md_base (unexpected characters in md node name)"
+          continue ;;
       esac
-      [[ "$md_base" =~ ^md[0-9]+$ ]] || continue   # array nodes only, not mdNpM
+      if ! [[ "$md_base" =~ ^md[0-9]+$ ]]; then    # array nodes only, not mdNpM
+        log "reconcile: skip $md_base (md partition node — the parent array owns the mount)"
+        continue
+      fi
       if findmnt -n -o TARGET --source "$md_dev" >/dev/null 2>&1; then
         log "reconcile: $md_base already mounted — nothing to do"
         continue

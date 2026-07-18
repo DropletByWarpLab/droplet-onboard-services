@@ -614,8 +614,9 @@ class TestNextcloudRegistration:
 # WARP-1338 — `reconcile` action: one-shot boot/upgrade registration of the
 # ALREADY-mounted /mnt/droplet/* paths (pool mounts are created by
 # droplet-storage-pool.sh, and a fleet-upgraded box's mounts predate
-# registration entirely). It mounts nothing new, mirrors the add-path
-# trust gate, and is idempotent.
+# registration entirely). Since WARP-1361 the only thing it MOUNTS is an
+# assembled-but-unmounted droplet pool array (TestReconcileMountsUnmountedPools);
+# it mirrors the add-path trust gate and is idempotent.
 # =====================================================================
 
 _RECONCILE_STUBS = {
@@ -1145,3 +1146,158 @@ class TestReconcileMountsUnmountedPools:
         )
         assert "feedface-uuid" not in seeded, seeded
         assert "foreign" in logged, logged
+
+
+# =====================================================================
+# WARP-1361 review fixes — the md add path is hot on EVERY boot now, so:
+#  (1) never a recursive chown on a pool remount (a terabyte-scale
+#      `chown -R` blows the unit's TimeoutStartSec mid-add and flips the
+#      ownership of files Nextcloud wrote as uid 33 through the
+#      /mnt/droplet -> /host bind);
+#  (2) the whole probe+mount+register section takes a per-device lock so
+#      the udev add and the reconcile-spawned add for the same node can't
+#      race a check-then-mount into a stacked duplicate mount + duplicate
+#      Nextcloud registration (the duplicate class WARP-1338 fixed);
+#  (3) is_droplet_md's homehost fallback accepts exactly the shipping
+#      droplet-sys convention — not any droplet-prefixed stranger;
+#  (4) the legacy GUID mount name goes through the same charset guard as
+#      labels (blkid output is never trusted as a path component);
+#  (5) "already mounted at the right path" verifies the live mount is
+#      actually rw when the drive earned rw — a pre-existing ro mount of
+#      a healthy pool is remounted read-write (AC2 edge);
+#  (6) the reconcile md enumeration logs a reason for EVERY skip — the
+#      crafted-name and mdNpM-partition continues were silent (AC4).
+# =====================================================================
+
+
+class TestWarp1361ReviewFixes:
+    _run_reconcile = TestReconcile._run_reconcile
+
+    def test_md_remount_chowns_mount_root_only_never_recursive(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_FS_LABEL": "pool"})
+        assert proc.returncode == 0, proc.stderr
+        chowns = [c for c in cmds if c.startswith("chown ")]
+        assert chowns, cmds
+        assert not any(c.startswith("chown -R") for c in chowns), (
+            "recursive chown on a pool remount — this path runs on every "
+            "boot; a terabyte-scale chown -R exceeds TimeoutStartSec and "
+            "flips Nextcloud's uid-33 file ownership: %r" % chowns)
+        expected = "chown 1000:1000 " + _posix(
+            tmp_path / "mnt" / "pool-cafef00d")
+        assert expected in chowns, chowns
+
+    def test_plain_trusted_drive_keeps_the_recursive_chown(self, tmp_path):
+        # Control: the plain-drive first-mount behavior is unchanged (that
+        # path only runs on plug events, not every boot).
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "trusted.list").write_text(
+            "cafef00d-9360\n", encoding="utf-8")
+        proc, cmds, _l, _mj, _sd = _run_add("/dev/sdz1", "ext4", tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("chown -R 1000:1000 ") for c in cmds), cmds
+
+    def test_add_takes_a_per_device_lock_before_the_mount_section(self, tmp_path):
+        proc, cmds, _l, _mj, state_dir = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_FS_LABEL": "pool"})
+        assert proc.returncode == 0, proc.stderr
+        assert (state_dir / ".lock-dev-md127").exists(), (
+            "per-device lock file not created — the udev add and the "
+            "reconcile-spawned add can double-mount/double-register")
+        lock_idx = next(
+            (i for i, c in enumerate(cmds) if c == "flock 8"), None)
+        mount_idx = next(
+            (i for i, c in enumerate(cmds) if c.startswith("mount ")), None)
+        assert lock_idx is not None, cmds
+        assert mount_idx is not None and lock_idx < mount_idx, (
+            "the per-device lock must be taken BEFORE the check-then-mount "
+            "section: %r" % cmds)
+
+    def test_droplet_prefixed_foreign_homehost_is_not_trusted(self, tmp_path):
+        # is_droplet_md's fallback accepts exactly the shipping droplet-sys
+        # convention. "dropletnas", "droplet-foo" etc. are strangers — the
+        # homehost string is attacker-writable regardless, so the fallback
+        # must never be wider than the documented convention.
+        proc, cmds, logged, mounts_json, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_MD_NAME": "dropletnas:0"})
+        assert proc.returncode == 0, proc.stderr
+        assert '"trust": "untrusted-ro"' in mounts_json, mounts_json
+        assert re.search(r'mount -o "?ro,', "\n".join(cmds)), cmds
+        assert "foreign md array" in logged, logged
+
+    def test_legacy_guid_mount_name_is_charset_guarded(self, tmp_path):
+        # blkid UUIDs are hex+dashes today; the guard future-proofs the path
+        # construction so crafted metadata can never smuggle a separator or
+        # shell-relevant byte into the mount path.
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_FS_UUID": "evil/uu id$(pwn)"})
+        assert proc.returncode == 0, proc.stderr
+        # The RAW uuid may appear in log lines (trusted.list stores raw fs
+        # uuids) — but never as a path component under the mount base.
+        assert not any("mnt/evil/uu" in c for c in cmds), cmds
+        expected_mount = _posix(tmp_path / "mnt" / "evil-uu-id--pwn-")
+        assert any(
+            c.startswith("mount ") and c.endswith(" " + expected_mount)
+            for c in cmds), cmds
+
+    def test_preexisting_ro_mount_of_trusted_pool_is_remounted_rw(self, tmp_path):
+        # AC2 edge: the pool is healthy and already mounted at the right
+        # path — but read-only (e.g. an earlier boot mounted the
+        # auto-read-only array ro). "Already mounted" must not short-circuit
+        # the rw guarantee: flip the array readwrite and remount in place.
+        dev_dir = tmp_path / "dev"
+        dev_dir.mkdir(exist_ok=True)
+        dev = dev_dir / "md127"
+        dev.touch()
+        mount = tmp_path / "mnt" / "pool-cafef00d"
+        findmnt_stub = r"""
+printf 'findmnt %s\n' "$*" >> "$CMD_LOG"
+last=; for a in "$@"; do last="$a"; done
+case " $* " in
+  *" OPTIONS "*) printf 'ro,noatime\n'; exit 0 ;;
+  *" --source "*) printf '%s\n' "$STUB_EXISTING_MOUNT"; exit 0 ;;
+esac
+if [ "$last" = "/" ]; then printf '/dev/nvme0n1p2\n'; exit 0; fi
+if [ "$last" = "$STUB_EXISTING_MOUNT" ]; then
+  printf '%s\n' "$STUB_EXISTING_DEV"; exit 0
+fi
+exit 1
+"""
+        mountpoint_stub = (
+            "printf 'mountpoint %s\\n' \"$*\" >> \"$CMD_LOG\"\n"
+            "tgt=; for a in \"$@\"; do tgt=\"$a\"; done\n"
+            "[ \"$tgt\" = \"$STUB_EXISTING_MOUNT\" ] && exit 0\n"
+            "exit 1\n")
+        proc, cmds, logged, _mj, _sd = _run_add(
+            _posix(dev), "ext4", tmp_path,
+            extra_env={"STUB_FS_LABEL": "pool",
+                       "STUB_EXISTING_MOUNT": _posix(mount),
+                       "STUB_EXISTING_DEV": _posix(dev)},
+            stub_overrides={"findmnt": findmnt_stub,
+                            "mountpoint": mountpoint_stub})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "already mounted" in logged, logged
+        assert ("mount -o remount,rw " + _posix(mount)) in joined, (
+            "a pre-existing ro mount of a healthy trusted pool was left "
+            "read-only: %s" % joined)
+        assert ("mdadm --readwrite " + _posix(dev)) in joined, joined
+        # No fresh full mount attempt — the flip happens in place.
+        assert not any(
+            re.match(r'mount -o "?r[wo],', c) for c in cmds), cmds
+
+    def test_reconcile_logs_a_reason_for_partition_and_crafted_md_nodes(
+            self, tmp_path):
+        # AC4: every skip path says why. The md enumeration's continues for
+        # mdNpM partition nodes and crafted names were the two silent ones.
+        proc, cmds, logged = self._run_reconcile(
+            tmp_path, {}, dev_nodes=["md0p1", "mdX"])
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "skip md0p1" in logged, logged
+        assert "skip mdX" in logged, logged
