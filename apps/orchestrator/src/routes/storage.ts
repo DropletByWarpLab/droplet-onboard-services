@@ -1186,8 +1186,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       if (!validMdDevice(device)) {
         return res.status(400).json({ error: "Invalid pool device" });
       }
+      // WARP-1338 review: same pinned allow-list as adopt/reclaim. The old
+      // shape-only regex admitted fstypes whose mkfs doesn't take -L (vfat
+      // uses -n), and the host's pool_format now unconditionally runs
+      // `mkfs.$FSTYPE -L pool` — a loose fstype would fail the op there.
       const fstype = req.body?.fstype;
-      if (fstype !== undefined && !/^[a-z0-9]{1,12}$/.test(String(fstype))) {
+      if (fstype !== undefined && !VALID_FSTYPES.has(String(fstype))) {
         return res.status(400).json({ error: "Invalid fstype" });
       }
       return evalAndRespond(
