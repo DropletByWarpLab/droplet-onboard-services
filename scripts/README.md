@@ -377,7 +377,9 @@ OTA release manifests (`release.json`, published by
 `.github/workflows/publish-release.yml`) are signed with
 [cosign](https://github.com/sigstore/cosign) and verified on-device by the
 orchestrator's update agent against the public key baked into the image at
-`apps/orchestrator/src/services/update-agent/cosign.pub`.
+`apps/orchestrator/src/services/update-agent/cosign.pub`, and by the
+fleet-agent's update-poll (WARP-1025) against its byte-identical copy at
+`services/fleet-agent/cosign.pub` — the ceremony stamps BOTH copies.
 
 > **The committed `cosign.pub` is a PLACEHOLDER.** The update agent's verify
 > path detects the `DROPLET-OTA-PLACEHOLDER` marker and **fails closed** —
@@ -397,9 +399,12 @@ cosign generate-key-pair          # writes cosign.key + cosign.pub
 gh secret set COSIGN_PRIVATE_KEY < cosign.key
 gh secret set COSIGN_PASSWORD     # paste the password from step 1
 
-# 3. Commit the PUBLIC side over the placeholder.
+# 3. Commit the PUBLIC side over BOTH placeholders (orchestrator update
+#    agent + fleet-agent update-poll, WARP-1025).
 cp cosign.pub apps/orchestrator/src/services/update-agent/cosign.pub
-git add apps/orchestrator/src/services/update-agent/cosign.pub
+cp cosign.pub services/fleet-agent/cosign.pub
+git add apps/orchestrator/src/services/update-agent/cosign.pub \
+        services/fleet-agent/cosign.pub
 git commit -m "chore: install real OTA cosign public key (key ceremony)"
 
 # 4. Destroy the local private key (it now lives only in GH secrets +

@@ -27,6 +27,12 @@ from typing import Mapping, Optional
 DEFAULT_PORTAL_URL = "https://analytics.warp-lab.ai/api/v1"
 DEFAULT_STATE_DIR = "/var/lib/droplet/fleet-agent"
 FALLBACK_FIRMWARE_VERSION = "0.0.0+unknown"
+# WARP-1025: same canonical publisher default as the orchestrator poller
+# (apps/orchestrator/src/config.ts DROPLET_OTA_RELEASES_URL) — one .env
+# knob configures both while the WARP-538 reconciliation is pending.
+DEFAULT_RELEASES_URL = (
+    "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest"
+)
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
@@ -55,6 +61,19 @@ class AgentConfig:
     errors_flush_interval_s: int
     # Disk spool bound — oldest heartbeats drop beyond this.
     spool_max: int
+    # WARP-1025 — signed update-poll (ADR-028). Its OWN opt-in, separate
+    # from telemetry: checking for signed releases and sharing telemetry
+    # are different operator consents (both default OFF, ADR-012
+    # default-deny egress).
+    update_poll_enabled: bool
+    releases_url: str
+    github_token: str
+    update_poll_interval_s: int
+    # Targeting tags (ratified ADR-028 selector vocabulary). channel is
+    # the always-on gate; customer is optional. tier / hardware_revision /
+    # geo_region above double as the tier / hw / region tags.
+    update_channel: str
+    customer: Optional[str]
 
 
 def _canonical_country(raw: Optional[str]) -> Optional[str]:
@@ -131,4 +150,14 @@ def load_config(env: Mapping[str, str]) -> AgentConfig:
         ),
         errors_flush_interval_s=_int_env(env, "DROPLET_TELEMETRY_ERRORS_SEC", 5),
         spool_max=_int_env(env, "DROPLET_TELEMETRY_SPOOL_MAX", 1000),
+        update_poll_enabled=(
+            (env.get("DROPLET_UPDATE_POLL_ENABLED") or "").strip().lower() in _TRUTHY
+        ),
+        releases_url=(
+            (env.get("DROPLET_OTA_RELEASES_URL") or "").strip() or DEFAULT_RELEASES_URL
+        ),
+        github_token=(env.get("DROPLET_OTA_GITHUB_TOKEN") or "").strip(),
+        update_poll_interval_s=_int_env(env, "DROPLET_UPDATE_POLL_SEC", 300),
+        update_channel=(env.get("DROPLET_UPDATE_CHANNEL") or "").strip() or "stable",
+        customer=(env.get("DROPLET_CUSTOMER") or "").strip() or None,
     )
