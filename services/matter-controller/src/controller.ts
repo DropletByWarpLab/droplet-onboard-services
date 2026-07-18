@@ -833,7 +833,12 @@ async function invokeClusterCommand(
       `Command '${commandName}' not found on cluster '${clusterName}'`,
     );
   }
-  await fn(args ?? {});
+  // WARP-1366: pass args through UNTOUCHED. onOff.on/off/toggle take a void
+  // request — matter.js validates the payload against the cluster schema and
+  // rejects a substituted {} with ValidationDatatypeMismatchError, which made
+  // every commissioned on/off device uncontrollable (proven live on .87 with
+  // the first end-to-end commissioned GE Cync light).
+  await fn(args);
 }
 
 async function writeClusterAttribute(

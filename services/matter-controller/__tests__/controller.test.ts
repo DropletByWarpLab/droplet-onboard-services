@@ -532,6 +532,23 @@ describe("createMatterControllerCore", () => {
       expect(ep.commands.onOff.on).toHaveBeenCalledOnce();
     });
 
+    // WARP-1366: onOff.on/off/toggle take a VOID request. matter.js validates
+    // the payload against the cluster schema and rejects a substituted {}
+    // (ValidationDatatypeMismatchError) — which made every commissioned
+    // on/off device uncontrollable on the real box. The invocation must pass
+    // NO payload for no-arg commands.
+    it("invokes void commands (on/off/toggle) with no payload, not {}", async () => {
+      const node = fakeNode();
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      const ep = node.parts.get(1) as ReturnType<typeof fakeEndpoint>;
+      await core.sendCommand("1", "turn_on");
+      await core.sendCommand("1", "turn_off");
+      await core.sendCommand("1", "toggle");
+      expect(ep.commands.onOff.on).toHaveBeenCalledWith(undefined);
+      expect(ep.commands.onOff.off).toHaveBeenCalledWith(undefined);
+      expect(ep.commands.onOff.toggle).toHaveBeenCalledWith(undefined);
+    });
+
     it("refuses commands to a disconnected node", async () => {
       const node = fakeNode({ connectionState: NodeStates.Disconnected });
       (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
