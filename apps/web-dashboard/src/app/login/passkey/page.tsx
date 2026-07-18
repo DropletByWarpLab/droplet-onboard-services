@@ -124,7 +124,7 @@ function failGuidance(cause: FailCause): string {
     case "timeout":
       return "The request timed out before a passkey was used. You can try again, or sign in with your password.";
     case "network":
-      return "We couldn't reach your Droplet to finish signing in. Check that you're on your home network, then try again.";
+      return "We couldn't reach your Droplet to finish signing in. Check that you're on your office network, then try again.";
     case "rejected":
       return "We couldn't verify that passkey. Try again, or use your password — if this keeps happening, you can manage passkeys in Settings after signing in.";
     case "cancelled":

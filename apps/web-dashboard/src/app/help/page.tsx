@@ -202,8 +202,8 @@ const SECTIONS: Section[] = [
         <p>
           Droplet is a private AI appliance that lives on your own network — a
           single box that runs your files, conversations, cameras, and
-          smart-home control. Think of it as your own cloud, except it never
-          leaves your home or office.
+          smart-device control. Think of it as your own cloud, except it never
+          leaves your office.
         </p>
         <p>
           <strong>The AI runs locally.</strong> The models that power chat and
@@ -221,10 +221,10 @@ const SECTIONS: Section[] = [
         </p>
         <p>
           <strong>You&rsquo;re still reachable when you need to be.</strong>{" "}
-          On your home network, your devices connect to the Droplet directly
+          On your office network, your devices connect to the Droplet directly
           over its own end-to-end-encrypted VPN — so you reach your data
           without it passing through any cloud service in between.
-          Away-from-home access arrives with the secure relay — coming soon.
+          Away-from-office access arrives with the secure relay — coming soon.
         </p>
       </>
     ),
@@ -261,9 +261,9 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>
-          A workspace is the shared home for everyone who uses this
+          A workspace is the shared space for everyone who uses this
           Droplet — your files, chats, cameras, and people all live inside
-          it. Most homes need just one.
+          it. Most organizations need just one.
         </p>
         <p>
           <strong>Name and address:</strong> the workspace name is what
@@ -331,7 +331,7 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>
-          If parts of your home are out of the Droplet&rsquo;s Wi-Fi range,
+          If parts of your office are out of the Droplet&rsquo;s Wi-Fi range,
           add a Droplet extender to widen coverage. Plug it in on the same
           network and it shows up on the Network page for one-tap approval —
           usually within about 30 seconds.
@@ -353,20 +353,20 @@ const SECTIONS: Section[] = [
       <>
         <p>
           Your Droplet has its own secure web address — the name you gave
-          it during setup. It works across your home network, with a real
+          it during setup. It works across your office network, with a real
           certificate, a green padlock, and nothing to install.
           There&rsquo;s nothing to sign up for and no address to type in.
         </p>
         <p>
-          <strong>Away from home:</strong> away-from-home access arrives
-          with the secure relay — coming soon. When it lands, you&rsquo;ll
-          open the Droplet app, turn on <strong>Connect</strong>, and use
-          the same web address you use at home — no &ldquo;Not
+          <strong>Away from the office:</strong> away-from-office access
+          arrives with the secure relay — coming soon. When it lands,
+          you&rsquo;ll open the Droplet app, turn on <strong>Connect</strong>,
+          and use the same web address you use at the office — no &ldquo;Not
           secure&rdquo; warning.
         </p>
         <p>
           <strong>Nothing to configure:</strong> no dynamic-DNS account, no
-          subdomain or token, and no changes to your home router.
+          subdomain or token, and no changes to your office router.
         </p>
       </>
     ),
@@ -425,7 +425,7 @@ const SECTIONS: Section[] = [
         <p>
           <strong>Remote viewing:</strong> connect your phone to the
           Droplet&rsquo;s VPN (Remote Access page) — once connected, the
-          Cameras page works just like it does on your home Wi-Fi. The
+          Cameras page works just like it does on your office Wi-Fi. The
           actual camera IPs and RTSP URLs never leave the Droplet.
         </p>
       </>
@@ -501,12 +501,12 @@ const SECTIONS: Section[] = [
   },
   {
     anchor: "devices",
-    title: "Smart home devices",
+    title: "Smart devices",
     Icon: Cpu,
     body: (
       <>
         <p>
-          The Droplet speaks Matter — the smart-home protocol most new
+          The Droplet speaks Matter — the smart-device protocol most new
           devices support. Pair a Matter-compatible light / switch /
           sensor / thermostat and it appears on the Devices page.
         </p>

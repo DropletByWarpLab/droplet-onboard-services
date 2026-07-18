@@ -31,7 +31,7 @@ export default function Error({
         </h1>
         <p className="type-footnote text-label-tertiary mt-2">
           The dashboard hit an unexpected error. You can try again, reload the
-          page, or head back to the home screen.
+          page, or head back to the overview.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
@@ -54,7 +54,7 @@ export default function Error({
             Reload page
           </button>
           <a href="/" className="type-footnote text-accent hover:underline">
-            Go home
+            Go to overview
           </a>
         </div>
       </div>

@@ -62,7 +62,7 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
 
     // Current step is not a navigation button.
     expect(
-      screen.queryByRole("button", { name: "Go to Home Wi-Fi" }),
+      screen.queryByRole("button", { name: "Go to Wi-Fi" }),
     ).toBeNull();
     // Internet address (idx 6) is past the furthest-reached index → locked.
     expect(

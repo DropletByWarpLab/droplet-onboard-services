@@ -86,11 +86,11 @@ describe("Remote Access — honest away-from-home copy (WARP-993)", () => {
     await screen.findByText("casa.droplet-us.com");
 
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
-    expect(screen.queryAllByText(/home and away/i)).toHaveLength(0);
+    expect(screen.queryAllByText(/office and away/i)).toHaveLength(0);
     // The low-key forward-looking note is present.
     expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
     expect(screen.queryAllByText(/secure relay/i).length).toBeGreaterThan(0);
-    // The "Away from home" stat no longer instructs a dead-end Connect tap.
+    // The "Away from the office" stat no longer instructs a dead-end Connect tap.
     expect(
       screen.queryAllByText(/turn on connect in the app/i),
     ).toHaveLength(0);

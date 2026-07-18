@@ -442,11 +442,13 @@ Used by the Home tab's "Devices" KPI.
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/settings/workspace` | Bearer | `{ workspaceType: "home"\|"business" }` |
-| POST | `/settings/workspace` | Bearer (owner) | `{ workspaceType }` → `{ ok }` |
+| GET | `/settings/workspace` | Bearer | `{ workspaceType: "business" }` |
+| POST | `/settings/workspace` | Bearer (owner) | body `{ workspaceType: "business" }` → `{ workspaceType }` |
 
-This endpoint does not exist yet (Phase 4 of dashboard rehaul). Mobile
-defaults to "home" when the endpoint returns 404.
+WARP-1341: this is a **business-only** build. `workspaceType` is always
+`"business"` — GET never returns `"home"`, and a POST with `"home"` is a
+`400 invalid_body`. Missing-row default is `"business"`, so mobile can treat
+a 404 the same way.
 
 ## Error shape
 

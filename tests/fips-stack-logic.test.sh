@@ -198,6 +198,37 @@ else
   pass "the DROPLET_FIPS_REQUIRED:-true default is gone from the compose file"
 fi
 
+# --- 3b) device-identity-svc mount-ownership fix (WARP-1248) -----------------
+# The compose file bind-mounts /var/lib/droplet/tpm + /var/run/droplet into
+# device-identity-svc; on any host where a source dir doesn't pre-exist (every
+# fresh CI runner) dockerd auto-creates it root:root and the non-root sidecar
+# crash-loops on its first EK-cert write. The image entrypoint must fix the
+# mount ownership as root and then DROP privileges, and the harness must
+# assert the sidecar genuinely boots (the crash-loop was silent in green runs).
+DIS_ENTRYPOINT="$REPO_ROOT/services/device-identity-svc/entrypoint.sh"
+DIS_DOCKERFILE="$REPO_ROOT/services/device-identity-svc/Dockerfile"
+if [ -f "$DIS_ENTRYPOINT" ] \
+   && grep -q 'chown -R droplet:droplet' "$DIS_ENTRYPOINT" \
+   && grep -qE 'setpriv .*--reuid droplet' "$DIS_ENTRYPOINT"; then
+  pass "device-identity entrypoint chowns the bind mounts, then drops to droplet via setpriv"
+else
+  fail "device-identity entrypoint missing its chown-then-drop-privileges shape"
+fi
+if grep -qE '^ENTRYPOINT \["/entrypoint\.sh"\]' "$DIS_DOCKERFILE" \
+   && ! grep -qE '^USER ' "$DIS_DOCKERFILE"; then
+  pass "device-identity Dockerfile wires the entrypoint (no USER directive to bypass it)"
+else
+  fail "device-identity Dockerfile does not start via the ownership-fixing entrypoint"
+fi
+if [ -f "$HARNESS" ] \
+   && grep -q 'PermissionError' "$HARNESS" \
+   && grep -q 'test -S /var/run/droplet/device-identity.sock' "$HARNESS" \
+   && grep -q 'test -f /var/lib/droplet/tpm/provisioned.json' "$HARNESS"; then
+  pass "harness asserts device-identity-svc health (no PermissionError, provisioned, socket bound)"
+else
+  fail "harness lost the WARP-1248 device-identity-svc health assertions"
+fi
+
 # --- 4) CI wiring + operator docs -------------------------------------------
 TFY="$REPO_ROOT/.github/workflows/test-fips.yml"
 if grep -q 'tests/integration/fips-stack.test.sh' "$TFY" && grep -q 'fips-stack' "$TFY"; then

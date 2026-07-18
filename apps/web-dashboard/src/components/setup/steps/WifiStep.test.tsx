@@ -86,7 +86,7 @@ describe("WifiStep — optional / skippable (WARP-809)", () => {
     expect(pwInput()).toBeInTheDocument();
     // The reframe that stops implying box-as-router and offers coexistence.
     expect(
-      screen.getByText(/already on a home network\? skip this/i),
+      screen.getByText(/already on an office network\? skip this/i),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/your droplet always runs a local network/i),

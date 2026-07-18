@@ -1,3 +1,18 @@
+# Crypto-shred (WARP-232 device-level, WARP-242 per-document)
+
+Two granularities share the destroy-the-key principle:
+
+- **Per-document (WARP-242):** deleting a brain document (chat attachment)
+  destroys its per-document DEK alongside its rows and files, making the
+  document's chunk ciphertext unrecoverable — including from off-box restic
+  snapshots, because the wrapping doc-KEK keyfile
+  (`data/secrets/doc-kek.key`) is excluded from the backup set. Full design,
+  key hierarchy, and the on-box-restore caveat:
+  `docs/security/at-rest-encryption.md` §"Per-document chunk encryption".
+- **Device-level (WARP-232):** the whole-appliance decommission below. Note
+  step 4 (`factory-reset`) also removes `data/secrets/doc-kek.key`, which
+  independently orphans every per-document DEK.
+
 # Crypto-shred decommissioning (WARP-232)
 
 `scripts/host/droplet-crypto-shred.sh` decommissions an appliance by destroying

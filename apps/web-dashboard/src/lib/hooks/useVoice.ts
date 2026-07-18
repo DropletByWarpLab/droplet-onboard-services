@@ -80,12 +80,26 @@ export function useVoiceSurfaceData(): VoiceSurfaceData {
   // where the raw/pre-gain domain contract is regression-pinned (F1).
   const statusRef = useRef<VoiceStatusInfo | null>(null);
   statusRef.current = status ?? null;
+  const statusErrorRef = useRef<unknown>(null);
+  statusErrorRef.current = statusError ?? null;
   const calibrationRef = useRef<VoiceCalibrationInfo | null>(null);
   calibrationRef.current = calibration ?? null;
   const consecutiveRef = useRef(0);
   const [noiseSustained, setNoiseSustained] = useState(false);
   useEffect(() => {
     const timer = setInterval(() => {
+      // WARP-1060 (R2 from the WARP-1055 review): the latch reads SWR's
+      // LAST payload — when polling is paused (hidden tab: SWR's
+      // refreshWhenHidden=false; voice-io outage: statusError set while
+      // the stale data is retained) a tick would re-count the same
+      // frozen sample and could pre-latch the drift banner. Freeze the
+      // count until fresh polls resume.
+      if (
+        statusErrorRef.current != null ||
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
       const next = nextNoiseCount(
         consecutiveRef.current,
         statusRef.current,

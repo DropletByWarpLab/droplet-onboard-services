@@ -332,7 +332,7 @@ describe("setup VPN step (WARP-174)", () => {
 
     // … but the customer wanders off via the rail instead (flag must clear) …
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Go to Home Wi-Fi" }));
+      fireEvent.click(screen.getByRole("button", { name: "Go to Wi-Fi" }));
     });
     await act(async () => {
       fireEvent.click(

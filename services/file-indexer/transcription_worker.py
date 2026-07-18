@@ -118,6 +118,17 @@ def _dispatch_and_index(item: dict) -> None:
             f"embedding count mismatch: {len(vectors)} vs {len(prefixed_chunks)}"
         )
 
+    # WARP-242: mint (or fetch) the item's per-document DEK — the transcript
+    # chunks are encrypted at rest exactly like the document path
+    # (brain_ingest). Raises when the doc-KEK keyfile is missing; run_one's
+    # catch-all transitions the row to 'failed' (fail closed — never index
+    # transcript plaintext).
+    import column_crypto
+    import doc_keys
+
+    key_id = f"brain:{item_id}"
+    dek = doc_keys.get_or_create_dek(key_id)
+
     # Wipe any stale chunks for this item, then upsert fresh ones. Mirrors
     # brain_ingest's idempotency pattern. WARP-435: persist the prefixed
     # text so the lexical arm + LLM citation surface see the section
@@ -145,12 +156,15 @@ def _dispatch_and_index(item: dict) -> None:
             nc_file_id=_synthetic_nc_file_id(item_id),
             path=storage_path,
             chunk_idx=idx,
-            text=prefixed_text,
+            # WARP-242: dcv1 ciphertext of the prefixed transcript chunk;
+            # the orchestrator/mcp-server decrypt on read.
+            text=column_crypto.encrypt_text(dek, prefixed_text, aad=key_id),
             embedding=vec,
             source="brain",
             brain_item_id=item_id,
             warnings=warnings,
             metadata=chunk_metadata,
+            sensitivity="sensitive",
         )
 
 
