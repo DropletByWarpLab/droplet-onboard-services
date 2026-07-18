@@ -881,12 +881,16 @@ export interface PoolCommandToken {
   expiresIn?: number;
 }
 
-/** Step 1: create a pool — returns a confirm token (does NOT create yet). */
+/** Step 1: create a pool — returns a confirm token (does NOT create yet).
+ *  WARP-1337: `displayName` optionally names the pool at birth — on the
+ *  confirmed create the orchestrator seeds the StoragePool row with it, so
+ *  the pool never shows up as a bare md device / GUID mount. */
 export async function requestCreatePool(input: {
   device: string;
   level: PoolInfo["level"];
   members: string[];
   confirmPhrase: string;
+  displayName?: string;
 }): Promise<PoolCommandToken> {
   const res = await authFetch(`${BASE}/api/storage/pools`, {
     method: "POST",

@@ -4,6 +4,10 @@ import { HardDrive } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { Meter } from "@/components/shell/primitives";
 import type { DriveInfo } from "@/lib/types";
+// WARP-1337: ONE shared display-name chain (displayName → label → GUID-guarded
+// mount tail) — this panel used to skip `displayName` entirely and rendered a
+// pool's raw fs-UUID mount tail as the tile title.
+import { driveDisplayName, isPoolBackedDevice } from "./drive-display";
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
@@ -11,17 +15,6 @@ function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   const value = bytes / Math.pow(1024, i);
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
-}
-
-// Customer-facing name: prefer the filesystem label, fall back to the mount
-// point's last segment so a customer sees "Cameras" or "Cloud Storage" — never
-// /dev/nvme0n1p1. If neither is usable, show a generic "Drive" rather than the
-// raw device path, since the target user is non-technical.
-function displayName(d: DriveInfo): string {
-  const fromMount = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const raw = (d.label || fromMount).replace(/[-_]+/g, " ").trim();
-  if (!raw) return "Drive";
-  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
 function pct(d: DriveInfo): number {
@@ -66,7 +59,7 @@ export function VolumesPanel() {
     >
       {drives.map((d) => {
         const p = pct(d);
-        const name = displayName(d);
+        const name = driveDisplayName(d, { poolBacked: isPoolBackedDevice(d.device) });
         return (
           <div key={d.mount || d.device} role="listitem" className="card">
             <div className="card-h">
