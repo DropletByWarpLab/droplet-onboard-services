@@ -454,6 +454,53 @@ describe("VoiceSurface processor restart (WARP-1057, §7.3)", () => {
   });
 });
 
+describe("VoiceSurface buttons use the indigo shell idiom (WARP-1345)", () => {
+  // The /voice surface renders inside ShellPage's `.droplet-shell` scope, so
+  // its buttons must use the shell `btn` classes — never the legacy
+  // `dp-btn-*` + `type-*` utilities (the shell class supplies sizing).
+
+  it("calibrated hero: Recalibrate is a quiet shell secondary", () => {
+    const { container } = renderSurface();
+    const recal = screen.getByRole("button", { name: "Recalibrate" });
+    expect(recal).toHaveClass("btn", "ghost");
+    expect(recal).not.toHaveClass("sm");
+    expect(recal.className).not.toMatch(/dp-btn|type-/);
+    expect(container.innerHTML).not.toContain("dp-btn");
+  });
+
+  it("first-run hero: Set up microphone is a shell primary", () => {
+    renderSurface({
+      calibration: { calibrated: false },
+      status: status({ last_wake_at: null, last_response_at: null }),
+    });
+    const cta = screen.getByRole("button", { name: "Set up microphone" });
+    expect(cta).toHaveClass("btn", "primary");
+    expect(cta).not.toHaveClass("sm");
+    expect(cta.className).not.toMatch(/dp-btn|type-/);
+  });
+
+  it("drift hero: Fix it is a shell primary; the banner action is compact", () => {
+    renderSurface({ noiseSustained: true });
+    const fixIt = screen.getByRole("button", { name: "Fix it" });
+    expect(fixIt).toHaveClass("btn", "primary");
+    expect(fixIt).not.toHaveClass("sm");
+    // The inline banner CTA stays a step below the hero CTA — `sm` variant,
+    // no hand-rolled `!min-h`/`!py` overrides.
+    const bannerRecal = screen.getByRole("button", { name: "Recalibrate" });
+    expect(bannerRecal).toHaveClass("btn", "primary", "sm");
+    expect(bannerRecal.className).not.toMatch(/dp-btn|type-|min-h|py-/);
+  });
+
+  it("no-mic hero: Check again is a shell primary", () => {
+    renderSurface({
+      status: status({ state: "no_mic", listening: false, last_wake_at: null }),
+    });
+    const check = screen.getByRole("button", { name: "Check again" });
+    expect(check).toHaveClass("btn", "primary");
+    expect(check.className).not.toMatch(/dp-btn|type-/);
+  });
+});
+
 describe("VoiceSurface wizard entry + cancel safety (§7.4)", () => {
   it("Recalibrate opens Flow A; Escape closes it, writes nothing, toasts", async () => {
     renderSurface();
