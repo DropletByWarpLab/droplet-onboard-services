@@ -64,6 +64,10 @@ async function main() {
     wifiPsk: config.DROPLET_MATTER_WIFI_PSK,
     wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
     regulatoryCountryCode: config.DROPLET_MATTER_REGULATORY_COUNTRY,
+    // Discovery must know which transports exist: without this the core
+    // omits discoveryCapabilities and matter.js scans mDNS only, so a
+    // freshly-reset BLE-first device is never found.
+    bleCommissioning: capabilities.bleCommissioning,
   });
 
   // Step 3 — controller init, non-fatal (matches the orchestrator's

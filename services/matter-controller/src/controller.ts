@@ -146,6 +146,14 @@ export interface MatterControllerCoreOptions {
   wifiPskFile?: string;
   /** ISO-3166 alpha-2 regulatory domain; defaults to "XX" (unspecified). */
   regulatoryCountryCode?: string;
+  /**
+   * Whether the BLE transport was registered at process start (ble.ts).
+   * Manual pairing codes carry no discovery-capability bits, and
+   * matter.js defaults to mDNS-only when `discoveryCapabilities` is
+   * absent — so without this flag the BLE scanner never runs and a
+   * freshly-reset BLE-first device can never be discovered.
+   */
+  bleCommissioning?: boolean;
   /** Test seam — defaults to constructing the real matter.js controller. */
   createController?: () => ControllerLike;
 }
@@ -549,6 +557,16 @@ export function createMatterControllerCore(
         );
       }
 
+      // Scan every transport we actually have: pairing codes carry no
+      // discovery-capability bits (and we deliberately ignore the QR's —
+      // scanning a superset is harmless, matter.js uses whichever scanner
+      // finds the device first). Omitting this made discovery mDNS-only,
+      // which is exactly the retail BLE-first case WARP-895 exists for.
+      const discoveryCapabilities = {
+        onIpNetwork: true,
+        ...(options.bleCommissioning ? { ble: true } : {}),
+      };
+
       let commissioningOptions: NodeCommissioningOptions;
 
       if (trimmed.startsWith("MT:")) {
@@ -560,6 +578,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { longDiscriminator: qr.discriminator },
+            discoveryCapabilities,
           },
           passcode: qr.passcode,
         };
@@ -570,6 +589,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { shortDiscriminator: manual.shortDiscriminator },
+            discoveryCapabilities,
           },
           passcode: manual.passcode,
         };

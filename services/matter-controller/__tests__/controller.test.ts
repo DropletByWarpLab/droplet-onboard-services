@@ -275,6 +275,54 @@ describe("createMatterControllerCore", () => {
     });
   });
 
+  // WARP-1362: without discoveryCapabilities matter.js runs the mDNS scanner
+  // ONLY — the BLE scanner never starts even with the transport registered,
+  // so a freshly-reset BLE-first device is undiscoverable by pairing code
+  // (proven live on .87: "1 scanners" vs "2 scanners" in PeerCommissioner).
+  describe("discovery capabilities (WARP-1362)", () => {
+    function coreWithBle(ctl: ControllerLike): MatterControllerCore {
+      return createMatterControllerCore({
+        storagePath: ".data/matter-controller-test",
+        adminFabricLabel: "Droplet Test",
+        createController: () => ctl,
+        bleCommissioning: true,
+      });
+    }
+
+    function optionsOf(ctl: ControllerLike) {
+      return (ctl.commissionNode as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("always scans the IP network, and NOT BLE when the transport is absent", async () => {
+      await core.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(controller).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+      });
+    });
+
+    it("adds the BLE scanner for a manual pairing code when BLE is registered", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
+    });
+
+    it("adds the BLE scanner for a QR pairing code too (the QR bits are deliberately superseded)", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
+    });
+  });
+
   describe("decommission", () => {
     it("prefers the graceful node.decommission()", async () => {
       const node = fakeNode();
