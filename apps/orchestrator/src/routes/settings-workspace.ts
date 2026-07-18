@@ -23,12 +23,12 @@
  *     trail. Idempotent — re-posting "business" is a no-op 200,
  *     not a 400.
  *
- * Phase 4b (separate PR off the wizard branch) adds a wizard step
- * that calls POST once at first-run. This route is the orchestrator
- * half; the dashboard half lives in
- * `apps/web-dashboard/src/lib/workspace.tsx` which hydrates from GET
- * and falls back to localStorage on 404 (so Docker-dev stacks
- * without this route still work).
+ * The setup wizard's org step calls POST once at first-run to pin the
+ * singleton to BUSINESS. This route is the orchestrator half; the
+ * dashboard half in `apps/web-dashboard/src/lib/workspace.tsx` is now a
+ * static business-only context (WARP-1341) — it no longer hydrates the
+ * type from GET or falls back to localStorage. GET/POST here remain the
+ * audit + display-name surface (the chrome pill reads `displayName`).
  */
 
 import { Router, type Request } from "express";
