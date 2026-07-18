@@ -51,6 +51,7 @@ import {
 // and VolumesPanel alike — the private per-panel copies drifted (VolumesPanel's
 // never consulted displayName and rendered raw fs-UUID tails).
 import {
+  driveContentsHref,
   driveDisplayName,
   drivePoolName,
   isPoolBackedDevice,
@@ -86,17 +87,9 @@ function poolName(pool: PoolInfo): string {
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
-// WARP-827: the auto-mounter registers each drive as a Nextcloud external
-// storage mount at `/<mount-tail>` (services/automount/droplet-automount.sh →
-// `files_external:create "/$NAME"`), where the tail equals the host mount's
-// last path segment. So the drive's contents are browsable in the existing
-// Nextcloud-backed file browser at that path — we deep-link there (reuse, no
-// new endpoint). The FilesPage reads `?path=` on mount.
-function driveContentsHref(d: DriveInfo): string {
-  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const ncPath = `/${tail}`;
-  return `/files?path=${encodeURIComponent(ncPath)}`;
-}
+// WARP-1338: driveContentsHref moved to the shared drive-display helper —
+// VolumesPanel tiles deep-link to the same target now, and a private copy
+// here would let the two surfaces drift.
 
 // Customer-chosen drive names are 1–64 chars, trimmed, non-empty — mirrors the
 // orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
@@ -950,7 +943,10 @@ function DriveCard({
   }
 
   return (
-    <div role="listitem" className="card">
+    // `relative` anchors the stretched title-link overlay (WARP-1338): the
+    // whole card is the click target, while later-in-DOM positioned controls
+    // (the Rename button) stack above it and stay functional.
+    <div role="listitem" className="card relative">
       <div className="flex items-start gap-3">
         <IconTile>
           <BusIcon bus={d.bus} className="h-5 w-5" />
@@ -1012,6 +1008,12 @@ function DriveCard({
                 style={{ borderRadius: "var(--radius-input)" }}
                 aria-label={`Open ${name}`}
               >
+                {/* WARP-1338: stretched link — this overlay spans the whole
+                    (relative) card, widening the click target without adding
+                    a second tab stop or nesting controls inside the anchor.
+                    The Rename button below is positioned later in the DOM,
+                    so it stacks above and stays clickable. */}
+                <span className="absolute inset-0" aria-hidden="true" />
                 <h3
                   className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                   style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
@@ -1035,7 +1037,9 @@ function DriveCard({
                   ref={renameBtnRef}
                   onClick={beginEdit}
                   aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
+                  // `relative` lifts the control above the stretched title
+                  // link's inset overlay (WARP-1338) so Rename stays clickable.
+                  className="relative flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
                   style={{
                     borderRadius: "var(--radius-input)",
                     color: "var(--text-muted)",
@@ -1093,7 +1097,12 @@ function DriveCard({
           <button
             onClick={onEject}
             disabled={ejecting}
-            className="btn ghost sm disabled:opacity-60"
+            // `relative` lifts the control above the stretched title link's
+            // inset overlay (WARP-1338) — same treatment as Rename. Without
+            // it the positioned overlay paints over this static button and
+            // clicking Eject silently navigates to /files instead (UX
+            // review finding).
+            className="relative btn ghost sm disabled:opacity-60"
           >
             {ejecting ? "Ejecting…" : "Eject"}
           </button>

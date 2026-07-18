@@ -159,6 +159,52 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
       expect.stringContaining("/files?path=%2Fphotos-ab12cd34"),
     );
   });
+
+  // WARP-1338 (c): the whole card is the click target — the title link
+  // carries an absolutely-positioned overlay spanning the (relative) card —
+  // while the rename control stays functional ABOVE it. Never a button
+  // nested inside an anchor.
+  it("stretches the drive link across the whole card (WARP-1338)", () => {
+    setup({ drives: [makeDrive()] });
+    const link = screen.getByRole("link", { name: /open/i });
+    const overlay = link.querySelector('[aria-hidden="true"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay!.className).toMatch(/absolute/);
+    expect(overlay!.className).toMatch(/inset-0/);
+    expect(document.querySelector("a button")).toBeNull();
+  });
+
+  it("keeps the Rename control clickable above the stretched link (WARP-1338)", () => {
+    setup({ drives: [makeDrive()] });
+    fireEvent.click(screen.getByRole("button", { name: /rename/i }));
+    expect(screen.getByLabelText("Drive name")).toBeInTheDocument();
+  });
+
+  // UX review (WARP-1338): the inset-0 overlay is POSITIONED, so it paints
+  // above every static-positioned sibling in the card — a control without its
+  // own positioned class is silently occluded: mouse/touch clicks navigate to
+  // /files instead of firing the control (exactly how Eject broke; keyboard
+  // still reached it, making the modalities inconsistent). jsdom can't
+  // hit-test, and fireEvent.click bypasses occlusion — so assert the
+  // practical proxy: EVERY interactive control inside a card carrying the
+  // overlay must have a positioned class lifting it above the overlay.
+  it("positions every control in the card above the stretched overlay (WARP-1338 UX review)", () => {
+    // makeDrive() defaults are removable+mounted, so Eject renders too.
+    setup({ drives: [makeDrive()] });
+    const overlay = document.querySelector('a [aria-hidden="true"].absolute');
+    expect(overlay).not.toBeNull();
+    const card = overlay!.closest('[role="listitem"]');
+    expect(card).not.toBeNull();
+    const controls = Array.from(card!.querySelectorAll("button"));
+    expect(controls.length).toBeGreaterThanOrEqual(2); // Rename + Eject
+    for (const control of controls) {
+      expect(control.className).toMatch(/(?:^|\s)relative(?:\s|$)/);
+    }
+    // And Eject by name — the control the UX review caught occluded.
+    expect(screen.getByRole("button", { name: /eject/i }).className).toMatch(
+      /(?:^|\s)relative(?:\s|$)/,
+    );
+  });
 });
 
 describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {

@@ -6,6 +6,10 @@
 # Called as:
 #   droplet-automount.sh add    /dev/sda1
 #   droplet-automount.sh remove /dev/sda1
+#   droplet-automount.sh reconcile          (WARP-1338 — oneshot, boot-time:
+#                                            register already-mounted
+#                                            /mnt/droplet/* paths with
+#                                            Nextcloud; mounts nothing new)
 #
 # Mount point convention: /mnt/droplet/<label>-<short-uuid> (human-friendly
 # but unambiguous). State file at /var/lib/droplet-automount/mounts.json
@@ -30,8 +34,11 @@ USB_ENROLL="${DROPLET_AUTOMOUNT_USB_ENROLL:-/usr/local/sbin/droplet-usb-enroll.s
 SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
 CRYPTSETUP="${DROPLET_CRYPTSETUP_BIN:-cryptsetup}"
 
-NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-docker-nextcloud-1}"
-NEXTCLOUD_USER="${NEXTCLOUD_USER:-admin}"
+# WARP-1338: the shipping compose project is `droplet`, so the container is
+# droplet-nextcloud-1 (the old docker-nextcloud-1 default never matched a
+# live box). Provisioning still pins it via /etc/droplet/automount.env, which
+# the root units load with EnvironmentFile=.
+NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-droplet-nextcloud-1}"
 BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:9090}"
 # The device-bridge requires its shared token on /drives/changed (it gates the
 # mutating routes). Read it from the same env file the bridge itself reads
@@ -57,10 +64,14 @@ chmod 755 "$MOUNT_BASE"
 
 log() { printf "%s [%s] %s\n" "$(date -Iseconds)" "$ACTION" "$*" >> "$LOG_FILE"; }
 
-if [ -z "$ACTION" ] || [ -z "$DEVICE" ]; then
-  log "usage: $0 add|remove /dev/sdX1"
+if [ -z "$ACTION" ] || { [ "$ACTION" != "reconcile" ] && [ -z "$DEVICE" ]; }; then
+  log "usage: $0 add|remove /dev/sdX1 | reconcile"
   exit 1
 fi
+
+# The per-device guards below only make sense for udev add/remove events;
+# `reconcile` carries no device (it walks the already-mounted paths).
+if [ "$ACTION" != "reconcile" ]; then
 
 # Never touch the boot medium. The inference host boots from eMMC
 # (/dev/mmcblk*) so that's an absolute skip. NVMe is user-modular
@@ -96,6 +107,8 @@ if [ -n "$size_bytes" ] && [ "$size_bytes" -lt 104857600 ] 2>/dev/null; then
   log "skip $DEVICE (size ${size_bytes}B < 100 MiB — not a storage volume)"
   exit 0
 fi
+
+fi # per-device guards (add/remove only)
 
 notify_bridge() {
   # Non-blocking notify. The bridge caches drive state itself via
@@ -178,23 +191,25 @@ nextcloud_add() {
     log "failed to enable files_external; is nextcloud running?"
     return 1
   fi
-  if nc_occ files_external:list --output=json 2>/dev/null \
-      | grep -q "\"datadir\":\"\\\\?/host/$name\""; then
+  # WARP-1338: occ's json escapes slashes ("\/host\/x"); the old pattern
+  # (`\\?/host/...`) matched a literal `\?` — i.e. NOTHING, in either output
+  # shape — so every re-run created a DUPLICATE external mount. Normalize the
+  # escaping away, then fixed-string match (the boot reconcile re-runs this
+  # on every boot, so the idempotency check must actually work).
+  if nc_occ files_external:list --output=json 2>/dev/null | tr -d '\\' \
+      | grep -qF "\"datadir\":\"/host/$name\""; then
     log "nextcloud: already registered $name"
     return 0
   fi
   local rc
+  # WARP-1338: NO files_external:applicable scoping. Browsing acts as each
+  # user's OWN Nextcloud account (orchestrator files.ts), so the old
+  # `--add-user=admin` scoping made every registration invisible to the whole
+  # household except the bootstrap admin. An unscoped external mount is
+  # visible to every user — exactly the household-wide posture we want.
   rc=$(nc_occ files_external:create \
         "/$name" local null::null -c datadir="/host/$name" 2>&1) || true
   log "nextcloud create: $rc"
-  local mid
-  # PYNET-018: only extract the id from occ's actual success line ("... created
-  # with id N"), not the first number in an arbitrary error/warning ("config.php: 33").
-  mid=$(echo "$rc" | grep -oiE 'created with id [0-9]+' | grep -oE '[0-9]+' | head -1)
-  if [ -n "$mid" ]; then
-    nc_occ files_external:applicable \
-      --add-user="$NEXTCLOUD_USER" "$mid" >/dev/null 2>&1 || true
-  fi
 }
 
 nextcloud_remove() {
@@ -350,12 +365,25 @@ case "$ACTION" in
     # "encrypt" / "trust"). Enrolled drives keep TRUST=enrolled.
     if [ "$TRUST" != "enrolled" ]; then
       TRUSTED_LIST="${STATE_DIR}/trusted.list"
-      if [ -n "${UUID:-}" ] && [ -f "$TRUSTED_LIST" ] \
-         && grep -qxF "$UUID" "$TRUSTED_LIST" 2>/dev/null; then
-        TRUST="trusted"
-      else
-        TRUST="untrusted-ro"
-      fi
+      case "$BACKING_DEVICE" in
+        /dev/md*)
+          # WARP-1338: an md-array filesystem is owner-created via the
+          # confirm-gated pool flow (droplet-storage-pool.sh) — it is not
+          # hot-pluggable media, so the supply-chain trust list doesn't
+          # apply. Mount rw so the pool doesn't silently flip read-only on
+          # reboot (the pool script also seeds trusted.list at format time;
+          # this covers pools created before that).
+          TRUST="trusted"
+          ;;
+        *)
+          if [ -n "${UUID:-}" ] && [ -f "$TRUSTED_LIST" ] \
+             && grep -qxF "$UUID" "$TRUSTED_LIST" 2>/dev/null; then
+            TRUST="trusted"
+          else
+            TRUST="untrusted-ro"
+          fi
+          ;;
+      esac
     fi
     # rw for enrolled/trusted drives, ro for untrusted ones.
     if [ "$TRUST" = "untrusted-ro" ]; then
@@ -414,7 +442,15 @@ case "$ACTION" in
     # separately (to close on remove). WARP-232 finding 7.
     state_add "$BACKING_DEVICE" "$MOUNT" "$LABEL" "${UUID:-}" "$TRUST" "$MAPPER_DEVICE"
     if [ "$NEXTCLOUD_AUTO_REGISTER" = "1" ]; then
-      nextcloud_add "$MOUNT" "$NAME" || log "nextcloud registration skipped"
+      if [ "$TRUST" = "untrusted-ro" ]; then
+        # WARP-1338 trust gate: never expose an untrusted hot-plugged stick
+        # to Nextcloud — auto-registering unknown media is the supply-chain
+        # vector the opt-in exists for (see NEXTCLOUD_AUTO_REGISTER above).
+        # Enrolled/trusted drives and md-pool mounts register normally.
+        log "nextcloud registration skipped for untrusted drive $NAME"
+      else
+        nextcloud_add "$MOUNT" "$NAME" || log "nextcloud registration skipped"
+      fi
     else
       log "nextcloud auto-register disabled (set NEXTCLOUD_AUTO_REGISTER=1 to enable)"
     fi
@@ -453,6 +489,120 @@ case "$ACTION" in
       fi
     done < <(state_remove "$DEVICE")
     notify_bridge remove "$DEVICE" ""
+    ;;
+
+  reconcile)
+    # WARP-1338 — one-shot boot/upgrade reconcile, run by
+    # droplet-automount-reconcile.service (oneshot, after docker): register
+    # every ELIGIBLE already-mounted /mnt/droplet/* path with Nextcloud.
+    # Pool mounts are created by droplet-storage-pool.sh (not this script),
+    # and mounts on a fleet-upgraded box predate registration entirely —
+    # this converges them WITHOUT mounting anything new (so it is not the
+    # install-time drive sweep the installer deliberately avoids).
+    # Idempotent: nextcloud_add short-circuits on an existing registration.
+    # Eligibility mirrors the add-path trust gate: md-pool filesystems
+    # (owner-created via the confirm-gated pool flow), enrolled LUKS mappers,
+    # and trusted.list'd plain drives — never an untrusted hot-plugged stick.
+    #
+    # WARP-1338 review — trust-list convergence for legacy md pools. The
+    # add-path blanket-trusts /dev/md* only to cover pools created BEFORE
+    # pool_format started seeding trusted.list; that blanket rule is itself
+    # a residual supply-chain gap (mdadm's incremental-assembly udev rules
+    # will auto-assemble a hot-plugged disk carrying a crafted md
+    # superblock, and md nodes match the automount rule — WARP-936). Seed
+    # trusted.list from every mounted md source here so live boxes converge
+    # onto explicit membership — the prerequisite for a follow-up that
+    # tightens md trust to trusted.list/pool-state and drops the blanket
+    # rule. Runs BEFORE the Nextcloud opt-in gate below: trust is a
+    # mount-time property, not a registration one. Grep-guarded append —
+    # idempotent across boots — and best-effort (never a failed unit).
+    for m in "$MOUNT_BASE"/*; do
+      [ -d "$m" ] || continue
+      mountpoint -q "$m" || continue
+      src="$(findmnt -n -o SOURCE "$m" 2>/dev/null | head -1 || true)"
+      case "$src" in
+        /dev/md*)
+          md_uuid="$(blkid -o value -s UUID "$src" 2>/dev/null | head -1 || true)"
+          md_uuid="${md_uuid//$'\n'/}"
+          if [ -n "$md_uuid" ] \
+             && ! grep -qxF "$md_uuid" "${STATE_DIR}/trusted.list" 2>/dev/null; then
+            printf '%s\n' "$md_uuid" >> "${STATE_DIR}/trusted.list" 2>/dev/null \
+              && log "reconcile: seeded trusted.list with md-pool uuid $md_uuid" \
+              || true
+          fi
+          ;;
+      esac
+    done
+    if [ "$NEXTCLOUD_AUTO_REGISTER" != "1" ]; then
+      log "reconcile: nextcloud auto-register disabled (set NEXTCLOUD_AUTO_REGISTER=1 in /etc/droplet/automount.env)"
+      exit 0
+    fi
+    # Wait out the Nextcloud container on boot: docker.service being up does
+    # not mean the container answers occ yet. Bounded, never a failed unit —
+    # the next boot (or the next udev add) retries.
+    nc_tries="${DROPLET_NC_WAIT_TRIES:-30}"
+    nc_interval="${DROPLET_NC_WAIT_INTERVAL:-10}"
+    nc_i=0
+    until nc_occ status >/dev/null 2>&1; do
+      nc_i=$((nc_i + 1))
+      if [ "$nc_i" -ge "$nc_tries" ]; then
+        log "reconcile: nextcloud ($NEXTCLOUD_CONTAINER) not answering after ${nc_tries} attempts — giving up until the next boot"
+        exit 0
+      fi
+      sleep "$nc_interval"
+    done
+    for m in "$MOUNT_BASE"/*; do
+      [ -d "$m" ] || continue
+      mountpoint -q "$m" || continue
+      src="$(findmnt -n -o SOURCE "$m" 2>/dev/null | head -1 || true)"
+      [ -n "$src" ] || continue
+      name="$(basename "$m")"
+      eligible=0
+      case "$src" in
+        /dev/md*) eligible=1 ;;                    # md-pool mount (owner-created)
+        /dev/mapper/droplet-usb-*) eligible=1 ;;   # droplet-enrolled LUKS
+        *)
+          uuid="$(blkid -o value -s UUID "$src" 2>/dev/null | head -1 || true)"
+          uuid="${uuid//$'\n'/}"
+          if [ -n "$uuid" ] \
+             && grep -qxF "$uuid" "${STATE_DIR}/trusted.list" 2>/dev/null; then
+            eligible=1
+          fi
+          ;;
+      esac
+      if [ "$eligible" = 1 ]; then
+        nextcloud_add "$m" "$name" \
+          || log "reconcile: nextcloud registration failed for $name"
+      else
+        log "reconcile: skip untrusted mount $name"
+      fi
+    done
+    # WARP-1338 review — prune dangling /host/<tail> registrations. The udev
+    # remove path deregisters only on a LIVE remove event, so a drive
+    # unplugged while the box was off — or a legacy pool renamed to the
+    # automount <label>-<short-uuid> derivation on its first post-upgrade
+    # boot — leaves an unscoped external mount whose datadir no longer
+    # exists: a dead GUID-named folder in every user's Files root. An
+    # unmounted tail is exactly the state the remove handler would have
+    # deregistered, so pruning it here preserves the deregister-on-remove
+    # invariant. Only OUR /host/-datadir entries are considered; any other
+    # files_external storage is left alone. Runs after the register loop so
+    # a renamed pool converges in one pass (new tail registered above, old
+    # tail pruned here). occ's json escapes slashes — normalize before the
+    # match, same as nextcloud_add's idempotency check.
+    { nc_occ files_external:list --output=json 2>/dev/null | tr -d '\\' \
+        | grep -oE '"datadir":"/host/[^"]+"' || true; } \
+      | while IFS= read -r dd; do
+          tail="${dd#*\"datadir\":\"/host/}"
+          tail="${tail%\"}"
+          [ -n "$tail" ] || continue
+          case "$tail" in */*) continue ;; esac   # defensive: never nested
+          if mountpoint -q "$MOUNT_BASE/$tail"; then
+            continue
+          fi
+          log "reconcile: pruning dangling registration $tail (no longer mounted)"
+          nextcloud_remove "$tail" || true
+        done
     ;;
 
   *)

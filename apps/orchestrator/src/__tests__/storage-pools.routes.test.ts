@@ -380,6 +380,43 @@ describe("destructive pool routes — no execution without a valid confirm token
   });
 });
 
+// WARP-1338 review — pool_format's fstype must be pinned to the SAME
+// allow-list adopt/reclaim already use (ext4/xfs/btrfs — every mkfs there
+// accepts `-L`). The old shape-only regex (/^[a-z0-9]{1,12}$/) admitted
+// fstypes whose mkfs doesn't take -L (vfat uses -n), and pool_format now
+// unconditionally runs `mkfs.$FSTYPE -L pool` — so a loose fstype that used
+// to format would now fail the op on the host. Reject at the edge instead.
+describe("POST /api/storage/pools/:device/format — pinned fstype allow-list", () => {
+  it("accepts the pinned fstypes (and an omitted fstype, defaulting downstream)", async () => {
+    for (const good of [undefined, "ext4", "xfs", "btrfs"]) {
+      const prisma = createPrismaMock();
+      const app = makeApp(prisma, bridgePoolsResponse([]));
+      const res = await request(app)
+        .post("/api/storage/pools/md0/format")
+        .send({ ...(good ? { fstype: good } : {}), confirmPhrase: "ERASE md0" });
+      expect(res.status, `fstype=${good}`).toBe(202);
+      expect(res.body.confirmationToken).toBeTruthy();
+    }
+  });
+
+  it("rejects a shape-valid fstype whose mkfs cannot -L (vfat et al) and never mints a token", async () => {
+    for (const bad of ["vfat", "exfat", "f2fs", "ntfs", "EXT4", "ext4; rm -rf /"]) {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const res = await request(app)
+        .post("/api/storage/pools/md0/format")
+        .send({ fstype: bad, confirmPhrase: "ERASE md0" });
+      expect(res.status, `fstype=${bad}`).toBe(400);
+      expect(res.body.confirmationToken).toBeUndefined();
+      const hit = (bridge as any).mock.calls.some((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      expect(hit).toBe(false);
+    }
+  });
+});
+
 // WARP-1337 — POST /api/storage/pools accepts an optional customer-facing
 // displayName. Zod-validated BEFORE any prisma call (pre-DB gate); carried in
 // the confirm-token params (never forwarded to the bridge — the host script

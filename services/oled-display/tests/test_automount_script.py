@@ -47,11 +47,15 @@ def _posix(p: Path) -> str:
 
 _STUBS = {
     # blkid answers from $STUB_FS_TYPE so each test picks the signature.
+    # WARP-1338: $STUB_FS_LABEL (optional) supplies a label, so the md-pool
+    # tests can model droplet-storage-pool.sh's `mkfs -L pool` output.
     "blkid": r"""
 printf 'blkid %s\n' "$*" >> "$CMD_LOG"
 case " $* " in
   *" -s TYPE "*) [ -n "${STUB_FS_TYPE:-}" ] && printf '%s\n' "$STUB_FS_TYPE"; exit 0 ;;
-  *" -s LABEL "*) exit 2 ;;
+  *" -s LABEL "*)
+    if [ -n "${STUB_FS_LABEL:-}" ]; then printf '%s\n' "$STUB_FS_LABEL"; exit 0; fi
+    exit 2 ;;
   *" -s UUID "*) printf 'cafef00d-9360\n'; exit 0 ;;
 esac
 exit 0
@@ -82,7 +86,11 @@ exit 1
 """,
     "mountpoint": "printf 'mountpoint %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n",
 }
-for _tool in ("mount", "umount", "chown", "curl", "docker"):
+for _tool in ("mount", "umount", "chown", "curl", "docker", "flock"):
+    # `flock` guards the mounts.json read-modify-write (PYNET-009). Git-Bash
+    # on a Windows dev host ships no flock binary, which 127'd every state_add
+    # path; these hermetic tests are single-process, so a no-op stub is a
+    # faithful stand-in on every host (Linux CI included).
     _STUBS[_tool] = (
         "printf '%s %%s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 0\n" % _tool
     )
@@ -115,10 +123,14 @@ exit 0
 """
 
 
-def _run_add(device: str, fs_type: str, tmp_path: Path, extra_env: dict | None = None):
+def _run_add(device: str, fs_type: str, tmp_path: Path, extra_env: dict | None = None,
+             stub_overrides: dict | None = None):
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir(exist_ok=True)
-    for name, body in _STUBS.items():
+    stubs = dict(_STUBS)
+    if stub_overrides:
+        stubs.update(stub_overrides)
+    for name, body in stubs.items():
         stub = stub_dir / name
         stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
                         encoding="utf-8", newline="\n")
@@ -139,6 +151,12 @@ def _run_add(device: str, fs_type: str, tmp_path: Path, extra_env: dict | None =
     script_log = tmp_path / "automount.log"
     env = dict(os.environ)
     env.update({
+        # Git-Bash (MSYS) rewrites POSIX-looking args (/dev/sdz1 ->
+        # C:/Program Files/Git/dev/sdz1) when bash crosses into the NATIVE
+        # python the stub execs, corrupting the device recorded in
+        # mounts.json. Disable the conversion for these hermetic runs; the
+        # var is ignored everywhere but Windows.
+        "MSYS2_ARG_CONV_EXCL": "*",
         "CMD_LOG": _posix(log),
         "STUB_FS_TYPE": fs_type,
         "DROPLET_AUTOMOUNT_BASE": _posix(base),
@@ -252,6 +270,7 @@ class TestLuksAutomount:
         log.write_text("", encoding="utf-8")
         env = dict(os.environ)
         env.update({
+            "MSYS2_ARG_CONV_EXCL": "*",  # see _run_add
             "CMD_LOG": _posix(log),
             "DROPLET_AUTOMOUNT_BASE": _posix(tmp_path / "mnt"),
             "DROPLET_AUTOMOUNT_STATE_DIR": _posix(state_dir),
@@ -419,3 +438,407 @@ class TestTrustedListSeeding:
                        text=True, timeout=60)
         tlist = (state_dir / "trusted.list").read_text(encoding="utf-8").split()
         assert tlist == ["u1"], "re-seed duplicated the entry: %r" % tlist
+
+
+# =====================================================================
+# WARP-1338 — Nextcloud external-storage registration wiring.
+#
+# The add-path registration must (a) fire only when provisioning opted in
+# via NEXTCLOUD_AUTO_REGISTER=1 (the env file a root unit loads — the
+# in-script default stays 0), (b) respect the trust gate: never expose an
+# untrusted hot-plugged stick to Nextcloud (supply-chain posture), while
+# md-pool filesystems — owner-created via the confirm-gated pool flow —
+# always count as trusted, (c) use the container name from the same env
+# (live boxes run droplet-nextcloud-1, not the old docker-nextcloud-1
+# default), and (d) register for the whole household (no
+# files_external:applicable / --add-user=admin scoping — browsing acts as
+# each user's OWN Nextcloud account, so an admin-scoped mount was
+# invisible to everyone else).
+# =====================================================================
+
+# Registration-aware docker stub: files_external:list answers from
+# $STUB_NC_LIST (default: empty list), files_external:create reports the
+# id line real occ prints. Everything is logged for the assertions.
+_NC_DOCKER_STUB = r"""
+printf 'docker %s\n' "$*" >> "$CMD_LOG"
+case " $* " in
+  *" files_external:list "*)
+    if [ -n "${STUB_NC_LIST:-}" ] && [ -f "${STUB_NC_LIST:-}" ]; then
+      cat "$STUB_NC_LIST"
+    else
+      printf '[]\n'
+    fi
+    exit 0 ;;
+  *" files_external:create "*)
+    printf 'Storage created with id 7\n'; exit 0 ;;
+esac
+exit 0
+"""
+
+_REGISTER_ENV = {
+    "NEXTCLOUD_AUTO_REGISTER": "1",
+    "NEXTCLOUD_CONTAINER": "droplet-nextcloud-1",
+}
+
+
+class TestNextcloudRegistration:
+    def _trusted(self, tmp_path: Path, uuid: str = "cafef00d-9360"):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "trusted.list").write_text(uuid + "\n", encoding="utf-8")
+
+    def test_trusted_drive_registers_with_env_container(self, tmp_path):
+        # Opted in + trusted → the occ chain runs inside the container the
+        # env names (droplet-nextcloud-1 — the live compose-project name).
+        self._trusted(tmp_path)
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path, extra_env=_REGISTER_ENV,
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "docker exec -u 33 droplet-nextcloud-1 php occ app:enable files_external" in joined, joined
+        # Unlabeled vfat drive: automount names it drive-<short-uuid>.
+        assert "files_external:create /drive-cafef00d local null::null -c datadir=/host/drive-cafef00d" in joined, joined
+
+    def test_untrusted_stick_never_registers_even_when_opted_in(self, tmp_path):
+        # The supply-chain gate: an unknown hot-plugged stick mounts ro and is
+        # NEVER exposed to Nextcloud, opt-in or not.
+        proc, cmds, logged, mounts_json, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path, extra_env=_REGISTER_ENV,
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        assert '"trust": "untrusted-ro"' in mounts_json, mounts_json
+        joined = "\n".join(cmds)
+        assert "files_external:create" not in joined, joined
+        assert "skip" in logged.lower() and "untrusted" in logged.lower(), logged
+
+    def test_registration_stays_off_without_the_env_opt_in(self, tmp_path):
+        # The in-script default is 0 (deliberate opt-out posture) —
+        # provisioning opts in via /etc/droplet/automount.env; with no env
+        # even a trusted drive is not auto-registered.
+        self._trusted(tmp_path)
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path,
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        assert "files_external:create" not in "\n".join(cmds), cmds
+        assert "auto-register disabled" in logged, logged
+
+    def test_registration_is_household_wide_not_admin_scoped(self, tmp_path):
+        # WARP-1338 AC4: no files_external:applicable / --add-user scoping —
+        # an unscoped mount is visible to every household user's own account.
+        self._trusted(tmp_path)
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path, extra_env=_REGISTER_ENV,
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "files_external:create" in joined, joined
+        assert "files_external:applicable" not in joined, joined
+        assert "--add-user" not in joined, joined
+
+    def test_md_pool_mount_is_trusted_rw_and_registers_at_stable_name(self, tmp_path):
+        # An md array filesystem (labelled "pool" by droplet-storage-pool.sh's
+        # mkfs -L) is owner-created, not hot-plugged: it mounts rw WITHOUT a
+        # trusted.list entry and registers. The mount tail must be the same
+        # label-<short-uuid> derivation the pool script uses at creation time,
+        # so the registration + driveContentsHref never dangle across reboots.
+        proc, cmds, _l, mounts_json, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={**_REGISTER_ENV, "STUB_FS_LABEL": "pool"},
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert re.search(r'mount -o "?rw,.* /dev/md127 .*/pool-cafef00d', joined), joined
+        assert '"trust": "trusted"' in mounts_json, mounts_json
+        assert "files_external:create /pool-cafef00d local null::null -c datadir=/host/pool-cafef00d" in joined, joined
+
+    def test_already_registered_mount_is_not_created_twice(self, tmp_path):
+        # Idempotence: an existing datadir entry short-circuits the create.
+        self._trusted(tmp_path)
+        nc_list = tmp_path / "nc-list.json"
+        nc_list.write_text(
+            '[{"mount_id": 7, "mount_point": "/drive-cafef00d", '
+            '"datadir":"/host/drive-cafef00d"}]\n', encoding="utf-8")
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path,
+            extra_env={**_REGISTER_ENV, "STUB_NC_LIST": _posix(nc_list)},
+            stub_overrides={"docker": _NC_DOCKER_STUB})
+        assert proc.returncode == 0, proc.stderr
+        assert "files_external:create" not in "\n".join(cmds), cmds
+
+
+# =====================================================================
+# WARP-1338 — `reconcile` action: one-shot boot/upgrade registration of the
+# ALREADY-mounted /mnt/droplet/* paths (pool mounts are created by
+# droplet-storage-pool.sh, and a fleet-upgraded box's mounts predate
+# registration entirely). It mounts nothing new, mirrors the add-path
+# trust gate, and is idempotent.
+# =====================================================================
+
+_RECONCILE_STUBS = {
+    "docker": _NC_DOCKER_STUB,
+    # mountpoint: true only for targets listed in $STUB_MOUNTED.
+    "mountpoint": r"""
+printf 'mountpoint %s\n' "$*" >> "$CMD_LOG"
+tgt=; for a in "$@"; do tgt="$a"; done
+grep -qxF "$tgt" "$STUB_MOUNTED" 2>/dev/null && exit 0
+exit 1
+""",
+    # findmnt: TARGET -> SOURCE from the $STUB_MOUNT_TABLE ("target source").
+    "findmnt": r"""
+printf 'findmnt %s\n' "$*" >> "$CMD_LOG"
+tgt=; for a in "$@"; do tgt="$a"; done
+hits="$(awk -v t="$tgt" '$1 == t { print $2 }' "$STUB_MOUNT_TABLE" 2>/dev/null)"
+[ -n "$hits" ] || exit 1
+printf '%s\n' "$hits"
+exit 0
+""",
+    # blkid: SOURCE -> UUID from $STUB_BLKID_TABLE ("source uuid").
+    "blkid": r"""
+printf 'blkid %s\n' "$*" >> "$CMD_LOG"
+src=; for a in "$@"; do src="$a"; done
+case " $* " in
+  *" -s UUID "*)
+    awk -v s="$src" '$1 == s { print $2 }' "$STUB_BLKID_TABLE" 2>/dev/null
+    exit 0 ;;
+esac
+exit 0
+""",
+}
+
+
+class TestReconcile:
+    def _run_reconcile(self, tmp_path: Path, mounts: dict[str, str],
+                       trusted: list[str] | None = None,
+                       blkid: dict[str, str] | None = None,
+                       extra_env: dict | None = None):
+        """mounts: mount-dir name -> backing source device."""
+        base = tmp_path / "mnt"
+        base.mkdir(exist_ok=True)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        if trusted:
+            (state_dir / "trusted.list").write_text(
+                "".join(u + "\n" for u in trusted), encoding="utf-8")
+        mounted = tmp_path / "stub-mounted.txt"
+        table = tmp_path / "stub-mount-table.txt"
+        blkid_table = tmp_path / "stub-blkid-table.txt"
+        lines_mounted, lines_table = [], []
+        for name, src in mounts.items():
+            (base / name).mkdir(exist_ok=True)
+            tgt = _posix(base / name)
+            lines_mounted.append(tgt + "\n")
+            lines_table.append(f"{tgt} {src}\n")
+        mounted.write_text("".join(lines_mounted), encoding="utf-8")
+        table.write_text("".join(lines_table), encoding="utf-8")
+        blkid_table.write_text(
+            "".join(f"{s} {u}\n" for s, u in (blkid or {}).items()),
+            encoding="utf-8")
+
+        env = {
+            **_REGISTER_ENV,
+            "STUB_MOUNTED": _posix(mounted),
+            "STUB_MOUNT_TABLE": _posix(table),
+            "STUB_BLKID_TABLE": _posix(blkid_table),
+            "DROPLET_NC_WAIT_TRIES": "2",
+            "DROPLET_NC_WAIT_INTERVAL": "0",
+        }
+        if extra_env:
+            env.update(extra_env)
+
+        stub_dir = tmp_path / "stub-bin"
+        stub_dir.mkdir(exist_ok=True)
+        stubs = dict(_STUBS)
+        stubs.update(_RECONCILE_STUBS)
+        for name, body in stubs.items():
+            stub = stub_dir / name
+            stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
+                            encoding="utf-8", newline="\n")
+            os.chmod(stub, 0o755)
+        py_stub = stub_dir / "python3"
+        py_stub.write_text(
+            '#!/usr/bin/env bash\nexec "{}" "$@"\n'.format(
+                Path(sys.executable).as_posix()),
+            encoding="utf-8", newline="\n")
+        os.chmod(py_stub, 0o755)
+
+        log = tmp_path / "cmd-log.txt"
+        log.write_text("", encoding="utf-8")
+        run_env = dict(os.environ)
+        run_env.update({
+            "CMD_LOG": _posix(log),
+            "DROPLET_AUTOMOUNT_BASE": _posix(base),
+            "DROPLET_AUTOMOUNT_STATE_DIR": _posix(state_dir),
+            "DROPLET_AUTOMOUNT_LOG": _posix(tmp_path / "automount.log"),
+            "BRIDGE_ENV_FILE": _posix(tmp_path / "no-such.env"),
+            "PATH": str(stub_dir) + os.pathsep + run_env.get("PATH", ""),
+        })
+        run_env.update(env)
+        proc = subprocess.run(
+            [BASH, str(SCRIPT), "reconcile"],
+            env=run_env, capture_output=True, text=True, timeout=120,
+        )
+        cmds = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln]
+        logged = ""
+        script_log = tmp_path / "automount.log"
+        if script_log.exists():
+            logged = script_log.read_text(encoding="utf-8")
+        return proc, cmds, logged
+
+    def test_registers_md_pool_mount(self, tmp_path):
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /pool-cafef00d" in joined, joined
+
+    def test_registers_trusted_plain_and_skips_untrusted(self, tmp_path):
+        proc, cmds, logged = self._run_reconcile(
+            tmp_path,
+            {"family-aaaa1111": "/dev/sdz1", "stray-bbbb2222": "/dev/sdy1"},
+            trusted=["aaaa1111-uuid"],
+            blkid={"/dev/sdz1": "aaaa1111-uuid", "/dev/sdy1": "bbbb2222-uuid"})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "files_external:create /family-aaaa1111" in joined, joined
+        assert "files_external:create /stray-bbbb2222" not in joined, joined
+        assert "skip untrusted" in logged, logged
+
+    def test_registers_enrolled_luks_mapper_mount(self, tmp_path):
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"vault-cafe1234": "/dev/mapper/droplet-usb-cafe1234"})
+        assert proc.returncode == 0, proc.stderr
+        assert "files_external:create /vault-cafe1234" in "\n".join(cmds), cmds
+
+    def test_is_idempotent_when_already_registered(self, tmp_path):
+        # Real occ json escapes slashes ("\/host\/..."): the escaped shape is
+        # what the boot-time reconcile actually sees, so pin it here (the
+        # add-path test pins the unescaped shape — both must short-circuit).
+        nc_list = tmp_path / "nc-list.json"
+        nc_list.write_text(
+            '[{"mount_id": 3, "mount_point": "\\/pool-cafef00d", '
+            '"datadir":"\\/host\\/pool-cafef00d"}]\n', encoding="utf-8")
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            extra_env={"STUB_NC_LIST": _posix(nc_list)})
+        assert proc.returncode == 0, proc.stderr
+        assert "files_external:create" not in "\n".join(cmds), cmds
+
+    def test_noop_without_the_env_opt_in(self, tmp_path):
+        proc, cmds, logged = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            extra_env={"NEXTCLOUD_AUTO_REGISTER": ""})
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("docker") for c in cmds), cmds
+        assert "disabled" in logged, logged
+
+    def test_seeds_trusted_list_for_mounted_md_pool(self, tmp_path):
+        # WARP-1338 review: the add-path blanket-trusts /dev/md* only to keep
+        # pools created BEFORE pool_format seeded trusted.list from flipping
+        # read-only on reboot. Reconcile must converge those legacy pools onto
+        # explicit trusted.list membership (grep-guarded, idempotent) — the
+        # prerequisite for a follow-up that drops the blanket md rule.
+        proc, _cmds, logged = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"})
+        assert proc.returncode == 0, proc.stderr
+        tlist = tmp_path / "state" / "trusted.list"
+        assert tlist.exists(), logged
+        assert tlist.read_text(encoding="utf-8").split() == \
+            ["mdpool-uuid-1234"], tlist.read_text(encoding="utf-8")
+        # Idempotent: a second boot's reconcile must not duplicate the entry.
+        proc2, _c2, _l2 = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"})
+        assert proc2.returncode == 0, proc2.stderr
+        assert tlist.read_text(encoding="utf-8").split() == \
+            ["mdpool-uuid-1234"], tlist.read_text(encoding="utf-8")
+
+    def test_seeds_md_pool_trust_even_without_nc_opt_in(self, tmp_path):
+        # Trust is a mount-time property, not a registration one: a box that
+        # never opted into Nextcloud auto-register still converges its legacy
+        # pool onto trusted.list (the reconcile's registration half stays a
+        # no-op there).
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            blkid={"/dev/md127": "mdpool-uuid-1234"},
+            extra_env={"NEXTCLOUD_AUTO_REGISTER": ""})
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("docker") for c in cmds), cmds
+        tlist = tmp_path / "state" / "trusted.list"
+        assert tlist.exists() and "mdpool-uuid-1234" in \
+            tlist.read_text(encoding="utf-8").split(), cmds
+
+    def test_prunes_dangling_host_registrations(self, tmp_path):
+        # WARP-1338 review: the udev remove path deregisters only on a LIVE
+        # remove event. A drive unplugged while the box was off — or a legacy
+        # pool renamed to the automount <label>-<short-uuid> derivation on its
+        # first post-upgrade boot — leaves a registration whose /host/<tail>
+        # no longer exists: a dead GUID-named folder in every user's Files
+        # root. Reconcile must prune /host/-datadir entries whose tail is no
+        # longer mounted (that is exactly the state the remove handler would
+        # have deregistered), and must leave BOTH still-mounted /host entries
+        # AND non-/host external storages alone.
+        dead = "9a8b7c6d-0e1f-2a3b-4c5d-6e7f8090a0b0"
+        nc_list = tmp_path / "nc-list.json"
+        nc_list.write_text(
+            '[{"mount_point":"\\/pool-cafef00d",'
+            '"datadir":"\\/host\\/pool-cafef00d","mount_id":3},'
+            '{"mount_point":"\\/' + dead + '",'
+            '"datadir":"\\/host\\/' + dead + '","mount_id":9},'
+            '{"mount_point":"\\/other",'
+            '"datadir":"\\/media\\/other","mount_id":5}]\n',
+            encoding="utf-8")
+        proc, cmds, logged = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            extra_env={"STUB_NC_LIST": _posix(nc_list)})
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        # The dangling GUID tail is deregistered…
+        assert "files_external:delete -y 9" in joined, joined
+        assert "pruning" in logged and dead in logged, logged
+        # …the mounted pool registration and the non-/host storage are NOT.
+        assert "files_external:delete -y 3" not in joined, joined
+        assert "files_external:delete -y 5" not in joined, joined
+
+    def test_gives_up_cleanly_when_nextcloud_never_answers(self, tmp_path):
+        # Boot race: the container may not answer occ within the bounded wait
+        # — the oneshot must exit 0 (no failed unit) and register nothing;
+        # the next boot retries.
+        down_docker = (
+            "printf 'docker %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n"
+        )
+        proc, cmds, _l = self._run_reconcile(
+            tmp_path, {"pool-cafef00d": "/dev/md127"},
+            extra_env={"DROPLET_NC_WAIT_TRIES": "2"})
+        # sanity: default stub answers; now the down-container variant:
+        stub_dir = tmp_path / "stub-bin"
+        (stub_dir / "docker").write_text(
+            "#!/usr/bin/env bash\n" + down_docker, encoding="utf-8",
+            newline="\n")
+        os.chmod(stub_dir / "docker", 0o755)
+        log = tmp_path / "cmd-log.txt"
+        log.write_text("", encoding="utf-8")
+        run_env = dict(os.environ)
+        run_env.update({
+            "CMD_LOG": _posix(log),
+            "DROPLET_AUTOMOUNT_BASE": _posix(tmp_path / "mnt"),
+            "DROPLET_AUTOMOUNT_STATE_DIR": _posix(tmp_path / "state"),
+            "DROPLET_AUTOMOUNT_LOG": _posix(tmp_path / "automount.log"),
+            "BRIDGE_ENV_FILE": _posix(tmp_path / "no-such.env"),
+            "STUB_MOUNTED": _posix(tmp_path / "stub-mounted.txt"),
+            "STUB_MOUNT_TABLE": _posix(tmp_path / "stub-mount-table.txt"),
+            "STUB_BLKID_TABLE": _posix(tmp_path / "stub-blkid-table.txt"),
+            "DROPLET_NC_WAIT_TRIES": "2",
+            "DROPLET_NC_WAIT_INTERVAL": "0",
+            "PATH": str(stub_dir) + os.pathsep + run_env.get("PATH", ""),
+        })
+        run_env.update(_REGISTER_ENV)
+        proc = subprocess.run(
+            [BASH, str(SCRIPT), "reconcile"],
+            env=run_env, capture_output=True, text=True, timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
+        joined = log.read_text(encoding="utf-8")
+        assert "files_external:create" not in joined, joined

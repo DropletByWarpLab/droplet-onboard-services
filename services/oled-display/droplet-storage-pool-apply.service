@@ -16,6 +16,13 @@ Description=Droplet storage-pool apply (root executor for owner-confirmed mdadm/
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/droplet-storage-pool-apply.sh
+# WARP-1338: droplet-storage-pool.sh registers freshly-mounted pool/adopted
+# filesystems with Nextcloud; the container name (NEXTCLOUD_CONTAINER) comes
+# from the SAME env file the automount units load. `-` keeps a box without
+# the file working. The file feeds this ROOT unit, so
+# services/automount/install.sh keeps it root:root 0644 — NEVER
+# droplet-writable (WARP-843 root-unit LPE invariant).
+EnvironmentFile=-/etc/droplet/automount.env
 # mkfs/mdadm on a large array can take minutes. Keep this just under the
 # bridge's 600 s subprocess timeout on `systemctl start` so systemd reports
 # the failure before the bridge gives up on the call.

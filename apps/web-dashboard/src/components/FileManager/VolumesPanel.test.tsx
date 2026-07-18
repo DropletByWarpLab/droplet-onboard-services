@@ -13,6 +13,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { DriveInfo, PoolInfo } from "@/lib/types";
 
+// next/link → plain anchor so we can assert href without a Next router
+// (same shape as DrivesPanel.test.tsx).
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...rest }: { href: string; children?: React.ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 const useDrivesMock = vi.fn();
 vi.mock("@/lib/hooks/useDrives", () => ({ useDrives: () => useDrivesMock() }));
 
@@ -134,9 +144,13 @@ describe("VolumesPanel — one pooled tile (WARP-1339 AC3)", () => {
     expect(screen.queryByText("Storage pool")).not.toBeInTheDocument();
   });
 
-  it("keeps tiles non-clickable in this PR (WARP-1338 adds links on top)", () => {
+  it("makes the pooled tile clickable into the file browser at the md mount tail (WARP-1338)", () => {
     setup([mdDrive()], [pool]);
-    expect(screen.queryByRole("link")).toBeNull();
+    const link = screen.getByRole("link", { name: /open storage pool/i });
+    expect(link).toHaveAttribute(
+      "href",
+      `/files?path=${encodeURIComponent(`/${GUID}`)}`,
+    );
   });
 
   it("keeps standalone drives as plain tiles alongside the pooled tile", () => {
@@ -164,5 +178,51 @@ describe("VolumesPanel — one pooled tile (WARP-1339 AC3)", () => {
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect(screen.getByText("Storage pool")).toBeInTheDocument();
     expect(screen.queryByText(new RegExp(GUID.slice(0, 8), "i"))).not.toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-1338 — the tiles become CLICKABLE: a stretched link into the file
+// browser at /files?path=/<mount-tail> (the Nextcloud external-storage
+// path the automount/pool registration created), via the shared
+// driveContentsHref helper. Stretched-link pattern: the anchor overlays
+// the whole card — never a button nested inside an anchor.
+// =====================================================================
+describe("VolumesPanel — clickable tiles (WARP-1338)", () => {
+  it("links a standalone drive tile to /files?path=/<mount-tail>", () => {
+    setup([
+      makeDrive({
+        mount: "/mnt/droplet/photos-ab12cd34",
+        displayName: "Family Photos",
+      }),
+    ]);
+    const link = screen.getByRole("link", { name: /open family photos/i });
+    expect(link).toHaveAttribute("href", "/files?path=%2Fphotos-ab12cd34");
+  });
+
+  it("gives every tile exactly one link and nests no interactive controls inside it", () => {
+    setup(
+      [
+        makeDrive({
+          device: "/dev/sda1",
+          uuid: "U-2",
+          mount: "/mnt/droplet/photos",
+          displayName: "Family Photos",
+        }),
+      ],
+    );
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    // Stretched-link hygiene: never nest buttons (or nested anchors) inside.
+    expect(document.querySelector("a button")).toBeNull();
+    expect(document.querySelector("a a")).toBeNull();
+  });
+
+  it("stretches the link across the card (absolute inset overlay on a relative card)", () => {
+    setup([makeDrive({ displayName: "Family Photos" })]);
+    const link = screen.getByRole("link", { name: /open family photos/i });
+    expect(link.className).toMatch(/absolute/);
+    expect(link.className).toMatch(/inset-0/);
+    const card = screen.getByRole("listitem");
+    expect(card.className).toMatch(/relative/);
   });
 });

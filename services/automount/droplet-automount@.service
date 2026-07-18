@@ -20,6 +20,13 @@ TimeoutStartSec=30
 TimeoutStopSec=30
 # Pass known-good PATH so docker/blkid/mount are found when run from udev.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# WARP-1338: provisioning's Nextcloud-registration opt-in
+# (NEXTCLOUD_AUTO_REGISTER=1 + NEXTCLOUD_CONTAINER). `-` so a box that
+# predates the installer still automounts. This file feeds a ROOT unit, so
+# install.sh keeps it root:root 0644 — NEVER droplet-writable (a
+# droplet-writable EnvironmentFile on a root unit is the WARP-843 LPE; see
+# tests/openwrt-attach-env-invariant.test.sh).
+EnvironmentFile=-/etc/droplet/automount.env
 
 [Install]
 WantedBy=multi-user.target

@@ -69,6 +69,21 @@ export function drivePoolName(d: PoolJoinSource): string | null {
 }
 
 /**
+ * WARP-827 / WARP-1338 — deep link into the existing Nextcloud-backed file
+ * browser at the volume's registered path. The automount service (and, as of
+ * WARP-1338, droplet-storage-pool.sh at pool_format/adopt/reclaim time)
+ * registers each volume as external storage at `/<mount-tail>` — the host
+ * mount's last path segment — so the drive's contents are browsable at that
+ * path with the user's own account (reuse, no new endpoint). FilesPage reads
+ * `?path=` on mount. Shared by DrivesPanel cards and VolumesPanel tiles so
+ * the target can never drift between the two surfaces.
+ */
+export function driveContentsHref(d: { mount: string }): string {
+  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
+  return `/files?path=${encodeURIComponent(`/${tail}`)}`;
+}
+
+/**
  * WARP-1339 — the mounted filesystem backing a pool: the drives-list entry
  * whose device is the pool's md node (or a partition of it). This is the
  * pool's ONLY fs-level capacity/browse source (ADR-019 — real usable
@@ -118,6 +133,48 @@ export function driveDisplayName(
     .trim();
   if (!raw) return opts.poolBacked ? "Storage pool" : "Drive";
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+}
+
+/**
+ * WARP-1338 (UX review) — friendly label for the FIRST breadcrumb segment on
+ * the Files screen. A volume deep-link lands on /files?path=/<mount-tail>;
+ * for the live box's legacy pool that tail is the FULL fs UUID, and rendering
+ * it raw as the current-folder crumb re-introduces the exact
+ * GUID-as-primary-label the WARP-1337 chain exists to prevent — one click
+ * after the GUID-guarded tile.
+ *
+ * Resolution: match the segment against the known volumes' mount tails and
+ * run the SAME display chain the tiles/cards use (pool displayName leads for
+ * a pool-backed volume, mirroring VolumesPanel's pooled-tile naming). An
+ * UNMATCHED machine tail (drives payload still loading, dead link) still
+ * humanizes to the generic — "Storage pool" for pool-<hex>, else "Drive" —
+ * rather than leaking the GUID. A human segment returns undefined so real
+ * folder names keep rendering raw.
+ */
+export function volumeCrumbLabel(
+  segment: string,
+  drives: ReadonlyArray<DriveNameSource & PoolJoinSource>,
+  pools: ReadonlyArray<{ device: string; displayName?: string | null }>,
+): string | undefined {
+  for (const d of drives) {
+    const tail = d.mount.split("/").filter(Boolean).pop();
+    if (!tail || tail !== segment) continue;
+    const md = drivePoolName(d);
+    const pool = md ? pools.find((p) => p.device === md) : undefined;
+    if (pool) {
+      // Pool's OWN displayName leads; the backing drive's label / GUID-guarded
+      // tail back it up (same shape as VolumesPanel's pooled tile).
+      return driveDisplayName(
+        { mount: d.mount, label: d.label, displayName: pool.displayName },
+        { poolBacked: true },
+      );
+    }
+    return driveDisplayName(d, { poolBacked: isPoolBackedDevice(d.device) || !!md });
+  }
+  if (isMachineTail(segment)) {
+    return /^pool-/i.test(segment) ? "Storage pool" : "Drive";
+  }
+  return undefined;
 }
 
 /**
