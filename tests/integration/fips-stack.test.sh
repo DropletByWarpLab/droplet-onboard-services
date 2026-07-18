@@ -298,9 +298,10 @@ echo "  ✓ ai-gateway (pyca + system OpenSSL): both enforcing, TLS context cons
 # (which has no validated provider) would receive DROPLET_FIPS_REQUIRED=true,
 # run the WARP-229 self-test, fail it, and log `fips_self_test fips:false`
 # before restart-looping. We assert the negative across the whole booted set —
-# robust to the service being down for an unrelated reason (e.g. the pre-
-# existing test-lane TPM perm quirk in device-identity-svc), because the pin's
-# effect is "the self-test is SKIPPED", i.e. no fips line at all.
+# robust to a service being down for an unrelated reason, because the pin's
+# effect is "the self-test is SKIPPED", i.e. no fips line at all. (The old
+# example of such a reason — the test-lane TPM perm crash-loop — is fixed and
+# asserted healthy below, WARP-1248.)
 echo "── non-provider services stay off the FIPS boot gate (WARP-318 fix) ──"
 # Herestring greps, not `compose logs | grep -q` — same pipefail/SIGPIPE trap
 # as wait_for_log (worse here: a SIGPIPE-poisoned pipeline looks like "no
@@ -320,6 +321,30 @@ if grep -qE '"event":[[:space:]]*"fips_self_test"' <<<"$dis_logs"; then
   echo "FAIL: device-identity-svc ran the FIPS self-test — its pin (no provider) regressed"; exit 1
 fi
 echo "  ✓ no non-provider service entered the FIPS boot gate; device-identity-svc skipped it"
+
+# ── 7b) device-identity-svc genuinely boots (WARP-1248 fix) ──────────────────
+# On a fresh host dockerd auto-creates the bind-mounted /var/lib/droplet/tpm +
+# /var/run/droplet as root:root, which used to fail the sidecar's first EK-cert
+# write (PermissionError: ek-cert.pem.tmp) into a crash-loop — silent in green
+# runs (nothing asserted its health), muddying every red run's failure dump.
+# The image entrypoint now chowns the two mounts before dropping privileges.
+# Assert the visible symptom stays gone AND the positive outcomes it blocked:
+# provisioning completed and the gRPC socket actually exists (grpc's
+# add_insecure_port fails WITHOUT raising, so the "Listening" log line alone
+# proves nothing — exec and check the filesystem).
+echo "── device-identity-svc boots on fresh bind mounts (WARP-1248 fix) ──"
+if grep -q 'PermissionError' <<<"$dis_logs"; then
+  echo "FAIL: device-identity-svc hit a PermissionError — the WARP-1248 mount-ownership fix regressed:"
+  grep 'PermissionError' <<<"$dis_logs" | head
+  exit 1
+fi
+wait_for_log device-identity-svc 'Listening on unix://' 120 \
+  || { echo "FAIL: device-identity-svc never reached its serving log line"; exit 1; }
+compose exec -T device-identity-svc test -f /var/lib/droplet/tpm/provisioned.json \
+  || { echo "FAIL: device-identity-svc did not auto-provision (provisioned.json missing)"; exit 1; }
+compose exec -T device-identity-svc test -S /var/run/droplet/device-identity.sock \
+  || { echo "FAIL: device-identity-svc socket missing (unix bind failed silently)"; exit 1; }
+echo "  ✓ device-identity-svc provisioned + socket bound (no tpm-dir PermissionError)"
 
 # ── 8) The full FIPS-enforcing app boot (WARP-1063 fixed the boot block) ─────
 # Always asserted since the WARP-1063 fix. EXPECT_FIPS_STACK_BOOTS=1 remains

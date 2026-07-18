@@ -35,6 +35,13 @@ describe("PasskeysSection", () => {
     expect(screen.getByRole("button", { name: /add a passkey/i })).toBeInTheDocument();
   });
 
+  it("renders the group header via the shell Sect pattern — sentence case, no uppercase eyebrow (WARP-1344)", () => {
+    render(<PasskeysSection />);
+    const heading = screen.getByRole("heading", { name: "Passkeys" });
+    expect(heading.className).not.toMatch(/uppercase/);
+    expect(heading.closest(".sect")).not.toBeNull();
+  });
+
   it("enrols a passkey and shows a success confirmation", async () => {
     registerPasskey.mockResolvedValueOnce(undefined);
     render(<PasskeysSection />);

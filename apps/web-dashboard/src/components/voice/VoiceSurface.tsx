@@ -11,14 +11,19 @@
  * copy, which ships verbatim from the COPY table below.
  *
  * Deliberately absent (no dead-end affordances):
- *  - "Add a voice" / enrollment — Flow B is WARP-1056;
- *  - "See all in Activity" — the voice activity feed is WARP-1058.
+ *  - "Add a voice" / enrollment — Flow B is WARP-1056.
  *
  * WARP-1057 wired the §7.3 processor card's "Restart processor" inline
  * action: confirm dialog (~10 s hearing outage) → POST
  * /api/voice/restart-processor → watch the live status poll until
  * `input_flatlined` clears; after two failed restarts the card
  * escalates to the power-cycle copy + Get help.
+ *
+ * WARP-1058 upgraded "Recent voice activity" from the single live
+ * last-wake row to the real §3.4 feed: max 5 signed kind=voice rows
+ * (time mono · person-or-Guest · what happened), §6.3 self-heal rows
+ * rendered without a person, and the "See all in Activity" deep-link
+ * pre-filtered to kind=voice.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -28,7 +33,11 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { useToast } from "@/components/Toast";
 import { measureVoiceLevel, restartVoiceProcessor } from "@/lib/api";
-import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
+import type {
+  VoiceActivityItem,
+  VoiceCalibrationInfo,
+  VoiceStatusInfo,
+} from "@/lib/types";
 import { CalibrationWizard } from "./CalibrationWizard";
 import { HealthStrip } from "./HealthStrip";
 import { LiveMeter, StatusRing } from "./VoiceBits";
@@ -102,11 +111,18 @@ export interface VoiceSurfaceProps {
   loading: boolean;
   /** Sustained room level above the calibrated floor (drift input). */
   noiseSustained: boolean;
+  /** WARP-1058 §3.4 feed rows (kind=voice, newest first); null while
+   *  loading or when the fetch failed — renders the empty state. */
+  activity: VoiceActivityItem[] | null;
   /** Epoch seconds — injectable for deterministic tests. */
   nowS?: number;
   onRefresh: () => void;
   onCalibrationApplied: () => void;
 }
+
+/** §3.4: "A short list (max 5)". The API asks for 5; slice defends the
+ *  render if a caller ever passes more. */
+const ACTIVITY_MAX_ROWS = 5;
 
 export function VoiceSurface({
   status,
@@ -114,6 +130,7 @@ export function VoiceSurface({
   unavailable,
   loading,
   noiseSustained,
+  activity,
   nowS,
   onRefresh,
   onCalibrationApplied,
@@ -363,7 +380,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaFirstRun}
@@ -374,7 +391,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-secondary type-subheadline"
+          className="btn ghost"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaRecalibrate}
@@ -385,7 +402,7 @@ export function VoiceSurface({
       return (
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={() => setWizardOpen(true)}
         >
           {COPY.ctaFix}
@@ -400,7 +417,7 @@ export function VoiceSurface({
         </Link>
         <button
           type="button"
-          className="dp-btn-primary type-subheadline"
+          className="btn primary"
           onClick={onRefresh}
         >
           Check again
@@ -409,14 +426,8 @@ export function VoiceSurface({
     );
   }
 
-  /* ── Recent activity: the one live row the pipeline actually knows ── */
-  const lastWakeAt = status?.last_wake_at ?? null;
-  const lastWakeOutcome =
-    lastWakeAt != null &&
-    status?.last_response_at != null &&
-    status.last_response_at >= lastWakeAt
-      ? "Answered"
-      : "Heard the wake word";
+  /* ── Recent voice activity (§3.4): max-5 signed kind=voice rows ── */
+  const activityRows = (activity ?? []).slice(0, ACTIVITY_MAX_ROWS);
 
   return (
     <div className="voice-surface">
@@ -446,7 +457,7 @@ export function VoiceSurface({
             <span className="txt">{surface.banner}</span>
             <button
               type="button"
-              className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5"
+              className="btn primary sm"
               onClick={() => setWizardOpen(true)}
             >
               {COPY.ctaRecalibrate}
@@ -479,20 +490,35 @@ export function VoiceSurface({
         <p className="vcaption">{COPY.privacyProfiles}</p>
       </section>
 
-      {/* ── Recent voice activity (§3.4 — full feed lands with WARP-1058) ── */}
+      {/* ── Recent voice activity (§3.4 feed + §6.3 self-heal rows) ── */}
       <section aria-labelledby="voice-activity-h">
         <div className="vsect-h">
           <h2 id="voice-activity-h">Recent voice activity</h2>
         </div>
         <div className="vcard">
-          {lastWakeAt != null ? (
-            <ul className="vact">
-              <li>
-                <span className="t">{formatClock(lastWakeAt)}</span>
-                <span className="who">Guest</span>
-                <span className="what">{lastWakeOutcome}</span>
-              </li>
-            </ul>
+          {activityRows.length > 0 ? (
+            <>
+              <ul className="vact">
+                {activityRows.map((row) => (
+                  <li key={row.id}>
+                    <span className="t">{formatClock(row.atS)}</span>
+                    {/* §3.4: person-or-Guest. Self-heal rows (§6.3 —
+                        DSP wedge/recovery, restarts, calibration) have
+                        no speaker: em-dash, muted, quiet competence. */}
+                    <span className={row.person ? "who" : "who sys"}>
+                      {row.person ?? "—"}
+                    </span>
+                    <span className="what">{row.what}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="vact-foot">
+                <Link href="/admin/audit?kind=voice" className="vtext-btn">
+                  See all in Activity{" "}
+                  <ArrowRight size={13} aria-hidden="true" />
+                </Link>
+              </div>
+            </>
           ) : (
             <div className="vempty">{COPY.activityEmpty}</div>
           )}

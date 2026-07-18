@@ -314,6 +314,18 @@ describe("GET/POST /api/voice/calibration (WARP-1055)", () => {
         body: JSON.stringify(APPLY_BODY),
       }),
     );
+    // WARP-1058 — a successful apply leaves a kind=voice activity row
+    // with the measured values in the sub line.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "ok",
+      sourceIcon: "mic",
+      what: "Calibration applied",
+      sub: "noise floor -41 dB · wake word 3/3",
+      refs: { surface: "voice-calibration", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-owner" },
+    });
   });
 
   it("POST rejects a non-object body with 400 and never calls upstream", async () => {
@@ -327,7 +339,7 @@ describe("GET/POST /api/voice/calibration (WARP-1055)", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("POST relays a voice-io validation rejection (422) verbatim", async () => {
+  it("POST relays a voice-io validation rejection (422) verbatim — no activity row", async () => {
     fetchSpy.mockResolvedValue(
       upstreamJson(422, { detail: [{ msg: "field required" }] }),
     );
@@ -335,15 +347,19 @@ describe("GET/POST /api/voice/calibration (WARP-1055)", () => {
       .post("/api/voice/calibration")
       .send({ echo_ok: true });
     expect(res.status).toBe(422);
+    // WARP-1058 — a rejected apply changed nothing on the box, so it
+    // must not read as "Calibration applied" in the activity feed.
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
-  it("answers 503 voice_unavailable when unreachable", async () => {
+  it("answers 503 voice_unavailable when unreachable — no activity row", async () => {
     fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
     const res = await request(buildApp(mkUser("owner")))
       .post("/api/voice/calibration")
       .send(APPLY_BODY);
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("voice_unavailable");
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });
 
@@ -363,7 +379,9 @@ describe("POST /api/voice/restart-processor (WARP-1057)", () => {
     );
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
-      kind: "system",
+      // WARP-1058: kind voice (was system) so the row lands in the
+      // /voice feed's kind filter.
+      kind: "voice",
       severity: "info",
       what: "Voice processor restarted",
       refs: { surface: "voice-restart-processor", upstreamStatus: 200 },
@@ -382,7 +400,7 @@ describe("POST /api/voice/restart-processor (WARP-1057)", () => {
     expect(res.body.detail).toMatch(/xvf_host REBOOT 1 failed/);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
-      kind: "system",
+      kind: "voice",
       severity: "err",
       what: "Voice processor restart failed",
       refs: { upstreamStatus: 503 },
@@ -488,6 +506,111 @@ describe("POST/DELETE /api/voice/calibration-mode (WARP-1059)", () => {
     const del = await request(app).delete("/api/voice/calibration-mode");
     expect(del.status).toBe(503);
     expect(del.body.error).toBe("voice_unavailable");
+  });
+});
+
+describe("POST /api/voice/events (WARP-1058)", () => {
+  /** The exact principal authMiddleware mints for ORCHESTRATOR_TOKEN. */
+  function mkVoicePrincipal(): AuthUser {
+    return {
+      id: "_service:voice",
+      username: "_service:voice",
+      displayName: "voice-io",
+      role: "service" as Role,
+    };
+  }
+
+  it("maps wake_answered to the §3.4 'Answered' Guest row", async () => {
+    const res = await request(buildApp(mkVoicePrincipal()))
+      .post("/api/voice/events")
+      .send({ type: "wake_answered", score: 0.91, threshold: 0.7, model: "hey_droplet" });
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ recorded: false }); // mock recorder returns null
+    expect(fetchSpy).not.toHaveBeenCalled(); // no proxy hop — direct record
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: "mic",
+      what: "Answered",
+      sub: "Guest",
+      refs: {
+        surface: "voice-io",
+        principal: "_service:voice",
+        person: "Guest",
+        score: 0.91,
+        threshold: 0.7,
+        model: "hey_droplet",
+      },
+      // Service principals map to the system actor (actorFromRequest).
+      actor: { type: "system", id: null },
+    });
+  });
+
+  it("maps wake_missed to a warn row and dsp_wedge to an err row", async () => {
+    const app = buildApp(mkVoicePrincipal());
+    await request(app).post("/api/voice/events").send({ type: "wake_missed" });
+    await request(app).post("/api/voice/events").send({ type: "dsp_wedge" });
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "warn",
+      what: "Missed wake word",
+      sub: "Guest",
+    });
+    // DSP rows carry no person — they're §6.3 self-heal transparency.
+    expect(recordActivityMock.mock.calls[1]![0]).toMatchObject({
+      kind: "voice",
+      severity: "err",
+      what: "Mic processor stopped responding",
+      sub: null,
+    });
+    expect(
+      (recordActivityMock.mock.calls[1]![0].refs as Record<string, unknown>)
+        .person,
+    ).toBeUndefined();
+  });
+
+  it("honours a sane caller-supplied event time and clamps a skewed one", async () => {
+    const app = buildApp(mkVoicePrincipal());
+    const recentS = Math.floor(Date.now() / 1000) - 30;
+    await request(app)
+      .post("/api/voice/events")
+      .send({ type: "wake_heard", at: recentS });
+    const recentAt = recordActivityMock.mock.calls[0]![0].at as Date;
+    expect(recentAt.getTime()).toBe(recentS * 1000);
+
+    // 1970-era timestamp (skewed container clock) → clamped to now.
+    await request(app).post("/api/voice/events").send({ type: "wake_heard", at: 123 });
+    const clampedAt = recordActivityMock.mock.calls[1]![0].at as Date;
+    expect(Math.abs(clampedAt.getTime() - Date.now())).toBeLessThan(10_000);
+  });
+
+  it("rejects an unknown event type with 400 and records nothing", async () => {
+    const res = await request(buildApp(mkVoicePrincipal()))
+      .post("/api/voice/events")
+      .send({ type: "wake_word_stolen" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_event");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("denies every human role, other service principals, and no-session", async () => {
+    const principals: (AuthUser | null)[] = [
+      mkUser("owner"),
+      mkUser("admin"),
+      mkUser("family"),
+      mkUser("guest"),
+      mkUser("service"), // coarse service role, NOT _service:voice
+      null,
+    ];
+    for (const principal of principals) {
+      const res = await request(buildApp(principal))
+        .post("/api/voice/events")
+        .send({ type: "wake_answered" });
+      expect(res.status).toBe(403);
+    }
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });
 

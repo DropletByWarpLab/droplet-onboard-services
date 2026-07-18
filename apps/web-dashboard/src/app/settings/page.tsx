@@ -147,7 +147,11 @@ export default function SettingsPage() {
               <span className="rt">
                 <span className="nm">Theme</span>
               </span>
-              <ThemeToggle />
+              {/* fit="content" (WARP-1344): the fill variant's flex-1/min-w-0
+                  squeeze compressed the group to min-content inside this .lrow
+                  and clipped "Light" to "Li…"; content sizing lets the labels
+                  set the width and takes the indigo shell surface. */}
+              <ThemeToggle fit="content" />
             </div>
           </div>
         </div>

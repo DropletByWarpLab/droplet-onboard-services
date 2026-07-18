@@ -49,6 +49,7 @@ const KNOWN_KINDS: ReadonlySet<ActivityKindName> = new Set<ActivityKindName>([
   "auth",
   "tool_run",
   "system",
+  "voice",
 ]);
 
 const KNOWN_SEVERITIES: ReadonlySet<ActivitySeverityName> =

@@ -1282,8 +1282,13 @@ def _unescape_mount(path: str) -> str:
 # RAID-member WD drives were invisible to every layer). This additive lsblk
 # walk lists every WHOLE disk except the OS disk and <100MB devices, each with
 # an EXPLICIT state enum — the dashboard branches on the enum, never guesses:
-#   in_use      — the disk, a partition, or an md it backs is mounted
-#   pool_member — carries a linux_raid_member signature (md name included)
+#   in_use      — the disk itself or a NON-md descendant (plain partition,
+#                 dm/LVM volume) is mounted. A mount on the md ARRAY a member
+#                 backs does NOT count (WARP-1336): that's the pool in use,
+#                 not the disk — the member stays pool_member so Reclaim
+#                 remains reachable on a healthy (mounted) pool.
+#   pool_member — carries a linux_raid_member signature (md name + md_mounted
+#                 included)
 #   foreign     — has some fs/RAID/LVM signature but nothing mounted
 #   available   — no signature at all
 # READ-ONLY. Rides the drives_snapshot 10s cache (and its /drives/changed
@@ -1336,8 +1341,26 @@ def classify_disks(lsblk_tree, os_disk):
         if size < _MIN_DRIVE_BYTES:
             continue
         descendants = list(_walk_block_children(dev))
+        # WARP-1336: split mounts by WHERE they sit. On a healthy box the
+        # pool filesystem is mounted on the md array the members back, and
+        # counting that mount against the member disk classified every
+        # member in_use with no `md` — making the dashboard's Reclaim
+        # affordance (gated on pool_member + md) unreachable exactly when
+        # the pool worked. A mount on an md descendant is the ARRAY in use;
+        # only the disk node itself or a non-md descendant (plain partition,
+        # dm/LVM volume) being mounted makes the DISK in_use.
+        md_name = next(
+            (d.get("name") for d in descendants
+             if (d.get("name") or "").startswith("md")),
+            "",
+        )
+        md_mounted = any(
+            d.get("mountpoint") for d in descendants
+            if (d.get("name") or "").startswith("md")
+        )
         mounted = bool(dev.get("mountpoint")) or any(
             d.get("mountpoint") for d in descendants
+            if not (d.get("name") or "").startswith("md")
         )
         signatures = [
             t for t in [dev.get("fstype")] + [d.get("fstype") for d in descendants]
@@ -1347,6 +1370,12 @@ def classify_disks(lsblk_tree, os_disk):
             state = "in_use"  # wins over everything — never adoptable
         elif "linux_raid_member" in signatures:
             state = "pool_member"
+        elif md_mounted:
+            # A mounted md descendant WITHOUT a raid-member signature on the
+            # disk is a shape we can't reason about — fail closed as in_use
+            # (never adoptable, and not reclaimable: there is no superblock
+            # for drive_reclaim to zero).
+            state = "in_use"
         elif signatures:
             state = "foreign"
         else:
@@ -1360,15 +1389,16 @@ def classify_disks(lsblk_tree, os_disk):
             "model": (dev.get("model") or "").strip(),
             "serial": (dev.get("serial") or "").strip(),
         }
-        if state == "pool_member":
-            # Name the array so the dashboard routes the user to the pool
-            # card (format/destroy) instead of a per-disk adopt that would
-            # fail EBUSY on an md-held member anyway.
-            entry["md"] = next(
-                (d.get("name") for d in descendants
-                 if (d.get("name") or "").startswith("md")),
-                "",
-            )
+        if md_name or state == "pool_member":
+            # Name the array so the dashboard routes the member to Reclaim
+            # (drive_reclaim needs the owning md) instead of a per-disk
+            # adopt that would fail EBUSY on an md-held member anyway.
+            # WARP-1336: attached in EVERY state that has an md descendant —
+            # the member→array linkage must survive the state — plus
+            # `md_mounted` so UI copy can distinguish a live pool from
+            # leftover metadata.
+            entry["md"] = md_name
+            entry["md_mounted"] = md_mounted
         disks.append(entry)
     return disks
 

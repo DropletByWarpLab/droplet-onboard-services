@@ -7,7 +7,10 @@
  * admin-rag-eval proxy. Owner/admin only: voice status exposes the last
  * transcript + reply (household-private speech), and `/say` drives the
  * room speaker. Service principals are denied by the same guard
- * (`requireRole` never lists the `service` role here).
+ * (`requireRole` never lists the `service` role here) — the one
+ * exception is POST /voice/events (WARP-1058), which is the inverse:
+ * ONLY the `_service:voice` principal may push pipeline events into
+ * the activity chain, and every human role is denied.
  *
  * Availability: voice-io ships under the `linux` compose profile
  * (production appliances). On macOS dev installs (or whenever the
@@ -18,12 +21,19 @@
  * pipeline faulted) is relayed verbatim instead, so a real fault stays
  * visible rather than reading as "not installed".
  */
-import { Router, type Request, type Response } from "express";
+import {
+  Router,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
+import { z } from "zod";
 import { requireRole } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import type { ActivitySeverityName } from "../services/audit-signing.service.js";
 
 const logger = createLogger("voice");
 
@@ -62,6 +72,96 @@ const MEASURE_SECONDS_MAX = 30;
 /** WARP-1059 — mirrors voice-io's CalibrationModeRequest ttl_s bounds. */
 const CALIBRATION_MODE_TTL_MIN_S = 5;
 const CALIBRATION_MODE_TTL_MAX_S = 300;
+
+/**
+ * WARP-1058 — voice-io → activity-chain event bridge.
+ *
+ * voice-io pushes pipeline events (wake outcomes, DSP wedge/recovery)
+ * to POST /api/voice/events over the SAME channel it already uses for
+ * /api/llm/chat and /api/persona/prompt: HTTP with the
+ * `ORCHESTRATOR_TOKEN` bearer, which authMiddleware resolves to the
+ * `_service:voice` principal. The orchestrator — not voice-io — owns
+ * the signed rows' copy: the wire carries only a typed event plus
+ * measured context (score/threshold/model), and this table maps it to
+ * the §3.4 outcome wording the /voice feed renders verbatim. A
+ * compromised or buggy container can therefore never inject arbitrary
+ * text into the audit chain.
+ *
+ * `person` is "Guest" on every wake row until voice enrollment
+ * (WARP-1056) lands — §3.3: unrecognized voices are guests.
+ */
+const VOICE_EVENT_ROWS: Record<
+  string,
+  { severity: ActivitySeverityName; what: string; person?: string }
+> = {
+  wake_answered: { severity: "info", what: "Answered", person: "Guest" },
+  wake_heard: {
+    severity: "info",
+    what: "Heard the wake word",
+    person: "Guest",
+  },
+  wake_ignored: {
+    severity: "info",
+    what: "Ignored — below confidence",
+    person: "Guest",
+  },
+  wake_missed: { severity: "warn", what: "Missed wake word", person: "Guest" },
+  dsp_wedge: { severity: "err", what: "Mic processor stopped responding" },
+  dsp_recovered: { severity: "info", what: "Mic processor recovered" },
+};
+
+const voiceEventSchema = z.object({
+  type: z.enum([
+    "wake_answered",
+    "wake_heard",
+    "wake_ignored",
+    "wake_missed",
+    "dsp_wedge",
+    "dsp_recovered",
+  ]),
+  /** Event wall time (epoch seconds) — the reporter queues events, so
+   *  "now" at record time can lag the actual detection by seconds. */
+  at: z.number().finite().optional(),
+  score: z.number().finite().optional(),
+  threshold: z.number().finite().optional(),
+  model: z.string().max(200).optional(),
+});
+
+/** Clamp a caller-supplied event time into a sane window so a skewed
+ *  container clock can't back- or forward-date signed rows. */
+const EVENT_AT_MAX_PAST_S = 3600;
+const EVENT_AT_MAX_FUTURE_S = 60;
+
+function eventDate(atS: number | undefined, nowMs: number): Date {
+  if (atS === undefined) return new Date(nowMs);
+  const atMs = atS * 1000;
+  if (
+    atMs < nowMs - EVENT_AT_MAX_PAST_S * 1000 ||
+    atMs > nowMs + EVENT_AT_MAX_FUTURE_S * 1000
+  ) {
+    return new Date(nowMs);
+  }
+  return new Date(atMs);
+}
+
+/**
+ * Guard for the event bridge: EXACTLY the voice-io service principal.
+ * Humans (any role) are denied — voice events describe what the box
+ * heard; a dashboard session has no business forging them — and so is
+ * every other service principal (mcp/email/…), which keeps the coarse
+ * `service` role from becoming an audit-row injection path.
+ */
+function requireVoiceServicePrincipal(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  if (req.user?.id === "_service:voice" && req.user.role === "service") {
+    next();
+    return;
+  }
+  res.status(403).json({ error: "Forbidden: voice-io service only" });
+}
 
 function voiceIoBaseUrl(): string {
   // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
@@ -235,7 +335,33 @@ export function createVoiceRouter(): Router {
       res.status(400).json({ error: "invalid_calibration" });
       return;
     }
-    await proxy(res, "POST", "/voice/calibration", body);
+    const status = await proxy(res, "POST", "/voice/calibration", body);
+    // WARP-1058 — a persisted calibration is a hardware-tuning write;
+    // it leaves an activity row like the restart below. Only on
+    // success: a rejected/failed apply changed nothing on the box.
+    // Fire-and-forget after the response is committed (recordActivity
+    // swallows recorder failures).
+    if (status >= 200 && status < 300) {
+      const record = body as Record<string, unknown>;
+      const floor = record.noise_floor_dbfs;
+      const wakes = record.wake_detections;
+      const subParts: string[] = [];
+      if (typeof floor === "number" && Number.isFinite(floor)) {
+        subParts.push(`noise floor ${floor} dB`);
+      }
+      if (typeof wakes === "number" && Number.isFinite(wakes)) {
+        subParts.push(`wake word ${wakes}/3`);
+      }
+      void recordActivity({
+        kind: "voice",
+        severity: "ok",
+        sourceIcon: "mic",
+        what: "Calibration applied",
+        sub: subParts.length > 0 ? subParts.join(" · ") : null,
+        refs: { surface: "voice-calibration", upstreamStatus: status },
+        actor: actorFromRequest(req),
+      });
+    }
   });
 
   // ── WARP-1057: XVF3800 DSP restart (wedge recovery) ──
@@ -259,7 +385,10 @@ export function createVoiceRouter(): Router {
     // reboot into a 500 (recordActivity swallows recorder failures).
     const ok = status >= 200 && status < 300;
     void recordActivity({
-      kind: "system",
+      // WARP-1058: kind `voice` (was `system`) so restarts surface in
+      // the /voice "Recent voice activity" feed's kind filter — the
+      // §6.3 self-heal-transparency row.
+      kind: "voice",
       severity: ok ? "info" : "err",
       sourceIcon: "mic",
       what: ok ? "Voice processor restarted" : "Voice processor restart failed",
@@ -268,6 +397,46 @@ export function createVoiceRouter(): Router {
       actor: actorFromRequest(req),
     });
   });
+
+  // ── WARP-1058: voice-io → activity-chain event bridge ──
+
+  router.post(
+    "/voice/events",
+    requireVoiceServicePrincipal,
+    async (req: Request, res) => {
+      const parsed = voiceEventSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "invalid_event",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const { type, at, score, threshold, model } = parsed.data;
+      const row = VOICE_EVENT_ROWS[type]!;
+      const refs: Record<string, unknown> = {
+        surface: "voice-io",
+        principal: req.user!.id,
+      };
+      if (row.person !== undefined) refs.person = row.person;
+      if (score !== undefined) refs.score = score;
+      if (threshold !== undefined) refs.threshold = threshold;
+      if (model !== undefined) refs.model = model;
+      // Awaited so the reporter's sequential queue preserves event
+      // order in the chain; recordActivity swallows recorder failures.
+      const recorded = await recordActivity({
+        kind: "voice",
+        severity: row.severity,
+        sourceIcon: "mic",
+        what: row.what,
+        sub: row.person ?? null,
+        refs,
+        actor: actorFromRequest(req),
+        at: eventDate(at, Date.now()),
+      });
+      res.status(202).json({ recorded: recorded !== null });
+    },
+  );
 
   return router;
 }

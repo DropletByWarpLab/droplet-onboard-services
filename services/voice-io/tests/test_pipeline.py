@@ -2614,3 +2614,52 @@ class TestFlatlineDegraded:
         pipe = _quiet_pipe(flatline_window_s=0.01)
         time.sleep(0.05)
         assert pipe.status().input_flatlined is False
+
+
+class TestFlatlineGainCompensation:
+    """WARP-1060 (R1 from the WARP-1055 review) — the flatline gate is
+    tuned in the effective (post-gain) domain, but frames are tracked
+    raw (pre-gain, the F1 domain contract). The compare must therefore
+    shift by 20·log10(input_gain): a quiet-but-healthy chain whose raw
+    self-noise sits below -70 dBFS on a gained box must not read as
+    "Mic processor not responding" after a silent flatline window."""
+
+    # Constant-amplitude-5 frames: 20·log10(5/32768) ≈ -76.3 dBFS raw —
+    # below the -70 default gate, above the gain-4 compensated gate
+    # (-70 - 20·log10(4) ≈ -82.0).
+    QUIET_CHAIN_AMPLITUDE = 5
+
+    def test_raw_self_noise_counts_as_audio_under_gain(self):
+        pipe = _quiet_pipe(input_gain=4.0)
+        pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
+        assert pipe.status().last_audio_at is not None
+
+    def test_same_frames_do_not_count_without_gain(self):
+        # Companion pin: the compensation comes from the gain, not from
+        # a loosened default gate.
+        pipe = _quiet_pipe(input_gain=1.0)
+        pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
+        assert pipe.status().last_audio_at is None
+
+    def test_gained_box_does_not_false_flag_flatline(self):
+        pipe = _quiet_pipe(flatline_window_s=0.05, input_gain=4.0)
+        pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
+        time.sleep(0.1)
+        pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
+        assert pipe.status().input_flatlined is False
+
+    def test_wedge_dither_still_flatlines_under_gain(self):
+        # ±1-count dither (≈ -90 dBFS) is the wedged-DSP signature; it
+        # must stay below the compensated gate on a gained box.
+        pipe = _quiet_pipe(flatline_window_s=0.05, input_gain=4.0)
+        pipe._on_frame(_audio_frame(1))
+        time.sleep(0.1)
+        assert pipe.status().input_flatlined is True
+
+    def test_live_calibration_gain_applies_to_the_gate(self):
+        # set_input_gain (the wizard's live-apply) must move the gate
+        # the same way the construct-time env gain does.
+        pipe = _quiet_pipe()
+        pipe.set_input_gain(4.0)
+        pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
+        assert pipe.status().last_audio_at is not None

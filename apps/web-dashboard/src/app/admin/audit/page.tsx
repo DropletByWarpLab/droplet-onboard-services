@@ -13,11 +13,17 @@
  *
  * Role gate mirrors /admin/claude-activity: client check here, real
  * enforcement in the orchestrator's owner/admin middleware.
+ *
+ * WARP-1058: `?kind=<ActivityKind>` pre-selects the kind filter so
+ * other surfaces can deep-link a filtered view (the /voice page's
+ * "See all in Activity" points at /admin/audit?kind=voice). Initial
+ * value only — the dropdown stays local state after load.
  */
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Download, FileLock2, ScrollText, Search, ShieldOff } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 import { fetchUsers } from "@/lib/api";
@@ -63,8 +69,46 @@ function isAdminRole(role?: string): boolean {
   return role === "owner" || role === "admin";
 }
 
+/** WARP-1058: validate a ?kind= deep-link value against the wire enum
+ *  — anything else falls back to "All kinds". */
+function parseKindParam(value: string | null | undefined): string {
+  return value && (ACTIVITY_KINDS as readonly string[]).includes(value)
+    ? value
+    : "";
+}
+
+// useSearchParams must be read under a Suspense boundary (Next.js
+// app-router) — mirror the /network pattern: a thin outer component
+// holds the boundary, the inner component owns all the page logic.
 export default function AuditPage() {
+  return (
+    <Suspense fallback={<AuditPageSkeleton />}>
+      <AuditPageInner />
+    </Suspense>
+  );
+}
+
+function AuditPageSkeleton() {
+  return (
+    <ShellPage
+      icon={<ScrollText size={15} />}
+      label="Audit log"
+      title="Audit log"
+    >
+      <div
+        className="card"
+        aria-busy="true"
+        style={{ textAlign: "center", padding: 48, color: "var(--text-muted)" }}
+      >
+        Loading…
+      </div>
+    </ShellPage>
+  );
+}
+
+function AuditPageInner() {
   const { user, isLoading: authLoading } = useAuth();
+  const searchParams = useSearchParams();
 
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -78,7 +122,11 @@ export default function AuditPage() {
   // fresh nextCursor.
   const fetchGenRef = useRef(0);
 
-  const [kind, setKind] = useState("");
+  // WARP-1058: deep-linked pre-filter (e.g. /admin/audit?kind=voice
+  // from the /voice feed's "See all in Activity").
+  const [kind, setKind] = useState(() =>
+    parseKindParam(searchParams?.get("kind")),
+  );
   const [actorType, setActorType] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("all");
   const [q, setQ] = useState("");
