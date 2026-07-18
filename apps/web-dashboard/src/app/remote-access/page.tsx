@@ -92,6 +92,15 @@ export default function RemoteAccessPage() {
 
   const activePeers = peers.filter((p) => p.status === "active");
   const endpointMissing = status && !status.endpointConfigured;
+  // WARP-1391: the "Add device" mint is HOME mode — Endpoint = the box's
+  // discovered home-facing LAN IP (resolveHomeEndpointHost), NOT the away-mode
+  // default's split-horizon public FQDN (that FQDN is public-NXDOMAIN by design
+  // — WARP-954 / ADR-023 — so an away conf shows keepalive but zero handshakes).
+  // When the box hasn't discovered that LAN IP yet (homeEndpointHost null/absent)
+  // a home mint 503s, so gate the affordance off rather than offer a dead mint.
+  // Missing field ⇒ treat as "not reachable at home yet" (never over-promise —
+  // the WARP-993 offLanReachable convention). Only surfaced once status loads.
+  const homeMintBlocked = Boolean(status) && !status?.homeEndpointHost;
   // WARP-993: only promise "from anywhere" when the endpoint is actually
   // routable from outside the home LAN. FQDN-only (split-horizon, no public
   // A record — ADR-023 §3) reports false until the ADR-025 relay lands.
@@ -102,7 +111,7 @@ export default function RemoteAccessPage() {
     <button
       className="btn primary"
       onClick={() => setShowAdd(true)}
-      disabled={endpointMissing === true}
+      disabled={endpointMissing === true || homeMintBlocked}
       type="button"
     >
       <Plus size={15} />
@@ -144,6 +153,29 @@ export default function RemoteAccessPage() {
                 Your box is still setting up its own web address. Remote access turns
                 on automatically once that’s ready — no settings to enter. If this
                 doesn’t clear on its own, restart the box.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WARP-1391: the box has its internet address but hasn't discovered its
+          home-network address yet, so a device can't be minted for home use
+          right now. Say so honestly (same calm tone as the endpoint card) and
+          keep "Add device" disabled until the address appears — no dead config,
+          no over-promise. Only shown when the endpoint itself IS ready, so this
+          never stacks with the "Web address not ready yet" card above. */}
+      {homeMintBlocked && !endpointMissing && (
+        <div className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Home address not ready yet</p>
+              <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
+                Your box is still setting up its home address on your network.
+                Adding a device works on your office Wi-Fi — the button lights up
+                automatically once that address is ready, with nothing to enter.
+                If this doesn’t clear on its own, restart the box.
               </p>
             </div>
           </div>
@@ -380,7 +412,12 @@ function AddDeviceDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const result = await createVpnPeer(trimmed);
+      // WARP-1391: mint HOME mode explicitly. The orchestrator route defaults to
+      // "away" (a byte-identical pre-hybrid compat contract, PR #897) which bakes
+      // the split-horizon public FQDN Endpoint — public-NXDOMAIN by design, so the
+      // conf shows keepalive but zero handshakes. Home bakes the box LAN IP and
+      // works today; the page gates this affordance on homeEndpointHost.
+      const result = await createVpnPeer(trimmed, "home");
       setCreated(result);
       setStep("ready");
       onAdded();

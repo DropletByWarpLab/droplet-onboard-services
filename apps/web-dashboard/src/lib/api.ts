@@ -5205,11 +5205,28 @@ export async function fetchVpnPeers(): Promise<{ peers: VpnPeerInfo[] }> {
   return res.json();
 }
 
-export async function createVpnPeer(deviceLabel: string): Promise<VpnPeerCreatedInfo> {
+/**
+ * Mint a WireGuard peer. `mode` selects how the device dials the box:
+ *
+ *   "home" — Endpoint is the box's discovered home-facing LAN IP
+ *            (resolveHomeEndpointHost on the orchestrator). Works today on the
+ *            home/office network. This is the DEFAULT for every user-facing
+ *            surface (WARP-1391): the orchestrator route's own default is "away"
+ *            (a byte-identical pre-hybrid compat contract, PR #897), and away
+ *            bakes the split-horizon public FQDN Endpoint — a public-NXDOMAIN
+ *            address (WARP-954 / ADR-023) the stock WireGuard app can't
+ *            handshake, so an omitted mode silently minted a dead config.
+ *   "away" — operator-only: dials the public FQDN / relay endpoint. Reachable
+ *            via the direct API; the dashboard never mints it.
+ */
+export async function createVpnPeer(
+  deviceLabel: string,
+  mode: "home" | "away" = "home",
+): Promise<VpnPeerCreatedInfo> {
   const res = await authFetch(`${BASE}/api/vpn/peers`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deviceLabel }),
+    body: JSON.stringify({ deviceLabel, mode }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
