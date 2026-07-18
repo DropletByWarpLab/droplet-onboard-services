@@ -40,6 +40,11 @@ import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  enrollOverlayDevice,
+  type OverlayEnrollInput,
+} from "../services/overlay-connect.service.js";
+import { createDeviceIdentityClient } from "../services/device-identity.client.js";
 
 const logger = createLogger("vpn-route");
 
@@ -148,8 +153,82 @@ function isAdmin(req: Request): boolean {
   return role === "owner" || role === "admin";
 }
 
-export function createVpnRouter(prisma: PrismaClient): Router {
+/** WARP-1385 — the box→HQ vouching call. Injected so the route unit-tests
+ *  without the gRPC device-identity sidecar; production wires it to
+ *  enrollOverlayDevice + createDeviceIdentityClient below. */
+export type OverlayEnrollFn = (input: OverlayEnrollInput) => Promise<unknown>;
+
+function defaultOverlayEnroll(input: OverlayEnrollInput): Promise<unknown> {
+  return enrollOverlayDevice(
+    {
+      config: {
+        hqBaseUrl: config.HQ_ISSUANCE_URL,
+        deviceId: config.DROPLET_DEVICE_ID,
+      },
+      identity: createDeviceIdentityClient(),
+    },
+    input,
+  );
+}
+
+// WARP-1385 (Part D) — body for POST /api/vpn/overlay/devices. base64 wg key
+// (43 chars + '='); a PEM public key; a human label.
+const overlayEnrollSchema = z.object({
+  wg_public_key: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]{43}=$/, "must be a base64 WireGuard public key"),
+  // NOT trimmed: the box vouches over EXACTLY the bytes it received (the enroll
+  // grant embeds sha256(sign_public_key_pem)), so trimming here would desync the
+  // box's fingerprint from what the client + HQ compute.
+  sign_public_key_pem: z
+    .string()
+    .min(1)
+    .includes("PUBLIC KEY", { message: "must be a PEM public key" }),
+  label: z.string().trim().min(1).max(64),
+});
+
+export function createVpnRouter(
+  prisma: PrismaClient,
+  opts: { overlayEnroll?: OverlayEnrollFn } = {},
+): Router {
   const router = Router();
+  const overlayEnroll = opts.overlayEnroll ?? defaultOverlayEnroll;
+
+  // ── POST /api/vpn/overlay/devices ──
+  // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
+  // Owner/admin only: the box signs a grant over the client's key material and
+  // vouches for it to HQ (the box→HQ bridge the Android client — WARP-1386 —
+  // calls). HQ never owns user accounts; the box signature IS the vouch.
+  router.post(
+    "/vpn/overlay/devices",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = overlayEnrollSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+        if (!config.HQ_ISSUANCE_URL) {
+          return res.status(503).json({
+            error:
+              "The box hasn't linked to its fleet directory yet — remote-access enrollment turns on automatically once it does.",
+          });
+        }
+        const result = await overlayEnroll({
+          wgPublicKey: parsed.data.wg_public_key,
+          signPublicKeyPem: parsed.data.sign_public_key_pem,
+          label: parsed.data.label,
+        });
+        return res.status(200).json(result);
+      } catch (err) {
+        logger.warn({ err }, "overlay device enroll failed");
+        return next(err);
+      }
+    },
+  );
 
   // ── GET /api/vpn/status ──
   // Public-ish info for the dashboard: server pubkey, listen port, peer
