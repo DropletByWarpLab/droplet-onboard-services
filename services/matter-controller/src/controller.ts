@@ -68,7 +68,9 @@ const DEVICE_TYPE_CATEGORY: Record<number, SmartHomeCategory> = {
   0x0015: "binary_sensor", // Contact Sensor
   // Climate
   0x0301: "climate",    // Thermostat
-  0x002b: "climate",    // Fan
+  // WARP-897: 0x002b is the Fan device type — it was mislabeled "climate",
+  // which routed it to the thermostat widget and hid the fan controls.
+  0x002b: "fan",        // Fan
   // Media
   0x0028: "media_player", // Basic Video Player
   0x0023: "media_player", // Casting Video Player
@@ -837,6 +839,40 @@ function readEndpointAttributes(
     }
   } catch { /* cluster not present */ }
 
+  // WARP-897: the state the control widgets render — color, cover position,
+  // fan speed/mode, lock bolt state. Same per-cluster try pattern: absent
+  // clusters simply contribute nothing.
+  try {
+    const color = endpoint.state?.colorControl;
+    if (color !== undefined) {
+      attributes.currentHue = color.currentHue;
+      attributes.currentSaturation = color.currentSaturation;
+      attributes.colorTemperatureMireds = color.colorTemperatureMireds;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const cover = endpoint.state?.windowCovering;
+    if (cover !== undefined) {
+      attributes.liftPercent100ths = cover.currentPositionLiftPercent100ths;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const fan = endpoint.state?.fanControl;
+    if (fan !== undefined) {
+      attributes.fanPercent = fan.percentCurrent ?? fan.percentSetting;
+      attributes.fanMode = fan.fanMode;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const lock = endpoint.state?.doorLock;
+    if (lock !== undefined) {
+      attributes.lockState = lock.lockState;
+    }
+  } catch { /* cluster not present */ }
+
   try {
     const temp = endpoint.state?.temperatureMeasurement;
     if (temp !== undefined) {
@@ -851,8 +887,27 @@ function deriveStateString(
 ): string {
   if (node.connectionState !== NodeStates.Connected) return "unavailable";
 
+  // WARP-897: a lock is its bolt, never its (absent) onOff — DoorLock
+  // lockState: 1 Locked, 2 Unlocked; anything else is honestly reported.
+  if (attributes.lockState !== undefined && attributes.lockState !== null) {
+    const ls = Number(attributes.lockState);
+    if (ls === 1) return "locked";
+    if (ls === 2) return "unlocked";
+    return "not fully locked";
+  }
+  // WARP-897: covers — Matter lift is hundredths CLOSED (10000 = closed).
+  if (
+    attributes.liftPercent100ths !== undefined &&
+    attributes.liftPercent100ths !== null
+  ) {
+    return Number(attributes.liftPercent100ths) >= 9900 ? "closed" : "open";
+  }
   if (attributes.onOff !== undefined) {
     return attributes.onOff ? "on" : "off";
+  }
+  // WARP-897: fans without an onOff cluster — speed is the state.
+  if (attributes.fanPercent !== undefined && attributes.fanPercent !== null) {
+    return Number(attributes.fanPercent) > 0 ? "on" : "off";
   }
   if (attributes.measuredValue !== undefined) {
     return String(Number(attributes.measuredValue) / 100);
