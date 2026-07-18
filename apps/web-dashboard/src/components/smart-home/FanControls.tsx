@@ -79,14 +79,13 @@ export function FanControls({ device, onCommand }: FanControlsProps) {
               type="button"
               aria-pressed={active}
               onClick={() => onCommand(device.nodeId, "set_fan_mode", { mode })}
-              className="flex-1 py-1 rounded-lg type-caption-1 capitalize transition-colors
+              className={`flex-1 py-1 rounded-lg type-caption-1 capitalize transition-colors
                 duration-200 focus-visible:outline-none focus-visible:ring-2
-                focus-visible:ring-[var(--brand)]"
-              style={
-                active
-                  ? { background: "var(--brand-subtle)", color: "var(--brand)" }
-                  : { background: "var(--card-inner)", color: "var(--text-muted)" }
-              }
+                focus-visible:ring-[var(--brand)] ${
+                  active
+                    ? "bg-[var(--brand-subtle)] text-[var(--brand)]"
+                    : "bg-[var(--card-inner)] text-[var(--text-muted)] hover:bg-[var(--hover)]"
+                }`}
             >
               {mode}
             </button>

@@ -42,6 +42,14 @@ export function ColorControls({ device, onCommand }: ColorControlsProps) {
   const [localHue, setLocalHue] = useState(currentHueDeg);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
+  // Nearest named swatch - drives the selected ring and the slider
+  // announcement (a home user hears "Purple", not raw degrees).
+  const nearest = SWATCHES.reduce((best, sw) => {
+    const d = Math.min(Math.abs(sw.hue - localHue), 360 - Math.abs(sw.hue - localHue));
+    const bd = Math.min(Math.abs(best.hue - localHue), 360 - Math.abs(best.hue - localHue));
+    return d < bd ? sw : best;
+  }, SWATCHES[0]);
+
   const setColor = useCallback(
     (hue: number) => {
       onCommand(device.nodeId, "set_color", { hue, saturation: 100 });
@@ -62,25 +70,31 @@ export function ColorControls({ device, onCommand }: ColorControlsProps) {
   return (
     <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center gap-2 flex-wrap" role="group" aria-label="Color presets">
-        {SWATCHES.map((s) => (
-          <button
-            key={s.name}
-            type="button"
-            aria-label={s.name}
-            title={s.name}
-            onClick={() => {
-              setLocalHue(s.hue);
-              setColor(s.hue);
-            }}
-            className="w-6 h-6 rounded-full flex-shrink-0 transition-transform duration-200
-              hover:scale-110 focus-visible:outline-none focus-visible:ring-2
-              focus-visible:ring-[var(--brand)] focus-visible:ring-offset-1"
-            style={{
-              background: `hsl(${s.hue} 85% 55%)`,
-              border: "1px solid var(--card-bd)",
-            }}
-          />
-        ))}
+        {SWATCHES.map((s) => {
+          const selected = s.name === nearest.name;
+          return (
+            <button
+              key={s.name}
+              type="button"
+              aria-label={s.name}
+              aria-pressed={selected}
+              title={s.name}
+              onClick={() => {
+                setLocalHue(s.hue);
+                setColor(s.hue);
+              }}
+              className={`w-6 h-6 rounded-full flex-shrink-0 transition-transform duration-200
+                hover:scale-110 focus-visible:outline-none focus-visible:ring-2
+                focus-visible:ring-[var(--brand)] focus-visible:ring-offset-1 ${
+                  selected ? "ring-2 ring-[var(--brand)] ring-offset-1" : ""
+                }`}
+              style={{
+                background: `hsl(${s.hue} 85% 55%)`,
+                border: "1px solid var(--card-bd)",
+              }}
+            />
+          );
+        })}
         {WHITES.map((w) => (
           <button
             key={w.name}
@@ -109,7 +123,7 @@ export function ColorControls({ device, onCommand }: ColorControlsProps) {
           aria-valuemin={0}
           aria-valuemax={360}
           aria-valuenow={localHue}
-          aria-valuetext={`${localHue} degrees`}
+          aria-valuetext={nearest.name}
           className="flex-1 h-1.5 rounded-full appearance-none
             [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4
             [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full

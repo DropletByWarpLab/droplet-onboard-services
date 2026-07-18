@@ -21,10 +21,15 @@ interface LockControlProps {
 export function LockControl({ device, onCommand }: LockControlProps) {
   const isLocked = device.state === "locked";
 
+  // Backgrounds are CLASSES, never inline styles - an inline background
+  // beats the hover pseudo-class and kills the hover state (the WARP-1356
+  // dead-state family). The active state swaps classes instead.
   const btn =
     "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg type-caption-1 " +
     "transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 " +
-    "focus-visible:ring-[var(--brand)] hover:bg-[var(--hover)]";
+    "focus-visible:ring-[var(--brand)]";
+  const inactive = btn + " bg-[var(--card-inner)] text-[var(--text)] hover:bg-[var(--hover)]";
+  const active = btn + " bg-[var(--brand-subtle)] text-[var(--brand)]";
 
   return (
     <div
@@ -35,27 +40,17 @@ export function LockControl({ device, onCommand }: LockControlProps) {
     >
       <button
         type="button"
-        className={btn}
+        className={isLocked ? active : inactive}
         aria-pressed={isLocked}
         onClick={() => onCommand(device.nodeId, "lock")}
-        style={
-          isLocked
-            ? { background: "var(--brand-subtle)", color: "var(--brand)" }
-            : { background: "var(--card-inner)", color: "var(--text)" }
-        }
       >
         <Lock size={14} /> Lock
       </button>
       <button
         type="button"
-        className={btn}
+        className={device.state === "unlocked" ? active : inactive}
         aria-pressed={!isLocked && device.state === "unlocked"}
         onClick={() => onCommand(device.nodeId, "unlock")}
-        style={
-          device.state === "unlocked"
-            ? { background: "var(--brand-subtle)", color: "var(--brand)" }
-            : { background: "var(--card-inner)", color: "var(--text)" }
-        }
       >
         <LockOpen size={14} /> Unlock
       </button>

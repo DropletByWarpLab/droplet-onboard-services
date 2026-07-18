@@ -38,10 +38,14 @@ export function CoverControls({ device, onCommand }: CoverControlsProps) {
     [device.nodeId, onCommand],
   );
 
+  // Backgrounds are CLASSES, never inline styles - an inline background
+  // beats the hover pseudo-class and kills the hover state (the WARP-1356
+  // dead-state family).
   const motionBtn =
     "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg type-caption-1 " +
     "transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 " +
-    "focus-visible:ring-[var(--brand)] hover:bg-[var(--hover)]";
+    "focus-visible:ring-[var(--brand)] bg-[var(--card-inner)] text-[var(--text)] " +
+    "hover:bg-[var(--hover)]";
 
   return (
     <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
@@ -49,7 +53,6 @@ export function CoverControls({ device, onCommand }: CoverControlsProps) {
         <button
           type="button"
           className={motionBtn}
-          style={{ background: "var(--card-inner)", color: "var(--text)" }}
           onClick={() => onCommand(device.nodeId, "open_cover")}
         >
           <ChevronUp size={14} /> Open
@@ -57,7 +60,6 @@ export function CoverControls({ device, onCommand }: CoverControlsProps) {
         <button
           type="button"
           className={motionBtn}
-          style={{ background: "var(--card-inner)", color: "var(--text)" }}
           onClick={() => onCommand(device.nodeId, "stop_cover")}
         >
           <Square size={12} /> Stop
@@ -65,7 +67,6 @@ export function CoverControls({ device, onCommand }: CoverControlsProps) {
         <button
           type="button"
           className={motionBtn}
-          style={{ background: "var(--card-inner)", color: "var(--text)" }}
           onClick={() => onCommand(device.nodeId, "close_cover")}
         >
           <ChevronDown size={14} /> Close

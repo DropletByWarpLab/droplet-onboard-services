@@ -15,10 +15,15 @@ interface MediaControlsProps {
 }
 
 export function MediaControls({ device, onCommand }: MediaControlsProps) {
+  // Backgrounds are CLASSES, never inline styles - an inline background
+  // beats the hover pseudo-class and kills the hover state (the WARP-1356
+  // dead-state family). The active state swaps classes instead.
   const btn =
     "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg type-caption-1 " +
     "transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 " +
-    "focus-visible:ring-[var(--brand)] hover:bg-[var(--hover)]";
+    "focus-visible:ring-[var(--brand)]";
+  const inactive = btn + " bg-[var(--card-inner)] text-[var(--text)] hover:bg-[var(--hover)]";
+  const active = btn + " bg-[var(--brand-subtle)] text-[var(--brand)]";
 
   const playing = device.state === "playing";
 
@@ -31,29 +36,22 @@ export function MediaControls({ device, onCommand }: MediaControlsProps) {
     >
       <button
         type="button"
-        className={btn}
+        className={playing ? active : inactive}
         aria-pressed={playing}
         onClick={() => onCommand(device.nodeId, "play_media")}
-        style={
-          playing
-            ? { background: "var(--brand-subtle)", color: "var(--brand)" }
-            : { background: "var(--card-inner)", color: "var(--text)" }
-        }
       >
         <Play size={14} /> Play
       </button>
       <button
         type="button"
-        className={btn}
-        style={{ background: "var(--card-inner)", color: "var(--text)" }}
+        className={inactive}
         onClick={() => onCommand(device.nodeId, "pause_media")}
       >
         <Pause size={14} /> Pause
       </button>
       <button
         type="button"
-        className={btn}
-        style={{ background: "var(--card-inner)", color: "var(--text)" }}
+        className={inactive}
         onClick={() => onCommand(device.nodeId, "stop_media")}
       >
         <Square size={12} /> Stop
