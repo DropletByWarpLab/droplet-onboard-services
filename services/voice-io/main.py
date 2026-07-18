@@ -42,6 +42,7 @@ try:
 except Exception:  # pragma: no cover — sounddevice absent on this host
     class _PortAudioError(Exception):
         """Stand-in when sounddevice isn't importable."""
+from voice.activity import ActivityReporter, build_reporter_from_env
 from voice.calibration import CalibrationStore
 from voice.speaker_id import (
     MAX_TOTAL_LINES,
@@ -178,6 +179,12 @@ _pipeline: Optional[WakePipeline] = None
 # LLM_URL=__mock__).
 _persona_fetcher: Optional[PersonaFetcher] = None
 
+# WARP-1058 — the activity-feed event reporter (voice → orchestrator
+# POST /api/voice/events). Module scope so shutdown can stop its POST
+# worker. None until startup builds it (and always None under
+# LLM_URL=__mock__).
+_activity_reporter: Optional[ActivityReporter] = None
+
 
 # Cached on first call; /audio/devices refreshes on demand.
 _resolution: Optional[DeviceResolution] = None
@@ -299,11 +306,16 @@ async def startup() -> None:
     # case (DNS failures, dropped packets). Run them in a worker thread
     # so the FastAPI `/health` endpoint stays responsive within the
     # Dockerfile `HEALTHCHECK --start-period=10s` window.
-    global _pipeline, _persona_fetcher
+    global _pipeline, _persona_fetcher, _activity_reporter
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
         tts = build_tts_from_env()
+        # WARP-1058 — activity-feed event bridge (wake outcomes, missed
+        # wakes, DSP wedge/recovery → orchestrator /api/voice/events).
+        # Cheap to build (env read + a parked daemon thread); no I/O
+        # until the first event.
+        _activity_reporter = build_reporter_from_env()
         # WARP-1119 — build the persona fetcher FIRST so the same instance
         # is shared by the LLM's greeting path and /health's observability
         # fields. Prime it once off the event loop: the result is cached
@@ -346,6 +358,7 @@ async def startup() -> None:
             input_gain=VOICE_INPUT_GAIN,
             flatline_window_s=VOICE_FLATLINE_WINDOW_S,
             flatline_dbfs=VOICE_FLATLINE_DBFS,
+            activity_reporter=_activity_reporter,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -358,10 +371,13 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _pipeline
+    global _pipeline, _activity_reporter
     if _pipeline is not None:
         _pipeline.stop()
         _pipeline = None
+    if _activity_reporter is not None:
+        _activity_reporter.stop()
+        _activity_reporter = None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -747,6 +763,20 @@ def audio_test_tone(duration_s: float = 1.0, frequency_hz: float = 440.0) -> Tes
     )
 
 
+# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
+# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
+# interleaved buffers); a second concurrent measure answers 409 so the
+# dashboard can tell "busy, retry" apart from "device broken" (503).
+# threading.Lock works because these endpoints are sync `def`s — FastAPI
+# runs each in its own threadpool thread. /audio/test-record opens the
+# same capture device, so it holds the same lock (WARP-1060).
+_capture_lock = threading.Lock()
+
+_CAPTURE_BUSY_DETAIL = (
+    "Another microphone measurement is already running — try again in a few seconds."
+)
+
+
 @app.post("/audio/test-record", response_model=TestRecordResponse)
 def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
     """Record a short clip from the picked input + report level.
@@ -766,6 +796,8 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
         raise HTTPException(
             status_code=400, detail="duration_s must be between 0.1 and 10.0",
         )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
         result = measure_input_level(
             duration_s=duration_s,
@@ -775,25 +807,25 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
         )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        # Same operational-fault mapping as /audio/measure (WARP-1060):
+        # device busy / unplugged / rate-rejected is a retryable 503,
+        # never a raw 500 relayed to the dashboard.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The microphone didn't respond (device busy or "
+                f"disconnected: {exc}). Check the mic and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
     return TestRecordResponse(
         rms_dbfs=result["rms_dbfs"],
         peak_dbfs=result["peak_dbfs"],
         samples=result["samples"],
         duration_s=duration_s,
     )
-
-
-# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
-# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
-# interleaved buffers); a second concurrent measure answers 409 so the
-# dashboard can tell "busy, retry" apart from "device broken" (503).
-# threading.Lock works because these endpoints are sync `def`s — FastAPI
-# runs each in its own threadpool thread.
-_capture_lock = threading.Lock()
-
-_CAPTURE_BUSY_DETAIL = (
-    "Another microphone measurement is already running — try again in a few seconds."
-)
 
 
 @app.post("/audio/measure", response_model=MeasureResponse)

@@ -36,7 +36,7 @@
  * gRPC, or the network.
  */
 import * as forge from "node-forge";
-import { validateBoxName } from "@droplet/shared-types";
+import { validateBoxName, boxNameToFqdn } from "@droplet/shared-types";
 import type { DeviceIdentityClient, DeviceIdentityStatus } from "./device-identity.client.js";
 
 /** The exact bytes signed by the device TPM key, per the issuance contract:
@@ -1093,6 +1093,52 @@ export function createTlsIssuanceService(
   }
 
   /**
+   * WARP-980 follow-up — drive the DEFERRED name claim from the issuance tick.
+   * setBoxName/renameBoxName claim at wizard/rename time, but when that claim
+   * fell back without HQ confirming (HQ unreachable / device not registered
+   * yet — the exact state of every box while the default HQ hostname was
+   * unbound in DNS), DROPLET_BOX_NAME stayed persisted and NOTHING ever
+   * re-claimed it: the "re-claimed on the next issuance tick" promise in the
+   * claim-failure logs had no implementation, so the box kept issuing under
+   * the opaque `d-<hmac>` fqdn forever. Claim here, at most once per tick,
+   * BEFORE the order, so HQ honors `requested_name` on the very order this
+   * tick places. Fail-safe by the same contract as the wizard path:
+   * `claimBoxName` never throws, and every non-claimed outcome falls back to
+   * today's opaque/bootstrap issuance (re-attempted next tick).
+   */
+  let claimAttemptedThisTick = false;
+  async function ensureRequestedNameClaimed(): Promise<void> {
+    if (!requestedSlug || claimAttemptedThisTick) return;
+    // Already issued under the chosen name — nothing to claim.
+    if (fqdn && fqdn === boxNameToFqdn(requestedSlug)) return;
+    claimAttemptedThisTick = true;
+    const claim = await claimBoxName(requestedSlug, {
+      deviceId,
+      hq,
+      identity,
+      logger,
+      hqConfigured,
+    });
+    if (claim.outcome === CLAIM_RESULT_CLAIMED) {
+      logger.info(
+        { name: requestedSlug, fqdn: claim.fqdn },
+        "tls-issuance: deferred name claim confirmed — this order issues under the owner-chosen name",
+      );
+    } else if (
+      claim.outcome === CLAIM_RESULT_ALREADY_NAMED &&
+      claim.currentName === requestedSlug
+    ) {
+      // HQ already binds exactly this name to this device (claimed on an
+      // earlier tick/rename) — proceed; the order issues under it.
+    } else {
+      logger.warn(
+        { name: requestedSlug, outcome: claim.outcome },
+        "tls-issuance: deferred name claim did not confirm — proceeding with opaque/bootstrap issuance (re-attempted next tick)",
+      );
+    }
+  }
+
+  /**
    * The full issuance/renewal flow. Returns the LEARNED fqdn (from the HQ
    * challenge response) + the new not_after on success. The learned fqdn is the
    * authoritative name: a zero-touch box starts with an empty seed and only
@@ -1102,6 +1148,11 @@ export function createTlsIssuanceService(
   async function issueOrRenew(
     mode: "issue" | "renew",
   ): Promise<{ fqdn: string; notAfter: string }> {
+    // 0. WARP-980 follow-up — make sure the owner-chosen name is claimed
+    //    before this order, so HQ honors `requested_name` (a deferred/failed
+    //    wizard-time claim otherwise left the box on the opaque fqdn forever).
+    await ensureRequestedNameClaimed();
+
     // 1-2. Fetch a fresh challenge + sign the exact contract string with the
     //      device TPM key (shared with the factory-reset deregister path).
     const signed = await signChallenge({ deviceId, hq, identity });
@@ -1245,6 +1296,10 @@ export function createTlsIssuanceService(
 
   return {
     async runOnce() {
+      // A long-lived service instance runs one tick per cron firing — the
+      // deferred name claim is at-most-once PER TICK, not per process.
+      claimAttemptedThisTick = false;
+
       // The cert-state row is keyed on the fqdn (`TlsCert.fqdn @id`). A
       // zero-touch box starts with an empty seed and only LEARNS its opaque
       // name from the HQ challenge, so `seed` may be empty here. The row + the

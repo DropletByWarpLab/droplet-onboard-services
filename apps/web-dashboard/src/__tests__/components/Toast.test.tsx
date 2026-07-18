@@ -140,10 +140,11 @@ describe("Toast a11y (WARP-297)", () => {
   });
 
   it("does NOT render 'Dismiss all' with fewer than 3 toasts", () => {
+    // Distinct messages — identical repeats are deduped (WARP-1306).
     renderWithProvider();
     act(() => {
       fireEvent.click(screen.getByText("fire-error"));
-      fireEvent.click(screen.getByText("fire-error"));
+      fireEvent.click(screen.getByText("fire-success"));
     });
     expect(
       screen.queryByRole("button", { name: /dismiss all/i }),
@@ -151,15 +152,18 @@ describe("Toast a11y (WARP-297)", () => {
   });
 
   it("renders 'Dismiss all' when 3+ toasts are visible and clears them on click", () => {
+    // Distinct messages — identical repeats are deduped (WARP-1306).
     renderWithProvider();
     act(() => {
       fireEvent.click(screen.getByText("fire-error"));
-      fireEvent.click(screen.getByText("fire-error"));
-      fireEvent.click(screen.getByText("fire-error"));
+      fireEvent.click(screen.getByText("fire-success"));
+      fireEvent.click(screen.getByText("fire-info"));
     });
     const dismissAll = screen.getByRole("button", { name: /dismiss all/i });
     expect(dismissAll).toBeInTheDocument();
-    expect(screen.getAllByText("Boom")).toHaveLength(3);
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    expect(screen.getByText("Yay")).toBeInTheDocument();
+    expect(screen.getByText("FYI")).toBeInTheDocument();
     act(() => {
       fireEvent.click(dismissAll);
     });
@@ -167,5 +171,52 @@ describe("Toast a11y (WARP-297)", () => {
     expect(
       screen.queryByRole("button", { name: /dismiss all/i }),
     ).toBeNull();
+  });
+});
+
+describe("Toast dedup (WARP-1306)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("does not stack an identical (message, type) toast twice", () => {
+    // The Projects New-project dialog surfaced the same 'module disabled'
+    // error toast twice (error toasts persist until dismissed, so a second
+    // identical failure stacked a twin). Identical repeats now no-op.
+    renderWithProvider();
+    act(() => {
+      fireEvent.click(screen.getByText("fire-error"));
+      fireEvent.click(screen.getByText("fire-error"));
+    });
+    expect(screen.getAllByText("Boom")).toHaveLength(1);
+  });
+
+  it("still stacks different messages", () => {
+    renderWithProvider();
+    act(() => {
+      fireEvent.click(screen.getByText("fire-error"));
+      fireEvent.click(screen.getByText("fire-success"));
+    });
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    expect(screen.getByText("Yay")).toBeInTheDocument();
+  });
+
+  it("allows the same message again after the first was dismissed", () => {
+    renderWithProvider();
+    act(() => {
+      fireEvent.click(screen.getByText("fire-error"));
+    });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+    });
+    expect(screen.queryByText("Boom")).toBeNull();
+    act(() => {
+      fireEvent.click(screen.getByText("fire-error"));
+    });
+    expect(screen.getByText("Boom")).toBeInTheDocument();
   });
 });

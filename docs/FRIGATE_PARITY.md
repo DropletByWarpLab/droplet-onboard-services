@@ -1,6 +1,6 @@
 # Frigate Feature Parity in the Droplet Dashboard
 
-> **Goal.** Every feature Frigate exposes through its own web UI is delivered through the Droplet dashboard instead. There is no `/frigate/` escape hatch, no "Open Frigate UI" button, and no separate auth surface — operators manage cameras, events, recordings, zones, detection rules, and system stats entirely from `https://droplet-ai.local`.
+> **Goal.** Every feature Frigate exposes through its own web UI is delivered through the Droplet dashboard instead. There is no `/frigate/` escape hatch, no "Open Frigate UI" button, and no separate auth surface — operators manage cameras, events, recordings, zones, detection rules, and system stats entirely from the Droplet dashboard at the box's trusted address (`https://<box-name>.droplet-us.com` — `droplet.local` is the shortcut you can type on the LAN; WARP-1301).
 
 ---
 

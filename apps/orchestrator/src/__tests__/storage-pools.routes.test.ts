@@ -41,6 +41,15 @@ function createPrismaMock() {
     storagePool: {
       findMany: vi.fn(async () => [...pools.values()]),
       findUnique: vi.fn(async ({ where }: any) => pools.get(where.device) ?? null),
+      // WARP-1337: pool-create seeds the customer's displayName via upsert.
+      upsert: vi.fn(async ({ where, create, update }: any) => {
+        const existing = pools.get(where.device);
+        const row = existing
+          ? { ...existing, ...update }
+          : { device: where.device, status: "none", notes: null, ...create };
+        pools.set(where.device, row);
+        return row;
+      }),
     },
     poolMember: {
       findMany: vi.fn(async ({ where }: any = {}) =>
@@ -368,6 +377,169 @@ describe("destructive pool routes — no execution without a valid confirm token
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// WARP-1337 — POST /api/storage/pools accepts an optional customer-facing
+// displayName. Zod-validated BEFORE any prisma call (pre-DB gate); carried in
+// the confirm-token params (never forwarded to the bridge — the host script
+// has no such parameter) and, on a successful CONFIRM/execute, seeds the
+// StoragePool row keyed by the md device so the new pool is born named
+// instead of waiting for a later PATCH rename.
+describe("POST /api/storage/pools — optional displayName seeding (WARP-1337)", () => {
+  it("create-with-name seeds the StoragePool row on confirm and GET returns it", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([
+      { device: "md0", level: "raid1", status: "active", members: ["sda", "sdb"] },
+    ]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sdb"],
+        confirmPhrase: "ERASE sda sdb",
+        displayName: "Family Vault",
+      });
+    expect(create.status).toBe(202);
+
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: create.body.confirmationToken,
+        service: "pool_create",
+        resourceId: "md0",
+      });
+    expect(confirm.status).toBe(200);
+
+    // The row exists, keyed by mdDevice, with the customer's name + the
+    // validated level (an explicit enum column — never a host default).
+    expect(prisma.pools.get("md0")).toMatchObject({
+      device: "md0",
+      displayName: "Family Vault",
+      level: "raid1",
+    });
+
+    // And the read path joins it, exactly like a PATCH-renamed pool.
+    const list = await request(app).get("/api/storage/pools");
+    expect(list.status).toBe(200);
+    expect(list.body.pools[0].displayName).toBe("Family Vault");
+  });
+
+  // Code review (WARP-1337): pool_delete leaves the StoragePool row behind, so
+  // a RECREATE of the same md device at a different RAID level hits the
+  // upsert's update branch — which must refresh `level` too, not just
+  // displayName, or the row keeps the deleted pool's stale level forever
+  // (GET reads level from the live bridge, but the DB column must not lie).
+  it("refreshes a stale level when the pool is recreated at a different RAID level", async () => {
+    const prisma = createPrismaMock();
+    // Stale row from a pool that was deleted on the host: raid5, old name.
+    prisma.pools.set("md0", {
+      device: "md0",
+      displayName: "Old Vault",
+      level: "raid5",
+      status: "none",
+      notes: null,
+    });
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sdb"],
+        confirmPhrase: "ERASE sda sdb",
+        displayName: "Family Vault",
+      });
+    expect(create.status).toBe(202);
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: create.body.confirmationToken,
+        service: "pool_create",
+        resourceId: "md0",
+      });
+    expect(confirm.status).toBe(200);
+    expect(prisma.pools.get("md0")).toMatchObject({
+      device: "md0",
+      displayName: "Family Vault",
+      level: "raid1",
+    });
+  });
+
+  it("never forwards displayName to the bridge (host script has no such param)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sdb"],
+        confirmPhrase: "ERASE sda sdb",
+        displayName: "Family Vault",
+      });
+    await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: create.body.confirmationToken,
+        service: "pool_create",
+        resourceId: "md0",
+      });
+    const cmdCall = (bridge as any).mock.calls.find((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(cmdCall).toBeTruthy();
+    const sent = JSON.parse(cmdCall[1].body);
+    expect(sent.params.displayName).toBeUndefined();
+    expect(sent.params.level).toBe("raid1");
+    expect(sent.params.members).toEqual(["/dev/sda", "/dev/sdb"]);
+  });
+
+  it("rejects an invalid displayName with 400 BEFORE minting a token (pre-DB zod gate)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    for (const bad of [42, "x".repeat(65), ""]) {
+      const res = await request(app)
+        .post("/api/storage/pools")
+        .send({
+          device: "md0",
+          level: "raid1",
+          members: ["/dev/sda", "/dev/sdb"],
+          confirmPhrase: "ERASE sda sdb",
+          displayName: bad,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.confirmationToken).toBeUndefined();
+    }
+    expect(prisma.storagePool.upsert).not.toHaveBeenCalled();
+  });
+
+  it("create WITHOUT a displayName seeds no phantom StoragePool row", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({
+        device: "md0",
+        level: "raid1",
+        members: ["/dev/sda", "/dev/sdb"],
+        confirmPhrase: "ERASE sda sdb",
+      });
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: create.body.confirmationToken,
+        service: "pool_create",
+        resourceId: "md0",
+      });
+    expect(confirm.status).toBe(200);
+    expect(prisma.storagePool.upsert).not.toHaveBeenCalled();
+    expect(prisma.pools.size).toBe(0);
   });
 });
 

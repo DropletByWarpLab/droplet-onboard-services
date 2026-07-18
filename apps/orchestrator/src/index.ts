@@ -13,6 +13,7 @@ import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
 import { attachWsBridge } from "./services/ws-bridge.service.js";
+import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
   initMatterService,
   shutdownMatterService,
@@ -285,6 +286,13 @@ async function main() {
   // `droplet/index/+/indexed` and `droplet/index/+/deleted`. Best-
   // effort like the bridge above — if MQTT is down we miss the rows.
   attachFileIndexerActivityBridge();
+
+  // WARP-353 (ADR-014): orchestrator side of the desktop tool-host bridge.
+  // Subscribes droplet/client-hello/+, droplet/client-presence/+ and
+  // droplet/llm-tool-response/+ (signed, replay-checked consent outcomes).
+  // Best-effort like the bridges above — if MQTT is down the appliance
+  // keeps running and clients simply appear offline.
+  attachClientDispatchBridge(prisma);
 
   // Initialize Matter controller (non-fatal if unavailable)
   try {

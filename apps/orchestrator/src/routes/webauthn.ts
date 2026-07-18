@@ -64,6 +64,7 @@ import { createChallenge, consumeChallenge } from "../services/webauthn-challeng
 import { deriveWebAuthnRp } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
+import { browserMarkerHeader } from "../lib/browser-context.js";
 
 const logger = createLogger("webauthn-routes");
 
@@ -137,7 +138,19 @@ async function issueSession(
     maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
   });
 
-  const wantBody = req.query.return === "body" || req.query.return === "body=1";
+  // WARP-582 — same NATIVE-client-only gate as POST /auth/login: a browser
+  // context (any Sec-Fetch-* / Origin / Referer marker present) never gets
+  // tokens in the body; it keeps the cookie-only session. See
+  // lib/browser-context.ts for the marker rationale.
+  const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
+  const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
+  if (wantBodyParam && browserMarker !== null) {
+    logger.warn(
+      { marker: browserMarker, username: user.username },
+      "passkey login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
+    );
+  }
+  const wantBody = wantBodyParam && browserMarker === null;
   res.json({
     user: { id: user.id, username: user.username, displayName: user.displayName, role: user.role },
     ...(wantBody

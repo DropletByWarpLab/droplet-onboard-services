@@ -364,9 +364,11 @@ export function createApp(
   app.use("/api", createAdminCapabilitiesRouter());
   // WARP-1154/WARP-1155 — module-capability probe for every authenticated
   // principal. The dashboard drives the Projects nav entry + /projects route
-  // off this explicit flag (never off request errors). The module-toggles
-  // layer must wire its effective state through here when it lands.
-  app.use("/api", createCapabilitiesRouter());
+  // off this explicit flag (never off request errors). WARP-1306: the flag
+  // now mirrors the module-toggles effective state (same resolution the
+  // module gate above enforces), so the probe and the gate can never
+  // disagree about whether Projects is on.
+  app.use("/api", createCapabilitiesRouter(prisma, config));
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.

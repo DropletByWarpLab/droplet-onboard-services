@@ -12,11 +12,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import React from "react";
 
-// WARP-1281: these polling-bounds walks drive 305-615 one-second
-// fake-timer iterations through the full setup page, which was already
-// borderline against the default 5s testTimeout under full-suite load
-// (pre-existing flake on main), and the discovery browse chain roughly
-// doubles the per-iteration work. File-scoped bound only — a hang guard,
+// WARP-853: the polling-bounds walks used to drive 305-615 one-second
+// fake-timer iterations through the full setup page, one act() render per
+// tick, so per-test wall time scaled with machine load. Under full-suite
+// parallel contention a test could outlive its timeout; vitest can't
+// cancel the timed-out body, and its still-running act/timer loop then
+// interleaved with the NEXT test's wizard walk — which is why the
+// follow-on failures landed in passOrgStep ("Unable to find a label …
+// /workspace name/i") while the file passed in isolation. The walks now
+// advance in a few batched advanceTimersByTimeAsync() calls (see
+// advanceScanSeconds), so per-test cost no longer scales with the scan
+// window. The WARP-1281 file-scoped bound stays as a pure hang guard —
 // not a performance target; the global config stays untouched.
 vi.setConfig({ testTimeout: 60_000 });
 
@@ -176,6 +182,24 @@ async function advanceToDiscovery() {
   });
 }
 
+/**
+ * WARP-853 — advance the discovery step's fake clock by `seconds` in one
+ * batched act instead of one act-wrapped render per simulated second.
+ * advanceTimersByTimeAsync drains microtasks between timer callbacks, so
+ * the WARP-1281 commissionable-browse chain still resolves and clears its
+ * abort watchdog exactly as under the old per-second loop; the intended
+ * difference is that React flushes the accumulated scanSeconds state once
+ * at the end rather than re-rendering the full setup page 305-615 times —
+ * the wall-time driver behind the parallel-load flake. The phase effect
+ * only compares scanSeconds against its thresholds (>=, not ===), so the
+ * end states these tests assert are unchanged.
+ */
+async function advanceScanSeconds(seconds: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(seconds * 1000);
+  });
+}
+
 describe("setup discovery polling bounds (WARP-298)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -191,16 +215,9 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     render(<SetupPage />);
     await advanceToDiscovery();
 
-    // Tick 60s of scanSeconds (timer fires every 1000ms). The phase-watching
-    // effect needs both the timer tick AND a flush to React state — so we
-    // tick by 1000 in a loop, letting each scanSeconds++ flush, and the
-    // hint should appear once idleFor >= 60.
-    for (let i = 0; i < 65; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    // Advance 65s of scanSeconds in one batched act (timer fires every
+    // 1000ms; the hint appears once idleFor >= 60 with no new devices).
+    await advanceScanSeconds(65);
 
     expect(screen.getByTestId("discovery-downshift-hint")).toBeInTheDocument();
   });
@@ -209,24 +226,15 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     render(<SetupPage />);
     await advanceToDiscovery();
 
-    // Tick 5 minutes (300s) + a couple of seconds slack. Use a slightly
-    // coarser step (5s) to keep the test fast; the phase effect only
-    // depends on scanSeconds, not on intermediate timer fires.
-    for (let i = 0; i < 305; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    // Tick 5 minutes (300s) + a couple of seconds slack; the phase effect
+    // only depends on scanSeconds, not on intermediate timer fires.
+    await advanceScanSeconds(305);
 
     expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
     // The fetchDevices poll has stopped — capture call count, advance more
     // time, count should stay flat.
     const beforeStopCount = fetchDevicesMock.mock.calls.length;
-    await act(async () => {
-      vi.advanceTimersByTime(30000);
-      await Promise.resolve();
-    });
+    await advanceScanSeconds(30);
     expect(fetchDevicesMock.mock.calls.length).toBe(beforeStopCount);
   });
 
@@ -239,12 +247,7 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     render(<SetupPage />);
     await advanceToDiscovery();
 
-    for (let i = 0; i < 305; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(305);
 
     expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
     const scanAgain = screen.getByRole("button", { name: /scan again/i });
@@ -267,12 +270,7 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     await advanceToDiscovery();
 
     // Drive to the stopped state.
-    for (let i = 0; i < 305; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(305);
     expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
 
     // Click "Scan again" — startDiscovery should clear the old timer
@@ -286,35 +284,20 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     // Advance exactly 5 seconds and assert the visible counter shows 5,
     // not 10. The "Scanning... Ns" caption is the user-facing tell — if
     // the ticker were doubled it would read "Scanning... 10s" here.
-    for (let i = 0; i < 5; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(5);
     expect(screen.getByText(/Scanning\.\.\. 5s/)).toBeInTheDocument();
     expect(screen.queryByText(/Scanning\.\.\. 10s/)).not.toBeInTheDocument();
 
     // Belt + braces: click "Scan again" once more after driving back to
     // the stopped state, and verify the ticker still advances at 1 Hz —
     // the original bug compounded with each click.
-    for (let i = 0; i < 305; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(305);
     expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
       await Promise.resolve();
     });
-    for (let i = 0; i < 3; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(3);
     expect(screen.getByText(/Scanning\.\.\. 3s/)).toBeInTheDocument();
   });
 
@@ -322,12 +305,7 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     render(<SetupPage />);
     await advanceToDiscovery();
 
-    for (let i = 0; i < 305; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(305);
 
     expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
     const callsBefore = fetchDevicesMock.mock.calls.length;
@@ -343,12 +321,7 @@ describe("setup discovery polling bounds (WARP-298)", () => {
 
     // Advance a few seconds and verify fetchMatterDevices was called
     // again — i.e. polling actually restarted.
-    for (let i = 0; i < 6; i++) {
-      await act(async () => {
-        vi.advanceTimersByTime(1000);
-        await Promise.resolve();
-      });
-    }
+    await advanceScanSeconds(6);
     expect(fetchDevicesMock.mock.calls.length).toBeGreaterThan(callsBefore);
   });
 });

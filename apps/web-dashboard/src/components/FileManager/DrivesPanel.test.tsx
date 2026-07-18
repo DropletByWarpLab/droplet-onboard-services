@@ -47,6 +47,7 @@ vi.mock("@/lib/api", () => ({
   // because DrivesPanel imports helpers from StorageStep, whose module-level
   // imports must all resolve on the mocked module.
   adoptDrive: vi.fn(),
+  reclaimDrive: vi.fn(),
   confirmStorageCommand: vi.fn(),
   requestFormatPool: vi.fn(),
   fetchDrives: vi.fn(),
@@ -59,6 +60,7 @@ vi.mock("@/lib/api", () => ({
 import {
   updateDriveLabel,
   adoptDrive,
+  reclaimDrive,
   confirmStorageCommand,
   requestFormatPool,
 } from "@/lib/api";
@@ -126,6 +128,23 @@ describe("DrivesPanel — no raw device path (WARP-827 AC3/AC6)", () => {
   it("still shows the friendly bus label", () => {
     setup();
     expect(screen.getByText("USB")).toBeInTheDocument();
+  });
+
+  // WARP-1337 — the shared display-name helper guards the mount-tail fallback:
+  // a volume with no displayName/label mounted at /mnt/droplet/<fs-uuid> must
+  // title as the friendly generic, never the GUID.
+  it("never renders a GUID mount tail as the card title (WARP-1337)", () => {
+    setup({
+      drives: [
+        makeDrive({
+          mount: "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08",
+          label: "",
+          displayName: null,
+        }),
+      ],
+    });
+    expect(screen.queryByText(/a0f10a84/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Drive")).toBeInTheDocument();
   });
 });
 
@@ -324,6 +343,10 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
           device: "sdc",
           wipeMethod: "quick",
           confirmPhrase: "ERASE sdc",
+          // WARP-1337: the card's title (the hardware model) seeds the
+          // post-wipe FS label — sanitized to ^[A-Za-z0-9_-]{1,16}$ — so the
+          // adopted drive never mounts back onto a GUID tail.
+          label: "Samsung_T7",
         }),
       ),
     );
@@ -343,6 +366,148 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
   it("offers adopt for an empty (available) disk too", () => {
     setup({ disks: [makeDisk({ name: "sdd", state: "available", fstype: "", model: "" })] });
     expect(screen.getByRole("button", { name: /erase & adopt/i })).toBeInTheDocument();
+  });
+
+  // WARP-1337: a disk with no usable name must OMIT the label entirely — the
+  // orchestrator rejects an empty/invalid one, and a fabricated placeholder
+  // would defeat the GUID-guarded display fallback.
+  it("omits the fs label when the disk has no model to seed it from", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({ disks: [makeDisk({ name: "sdd", state: "available", fstype: "", model: "" })] });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    expect(
+      (adoptDrive as ReturnType<typeof vi.fn>).mock.calls[0][0].label,
+    ).toBeUndefined();
+  });
+
+  // Code review (WARP-1337): the host script mounts at /mnt/droplet/<LABEL>
+  // with no busy-target guard — seeding a label another mounted volume already
+  // carries would STACK the new mount over it (shadow mount; writes land on
+  // the wrong drive). Adopting the second of two identical-model drives must
+  // therefore suffix the label (short serial tail) instead of reusing it.
+  it("suffixes the seeded label when a mounted volume already carries it (shadow-mount guard)", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({
+      // The FIRST Samsung T7, adopted earlier this session, already mounted
+      // under its model-seeded label.
+      drives: [
+        makeDrive({
+          device: "/dev/sdc1",
+          mount: "/mnt/droplet/Samsung_T7",
+          label: "Samsung_T7",
+          uuid: "U-T7-1",
+        }),
+      ],
+      // The SECOND, identical-model T7 the owner now adopts.
+      disks: [makeDisk({ name: "sdd", model: "Samsung T7", serial: "S6XNNS0T123456B" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() =>
+      expect(adoptDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sdd", label: "Samsung_T7_456B" }),
+      ),
+    );
+  });
+
+  // Code review (WARP-1337): the wipe erases the TARGET disk's own volumes,
+  // so their labels/mount tails are not collisions — a drive re-adopted while
+  // a stale snapshot still lists its auto-mounted partition must keep its
+  // clean model-seeded label, not burn an unnecessary serial suffix.
+  // (StorageStep's fsLabelFor and the Danger zone's reformat already exclude
+  // the target disk; the panel mirrors them.)
+  it("does not suffix against the target disk's OWN mounted volumes on adopt", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdd",
+    });
+    setup({
+      // The target disk's own partition, still listed under its model-seeded
+      // label — erased by the adopt wipe, so NOT a collision.
+      drives: [
+        makeDrive({
+          device: "/dev/sdd1",
+          mount: "/mnt/droplet/Samsung_T7",
+          label: "Samsung_T7",
+          uuid: "U-T7-OWN",
+        }),
+      ],
+      disks: [makeDisk({ name: "sdd", model: "Samsung T7", serial: "S6XNNS0T123456B" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() =>
+      expect(adoptDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sdd", label: "Samsung_T7" }),
+      ),
+    );
+  });
+
+  // WARP-1337: reclaim seeds the same sanitized label so the reclaimed drive
+  // comes back named, not GUID-mounted.
+  it("passes the sanitized fs label on reclaim too", async () => {
+    (reclaimDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    setup({
+      pools: [md127],
+      disks: [makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    await waitFor(() =>
+      expect(reclaimDrive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          device: "sda",
+          md: "md127",
+          label: "WD_Red_4TB",
+        }),
+      ),
+    );
+  });
+
+  // Code review (WARP-1337): the reclaim path carries the same shadow-mount
+  // guard as adopt — a colliding model-seeded label gets the serial suffix.
+  it("suffixes the reclaim label too when a mounted volume already carries it", async () => {
+    (reclaimDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    setup({
+      pools: [md127],
+      drives: [
+        makeDrive({
+          device: "/dev/sdc1",
+          mount: "/mnt/droplet/WD_Red_4TB",
+          label: "WD_Red_4TB",
+          uuid: "U-WD-1",
+        }),
+      ],
+      disks: [
+        makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB", serial: "WX91A2B3C4D5" }),
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    await waitFor(() =>
+      expect(reclaimDrive).toHaveBeenCalledWith(
+        expect.objectContaining({ device: "sda", label: "WD_Red_4TB_C4D5" }),
+      ),
+    );
   });
 
   it("routes a pool-member disk to the pool card — never an individual adopt", () => {

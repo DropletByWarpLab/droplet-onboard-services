@@ -103,7 +103,20 @@ async function findModelInfo(
   if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
     try {
       const res = await listModels();
-      _modelsCache = { at: now, models: res.models };
+      if (res.degraded_providers?.length) {
+        // WARP-1289: a degraded fan-out (some provider raised while the
+        // gateway listed models — WARP-1284's additive signal) is a PARTIAL
+        // list. Never cache it: snapshotting it would pin "unknown
+        // capabilities" for the full TTL after a one-blip Ollama hiccup.
+        // Resolve this lookup from the partial list one-off, unless we
+        // already hold a (stale but complete) snapshot — then serve stale,
+        // same posture as the catch path below.
+        if (!_modelsCache) {
+          return res.models.find((m) => m.id === model);
+        }
+      } else {
+        _modelsCache = { at: now, models: res.models };
+      }
     } catch {
       if (!_modelsCache) return undefined; // never populated → unknown
       // else: serve stale rather than failing the turn

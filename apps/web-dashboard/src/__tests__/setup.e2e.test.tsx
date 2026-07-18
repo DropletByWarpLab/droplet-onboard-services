@@ -18,6 +18,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
+// WARP-853: this single test walks the ENTIRE wizard (13 steps, ~500 lines
+// of drive) in one jsdom pass — ~1.1s idle but >3s at 3x CPU contention, so
+// the default 5s testTimeout is exactly what flaked under full-suite
+// parallel load. The walk itself is microtask-driven (no real waits except
+// the address-step debounce below), so the budget is the only wall-clock
+// coupling. File-scoped hang guard only (same pattern as WARP-1281 in
+// setup.discovery-bounds); the global config stays untouched.
+vi.setConfig({ testTimeout: 60_000 });
+
 vi.mock("framer-motion", async () => {
   const actual =
     await vi.importActual<typeof import("framer-motion")>("framer-motion");
@@ -364,11 +373,18 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
 
     // 4b. Address → WARP-979 Secured / name-your-box. Type a name; the debounced
     // availability check enables Continue, which POSTs the chosen name.
+    // WARP-853: the 450ms CHECK_DEBOUNCE_MS runs on REAL timers here, so
+    // waitFor's 1s default left only ~550ms of slack for a contended
+    // worker — the one real-clock wait in this walk gets a generous budget.
     fireEvent.change(screen.getByLabelText(/box name/i), {
       target: { value: "studio" },
     });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^continue$/i })).toBeEnabled(),
+    await waitFor(
+      () =>
+        expect(
+          screen.getByRole("button", { name: /^continue$/i }),
+        ).toBeEnabled(),
+      { timeout: 10_000 },
     );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));

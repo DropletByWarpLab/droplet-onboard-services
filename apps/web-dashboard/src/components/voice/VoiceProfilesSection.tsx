@@ -143,7 +143,7 @@ export function VoiceProfilesSection({
         <h2 id="voice-profiles-h">{COPY.header}</h2>
         <button
           type="button"
-          className="dp-btn-secondary type-footnote vsect-action"
+          className="btn ghost sm vsect-action"
           disabled={!enrollmentAllowed}
           title={
             enrollmentAllowed

@@ -20,7 +20,7 @@
  * tray) unless their `NEXT_PUBLIC_FEATURE_*` flag is enabled.
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity as ActivityIcon,
@@ -34,11 +34,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Cloud,
+  Copy,
   Cpu,
+  Download,
   FileSpreadsheet,
   FileText,
   FilePlus,
   Folder,
+  Globe,
   Image as ImageIcon,
   Lightbulb,
   Lock,
@@ -49,12 +52,15 @@ import {
   PenLine,
   Plus,
   Settings,
+  ShieldOff,
   Sparkles,
   Thermometer,
   Video,
   Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
@@ -63,7 +69,23 @@ import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
-import type { FileEntryInfo } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
+import {
+  createVpnPeer,
+  deleteVpnPeer,
+  fetchVpnPeers,
+  fetchVpnStatus,
+} from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
+import { dashboardUrlFromConf } from "@/lib/wireguard";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import type {
+  FileEntryInfo,
+  VpnPeerCreatedInfo,
+  VpnPeerInfo,
+  VpnStatusInfo,
+} from "@/lib/types";
 
 export interface WidgetProps {
   w: number;
@@ -792,6 +814,310 @@ export function NotesWidget() {
   );
 }
 
+/* ─────────────────────────── Remote access (Connect) ─────────────────────────── */
+
+const CONF_CLIPBOARD_TTL_MS = 30_000;
+
+/**
+ * RemoteAccessWidget — the one-tap Connect toggle on Home (WARP-1351).
+ *
+ * Ports the WARP-979 VpnStep contract onto the bento board: flipping the
+ * switch on mints a peer with the auto-derived "This device" label and
+ * surfaces the one-shot QR/.conf in a dialog; when active peers already
+ * exist the switch reports on, and flipping it off is confirm-gated — it
+ * revokes only the current user's own active devices. Backed by the real
+ * /api/vpn endpoints, with an honest blocked state while the box is still
+ * learning its web address (WARP-1313).
+ */
+export function RemoteAccessWidget(_: WidgetProps) {
+  const { user } = useAuth();
+  const [status, setStatus] = useState<VpnStatusInfo | null>(null);
+  const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const s = await fetchVpnStatus();
+      setStatus(s);
+      if ((s.peerCount ?? 0) > 0) {
+        // Peer list unavailable → fall back to the off-toggle rather than a
+        // half-rendered on-state (same posture as VpnStep).
+        const { peers: all } = await fetchVpnPeers().catch(() => ({
+          peers: [] as VpnPeerInfo[],
+        }));
+        setPeers(all.filter((p) => p.status === "active"));
+      } else {
+        setPeers([]);
+      }
+    } catch {
+      setStatus(null);
+      setPeers([]);
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const blocked = !status?.endpointConfigured;
+  const on = peers.length > 0;
+  const mine = user?.username
+    ? peers.filter((p) => p.userId === user.username)
+    : [];
+  const fqdn = status?.publicFqdn?.trim() || status?.endpointHost || null;
+
+  // Mint with the auto-derived label — the WARP-979 one-tap path.
+  const connect = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      const result = await createVpnPeer("This device");
+      setCreated(result);
+      await load();
+    } catch (e) {
+      setError(translateError(e, "vpn"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setError(null);
+    try {
+      for (const p of mine) {
+        await deleteVpnPeer(p.id);
+      }
+      setConfirmOff(false);
+      await load();
+    } catch (e) {
+      // Partial revocation is possible — refetch so the count is honest, then
+      // re-throw so the ConfirmDialog stays open for retry (its contract).
+      await load();
+      setError(translateError(e, "vpn"));
+      throw e;
+    }
+  };
+
+  // The switch is inert while loading/blocked/minting, and while on with no
+  // devices of your own to revoke (others manage theirs in Remote Access).
+  const inert = !loaded || blocked || submitting || (on && mine.length === 0);
+
+  const flip = () => {
+    if (inert) return;
+    if (on) setConfirmOff(true);
+    else void connect();
+  };
+
+  const sub = !loaded
+    ? "Checking…"
+    : blocked
+      ? "Web address not ready yet"
+      : submitting
+        ? "Connecting this device…"
+        : on
+          ? `On · ${peers.length} connected device${peers.length === 1 ? "" : "s"}`
+          : "Off · tap to connect this device";
+
+  const copyConf = () => {
+    if (!created) return;
+    navigator.clipboard.writeText(created.conf).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+      // Same hygiene as VpnStep: don't leave a private key on the clipboard.
+      setTimeout(() => {
+        navigator.clipboard.writeText("").catch(() => {});
+      }, CONF_CLIPBOARD_TTL_MS);
+    });
+  };
+
+  const downloadConf = () => {
+    if (!created) return;
+    const safeName =
+      created.peer.deviceLabel.replace(/[^a-z0-9_-]+/gi, "_") || "wg-peer";
+    const blob = new Blob([created.conf], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeName}.conf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="w-remote">
+      <div
+        className={"w-dev" + (on || submitting ? " on" : "")}
+        role="switch"
+        aria-checked={on || submitting}
+        aria-disabled={inert || undefined}
+        aria-label="Remote access"
+        aria-describedby="w-remote-sub"
+        tabIndex={0}
+        onClick={flip}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            flip();
+          }
+        }}
+      >
+        <span className="di">
+          <Globe size={14} />
+        </span>
+        <span className="dn">
+          <div className="nm">Droplet VPN</div>
+          <div className="sb" id="w-remote-sub">{sub}</div>
+        </span>
+        <span className="w-toggle">
+          <span className="ball" />
+        </span>
+      </div>
+
+      <div className="w-remote-addr">
+        {fqdn ? (
+          <span className="addr">https://{fqdn}</span>
+        ) : (
+          <span className="ph">your secure address</span>
+        )}
+        <a className="w-remote-link" href="/remote-access">
+          Remote access
+          <ArrowUpRight size={12} />
+        </a>
+      </div>
+
+      {error && (
+        <div className="w-remote-err" role="alert">
+          <AlertTriangle size={12} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {created && (
+        <Dialog
+          open
+          onClose={() => setCreated(null)}
+          labelledBy="w-remote-qr-title"
+          maxWidth="md"
+          flush
+        >
+          <div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+              <h3
+                id="w-remote-qr-title"
+                className="type-headline text-label-primary"
+              >
+                Scan to connect
+              </h3>
+              <button
+                onClick={() => setCreated(null)}
+                className="p-1 text-label-tertiary hover:text-label-primary"
+                aria-label="Close"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <ol className="type-footnote text-label-secondary list-decimal pl-5 space-y-1">
+                <li>
+                  Install <strong>WireGuard</strong> from the App Store or Play
+                  Store.
+                </li>
+                <li>
+                  Open the app, tap <strong>+</strong>, choose{" "}
+                  <strong>Create from QR code</strong>, and scan the code below.
+                </li>
+                <li>
+                  Activate the tunnel, then open{" "}
+                  <strong className="font-mono break-all">
+                    {dashboardUrlFromConf(
+                      created.conf,
+                      status?.publicFqdn ?? undefined,
+                    )}
+                  </strong>{" "}
+                  in the browser —{" "}
+                  {/* WARP-993: only promise "from anywhere" when the minted
+                      conf is actually routable off-LAN (echoed on the create
+                      response; missing ⇒ stay honest). */}
+                  {created.offLanReachable === true
+                    ? "that’s this Droplet from anywhere."
+                    : "that’s this Droplet on your home network."}
+                </li>
+              </ol>
+              <div className="flex justify-center">
+                <div className="p-4 bg-white rounded-lg">
+                  <QRCodeSVG
+                    value={created.conf}
+                    size={224}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={copyConf}
+                  className="flex-1 dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                  type="button"
+                >
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  {copied ? "Copied" : "Copy text"}
+                </button>
+                <button
+                  onClick={downloadConf}
+                  className="flex-1 dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                  type="button"
+                >
+                  <Download size={14} />
+                  Download .conf
+                </button>
+              </div>
+              <div className="p-3 bg-system-orange/10 border border-system-orange/20 rounded type-caption-1 text-system-orange flex items-start gap-2">
+                <ShieldOff size={14} className="mt-0.5 flex-shrink-0" />
+                <span>
+                  Save this now — the private key is shown once. If you lose it,
+                  revoke this device and add a new one.
+                </span>
+              </div>
+              <div className="flex justify-end pt-1">
+                <button
+                  onClick={() => setCreated(null)}
+                  className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                  type="button"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </Dialog>
+      )}
+
+      <ConfirmDialog
+        open={confirmOff}
+        onConfirm={disconnect}
+        onCancel={() => setConfirmOff(false)}
+        title="Turn off remote access?"
+        description={
+          "Your devices will be disconnected immediately and the WireGuard config on each of them will stop working. You can reconnect any time with one tap." +
+          (peers.length > mine.length
+            ? " Other members’ devices stay connected."
+            : "")
+        }
+        confirmLabel="Turn off"
+        variant="destructive"
+      />
+    </div>
+  );
+}
+
 /* ─────────────────────────── Registry ───────────────────────────
  * Widgets backed by a real endpoint are always present. The four whose
  * backend doesn't exist yet (Activity, Scenes, Tools/automations, Tasks)
@@ -808,6 +1134,7 @@ export const WIDGETS: Record<string, WidgetMeta> = {
   chat:     { title: "Ask AI",        icon: Sparkles,     Comp: ChatWidget,     minW: 3, minH: 4, maxW: 12, maxH: 7, feature: true },
   calendar: { title: "Calendar",      icon: Calendar,     Comp: CalendarWidget, minW: 3, minH: 3, maxW: 6,  maxH: 6 },
   status:   { title: "System status", icon: Network,      Comp: StatusWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 4 },
+  remote:   { title: "Remote access", icon: Globe,        Comp: RemoteAccessWidget, minW: 2, minH: 2, maxW: 6, maxH: 4 },
   files:    { title: "Recent files",  icon: Folder,       Comp: FilesWidget,    minW: 2, minH: 2, maxW: 6,  maxH: 6, scroll: true },
   cameras:  { title: "Cameras",       icon: Video,        Comp: CamerasWidget,  minW: 2, minH: 2, maxW: 6,  maxH: 5 },
   models:   { title: "Models",        icon: Brain,        Comp: ModelsWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 5, scroll: true },

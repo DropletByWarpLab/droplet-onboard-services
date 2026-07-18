@@ -256,6 +256,14 @@ export interface ModelsPagePayload {
   gpu: ModelsGpuInfo | null;
   avgLatencyMs: number;
   cloudSpendUsd: number;
+  /** WARP-1289 (additive; optional so an older orchestrator that predates
+   *  the flag still parses): true when `local` can't be trusted as complete —
+   *  the orchestrator couldn't reach the ai-gateway, or the gateway reported
+   *  its local Ollama provider failed during listing. An empty `local` WITH
+   *  `degraded` means "can't reach the AI service right now", NOT "no local
+   *  models" — the page renders the two differently (same honesty pattern
+   *  as the wizard's WARP-1284 model-degraded note). */
+  degraded?: boolean;
 }
 
 // WARP-311: legacy session types removed alongside the orchestrator
@@ -621,6 +629,24 @@ export interface VoiceCalibrationInfo {
   wake_detections?: number | null;
   echo_ok?: boolean | null;
   flags?: string[];
+}
+
+/**
+ * WARP-1058 — one row of the /voice "Recent voice activity" feed
+ * (§3.4). Sourced from `GET /api/activity?kind=voice&limit=5`; `what`
+ * is the §3.4 outcome copy ("Answered" / "Missed wake word" / …) the
+ * orchestrator wrote into the signed row, and `person` is the wake
+ * rows' attribution ("Guest" until voice enrollment lands) — absent on
+ * self-heal rows (§6.3: DSP wedge/recovery, processor restarts,
+ * calibration applies).
+ */
+export interface VoiceActivityItem {
+  id: string;
+  /** Epoch seconds (converted from the API's ISO timestamp). */
+  atS: number;
+  what: string;
+  severity: "ok" | "warn" | "err" | "info";
+  person: string | null;
 }
 
 /** Payload of the wizard's single write (`POST /api/voice/calibration`). */

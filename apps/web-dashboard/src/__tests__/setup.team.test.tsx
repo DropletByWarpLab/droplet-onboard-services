@@ -92,11 +92,14 @@ describe("setup Team step (PR #381)", () => {
     expect(screen.getByLabelText(/invite by email/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/^role$/i)).toBeInTheDocument();
     // Directory-sync (SSO) alternative — an informational note, not a no-op
-    // button (the dead "Connect SSO" control was removed; the card now reflects
-    // real discovery state, see TeamStep.sso.test.tsx). `findByText` because the
+    // button (the dead "Connect SSO" control was removed; WARP-1305 made the
+    // not-connected card an explicit "isn't available yet" note — see
+    // TeamStep.directory-sync-unavailable.test.tsx). `findByText` because the
     // card shows neutral "Checking…" copy until discovery resolves to [] (no
     // directory) — flash-free, so the not-connected note appears async.
-    expect(await screen.findByText(/sync your directory/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/invite people by email below/i),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /connect sso/i }),
     ).not.toBeInTheDocument();

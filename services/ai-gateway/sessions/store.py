@@ -6,6 +6,7 @@ Each session stores metadata and an ordered list of messages.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -14,6 +15,18 @@ import uuid
 from dataclasses import dataclass, field, asdict
 
 logger = logging.getLogger(__name__)
+
+# WARP-1290 — monotonic tiebreaker for session ordering. ``updated_at`` is
+# ``time.time()``, whose tick is coarse enough that two rapid creations (or a
+# create + update) can land on the SAME float. ``sorted(..., reverse=True)``
+# is stable, so a tie silently fell back to insertion order and "most recent
+# first" became nondeterministic. Every create/update also stamps a strictly
+# increasing sequence number, used as the secondary sort key.
+_seq_counter = itertools.count(1)
+
+
+def _next_seq() -> int:
+    return next(_seq_counter)
 
 REDIS_URL = os.getenv("REDIS_URL", "")
 SESSION_TTL = int(os.getenv("SESSION_TTL", str(7 * 24 * 3600)))  # 7 days default
@@ -54,6 +67,12 @@ class Session:
     # None for identity-less/legacy sessions. Read by the route layer to refuse
     # cross-user reads so one household member can't read another's chat.
     owner: str | None = None
+    # WARP-1290: strictly increasing sequence stamped at create AND on every
+    # update — the secondary sort key that keeps "most recent first"
+    # deterministic when two sessions share an ``updated_at`` tick. Internal
+    # ordering detail: never serialized into API responses (main.py maps
+    # fields explicitly). 0 = legacy record from before the field existed.
+    seq: int = 0
 
 
 class SessionStore:
@@ -110,6 +129,7 @@ class InMemorySessionStore(SessionStore):
             updated_at=now,
             system_prompt=system_prompt,
             owner=owner,
+            seq=_next_seq(),
         )
         self._sessions[session_id] = session
         return session
@@ -118,8 +138,12 @@ class InMemorySessionStore(SessionStore):
         return self._sessions.get(session_id)
 
     async def list_sessions(self, limit: int = 50, offset: int = 0, owner: str | None = None) -> list[Session]:
+        # WARP-1290: (updated_at, seq) — seq breaks updated_at ties so two
+        # creations within one time.time() tick still list newest-first.
         all_sessions = sorted(
-            self._sessions.values(), key=lambda s: s.updated_at, reverse=True
+            self._sessions.values(),
+            key=lambda s: (s.updated_at, s.seq),
+            reverse=True,
         )
         if owner is not None:
             all_sessions = [s for s in all_sessions if s.owner == owner]
@@ -132,6 +156,7 @@ class InMemorySessionStore(SessionStore):
         msg = SessionMessage(role=role, content=content)
         session.messages.append(msg)
         session.updated_at = time.time()
+        session.seq = _next_seq()
         return msg
 
     async def delete(self, session_id: str) -> bool:
@@ -143,6 +168,7 @@ class InMemorySessionStore(SessionStore):
             return False
         session.title = title
         session.updated_at = time.time()
+        session.seq = _next_seq()
         return True
 
 
@@ -151,6 +177,10 @@ class RedisSessionStore(SessionStore):
 
     KEY_PREFIX = "session:"
     INDEX_KEY = "sessions:index"
+    # WARP-1290: Redis-side monotonic counter (INCR) backing Session.seq —
+    # shared across workers, so the tiebreaker holds even when two gateway
+    # processes create sessions in the same time.time() tick.
+    SEQ_KEY = "sessions:seq"
 
     def __init__(self, redis_url: str):
         import redis.asyncio as aioredis
@@ -172,6 +202,9 @@ class RedisSessionStore(SessionStore):
             # Empty string in the hash means "no recorded owner" (legacy /
             # identity-less session) — normalise back to None.
             owner=(data.get("owner") or None),
+            # Legacy hashes (pre-WARP-1290) have no seq — default 0 sorts
+            # them below any stamped record on an updated_at tie.
+            seq=int(data.get("seq") or 0),
         )
 
     def _session_to_dict(self, session: Session) -> dict:
@@ -184,6 +217,7 @@ class RedisSessionStore(SessionStore):
             "messages": json.dumps([asdict(m) for m in session.messages]),
             "system_prompt": session.system_prompt or "",
             "owner": session.owner or "",
+            "seq": str(session.seq),
         }
 
     async def create(
@@ -203,6 +237,7 @@ class RedisSessionStore(SessionStore):
             updated_at=now,
             system_prompt=system_prompt,
             owner=owner,
+            seq=int(await self._redis.incr(self.SEQ_KEY)),
         )
         key = self._key(session_id)
         await self._redis.hset(key, mapping=self._session_to_dict(session))
@@ -231,6 +266,11 @@ class RedisSessionStore(SessionStore):
             if owner is not None and session.owner != owner:
                 continue
             sessions.append(session)
+        # WARP-1290: zrevrange orders equal scores lexicographically by
+        # member (the session id) — arbitrary relative to creation order.
+        # Re-sort the fetched window on (updated_at, seq) so an updated_at
+        # tie still lists newest-first, matching the in-memory store.
+        sessions.sort(key=lambda s: (s.updated_at, s.seq), reverse=True)
         return sessions[offset : offset + limit]
 
     async def add_message(self, session_id: str, role: str, content: str) -> SessionMessage | None:
@@ -247,10 +287,12 @@ class RedisSessionStore(SessionStore):
         session.messages.append(msg)
         now = time.time()
         session.updated_at = now
+        session.seq = int(await self._redis.incr(self.SEQ_KEY))
 
         await self._redis.hset(key, mapping={
             "messages": json.dumps([asdict(m) for m in session.messages]),
             "updated_at": str(now),
+            "seq": str(session.seq),
         })
         await self._redis.expire(key, SESSION_TTL)
         await self._redis.zadd(self.INDEX_KEY, {session_id: now})
@@ -268,7 +310,10 @@ class RedisSessionStore(SessionStore):
         if not exists:
             return False
         now = time.time()
-        await self._redis.hset(key, mapping={"title": title, "updated_at": str(now)})
+        seq = int(await self._redis.incr(self.SEQ_KEY))
+        await self._redis.hset(
+            key, mapping={"title": title, "updated_at": str(now), "seq": str(seq)}
+        )
         await self._redis.zadd(self.INDEX_KEY, {session_id: now})
         return True
 

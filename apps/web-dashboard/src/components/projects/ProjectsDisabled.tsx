@@ -1,16 +1,50 @@
 "use client";
 
+import { useState } from "react";
 import { FolderKanban } from "lucide-react";
+import { mutate } from "swr";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { EmptyBlock } from "@/components/projects/bits";
+import { useAuth } from "@/lib/auth";
+import { setAppModuleEnabled } from "@/lib/api";
 
 /** Honest "module off" state (WARP-1154/1155). Rendered when the orchestrator
- *  explicitly reports the Projects module disabled — a PERMANENT condition, so
- *  there is deliberately no Retry affordance and no PM request ever fires.
+ *  explicitly reports the Projects module disabled — no PM request ever fires
+ *  from here.
+ *
+ *  WARP-1306 — the enable path lives right here for the people who can act on
+ *  it: an owner/admin gets a working "Turn on Projects" button (PATCH
+ *  /api/admin/modules/projects — the same module-toggles write the server
+ *  gates to owner/admin), and on success the /api/capabilities SWR cache is
+ *  flipped in place so the workspace renders immediately instead of waiting
+ *  out the probe's 30 s HTTP cache. Everyone else keeps the honest "an owner
+ *  or admin can turn it on" copy with no dead affordance.
  *
  *  Lives in its own module (not the `projects/page.tsx` route file) because
  *  Next.js App Router rejects any non-reserved named export from a page route. */
 export function ProjectsDisabled(): JSX.Element {
+  const { user } = useAuth();
+  const canEnable = user?.role === "owner" || user?.role === "admin";
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const enable = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await setAppModuleEnabled("projects", true);
+      // Flip the capability cache in place — revalidating would re-hit the
+      // browser's 30 s HTTP cache and keep this screen up after the server
+      // already said yes. The gate cache is invalidated server-side by the
+      // PATCH, so the workspace's PM reads succeed immediately.
+      await mutate("/api/capabilities", { projects: true }, { revalidate: false });
+    } catch {
+      setError("Couldn't turn on Projects just now. Try again in a moment.");
+      setBusy(false);
+    }
+  };
+
   return (
     <ShellPage icon={<FolderKanban size={15} />} label="Projects" title="Projects">
       <div className="pm-scope">
@@ -19,7 +53,31 @@ export function ProjectsDisabled(): JSX.Element {
             <EmptyBlock
               icon="board"
               heading="Projects isn't enabled on this Droplet."
-              body="An owner or admin can turn it on."
+              body={
+                canEnable
+                  ? "Turn it on to start tracking work — you can turn it off anytime."
+                  : "An owner or admin can turn it on."
+              }
+              cta={
+                canEnable ? (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+                    <button
+                      className="pm-btn primary"
+                      type="button"
+                      onClick={() => void enable()}
+                      disabled={busy}
+                    >
+                      <FolderKanban size={14} />
+                      {busy ? "Turning on…" : "Turn on Projects"}
+                    </button>
+                    {error && (
+                      <p role="alert" style={{ margin: 0, fontSize: 12.5, color: "var(--err)" }}>
+                        {error}
+                      </p>
+                    )}
+                  </div>
+                ) : undefined
+              }
             />
           </div>
         </div>

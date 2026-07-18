@@ -84,6 +84,7 @@ import type {
   VoiceEnrollCaptureResult,
   VoiceEnrollVerifyResult,
   VoiceEnrollCommitResult,
+  VoiceActivityItem,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -885,12 +886,16 @@ export interface PoolCommandToken {
   expiresIn?: number;
 }
 
-/** Step 1: create a pool — returns a confirm token (does NOT create yet). */
+/** Step 1: create a pool — returns a confirm token (does NOT create yet).
+ *  WARP-1337: `displayName` optionally names the pool at birth — on the
+ *  confirmed create the orchestrator seeds the StoragePool row with it, so
+ *  the pool never shows up as a bare md device / GUID mount. */
 export async function requestCreatePool(input: {
   device: string;
   level: PoolInfo["level"];
   members: string[];
   confirmPhrase: string;
+  displayName?: string;
 }): Promise<PoolCommandToken> {
   const res = await authFetch(`${BASE}/api/storage/pools`, {
     method: "POST",
@@ -1212,6 +1217,28 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Cert-lifecycle snapshot from the PUBLIC tls-status route (ADR-023 §3,
+ *  WARP-1302). Carries no secrets — state, the CT-public FQDN, and whether
+ *  HQ issuance is configured at all. */
+export interface TlsStatus {
+  state: string;
+  fqdn: string | null;
+  hqConfigured: boolean;
+}
+
+export async function fetchTlsStatus(): Promise<TlsStatus> {
+  // Public endpoint (no auth) — the same payload the gateway's plain-HTTP
+  // status page polls. WARP-1342: dashboard chrome reads `fqdn` to upgrade
+  // the identity chip off the droplet.local fallback.
+  const res = await fetch(`${BASE}/api/tls/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch TLS status: ${res.status}`);
   }
   return res.json();
 }
@@ -5445,6 +5472,37 @@ export async function removeVoiceProfile(userId: string): Promise<void> {
   if (!res.ok) await throwVoiceError(res, "Couldn't remove the voice profile");
 }
 
+// --- WARP-1058: recent voice activity (§3.4 feed) ---
+
+/**
+ * The /voice page's max-5 feed, from the generic signed activity
+ * surface filtered to kind=voice (the same rows the audit log's
+ * "See all in Activity" deep-link shows). `person` is lifted from the
+ * row's refs — present on wake rows ("Guest" until enrollment lands),
+ * absent on §6.3 self-heal rows.
+ */
+export async function fetchVoiceActivity(limit = 5): Promise<VoiceActivityItem[]> {
+  const res = await authFetch(`${BASE}/api/activity?kind=voice&limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to fetch voice activity");
+  const json = (await res.json()) as {
+    items: Array<{
+      id: string;
+      at: string;
+      what: string;
+      severity: VoiceActivityItem["severity"];
+      refs: Record<string, unknown> | null;
+    }>;
+  };
+  return json.items.map((item) => ({
+    id: item.id,
+    atS: Math.floor(new Date(item.at).getTime() / 1000),
+    what: item.what,
+    severity: item.severity,
+    person:
+      typeof item.refs?.person === "string" ? (item.refs.person as string) : null,
+  }));
+}
+
 // --- WARP-979: Secured / name-your-box ---
 
 /**
@@ -5811,6 +5869,33 @@ export async function fetchAppCapabilities(): Promise<AppCapabilities> {
   const res = await authFetch(`${BASE}/api/capabilities`);
   if (!res.ok) throw new Error(`Failed to fetch app capabilities: ${res.status}`);
   return res.json();
+}
+
+/**
+ * Toggle a user-facing module on/off (WARP-1306) — the owner/admin enable
+ * path behind the honest "module off" states (e.g. ProjectsDisabled). PATCH
+ * /api/admin/modules/:id is owner/admin-gated server-side (403
+ * `admin_required` otherwise); callers gate the affordance on the caller's
+ * role and treat this as the action, never the authority.
+ */
+export async function setAppModuleEnabled(
+  moduleId: string,
+  enabled: boolean,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/admin/modules/${encodeURIComponent(moduleId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(
+      body.message || `Failed to update the module: ${res.status}`,
+    );
+  }
 }
 
 // --- WARP-825: Settings Danger Zone — factory reset ---

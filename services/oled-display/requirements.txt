@@ -10,3 +10,11 @@ pyserial>=3.5
 # qrcode is used by device-bridge.py to render the Wi-Fi QR matrix the
 # PyPortal paints on the "QR" screen.
 qrcode>=7.4
+# WARP-1023 — FIPS boot self-test. services/_shared/fips_selftest.py is
+# COPY'd into this image and its is_fips_enabled() probe reads
+# cryptography's backend `_fips_enabled` flag. Nothing above pulls
+# cryptography transitively, so without this pin the probe reports
+# "FIPS not enabled" even where OpenSSL is genuinely enforcing. Same
+# fix class as WARP-1018 (file-indexer); kept in lockstep with
+# services/ai-gateway's pin.
+cryptography>=49.0.0

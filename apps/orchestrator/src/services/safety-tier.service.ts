@@ -21,6 +21,16 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("safety-tier");
 
+/**
+ * WARP-353 (ADR-014 "Core mechanism — the target axis"): where a command
+ * lands. `'self'` — the appliance itself (the pre-353 behaviour, and the
+ * default everywhere). `{ kind: 'client', deviceId }` — a paired desktop
+ * tool-host (`DeviceClient.id`); the Tier-2 confirmation surface is then
+ * the target device's native modal (no dashboard /command/confirm
+ * round-trip) and the signed `tool_response` validates consent.
+ */
+export type DispatchTarget = "self" | { kind: "client"; deviceId: string };
+
 interface PendingConfirmation {
   token: string;
   entityId: string;
@@ -37,6 +47,14 @@ interface PendingConfirmation {
   userId?: string;
   tier: number;
   expiresAt: number;
+  /**
+   * WARP-353: set when the token was minted for a client target. Binds the
+   * confirmationToken to { service, action, resourceId, targetDeviceId }
+   * per ADR-014 — a confirm that doesn't echo the same targetDeviceId
+   * (including the dashboard round-trip, which never echoes one) is
+   * rejected with TOKEN_OPERATION_MISMATCH. Absent for target 'self'.
+   */
+  targetDeviceId?: string;
 }
 
 /** In-memory rate limit tracking: entityId -> timestamps[] */
@@ -63,14 +81,56 @@ export async function evaluateCommand(
    * differs from `service`. Defaults to `service` for the existing callers
    * where the two are identical.
    */
-  command?: string
+  command?: string,
+  /**
+   * WARP-353: where the command lands. Defaults to 'self' so every existing
+   * caller keeps the pre-353 flow byte-for-byte. For a client target the
+   * Tier-2 result carries `targetDeviceId` + `confirmationSurface: 'client'`
+   * and the token only confirms when the same targetDeviceId is echoed.
+   */
+  target: DispatchTarget = "self"
 ): Promise<
   | { allowed: true; tier: number }
-  | { allowed: false; requiresConfirmation: true; confirmationToken: string; reason: string; tier: number }
+  | {
+      allowed: false;
+      requiresConfirmation: true;
+      confirmationToken: string;
+      reason: string;
+      tier: number;
+      /** WARP-353: present iff the command targets a paired client. */
+      targetDeviceId?: string;
+      /** WARP-353: 'client' iff the confirm surface is the target device's native modal. */
+      confirmationSurface?: "client";
+    }
   | { allowed: false; blocked: true; reason: string; tier: number }
 > {
+  const targetDeviceId = target === "self" ? undefined : target.deviceId;
   const domain = entityId.split(".")[0];
   const classification = classifyCommand(domain, service, data);
+
+  // WARP-353 (ADR-014 ②): Tier-3-blocked actions never reach a confirmation
+  // path — get_clipboard / screenshot / anything outside the V1 client-tool
+  // whitelist is refused outright until the deep-assist ADR (WARP-549) lands.
+  if (classification.blockedForAi) {
+    await logCommand(prisma, {
+      userId,
+      entityId,
+      domain,
+      service,
+      data,
+      tier: classification.tier,
+      confirmed: false,
+      blocked: true,
+      reason: classification.reason ?? "Blocked for AI",
+      targetDeviceId,
+    });
+    return {
+      allowed: false,
+      blocked: true,
+      reason: classification.reason ?? "This action is blocked for AI",
+      tier: classification.tier,
+    };
+  }
 
   // Tier 1: Check rate limit
   if (!classification.requiresConfirmation) {
@@ -86,6 +146,7 @@ export async function evaluateCommand(
         confirmed: false,
         blocked: true,
         reason: "Rate limit exceeded",
+        targetDeviceId,
       });
       return {
         allowed: false,
@@ -111,6 +172,7 @@ export async function evaluateCommand(
           confirmed: false,
           blocked: true,
           reason: `Parameter ${bounds.field} out of bounds: ${value} (allowed: ${bounds.min}-${bounds.max})`,
+          targetDeviceId,
         });
         return {
           allowed: false,
@@ -132,6 +194,7 @@ export async function evaluateCommand(
       tier: classification.tier,
       confirmed: true,
       blocked: false,
+      targetDeviceId,
     });
     return { allowed: true, tier: classification.tier };
   }
@@ -148,6 +211,7 @@ export async function evaluateCommand(
     userId,
     tier: classification.tier,
     expiresAt: Date.now() + CONFIRMATION_TOKEN_EXPIRY_MS,
+    targetDeviceId,
   });
 
   await logCommand(prisma, {
@@ -160,19 +224,26 @@ export async function evaluateCommand(
     confirmed: false,
     blocked: false,
     reason: classification.reason,
+    targetDeviceId,
   });
 
   logger.info(
-    { entityId, domain, service, tier: classification.tier },
+    { entityId, domain, service, tier: classification.tier, targetDeviceId },
     "Command requires confirmation"
   );
 
+  // WARP-353: the extra target fields are only present for client targets so
+  // the self-target 202 body (JSON-serialized by matter.ts et al.) stays
+  // byte-for-byte identical to the pre-353 shape.
   return {
     allowed: false,
     requiresConfirmation: true,
     confirmationToken,
     reason: classification.reason || "This command requires confirmation",
     tier: classification.tier,
+    ...(targetDeviceId !== undefined
+      ? { targetDeviceId, confirmationSurface: "client" as const }
+      : {}),
   };
 }
 
@@ -195,12 +266,25 @@ export type ConfirmCommandError =
  * reconstructing the full entityId from live device state — a device that is
  * offline or mid-reconnect reports a degraded category, and a rebuilt
  * entityId would mismatch the token minted seconds earlier.
+ *
+ * WARP-353: `expected.targetDeviceId` is checked BOTH ways — a token minted
+ * for a client target only confirms when the same targetDeviceId is echoed
+ * (the dashboard round-trip never echoes one, so it can't confirm a client
+ * token), and a self-minted token rejects any targetDeviceId echo. The
+ * client-target confirm path is the verified signed `tool_response`
+ * (client-dispatch.service.ts), never a dashboard call.
  */
 export async function confirmCommand(
   prisma: PrismaClient,
   confirmationToken: string,
   userId?: string,
-  expected?: { service?: string; entityId?: string; nodeId?: string }
+  expected?: {
+    service?: string;
+    entityId?: string;
+    nodeId?: string;
+    /** WARP-353: required echo for tokens minted with a client target. */
+    targetDeviceId?: string;
+  }
 ): Promise<
   | {
       confirmed: true;
@@ -210,6 +294,8 @@ export async function confirmCommand(
       /** KAN-7: the device command to dispatch (may differ from `service`). */
       command: string;
       data?: Record<string, unknown>;
+      /** WARP-353: present iff the token was minted for a client target. */
+      targetDeviceId?: string;
     }
   | { confirmed: false; code: ConfirmCommandError; reason: string }
 > {
@@ -259,6 +345,19 @@ export async function confirmCommand(
       };
     }
   }
+  // WARP-353: target binding is checked in BOTH directions. A client-minted
+  // token demands the exact targetDeviceId echo (so the dashboard confirm,
+  // which never sends one, cannot confirm it); a self-minted token rejects
+  // any echo (so a client response can't confirm an appliance command).
+  if ((pending.targetDeviceId ?? null) !== (expected?.targetDeviceId ?? null)) {
+    return {
+      confirmed: false,
+      code: "TOKEN_OPERATION_MISMATCH",
+      reason: pending.targetDeviceId
+        ? `Confirmation target mismatch: token was minted for client device '${pending.targetDeviceId}'`
+        : "Confirmation target mismatch: token was minted for target 'self'",
+    };
+  }
 
   // Remove from pending (single-use)
   pendingConfirmations.delete(confirmationToken);
@@ -274,10 +373,16 @@ export async function confirmCommand(
     tier: pending.tier,
     confirmed: true,
     blocked: false,
+    targetDeviceId: pending.targetDeviceId,
   });
 
   logger.info(
-    { entityId: pending.entityId, service: pending.service, command: pending.command },
+    {
+      entityId: pending.entityId,
+      service: pending.service,
+      command: pending.command,
+      targetDeviceId: pending.targetDeviceId,
+    },
     "Command confirmed and executing"
   );
 
@@ -288,6 +393,9 @@ export async function confirmCommand(
     service: pending.service,
     command: pending.command ?? pending.service,
     data: pending.data,
+    ...(pending.targetDeviceId !== undefined
+      ? { targetDeviceId: pending.targetDeviceId }
+      : {}),
   };
 }
 
@@ -325,15 +433,25 @@ async function logCommand(
     confirmed: boolean;
     blocked: boolean;
     reason?: string;
+    /**
+     * WARP-353: the client device a command targets. Folded into the data
+     * JSON as `_targetDeviceId` (same no-migration pattern as KAN-7's
+     * `_command`) — the dedicated per-device audit axis (signed ActivityRow
+     * chain columns) is WARP-1299.
+     */
+    targetDeviceId?: string;
   }
 ): Promise<void> {
   try {
     // When command differs from service (KAN-7+), fold it into the data JSON so
     // the audit record captures the concrete sidecar call without a schema migration.
-    const auditData =
+    let auditData =
       entry.command && entry.command !== entry.service
         ? { ...(entry.data ?? {}), _command: entry.command }
         : entry.data;
+    if (entry.targetDeviceId !== undefined) {
+      auditData = { ...(auditData ?? {}), _targetDeviceId: entry.targetDeviceId };
+    }
     await prisma.commandAuditLog.create({
       data: {
         userId: entry.userId || null,

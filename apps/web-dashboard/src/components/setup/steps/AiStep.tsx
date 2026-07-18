@@ -128,6 +128,13 @@ export function AiStep({
   // during listing. An empty picker in this state means "can't reach the AI
   // service", NOT "model still downloading" — the two render differently.
   const [degraded, setDegraded] = useState(false);
+  // WARP-1287 — the last fetchModels() REJECTED (orchestrator down, 5xx,
+  // auth blip): the server never answered, so it couldn't stamp `degraded`
+  // (WARP-1284 covers answered-but-degraded only) and the client must
+  // track the failure itself. An empty picker in this state means "can't
+  // reach your Droplet", NOT "model still downloading". Cleared by any
+  // settled fetch — success wins, whatever it reports.
+  const [fetchFailed, setFetchFailed] = useState(false);
   // WARP-1119 — optional persona preset picker (architecture brief §7.3).
   // null = hidden: the fetch failed (persona API unavailable, or the
   // caller's role can't read it) and the wizard must never block — or even
@@ -163,11 +170,18 @@ export function AiStep({
       // re-evaluates it so the note self-heals the moment the AI service
       // is reachable again (the 8s WARP-849 poll keeps running either way).
       setDegraded(resp.degraded === true);
+      // WARP-1287 — the backend answered; whatever it said, the fetch
+      // itself is healthy again.
+      setFetchFailed(false);
       const local = pickDefaultLocalModel(list);
       if (local) setSelectedModel(local.id);
     } catch {
-      // Ollama may still be warming up after a fresh boot. The step
-      // stays renderable with an empty picker + a skip option.
+      // WARP-1287 — the request never got an answer (orchestrator down,
+      // 5xx, auth blip). The step stays renderable with an empty picker +
+      // a skip option, but it must NOT fall through to the WARP-849
+      // "still downloading" copy: track the failure so the empty state
+      // renders honestly. The 8s poll keeps running, so this self-heals.
+      setFetchFailed(true);
     } finally {
       loadInFlight.current = false;
       setLoading(false);
@@ -263,9 +277,10 @@ export function AiStep({
     if (!selectedModel) {
       // WARP-1284 — degraded-aware: when the AI service is unreachable, the
       // old "still warming up — give it a moment" copy would reintroduce the
-      // exact false framing this ticket removes.
+      // exact false framing this ticket removes. WARP-1287 extends the same
+      // honesty to a rejected fetch (the backend never answered at all).
       setError(
-        degraded
+        degraded || fetchFailed
           ? "We can't reach your AI service right now — you can skip this step and try from the Chat page later."
           : "Pick a model first. If the dropdown is empty, your AI is still warming up — give it a moment and try again.",
       );
@@ -385,10 +400,11 @@ export function AiStep({
             {loading && <option>Loading…</option>}
             {/* WARP-1284 — degraded-aware placeholder: "available yet"
                 reads download-flavored, which is wrong when the service
-                is unreachable. */}
+                is unreachable. WARP-1287 — same when the fetch itself
+                rejected (the backend never answered). */}
             {!loading && models.length === 0 && (
               <option>
-                {degraded
+                {degraded || fetchFailed
                   ? "Models unavailable right now"
                   : "No models available yet"}
               </option>
@@ -418,7 +434,31 @@ export function AiStep({
               picker is NOT a download in progress. Distinct, honest copy in
               the same soft-notice styling; the WARP-849 poll keeps running
               so this self-heals without any customer action. */}
-          {!loading && models.length === 0 && degraded && (
+          {/* WARP-1287 — the fetch itself rejected: the backend never
+              answered, so neither the WARP-849 downloading copy nor the
+              WARP-1284 degraded copy (which needs a server-stamped flag)
+              is honest. Same soft-notice styling; the WARP-849 poll keeps
+              running so this self-heals without any customer action. */}
+          {!loading && models.length === 0 && fetchFailed && (
+            <div
+              data-testid="model-fetch-failed"
+              role="status"
+              className="mt-2 flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+            >
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-label-tertiary"
+                aria-hidden="true"
+              />
+              <span>
+                We can&rsquo;t reach your Droplet right now — it may be
+                restarting. We&rsquo;ll keep trying, or you can skip and
+                come back from the Chat page later.
+              </span>
+            </div>
+          )}
+
+          {!loading && models.length === 0 && degraded && !fetchFailed && (
             <div
               data-testid="model-degraded"
               role="status"
@@ -442,7 +482,7 @@ export function AiStep({
               yet" read as "the GPT model doesn't link anymore") and
               keep checking in the background. Neutral note styling —
               this is expected behavior, not an error. */}
-          {!loading && models.length === 0 && !degraded && (
+          {!loading && models.length === 0 && !degraded && !fetchFailed && (
             <div
               data-testid="model-downloading"
               role="status"

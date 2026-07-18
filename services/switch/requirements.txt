@@ -7,3 +7,11 @@ httpx==0.28.1
 # services/file-indexer (apscheduler 3.x and 4.x have incompatible APIs).
 # IntervalTrigger is tz-agnostic, so no tzlocal is needed here.
 apscheduler==3.10.4
+# WARP-1023 — FIPS boot self-test. services/_shared/fips_selftest.py is
+# COPY'd into this image and its is_fips_enabled() probe reads
+# cryptography's backend `_fips_enabled` flag. Nothing above pulls
+# cryptography transitively, so without this pin the probe reports
+# "FIPS not enabled" even where OpenSSL is genuinely enforcing. Same
+# fix class as WARP-1018 (file-indexer); kept in lockstep with
+# services/ai-gateway's pin.
+cryptography>=49.0.0

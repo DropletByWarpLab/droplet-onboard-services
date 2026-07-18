@@ -8,14 +8,46 @@
  * pull / swap / benchmark / delete / add-model control anywhere on the page.
  * They also pin the honest-placeholder contract: not-yet-wired metrics render
  * as "—"/"Unavailable", and cloud spend as "$0.00", never fabricated values.
+ *
+ * WARP-1340 adds the indigo-shell scope contract: the page must render inside
+ * ShellPage's `.droplet-shell` wrapper, because every class the child
+ * components use (`.kpi`, `.card`, the `var(--…)` custom props) is
+ * descendant-scoped to it in droplet-shell.css / indigo-tokens.css.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { ModelsPagePayload } from "@/lib/types";
 
 const useModelsPageMock = vi.fn();
 vi.mock("@/lib/hooks/useModelsPage", () => ({
   useModelsPage: () => useModelsPageMock(),
+}));
+
+// WARP-1340 — ShellPage is mocked to a passthrough that renders the real
+// wrapper's `.droplet-shell` scope class, same rationale as the audit/trust
+// page tests (its SWR health chip + device hook are exercised by their own
+// tests). The passthrough keeps the scope assertions below meaningful: the
+// page only gets a `.droplet-shell` ancestor by actually rendering ShellPage.
+vi.mock("@/components/shell/ShellPage", () => ({
+  ShellPage: ({
+    title,
+    sub,
+    actions,
+    children,
+  }: {
+    title?: ReactNode;
+    sub?: ReactNode;
+    actions?: ReactNode;
+    children?: ReactNode;
+  }) => (
+    <div className="droplet-shell">
+      {title ? <h1>{title}</h1> : null}
+      {sub ? <p>{sub}</p> : null}
+      {actions ? <div data-testid="phead-actions">{actions}</div> : null}
+      {children}
+    </div>
+  ),
 }));
 
 import ModelsPage from "./page";
@@ -201,6 +233,47 @@ describe("<ModelsPage /> (WARP-836)", () => {
     // Cloud rows still render in the degraded state.
     expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
   });
+
+  // ── WARP-1289 — honest degraded state (same pattern as the wizard's
+  //    WARP-1284 model-degraded note): an empty local list WITH
+  //    `degraded: true` means "can't reach the AI service", and must NOT
+  //    render as "no local models". ──
+
+  it("renders the AI-service-unreachable state when degraded + empty local (WARP-1289)", () => {
+    ready({ local: [], degraded: true });
+    render(<ModelsPage />);
+    expect(
+      screen.getByRole("heading", { name: /can’t reach your ai service/i }),
+    ).toBeInTheDocument();
+    // The genuine-empty copy must NOT show — that's the exact dishonesty
+    // this ticket removes.
+    expect(
+      screen.queryByRole("heading", { name: /no local models/i }),
+    ).not.toBeInTheDocument();
+    // The rest of the page still renders (KPIs + cloud).
+    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
+  });
+
+  it("keeps the genuine-empty copy when local is [] and NOT degraded (WARP-1289)", () => {
+    ready({ local: [], degraded: false });
+    render(<ModelsPage />);
+    expect(
+      screen.getByRole("heading", { name: /no local models/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /can’t reach your ai service/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an incomplete-list note when degraded but some models still listed (WARP-1289)", () => {
+    ready({ degraded: true }); // fixture keeps one local model
+    render(<ModelsPage />);
+    // The card still renders…
+    expect(screen.getByText("llama3.1:70b")).toBeInTheDocument();
+    // …with an honest note that the list may be incomplete.
+    expect(screen.getByText(/may be missing/i)).toBeInTheDocument();
+  });
 });
 
 // ── One-model rule (architecture-guard #13) — status-only, NO mutations ──
@@ -229,11 +302,91 @@ describe("<ModelsPage /> one-model-rule guardrail (WARP-836)", () => {
     }
   });
 
+  it("exposes no mutation controls in the AI-service-unreachable state (WARP-1289)", () => {
+    ready({ local: [], degraded: true });
+    render(<ModelsPage />);
+    const buttons = screen.queryAllByRole("button");
+    for (const b of buttons) {
+      expect(b).not.toHaveTextContent(FORBIDDEN_MUTATION);
+      expect(b.getAttribute("aria-label") ?? "").not.toMatch(FORBIDDEN_MUTATION);
+    }
+  });
+
   it("the only switches are the disabled cloud toggles — none are operable", () => {
     ready();
     render(<ModelsPage />);
     const switches = screen.getAllByRole("switch");
     // Every switch on the page is disabled — there is no actionable toggle.
     expect(switches.every((s) => (s as HTMLButtonElement).disabled)).toBe(true);
+  });
+});
+
+// ── WARP-1340 — the page must mount the indigo shell scope. The `.kpi` /
+//    `.card` classes the child components (KpiStrip, LocalModelCard,
+//    CloudProviderRow) render are DESCENDANT-SCOPED in droplet-shell.css
+//    (`.droplet-shell .kpi { … }`), and the indigo custom properties are
+//    scoped the same way in indigo-tokens.css. Without a `.droplet-shell`
+//    ancestor (ShellPage) they match nothing and the tiles collapse to bare
+//    concatenated text — the exact live-box bug this ticket fixes. ──
+
+describe("<ModelsPage /> indigo shell scope (WARP-1340)", () => {
+  it("mounts the .droplet-shell scope around the KPI strip", () => {
+    ready();
+    const { container } = render(<ModelsPage />);
+    // All four KPI tiles must sit inside the shell scope, or their `.kpi` /
+    // `.k` / `.v` / `.d` spans render as unstyled inline text.
+    expect(container.querySelectorAll(".droplet-shell .kpi").length).toBe(4);
+  });
+
+  it("keeps the local-model + cloud cards inside the shell scope", () => {
+    ready();
+    const { container } = render(<ModelsPage />);
+    // LocalModelCard + the cloud rows' wrapper both render `.card`, which is
+    // also descendant-scoped.
+    expect(
+      container.querySelectorAll(".droplet-shell .card").length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the shell scope in the loading state", () => {
+    useModelsPageMock.mockReturnValue({
+      data: undefined,
+      error: undefined,
+      isLoading: true,
+      refresh: vi.fn(),
+    });
+    const { container } = render(<ModelsPage />);
+    expect(container.querySelector(".droplet-shell")).not.toBeNull();
+  });
+
+  it("keeps the shell scope in the error state", () => {
+    useModelsPageMock.mockReturnValue({
+      data: undefined,
+      error: new Error("boom"),
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    const { container } = render(<ModelsPage />);
+    expect(container.querySelector(".droplet-shell")).not.toBeNull();
+  });
+
+  // The legacy Topbar's per-page status chip is replaced by a visible status
+  // element in the shell header — same signal, same tone logic.
+  it("surfaces the page status — model count when healthy", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText("1 local model")).toBeInTheDocument();
+  });
+
+  it("surfaces the page status — 'Local models unavailable' when local is empty", () => {
+    ready({ local: [] });
+    render(<ModelsPage />);
+    expect(screen.getByText("Local models unavailable")).toBeInTheDocument();
+  });
+
+  it("surfaces the page status — 'AI service unreachable' when degraded (WARP-1289)", () => {
+    ready({ local: [], degraded: true });
+    render(<ModelsPage />);
+    expect(screen.getByText("AI service unreachable")).toBeInTheDocument();
   });
 });

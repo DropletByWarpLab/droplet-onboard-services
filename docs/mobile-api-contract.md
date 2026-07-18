@@ -72,6 +72,19 @@ also get httpOnly `Set-Cookie`). Tokens are HS256; **refresh rotates the
 refresh token on every call and denylists the previous one**, so native
 clients MUST persist the new `refreshToken` from `/auth/refresh`.
 
+**`?return=body` is native-client-only (WARP-582).** The server refuses the
+body-token opt-in when the request carries any browser-only marker header —
+`Sec-Fetch-Site` / `Sec-Fetch-Mode` / `Sec-Fetch-Dest`, `Origin`, or
+`Referer`. Browsers attach at least one of these to every request they
+originate (and the `Sec-Fetch-*`/`Origin` ones are forbidden header names
+page script cannot strip), so an in-browser login can never receive tokens
+in the JSON body — it gets the normal httpOnly-cookie session instead (the
+login still succeeds; only the body-token fields are omitted). The native
+HTTP stacks the apps use (OkHttp on Android, URLSession on iOS) send none of
+these headers by default — **do not add them to the login/refresh requests**,
+or the server will treat the client as a browser and withhold the tokens.
+The same gate applies to the passkey `POST /auth/webauthn/authenticate/verify?return=body`.
+
 **Second factor.** If the account has TOTP enabled, `/auth/login` returns
 `401 { error, code: "TOTP_REQUIRED" }` until a valid `totp` (or unused
 `recoveryCode`) is included in the login body. The successful access

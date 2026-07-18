@@ -226,14 +226,25 @@ export function Feed({
   );
 }
 
-/* Controlled toggle switch. */
-export function Toggle({ on, onChange }: { on: boolean; onChange?: (next: boolean) => void }) {
+/* Controlled toggle switch. `ariaLabel` gives the switch an accessible name
+   when the visible label lives in a sibling element (the switch renders no
+   text of its own) — same contract as the legacy smart-home ToggleSwitch. */
+export function Toggle({
+  on,
+  onChange,
+  ariaLabel,
+}: {
+  on: boolean;
+  onChange?: (next: boolean) => void;
+  ariaLabel?: string;
+}) {
   return (
     <button
       type="button"
       className={"sw" + (on ? " on" : "")}
       role="switch"
       aria-checked={on}
+      aria-label={ariaLabel}
       onClick={() => onChange && onChange(!on)}
     >
       <span className="ball" />

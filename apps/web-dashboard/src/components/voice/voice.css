@@ -58,6 +58,29 @@
   cursor: not-allowed;
 }
 
+/* Shell `.btn`s inside the wizard — same §8 floor as .vtext-btn above.
+   droplet-shell.css sizes `.btn` at 36px; the voice canon hard-specs
+   "all wizard actions ≥44px", and min-height beats the shell's fixed
+   height. One scoped rule, no per-callsite overrides. The surface hero
+   (36px `.btn`) and drift banner (`btn primary sm`, 30px) live outside
+   `.voice-wizard` and keep shell sizing by design. */
+.voice-wizard .btn {
+  min-height: 44px;
+}
+
+/* Dark-mode primary ink. droplet-shell.css hardcodes `color:#fff` on
+   `.btn.primary`, but the dark `--brand` is the light indigo #818cf8 —
+   2.98:1, under WCAG AA 1.4.3. Scoped to the two voice containers only
+   (the wizard's Dialog portals to document.body, so it needs its own
+   `.voice-wizard` scope — `.dark` on <html> still reaches it), using
+   the established dark-on-accent ink: --color-on-accent resolves from
+   globals.css's `.dark` block to #1d1d1f (≈5.6:1 on #818cf8).
+   interim: remove when WARP-1358 lands the shell-wide --on-brand token */
+.dark .voice-surface .btn.primary,
+.dark .voice-wizard .btn.primary {
+  color: var(--color-on-accent);
+}
+
 /* ── Status hero ── */
 .vhero {
   padding: 22px 24px;
@@ -352,6 +375,16 @@
 }
 .vact .what {
   color: var(--color-label-secondary);
+}
+/* §6.3 self-heal rows carry no speaker — muted em-dash placeholder. */
+.vact .who.sys {
+  color: var(--color-label-tertiary);
+  font-weight: 400;
+}
+/* §3.4 footer deep-link into the Activity surface (kind=voice). */
+.vact-foot {
+  padding: 10px 18px;
+  border-top: 1px solid var(--color-separator);
 }
 
 /* ── Skeletons (§7.8) ── */

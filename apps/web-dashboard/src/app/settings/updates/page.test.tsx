@@ -19,6 +19,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import React from "react";
 
 vi.mock("@/components/shell/ShellPage", () => ({
@@ -255,6 +257,45 @@ describe("/settings/updates — status fetch failure (copy honesty)", () => {
     expect(screen.queryByRole("button", { name: /check now/i })).not.toBeInTheDocument();
     // And the operator gets a retry.
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+});
+
+describe("/settings/updates — indigo shell fill (WARP-1346)", () => {
+  /**
+   * The page renders inside `.droplet-shell` (indigo scaffold); its fill
+   * must use the shell idiom (inline `var(--text)` / `var(--text-muted)` /
+   * `var(--card-bd)` styles, the converted input pattern) — never the
+   * legacy violet-system tokens. Source-scan pin in the style of
+   * `__tests__/dashboard-classes-guard.test.ts`. Semantic state colors
+   * (`text-system-red`, `text-system-green`, …) are allowed by canon and
+   * deliberately NOT pinned here.
+   */
+  const LEGACY_TOKENS: ReadonlyArray<string> = [
+    "type-headline",
+    "type-subheadline",
+    "type-footnote",
+    "type-caption-1",
+    "text-label-primary",
+    "text-label-secondary",
+    "text-label-tertiary",
+    "dp-input",
+    "border-separator",
+  ];
+
+  it("uses no legacy design tokens in the page source", () => {
+    const source = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    const hits: string[] = [];
+    for (const token of LEGACY_TOKENS) {
+      // Whole-token match: not preceded/followed by a word char or `-`,
+      // so a longer token never double-counts as its shorter prefix, and
+      // an opacity-suffixed token (`…/60`) still counts as its base.
+      const re = new RegExp(`(^|[^\\w-])${token}(?![\\w-])`);
+      const lines = source.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (re.test(lines[i])) hits.push(`${token} at page.tsx:${i + 1}`);
+      }
+    }
+    expect(hits).toEqual([]);
   });
 });
 

@@ -26,6 +26,7 @@ import { ShellPage } from "@/components/shell/ShellPage";
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
 import { useVoiceSurfaceData } from "@/lib/hooks/useVoice";
 import { useVoiceProfiles } from "@/lib/hooks/useVoiceProfiles";
+import { useVoiceActivity } from "@/lib/hooks/useVoiceActivity";
 
 const PAGE_SUB = "Microphone, wake word, and who Droplet recognizes.";
 
@@ -42,6 +43,8 @@ function VoicePageInner() {
   const profilesData = useVoiceProfiles();
   const searchParams = useSearchParams();
   const enrollUserId = searchParams.get("enroll");
+  // WARP-1058 — §3.4 feed (signed kind=voice rows; its own cadence).
+  const voiceActivity = useVoiceActivity();
 
   if (data.offline) {
     return (
@@ -83,6 +86,7 @@ function VoicePageInner() {
         speakerModelAvailable={profilesData.speakerModelAvailable}
         initialEnrollUserId={enrollUserId}
         onProfilesChanged={profilesData.refresh}
+        activity={voiceActivity.rows}
         onRefresh={data.refresh}
         onCalibrationApplied={data.onCalibrationApplied}
       />

@@ -450,7 +450,7 @@ export function CalibrationWizard({
                   : "Couldn't measure the room — the microphone didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
               {failKind === "threshold" && (
@@ -511,7 +511,7 @@ export function CalibrationWizard({
                   : "Couldn't measure your speech — the microphone didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
               {failKind === "threshold" && (
@@ -565,7 +565,7 @@ export function CalibrationWizard({
               >
                 {tipsOpen ? "Hide placement tips" : "Review placement tips"}
               </button>
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
             </FailNote>
@@ -605,7 +605,7 @@ export function CalibrationWizard({
                   : "Droplet couldn't run the speaker check — the audio device didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
             </FailNote>
@@ -726,7 +726,7 @@ export function CalibrationWizard({
         <div className="right">
           <button
             type="button"
-            className="dp-btn-primary type-subheadline"
+            className="btn primary"
             onClick={() => onClose({ applied: true })}
           >
             Done
@@ -775,7 +775,7 @@ export function CalibrationWizard({
               <div style={{ textAlign: "right" }}>
                 <button
                   type="button"
-                  className="dp-btn-primary type-subheadline"
+                  className="btn primary"
                   disabled={!ready || applying}
                   aria-busy={applying || undefined}
                   onClick={() => void handleApply()}

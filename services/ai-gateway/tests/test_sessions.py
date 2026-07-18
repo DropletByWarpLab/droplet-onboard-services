@@ -64,6 +64,79 @@ class TestSessionList:
         assert data["sessions"][0]["title"] == "Second"
 
 
+class _FrozenTime:
+    """Stub for the ``time`` module as store.py uses it (``time.time`` only).
+
+    WARP-1290: patching ``sessions.store.time`` with this forces every
+    create/update in the store to land on the SAME ``time.time()`` tick —
+    the exact condition that made ``test_list_sessions_after_create`` flaky
+    (``updated_at`` tie + stable sort ⇒ insertion order won instead of
+    newest-first). Scoped to the store module so nothing else sees the
+    frozen clock.
+    """
+
+    FROZEN = 1_700_000_000.0
+
+    @staticmethod
+    def time() -> float:
+        return _FrozenTime.FROZEN
+
+
+class TestSessionListTieBreak:
+    """WARP-1290 — newest-first must hold even on an ``updated_at`` tie."""
+
+    async def test_rapid_creations_list_newest_first_on_timestamp_tie(
+        self, monkeypatch
+    ):
+        from sessions import store as store_mod
+
+        monkeypatch.setattr(store_mod, "time", _FrozenTime)
+        st = store_mod.InMemorySessionStore()
+        first = await st.create(model="llama3.2:3b", title="First")
+        second = await st.create(model="mistral:7b", title="Second")
+        # Preconditions: the tie this test exists to force.
+        assert first.updated_at == second.updated_at
+
+        listed = await st.list_sessions()
+        assert [s.title for s in listed] == ["Second", "First"]
+
+    async def test_update_on_timestamp_tie_moves_session_to_front(
+        self, monkeypatch
+    ):
+        from sessions import store as store_mod
+
+        monkeypatch.setattr(store_mod, "time", _FrozenTime)
+        st = store_mod.InMemorySessionStore()
+        first = await st.create(model="llama3.2:3b", title="First")
+        await st.create(model="mistral:7b", title="Second")
+
+        # Same frozen tick: the message bump must still promote "First"
+        # to most-recently-updated.
+        await st.add_message(first.id, "user", "hello")
+        listed = await st.list_sessions()
+        assert [s.title for s in listed] == ["First", "Second"]
+
+    async def test_list_after_rapid_create_via_api_on_tie(
+        self, client_with_sessions, monkeypatch
+    ):
+        # The original flaky flow (two POSTs inside one tick), made
+        # deterministic: freeze the store's clock so the tie ALWAYS happens.
+        from sessions import store as store_mod
+
+        monkeypatch.setattr(store_mod, "time", _FrozenTime)
+        await client_with_sessions.post(
+            "/ai/sessions",
+            json={"model": "llama3.2:3b", "title": "First"},
+        )
+        await client_with_sessions.post(
+            "/ai/sessions",
+            json={"model": "mistral:7b", "title": "Second"},
+        )
+        resp = await client_with_sessions.get("/ai/sessions")
+        titles = [s["title"] for s in resp.json()["sessions"]]
+        assert titles == ["Second", "First"]
+
+
 class TestSessionGet:
     async def test_get_session(self, client_with_sessions):
         create_resp = await client_with_sessions.post(
