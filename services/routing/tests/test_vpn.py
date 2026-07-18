@@ -452,6 +452,81 @@ class TestVpnPeersEndpoint:
         assert resp.status_code == 404
 
 
+class TestVpnOverlayPeerEndpoint:
+    """WARP-1385 — POST /vpn/peers/overlay installs a caller-keyed direct-punch
+    peer with an endpoint + keepalive (no server-side keygen)."""
+
+    def test_requires_setup(self, vpn_client: TestClient) -> None:
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post(
+            "/vpn/peers/overlay",
+            json={
+                "public_key": pub,
+                "endpoint": "203.0.113.7:51820",
+                "allowed_ips": ["10.13.13.9/32"],
+            },
+            headers=AUTH,
+        )
+        assert resp.status_code == 409
+        assert "setup" in resp.json()["detail"].lower()
+
+    def test_installs_peer_with_endpoint_and_keepalive(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post(
+            "/vpn/peers/overlay",
+            json={
+                "public_key": pub,
+                "endpoint": "203.0.113.7:51820",
+                "allowed_ips": ["10.13.13.9/32"],
+                "persistent_keepalive": 25,
+                "description": "overlay sess-42",
+            },
+            headers=AUTH,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Never mints or returns a private key — the phone brings its own key.
+        assert "private_key" not in body
+        assert body["public_key"] == pub
+        assert body["endpoint"] == "203.0.113.7:51820"
+
+        # The installed peer carries the phone's key + observed endpoint + keepalive.
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1
+        assert match[0]["endpoint_host"] == "203.0.113.7:51820"
+        assert str(match[0]["persistent_keepalive"]) == "25"
+        assert match[0]["allowed_ips"] == ["10.13.13.9/32"]
+
+    def test_reinstall_refreshes_endpoint_no_duplicate(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        base = {
+            "public_key": pub,
+            "allowed_ips": ["10.13.13.9/32"],
+            "persistent_keepalive": 25,
+        }
+        vpn_client.post("/vpn/peers/overlay", json={**base, "endpoint": "203.0.113.7:51820"}, headers=AUTH)
+        # Re-connect from a new observed endpoint — must REFRESH, not duplicate.
+        vpn_client.post("/vpn/peers/overlay", json={**base, "endpoint": "198.51.100.9:40000"}, headers=AUTH)
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1  # refreshed in place, no duplicate section
+        assert match[0]["endpoint_host"] == "198.51.100.9:40000"
+
+    @pytest.mark.parametrize("bad_ep", ["notanip", "203.0.113.7", "203.0.113.7:", "203.0.113.7:99999999"])
+    def test_rejects_bad_endpoint(self, vpn_client: TestClient, bad_ep: str) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post(
+            "/vpn/peers/overlay",
+            json={"public_key": pub, "endpoint": bad_ep, "allowed_ips": ["10.13.13.9/32"]},
+            headers=AUTH,
+        )
+        assert resp.status_code == 422
+
+
 class TestVpnEndpointsRequireRouter:
     def test_setup_503_when_disconnected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(main, "router_instance", None)

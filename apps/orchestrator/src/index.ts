@@ -65,6 +65,13 @@ import {
 } from "./services/tls-issuance.adapters.js";
 import { scheduleTlsBootTick } from "./services/tls-issuance.boot-tick.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
+import {
+  runOverlayConnectTick,
+  expireIdleOverlayPeers,
+  type OverlayConnectDeps,
+} from "./services/overlay-connect.service.js";
+import { allocatePeerIp } from "./services/vpn.service.js";
+import { bridgeAuthToken } from "./lib/bridge-errors.js";
 import { createScheduleTicker } from "./services/schedule-ticker.js";
 import { createFirewallAdapter } from "./services/firewall-adapter.service.js";
 import {
@@ -502,6 +509,64 @@ async function main() {
     },
     { lockKey: "droplet:scene-schedule-ticker" },
   );
+
+  // WARP-1385 (ADR-030) — direct-punch remote-access overlay connect agent.
+  // Explicit opt-in (OVERLAY_CONNECT_ENABLED) AND HQ configured AND router
+  // supervision active (the peer install goes through the routing service). The
+  // HQ long-poll + the idle-expiry sweep are cron-driven — event-driven bounded
+  // ticks, NO while(true) — and each ticks under an advisory lock so only one
+  // replica polls HQ / sweeps.
+  if (
+    config.OVERLAY_CONNECT_ENABLED &&
+    config.HQ_ISSUANCE_URL &&
+    routerSupervisionEnabled
+  ) {
+    const overlayDeps: OverlayConnectDeps = {
+      config: {
+        hqBaseUrl: config.HQ_ISSUANCE_URL,
+        deviceId: config.DROPLET_DEVICE_ID,
+        bridgeUrl: config.DEVICE_BRIDGE_URL,
+        bridgeToken: bridgeAuthToken(),
+        vpnInterface: "wg0",
+        keepaliveSeconds: 25,
+        idleExpiryHours: config.OVERLAY_PEER_IDLE_EXPIRY_HOURS,
+      },
+      identity: createDeviceIdentityClient(),
+      prisma,
+      peers: {
+        install: async (p) => {
+          await openwrt.installOverlayVpnPeer(p);
+        },
+        remove: async (p) => {
+          await openwrt.deleteVpnPeer(p);
+        },
+      },
+      allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
+      logger: createLogger("overlay-connect"),
+    };
+    cronRuntime.scheduleInterval(
+      config.OVERLAY_CONNECT_POLL_SECONDS * 1000,
+      async () => {
+        await runOverlayConnectTick(overlayDeps);
+      },
+      { lockKey: "droplet:overlay-connect-poll" },
+    );
+    // Sweep ~4× per idle window so an expired peer is torn down well within it.
+    const overlaySweepMs = Math.max(
+      15 * 60_000,
+      (config.OVERLAY_PEER_IDLE_EXPIRY_HOURS * 3_600_000) / 4,
+    );
+    cronRuntime.scheduleInterval(
+      overlaySweepMs,
+      async () => {
+        await expireIdleOverlayPeers(overlayDeps);
+      },
+      { lockKey: "droplet:overlay-peer-expiry" },
+    );
+    logger.info(
+      "overlay connect agent enabled (HQ long-poll + idle-expiry sweep)",
+    );
+  }
 
   // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
   // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller

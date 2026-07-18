@@ -73,6 +73,7 @@ from schemas import (
     FirewallRedirectCollection,
     VpnSetupRequest,
     VpnPeerCreateRequest,
+    VpnOverlayPeerRequest,
     VpnPeerDeleteRequest,
     ApApproveRequest,
     ApTestSeedRequest,
@@ -1531,6 +1532,54 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
             "private_key": private_key,
             "allowed_ips": list(req.allowed_ips),
             "description": req.description,
+            "persistent_keepalive": req.persistent_keepalive,
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/vpn/peers/overlay")
+def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
+    """WARP-1385 (ADR-030) — install/refresh a direct-punch overlay peer.
+
+    The phone brings its OWN key (enrolled via HQ), so unlike POST /vpn/peers
+    this installs the caller-supplied `public_key` with the phone's observed
+    `endpoint` + a keepalive — WireGuard's own initiations from that endpoint
+    are the box side of the NAT hole-punch. Idempotent: any prior section for
+    the same public_key is removed first, so a re-connect just refreshes the
+    endpoint. Never generates or returns a private key.
+    """
+    try:
+        r = get_router()
+        if not r.vpn.interface_exists(req.interface):
+            raise HTTPException(
+                status_code=409,
+                detail=f"VPN interface '{req.interface}' not configured — POST /vpn/setup first",
+            )
+        # Refresh semantics: drop any existing section for this key before adding
+        # so the endpoint/allowed-ips update cleanly (add_peer would otherwise
+        # append a duplicate section).
+        r.vpn.delete_peer(req.interface, req.public_key)
+        allowed_ips_uci = ",".join(req.allowed_ips)
+        r.vpn.add_peer(
+            interface=req.interface,
+            public_key=req.public_key,
+            allowed_ips=allowed_ips_uci,
+            description=req.description,
+            endpoint=req.endpoint,
+            persistent_keepalive=req.persistent_keepalive,
+        )
+        try:
+            r.uci.apply(timeout=5, rollback=False)
+        except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            logger.warning("vpn: uci.apply after overlay add_peer failed (peer is staged): %s", exc)
+
+        return {
+            "status": "ok",
+            "interface": req.interface,
+            "public_key": req.public_key,
+            "endpoint": req.endpoint,
+            "allowed_ips": list(req.allowed_ips),
             "persistent_keepalive": req.persistent_keepalive,
         }
     except (ConnectionLost, UbusError) as exc:
