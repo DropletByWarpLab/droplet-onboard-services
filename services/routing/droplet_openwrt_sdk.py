@@ -1965,7 +1965,7 @@ class VPNApi:
             })
         return peers
 
-    def peer_handshakes(self, interface: str = "wg0") -> dict[str, int]:
+    def peer_handshakes(self, interface: str = "wg0") -> Optional[dict[str, int]]:
         """WARP-1389 — best-effort per-peer runtime `latest handshake` epoch
         (seconds), keyed by public_key, for the overlay punch-success telemetry.
 
@@ -1975,18 +1975,22 @@ class VPNApi:
         droplet-ai rpcd ACL denies file.exec on purpose (see the acl.d note), and
         telemetry must never motivate widening that grant.
 
-        Degrades to ``{}`` on any absence/error and OMITS peers that never
-        handshook — the caller treats missing data as UNKNOWN (skips the
-        success/fail metric), never a fabricated 0. Read-only.
+        Returns ``None`` = UNKNOWN (the ubus read failed, or the status carried
+        no peer data at all) — the caller must NOT treat that as "nobody
+        handshook", or every torn-down peer reads as a false failure and the
+        fleet punch-success rate collapses to 0%. Returns a dict = AVAILABLE: an
+        entry per peer that DID handshake (epoch > 0); a peer that exists but
+        never handshook is simply absent from the dict, which — since the read
+        succeeded — the caller reads as an observed 0 (a real failure). Read-only.
         """
         try:
             status = self._r._call(f"network.interface.{interface}", "status")
         except Exception:  # noqa: BLE001 — telemetry read, never fatal
-            return {}
+            return None
         data = status.get("data") if isinstance(status, dict) else None
         peers = data.get("peers") if isinstance(data, dict) else None
         if not isinstance(peers, list):
-            return {}
+            return None  # no peer data in the status → UNKNOWN, never a fake 0
         out: dict[str, int] = {}
         for p in peers:
             if not isinstance(p, dict):

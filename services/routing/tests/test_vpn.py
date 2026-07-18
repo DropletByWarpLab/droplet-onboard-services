@@ -565,6 +565,24 @@ class TestVpnPeerHandshakeEnrichment:
         main.router_instance.vpn._handshakes["GHOSTKEY"] = 999
         assert main.router_instance.vpn.peer_handshakes("wg0") == {}
 
+    def test_list_peers_OMITS_latest_handshake_when_runtime_data_unavailable(self, vpn_client: TestClient) -> None:
+        # UNKNOWN (ubus status carries no peer data) must be DISTINCT from an
+        # observed 0 — the field is omitted entirely, never defaulted to 0, or
+        # the orchestrator would score every torn-down peer as a false failure.
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        vpn_client.post(
+            "/vpn/peers/overlay",
+            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            headers=AUTH,
+        )
+        main.router_instance.vpn._handshakes_available = False
+        assert main.router_instance.vpn.peer_handshakes("wg0") is None
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1
+        assert "latest_handshake" not in match[0]  # UNKNOWN → field absent
+
 
 class TestVpnEndpointsRequireRouter:
     def test_setup_503_when_disconnected(self, monkeypatch: pytest.MonkeyPatch) -> None:

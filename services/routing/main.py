@@ -1482,10 +1482,12 @@ def vpn_status(interface: str = "wg0"):
 def vpn_list_peers(interface: str = "wg0"):
     """List peers configured on the interface. Empty list if none.
 
-    WARP-1389: each peer is enriched with `latest_handshake` (runtime epoch secs,
-    0 = never/unknown) from the permitted ubus interface-status read, so the
-    orchestrator's overlay sweep can classify a torn-down peer as a punch
-    success/failure. Best-effort: unavailable handshake data leaves 0.
+    WARP-1389: when runtime handshake data is AVAILABLE, each peer gets
+    `latest_handshake` (epoch secs; a real 0 = the peer exists but never
+    handshook). When it is UNAVAILABLE (ubus read failed / no peer data), the
+    field is OMITTED entirely — UNKNOWN must stay distinct from an observed 0, or
+    the orchestrator sweep would score every torn-down peer as a failed punch and
+    report a false 0% success rate. Never fails the list.
     """
     try:
         r = get_router()
@@ -1493,13 +1495,14 @@ def vpn_list_peers(interface: str = "wg0"):
             raise HTTPException(status_code=404, detail=f"VPN interface '{interface}' not configured")
         peers = r.vpn.list_peers(interface)
         try:
-            hs = r.vpn.peer_handshakes(interface)
+            hs = r.vpn.peer_handshakes(interface)  # dict = available, None = UNKNOWN
         except Exception:  # noqa: BLE001 — telemetry enrichment never fails the list
-            hs = {}
-        if not isinstance(hs, dict):
-            hs = {}
-        for p in peers:
-            p["latest_handshake"] = int(hs.get(p.get("public_key", ""), 0) or 0)
+            hs = None
+        if isinstance(hs, dict):
+            # Read succeeded: every peer gets a value (0 = observed never-handshook).
+            for p in peers:
+                p["latest_handshake"] = int(hs.get(p.get("public_key", ""), 0) or 0)
+        # else UNKNOWN: leave `latest_handshake` ABSENT on every peer.
         return {"interface": interface, "peers": peers}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

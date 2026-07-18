@@ -541,13 +541,20 @@ async function main() {
           await openwrt.deleteVpnPeer(p);
         },
         // WARP-1389 — real per-peer runtime handshake, read from the routing
-        // peer list (permitted ubus read; 0 when unknown), so the idle-expiry
-        // sweep can settle each torn-down peer as a punch success/failure.
+        // peer list, so the idle-expiry sweep can settle each torn-down peer as
+        // a punch success/failure. A peer is included ONLY when routing reported
+        // a value (observed: 0 = never handshook, >0 = handshook); a peer whose
+        // handshake is UNKNOWN (field absent — ubus data unavailable) is OMITTED
+        // so the sweep skips it rather than scoring a false failure.
         listHandshakes: async (iface) => {
           const peers = await openwrt.listVpnPeers(iface);
-          return Object.fromEntries(
-            peers.map((p) => [p.public_key, p.latest_handshake ?? 0]),
-          );
+          const out: Record<string, number> = {};
+          for (const p of peers) {
+            if (typeof p.latest_handshake === "number") {
+              out[p.public_key] = p.latest_handshake;
+            }
+          }
+          return out;
         },
       },
       allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),

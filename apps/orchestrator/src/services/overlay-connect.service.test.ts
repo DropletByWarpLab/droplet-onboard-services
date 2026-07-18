@@ -583,8 +583,10 @@ describe("expireIdleOverlayPeers", () => {
     ]);
     (prisma.rows[0] as Record<string, unknown>).lastSessionAt = stale;
     (prisma.rows[1] as Record<string, unknown>).lastSessionAt = stale;
-    // SHOOK punched (has a real handshake epoch); NEVER never handshook.
-    const { peers, removed } = makePeers({ SHOOK: 1_784_000_000 });
+    // Routing read AVAILABLE: SHOOK punched (real epoch); NEVER is an OBSERVED 0
+    // (present in the map with 0), which is a real failure — distinct from
+    // UNKNOWN (absent from the map).
+    const { peers, removed } = makePeers({ SHOOK: 1_784_000_000, NEVER: 0 });
     const { metrics, calls } = makeMetrics();
     const expired = await expireIdleOverlayPeers({
       config: baseConfig(),
@@ -604,13 +606,21 @@ describe("expireIdleOverlayPeers", () => {
     expect(calls.filter((c) => c.name === "overlay.punch.failed")).toHaveLength(1);
   });
 
-  it("WARP-1389: skips outcome telemetry when handshake data is unavailable (never guesses)", async () => {
+  it("WARP-1389: skips outcome telemetry for a peer whose handshake routing reports UNKNOWN (production seam)", async () => {
+    // The production wiring ALWAYS provides listHandshakes; the UNKNOWN signal
+    // is a peer OMITTED from the map (routing left latest_handshake absent). A
+    // guessed 0 here would score every torn-down peer on such a box as a false
+    // failure — the exact defect this test guards.
     const stale = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
     const prisma = makePrisma([
-      { id: "a", publicKey: "P", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+      { id: "a", publicKey: "UNKNOWN_PK", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+      { id: "b", publicKey: "OBSERVED_FAIL", assignedIp: "10.0.0.3", status: "active", kind: "overlay" },
     ]);
     (prisma.rows[0] as Record<string, unknown>).lastSessionAt = stale;
-    const { peers } = makePeers(); // no listHandshakes → data unavailable
+    (prisma.rows[1] as Record<string, unknown>).lastSessionAt = stale;
+    // listHandshakes IS wired (production path) but only carries OBSERVED peers:
+    // OBSERVED_FAIL present with 0 (real failure); UNKNOWN_PK omitted (UNKNOWN).
+    const { peers } = makePeers({ OBSERVED_FAIL: 0 });
     const { metrics, calls } = makeMetrics();
     await expireIdleOverlayPeers({
       config: baseConfig(),
@@ -621,7 +631,32 @@ describe("expireIdleOverlayPeers", () => {
       metrics,
       now: () => FIXED_NOW,
     });
-    // Peer still expired, but NO success/fail metric fabricated.
+    // Both peers expired…
+    expect(prisma.rows[0].status).toBe("revoked");
+    expect(prisma.rows[1].status).toBe("revoked");
+    // …but ONLY the observed-0 peer scores a failure; the UNKNOWN peer scores
+    // nothing (no fabricated 0), and nothing scores succeeded.
+    expect(calls.filter((c) => c.name === "overlay.punch.failed")).toHaveLength(1);
+    expect(calls.filter((c) => c.name === "overlay.punch.succeeded")).toHaveLength(0);
+  });
+
+  it("WARP-1389: skips outcome telemetry when the handshake collaborator is entirely absent", async () => {
+    const stale = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const prisma = makePrisma([
+      { id: "a", publicKey: "P", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = stale;
+    const { peers } = makePeers(); // no listHandshakes wired at all
+    const { metrics, calls } = makeMetrics();
+    await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      metrics,
+      now: () => FIXED_NOW,
+    });
     expect(prisma.rows[0].status).toBe("revoked");
     expect(calls.filter((c) => c.name.startsWith("overlay.punch"))).toHaveLength(0);
   });

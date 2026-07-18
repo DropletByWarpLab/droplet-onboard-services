@@ -24,8 +24,16 @@ existing box metric surface — the `Analytics.metric(name, value, labels)` sink
   `latest_handshake`, read via the routing `GET /vpn/peers` enrichment
   (`peer_handshakes`, a *permitted* ubus `network.interface.<iface> status`
   read — deliberately **not** `wg show` / `file.exec`, which the droplet-ai
-  rpcd ACL denies on purpose). When that handshake data is unavailable the
-  sweep emits **neither** metric — it never guesses an outcome.
+  rpcd ACL denies on purpose).
+- **UNKNOWN is kept distinct from an observed 0.** When the runtime read
+  succeeds, every peer carries `latest_handshake` (a real `0` = the peer exists
+  but never handshook ⇒ **failure**; `>0` ⇒ **success**). When the read is
+  UNAVAILABLE (ubus carried no peer data), routing **omits** the field
+  entirely and the sweep emits **neither** metric for that peer — it never
+  guesses `0`. A `latest_handshake` of `0` therefore means failure ONLY because
+  the field's presence proves the read succeeded; an absent field is UNKNOWN,
+  not a failure. (Collapsing the two would report a false 0% success rate on any
+  box lacking the ubus peer surface and poison the WARP-1390 relay dataset.)
 
 ## 2. HQ-side success-rate (D1 query recipe — operator doc, not code)
 

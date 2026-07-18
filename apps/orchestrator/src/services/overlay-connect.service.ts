@@ -122,10 +122,12 @@ export interface OverlayPeerOps {
     description: string;
   }): Promise<void>;
   remove(p: { interface: string; publicKey: string }): Promise<void>;
-  /** WARP-1389 — per-peer runtime `latest handshake` epoch (seconds; 0/absent =
-   *  never handshook). The idle-expiry sweep uses it to classify a torn-down
-   *  overlay peer as a punch success (handshook) or failure (never handshook).
-   *  Production reads it from the routing peer list (openwrt.listVpnPeers). */
+  /** WARP-1389 — per-peer runtime `latest handshake` epoch (seconds), keyed by
+   *  public_key, for peers whose handshake state was actually OBSERVED: value 0
+   *  = observed never-handshook, > 0 = handshook. A peer whose handshake is
+   *  UNKNOWN (routing had no runtime data) is OMITTED from the map entirely —
+   *  the sweep must skip it, never score a guessed 0 as a failure. Production
+   *  reads it from the routing peer list (openwrt.listVpnPeers). */
   listHandshakes?(iface: string): Promise<Record<string, number>>;
 }
 
@@ -565,14 +567,18 @@ export async function expireIdleOverlayPeers(
         data: { status: "revoked", revokedAt: now },
       });
       expired += 1;
-      // Settle the punch outcome from the peer's real handshake. Only emitted
-      // when handshake data was actually read (never guessed).
+      // Settle the punch outcome from the peer's real handshake. `handshakes`
+      // carries ONLY peers whose handshake was actually OBSERVED: an epoch > 0
+      // is a success, an observed 0 is a failure. A peer ABSENT from the map is
+      // UNKNOWN (routing had no runtime data) — emit NOTHING, never a guessed 0.
       if (handshakes) {
-        const shook = (handshakes[row.publicKey] ?? 0) > 0;
-        metrics.metric(
-          shook ? "overlay.punch.succeeded" : "overlay.punch.failed",
-          1,
-        );
+        const observed = handshakes[row.publicKey];
+        if (observed !== undefined) {
+          metrics.metric(
+            observed > 0 ? "overlay.punch.succeeded" : "overlay.punch.failed",
+            1,
+          );
+        }
       }
     } catch (err) {
       logger.warn(
