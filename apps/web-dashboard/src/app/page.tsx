@@ -34,8 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { useDevice } from "@/lib/hooks/useDevice";
-import { boxDisplayHost } from "@/lib/box-identity";
+import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
 import { resolveHealthCopy } from "./health-copy";
 import { BentoBoard } from "@/components/home/BentoBoard";
@@ -271,7 +270,6 @@ function MobileBoard({ items }: { items: LayoutItem[] }) {
 /* ─────────────────────────── Page ─────────────────────────── */
 export default function DashboardPage() {
   const { user } = useAuth();
-  const { device } = useDevice();
   const isMobile = useIsMobile();
 
   const [dir, setDir] = useState<DensityKey>("balanced");
@@ -364,9 +362,10 @@ export default function DashboardPage() {
     month: "long",
     day: "numeric",
   });
-  // WARP-992: canonical display identity — masks a leaked container-id
-  // hostname (stale Device row) and covers the not-yet-loaded state.
-  const host = boxDisplayHost(device?.hostname);
+  // WARP-992 + WARP-1342: canonical display identity — masks a leaked
+  // container-id hostname and upgrades the droplet.local fallback to the
+  // issued per-device FQDN (the address that also works over the VPN).
+  const host = useBoxAddress();
 
   // Live rolled-up system health (WARP-43) drives the always-visible toolbar
   // chip — dot colour + label track ok / degraded / down rather than being

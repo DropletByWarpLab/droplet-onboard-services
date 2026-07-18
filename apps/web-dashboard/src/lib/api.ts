@@ -1212,6 +1212,28 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
   return res.json();
 }
 
+/** Cert-lifecycle snapshot from the PUBLIC tls-status route (ADR-023 §3,
+ *  WARP-1302). Carries no secrets — state, the CT-public FQDN, and whether
+ *  HQ issuance is configured at all. */
+export interface TlsStatus {
+  state: string;
+  fqdn: string | null;
+  hqConfigured: boolean;
+}
+
+export async function fetchTlsStatus(): Promise<TlsStatus> {
+  // Public endpoint (no auth) — the same payload the gateway's plain-HTTP
+  // status page polls. WARP-1342: dashboard chrome reads `fqdn` to upgrade
+  // the identity chip off the droplet.local fallback.
+  const res = await fetch(`${BASE}/api/tls/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch TLS status: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Network / Router ---
 
 export type RouterErrorCode =
