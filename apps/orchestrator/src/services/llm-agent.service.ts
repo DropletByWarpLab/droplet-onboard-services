@@ -489,8 +489,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           emit({ type: "reasoning_step", text: step });
         }
       }
-      const visible = reasoning.cleanedContent;
-      if (visible) emit({ type: "content_delta", text: visible });
+      // WARP-1331 — finalisation guard: never surface a blank answer, a
+      // bare tool-args JSON object, or harmony citation cruft to the
+      // customer. stop_reason stays "model_done" (WARP-1012 pattern: only
+      // the visible content changes, the trace keeps the real signal).
+      const visible = sanitizeFinalContent(reasoning.cleanedContent);
+      emit({ type: "content_delta", text: visible });
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
@@ -764,12 +768,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         .map((t) => t.tool),
     ),
   ];
+  // WARP-1331 — trace tool names are model-controlled: the model invents
+  // garbled names ("memory_repay??", "search_content?") that the guard
+  // records as failures, and interpolating them verbatim put nonsense tools
+  // in customer-facing copy. Only registry-advertised names may be named;
+  // failures on invented tools get the generic phrasing.
+  const knownFailedTools = failedTools.filter((n) => advertisedNames.has(n));
   const fallbackText =
-    failedTools.length > 0
-      ? `I ran into a problem while working on that — the ${failedTools.join(
+    knownFailedTools.length > 0
+      ? `I ran into a problem while working on that — the ${knownFailedTools.join(
           ", ",
-        )} tool${failedTools.length > 1 ? "s" : ""} kept failing, so I couldn't finish your request. Please try again in a moment.`
-      : "I couldn't finish working through that request within my step limit. Please try again, or ask for a smaller piece of it.";
+        )} tool${knownFailedTools.length > 1 ? "s" : ""} kept failing, so I couldn't finish your request. Please try again in a moment.`
+      : failedTools.length > 0
+        ? "I ran into a problem while working on that — one of my tools kept failing, so I couldn't finish your request. Please try again in a moment."
+        : "I couldn't finish working through that request within my step limit. Please try again, or ask for a smaller piece of it.";
   emit({ type: "content_delta", text: fallbackText });
   emit({ type: "done", iterations: maxIter, stop_reason: "iteration_limit" });
   return {
@@ -778,6 +790,35 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     iterations: maxIter,
     stop_reason: "iteration_limit",
   };
+}
+
+// WARP-1331 — the model_done finalisation guard's honest fallback. Blank
+// answers and bare tool-args JSON were reaching customers verbatim
+// (staging-suite runs 1–3: `{"path":"/Admin"}` as a final answer, empty
+// bubbles on R02/R10/R19).
+const EMPTY_ANSWER_FALLBACK =
+  "I wasn't able to put together an answer that time — please try asking again.";
+
+function sanitizeFinalContent(raw: string | null): string {
+  // gpt-oss leaks harmony-style citation tokens (`【3†source=…】`) into
+  // otherwise-correct answers — strip the tokens, keep the prose.
+  const stripped = (raw ?? "")
+    .replace(/【[^】]*】/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+  if (!stripped) return EMPTY_ANSWER_FALLBACK;
+  // A final answer that IS a bare JSON object/array is tool-call arguments
+  // the loop failed to route — never emit it as prose. Fenced or inline
+  // JSON inside a sentence doesn't parse here and passes through untouched.
+  if (/^[[{]/.test(stripped)) {
+    try {
+      JSON.parse(stripped);
+      return EMPTY_ANSWER_FALLBACK;
+    } catch {
+      // Not valid JSON after all — treat as prose.
+    }
+  }
+  return stripped;
 }
 
 /**
