@@ -401,11 +401,17 @@ def run(
     # the top of the module; only ragas is deferred. Truly-fast `--help`
     # would need those moved inside `run()` too.
     from ragas import evaluate
+    # WARP-1406: ADR-003 specced a bare `LLMContextPrecision` metric, but NO
+    # ragas release exports that name (0.2.x and 0.4.x both ship only the
+    # WithReference / WithoutReference variants) — this import crashed every
+    # run that reached evaluate(), invisibly, on every appliance. We score
+    # precision against the goldens' expected_answer, so the WithReference
+    # variant is the one the design intended (see goldens.yaml header).
     from ragas.metrics import (
         AnswerRelevancy,
         Faithfulness,
         FactualCorrectness,
-        LLMContextPrecision,
+        LLMContextPrecisionWithReference,
         LLMContextRecall,
     )
 
@@ -438,7 +444,7 @@ def run(
         metrics=[
             Faithfulness(),
             LLMContextRecall(),
-            LLMContextPrecision(),
+            LLMContextPrecisionWithReference(),
             *([] if skip_answer_relevancy else [AnswerRelevancy()]),
             FactualCorrectness(),
         ],

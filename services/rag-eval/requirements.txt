@@ -1,10 +1,26 @@
-# WARP-RAG-EVAL — pinned to match tests/retrieval-eval/ragas/requirements.txt
-# so the in-container eval produces the same numbers as the offline runner.
-# Bump these in lockstep with that file (CI guards via a tiny diff check).
+# WARP-RAG-EVAL — pin ragas to match tests/retrieval-eval/ragas/
+# requirements.txt so the in-container eval produces the same numbers as
+# the offline runner. Bump the two files in lockstep, deliberately, with
+# a re-baseline run. (No CI diff-guard exists — the old comment here
+# claimed one; it never did. The offline file had silently drifted to
+# ragas==0.4.3, which ragas_runner.py cannot even import against;
+# realigned to 0.2.13 in WARP-1406.)
+#
+# WARP-1406: the langchain stack MUST be capped to the 0.3 line. ragas
+# 0.2.x (and 0.4.x!) does `from langchain_community.chat_models.vertexai
+# import ChatVertexAI` unconditionally at import time, and 2026's
+# langchain-community 1.x removed that module — so a fresh image build
+# with unpinned langchain resolved to 1.x and every RAGAS run crashed at
+# `from ragas import evaluate` in seconds, leaving no results file.
+# Verified combo (imports + metric construction): ragas 0.2.13 with
+# core/community/openai/langchain all on their latest 0.3.x.
 
 # RAGAS + LangChain wrapper (judge-LLM scoring)
 ragas==0.2.13
-langchain-openai>=0.2.0
+langchain>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-community>=0.3,<0.4
+langchain-openai>=0.2,<0.4
 openai>=1.0
 datasets>=3.0.0
 
