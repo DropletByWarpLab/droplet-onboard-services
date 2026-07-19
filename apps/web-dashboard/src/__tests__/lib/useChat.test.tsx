@@ -369,6 +369,34 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     ]);
   });
 
+  it("surfaces the orchestrator's 400 empty_replay rejection with its own copy", async () => {
+    // Server-side backstop for the empty-thread replay bug this branch
+    // fixes: the orchestrator now rejects a user-turn-less `messages`
+    // array with 400 { error: "empty_replay" } (routes/llm.ts) instead of
+    // running the agent loop on a blank thread. That rejection must reach
+    // the user as a distinct, actionable error bubble — not the generic
+    // fallback — so a future serialization regression is recognizable.
+    mockSendChat.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "empty_replay" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      expect(value!.messages.at(-1)?.error).toBeDefined();
+    });
+    expect(value!.messages.at(-1)!.error!.message).toBe(
+      "The app sent an empty conversation, so the AI had nothing to answer. Refresh the page and try again.",
+    );
+  });
+
   it("done event with stop_reason='error' marks the assistant turn as an error with retryPrompt", async () => {
     mockSendChat.mockResolvedValueOnce(
       sseResponse([

@@ -285,6 +285,13 @@ function friendlyPreStreamError(status: number, code: string | undefined): strin
   if (code === "turn_already_completed") {
     return "This reply already finished. Open the conversation again to see it.";
   }
+  if (code === "empty_replay") {
+    // The orchestrator's backstop for the empty-thread replay bug this
+    // branch fixes client-side: a request whose `messages` carry no user
+    // turn is rejected before the agent loop (routes/llm.ts). Seeing this
+    // copy means the dashboard serialized a user-turn-less thread again.
+    return "The app sent an empty conversation, so the AI had nothing to answer. Refresh the page and try again.";
+  }
   if (status === 401 || status === 403) {
     return "You're not allowed to do that right now. Try signing in again.";
   }
