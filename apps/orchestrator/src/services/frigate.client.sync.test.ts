@@ -1,36 +1,73 @@
 /**
- * #11 — syncCamerasFromDb: prune Frigate camera entries orphaned by a prior
- * version / Postgres wipe (e.g. camera_192_168_20_176), preserving the full
- * block of every camera still in the DB.
+ * #11 — syncCamerasFromDb + deleteCamera: prune Frigate camera entries.
+ *
+ * On Frigate 0.17 the resolved /api/config is not save-round-trippable and
+ * DELETE /api/config/cameras/<name> is a 404, so both operate on the AUTHORED
+ * YAML: GET /api/config/raw -> edit -> POST /api/config/save. This guards that
+ * survivors + non-camera config are preserved and only the targeted cameras
+ * are dropped.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { parse } from "yaml";
 
 // FRIGATE_URL is read from config at import; stub it deterministically.
 vi.mock("../config.js", () => ({
   config: { FRIGATE_URL: "http://frigate:5000" },
 }));
 
-import { syncCamerasFromDb } from "./frigate.client.js";
+import { syncCamerasFromDb, deleteCamera } from "./frigate.client.js";
 
-/** Route fetch by URL: /api/config returns the snapshot; /api/config/save 200s. */
-function stubConfig(
-  cameras: Record<string, unknown>,
-  extra: Record<string, unknown> = {},
-) {
+const BASE_YAML = `mqtt:
+  enabled: true
+detectors:
+  cpu:
+    type: cpu
+cameras:
+  good_cam:
+    ffmpeg:
+      inputs:
+        - path: rtsp://good
+          roles: [detect, record]
+    detect:
+      enabled: true
+  camera_192_168_20_176:
+    ffmpeg:
+      inputs:
+        - path: rtsp://stale
+`;
+
+/**
+ * /api/config/raw returns the authored YAML JSON-string-encoded (as Frigate
+ * 0.17 does); /api/config/save 200s. `yaml` is the raw YAML text to serve.
+ */
+function stubRaw(yaml = BASE_YAML, saveStatus = 200) {
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-    if (url.endsWith("/api/config")) {
-      return new Response(
-        JSON.stringify({ mqtt: { enabled: true }, ...extra, cameras }),
-        { status: 200 },
-      );
+    if (url.endsWith("/api/config/raw")) {
+      return new Response(JSON.stringify(yaml), { status: 200 });
     }
     if (url.includes("/api/config/save")) {
-      return new Response("", { status: 200 });
+      return new Response("", { status: saveStatus });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+/** Parse the YAML body of the (single) /api/config/save call. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function savedConfig(fetchMock: any) {
+  const saveCall = fetchMock.mock.calls.find(([u]: [string]) =>
+    String(u).includes("/api/config/save"),
+  );
+  expect(saveCall).toBeTruthy();
+  const [saveUrl, saveInit] = saveCall!;
+  expect(String(saveUrl)).toContain("save_option=restart");
+  expect((saveInit as RequestInit).method).toBe("POST");
+  expect((saveInit as RequestInit).headers).toMatchObject({
+    "Content-Type": "text/plain",
+  });
+  return parse((saveInit as RequestInit).body as string);
 }
 
 beforeEach(() => {
@@ -41,71 +78,60 @@ afterEach(() => {
 });
 
 describe("syncCamerasFromDb (#11)", () => {
-  it("prunes cameras not in the DB and POSTs the full config back", async () => {
-    const fetchMock = stubConfig({
-      good_cam: {
-        ffmpeg: { inputs: [{ path: "rtsp://x" }] },
-        detect: { enabled: true },
-      },
-      camera_192_168_20_176: { ffmpeg: { inputs: [{ path: "rtsp://stale" }] } },
-    });
+  it("prunes cameras not in the DB and saves the authored YAML back", async () => {
+    const fetchMock = stubRaw();
 
     const removed = await syncCamerasFromDb(["good_cam"]);
 
     expect(removed).toEqual(["camera_192_168_20_176"]);
-    const saveCall = fetchMock.mock.calls.find(([u]) =>
-      String(u).includes("/api/config/save"),
-    );
-    expect(saveCall).toBeTruthy();
-    const [saveUrl, saveInit] = saveCall!;
-    expect(String(saveUrl)).toContain("save_option=restart");
-    expect((saveInit as RequestInit).method).toBe("POST");
-    expect((saveInit as RequestInit).headers).toMatchObject({
-      "Content-Type": "text/plain",
-    });
-    const body = JSON.parse((saveInit as RequestInit).body as string);
-    expect(Object.keys(body.cameras)).toEqual(["good_cam"]);
-    expect(body.cameras.good_cam.detect.enabled).toBe(true); // survivor preserved
-    expect(body.mqtt).toEqual({ enabled: true }); // non-camera config preserved
+    // Never touches the resolved /api/config (not round-trippable on 0.17).
+    expect(
+      fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/config")),
+    ).toBe(false);
+
+    const cfg = savedConfig(fetchMock);
+    expect(Object.keys(cfg.cameras)).toEqual(["good_cam"]);
+    expect(cfg.cameras.good_cam.detect.enabled).toBe(true); // survivor preserved
+    expect(cfg.mqtt).toEqual({ enabled: true }); // non-camera config preserved
+    expect(cfg.detectors).toEqual({ cpu: { type: "cpu" } });
   });
 
   it("is a no-op (no save) when there are no orphans", async () => {
-    const fetchMock = stubConfig({ good_cam: { ffmpeg: {} } });
-    const removed = await syncCamerasFromDb(["good_cam"]);
+    const fetchMock = stubRaw();
+    const removed = await syncCamerasFromDb(["good_cam", "camera_192_168_20_176"]);
     expect(removed).toEqual([]);
     expect(
-      fetchMock.mock.calls.some(([u]) =>
-        String(u).includes("/api/config/save"),
-      ),
+      fetchMock.mock.calls.some(([u]) => String(u).includes("/api/config/save")),
     ).toBe(false);
   });
 
   it("removes ALL cameras when the DB is empty (the live-box state)", async () => {
-    const fetchMock = stubConfig({ camera_192_168_20_176: { ffmpeg: {} } });
+    const fetchMock = stubRaw();
     const removed = await syncCamerasFromDb([]);
-    expect(removed).toEqual(["camera_192_168_20_176"]);
-    const saveCall = fetchMock.mock.calls.find(([u]) =>
-      String(u).includes("/api/config/save"),
-    );
-    const body = JSON.parse((saveCall![1] as RequestInit).body as string);
-    expect(body.cameras).toEqual({});
+    expect(removed.sort()).toEqual(["camera_192_168_20_176", "good_cam"]);
+    const cfg = savedConfig(fetchMock);
+    expect(cfg.cameras ?? {}).toEqual({});
   });
 
   it("throws when Frigate rejects the save (so callers can log)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, _init?: RequestInit) => {
-        if (url.endsWith("/api/config")) {
-          return new Response(
-            JSON.stringify({ cameras: { orphan: {} } }),
-            { status: 200 },
-          );
-        }
-        return new Response("bad", { status: 422 });
-      }),
-    );
+    stubRaw(BASE_YAML, 422);
     await expect(syncCamerasFromDb([])).rejects.toThrow(
       /Frigate rejected the config: 422/,
     );
+  });
+});
+
+describe("deleteCamera", () => {
+  it("drops the camera from the authored YAML and saves it back", async () => {
+    const fetchMock = stubRaw();
+    await deleteCamera("good_cam");
+    const cfg = savedConfig(fetchMock);
+    expect(Object.keys(cfg.cameras)).toEqual(["camera_192_168_20_176"]);
+    expect(cfg.mqtt).toEqual({ enabled: true });
+  });
+
+  it("throws on a failed save", async () => {
+    stubRaw(BASE_YAML, 500);
+    await expect(deleteCamera("good_cam")).rejects.toThrow(/Delete camera: 500/);
   });
 });

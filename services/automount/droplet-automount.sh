@@ -469,7 +469,15 @@ case "$ACTION" in
       log "$BACKING_DEVICE is an unlabeled md pool filesystem — keeping its legacy mount name $NAME"
     else
       LABEL="${LABEL:-drive}"
-      NAME="$(echo "$LABEL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-\+//;s/-\+$//')"
+      NAME="$(printf '%s' "$LABEL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-\+//;s/-\+$//')"
+      # A label of "." or ".." (or any run of only dots) survives the charset
+      # filter unchanged — MOUNT="${MOUNT_BASE}/.." would then resolve OUTSIDE
+      # the mount base (its parent directory), and WARP-1338's Nextcloud
+      # auto-registration would expose that parent as browsable storage.
+      case "$NAME" in
+        ''|*[!.]*) : ;;
+        *) NAME="" ;;
+      esac
       [ -z "$NAME" ] && NAME="drive"
       if [ -n "$SHORT_UUID" ]; then
         NAME="${NAME}-${SHORT_UUID}"

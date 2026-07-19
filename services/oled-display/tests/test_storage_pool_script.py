@@ -858,6 +858,38 @@ def test_reclaim_mounts_at_automount_derived_name_and_registers(tmp_path):
     assert reg_idx > mount_idx, cmds
 
 
+# blkid stub that answers an EMPTY UUID — models a freshly-made filesystem
+# whose superblock UUID probe comes back empty (SHORT_UUID stays empty, so
+# automount_mount_name has no disambiguating suffix to append).
+_EMPTY_UUID_BLKID_STUB = r"""
+printf 'blkid %s\n' "$*" >> "$CMD_LOG"
+case " $* " in
+  *" -s UUID "*) exit 0 ;;
+  *" -s TYPE "*) exit 2 ;;
+esac
+exit 0
+"""
+
+
+def test_adopt_dotdot_label_never_escapes_the_mount_base(tmp_path):
+    # automount_mount_name's tr+sed charset filter allows '.' through, and the
+    # trailing dash-strip only trims DASHES — a label of exactly ".." with no
+    # UUID to append a disambiguating suffix survives sanitization unchanged,
+    # so "/mnt/droplet/$(automount_mount_name ..)" resolves to the mount
+    # base's PARENT directory instead of a name under it.
+    proc, cmds = _exec_run(
+        "drive_adopt", _adopt_params(label=".."), tmp_path,
+        extra_env=_pool_state_env(tmp_path),
+        stub_overrides={"blkid": _EMPTY_UUID_BLKID_STUB})
+    assert proc.returncode == 0, proc.stderr
+    forbidden_mount = "/mnt/droplet/.."
+    assert not any(
+        c.startswith("mount ") and c.endswith(" " + forbidden_mount)
+        for c in cmds), (
+        "a '..' label with no UUID collapsed automount_mount_name's output "
+        "to '..', landing the mount OUTSIDE the mount base: %r" % cmds)
+
+
 def test_managed_unmount_prunes_the_automount_state(tmp_path):
     # WARP-612 parity: the guarded-eject path "forgets" an unmounted drive by
     # dropping its entry from /var/lib/droplet-automount/mounts.json. A managed

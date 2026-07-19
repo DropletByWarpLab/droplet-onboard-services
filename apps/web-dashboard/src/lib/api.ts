@@ -5205,11 +5205,28 @@ export async function fetchVpnPeers(): Promise<{ peers: VpnPeerInfo[] }> {
   return res.json();
 }
 
-export async function createVpnPeer(deviceLabel: string): Promise<VpnPeerCreatedInfo> {
+/**
+ * Mint a WireGuard peer. `mode` selects how the device dials the box:
+ *
+ *   "home" — Endpoint is the box's discovered home-facing LAN IP
+ *            (resolveHomeEndpointHost on the orchestrator). Works today on the
+ *            home/office network. This is the DEFAULT for every user-facing
+ *            surface (WARP-1391): the orchestrator route's own default is "away"
+ *            (a byte-identical pre-hybrid compat contract, PR #897), and away
+ *            bakes the split-horizon public FQDN Endpoint — a public-NXDOMAIN
+ *            address (WARP-954 / ADR-023) the stock WireGuard app can't
+ *            handshake, so an omitted mode silently minted a dead config.
+ *   "away" — operator-only: dials the public FQDN / relay endpoint. Reachable
+ *            via the direct API; the dashboard never mints it.
+ */
+export async function createVpnPeer(
+  deviceLabel: string,
+  mode: "home" | "away" = "home",
+): Promise<VpnPeerCreatedInfo> {
   const res = await authFetch(`${BASE}/api/vpn/peers`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deviceLabel }),
+    body: JSON.stringify({ deviceLabel, mode }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -5868,6 +5885,36 @@ export interface AppCapabilities {
 export async function fetchAppCapabilities(): Promise<AppCapabilities> {
   const res = await authFetch(`${BASE}/api/capabilities`);
   if (!res.ok) throw new Error(`Failed to fetch app capabilities: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1368 — Settings → Features panel. Mirrors the orchestrator's
+ * ModulesView (services/modules.service.ts): every registry module with its
+ * two orthogonal axes (deploy-time `available`, operator `enabled`) plus the
+ * derived `effective`. `core` modules are never toggleable.
+ */
+export interface AppModuleState {
+  id: string;
+  label: string;
+  description: string;
+  category: "workspace" | "operations";
+  core: boolean;
+  available: boolean;
+  enabled: boolean;
+  effective: boolean;
+}
+
+export interface AppModulesView {
+  businessType: string | null;
+  modules: AppModuleState[];
+}
+
+/** Full module states for the Settings Features panel (any signed-in role may
+ *  read; the PATCH below is the admin-only half). */
+export async function fetchAppModules(): Promise<AppModulesView> {
+  const res = await authFetch(`${BASE}/api/modules`);
+  if (!res.ok) throw new Error(`Failed to fetch modules: ${res.status}`);
   return res.json();
 }
 

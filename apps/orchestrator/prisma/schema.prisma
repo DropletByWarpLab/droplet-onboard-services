@@ -1398,11 +1398,28 @@ model VpnPeer {
   //           the box, no public inbound). The .conf's Endpoint is the LAN IP.
   // A CHECK constraint pins it to exactly these two values (see the migration).
   mode        String    @default("away")
+  // WARP-1385: how this peer was provisioned. EXPLICIT enum-checked value, never
+  // inferred from absence (rule 10):
+  //   "static"  (default) — a persistent peer minted by the owner via
+  //             POST /api/vpn/peers (the QR/.conf flow). Every pre-1385 row is
+  //             "static" via the column default — no backfill needed.
+  //   "overlay" — a direct-punch overlay peer (ADR-030) installed/refreshed by
+  //             the overlay connect agent on each HQ session. `lastSessionAt`
+  //             tracks the last refresh so idle overlay peers can be expired.
+  // A CHECK constraint pins it to exactly these two values (see the migration).
+  kind          String    @default("static")
+  // Last time the overlay connect agent refreshed this peer's endpoint from an
+  // HQ session offer. NULL for "static" peers (they never carry a session); the
+  // idle-expiry sweep filters on `kind = 'overlay' AND lastSessionAt < cutoff`,
+  // so the NULL is never used to DERIVE state (rule 10).
+  lastSessionAt DateTime?
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?
 
   @@index([userId])
   @@index([status])
+  // WARP-1385: the overlay idle-expiry sweep scans (kind, status, lastSessionAt).
+  @@index([kind])
   // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
   // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
   // express partial-unique declaratively, so it lives as raw SQL in migration

@@ -1245,6 +1245,32 @@ class TestWarp1361ReviewFixes:
             c.startswith("mount ") and c.endswith(" " + expected_mount)
             for c in cmds), cmds
 
+    def test_dotdot_label_never_escapes_the_mount_base(self, tmp_path):
+        # tr -c 'A-Za-z0-9._-' '-' allows '.' through, and the trailing sed
+        # only trims leading/trailing DASHES — a LABEL of exactly ".." with no
+        # UUID to append a disambiguating suffix survives sanitization
+        # unchanged, so MOUNT="${MOUNT_BASE}/.." resolves to the mount base's
+        # PARENT directory instead of a name under it.
+        dotdot_blkid_stub = r"""
+printf 'blkid %s\n' "$*" >> "$CMD_LOG"
+case " $* " in
+  *" -s TYPE "*) [ -n "${STUB_FS_TYPE:-}" ] && printf '%s\n' "$STUB_FS_TYPE"; exit 0 ;;
+  *" -s LABEL "*) printf '..\n'; exit 0 ;;
+  *" -s UUID "*) exit 0 ;;
+esac
+exit 0
+"""
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "ext4", tmp_path,
+            stub_overrides={"blkid": dotdot_blkid_stub})
+        assert proc.returncode == 0, proc.stderr
+        forbidden_mount = _posix(tmp_path / "mnt" / "..")
+        assert not any(
+            c.startswith("mount ") and c.endswith(" " + forbidden_mount)
+            for c in cmds), (
+            "a '..' LABEL with no UUID collapsed the mount name to '..', "
+            "landing the mount OUTSIDE the mount base: %r" % cmds)
+
     def test_preexisting_ro_mount_of_trusted_pool_is_remounted_rw(self, tmp_path):
         # AC2 edge: the pool is healthy and already mounted at the right
         # path — but read-only (e.g. an earlier boot mounted the

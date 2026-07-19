@@ -377,6 +377,12 @@ class _MockVpn:
         # Flat peer list — tagged by interface so list/delete can filter.
         self._peers: list[dict[str, Any]] = []
         self._section_counter = 0
+        # WARP-1389 — settable per-peer runtime `latest handshake` epoch (secs),
+        # keyed by public_key. Tests set this to simulate a peer that punched.
+        self._handshakes: dict[str, int] = {}
+        # When False, peer_handshakes returns None (UNKNOWN) — simulates a box
+        # whose ubus interface status carries no peer handshake data.
+        self._handshakes_available: bool = True
 
     @staticmethod
     def generate_keypair() -> tuple[str, str]:
@@ -446,6 +452,16 @@ class _MockVpn:
             if not (p["interface"] == interface and p["public_key"] == public_key)
         ]
         return before - len(self._peers)
+
+    def peer_handshakes(self, interface: str = "wg0"):
+        """WARP-1389 — per-peer runtime `latest handshake` epoch (secs) for peers
+        on `interface`. Mirrors the real VPNApi read: None = UNKNOWN (no runtime
+        data), dict = available (handshook peers only). Tests seed `_handshakes`
+        and toggle `_handshakes_available`."""
+        if not self._handshakes_available:
+            return None
+        keys = {p["public_key"] for p in self._peers if p["interface"] == interface}
+        return {k: v for k, v in self._handshakes.items() if k in keys}
 
     def setup_firewall(self, interface: str = "wg0", listen_port: int = 51820) -> None:
         logger.info("mock: VPN setup_firewall iface=%s port=%s — no-op", interface, listen_port)

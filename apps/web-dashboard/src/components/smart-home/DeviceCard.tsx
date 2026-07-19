@@ -17,6 +17,12 @@ import type { MatterDevice, SmartHomeCategory } from "@/lib/types";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { BrightnessSlider } from "./BrightnessSlider";
 import { SensorReading } from "./SensorReading";
+import { ColorControls } from "./ColorControls";
+import { CoverControls } from "./CoverControls";
+import { FanControls } from "./FanControls";
+import { LockControl } from "./LockControl";
+import { MediaControls } from "./MediaControls";
+import { CLUSTER, hasCluster } from "./clusters";
 
 const CATEGORY_ICONS: Record<SmartHomeCategory, typeof Lightbulb> = {
   light: Lightbulb,
@@ -32,11 +38,13 @@ const CATEGORY_ICONS: Record<SmartHomeCategory, typeof Lightbulb> = {
   vacuum: CircleDot,
 };
 
+// WARP-897: covers are NOT toggleable — the toggle sent an onOff command a
+// WindowCovering never implements (guaranteed 500, June audit). Covers get
+// real motion controls below instead.
 const TOGGLEABLE = new Set<SmartHomeCategory>([
   "light",
   "switch",
   "fan",
-  "cover",
 ]);
 
 // The device's source/ecosystem, surfaced from the Matter fabric's vendorName.
@@ -148,6 +156,48 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
             brightness={brightnessPct}
             onBrightnessChange={handleBrightness}
           />
+        </div>
+      )}
+
+      {/* WARP-897: color controls — only for lights that actually implement
+          ColorControl (capability truth from the endpoint clusters). */}
+      {device.category === "light" &&
+        isOn &&
+        isConnected &&
+        hasCluster(device, CLUSTER.COLOR_CONTROL) && (
+          <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+            <ColorControls device={device} onCommand={onCommand} />
+          </div>
+        )}
+
+      {/* WARP-897: cover motion + position */}
+      {device.category === "cover" && isConnected && (
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+          <CoverControls device={device} onCommand={onCommand} />
+        </div>
+      )}
+
+      {/* WARP-897: fan speed + mode (cluster-gated — an on/off fan keeps
+          just its toggle) */}
+      {device.category === "fan" &&
+        isConnected &&
+        hasCluster(device, CLUSTER.FAN_CONTROL) && (
+          <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+            <FanControls device={device} onCommand={onCommand} />
+          </div>
+        )}
+
+      {/* WARP-897: lock / unlock — routes through the page's Tier-2 confirm */}
+      {device.category === "lock" && isConnected && (
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+          <LockControl device={device} onCommand={onCommand} />
+        </div>
+      )}
+
+      {/* WARP-897: media playback verbs */}
+      {device.category === "media_player" && isConnected && (
+        <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+          <MediaControls device={device} onCommand={onCommand} />
         </div>
       )}
 

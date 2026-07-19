@@ -112,6 +112,13 @@ _TAGS_TIMEOUT_S = 5.0
 # `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
 _CHAT_PATH = "/v1/chat/completions"
 
+# WARP-1333: gpt-oss's harmony parser intermittently 500s when the model
+# emits a tool call whose function name carries channel tokens
+# (harmonyparser.go "no reverse mapping found for function name"); the
+# identical retry succeeds. Bounded retry budget for that tool-call path.
+_HARMONY_500_RETRIES = 2
+_HARMONY_500_BACKOFF_S = 0.5
+
 
 class _LimitsCache:
     """Tiny cache of the appliance's /health.limits — refreshed on 503 or on init.
@@ -453,8 +460,26 @@ class OllamaLocalProvider(BaseProvider):
             rid = get_request_id()
             headers = {"x-request-id": rid} if rid else None
             assert self._sema is not None  # set by _ensure_limits
-            async with self._sema:
-                resp = await self.client.post(_CHAT_PATH, json=body, headers=headers)
+            # WARP-1333: only the tool-call path hits the harmony flake, and
+            # every agent-loop step passes through here — retry transient
+            # 500s when tools are present, re-acquiring the semaphore per
+            # attempt so concurrency limits stay honest. A 500 without tools
+            # (or one that persists past the budget) is a real error.
+            attempts = (_HARMONY_500_RETRIES + 1) if has_tools else 1
+            for attempt in range(attempts):
+                async with self._sema:
+                    resp = await self.client.post(
+                        _CHAT_PATH, json=body, headers=headers
+                    )
+                if resp.status_code == 500 and attempt < attempts - 1:
+                    logger.warning(
+                        "harmony_500_retry: POST %s returned 500 "
+                        "(attempt %d/%d) — retrying",
+                        _CHAT_PATH, attempt + 1, attempts,
+                    )
+                    await asyncio.sleep(_HARMONY_500_BACKOFF_S * (attempt + 1))
+                    continue
+                break
             if resp.status_code == 503:
                 # Appliance overload (model_loading / circuit_open / queue full).
                 # Refresh limits + rebuild sema, then bubble up so the caller can

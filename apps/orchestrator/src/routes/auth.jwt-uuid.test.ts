@@ -122,6 +122,9 @@ vi.mock("../services/brain-memory.service.js", () => ({
 // WARP-247 — this suite exercises token SHAPE across rotation, not session
 // lifecycle (that's auth.refresh-session.test.ts / session.service.test.ts).
 // Mock the session layer to a live record so refresh rotates.
+const countLiveSessions = vi.fn(
+  async (_userId: string): Promise<number | null> => 0,
+);
 vi.mock("../services/session.service.js", () => ({
   createSession: vi.fn(async () => ({ sid: "sid-jwt-uuid-suite", evictedSids: [] })),
   checkSession: vi.fn(async () => ({
@@ -129,6 +132,7 @@ vi.mock("../services/session.service.js", () => ({
     record: { userId: "any", role: "family", createdAt: 0, lastSeenAt: 0 },
   })),
   deleteSession: vi.fn(async () => undefined),
+  countLiveSessions: (...args: unknown[]) => countLiveSessions(...(args as [string])),
   revokeAllSessions: vi.fn(async () => 0),
 }));
 
@@ -336,6 +340,7 @@ beforeEach(() => {
   getNcToken.mockResolvedValue(null);
   deleteNcToken.mockResolvedValue(undefined);
   touchNcToken.mockResolvedValue(undefined);
+  countLiveSessions.mockResolvedValue(0);
 });
 
 // ADR-013 inverted the login auth model (Nextcloud-OCS → local argon2id
@@ -710,5 +715,82 @@ describe("WARP-485 round 2 — logout NC token key shape", () => {
     expect(getNcToken).toHaveBeenCalledWith("u-uuid-logout-5555");
     expect(deleteNcToken).toHaveBeenCalledWith("u-uuid-logout-5555");
     expect(nc.ncDeleteAppPassword).toHaveBeenCalledWith("nc-app-password-to-revoke");
+  });
+
+  // The NC app-password is a PER-USER credential: one Redis slot shared by
+  // every device session. Logging out on one device must not break file
+  // routes and the chat agent's file tools (read_file → AUTH_REQUIRED) on
+  // the user's other still-live sessions.
+  it("keeps the NC token when the user still has other live sessions", async () => {
+    const localUser: UserRow = {
+      id: "u-uuid-logout-6666",
+      username: "logout-user-2",
+      displayName: "Logout User 2",
+      email: "logout-user-2@warp.test",
+      nextcloudUsername: "logout-user-2",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([localUser]);
+
+    const accessToken = signAccessToken({
+      id: "u-uuid-logout-6666",
+      username: "logout-user-2",
+      displayName: "Logout User 2",
+      role: "family",
+    });
+
+    // Another device's session record is still live after this one is dropped.
+    countLiveSessions.mockResolvedValueOnce(1);
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("Authorization", `Bearer ${accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(countLiveSessions).toHaveBeenCalledWith("u-uuid-logout-6666");
+    // The shared credential is left untouched — not even looked up.
+    expect(getNcToken).not.toHaveBeenCalled();
+    expect(nc.ncDeleteAppPassword).not.toHaveBeenCalled();
+    expect(deleteNcToken).not.toHaveBeenCalled();
+  });
+
+  it("revokes when the live-session count is unknown (fail toward the security invariant)", async () => {
+    const localUser: UserRow = {
+      id: "u-uuid-logout-7777",
+      username: "logout-user-3",
+      displayName: "Logout User 3",
+      email: "logout-user-3@warp.test",
+      nextcloudUsername: "logout-user-3",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([localUser]);
+
+    const accessToken = signAccessToken({
+      id: "u-uuid-logout-7777",
+      username: "logout-user-3",
+      displayName: "Logout User 3",
+      role: "family",
+    });
+
+    countLiveSessions.mockResolvedValueOnce(null);
+    getNcToken.mockResolvedValueOnce("nc-app-password-orphaned");
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("Authorization", `Bearer ${accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(nc.ncDeleteAppPassword).toHaveBeenCalledWith("nc-app-password-orphaned");
+    expect(deleteNcToken).toHaveBeenCalledWith("u-uuid-logout-7777");
   });
 });

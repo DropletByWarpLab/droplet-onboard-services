@@ -150,7 +150,21 @@ export function VpnStep({
           // than trapping the customer on a half-rendered returning view.
         }
       }
-      // No peer yet → the one-tap toggle is the primary entry.
+      // No peer yet → the one-tap toggle is the primary entry. But the
+      // user-facing mint is HOME mode (WARP-1391): the Endpoint is the box's
+      // discovered home-facing LAN IP (resolveHomeEndpointHost), NOT the
+      // split-horizon public FQDN the away-mode default bakes (that FQDN is
+      // public-NXDOMAIN by design — WARP-954 / ADR-023 — so an away conf shows
+      // keepalive but zero handshakes). When the box hasn't discovered that LAN
+      // IP yet (homeEndpointHost null/absent) a home mint 503s, so DO NOT offer
+      // a dead toggle — surface the same routing-unavailable guidance the
+      // precheck already shows (WARP-1283), and stay honest (missing ⇒ "not
+      // reachable at home yet", the WARP-993 never-over-promise convention).
+      if (!s.homeEndpointHost) {
+        setPrecheckErrorCode("ROUTING_UNAVAILABLE");
+        setPhase("error");
+        return;
+      }
       setPhase("toggle");
     } catch (e) {
       setPrecheckErrorCode(
@@ -180,7 +194,11 @@ export function VpnStep({
       setErrorTone("error");
       setSubmitting(true);
       try {
-        const result = await createVpnPeer(trimmed);
+        // WARP-1391: user-facing surfaces mint HOME mode explicitly. The
+        // orchestrator route defaults to "away" (a byte-identical pre-hybrid
+        // compat contract, PR #897); an omitted mode silently baked a dead
+        // public-NXDOMAIN Endpoint. Home bakes the box LAN IP and works today.
+        const result = await createVpnPeer(trimmed, "home");
         setCreated(result);
         setPhase("created");
       } catch (e) {
