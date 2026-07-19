@@ -112,7 +112,7 @@ export function DeviceDetailPanel({
               <span className="type-caption-1 mb-2 block" style={{ color: "var(--text-muted)" }}>
                 Color
               </span>
-              <ColorControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
+              <ColorControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} size="lg" />
             </div>
           )}
 
