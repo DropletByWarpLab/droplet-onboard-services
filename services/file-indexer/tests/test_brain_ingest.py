@@ -75,6 +75,12 @@ def fake_io(monkeypatch, tmp_path):
     monkeypatch.setattr(brain_ingest, "mark_brain_item_indexed", _mark)
     monkeypatch.setattr(brain_ingest, "publish", _publish)
     monkeypatch.setattr(brain_ingest, "embed_texts", _embed)
+    # WARP-242: deterministic per-document DEK so the handler encrypts
+    # without a doc-KEK keyfile or a live DocumentEncryptionKey table.
+    # Assertions on stored text decrypt with TEST_DEK (see _stored_text).
+    import doc_keys
+
+    monkeypatch.setattr(doc_keys, "get_or_create_dek", lambda _key_id: TEST_DEK)
 
     return {
         "upserts": upserts,
@@ -83,6 +89,20 @@ def fake_io(monkeypatch, tmp_path):
         "published": published,
         "embed_calls": embed_calls,
     }
+
+
+# WARP-242: fixed DEK installed by fake_io; helpers to read stored chunk
+# text back out of the (now encrypted-at-rest) upsert rows.
+TEST_DEK = bytes([9] * 32)
+
+
+def _stored_text(upsert: dict) -> str:
+    """Decrypt one captured upsert row's text with the fixture DEK."""
+    import column_crypto
+
+    return column_crypto.decrypt_text(
+        TEST_DEK, upsert["text"], aad=f"brain:{upsert['brain_item_id']}"
+    )
 
 
 def _write_text_payload(tmp_path: Path, item_id: str, text: str) -> Path:
@@ -121,6 +141,12 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
         assert u["brain_item_id"] == "item-A"
         assert u["user_id"] == USER_ID
         assert u["nc_file_id"] >= (1 << 30)  # synthetic, not real
+        # WARP-242: stored text is dcv1 ciphertext under the item's DEK,
+        # policy-tagged sensitive; the plaintext round-trips via decrypt.
+        assert u["sensitivity"] == "sensitive"
+        assert u["text"].startswith("dcv1:")
+        assert "alpha" not in u["text"]
+        assert "alpha beta gamma" in _stored_text(u)
 
     # BrainMemoryItem marked indexed with status='ready' (WARP-330) —
     # the dashboard's pipeline-health aggregate filters on status='ready',
@@ -676,11 +702,13 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
     # Chunks were created.
     assert len(fake_io["upserts"]) >= 1, "expected ≥1 chunk from sample.pdf"
 
-    # Every stored chunk carries the WARP-435 contextual header prefix.
+    # Every stored chunk carries the WARP-435 contextual header prefix
+    # (WARP-242: under the dcv1 encryption — decrypt to assert).
     for upsert in fake_io["upserts"]:
         assert upsert["source"] == "brain"
         assert upsert["brain_item_id"] == "item-pdf"
-        text = upsert["text"]
+        assert upsert["sensitivity"] == "sensitive"
+        text = _stored_text(upsert)
         assert text.startswith("Document: sample.pdf"), text[:80]
 
     # Ready publish under the per-user namespace.
@@ -766,6 +794,10 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
     monkeypatch.setattr(
         db_mod, "mark_brain_item_indexed", lambda *a, **k: None
     )
+    # WARP-242: deterministic DEK (the real minter needs a live DB conn).
+    import doc_keys
+
+    monkeypatch.setattr(doc_keys, "get_or_create_dek", lambda _key_id: TEST_DEK)
 
     # Capture what the embedder is handed (must be the PREFIXED text).
     embed_inputs: list[list[str]] = []
@@ -801,8 +833,11 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
     for txt in embed_inputs[0]:
         assert txt.startswith("Document: original.txt"), txt[:80]
 
-    # 2) Stored `text` column carries the prefix, and metadata has
-    #    sectionPath — parity with the primary ingest paths.
+    # 2) Stored `text` column carries the prefix (WARP-242: under the dcv1
+    #    encryption — decrypt to assert), and metadata has sectionPath —
+    #    parity with the primary ingest paths.
+    import column_crypto
+
     inserts = [
         params
         for (sql, params) in executed
@@ -811,15 +846,23 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
     assert inserts, "no INSERT executed"
     for params in inserts:
         # Column order: userId, ncFileId, path, chunkIdx, text, embedding,
-        # source, brainItemId, pageNumber, warnings, metadata(json str).
-        stored_text = params[4]
+        # source, brainItemId, pageNumber, warnings, metadata(json str),
+        # sensitivity.
+        assert params[4].startswith("dcv1:")
+        stored_text = column_crypto.decrypt_text(
+            TEST_DEK, params[4], aad="brain:bmi-reindex"
+        )
         metadata_json = params[10]
         assert stored_text.startswith("Document: original.txt"), stored_text[:80]
         assert '"sectionPath"' in metadata_json, metadata_json
+        assert params[11] == "sensitive"
 
-    # 3) The embedded strings and the stored strings are identical
-    #    (the embedder saw exactly what we persisted).
-    stored_texts = [params[4] for params in inserts]
+    # 3) The embedded strings and the stored (decrypted) strings are
+    #    identical (the embedder saw exactly what we persisted).
+    stored_texts = [
+        column_crypto.decrypt_text(TEST_DEK, params[4], aad="brain:bmi-reindex")
+        for params in inserts
+    ]
     assert stored_texts == embed_inputs[0]
 
 
@@ -855,6 +898,10 @@ def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
     monkeypatch.setattr(
         brain_ingest, "embed_texts", lambda texts: [[0.0] * 384 for _ in texts]
     )
+    # WARP-242: deterministic DEK (the real minter needs a live DB conn).
+    import doc_keys
+
+    monkeypatch.setattr(doc_keys, "get_or_create_dek", lambda _key_id: TEST_DEK)
 
     # Force a chunk whose anchor serialization blows up.
     class _BadAnchor:

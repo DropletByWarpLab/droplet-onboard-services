@@ -31,6 +31,14 @@ describe("column-crypto (dcv1)", () => {
     expect(() => decryptColumn(generateDek(), blob)).toThrow();
   });
 
+  it("WARP-242: chunk AAD binds ciphertext to its document keyId", () => {
+    const dek = generateDek();
+    const blob = encryptColumn(dek, "chunk body", "brain:item1");
+    expect(decryptColumn(dek, blob, "brain:item1")).toBe("chunk body");
+    expect(() => decryptColumn(dek, blob, "brain:OTHER")).toThrow(); // GCM auth failure
+    expect(() => decryptColumn(dek, blob)).toThrow(); // AAD omitted
+  });
+
   it("emailLookupHash is deterministic + normalizing", () => {
     expect(emailLookupHash("  Alice@Example.COM ")).toBe(emailLookupHash("alice@example.com"));
     expect(emailLookupHash("alice@example.com")).toMatch(/^[0-9a-f]{64}$/);

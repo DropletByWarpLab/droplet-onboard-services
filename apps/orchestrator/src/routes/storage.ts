@@ -287,7 +287,24 @@ interface DriveWithLabel extends BridgeDrive {
   displayName: string | null;
   icon: string | null;
   notes: string | null;
+  /** WARP-1339: bare md array name (e.g. "md127" — the exact join key the
+   *  /storage/pools payload's `device` field carries, WITHOUT the /dev/
+   *  prefix this drive's own `device` has) when this mounted filesystem
+   *  lives on an md node or a partition of one. The dashboard joins on it
+   *  to render ONE pooled entry instead of pool card + anonymous GUID
+   *  drive tile. `null` (explicit — clients branch on the field, never on
+   *  its absence) for a standalone drive. The drive is NEVER dropped
+   *  server-side: it is the pool's only fs-level capacity/browse source,
+   *  and tools-core's list_drives stays an honest annotated list. */
+  pool: string | null;
 }
+
+/** WARP-1339: md node (/dev/md127) or a partition of one (/dev/md127p1).
+ *  Capture group 1 is the bare array name — a PARTITION is tagged with its
+ *  ARRAY's name, since /storage/pools only ever names the array. Anchored so
+ *  /dev/md127p1 can never tag as md12 (same pitfall the dashboard's
+ *  poolHasMountedFs matcher guards). */
+const MD_DEVICE_RE = /^\/dev\/(md\d+)(?:p\d+)?$/;
 
 const updateDriveSchema = z.object({
   displayName: z.string().trim().min(1).max(64).optional(),
@@ -300,6 +317,16 @@ const updateDriveSchema = z.object({
 const updatePoolSchema = z.object({
   displayName: z.string().trim().min(1).max(64).optional(),
   notes: z.string().trim().max(512).nullable().optional(),
+});
+
+/** WARP-1337: optional customer-facing name accepted at pool CREATE time, so a
+ *  new pool is born named instead of waiting for a later PATCH rename. Same
+ *  constraint as the rename schema. Zod-parsed BEFORE any prisma call (pre-DB
+ *  gate); the name rides in the confirm-token params and is seeded into the
+ *  StoragePool row only after the bridge reports the create succeeded — it is
+ *  never forwarded to the host script (which has no such parameter). */
+const createPoolNameSchema = z.object({
+  displayName: z.string().trim().min(1).max(64).optional(),
 });
 
 /**
@@ -425,6 +452,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
+          // WARP-1339: annotate (never drop) the mounted md filesystem with
+          // its bare array name so the dashboard can merge it into the pool
+          // card instead of rendering it twice.
+          pool: MD_DEVICE_RE.exec(d.device)?.[1] ?? null,
         };
       });
 
@@ -813,9 +844,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     resourceId: string,
     params: Record<string, unknown>,
   ) {
+    // WARP-1337: pool_create may carry the owner's chosen displayName in its
+    // confirm-token params. It is orchestrator-side seeding only — the host
+    // script has no such parameter — so split it off before the bridge call.
+    const { displayName, ...bridgeParams } = params as Record<string, unknown> & {
+      displayName?: unknown;
+    };
     try {
       const { ok, body } = await bridgePoolCommand(service, {
-        ...params,
+        ...bridgeParams,
         device: resourceId,
       });
       if (!ok) {
@@ -826,6 +863,40 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           ok: false,
           error: (body.error as string) || "The storage service refused this operation.",
         });
+      }
+      if (service === "pool_create" && typeof displayName === "string" && displayName.trim()) {
+        // Seed the customer-facing name the moment the pool exists, keyed by
+        // its md device — same row PATCH /storage/pools/:device upserts.
+        // `level` was validated against VALID_LEVELS when the token was
+        // minted; re-check before writing the enum column. The update branch
+        // writes level too (code review): pool_delete leaves the row behind,
+        // so recreating the same md device at a DIFFERENT RAID level lands
+        // here — without the refresh the row keeps the deleted pool's stale
+        // level. A failed seed must NOT fail the response: the pool WAS
+        // created on the host, and the owner can still name it via the
+        // rename flow.
+        const level = bridgeParams.level;
+        if (typeof level === "string" && VALID_LEVELS.has(level)) {
+          try {
+            await prisma.storagePool.upsert({
+              where: { device: resourceId },
+              create: {
+                device: resourceId,
+                displayName: displayName.trim(),
+                level: level as $Enums.ArrayLevel,
+              },
+              update: {
+                displayName: displayName.trim(),
+                level: level as $Enums.ArrayLevel,
+              },
+            });
+          } catch (err) {
+            logger.warn(
+              { err, device: resourceId },
+              "Pool created but seeding its StoragePool displayName failed",
+            );
+          }
+        }
       }
       return res.json({ ok: true, status: "ok", operation: service, device: resourceId, ...body });
     } catch (err) {
@@ -946,6 +1017,17 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   // POST /api/storage/pools — create a pool (DESTRUCTIVE).
   router.post("/storage/pools", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      // WARP-1337: zod-validate the optional displayName FIRST — before the
+      // evaluate step below reaches prisma (pre-DB static gate: prisma calls
+      // only after zod parsing).
+      const parsedName = createPoolNameSchema.safeParse(req.body ?? {});
+      if (!parsedName.success) {
+        return res.status(400).json({
+          error: "Invalid displayName",
+          details: parsedName.error.flatten(),
+        });
+      }
+      const { displayName } = parsedName.data;
       const { device, level, members, confirmPhrase } = req.body || {};
       if (!validMdDevice(device)) {
         return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
@@ -969,7 +1051,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         prisma,
         "pool_create",
         device,
-        { level, members, confirm_phrase: confirmPhrase ?? "" },
+        {
+          level,
+          members,
+          confirm_phrase: confirmPhrase ?? "",
+          // WARP-1337: carried through the confirm token for the post-create
+          // StoragePool seed; stripped before the bridge call (executeStorageOp).
+          ...(displayName ? { displayName } : {}),
+        },
         req.user?.id,
       );
     } catch (err) {
@@ -1097,8 +1186,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       if (!validMdDevice(device)) {
         return res.status(400).json({ error: "Invalid pool device" });
       }
+      // WARP-1338 review: same pinned allow-list as adopt/reclaim. The old
+      // shape-only regex admitted fstypes whose mkfs doesn't take -L (vfat
+      // uses -n), and the host's pool_format now unconditionally runs
+      // `mkfs.$FSTYPE -L pool` — a loose fstype would fail the op there.
       const fstype = req.body?.fstype;
-      if (fstype !== undefined && !/^[a-z0-9]{1,12}$/.test(String(fstype))) {
+      if (fstype !== undefined && !VALID_FSTYPES.has(String(fstype))) {
         return res.status(400).json({ error: "Invalid fstype" });
       }
       return evalAndRespond(

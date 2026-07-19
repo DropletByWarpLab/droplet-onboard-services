@@ -49,6 +49,7 @@ describe("<QueuedList />", () => {
             category: "audio",
             uploadedAt: new Date().toISOString(),
             reason: "audio file, scheduled for nightly transcription",
+            source: "brain",
           },
         ]}
       />,
@@ -73,6 +74,7 @@ describe("<QueuedList />", () => {
             category: "audio",
             uploadedAt: new Date().toISOString(),
             reason: "audio file",
+            source: "brain",
           },
         ]}
       />,
@@ -102,6 +104,7 @@ describe("<FailedList />", () => {
             failureReason: "no_chunks",
             lastAttemptedAt: new Date().toISOString(),
             recentAttemptCount: 2,
+            source: "brain",
           },
         ]}
       />,
@@ -125,6 +128,7 @@ describe("<FailedList />", () => {
             failureReason: "extractor_unavailable",
             lastAttemptedAt: null,
             recentAttemptCount: 0,
+            source: "brain",
           },
         ]}
       />,
@@ -153,6 +157,7 @@ describe("<FailedList />", () => {
             failureReason: "no_chunks",
             lastAttemptedAt: null,
             recentAttemptCount: 3,
+            source: "brain",
           },
         ]}
       />,
@@ -163,5 +168,56 @@ describe("<FailedList />", () => {
         screen.getByText(/Retry available in 30 mins/i),
       ).toBeInTheDocument();
     });
+  });
+});
+
+// ── WARP-1394 — synced (nextcloud) rows carry no per-item action: the
+// Run-now / Retry endpoints are BrainMemoryItem-only (transcription
+// pipeline); reindexing synced files is watcher-driven.
+describe("WARP-1394 — synced items render without brain-only actions", () => {
+  it("QueuedList hides 'Run extractor now' for a nextcloud item", () => {
+    render(
+      <QueuedList
+        items={[
+          {
+            id: "nc:/Inbox/scan.pdf",
+            filename: "scan.pdf",
+            mimeType: null,
+            category: "pdf",
+            uploadedAt: new Date().toISOString(),
+            reason: "being indexed from your synced files",
+            source: "nextcloud",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("scan.pdf")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Run extractor now/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("FailedList hides 'Retry indexing' for a nextcloud item but keeps the reason", () => {
+    render(
+      <FailedList
+        items={[
+          {
+            id: "nc:/Docs/x.pdf",
+            filename: "x.pdf",
+            mimeType: null,
+            category: "pdf",
+            failureReason: "nc_file_id_unresolved",
+            lastAttemptedAt: new Date().toISOString(),
+            recentAttemptCount: 0,
+            source: "nextcloud",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("x.pdf")).toBeInTheDocument();
+    expect(screen.getByText(/nc_file_id_unresolved/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Retry indexing/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -176,6 +176,17 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
+  // WARP-242: path to the doc-KEK master keyfile (raw 32 bytes, mode 0600,
+  // minted by scripts/setup.sh as data/secrets/doc-kek.key and single-file
+  // bind-mounted read-only). Deliberately a FILE and never an .env value:
+  // .env ships inside every restic snapshot, so a KEK carried there would
+  // make snapshots self-decrypting and per-document crypto-shred would not
+  // survive backups. The file is excluded from the backup set
+  // (droplet-backup.sh); TPM-sealing it is WARP-1033. Read lazily by
+  // column-crypto.service.ts at first encrypt/decrypt — fails closed with a
+  // pointer to setup.sh when missing.
+  DOC_KEK_PATH: z.string().default("/data/secrets/doc-kek.key"),
+
   // --- Matter (host-network sidecar client, WARP-850) ---
   //
   // DO NOT ADD NEW `MATTER_*` ENV VARS — ANYWHERE IN THE STACK.
@@ -434,6 +445,22 @@ const envSchema = z.object({
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
   DROPLET_DEVICE_ID: z.string().default("droplet"),
+
+  // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
+  // OVERLAY_CONNECT_ENABLED — explicit opt-in for the box overlay connect agent.
+  //   Default FALSE: the agent long-polls HQ's /api/overlay/* endpoints, which
+  //   ship in WARP-1384; until a box's HQ deployment exposes them, polling would
+  //   just 404 each tick. Boxes flip this on once HQ signaling is live. Also
+  //   requires HQ_ISSUANCE_URL to be set (the agent shares that HQ base URL).
+  OVERLAY_CONNECT_ENABLED: z
+    .string()
+    .transform((v) => v === "true" || v === "1")
+    .default("false"),
+  // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
+  // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
+  OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),
+  // Hours an overlay peer may sit without a session before the sweep revokes it.
+  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(12),
 
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
@@ -767,6 +794,19 @@ const envSchema = z.object({
   // rotate: change in .env and restart both the orchestrator and
   // droplet-egress-audit.service.
   SERVICE_TOKEN_EGRESS_AUDIT: z.string().default(""),
+
+  // SERVICE_TOKEN_RAG_EVAL — RAGAS eval-runner auth. Bearer the rag-eval
+  // container's ragas_runner.py presents on GET
+  // /api/admin/retrieval-eval/search (it reads the value as
+  // ORCHESTRATOR_SERVICE_TOKEN; compose wires both ends to the same
+  // secrets.sh-generated value). authMiddleware's matchServiceToken sets
+  // `_service:rag-eval`. Empty default = principal disabled (same posture
+  // as SERVICE_TOKEN_EMAIL); deliberately NOT in
+  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s in production,
+  // so a box without the rag-eval profile must still boot. To rotate:
+  // change here AND in the rag-eval container's compose env
+  // (ORCHESTRATOR_SERVICE_TOKEN).
+  SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
 
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push

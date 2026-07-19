@@ -102,6 +102,7 @@ export function CalibrationWizard({
   open,
   status,
   nowS,
+  enrollHook = false,
   onClose,
 }: {
   open: boolean;
@@ -109,8 +110,12 @@ export function CalibrationWizard({
   status: VoiceStatusInfo | null;
   /** Epoch seconds "now" — injectable for deterministic tests. */
   nowS?: number;
+  /** WARP-1056 §4-result forward hook: when true (no voice enrolled yet
+   *  and enrollment is possible), the result screen offers "Add my
+   *  voice" — closing with `addVoice: true` hands off to Flow B. */
+  enrollHook?: boolean;
   /** applied=true only after the result screen (the write happened). */
-  onClose: (result: { applied: boolean }) => void;
+  onClose: (result: { applied: boolean; addVoice?: boolean }) => void;
 }) {
   const [step, setStep] = useState<Step>(1);
   const [phase, setPhase] = useState<Phase>("measuring");
@@ -129,6 +134,8 @@ export function CalibrationWizard({
   const [flags, setFlags] = useState<string[]>([]);
   const [applying, setApplying] = useState(false);
   const [applyFailed, setApplyFailed] = useState(false);
+  // §4-result enrollment hook — "Maybe later" hides the card for this run.
+  const [hookDismissed, setHookDismissed] = useState(false);
 
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const later = useCallback((fn: () => void, ms: number) => {
@@ -189,6 +196,7 @@ export function CalibrationWizard({
     setFlags([]);
     setApplying(false);
     setApplyFailed(false);
+    setHookDismissed(false);
   }, [open]);
 
   /* ── WARP-1059 · calibration mode brackets the whole session ── */
@@ -442,7 +450,7 @@ export function CalibrationWizard({
                   : "Couldn't measure the room — the microphone didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
               {failKind === "threshold" && (
@@ -476,9 +484,18 @@ export function CalibrationWizard({
               <ZoneMeter
                 dbfs={status?.input_rms_dbfs ?? null}
                 zoneLabel={
-                  peakLocked && speechPeak != null
-                    ? `speech peak locked · ${speechPeak} dB`
-                    : "target zone — just speak normally"
+                  // WARP-1055 review tidy (deferred to WARP-1056): the
+                  // measured value inside the zone label is mono — the
+                  // instructional words stay in the UI font (§9
+                  // "measured values always mono").
+                  peakLocked && speechPeak != null ? (
+                    <>
+                      speech peak locked ·{" "}
+                      <span className="mono">{speechPeak} dB</span>
+                    </>
+                  ) : (
+                    "target zone — just speak normally"
+                  )
                 }
               />
               <p className="microcap">
@@ -494,7 +511,7 @@ export function CalibrationWizard({
                   : "Couldn't measure your speech — the microphone didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
               {failKind === "threshold" && (
@@ -548,7 +565,7 @@ export function CalibrationWizard({
               >
                 {tipsOpen ? "Hide placement tips" : "Review placement tips"}
               </button>
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
             </FailNote>
@@ -588,7 +605,7 @@ export function CalibrationWizard({
                   : "Droplet couldn't run the speaker check — the audio device didn't respond. Try again in a moment."
               }
             >
-              <button type="button" className="dp-btn-secondary type-footnote" onClick={retry}>
+              <button type="button" className="btn ghost" onClick={retry}>
                 Try again
               </button>
             </FailNote>
@@ -672,6 +689,32 @@ export function CalibrationWizard({
             ))}
           </div>
         )}
+        {/* §4-result forward hook (WARP-1056) — only when no voice is
+            enrolled yet; a quiet card, dismissable, never a nag. */}
+        {enrollHook && !hookDismissed && (
+          <div className="vhook">
+            <p className="vhook-copy">
+              Want Droplet to know it&apos;s you? Add your voice — it takes
+              about a minute.
+            </p>
+            <div className="vhook-actions">
+              <button
+                type="button"
+                className="vtext-btn"
+                onClick={() => setHookDismissed(true)}
+              >
+                Maybe later
+              </button>
+              <button
+                type="button"
+                className="dp-btn-secondary type-footnote"
+                onClick={() => onClose({ applied: true, addVoice: true })}
+              >
+                Add my voice
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -683,7 +726,7 @@ export function CalibrationWizard({
         <div className="right">
           <button
             type="button"
-            className="dp-btn-primary type-subheadline"
+            className="btn primary"
             onClick={() => onClose({ applied: true })}
           >
             Done
@@ -732,7 +775,7 @@ export function CalibrationWizard({
               <div style={{ textAlign: "right" }}>
                 <button
                   type="button"
-                  className="dp-btn-primary type-subheadline"
+                  className="btn primary"
                   disabled={!ready || applying}
                   aria-busy={applying || undefined}
                   onClick={() => void handleApply()}

@@ -51,8 +51,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UNIT_DIR="$REPO_ROOT/scripts/host/etc-systemd-system"
 SINGLE_BOX="$REPO_ROOT/scripts/lib/single-box.sh"
 BRIDGE_INSTALL="$REPO_ROOT/scripts/install-device-bridge.sh"
+AUTOMOUNT_INSTALL="$REPO_ROOT/services/automount/install.sh"
 BRIDGE_UNIT="$REPO_ROOT/services/oled-display/droplet-device-bridge.service"
 ATTACH="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-openwrt-attach"
+# WARP-1338: root units that live OUTSIDE scripts/host/etc-systemd-system but
+# load /etc/droplet/automount.env via EnvironmentFile= — the invariant must
+# cover them too (services/automount/install.sh owns that file's provisioning
+# and keeps it root:root 0644).
+AUX_ROOT_UNITS=(
+  "$REPO_ROOT/services/automount/droplet-automount@.service"
+  "$REPO_ROOT/services/automount/droplet-automount-reconcile.service"
+  "$REPO_ROOT/services/oled-display/droplet-storage-pool-apply.service"
+)
 
 TESTS=0
 FAILURES=0
@@ -74,7 +84,7 @@ echo "--- Part 1: static — root EnvironmentFile invariant ---"
 #   (b) `StateDirectory=<name>` in any shipped unit -> /var/lib/<name>.
 collect_droplet_writable() {
   local f line target var val u
-  for f in "$SINGLE_BOX" "$BRIDGE_INSTALL"; do
+  for f in "$SINGLE_BOX" "$BRIDGE_INSTALL" "$AUTOMOUNT_INSTALL"; do
     [ -f "$f" ] || continue
     while IFS= read -r line; do
       target="$(printf '%s\n' "$line" \
@@ -122,7 +132,7 @@ path_conflict() { # $1=env target $2=droplet-writable path -> 0 if same or under
 
 violations=0
 checked=0
-for u in "$UNIT_DIR"/*.service "$UNIT_DIR"/*.path "$UNIT_DIR"/*.timer "$UNIT_DIR"/*.d/*.conf; do
+for u in "$UNIT_DIR"/*.service "$UNIT_DIR"/*.path "$UNIT_DIR"/*.timer "$UNIT_DIR"/*.d/*.conf "${AUX_ROOT_UNITS[@]}"; do
   [ -f "$u" ] || continue
   # Root check: for a .d/*.conf drop-in, honor BOTH its own and the main unit's
   # User=; skip if either runs as a non-root user.
@@ -173,6 +183,30 @@ if [ "$attach_dw" -eq 1 ] && [ "$attach_envfile" -eq 1 ]; then
   fail "$ATTACH_ENV is BOTH droplet-writable AND a root EnvironmentFile — the WARP-843 LPE"
 else
   pass "$ATTACH_ENV is not simultaneously droplet-writable and a root EnvironmentFile"
+fi
+
+# WARP-1338 belt-and-braces: /etc/droplet/automount.env feeds three ROOT units
+# (the AUX_ROOT_UNITS above). It must (a) actually be referenced there — so
+# this scan is never vacuous — and (b) never be droplet-writable.
+AUTOMOUNT_ENV="/etc/droplet/automount.env"
+am_env_refs=0
+for u in "${AUX_ROOT_UNITS[@]}"; do
+  [ -f "$u" ] || continue
+  grep -qE "^EnvironmentFile=-?${AUTOMOUNT_ENV}\$" "$u" && am_env_refs=$((am_env_refs + 1))
+done
+if [ "$am_env_refs" -ge 3 ]; then
+  pass "all 3 automount/storage-pool root units load $AUTOMOUNT_ENV (scan is not vacuous)"
+else
+  fail "expected 3 root units to load $AUTOMOUNT_ENV, found $am_env_refs — the WARP-1338 wiring moved; update AUX_ROOT_UNITS"
+fi
+am_env_dw=0
+while IFS= read -r dw; do [ "$dw" = "$AUTOMOUNT_ENV" ] && am_env_dw=1; done <<EOF
+$DW_PATHS
+EOF
+if [ "$am_env_dw" -eq 1 ]; then
+  fail "$AUTOMOUNT_ENV is droplet-writable AND a root EnvironmentFile — the WARP-843 LPE, reintroduced via WARP-1338's wiring"
+else
+  pass "$AUTOMOUNT_ENV is not droplet-writable (root:root per services/automount/install.sh)"
 fi
 
 # --- PART 2: root parses ONLY the whitelisted keys from the creds file --------

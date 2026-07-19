@@ -74,10 +74,27 @@ type Chunk = {
   id: bigint;
   userId: string;
   brainItemId: string | null;
+  // WARP-1394 — the mock mirrors the real column set the dual-source
+  // queries touch: chunks carry a source discriminator, a display path,
+  // and text (only its length matters to the bytes aggregates).
+  source: "brain" | "nextcloud";
+  path: string;
+  textLen: number;
+};
+
+// WARP-1394 — Nextcloud-synced file statuses (watcher-written). Keyed by
+// the NEXTCLOUD username, never the local User UUID.
+type Fis = {
+  userId: string;
+  path: string;
+  status: "indexing" | "ready" | "skipped" | "failed";
+  reason: string | null;
+  updatedAt: Date;
 };
 
 const itemStore = new Map<string, Item>();
 const chunkStore = new Map<string, Chunk>();
+const fisStore = new Map<string, Fis>();
 
 function itemsFor(userId: string): Item[] {
   return [...itemStore.values()].filter((i) => i.userId === userId);
@@ -85,6 +102,54 @@ function itemsFor(userId: string): Item[] {
 
 function chunksFor(userId: string): Chunk[] {
   return [...chunkStore.values()].filter((c) => c.userId === userId);
+}
+
+function fisFor(userId: string): Fis[] {
+  return [...fisStore.values()].filter((f) => f.userId === userId);
+}
+
+// Local re-implementation of `path_ext_to_category()` (extension → the
+// same 8 buckets as mime_to_category) so the stub can simulate the SQL
+// function deterministically.
+function pathExtToCategory(path: string): string {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "other";
+  const ext = base.slice(dot + 1).toLowerCase();
+  if (["mp3", "wav", "m4a", "flac", "ogg", "opus", "aac"].includes(ext))
+    return "audio";
+  if (["mp4", "mov", "mkv", "avi", "webm", "m4v"].includes(ext))
+    return "video";
+  if (ext === "pdf") return "pdf";
+  if (
+    ["jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp", "heic"].includes(
+      ext,
+    )
+  )
+    return "image";
+  if (["eml", "msg"].includes(ext)) return "email";
+  if (["zip", "tar", "gz", "tgz", "bz2"].includes(ext)) return "archive";
+  if (
+    [
+      "txt",
+      "md",
+      "markdown",
+      "csv",
+      "tsv",
+      "json",
+      "xml",
+      "html",
+      "htm",
+      "docx",
+      "doc",
+      "rtf",
+      "log",
+      "yaml",
+      "yml",
+    ].includes(ext)
+  )
+    return "text";
+  return "other";
 }
 
 // Local re-implementation of the service's `mime_to_category()` so the
@@ -146,7 +211,186 @@ vi.mock("@prisma/client", () => {
       if (
         /^SELECT count\(\*\)::bigint AS c FROM "FileContentChunk"/.test(sql)
       ) {
+        // WARP-1394 — chunk counts are split by source: 'brain' rows key
+        // by the User UUID, 'nextcloud' rows by the Nextcloud username.
+        if (/"source" = 'brain'/.test(sql)) {
+          return [
+            {
+              c: BigInt(
+                chunksFor(userId).filter((c) => c.source === "brain").length,
+              ),
+            },
+          ];
+        }
+        if (/"source" = 'nextcloud'/.test(sql)) {
+          return [
+            {
+              c: BigInt(
+                chunksFor(userId).filter((c) => c.source === "nextcloud")
+                  .length,
+              ),
+            },
+          ];
+        }
         return [{ c: BigInt(chunksFor(userId).length) }];
+      }
+
+      // ── WARP-1394 — FileIndexStatus (Nextcloud-synced) queries ──
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "FileIndexStatus" WHERE "userId" = \$1$/.test(
+          sql,
+        )
+      ) {
+        return [{ c: BigInt(fisFor(userId).length) }];
+      }
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'indexing'$/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            c: BigInt(
+              fisFor(userId).filter((f) => f.status === "indexing").length,
+            ),
+          },
+        ];
+      }
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'failed'$/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            c: BigInt(
+              fisFor(userId).filter((f) => f.status === "failed").length,
+            ),
+          },
+        ];
+      }
+      // Indexed-text bytes for synced chunks
+      if (/sum\(length\("text"\)\), 0\)::bigint AS b\s+FROM "FileContentChunk"/.test(sql)) {
+        return [
+          {
+            b: BigInt(
+              chunksFor(userId)
+                .filter((c) => c.source === "nextcloud")
+                .reduce((acc, c) => acc + c.textLen, 0),
+            ),
+          },
+        ];
+      }
+      // Recently-indexed synced files (+ per-path chunk counts)
+      if (/AS "chunkCount"\s+FROM "FileIndexStatus" i/.test(sql)) {
+        return fisFor(userId)
+          .filter((f) => f.status === "ready")
+          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+          .slice(0, 10)
+          .map((f) => ({
+            path: f.path,
+            updatedAt: f.updatedAt,
+            chunkCount: BigInt(
+              chunksFor(userId).filter(
+                (c) => c.source === "nextcloud" && c.path === f.path,
+              ).length,
+            ),
+          }));
+      }
+      // byCategory file counts (extension-derived)
+      if (
+        /path_ext_to_category\("path"\) AS category,\s+count\(\*\)::bigint AS files\s+FROM "FileIndexStatus"/.test(
+          sql,
+        )
+      ) {
+        const buckets = new Map<string, number>();
+        for (const f of fisFor(userId)) {
+          const cat = pathExtToCategory(f.path);
+          buckets.set(cat, (buckets.get(cat) ?? 0) + 1);
+        }
+        return [...buckets.entries()].map(([category, n]) => ({
+          category,
+          files: BigInt(n),
+        }));
+      }
+      // byCategory indexed-text bytes (synced chunks)
+      if (
+        /path_ext_to_category\("path"\) AS category,\s+COALESCE\(sum\(length\("text"\)\), 0\)::bigint AS bytes\s+FROM "FileContentChunk"/.test(
+          sql,
+        )
+      ) {
+        const buckets = new Map<string, number>();
+        for (const c of chunksFor(userId)) {
+          if (c.source !== "nextcloud") continue;
+          const cat = pathExtToCategory(c.path);
+          buckets.set(cat, (buckets.get(cat) ?? 0) + c.textLen);
+        }
+        return [...buckets.entries()].map(([category, bytes]) => ({
+          category,
+          bytes: BigInt(bytes),
+        }));
+      }
+      // throughput7d for synced files ('ready' rows by updatedAt)
+      if (/date_trunc\('day', "updatedAt"\)::date AS day/.test(sql)) {
+        const byDay = new Map<string, number>();
+        const cutoff = new Date();
+        cutoff.setUTCDate(cutoff.getUTCDate() - 7);
+        for (const f of fisFor(userId)) {
+          if (f.status !== "ready") continue;
+          if (f.updatedAt < cutoff) continue;
+          const k = f.updatedAt.toISOString().slice(0, 10);
+          byDay.set(k, (byDay.get(k) ?? 0) + 1);
+        }
+        return [...byDay.entries()].map(([k, n]) => ({
+          day: new Date(k + "T00:00:00Z"),
+          count: BigInt(n),
+        }));
+      }
+      // pipeline health for synced files (no timing columns exist)
+      if (
+        /AS files,\s+count\(\*\) FILTER \(WHERE "status" = 'failed'\)::bigint AS failed\s+FROM "FileIndexStatus"/.test(
+          sql,
+        )
+      ) {
+        const buckets = new Map<string, { files: number; failed: number }>();
+        for (const f of fisFor(userId)) {
+          const cat = pathExtToCategory(f.path);
+          const cur = buckets.get(cat) ?? { files: 0, failed: 0 };
+          cur.files += 1;
+          if (f.status === "failed") cur.failed += 1;
+          buckets.set(cat, cur);
+        }
+        return [...buckets.entries()].map(([category, v]) => ({
+          category,
+          files: BigInt(v.files),
+          failed: BigInt(v.failed),
+        }));
+      }
+      // queued list (synced rows still indexing)
+      if (
+        /^SELECT "path", "updatedAt"\s+FROM "FileIndexStatus"\s+WHERE "userId" = \$1\s+AND "status" = 'indexing'/.test(
+          sql,
+        )
+      ) {
+        return fisFor(userId)
+          .filter((f) => f.status === "indexing")
+          .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+          .map((f) => ({ path: f.path, updatedAt: f.updatedAt }));
+      }
+      // failed list (synced rows)
+      if (
+        /^SELECT "path", "reason", "updatedAt"\s+FROM "FileIndexStatus"\s+WHERE "userId" = \$1\s+AND "status" = 'failed'/.test(
+          sql,
+        )
+      ) {
+        return fisFor(userId)
+          .filter((f) => f.status === "failed")
+          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+          .map((f) => ({
+            path: f.path,
+            reason: f.reason,
+            updatedAt: f.updatedAt,
+          }));
       }
       // Anchor the COUNT(*) variant so the queued/failed list queries
       // (which include the same status literal) don't match this branch.
@@ -391,6 +635,7 @@ beforeAll(async () => {
 beforeEach(() => {
   itemStore.clear();
   chunkStore.clear();
+  fisStore.clear();
   publishMock.mockReset();
   setUser("alice");
 });
@@ -430,7 +675,36 @@ function makeChunk(userId: string, brainItemId: string): void {
     id: chunkId,
     userId,
     brainItemId,
+    source: "brain",
+    path: "",
+    textLen: 0,
   });
+}
+
+// WARP-1394 — a synced (watcher-written) chunk: keyed by NC username,
+// no brain item, carries the display path + text length.
+function makeNcChunk(userId: string, path: string, textLen: number): void {
+  chunkId += 1n;
+  chunkStore.set(`c-${chunkId}`, {
+    id: chunkId,
+    userId,
+    brainItemId: null,
+    source: "nextcloud",
+    path,
+    textLen,
+  });
+}
+
+function makeFis(overrides: Partial<Fis> & { path: string }): Fis {
+  const row: Fis = {
+    userId: "alice",
+    status: "ready",
+    reason: null,
+    updatedAt: new Date(),
+    ...overrides,
+  };
+  fisStore.set(`${row.userId}:${row.path}`, row);
+  return row;
 }
 
 // ── Endpoint smoke tests ────────────────────────────────────────────────
@@ -818,5 +1092,130 @@ describe("WARP-493 — context-stats keys by req.user.id (UUID), never username"
       "droplet/transcription/run-one",
       { itemId: "f-uuid", userId: UUID },
     );
+  });
+});
+
+// ── WARP-1394 — Nextcloud-synced files surface in every aggregate ──
+//
+// The box's primary corpus arrives via file sync (watcher →
+// FileIndexStatus + FileContentChunk, keyed by NEXTCLOUD username), not
+// as chat attachments. Before this fix every aggregate read
+// BrainMemoryItem only, so a synced-only box reported files: 0 and the
+// dashboard rendered the "context is empty" onboarding card forever.
+// These cases run the PRODUCTION identity shape (UUID ≠ username) to pin
+// the dual keying: brain rows by req.user.id, synced rows by username.
+describe("WARP-1394 — synced files (FileIndexStatus) surface in context-stats", () => {
+  const UUID = "11111111-2222-4333-8444-555555555555";
+
+  it("a synced-only corpus yields files > 0 (the /context empty-state repro)", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeFis({ userId: "alice-nc", path: "/Docs/plan.docx" });
+    makeFis({ userId: "alice-nc", path: "/Docs/report.pdf" });
+    makeNcChunk("alice-nc", "/Docs/plan.docx", 1200);
+    makeNcChunk("alice-nc", "/Docs/report.pdf", 800);
+
+    const res = await request(app).get("/api/me/context-stats");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(2); // was 0 before WARP-1394
+    expect(res.body.chunks).toBe(2);
+    expect(
+      res.body.recentlyIndexed.map((r: { id: string }) => r.id),
+    ).toEqual(
+      expect.arrayContaining(["nc:/Docs/plan.docx", "nc:/Docs/report.pdf"]),
+    );
+    expect(
+      res.body.recentlyIndexed.every(
+        (r: { source: string }) => r.source === "nextcloud",
+      ),
+    ).toBe(true);
+  });
+
+  it("merges both pipelines in /full and keeps sources separate in pipelineHealth", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeItem({
+      id: "b-1",
+      userId: UUID,
+      filename: "attached.pdf",
+      mimeType: "application/pdf",
+      indexedAt: new Date(),
+    });
+    makeChunk(UUID, "b-1");
+    makeFis({ userId: "alice-nc", path: "/Docs/notes.txt" });
+    makeNcChunk("alice-nc", "/Docs/notes.txt", 500);
+
+    const res = await request(app).get("/api/me/context-stats/full");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(2);
+    expect(res.body.chunks).toBe(2);
+    // 1024 original chat-attachment bytes + 500 bytes of indexed synced text.
+    expect(res.body.bytesIndexed).toBe(1524);
+    const cats = Object.fromEntries(
+      res.body.byCategory.map((c: { category: string; files: number }) => [
+        c.category,
+        c.files,
+      ]),
+    );
+    expect(cats.pdf).toBe(1);
+    expect(cats.text).toBe(1);
+    expect(res.body.pipelineHealth).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: "pdf", source: "brain" }),
+        expect.objectContaining({
+          category: "text",
+          source: "nextcloud",
+          avgSecondsToReady: null,
+        }),
+      ]),
+    );
+  });
+
+  it("failed synced files appear with their reason and are not retryable here", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeFis({
+      userId: "alice-nc",
+      path: "/Docs/x.pdf",
+      status: "failed",
+      reason: "nc_file_id_unresolved",
+    });
+
+    const failed = await request(app).get("/api/me/context-stats/failed");
+    expect(failed.status).toBe(200);
+    expect(failed.body.items).toEqual([
+      expect.objectContaining({
+        id: "nc:/Docs/x.pdf",
+        filename: "x.pdf",
+        category: "pdf",
+        failureReason: "nc_file_id_unresolved",
+        source: "nextcloud",
+      }),
+    ]);
+
+    // The transcription-retry route owns BrainMemoryItem rows only; a
+    // synced id must 404, never mutate.
+    const retry = await request(app).post(
+      `/api/me/context-stats/failed/${encodeURIComponent("nc:/Docs/x.pdf")}/retry`,
+    );
+    expect(retry.status).toBe(404);
+  });
+
+  it("cross-user: bob's synced rows never leak into alice's aggregates", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeFis({ userId: "alice-nc", path: "/Docs/mine.txt" });
+    makeFis({ userId: "bob-nc", path: "/Docs/bobs-secret.pdf" });
+    makeFis({
+      userId: "bob-nc",
+      path: "/Docs/bobs-fail.pdf",
+      status: "failed",
+      reason: "boom",
+    });
+    makeNcChunk("bob-nc", "/Docs/bobs-secret.pdf", 999);
+
+    const summary = await request(app).get("/api/me/context-stats");
+    const full = await request(app).get("/api/me/context-stats/full");
+    const failed = await request(app).get("/api/me/context-stats/failed");
+    expect(summary.body.files).toBe(1);
+    expect(summary.body.chunks).toBe(0);
+    expect(JSON.stringify(full.body)).not.toContain("bobs-");
+    expect(failed.body.items).toEqual([]);
   });
 });

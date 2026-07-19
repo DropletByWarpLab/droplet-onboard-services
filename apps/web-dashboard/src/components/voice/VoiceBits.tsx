@@ -11,7 +11,7 @@
  * a deterministic visualization of that one number, never random.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useReducedMotion } from "framer-motion";
 import { CheckCircle2, AlertTriangle, Ear, Mic, Check, Volume2 } from "lucide-react";
 import { meterFractionFromDbfs } from "./state";
@@ -79,13 +79,16 @@ export function LiveMeter({
   );
 }
 
-/* Wizard meter with the acceptable/target zone band (§4.1/§4.2). */
+/* Wizard meter with the acceptable/target zone band (§4.1/§4.2).
+   `zoneLabel` takes a node so a measured value inside the label can
+   ride in mono while the instruction stays in the UI font (WARP-1056
+   tidy of the WARP-1055 review note). */
 export function ZoneMeter({
   dbfs,
   zoneLabel,
 }: {
   dbfs: number | null | undefined;
-  zoneLabel: string;
+  zoneLabel: ReactNode;
 }) {
   return (
     <div className="vzone-meter">

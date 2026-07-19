@@ -22,7 +22,7 @@ WORKDIR /app
 # 29.5; moby/moby#41715) — the reflash runner must bust layers without that
 # flag for these mounts to pay off (see WARP-1065).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && \
     apt-get install -y --no-install-recommends \

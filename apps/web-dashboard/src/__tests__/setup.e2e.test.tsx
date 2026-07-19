@@ -159,11 +159,14 @@ vi.mock("@/lib/api", () => ({
   ]),
   acceptDiscoveredCamera: (id: string) => acceptDiscoveredCameraMock(id),
 
-  // VPN endpoint configured — auto-derive landed in commit 4.
+  // VPN endpoint configured — auto-derive landed in commit 4. WARP-1391: the
+  // one-tap toggle is a HOME-mode mint, so the box must also have discovered its
+  // home-facing LAN IP for the toggle to render.
   fetchVpnStatus: vi.fn(async () => ({
     configured: true,
     endpointConfigured: true,
     endpointHost: "yourstudio.duckdns.org",
+    homeEndpointHost: "192.168.1.87",
     listenPort: 51820,
     peerCount: 0,
     addresses: ["10.13.13.1/24"],

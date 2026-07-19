@@ -128,7 +128,12 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   left by an older setup version is detected on re-run (generated header
   present but core keys missing / truncated last line) and recovered:
   restored from the newest complete `.env.bak.*` when one exists, otherwise
-  regenerated fresh with a loud warning. Docker secret files and the audit
+  regenerated fresh with a loud warning. The mid-run `.env` copies exist
+  ONLY for this convergence: a setup run that completes successfully removes
+  its `.env.bak.*` / `.env.torn.*` / staging strays on the way out, so a
+  green provision leaves nothing stale on the box (exception: a
+  `--regenerate-env` run keeps its `.env.bak.*` — that backup is the
+  documented recovery path below). Docker secret files and the audit
   signing key were already staged+renamed; the TLS cert/key pair is now also
   verified to *match* — a torn self-signed pair is restored from the
   `.bootstrap` trust anchor (or regenerated) instead of being kept forever.
@@ -159,8 +164,8 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   hand-edited version is kept as `.env.torn.*`).
 - **No automatic pre-update backup yet.** A setup.sh re-run does not snapshot
   the box first. The building blocks exist — scheduled restic backups
-  (WARP-254, `scripts/lib/backup.sh`) and the pre-reset full-device backup in
-  `factory-reset.sh` (WARP-570) — but wiring an automatic pre-update snapshot
+  (WARP-254, `scripts/lib/backup.sh`) and the opt-in pre-reset full-device
+  backup in `factory-reset.sh` (`--backup`, WARP-570) — but wiring an automatic pre-update snapshot
   into the re-run path is deliberately deferred to the OTA work (WARP-534/179),
   which owns the update transaction (snapshot → apply → verify → rollback).
   Until then: `sudo /usr/local/sbin/droplet-backup.sh` before a risky update
@@ -377,7 +382,9 @@ OTA release manifests (`release.json`, published by
 `.github/workflows/publish-release.yml`) are signed with
 [cosign](https://github.com/sigstore/cosign) and verified on-device by the
 orchestrator's update agent against the public key baked into the image at
-`apps/orchestrator/src/services/update-agent/cosign.pub`.
+`apps/orchestrator/src/services/update-agent/cosign.pub`, and by the
+fleet-agent's update-poll (WARP-1025) against its byte-identical copy at
+`services/fleet-agent/cosign.pub` — the ceremony stamps BOTH copies.
 
 > **The committed `cosign.pub` is a PLACEHOLDER.** The update agent's verify
 > path detects the `DROPLET-OTA-PLACEHOLDER` marker and **fails closed** —
@@ -397,9 +404,12 @@ cosign generate-key-pair          # writes cosign.key + cosign.pub
 gh secret set COSIGN_PRIVATE_KEY < cosign.key
 gh secret set COSIGN_PASSWORD     # paste the password from step 1
 
-# 3. Commit the PUBLIC side over the placeholder.
+# 3. Commit the PUBLIC side over BOTH placeholders (orchestrator update
+#    agent + fleet-agent update-poll, WARP-1025).
 cp cosign.pub apps/orchestrator/src/services/update-agent/cosign.pub
-git add apps/orchestrator/src/services/update-agent/cosign.pub
+cp cosign.pub services/fleet-agent/cosign.pub
+git add apps/orchestrator/src/services/update-agent/cosign.pub \
+        services/fleet-agent/cosign.pub
 git commit -m "chore: install real OTA cosign public key (key ceremony)"
 
 # 4. Destroy the local private key (it now lives only in GH secrets +

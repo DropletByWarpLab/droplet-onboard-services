@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Check, Mail } from "lucide-react";
+import { Sect } from "@/components/shell/primitives";
 import {
   getEmailChannel,
   saveEmailChannel,
@@ -98,12 +99,7 @@ export function EmailChannelSection() {
 
   return (
     <section className="mb-10">
-      <h2
-        className="type-footnote uppercase tracking-wider px-1 mb-2"
-        style={{ color: "var(--text-muted)" }}
-      >
-        Outbound email
-      </h2>
+      <Sect title="Outbound email" />
 
       <div className="card space-y-4">
         <div className="flex items-center justify-between">

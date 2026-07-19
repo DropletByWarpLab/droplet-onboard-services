@@ -38,6 +38,7 @@ import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
 import {
   buildConfirmPhrase,
   friendlyAdoptError,
+  wholeDiskName,
 } from "@/components/setup/steps/StorageStep";
 import {
   levelLabel,
@@ -45,6 +46,20 @@ import {
   poolStatusBadge,
   worstPoolAlarm,
 } from "./pool-display";
+// WARP-1337: the display-name chain (override → displayName → label →
+// GUID-guarded mount tail) lives in ONE shared helper now, used by this panel
+// and VolumesPanel alike — the private per-panel copies drifted (VolumesPanel's
+// never consulted displayName and rendered raw fs-UUID tails).
+import {
+  driveContentsHref,
+  driveDisplayName,
+  drivePoolName,
+  isPoolBackedDevice,
+  poolBackingDrive,
+  sanitizeFsLabel,
+  takenVolumeNames,
+  uniqueFsLabel,
+} from "./drive-display";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
 function fmtBytes(bytes: number): string {
@@ -55,17 +70,12 @@ function fmtBytes(bytes: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-// Customer-facing name: friendly displayName, then FS label, then the mount
-// tail — never the raw device path, since the target user is non-technical.
-// `override` lets the card show an optimistic just-typed name before the
-// hook's data refetches.
+// Customer-facing name: friendly displayName, then FS label, then the
+// GUID-guarded mount tail — never the raw device path or a machine id, since
+// the target user is non-technical. `override` lets the card show an
+// optimistic just-typed name before the hook's data refetches.
 function driveName(d: DriveInfo, override?: string | null): string {
-  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const raw = (override || d.displayName || d.label || tail)
-    .replace(/[-_]+/g, " ")
-    .trim();
-  if (!raw) return "Drive";
-  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+  return driveDisplayName(d, { override, poolBacked: isPoolBackedDevice(d.device) });
 }
 
 // Customer-facing pool name: the owner's displayName, else a generic label —
@@ -77,17 +87,9 @@ function poolName(pool: PoolInfo): string {
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
-// WARP-827: the auto-mounter registers each drive as a Nextcloud external
-// storage mount at `/<mount-tail>` (services/automount/droplet-automount.sh →
-// `files_external:create "/$NAME"`), where the tail equals the host mount's
-// last path segment. So the drive's contents are browsable in the existing
-// Nextcloud-backed file browser at that path — we deep-link there (reuse, no
-// new endpoint). The FilesPage reads `?path=` on mount.
-function driveContentsHref(d: DriveInfo): string {
-  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const ncPath = `/${tail}`;
-  return `/files?path=${encodeURIComponent(ncPath)}`;
-}
+// WARP-1338: driveContentsHref moved to the shared drive-display helper —
+// VolumesPanel tiles deep-link to the same target now, and a private copy
+// here would let the two surfaces drift.
 
 // Customer-chosen drive names are 1–64 chars, trimmed, non-empty — mirrors the
 // orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
@@ -259,15 +261,57 @@ export function DrivesPanel() {
     return drives.some((d) => re.test(d.device));
   };
 
+  // WARP-1339 — ONE pooled entry instead of pool card + anonymous GUID drive
+  // tile. The mounted md filesystem is merged INTO its pool's card (it is the
+  // pool's only fs-level capacity/browse source — ADR-019 real usable
+  // capacity, never a fabricated raw-member sum) and excluded from the drives
+  // grid below. The join key is the orchestrator's `pool` annotation (bare
+  // array name), with the anchored md-device matcher as the older-orchestrator
+  // fallback (drivePoolName). Only drives whose DEVICE is the md node are
+  // hidden — a dropped member disk lives in `disks` (state pool_member) and
+  // keeps its Available-drives card + Reclaim action untouched. When the pools
+  // payload lacks the matching pool (degraded /storage/pools fetch), the md
+  // drive stays in the grid: hiding it with no pool card to merge into would
+  // lose the volume entirely.
+  const standaloneDrives = drives.filter((d) => {
+    const md = drivePoolName(d);
+    return !md || !pools.some((p) => p.device === md);
+  });
+
+  // Code review (WARP-1337): the collision snapshot for a seeded FS label —
+  // every mounted volume's label/tail EXCEPT those on the target disk itself,
+  // which the wipe is about to erase (their names can't collide with the new
+  // mount). Same member derivation as StorageStep's reclaimDisks and the
+  // Danger zone's reformat, so all three destructive flows agree.
+  function takenNamesExcluding(disk: DiskInfo): string[] {
+    return takenVolumeNames(
+      drives.filter((d) => (d.parent_disk || wholeDiskName(d.device)) !== disk.name),
+    );
+  }
+
   async function handleStartAdopt(disk: DiskInfo) {
     if (disk.state !== "foreign" && disk.state !== "available") return;
     destructiveTriggerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setAdoptBusy(disk.name);
     try {
+      // WARP-1337: seed the post-wipe FS label from the name the card shows
+      // (the hardware model — an unmounted disk has no customer-typed name
+      // yet). The label becomes the mount tail, so the adopted drive never
+      // lands back on a GUID mount. Omitted when the bridge has no model.
+      // Code review: uniquified against the OTHER mounted volumes' labels/
+      // tails — the host script's raw mount would stack an identical label
+      // over the existing mount (2× the same model is the realistic trigger);
+      // the serial tail disambiguates.
+      const label = uniqueFsLabel(
+        sanitizeFsLabel(disk.model),
+        takenNamesExcluding(disk),
+        disk.serial,
+      );
       const token = await adoptDrive({
         device: disk.name,
         wipeMethod: "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([disk.name]),
       });
       setAdoptPending({
@@ -346,10 +390,22 @@ export function DrivesPanel() {
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setReclaimBusy(disk.name);
     try {
+      // WARP-1337: same FS-label seeding as adopt — the reclaimed drive comes
+      // back named instead of GUID-mounted — with the same shadow-mount
+      // collision guard and own-volume exclusion (code review). The pool's
+      // OWN mounted fs still counts: its device is the md node, whose parent
+      // is never this member disk, so it stays in the taken set (reclaiming
+      // one member leaves the array's mount alive).
+      const label = uniqueFsLabel(
+        sanitizeFsLabel(disk.model),
+        takenNamesExcluding(disk),
+        disk.serial,
+      );
       const token = await reclaimDrive({
         device: disk.name,
         md: disk.md,
         wipeMethod: "quick",
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([disk.name]),
       });
       setReclaimPending({
@@ -535,6 +591,10 @@ export function DrivesPanel() {
                 key={p.device}
                 pool={p}
                 isAdmin={isAdmin}
+                // WARP-1339: the mounted md filesystem backing this pool —
+                // its real used/size/free meter + browse link render on the
+                // pool card itself (one pooled entry).
+                backingDrive={poolBackingDrive(p.device, drives)}
                 // WARP-936: a pool whose md device backs no mounted filesystem
                 // was created but never formatted+mounted — give the owner the
                 // gated way forward. Failed pools get support copy, not a
@@ -559,7 +619,7 @@ export function DrivesPanel() {
         >
           Drives
         </h3>
-        {drives.length === 0 ? (
+        {standaloneDrives.length === 0 ? (
           <div className="card flex items-start gap-3">
             <span
               className="flex-none h-10 w-10 flex items-center justify-center"
@@ -592,7 +652,7 @@ export function DrivesPanel() {
             role="list"
             aria-label="Mounted drives"
           >
-            {drives.map((d) => (
+            {standaloneDrives.map((d) => (
               <DriveCard
                 key={d.uuid || d.mount || d.device}
                 drive={d}
@@ -883,7 +943,10 @@ function DriveCard({
   }
 
   return (
-    <div role="listitem" className="card">
+    // `relative` anchors the stretched title-link overlay (WARP-1338): the
+    // whole card is the click target, while later-in-DOM positioned controls
+    // (the Rename button) stack above it and stay functional.
+    <div role="listitem" className="card relative">
       <div className="flex items-start gap-3">
         <IconTile>
           <BusIcon bus={d.bus} className="h-5 w-5" />
@@ -945,6 +1008,12 @@ function DriveCard({
                 style={{ borderRadius: "var(--radius-input)" }}
                 aria-label={`Open ${name}`}
               >
+                {/* WARP-1338: stretched link — this overlay spans the whole
+                    (relative) card, widening the click target without adding
+                    a second tab stop or nesting controls inside the anchor.
+                    The Rename button below is positioned later in the DOM,
+                    so it stacks above and stays clickable. */}
+                <span className="absolute inset-0" aria-hidden="true" />
                 <h3
                   className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                   style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
@@ -968,7 +1037,9 @@ function DriveCard({
                   ref={renameBtnRef}
                   onClick={beginEdit}
                   aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
+                  // `relative` lifts the control above the stretched title
+                  // link's inset overlay (WARP-1338) so Rename stays clickable.
+                  className="relative flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
                   style={{
                     borderRadius: "var(--radius-input)",
                     color: "var(--text-muted)",
@@ -1026,7 +1097,12 @@ function DriveCard({
           <button
             onClick={onEject}
             disabled={ejecting}
-            className="btn ghost sm disabled:opacity-60"
+            // `relative` lifts the control above the stretched title link's
+            // inset overlay (WARP-1338) — same treatment as Rename. Without
+            // it the positioned overlay paints over this static button and
+            // clicking Eject silently navigates to /files instead (UX
+            // review finding).
+            className="relative btn ghost sm disabled:opacity-60"
           >
             {ejecting ? "Ejecting…" : "Eject"}
           </button>
@@ -1121,6 +1197,7 @@ function PoolAlarmBanner({
 function PoolCard({
   pool,
   isAdmin = false,
+  backingDrive,
   canFormat = false,
   formatting = false,
   onFormat,
@@ -1128,6 +1205,12 @@ function PoolCard({
 }: {
   pool: PoolInfo;
   isAdmin?: boolean;
+  /** WARP-1339: the mounted md filesystem backing this pool (the drives-list
+   *  entry whose device is the pool's md node / a partition of it). Supplies
+   *  the REAL fs-level used/size/free meter (ADR-019 usable capacity — never
+   *  a fabricated raw-member sum) and the browse deep-link. Absent for a
+   *  created-but-never-formatted pool. */
+  backingDrive?: DriveInfo;
   /** WARP-936: true when the pool's md device backs no mounted filesystem —
    *  created but never formatted+mounted. Admin-gated by the caller. */
   canFormat?: boolean;
@@ -1139,6 +1222,7 @@ function PoolCard({
   const { toast } = useToast();
   const badge = poolStatusBadge(pool.status);
   const memberCount = pool.members.length;
+  const usedPct = backingDrive ? usagePct(backingDrive) : 0;
 
   // Inline rename — mirrors DriveCard (WARP-827). Optimistic name shown until
   // the pools list refetches; rolled back on failure. Focus returns to the
@@ -1244,13 +1328,38 @@ function PoolCard({
             </div>
           ) : (
             <div className="flex items-center gap-2 flex-wrap">
-              <h4
-                className="truncate"
-                style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
-                title={name}
-              >
-                {name}
-              </h4>
+              {backingDrive ? (
+                // WARP-1339: the pool's contents are the mounted md
+                // filesystem's — deep-link into the existing file browser at
+                // its mount tail, exactly like a DriveCard title (reuse, no
+                // new endpoint).
+                <Link
+                  href={driveContentsHref(backingDrive)}
+                  className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
+                  style={{ borderRadius: "var(--radius-input)" }}
+                  aria-label={`Open ${name}`}
+                >
+                  <h4
+                    className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                    style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                    title={name}
+                  >
+                    {name}
+                  </h4>
+                  <FolderOpen
+                    className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                    style={{ color: "var(--text-muted)" }}
+                  />
+                </Link>
+              ) : (
+                <h4
+                  className="truncate"
+                  style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                  title={name}
+                >
+                  {name}
+                </h4>
+              )}
               <HwTag>{levelLabel(pool.level)}</HwTag>
               {isAdmin && (
                 <button
@@ -1273,6 +1382,28 @@ function PoolCard({
         </div>
         {!editing && <Badge kind={poolBadgeKind(pool.status)}>{badge.label}</Badge>}
       </div>
+
+      {/* WARP-1339: the pool's REAL usable capacity — the mounted md
+          filesystem's fs-level bytes (ADR-019), same meter idiom as a
+          DriveCard. No meter for a never-formatted pool: there is no
+          filesystem to measure, and a raw-member sum would be a fiction. */}
+      {backingDrive && (
+        <div className="mt-4">
+          <div
+            className="flex items-baseline justify-between tabular-nums mb-1.5"
+            style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}
+          >
+            <span>
+              <span style={{ color: "var(--text)" }}>
+                {fmtBytes(backingDrive.used_bytes)}
+              </span>{" "}
+              of {fmtBytes(backingDrive.size_bytes)}
+            </span>
+            <span>{fmtBytes(backingDrive.free_bytes)} free</span>
+          </div>
+          <Meter pct={usedPct} kind={meterKind(usedPct)} />
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-2 flex-wrap">
         <HwTag upper={false}>

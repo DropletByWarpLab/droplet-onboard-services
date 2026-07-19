@@ -86,6 +86,30 @@ entries:
     review_by: 2027-07-04
     code_refs: [docker/docker-compose.yml]
 
+  - id: overlay-stun-mapping
+    kind: egress
+    service: device-bridge
+    destination:
+      hosts: [stun.cloudflare.com, stun.l.google.com]
+      # Cloudflare answers STUN on 3478; Google's public STUN on 19302. Both are
+      # documented so the WARP-268 runtime audit knows the real ports.
+      ports: [3478, 19302]
+      protocol: udp/stun
+    phase: runtime
+    data_class: none
+    purpose: >-
+      STUN Binding probe (RFC 5389) sent by device-bridge FROM host udp/51820 to
+      learn the box's own public UDP mapping for the direct-punch remote-access
+      overlay (ADR-030 / WARP-1385). One request/response per connect; carries no
+      user content — only the box's reflexive ip:port, handed to HQ in the
+      overlay `answer`. The orchestrator only calls device-bridge's internal
+      /host/stun-probe endpoint; the STUN socket egress originates in
+      device-bridge (host netns), so that is the owning service.
+    ticket: WARP-1385
+    added: 2026-07-18
+    review_by: 2027-07-18
+    code_refs: [services/oled-display/device-bridge.py]
+
   - id: sso-oidc-idps
     kind: egress
     service: orchestrator

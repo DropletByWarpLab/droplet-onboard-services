@@ -5,16 +5,30 @@
 # never import from this directory. The harness is offline-only and runs
 # under scripts/test-rag.sh --with-ragas (added in batch C, step 2.5).
 #
-# Pinning rationale:
-#   - ragas: pinned to 0.4.3 because the metric API stabilized at 0.4 and
-#     0.5 is on the horizon with breaking changes (per upstream changelog).
-#     Bump deliberately, with a re-baseline run.
-#   - openai: >=1.0 for the OpenAI-compat client. Points at local Ollama
-#     by default (http://localhost:11434/v1) via ragas.llms.llm_factory.
+# Pinning rationale (WARP-1406 — keep in LOCKSTEP with
+# services/rag-eval/requirements.txt; there is no CI diff-guard, so the
+# lockstep is manual and deliberate):
+#   - ragas: 0.2.13 — the version whose metrics API ragas_runner.py is
+#     written against (LangchainLLMWrapper + LLMContextPrecisionWithReference
+#     et al.). The previous 0.4.3 pin here could never run this runner
+#     (0.4 does not export the metric names/wrapper path the runner uses)
+#     and had silently drifted from the service file. Bump both files
+#     together, deliberately, with a re-baseline run.
+#   - langchain*: capped to the 0.3 line. ragas 0.2.x (and 0.4.x) imports
+#     langchain_community.chat_models.vertexai unconditionally, which
+#     langchain-community 1.x (2026) removed — unpinned, a fresh install
+#     crashes at `from ragas import evaluate`.
+#   - langchain-openai: the runner's judge path (make_chat_llm) uses
+#     langchain_openai.ChatOpenAI pointed at local Ollama's OpenAI-compat
+#     endpoint by default.
 #   - datasets / pandas: needed by ragas.evaluate() return shape.
 #   - pyyaml: load goldens.yaml + queries.yaml.
 
-ragas==0.4.3
+ragas==0.2.13
+langchain>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-community>=0.3,<0.4
+langchain-openai>=0.2,<0.4
 openai>=1.0
 datasets>=2.14
 pandas>=2.0

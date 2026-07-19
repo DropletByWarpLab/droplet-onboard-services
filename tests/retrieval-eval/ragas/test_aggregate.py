@@ -1,17 +1,19 @@
-"""Unit tests for aggregate_runs() in ragas_runner.py.
+"""Unit tests for ragas_runner.py's offline-testable surface.
 
-Tests the quantile / IQR / floor arithmetic so regressions are caught
-before they silently corrupt baselines.json. Does NOT require ragas,
-langchain, or torch — only pandas, pyyaml, and datasets must be installed
-(the same lightweight set the module imports at top-level).
-
-WARP-521 — follow-up from PR #299 code review.
+Covers aggregate_runs()'s quantile / IQR / floor arithmetic (WARP-521 —
+follow-up from PR #299 code review) plus the RAGAS run-results-visibility
+fixes: _build_search_request (service bearer token + explicit eval user so
+the runner works on auth-enabled appliances), the NaN → null write
+sanitizer, and the None-tolerant Markdown renderer. Does NOT require
+ragas, langchain, or torch — only pandas, pyyaml, and datasets must be
+installed (the same lightweight set the module imports at top-level).
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import urllib.parse
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +21,12 @@ import pytest
 
 # Allow `import ragas_runner` without installing the package.
 sys.path.insert(0, str(Path(__file__).parent))
-from ragas_runner import aggregate_runs
+from ragas_runner import (
+    _build_search_request,
+    _render_markdown,
+    _sanitize_nonfinite,
+    aggregate_runs,
+)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -44,6 +51,19 @@ def _write_run(
 
 def _read_out(out_path: Path) -> dict:
     return json.loads(out_path.read_text())
+
+
+def _strict_loads(text: str) -> dict:
+    """json.loads that REJECTS bare NaN/Infinity tokens.
+
+    Python's json.loads accepts them by default, so a plain round-trip
+    would not prove the file is strict JSON (the property the rag-eval
+    service's allow_nan=False serializer depends on).
+    """
+    def _reject(token: str) -> None:
+        raise AssertionError(f"non-JSON constant in output: {token}")
+
+    return json.loads(text, parse_constant=_reject)
 
 
 # ─── tests ──────────────────────────────────────────────────────────────────
@@ -228,3 +248,200 @@ def test_empty_dir_returns_1(tmp_path: Path) -> None:
     out = tmp_path / "baselines.json"
     rc = aggregate_runs(tmp_path, out, "local")
     assert rc == 1, "aggregate_runs must return 1 when no results-*.json exist"
+
+
+# ─── _build_search_request (auth-enabled appliance support) ─────────────────
+
+def test_build_search_request_offline_lane_unchanged(monkeypatch) -> None:
+    """Neither env var set: request is byte-for-byte the pre-fix shape.
+
+    The AUTH_ENABLED=false offline test lane must keep working unchanged —
+    same URL, same param order, no extra params, no headers.
+    """
+    monkeypatch.delenv("ORCHESTRATOR_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("RAGAS_EVAL_USER", raising=False)
+    req = _build_search_request(
+        "http://localhost:3000", "hybrid", "what is x?", 10
+    )
+    assert req.full_url == (
+        "http://localhost:3000/api/admin/retrieval-eval/search"
+        "?variant=hybrid&q=what+is+x%3F&limit=10"
+    )
+    assert req.headers == {}, "offline lane must send no extra headers"
+
+
+def test_build_search_request_service_token_header(monkeypatch) -> None:
+    """ORCHESTRATOR_SERVICE_TOKEN set: Authorization: Bearer <token>."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "svc-token-123")
+    monkeypatch.delenv("RAGAS_EVAL_USER", raising=False)
+    req = _build_search_request("http://orchestrator:3000", "hybrid", "q", 5)
+    assert req.get_header("Authorization") == "Bearer svc-token-123"
+    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+    assert "user" not in qs, "user param must stay absent without RAGAS_EVAL_USER"
+
+
+def test_build_search_request_eval_user_param(monkeypatch) -> None:
+    """RAGAS_EVAL_USER set: user=<value> joins the query string."""
+    monkeypatch.delenv("ORCHESTRATOR_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("RAGAS_EVAL_USER", "romain")
+    req = _build_search_request("http://orchestrator:3000", "vector", "q", 5)
+    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+    assert qs["user"] == ["romain"]
+    assert qs["variant"] == ["vector"]
+    assert qs["limit"] == ["5"]
+    assert req.headers == {}, "no Authorization header without the token env"
+
+
+def test_build_search_request_both_env_vars(monkeypatch) -> None:
+    """Both set (the deployed-appliance shape): header AND user param."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "svc-token-123")
+    monkeypatch.setenv("RAGAS_EVAL_USER", "romain")
+    req = _build_search_request("http://orchestrator:3000", "hybrid", "q", 5)
+    assert req.get_header("Authorization") == "Bearer svc-token-123"
+    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+    assert qs["user"] == ["romain"]
+
+
+def test_build_search_request_empty_env_treated_as_unset(monkeypatch) -> None:
+    """Empty-string env vars behave exactly like unset (compose sets '')."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "")
+    monkeypatch.setenv("RAGAS_EVAL_USER", "")
+    req = _build_search_request("http://localhost:3000", "hybrid", "q", 10)
+    assert req.headers == {}
+    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+    assert "user" not in qs
+
+
+# ─── NaN → null write sanitizer ─────────────────────────────────────────────
+
+def test_sanitize_nonfinite_nested() -> None:
+    """NaN/±Inf floats become None recursively; everything else is untouched,
+    and the result serializes under json.dumps(allow_nan=False)."""
+    dirty = {
+        "a": float("nan"),
+        "b": {
+            "c": float("inf"),
+            "d": [1.0, float("-inf"), "s", None, True, 3],
+        },
+        "e": 0.5,
+    }
+    clean = _sanitize_nonfinite(dirty)
+    assert clean == {
+        "a": None,
+        "b": {"c": None, "d": [1.0, None, "s", None, True, 3]},
+        "e": 0.5,
+    }
+    # Regression belt: the exact serializer settings the runner writes with.
+    json.dumps(clean, allow_nan=False)
+
+
+# ─── aggregate_runs NaN / missing-metric tolerance ──────────────────────────
+
+def test_aggregate_tolerates_nan_null_and_missing_metrics(tmp_path: Path) -> None:
+    """One poisoned run + one metric-less run must not poison baselines.
+
+    run 1 is a pre-sanitizer results file with bare NaN tokens (json.dumps
+    allow_nan=True wrote them after judge failures; json.loads happily
+    parses them back to float("nan")). run 2 carries post-sanitizer nulls.
+    run 3 lacks answer_relevancy entirely (the skipped_metrics lane).
+    Envelopes must come from the finite samples only, per-metric `n` must
+    be honest, and the output must parse as STRICT JSON.
+    """
+    (tmp_path / "results-001.json").write_text(
+        '{"n_queries": 20, "metrics": {'
+        '"faithfulness": {"p50": NaN, "p95": NaN, "mean": NaN}, '
+        '"answer_relevancy": {"p50": 0.8, "p95": 0.8, "mean": 0.8}}, '
+        '"metrics_by_class": {'
+        '"factual": {"faithfulness": {"p50": NaN, "p95": NaN, "mean": NaN, "n": 5}}}}'
+    )
+    _write_run(
+        tmp_path,
+        "results-002.json",
+        metrics={
+            "faithfulness": {"p50": 0.7, "p95": 0.7, "mean": 0.7},
+            "answer_relevancy": {"p50": None, "p95": None, "mean": None},
+        },
+        metrics_by_class={
+            "factual": {
+                "faithfulness": {"p50": 0.7, "p95": 0.7, "mean": 0.7, "n": 5}
+            }
+        },
+    )
+    _write_run(
+        tmp_path,
+        "results-003.json",
+        metrics={"faithfulness": {"p50": 0.9, "p95": 0.9, "mean": 0.9}},
+    )
+
+    out = tmp_path / "baselines.json"
+    rc = aggregate_runs(tmp_path, out, "local")
+    assert rc == 0
+    data = _strict_loads(out.read_text())  # raises on any bare NaN token
+
+    # faithfulness: run-1 NaN skipped → samples [0.7, 0.9], honest n=2.
+    faith = data["envelopes"]["faithfulness"]
+    assert faith["p50"] == pytest.approx(
+        float(pd.Series([0.7, 0.9]).quantile(0.5))
+    )
+    assert faith["n"] == 2
+
+    # answer_relevancy: run-2 null and run-3 absence both skipped →
+    # single sample 0.8 from run 1 → iqr=0, floor=p50, honest n=1.
+    ar = data["envelopes"]["answer_relevancy"]
+    assert ar["p50"] == pytest.approx(0.8)
+    assert ar["iqr"] == pytest.approx(0.0)
+    assert ar["floor"] == pytest.approx(ar["p50"])
+    assert ar["n"] == 1
+
+    # Per-class path filters the same way: run-1's NaN factual sample is
+    # skipped, leaving run-2's 0.7 as the sole sample.
+    factual = data["envelopes_by_class"]["factual"]["faithfulness"]
+    assert factual["p50"] == pytest.approx(0.7)
+    assert factual["n"] == 1
+
+
+def test_aggregate_all_invalid_metric_omitted(tmp_path: Path) -> None:
+    """A metric whose every sample is NaN/null yields NO envelope at all —
+    explicit absence, not an envelope full of nulls."""
+    (tmp_path / "results-001.json").write_text(
+        '{"n_queries": 20, "metrics": {'
+        '"faithfulness": {"p50": 0.8, "p95": 0.8, "mean": 0.8}, '
+        '"answer_relevancy": {"p50": NaN, "p95": NaN, "mean": NaN}}, '
+        '"metrics_by_class": {}}'
+    )
+    _write_run(
+        tmp_path,
+        "results-002.json",
+        metrics={
+            "faithfulness": {"p50": 0.9, "p95": 0.9, "mean": 0.9},
+            "answer_relevancy": {"p50": None, "p95": None, "mean": None},
+        },
+    )
+    out = tmp_path / "baselines.json"
+    rc = aggregate_runs(tmp_path, out, "local")
+    assert rc == 0
+    data = _strict_loads(out.read_text())
+    assert "faithfulness" in data["envelopes"]
+    assert "answer_relevancy" not in data["envelopes"]
+
+
+# ─── Markdown renderer None tolerance ───────────────────────────────────────
+
+def test_render_markdown_tolerates_none_stats() -> None:
+    """Sanitized summaries can carry None stats (judge failures → NaN →
+    null); the table must render n/a, not crash on the `:.3f` specifier."""
+    summary = {
+        "variant": "hybrid",
+        "limit": 10,
+        "judge": "local",
+        "n_queries": 20,
+        "metrics": {
+            "faithfulness": {"p50": 0.8, "p95": 0.9, "mean": 0.85},
+            "answer_relevancy": {"p50": None, "p95": None, "mean": None},
+        },
+    }
+    md = _render_markdown(summary)
+    assert "variant=hybrid limit=10 judge=local" in md
+    assert "Queries: 20" in md
+    assert "| faithfulness | 0.800 | 0.900 | 0.850 |" in md
+    assert "| answer_relevancy | n/a | n/a | n/a |" in md

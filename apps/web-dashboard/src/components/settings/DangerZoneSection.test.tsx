@@ -199,8 +199,11 @@ describe("DangerZoneSection — reformat flow (WARP-828)", () => {
 
     await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
     // WHOLE-disk name derived from /dev/sdb → "sdb" (already whole, no suffix).
+    // WARP-1337: the customer's displayName seeds the post-wipe FS label
+    // (sanitized to ^[A-Za-z0-9_-]{1,16}$) so the reformatted drive keeps its
+    // name instead of re-mounting on a GUID tail.
     expect(adoptDrive).toHaveBeenCalledWith(
-      expect.objectContaining({ device: "sdb", wipeMethod: "quick" }),
+      expect.objectContaining({ device: "sdb", wipeMethod: "quick", label: "Wedding_Photos" }),
     );
     await waitFor(() => expect(confirmStorageCommand).toHaveBeenCalledTimes(1));
     // The confirm MUST echo the service + resourceId from the minted token.
@@ -232,8 +235,54 @@ describe("DangerZoneSection — reformat flow (WARP-828)", () => {
     fireEvent.click(screen.getByRole("button", { name: /erase and reformat/i }));
 
     await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    // WARP-1337: no displayName → the existing FS label is preserved across
+    // the reformat.
     expect(adoptDrive).toHaveBeenCalledWith(
-      expect.objectContaining({ device: "nvme0n1" }),
+      expect.objectContaining({ device: "nvme0n1", label: "VAULT" }),
+    );
+  });
+
+  // Code review (WARP-1337): the host script mounts at /mnt/droplet/<LABEL>
+  // with no busy-target guard — seeding a label a volume on ANOTHER disk
+  // already carries would stack the new mount over it (shadow mount). The
+  // reformat must suffix the colliding label; the drive's OWN label/mount
+  // (erased by the wipe) must not count as a collision — the whole-disk test
+  // above pins that side (VAULT reformats to plain "VAULT" over its own
+  // /mnt/droplet/vault mount).
+  it("suffixes the seeded label when a volume on another disk already carries it", async () => {
+    const base = feed();
+    base.drives.push({
+      device: "/dev/sdd1",
+      mount: "/mnt/droplet/Wedding_Photos",
+      label: "Wedding_Photos",
+      uuid: "U-CLASH",
+      size_bytes: 1_000_000_000_000,
+      used_bytes: 1e11,
+      free_bytes: 9e11,
+      mounted: true,
+      displayName: null,
+      removable: true,
+    });
+    fetchDrives.mockResolvedValue(base);
+    adoptDrive.mockResolvedValueOnce({
+      status: "confirmation_required",
+      confirmationToken: "tok-abc",
+      service: "drive_adopt",
+      resourceId: "sdb",
+    });
+    confirmStorageCommand.mockResolvedValueOnce({ ok: true });
+
+    render(<DangerZoneSection />);
+    const picker = await screen.findByLabelText(/choose a drive/i);
+    fireEvent.change(picker, { target: { value: "U-WED" } });
+    fireEvent.click(screen.getByRole("button", { name: /reformat this drive/i }));
+    const input = await screen.findByLabelText(/type .*to confirm/i);
+    fireEvent.change(input, { target: { value: "Wedding Photos" } });
+    fireEvent.click(screen.getByRole("button", { name: /erase and reformat/i }));
+
+    await waitFor(() => expect(adoptDrive).toHaveBeenCalledTimes(1));
+    expect(adoptDrive).toHaveBeenCalledWith(
+      expect.objectContaining({ device: "sdb", label: "Wedding_Phot_sdb" }),
     );
   });
 

@@ -175,6 +175,37 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.status).toBe(200);
       expect(ncMock.ncListFiles).toHaveBeenCalledWith(expect.any(String), "dev", "/");
     });
+
+    // WARP-938/WARP-1262 (security): the listing route resolves `path` through
+    // rootForSpace(), which rejects `..` traversal before it ever reaches
+    // ncListFiles/WebDAV. Lock that in for this route explicitly — the other
+    // GET /api/files/* routes each have their own coverage, but this one
+    // previously had none.
+    it.each([
+      "/Documents/../secret",
+      "/../escape",
+      "/a/b/../../c",
+      "../relative",
+      "/foo/..",
+    ])("rejects a traversal path (%s) with 400 instead of forwarding to WebDAV", async (badPath) => {
+      const res = await request(app)
+        .get("/api/files")
+        .query({ path: badPath });
+      expect(res.status).toBe(400);
+      expect(ncMock.ncListFiles).not.toHaveBeenCalled();
+    });
+
+    // Pre-encoded and raw (not via `.query({...})`, which would re-encode the
+    // literal `%` and defeat the point) so it decodes to a `..` segment
+    // exactly once, same as Express's query parser on a real request.
+    it.each([
+      "/api/files?path=%2e%2e%2Fescape",
+      "/api/files?path=..%2fescape",
+    ])("rejects an encoded traversal path (%s) with 400", async (url) => {
+      const res = await request(app).get(url);
+      expect(res.status).toBe(400);
+      expect(ncMock.ncListFiles).not.toHaveBeenCalled();
+    });
   });
 
   // ── Degrade-on-outage (Nextcloud down → 200 empty, not 500) ──

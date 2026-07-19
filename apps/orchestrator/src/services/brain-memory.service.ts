@@ -31,6 +31,8 @@ import type { PrismaClient, Prisma } from "@prisma/client";
 import pino from "pino";
 import archiver from "archiver";
 
+import { shredDocumentKey, shredDocumentKeys } from "./document-key.service.js";
+
 const logger = pino({ name: "brain-memory.service" });
 
 /**
@@ -296,6 +298,12 @@ export async function deleteItem(
     return false;
   }
   await prisma.fileContentChunk.deleteMany({ where: { brainItemId: itemId } });
+  // WARP-242 crypto-shred: destroy the item's DEK (all versions). This is
+  // what makes the deletion hold against restic snapshots — old pg_dumps
+  // still carry the dcv1 ciphertext, but with the wrapped DEK gone from the
+  // live DB (and the doc-KEK keyfile excluded from the backup set) the
+  // snapshots restore ciphertext that can never be decrypted off-box.
+  await shredDocumentKey(prisma, `brain:${itemId}`);
   await prisma.brainMemoryItem.delete({ where: { id: itemId } });
   await purgeItem(userId, itemId);
   return true;
@@ -310,9 +318,19 @@ export async function purgeUserData(
   prisma: PrismaClient,
   userId: string,
 ): Promise<{ items: number; chunks: number }> {
+  // WARP-242 crypto-shred: collect the item ids BEFORE deleting the rows so
+  // every per-document DEK (`brain:<itemId>`) can be destroyed with them.
+  const itemIds = await prisma.brainMemoryItem.findMany({
+    where: { userId },
+    select: { id: true },
+  });
   const chunkResult = await prisma.fileContentChunk.deleteMany({
     where: { userId, source: "brain" },
   });
+  await shredDocumentKeys(
+    prisma,
+    itemIds.map((i) => `brain:${i.id}`),
+  );
   const itemResult = await prisma.brainMemoryItem.deleteMany({
     where: { userId },
   });

@@ -83,6 +83,10 @@ vi.mock("../services/file-search.service.js", () => ({
     return searchByVectorSpy(...args);
   },
   listRecent: (...args: unknown[]) => listRecentSpy(...args),
+  // WARP-242: the recent route decrypts brain-chunk ciphertext before
+  // snippetting. These tests seed plaintext rows, so an identity
+  // passthrough preserves the pre-WARP-242 behaviour under test.
+  decryptChunkRows: async (_prisma: unknown, rows: unknown[]) => rows,
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
