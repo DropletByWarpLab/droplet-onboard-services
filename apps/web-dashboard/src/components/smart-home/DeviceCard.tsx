@@ -23,6 +23,7 @@ import { FanControls } from "./FanControls";
 import { LockControl } from "./LockControl";
 import { MediaControls } from "./MediaControls";
 import { CLUSTER, hasCluster } from "./clusters";
+import { displayName } from "./rooms-model";
 
 const CATEGORY_ICONS: Record<SmartHomeCategory, typeof Lightbulb> = {
   light: Lightbulb,
@@ -125,7 +126,10 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
         {/* Name + state + source */}
         <div className="flex-1 min-w-0">
           <p className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
-            {device.name}
+            {/* WARP-1396: show the household name (alias → product → Matter),
+                matching the detail panel — the card was still showing the raw
+                Matter product name after a rename. */}
+            {displayName(device)}
           </p>
           <div className="flex items-center gap-1.5 min-w-0">
             <span

@@ -4045,3 +4045,32 @@ model ErpAuditLog {
 
   @@index([connectionId, at])
 }
+
+/// WARP-1396 — device rooms (the household map). Rooms are a Droplet-LOCAL
+/// concept (orchestrator data, never Matter fabric state); room names feed the
+/// assistant's device-targeting vocabulary ("turn off the kitchen").
+model Room {
+  id        String        @id @default(cuid())
+  name      String
+  icon      String        @default("home")
+  sortOrder Int           @default(0)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  aliases   DeviceAlias[]
+}
+
+/// WARP-1396 — a device's household identity: a friendly (speakable) name and
+/// its room, keyed by the Matter nodeId. Deliberately NOT the Matter
+/// `nodeLabel` (bridged ecosystems fight over it); the alias is Droplet-local,
+/// which also makes it survive re-commissioning. A device belongs to zero or
+/// one room; deleting the room nulls the link (devices are never deleted with
+/// a room — brief §5.5).
+model DeviceAlias {
+  nodeId    String   @id
+  name      String?
+  roomId    String?
+  room      Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  updatedAt DateTime @updatedAt
+
+  @@index([roomId])
+}

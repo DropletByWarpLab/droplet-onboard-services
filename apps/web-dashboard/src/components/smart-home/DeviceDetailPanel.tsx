@@ -1,8 +1,8 @@
 "use client";
 
-import { useId } from "react";
-import { X } from "lucide-react";
-import type { MatterDevice } from "@/lib/types";
+import { useId, useState } from "react";
+import { X, Pencil, Check } from "lucide-react";
+import type { MatterDevice, Room } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { BrightnessSlider } from "./BrightnessSlider";
@@ -14,11 +14,24 @@ import { FanControls } from "./FanControls";
 import { LockControl } from "./LockControl";
 import { MediaControls } from "./MediaControls";
 import { CLUSTER, hasCluster } from "./clusters";
+import { RoomAssignRow } from "./RoomAssignRow";
+import { displayName } from "./rooms-model";
+import { useToast } from "@/components/Toast";
 
 interface DeviceDetailPanelProps {
   device: MatterDevice;
   onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
   onClose: () => void;
+  /** WARP-1396 — rooms + alias plumbing. Optional so existing callers/tests
+   *  that only exercise controls keep working. */
+  rooms?: Room[];
+  onSetAlias?: (
+    nodeId: string,
+    patch: { name?: string | null; roomId?: string | null },
+  ) => Promise<unknown>;
+  onCreateRoom?: (name: string, icon: string) => Promise<Room>;
+  /** Other devices' display names — for the §4.2 duplicate-name warning. */
+  takenNames?: string[];
 }
 
 // WARP-897: covers get real motion controls, not an onOff toggle a
@@ -36,6 +49,10 @@ export function DeviceDetailPanel({
   device,
   onCommand,
   onClose,
+  rooms,
+  onSetAlias,
+  onCreateRoom,
+  takenNames = [],
 }: DeviceDetailPanelProps) {
   const isOn = device.state === "on" || device.state === "playing";
   const isConnected = device.connectionState === "connected";
@@ -44,6 +61,37 @@ export function DeviceDetailPanel({
   const brightnessPct = brightness != null ? Math.round((brightness / 254) * 100) : undefined;
 
   const headingId = useId();
+
+  // WARP-1396 — rename flow. The visible title is the friendly alias, then the
+  // product name; editing writes the alias (never the Matter nodeLabel).
+  const shown = displayName(device);
+  const [editing, setEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(shown);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const canRename = !!onSetAlias;
+  const { toast } = useToast();
+
+  const trimmedDraft = nameDraft.trim();
+  const tooLong = trimmedDraft.length > 32;
+  // §4.2: duplicate names are allowed but warned (never blocked).
+  const isDuplicate =
+    trimmedDraft.length > 0 &&
+    trimmedDraft.toLowerCase() !== shown.toLowerCase() &&
+    takenNames.some((n) => n.toLowerCase() === trimmedDraft.toLowerCase());
+
+  async function saveName() {
+    if (!onSetAlias || tooLong) return;
+    const next = trimmedDraft;
+    setRenameError(null);
+    try {
+      // Empty → clear the alias (revert to the product name).
+      await onSetAlias(device.nodeId, { name: next.length ? next : null });
+      setEditing(false);
+      toast(next.length ? `Renamed to ${next}` : "Name cleared");
+    } catch {
+      setRenameError("That didn’t save — your name is still here. Try again.");
+    }
+  }
 
   function cmd(command: string, data?: Record<string, unknown>) {
     onCommand(device.nodeId, command, data);
@@ -54,23 +102,98 @@ export function DeviceDetailPanel({
     // padding (WARP-1153).
     <Dialog open onClose={onClose} labelledBy={headingId} placement="right" flush>
       {/* Header */}
-      <div className="flex items-center justify-between p-5" style={{ borderBottom: "1px solid var(--card-bd)" }}>
-        <div>
-          <h2 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
-            {device.name}
-          </h2>
+      <div className="flex items-start justify-between p-5 gap-3" style={{ borderBottom: "1px solid var(--card-bd)" }}>
+        <div className="flex-1 min-w-0">
+          {editing ? (
+            <div className="flex items-center gap-2">
+              <input
+                autoFocus
+                aria-label="Device name"
+                value={nameDraft}
+                maxLength={32}
+                onChange={(e) => {
+                  setNameDraft(e.target.value);
+                  setRenameError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void saveName();
+                  if (e.key === "Escape") {
+                    setEditing(false);
+                    setNameDraft(shown);
+                  }
+                }}
+                className="type-title-3 flex-1 min-w-0 rounded-md px-2 py-0.5 bg-[var(--card-inner)]
+                  text-[var(--text)] border border-[var(--card-bd)]
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+              />
+              <button
+                type="button"
+                aria-label="Save name"
+                onClick={() => void saveName()}
+                className="p-1.5 rounded-md text-[var(--brand)] hover:bg-[var(--hover)]
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+              >
+                <Check size={18} />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <h2 id={headingId} className="type-title-3 truncate" style={{ color: "var(--text)" }}>
+                {shown}
+              </h2>
+              {canRename && (
+                <button
+                  type="button"
+                  aria-label="Rename device"
+                  onClick={() => {
+                    setNameDraft(shown);
+                    setEditing(true);
+                  }}
+                  className="p-1 rounded-md text-[var(--text-muted)] hover:bg-[var(--hover)] flex-none
+                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                >
+                  <Pencil size={15} />
+                </button>
+              )}
+            </div>
+          )}
           <p className="type-caption-1 capitalize" style={{ color: "var(--text-muted)" }}>
             {device.category.replace("_", " ")} &middot; {device.state}
           </p>
+          {renameError && (
+            <p role="status" className="type-footnote text-system-red mt-1">
+              {renameError}
+            </p>
+          )}
+          {editing && isDuplicate && !renameError && (
+            <p role="status" className="type-footnote mt-1" style={{ color: "var(--color-system-orange, #ff9500)" }}>
+              Another device is already called this — voice commands may ask you to pick.
+            </p>
+          )}
+          {editing && (
+            <p className="type-caption-1 mt-1" style={{ color: "var(--text-muted)" }}>
+              This is also the name you’ll use when you ask Droplet out loud.
+            </p>
+          )}
         </div>
         <button
           onClick={onClose}
           aria-label="Close"
-          className="p-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 text-[var(--text-muted)] hover:bg-[var(--hover)] focus-visible:ring-[var(--brand)]"
+          className="p-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 text-[var(--text-muted)] hover:bg-[var(--hover)] focus-visible:ring-[var(--brand)] flex-none"
         >
           <X size={20} />
         </button>
       </div>
+
+      {/* WARP-1396 — room assignment */}
+      {onSetAlias && rooms && (
+        <RoomAssignRow
+          device={device}
+          rooms={rooms}
+          onSetAlias={onSetAlias}
+          onCreateRoom={onCreateRoom}
+        />
+      )}
 
       {/* Controls */}
       <div className="p-5 space-y-6">
