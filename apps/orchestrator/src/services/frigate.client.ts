@@ -5,6 +5,8 @@
  * camera IPs and RTSP URLs are never exposed to external clients.
  */
 
+import { parseDocument, isMap, isScalar } from "yaml";
+
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -753,12 +755,52 @@ export async function disableRecording(cameraName: string): Promise<void> {
 
 // --- Config management ---
 
+/**
+ * Frigate's AUTHORED config (config.yml text), not the resolved runtime tree.
+ * Frigate 0.17 serves it JSON-string-encoded on /api/config/raw. The resolved
+ * /api/config carries computed-only fields (auth.roles reserved names,
+ * model.colormap, …) that /api/config/save rejects with a 400, so anything
+ * that saves a whole config must start from the authored YAML, which
+ * round-trips cleanly.
+ */
+async function fetchRawConfigYaml(): Promise<string> {
+  const resp = await fetch(`${FRIGATE_URL}/api/config/raw`, { signal: timeout() });
+  if (!resp.ok) throw new Error(`Fetch raw config: ${resp.status}`);
+  const text = await resp.text();
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "string") return parsed;
+  } catch {
+    /* already plain YAML */
+  }
+  return text;
+}
+
+/** Persist authored YAML and reload Frigate. text/plain so safe_load parses it. */
+async function saveRawConfig(yamlText: string): Promise<Response> {
+  return fetch(`${FRIGATE_URL}/api/config/save?save_option=restart`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: yamlText,
+    signal: timeout(30_000),
+  });
+}
+
 export async function deleteCamera(cameraName: string): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/config/cameras/${encodeURIComponent(cameraName)}`,
-    { method: "DELETE", signal: timeout() }
-  );
-  if (!resp.ok) throw new Error(`Delete camera: ${resp.status}`);
+  // DELETE /api/config/cameras/<name> is gone on Frigate 0.17 (404), and
+  // config/set only MERGES (it can't remove a key). Drop the camera from the
+  // authored YAML and save the whole thing back.
+  const doc = parseDocument(await fetchRawConfigYaml());
+  doc.deleteIn(["cameras", cameraName]);
+  const resp = await saveRawConfig(String(doc));
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => "");
+    logger.warn(
+      { status: resp.status, camera: cameraName, body: errBody.slice(0, 200) },
+      "Frigate config/save rejected while deleting camera",
+    );
+    throw new Error(`Delete camera: ${resp.status}`);
+  }
 }
 
 export async function addCamera(
@@ -767,78 +809,87 @@ export async function addCamera(
   detect = true
 ): Promise<boolean> {
   const safeName = name.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
-  const cameraConfig = {
-    cameras: {
-      [safeName]: {
-        ffmpeg: {
-          inputs: [{ path: rtspUrl, roles: ["detect", "record"] }],
-        },
-        detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
-        record: { enabled: true },
-        snapshots: { enabled: true },
-      },
-    },
-  };
 
+  // Frigate 0.17 replaced POST /api/config/set (405) with a PUT that takes a
+  // {config_data, requires_restart} envelope and deep-MERGES config_data into
+  // the running config — so we send only the new camera block and existing
+  // cameras are preserved. This is the same call the camera-discovery service
+  // uses to auto-adopt. requires_restart=1 persists to disk and reloads so the
+  // camera actually starts capturing.
   const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
-    method: "POST",
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cameraConfig),
-    signal: timeout(15_000),
+    body: JSON.stringify({
+      config_data: {
+        cameras: {
+          [safeName]: {
+            ffmpeg: { inputs: [{ path: rtspUrl, roles: ["detect", "record"] }] },
+            detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
+            record: { enabled: true },
+            snapshots: { enabled: true },
+          },
+        },
+      },
+      requires_restart: 1,
+    }),
+    signal: timeout(30_000),
   });
 
-  return resp.ok;
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => "");
+    logger.warn(
+      { status: resp.status, camera: safeName, body: errBody.slice(0, 200) },
+      "Frigate config/set rejected while adding camera",
+    );
+    return false;
+  }
+  // Frigate 0.17 always sets `success`; treat its absence as a response-shape
+  // change, not a silent success.
+  const body = (await resp.json().catch(() => ({}))) as { success?: boolean };
+  return body.success === true;
 }
 
 /**
  * Reconcile Frigate's `config.cameras` against the orchestrator DB (#11).
  * Frigate persists camera blocks in its own /config volume, which outlives a
  * Postgres wipe (factory-reset, version migration). The result is orphaned
- * camera entries — e.g. `camera_192_168_20_176` — that no DELETE /cameras/:name
- * can reach (the dashboard never lists a camera the DB doesn't know about).
+ * camera entries — e.g. `camera_192_168_20_176` — that the dashboard never
+ * lists (the DB doesn't know them) and no DELETE can reach.
  *
- * SET reconciliation: every Frigate camera whose name is NOT in `dbCameraNames`
- * is dropped; survivors keep their FULL existing block (ffmpeg inputs, detect,
- * zones, masks, per-camera settings). We do NOT rebuild survivors from the DB —
- * the Camera row doesn't persist the RTSP URL, so regenerating would destroy
- * working stream config. Replace-not-merge applies to the `cameras` MAP
- * (orphans removed), not to each camera's internals.
+ * Every Frigate camera whose name is NOT in `dbCameraNames` is dropped;
+ * survivors keep their FULL existing block (ffmpeg inputs, detect, zones,
+ * masks, per-camera settings) untouched. We do NOT rebuild survivors from the
+ * DB — the Camera row doesn't persist the RTSP URL, so regenerating would
+ * destroy working stream config.
  *
- * Reuses the verified full-config save path (POST /api/config/save?
- * save_option=restart, JSON-as-text/plain) that camera-settings.service already
- * uses against this Frigate version. A bare {cameras:{…}} body fails Frigate's
- * schema validation (it requires mqtt/detectors), so we read the full config,
- * swap only `cameras`, and write the whole thing back. No-op fast path when
- * there are no orphans (skips the camera-dropping restart). Returns the names
- * removed.
+ * Works off the AUTHORED YAML (fetchRawConfigYaml), the same round-trip
+ * deleteCamera uses: the resolved /api/config isn't save-round-trippable on
+ * Frigate 0.17, and DELETE /api/config/cameras/<name> is a 404. No-op fast
+ * path when there are no orphans (skips the camera-dropping restart). Returns
+ * the names removed.
  */
 export async function syncCamerasFromDb(
   dbCameraNames: string[],
 ): Promise<string[]> {
   const wanted = new Set(dbCameraNames);
-  const fullConfig = (await fetchConfig()) as Record<string, unknown>;
-  const cameras = (fullConfig.cameras ?? {}) as Record<string, unknown>;
+  const doc = parseDocument(await fetchRawConfigYaml());
 
-  const removed = Object.keys(cameras).filter((name) => !wanted.has(name));
+  const camerasNode = doc.getIn(["cameras"]);
+  const current: string[] = [];
+  if (isMap(camerasNode)) {
+    for (const item of camerasNode.items) {
+      const key = item.key;
+      current.push(isScalar(key) ? String(key.value) : String(key));
+    }
+  }
+
+  const removed = current.filter((name) => !wanted.has(name));
   if (removed.length === 0) {
     return [];
   }
+  for (const name of removed) doc.deleteIn(["cameras", name]);
 
-  const pruned: Record<string, unknown> = {};
-  for (const [name, block] of Object.entries(cameras)) {
-    if (wanted.has(name)) pruned[name] = block;
-  }
-  fullConfig.cameras = pruned;
-
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/config/save?save_option=restart`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify(fullConfig),
-      signal: timeout(30_000),
-    },
-  );
+  const resp = await saveRawConfig(String(doc));
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
