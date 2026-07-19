@@ -15,6 +15,7 @@ import {
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
+import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
@@ -155,6 +156,11 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+
+        {/* Features (WARP-1368) — operator toggles for the WARP-1306 runtime
+            modules (registry: orchestrator module-registry.ts). Self-gates to
+            owner/admin like the cards below. */}
+        <FeaturesCard />
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
