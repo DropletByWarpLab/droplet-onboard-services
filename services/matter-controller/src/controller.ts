@@ -668,9 +668,16 @@ export function createMatterControllerCore(
       // 1000 here previously turned a 5000ms scan into a 5ms one that found
       // nothing.
       const timeout = timeoutMs as Duration;
+      // WARP-1362 sibling: an omitted discoveryCapabilities defaults
+      // matter.js's collectScanners() to mDNS-only, so the BLE scanner
+      // never runs even with the transport registered (see commission()).
+      const discoveryCapabilities = {
+        onIpNetwork: true,
+        ...(options.bleCommissioning ? { ble: true } : {}),
+      };
       const devices = await ctl.discoverCommissionableDevices(
         {} as any, // Empty identifier = discover all
-        undefined,
+        discoveryCapabilities,
         undefined,
         timeout,
       );

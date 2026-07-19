@@ -416,6 +416,33 @@ describe("createMatterControllerCore", () => {
         ble: true,
       });
     });
+
+    // Sibling of the commission() fix above: discover() backs GET /discover
+    // (the "scan for nearby devices" list), and hit the identical bug — an
+    // omitted discoveryCapabilities defaults matter.js's collectScanners()
+    // to mDNS-only, so a freshly-reset BLE-first device never appears.
+    it("discover() always scans the IP network, and NOT BLE when the transport is absent", async () => {
+      await core.discover(5000);
+      expect(controller.discoverCommissionableDevices).toHaveBeenCalledWith(
+        expect.anything(),
+        { onIpNetwork: true },
+        undefined,
+        5000,
+      );
+    });
+
+    it("discover() adds the BLE scanner when BLE is registered", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.discover(5000);
+      expect(ctl.discoverCommissionableDevices).toHaveBeenCalledWith(
+        expect.anything(),
+        { onIpNetwork: true, ble: true },
+        undefined,
+        5000,
+      );
+    });
   });
 
   describe("decommission", () => {
@@ -786,7 +813,7 @@ describe("createMatterControllerCore", () => {
       // raw 5000, not 5 (which would expire the scan in ~5ms).
       expect(discover).toHaveBeenCalledWith(
         expect.anything(),
-        undefined,
+        { onIpNetwork: true },
         undefined,
         5000,
       );
