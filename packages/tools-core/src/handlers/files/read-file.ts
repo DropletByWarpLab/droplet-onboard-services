@@ -49,10 +49,19 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // at the tool boundary. read tools aren't in WRITE_TOOLS, so a
   // low-privilege role (family/guest) can reach them.
   if (!ctx.userId || !ctx.ncToken) {
+    // The message is surfaced verbatim to the chat model, which relays it
+    // to the user — say how to RECOVER, not just that auth is missing.
+    // Sessions minted without a password (passkey/SSO), or whose stored
+    // Nextcloud credential was lost (cache restart) or revoked (logout
+    // elsewhere), can only be re-provisioned by a password sign-in.
     return {
       ok: false,
       status: "error",
-      error: { code: "AUTH_REQUIRED", message: "auth_required" },
+      error: {
+        code: "AUTH_REQUIRED",
+        message:
+          "File access isn't connected for this session. Ask the user to sign out of the Droplet dashboard and sign back in with their password — that reconnects file access and file tools will work again.",
+      },
     };
   }
   const v = validateNcPath(args.path);

@@ -39,6 +39,10 @@ describe("read_file", () => {
     const r = await readFile.handler({ path: "/notes/x.txt" }, ctxWith(get, { ncToken: "" }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AUTH_REQUIRED");
+    // The message is the model's only recovery signal: it must say HOW to
+    // fix the state (password re-login re-provisions the file credential),
+    // not read as a permissions refusal the model apologizes for.
+    if (!r.ok) expect(r.error.message).toContain("sign back in with their password");
     expect(get).not.toHaveBeenCalled();
   });
 
