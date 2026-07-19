@@ -307,6 +307,38 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
+  # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
+  # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged
+  # XVF3800 DSP. Vendored + checksum-verified (scripts/host/xvf/) so DSP recovery
+  # survives a reflash instead of being wiped with /tmp. xvf_host resolves its
+  # dlopen'd libs binary-adjacent, so the libs are co-located with the binary;
+  # /usr/local/bin is bind-mounted read-only into voice-io at /host/usr-local-bin,
+  # so this one install serves BOTH the host watchdog and the container endpoint.
+  local xvf_src
+  case "$(uname -m)" in
+    x86_64) xvf_src="$host_src/xvf/linux_x86_64" ;;
+    *)      xvf_src="" ;;
+  esac
+  if [ -z "$xvf_src" ] || [ ! -f "$xvf_src/xvf_host" ]; then
+    log_warn "xvf_host: no vendored payload for arch $(uname -m) — XVF3800 DSP self-heal unavailable"
+  elif ! ( cd "$xvf_src" && sha256sum -c SHA256SUMS ) >/dev/null 2>&1; then
+    # Never install an unverified control binary. Loud but non-fatal: the box
+    # still boots and the voice_dsp check reports the missing tool honestly.
+    log_error "xvf_host: SHA256 verification FAILED in $xvf_src — refusing to install (DSP self-heal unavailable)"
+  else
+    sudo install -m 0755 "$xvf_src/xvf_host" /usr/local/bin/xvf_host
+    sudo install -m 0644 \
+      "$xvf_src/libcommand_map.so" "$xvf_src/libdevice_usb.so" \
+      "$xvf_src/transport_config.yaml" "$xvf_src/dfu_cmds.yaml" \
+      /usr/local/bin/
+    if [ -x /usr/local/bin/xvf_host ]; then
+      log_success "Installed xvf_host + libs to /usr/local/bin (XVF3800 DSP self-heal survives reflash)"
+    else
+      log_error "xvf_host: install ran but /usr/local/bin/xvf_host is not executable"
+    fi
+  fi
+
   # --- WARP-268 egress-audit collector -------------------------------------
   sudo install -d -m 0755 /usr/local/lib/droplet-egress-audit
   sudo install -m 0644 "$REPO_ROOT/services/egress-audit/"*.py \
