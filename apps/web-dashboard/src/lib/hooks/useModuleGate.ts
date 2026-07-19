@@ -19,8 +19,10 @@ import { authFetch } from "../auth";
  * (never hide a nav entry we can't classify).
  *
  * Self-contained (no dependency on the Features-panel api helpers) but shares
- * the `/api/modules` SWR key with them, so the Features toggle revalidating
- * that key updates the nav within one refetch — no reload.
+ * the `/api/modules` SWR key with them: when the Features toggle lands (the
+ * WARP-1368 branch mutates this exact key), the nav updates immediately.
+ * Standalone (without that mutate) the nav refreshes on the next focus /
+ * navigation revalidation, or the poll interval at worst — never a reload.
  */
 
 const MODULES_KEY = "/api/modules";
@@ -56,9 +58,12 @@ export function isModuleEffective(
 
 export function useModuleGate(): (moduleId: string) => boolean {
   const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, {
-    // Module state changes only when the owner reconfigures the box; the
-    // Features toggle revalidates this key explicitly for the live update.
-    refreshInterval: 600_000,
+    // Module state changes only when the owner reconfigures the box. The
+    // Features toggle revalidates this key explicitly for the instant update;
+    // revalidateOnFocus + a modest poll are the standalone safety net so the
+    // nav can't lag long without that mutate.
+    refreshInterval: 120_000,
+    revalidateOnFocus: true,
     shouldRetryOnError: false,
   });
 

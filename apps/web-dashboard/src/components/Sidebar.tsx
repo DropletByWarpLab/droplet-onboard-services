@@ -74,6 +74,10 @@ type NavItem = {
    * entry (no dead, module-gated 404). The gate fails open, so an entry only
    * disappears on a positive "off". Core modules (chat) are never tagged.
    * The id must match the orchestrator module-registry id.
+   *
+   * Applies to TOP-LEVEL items only (visibleItems filters the group items).
+   * Children ride their parent's visibility — to gate a sub-nav entry, gate
+   * its parent, not the child (a child `requiresModule` is currently a no-op).
    */
   requiresModule?:
     | "files"
@@ -394,16 +398,21 @@ export function Sidebar() {
     }))
     .filter((g) => g.items.length > 0);
 
-  // The four hrefs that survive into the bottom tab bar. Each looked up
-  // against the full nav so the icon + label match the desktop sidebar.
+  // The primary hrefs that survive into the bottom tab bar. WARP-1397: looked
+  // up against the GATED `renderedGroups`, NOT the raw NAV_GROUPS — otherwise a
+  // module-gated primary (/files, /devices) would still render a dead bottom
+  // tab on mobile while the desktop sidebar and "More" drawer correctly hide
+  // it (the exact dead-surface state this gate exists to remove). A primary
+  // whose module is off is dropped; the bar simply shows fewer tabs (the
+  // surface is genuinely gone), and everything non-primary stays in the
+  // drawer.
   const mobileTabs: NavItem[] = MOBILE_PRIMARY_HREFS.map((href) => {
-    for (const g of NAV_GROUPS) {
+    for (const g of renderedGroups) {
       const found = g.items.find((i) => i.href === href);
       if (found) return found;
     }
-    // This shouldn't happen — the constant is hand-curated against NAV_GROUPS.
-    return { href, label: href, icon: LayoutDashboard };
-  });
+    return null;
+  }).filter((x): x is NavItem => x !== null);
 
   return (
     <>
