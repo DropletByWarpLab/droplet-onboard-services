@@ -73,6 +73,87 @@ else
   fail "wg0 DNAT rules must come after the prerouting flush loop"
 fi
 
+# =============================================================================
+# WARP-1385 — HOST-level WireGuard overlay NAT (the direct-punch NAT path).
+#
+# wg0 lives INSIDE droplet-openwrt. Before WARP-1385 the host published
+# udp/51820 via docker-proxy (compose `51820:51820/udp`); docker-proxy owns the
+# host port and rewrites container egress with an EPHEMERAL host source port, so
+# the box's OUTBOUND wg mapping never matched the inbound path and hole-punching
+# failed (verified live on .87, 2026-06-10). The compose publish is removed and
+# replaced by two HOST nft rules: DNAT inbound udp/51820 -> the openwrt
+# container, and a source-port-PRESERVING masquerade on egress.
+#
+# These rules live in a DEDICATED nft table (`droplet_overlay_nat`), NEVER
+# Docker's `ip nat`, so they can't clobber Docker's NAT or the container-side
+# dashboard DNAT above.
+# =============================================================================
+
+# --- 5a. Inbound DNAT: udp/51820 on the uplink -> the openwrt container ------
+if grep -E "nft add rule ip droplet_overlay_nat prerouting .*udp dport 51820 dnat to" "$ATTACH" >/dev/null; then
+  pass "host DNAT: inbound udp/51820 -> openwrt container (dedicated overlay table)"
+else
+  fail "missing host DNAT for inbound WireGuard udp/51820 (inbound punch dies)"
+fi
+
+# --- 5b. The host DNAT carries the ip-daddr hijack guard --------------------
+# Same discipline as the wg0 dashboard DNAT (check 3): scope to the box's own
+# uplink IP so a stray udp/51820 seen on another host iface can't be hijacked.
+if grep -E "nft add rule ip droplet_overlay_nat prerouting .*ip daddr .*udp dport 51820 dnat to" "$ATTACH" >/dev/null; then
+  pass "host DNAT carries an ip-daddr hijack guard"
+else
+  fail "host DNAT for udp/51820 lacks the ip-daddr hijack guard"
+fi
+
+# --- 5c. Egress: source-port-PRESERVING masquerade --------------------------
+# This is the crux of the fix — container-sourced udp sport 51820 must egress
+# with source port 51820 preserved so the upstream NAT mapping matches inbound.
+if grep -E "nft add rule ip droplet_overlay_nat postrouting .*udp sport 51820 masquerade to :51820" "$ATTACH" >/dev/null; then
+  pass "host egress masquerade PRESERVES source port 51820 (the hole-punch mapping)"
+else
+  fail "missing source-port-preserving SNAT/masquerade for udp sport 51820"
+fi
+
+# --- 5d. The overlay rules never touch Docker's `ip nat` table --------------
+if ! grep -E "nft add rule ip nat (prerouting|postrouting) .*51820" "$ATTACH" >/dev/null; then
+  pass "WG overlay rules stay out of Docker's ip nat table (no regression)"
+else
+  fail "a udp/51820 rule leaked into Docker's ip nat table"
+fi
+
+# --- 5e. The overlay table is rebuilt each attach (survives re-attach) -------
+if grep -E "nft delete table ip droplet_overlay_nat" "$ATTACH" >/dev/null; then
+  pass "overlay NAT table is flushed + rebuilt on each attach (idempotent, re-IP-safe)"
+else
+  fail "overlay NAT table is not rebuilt on attach — rules go stale on container re-IP"
+fi
+
+# --- 5f. Container IP resolved with the validated GATEWAY_IP idiom -----------
+# The DNAT target must reject empty/0.0.0.0/multi-net-concat container IPs the
+# same way the GATEWAY_IP DNAT resolution does (a garbage target makes the whole
+# nft add fail). Assert the overlay container IP is only committed inside the
+# validated branch (`OVERLAY_OPENWRT_IP="$_owip"` guarded by the octet regex +
+# 0.0.0.0 reject).
+if grep -E 'OVERLAY_OPENWRT_IP="\$_owip"' "$ATTACH" >/dev/null && \
+   grep -E '"\$_owip" != "0\.0\.0\.0"' "$ATTACH" >/dev/null; then
+  pass "overlay container IP is committed only through the validated GATEWAY_IP idiom"
+else
+  fail "overlay container IP not validated with the GATEWAY_IP idiom"
+fi
+
+# =============================================================================
+# WARP-1385 — the compose port publish is REMOVED (docker-proxy must not own
+# host:51820, or the host nft rules above never see the packets and the
+# ephemeral-source-port masquerade returns).
+# =============================================================================
+for f in "docker/docker-compose.yml" "scripts/host/docker-compose.poc.yml"; do
+  if grep -E '^[[:space:]]*-[[:space:]]*"[^"]*51820/udp"' "$REPO_ROOT_REAL/$f" >/dev/null 2>&1; then
+    fail "$f still publishes udp/51820 via docker-proxy (breaks the punch)"
+  else
+    pass "$f no longer publishes udp/51820 via docker-proxy"
+  fi
+done
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
   echo "  ${FAILURES}/${TESTS} checks FAILED"

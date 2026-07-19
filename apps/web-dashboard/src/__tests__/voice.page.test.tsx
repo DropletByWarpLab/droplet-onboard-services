@@ -10,7 +10,8 @@
  *   3. drift banner: max one, with the Recalibrate action;
  *   4. health strip: failing card exposes exactly one inline action;
  *      collapses to one explanatory card when no mic;
- *   5. no dead-end affordances: no "Add a voice" (WARP-1056);
+ *   5. "Add a voice" renders but stays DISABLED until the profiles
+ *      wiring says the box can enroll (WARP-1056 §7.2);
  *   6. §7.4 cancel-safety: closing the wizard mid-flow writes nothing
  *      and toasts "Calibration canceled — previous settings kept."
  *   7. WARP-1057 — the wedged-processor card's "Restart processor"
@@ -251,7 +252,7 @@ describe("VoiceSurface hero states (WARP-1055)", () => {
 });
 
 describe("VoiceSurface sections (WARP-1055)", () => {
-  it("profiles: header, guest line + privacy caption verbatim, NO Add a voice", () => {
+  it("profiles: header, guest line + privacy caption verbatim; Add a voice gated", () => {
     renderSurface();
     expect(screen.getByText("Who Droplet recognizes")).toBeInTheDocument();
     expect(
@@ -264,8 +265,10 @@ describe("VoiceSurface sections (WARP-1055)", () => {
         "Voiceprints are stored and matched on this box. They never leave your network and are deleted instantly when removed.",
       ),
     ).toBeInTheDocument();
-    // Flow B is WARP-1056 — no dead-end affordance.
-    expect(screen.queryByText("Add a voice")).toBeNull();
+    // WARP-1056 wired Flow B — but without the profiles wiring
+    // (speakerModelAvailable defaults false) the entry point stays
+    // DISABLED: §7.2, never launch a wizard that cannot succeed.
+    expect(screen.getByRole("button", { name: "Add a voice" })).toBeDisabled();
   });
 
   it("recent activity (WARP-1058): §3.4 rows — mono time · person-or-Guest · what", () => {
@@ -451,6 +454,53 @@ describe("VoiceSurface processor restart (WARP-1057, §7.3)", () => {
         name: "Restart processor",
       }),
     ).toBeNull();
+  });
+});
+
+describe("VoiceSurface buttons use the indigo shell idiom (WARP-1345)", () => {
+  // The /voice surface renders inside ShellPage's `.droplet-shell` scope, so
+  // its buttons must use the shell `btn` classes — never the legacy
+  // `dp-btn-*` + `type-*` utilities (the shell class supplies sizing).
+
+  it("calibrated hero: Recalibrate is a quiet shell secondary", () => {
+    const { container } = renderSurface();
+    const recal = screen.getByRole("button", { name: "Recalibrate" });
+    expect(recal).toHaveClass("btn", "ghost");
+    expect(recal).not.toHaveClass("sm");
+    expect(recal.className).not.toMatch(/dp-btn|type-/);
+    expect(container.innerHTML).not.toContain("dp-btn");
+  });
+
+  it("first-run hero: Set up microphone is a shell primary", () => {
+    renderSurface({
+      calibration: { calibrated: false },
+      status: status({ last_wake_at: null, last_response_at: null }),
+    });
+    const cta = screen.getByRole("button", { name: "Set up microphone" });
+    expect(cta).toHaveClass("btn", "primary");
+    expect(cta).not.toHaveClass("sm");
+    expect(cta.className).not.toMatch(/dp-btn|type-/);
+  });
+
+  it("drift hero: Fix it is a shell primary; the banner action is compact", () => {
+    renderSurface({ noiseSustained: true });
+    const fixIt = screen.getByRole("button", { name: "Fix it" });
+    expect(fixIt).toHaveClass("btn", "primary");
+    expect(fixIt).not.toHaveClass("sm");
+    // The inline banner CTA stays a step below the hero CTA — `sm` variant,
+    // no hand-rolled `!min-h`/`!py` overrides.
+    const bannerRecal = screen.getByRole("button", { name: "Recalibrate" });
+    expect(bannerRecal).toHaveClass("btn", "primary", "sm");
+    expect(bannerRecal.className).not.toMatch(/dp-btn|type-|min-h|py-/);
+  });
+
+  it("no-mic hero: Check again is a shell primary", () => {
+    renderSurface({
+      status: status({ state: "no_mic", listening: false, last_wake_at: null }),
+    });
+    const check = screen.getByRole("button", { name: "Check again" });
+    expect(check).toHaveClass("btn", "primary");
+    expect(check.className).not.toMatch(/dp-btn|type-/);
   });
 });
 

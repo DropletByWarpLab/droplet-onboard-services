@@ -1,32 +1,34 @@
 /**
- * `/api/settings/workspace` — Home vs Business workspace selection.
+ * `/api/settings/workspace` — workspace settings (business-only build).
  *
- * Per ADR-007 + ADR-009, every Droplet has a workspace type that
- * gates which admin surfaces render in the dashboard (Roles matrix,
- * Groups, Sessions, full People, Plan/Billing — Business only).
+ * Per ADR-007 + ADR-009, the workspace type gates which admin surfaces
+ * render in the dashboard (Roles matrix, Groups, Sessions, full People,
+ * Plan/Billing). WARP-1341: this build ships business-only, so BUSINESS
+ * is the only accepted and only reported type — "home" on the wire is a
+ * 400, and the missing-row default is business.
  * The setting is a singleton row in `Workspace` (id = 1).
  *
  * Endpoints:
  *   GET  /api/settings/workspace
  *     → { workspaceType, displayName?, setBy?, setAt }
  *     Any authenticated user reads it (drives the chrome pill).
- *     If the row doesn't exist yet, returns the HOME default so the
+ *     If the row doesn't exist yet, returns the BUSINESS default so the
  *     dashboard's WorkspaceProvider can render before the setup
  *     wizard has run.
  *
  *   POST /api/settings/workspace
- *     Body: { workspaceType: "home"|"business", displayName?: string }
+ *     Body: { workspaceType: "business", displayName?: string }
  *     → { workspaceType, displayName?, setBy, setAt }
- *     Owner-only. Records who flipped it + when so we have an audit
- *     trail. Idempotent — setting Home when already Home is a no-op
- *     200, not a 400.
+ *     Owner-only. Records who set it + when so we have an audit
+ *     trail. Idempotent — re-posting "business" is a no-op 200,
+ *     not a 400.
  *
- * Phase 4b (separate PR off the wizard branch) adds a wizard step
- * that calls POST once at first-run. This route is the orchestrator
- * half; the dashboard half lives in
- * `apps/web-dashboard/src/lib/workspace.tsx` which hydrates from GET
- * and falls back to localStorage on 404 (so Docker-dev stacks
- * without this route still work).
+ * The setup wizard's org step calls POST once at first-run to pin the
+ * singleton to BUSINESS. This route is the orchestrator half; the
+ * dashboard half in `apps/web-dashboard/src/lib/workspace.tsx` is now a
+ * static business-only context (WARP-1341) — it no longer hydrates the
+ * type from GET or falls back to localStorage. GET/POST here remain the
+ * audit + display-name surface (the chrome pill reads `displayName`).
  */
 
 import { Router, type Request } from "express";
@@ -62,19 +64,21 @@ function getUsername(req: Request): string | null {
 }
 
 /** Wire-shape WorkspaceType — lowercase string for the dashboard's
- *  `useWorkspace()` hook. Prisma's enum is uppercase. */
-function toWireType(t: WorkspaceType): "home" | "business" {
-  return t === WorkspaceType.BUSINESS ? "business" : "home";
+ *  `useWorkspace()` hook. Prisma's enum is uppercase. WARP-1341: a
+ *  pre-migration HOME row (should not exist after the data migration)
+ *  is still reported as "business" — the wire contract has one value. */
+function toWireType(_t: WorkspaceType): "business" {
+  return "business";
 }
 
 function fromWireType(s: string): WorkspaceType | null {
-  if (s === "home") return WorkspaceType.HOME;
   if (s === "business") return WorkspaceType.BUSINESS;
   return null;
 }
 
 const postBodySchema = z.object({
-  workspaceType: z.enum(["home", "business"]),
+  // WARP-1341: business-only — "home" is rejected as invalid_body.
+  workspaceType: z.enum(["business"]),
   displayName: z.string().min(1).max(120).optional(),
 });
 
@@ -89,13 +93,13 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         return;
       }
       // Singleton — id = 1. findUnique returns null if the wizard
-      // hasn't run yet; the HOME default ships in that case so the
-      // dashboard chrome can paint before any user has a chance to
-      // pick.
+      // hasn't run yet; the BUSINESS default ships in that case so the
+      // dashboard chrome can paint before the wizard has written the
+      // row (WARP-1341: business is the only mode).
       const row = await prisma.workspace.findUnique({ where: { id: 1 } });
       if (!row) {
         res.json({
-          workspaceType: "home",
+          workspaceType: "business",
           displayName: null,
           setBy: null,
           setAt: null,

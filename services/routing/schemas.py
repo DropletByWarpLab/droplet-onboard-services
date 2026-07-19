@@ -485,6 +485,48 @@ class VpnPeerCreateRequest(BaseModel):
         return v
 
 
+class VpnOverlayPeerRequest(BaseModel):
+    """WARP-1385 — install/refresh a DIRECT-PUNCH overlay peer (ADR-030).
+
+    Unlike VpnPeerCreateRequest (which generates the keypair server-side and
+    returns the private key), an overlay peer brings its OWN key: the phone was
+    enrolled with HQ, so the box installs the phone's public key with the
+    phone's observed `endpoint` + a keepalive so WireGuard's own initiations
+    punch outbound. Idempotent: re-installing the same public_key replaces the
+    prior section (refresh), so a re-connect just updates the endpoint."""
+
+    interface: str = Field(default="wg0", pattern=_WG_IFACE_PATTERN)
+    public_key: str = Field(
+        ..., pattern=_WG_KEY_PATTERN,
+        description="Phone's WireGuard public key, base64-encoded (43 chars + '=').",
+    )
+    # The phone's observed public mapping (STUN reflexive) as IPv4:port. IPv6 is
+    # tracked as a follow-up caveat in ADR-030's client stories.
+    endpoint: str = Field(
+        ...,
+        pattern=r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d):(?:[1-9]\d{0,4})$",
+        description="Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'.",
+    )
+    allowed_ips: list[str] = Field(
+        ..., min_length=1, max_length=8,
+        description="CIDRs that route to this peer (typically one /32).",
+    )
+    persistent_keepalive: int = Field(
+        default=25, ge=1, le=600,
+        description="Seconds between keepalives — the box side of the punch.",
+    )
+    description: str = Field(default="", max_length=128)
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def _validate_allowed_ips(cls, v: list[str]) -> list[str]:
+        cidr_re = re.compile(_CIDR_PATTERN)
+        for item in v:
+            if not cidr_re.fullmatch(item):
+                raise ValueError(f"invalid CIDR: {item!r}")
+        return v
+
+
 class VpnPeerDeleteRequest(BaseModel):
     """Remove all peer sections matching `public_key` from `interface`."""
 

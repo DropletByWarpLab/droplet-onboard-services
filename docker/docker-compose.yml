@@ -368,6 +368,14 @@ services:
       # would let this container mint arbitrary service identities.
       # (Single-file bind: setup.sh materializes audit.key before compose up.)
       - ../data/secrets/audit.key:/data/secrets/audit.key:ro
+      # WARP-242: doc-KEK master keyfile — wraps the per-document DEKs that
+      # encrypt brain chunks (decrypt-on-read lives in file-search.service /
+      # the chat attachment-context builder). Deliberately a keyfile and NOT
+      # an .env value: .env travels inside restic snapshots, the keyfile is
+      # excluded from the backup set (droplet-backup.sh) so crypto-shredding
+      # a DEK holds against restored backups. Single-file bind, same
+      # rationale as audit.key above. TPM-sealing is WARP-1033.
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
       # WARP-235/236: this service's own TLS bundle (cert+key+CA, CN =
       # "orchestrator") from the internal CA. The MQTT clients present it on
       # mqtts:// brokers; the DROPLET_TLS_* defaults point here.
@@ -525,6 +533,10 @@ services:
     volumes:
       # WARP-234/236: internal-TLS bundle — redis-tls.ts reads ca.pem.
       - ../data/secrets/service-tls/mcp-server:/data/service-tls:ro
+      # WARP-242: doc-KEK master keyfile — the standalone mcp-server
+      # decrypts encrypted brain chunks in its search_content results
+      # (see the orchestrator service's mount comment for the full story).
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
     restart: unless-stopped
     <<: *default-logging
     env_file:
@@ -976,6 +988,10 @@ services:
       # WARP-235: this service's own TLS bundle (CN = "file-indexer") for the
       # mqtts:// broker connection — identity is the cert CN, no password.
       - ../data/secrets/service-tls/file-indexer:/data/service-tls:ro
+      # WARP-242: doc-KEK master keyfile — the indexer mints each brain
+      # item's DEK at first chunk-write and encrypts chunk text before it
+      # lands in pgvector (see the orchestrator service's mount comment).
+      - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
     env_file:
       - path: ../.env
         required: false
@@ -1205,6 +1221,7 @@ services:
       # bare MATTER_* name is one stray env_file away from matter.js's
       # auto-import minefield. single-box.sh sets SSID + an operator PSK.
       - DROPLET_MATTER_WIFI_SSID=${DROPLET_MATTER_WIFI_SSID:-}
+      - DROPLET_MATTER_WIFI_SSID_FILE=${DROPLET_MATTER_WIFI_SSID_FILE:-}
       - DROPLET_MATTER_WIFI_PSK=${DROPLET_MATTER_WIFI_PSK:-}
       - DROPLET_MATTER_WIFI_PSK_FILE=${DROPLET_MATTER_WIFI_PSK_FILE:-}
       - DROPLET_MATTER_REGULATORY_COUNTRY=${DROPLET_MATTER_REGULATORY_COUNTRY:-XX}
@@ -1593,7 +1610,9 @@ services:
     # applied mic calibration (voice/calibration.py, mounted at /data)
     # survives container restarts/recreates; factory-reset's volume sweep
     # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
-    # behaviour.
+    # behaviour. WARP-1056 — per-person voiceprints live on the same
+    # volume (/data/voiceprints, voice/speaker_id.py), so the sweep also
+    # deletes every voiceprint on reset.
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
@@ -2129,8 +2148,16 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+    # WARP-1385: the customer-facing WireGuard listener (udp/51820) is NO LONGER
+    # published here via docker-proxy. docker-proxy owns host:51820 and
+    # masquerades the container's OUTBOUND wg packets with an EPHEMERAL host
+    # source port, so the box's egress mapping never matches the inbound path and
+    # the direct-punch overlay (ADR-030) can't hole-punch (verified live on .87,
+    # 2026-06-10). The listener is now wired at the HOST layer by
+    # scripts/host/usr-local-sbin/droplet-openwrt-attach: a DNAT of inbound
+    # udp/51820 into this container plus a source-port-PRESERVING masquerade on
+    # egress. Only the host-only ubus port stays published.
     ports:
-      - "${WIREGUARD_PORT:-51820}:51820/udp"  # WireGuard listen (customer-facing)
       - "127.0.0.1:8181:80"                   # uhttpd / ubus, host-only —
                                               # routing service reaches it
                                               # via 127.0.0.1:8181 (Phase L).
@@ -2278,8 +2305,19 @@ services:
       - DROPLET_FIRMWARE_VERSION=${DROPLET_FIRMWARE_VERSION:-}
       - DROPLET_TIER=${DROPLET_TIER:-home}
       - DROPLET_HOSTNAME=${DROPLET_HOSTNAME:-}
+      # WARP-1025: signed update-poll (ADR-028 mount). Its OWN opt-in,
+      # default OFF; verification fails closed on the placeholder trust
+      # anchor until the key ceremony (scripts/README.md). Empty
+      # RELEASES_URL falls back to the canonical publisher in config.py.
+      - DROPLET_UPDATE_POLL_ENABLED=${DROPLET_UPDATE_POLL_ENABLED:-0}
+      - DROPLET_OTA_RELEASES_URL=${DROPLET_OTA_RELEASES_URL:-}
+      - DROPLET_OTA_GITHUB_TOKEN=${DROPLET_OTA_GITHUB_TOKEN:-}
+      - DROPLET_UPDATE_POLL_SEC=${DROPLET_UPDATE_POLL_SEC:-300}
+      - DROPLET_UPDATE_CHANNEL=${DROPLET_UPDATE_CHANNEL:-stable}
+      - DROPLET_CUSTOMER=${DROPLET_CUSTOMER:-}
     volumes:
-      # Ingest token + bounded heartbeat spool. Runtime-only, never tracked.
+      # Ingest token + bounded heartbeat spool + verified update-candidate
+      # record. Runtime-only, never tracked.
       - fleet-agent-state:/var/lib/droplet/fleet-agent
     profiles: ["telemetry"]
     restart: unless-stopped
@@ -2331,6 +2369,10 @@ volumes:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.
+  # WARP-1056 — the same volume (mounted at /data) also holds the
+  # per-person voiceprints (/data/voiceprints/<user>.json, biometric-
+  # adjacent, on-box only); the factory-reset sweep wiping it IS the
+  # "reset ⇒ every voiceprint deleted" guarantee.
   voice-calibration:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:

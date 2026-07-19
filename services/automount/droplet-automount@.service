@@ -16,10 +16,22 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/droplet-automount.sh add   /dev/%I
 ExecStop=/usr/local/bin/droplet-automount.sh remove /dev/%I
-TimeoutStartSec=30
+# WARP-1361: the md add path is hot on every boot and can legitimately spend
+# ~10 s in the assembly settle loop, wait on the per-device lock while the
+# reconcile-spawned add finishes, and run the occ registration. The old 30 s
+# killed the oneshot mid-add on large pools — the fs stayed mounted but
+# state_add/registration were skipped and the unit failed every boot.
+TimeoutStartSec=300
 TimeoutStopSec=30
 # Pass known-good PATH so docker/blkid/mount are found when run from udev.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# WARP-1338: provisioning's Nextcloud-registration opt-in
+# (NEXTCLOUD_AUTO_REGISTER=1 + NEXTCLOUD_CONTAINER). `-` so a box that
+# predates the installer still automounts. This file feeds a ROOT unit, so
+# install.sh keeps it root:root 0644 — NEVER droplet-writable (a
+# droplet-writable EnvironmentFile on a root unit is the WARP-843 LPE; see
+# tests/openwrt-attach-env-invariant.test.sh).
+EnvironmentFile=-/etc/droplet/automount.env
 
 [Install]
 WantedBy=multi-user.target

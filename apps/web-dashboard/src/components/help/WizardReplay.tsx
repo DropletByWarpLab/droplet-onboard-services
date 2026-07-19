@@ -100,8 +100,8 @@ export function WizardReplay({
             title="Remote access is end-to-end encrypted"
             body={
               remoteFqdn
-                ? `Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off your home Wi-Fi, you open the very same address you use at home — ${remoteFqdn} — with a green padlock and nothing to install on each device.`
-                : "Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off your home Wi-Fi, you reach the dashboard over that tunnel using the address you set up."
+                ? `Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off the office Wi-Fi, you open the very same address you use at the office — ${remoteFqdn} — with a green padlock and nothing to install on each device.`
+                : "Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off the office Wi-Fi, you reach the dashboard over that tunnel using the address you set up."
             }
           />
         </div>

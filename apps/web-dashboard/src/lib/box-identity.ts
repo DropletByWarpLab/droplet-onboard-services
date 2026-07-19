@@ -41,3 +41,32 @@ export function boxDisplayHost(hostname: string | null | undefined): string {
   if (!h || CONTAINER_ID_RE.test(h)) return LAN_FALLBACK_HOST;
   return h;
 }
+
+/**
+ * WARP-1342 — the address shown in dashboard chrome (ShellPage status chip,
+ * Home header).
+ *
+ * `boxDisplayHost` alone strands already-deployed boxes on `droplet.local`
+ * whenever the Device row / DROPLET_PUBLIC_FQDN env chain misses (stale row,
+ * failed write-back, env injected after boot) — even though the issued
+ * ADR-023 per-device FQDN (`<name>.droplet-us.com`, the one address that
+ * works over the VPN tunnel) is already persisted in `TlsCert` and served by
+ * the public `GET /api/tls/status`.
+ *
+ * Resolution order:
+ *   1. The registered hostname, when it resolves to something better than
+ *      the LAN fallback — an owner-chosen box name (WARP-979) always wins.
+ *   2. The issued FQDN from /api/tls/status, when the hostname resolved to
+ *      the LAN fallback.
+ *   3. `droplet.local` — pre-issuance, or while the status fetch is in
+ *      flight.
+ */
+export function resolveBoxAddress(
+  hostname: string | null | undefined,
+  issuedFqdn: string | null | undefined,
+): string {
+  const named = boxDisplayHost(hostname);
+  if (named !== LAN_FALLBACK_HOST) return named;
+  const fqdn = (issuedFqdn ?? "").trim();
+  return fqdn || LAN_FALLBACK_HOST;
+}
