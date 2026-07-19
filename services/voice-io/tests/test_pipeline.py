@@ -2490,6 +2490,93 @@ def _quiet_pipe(**kwargs) -> WakePipeline:
     return pipe
 
 
+class TestDspAutoRecovery:
+    """WARP-1409 — bounded in-app auto-recovery of a wedged XVF3800 DSP."""
+
+    def _wedged_pipe(self, restart, **kwargs) -> WakePipeline:
+        # Parked 'listening', flatlines almost immediately, with the
+        # injected heal and (by default) a cooldown-free policy so each
+        # tick re-attempts.
+        kwargs.setdefault("dsp_recovery_cooldown_s", 0.0)
+        pipe = _quiet_pipe(flatline_window_s=0.01, dsp_restart=restart, **kwargs)
+        pipe._on_frame(_silence_frame())  # baseline frame starts the clock
+        time.sleep(0.03)                  # elapse the flatline window
+        assert pipe.status().input_flatlined is True
+        return pipe
+
+    def test_no_restart_callback_is_a_noop(self):
+        pipe = _quiet_pipe(flatline_window_s=0.01)
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.03)
+        assert pipe.status().input_flatlined is True
+        pipe._maybe_auto_recover_dsp()  # dsp_restart is None → no action
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault == "flatlined"
+
+    def test_wedge_triggers_one_restart(self):
+        calls = []
+        pipe = self._wedged_pipe(lambda: calls.append(1))
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.mic_fault == "wedged_restarting"
+        assert s.dsp_last_restart_at is not None
+
+    def test_cooldown_suppresses_back_to_back_restart(self):
+        calls = []
+        pipe = self._wedged_pipe(
+            lambda: calls.append(1), dsp_recovery_cooldown_s=3600.0,
+        )
+        pipe._maybe_auto_recover_dsp()  # attempt 1
+        pipe._maybe_auto_recover_dsp()  # inside cooldown → skipped
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+
+    def test_bounded_attempts_then_escalates(self):
+        calls = []
+        pipe = self._wedged_pipe(
+            lambda: calls.append(1), dsp_recovery_max_attempts=2,
+        )
+        pipe._maybe_auto_recover_dsp()  # attempt 1
+        pipe._maybe_auto_recover_dsp()  # attempt 2
+        pipe._maybe_auto_recover_dsp()  # cap reached → escalate, no call
+        assert len(calls) == 2
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 2
+        assert s.mic_fault == "wedged_escalated"
+        pipe._maybe_auto_recover_dsp()  # stays escalated, still no call
+        assert len(calls) == 2
+
+    def test_failing_restart_still_counts_and_escalates(self):
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("xvf_host missing")
+
+        pipe = self._wedged_pipe(boom, dsp_recovery_max_attempts=1)
+        pipe._maybe_auto_recover_dsp()  # attempt 1 (exception caught)
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+        pipe._maybe_auto_recover_dsp()  # cap → escalate
+        assert pipe.status().mic_fault == "wedged_escalated"
+
+    def test_recovery_resets_the_machine(self):
+        calls = []
+        pipe = self._wedged_pipe(lambda: calls.append(1))
+        pipe._maybe_auto_recover_dsp()
+        assert pipe.status().dsp_restart_attempts == 1
+        # Real audio returns → no longer flatlined.
+        pipe._on_frame(_audio_frame(1000))
+        assert pipe.status().input_flatlined is False
+        pipe._maybe_auto_recover_dsp()  # recovery edge → reset to nominal
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault is None
+
+
 class TestInputLevelTracking:
     def test_no_frames_yet_reports_none(self):
         pipe = _quiet_pipe()
