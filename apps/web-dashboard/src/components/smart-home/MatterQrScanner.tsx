@@ -255,82 +255,26 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
 
   // --- Render ---
 
+  // WARP-1411: the camera viewport only exists while the camera is actually
+  // live. Reserving an aspect-square box up front cost ~670px of empty black
+  // on a desktop column and pushed the pairing-code field — the ONLY path
+  // that works on a machine with no camera — below the fold.
+  const cameraOpen =
+    status === "starting" || status === "scanning" || status === "decoded";
+
   return (
     <div className="space-y-4">
-      {/* Camera viewport — black box that lights up once permission grants */}
-      <div
-        className="relative aspect-square rounded-xl overflow-hidden"
-        style={{ background: "var(--inset)", border: "1px solid var(--card-bd)" }}
-      >
-        <video
-          ref={videoRef}
-          className="w-full h-full object-cover"
-          // playsInline keeps iOS Safari from going fullscreen on .play()
-          playsInline
-          muted
-          aria-label="QR code camera viewport"
-        />
-
-        {/* Viewfinder overlay (corner brackets) only visible while scanning */}
-        {status === "scanning" && (
-          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            <div
-              className="w-3/5 aspect-square border-2 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
-              style={{ borderColor: "color-mix(in srgb, var(--brand) 60%, transparent)" }}
-            />
-          </div>
-        )}
-
-        {/* Status overlays for non-scanning states */}
-        {status === "idle" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
-            <Camera size={32} aria-hidden="true" />
-            <p className="type-subheadline">Tap to scan a Matter device QR code</p>
-            <button onClick={startCamera} disabled={disabled} className="btn primary">
-              Start camera
-            </button>
-          </div>
-        )}
-
-        {status === "starting" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[var(--text-muted)]">
-            <Loader2 size={28} className="animate-spin" aria-hidden="true" />
-            <p className="type-footnote">Waiting for camera permission…</p>
-          </div>
-        )}
-
-        {(status === "denied" || status === "no-camera" || status === "error") && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[var(--text-muted)] px-6 text-center">
-            <CameraOff size={32} aria-hidden="true" />
-            <p className="type-footnote">{errorMsg}</p>
-          </div>
-        )}
-
-        {status === "decoded" && (
-          <div
-            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-system-green"
-            style={{ background: "var(--scrim)" }}
-          >
-            <Loader2 size={28} className="animate-spin" aria-hidden="true" />
-            <p className="type-callout font-medium">QR detected — commissioning…</p>
-          </div>
-        )}
-      </div>
-
-      {/* Manual fallback. Always shown so users with no camera (desktop
-          ops console, headless setup) have a path. */}
+      {/* Primary path: the pairing code. Leads because the dashboard is
+          opened on a laptop at least as often as a phone, and every Matter
+          device prints the code next to the QR. */}
       <div className="space-y-2">
         <label
           htmlFor="matter-manual-code"
           className="flex items-center gap-2 type-subheadline font-medium text-[var(--text)]"
         >
           <KeyRound size={14} aria-hidden="true" />
-          Or enter the pairing code
+          Enter the pairing code
         </label>
-        <p className="type-footnote text-[var(--text-muted)]">
-          Look on the device, packaging, or quick-start guide. The code is 11 or
-          21 digits, sometimes shown with hyphens (e.g. 3497-0112-3320).
-        </p>
         <div className="flex gap-2">
           <input
             id="matter-manual-code"
@@ -355,15 +299,22 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
             Commission
           </button>
         </div>
+        <p id="matter-manual-help" className="type-footnote text-[var(--text-muted)]">
+          11 or 21 digits, on the device or its packaging — hyphens are fine.
+        </p>
 
         {/* Camera-error OR format-validation hint. Both flow through the
             same `errorMsg` state — camera failures are surfaced as
             graceful-degrade copy ("use the pairing code below"), QR
             and manual-code rejections are surfaced as actionable copy
-            ("look for MT:…", "11 or 21 digits"). */}
-        {errorMsg && (status === "denied" || status === "no-camera" || status === "scanning" || status === "idle") && (
+            ("look for MT:…", "11 or 21 digits").
+            WARP-1411: rendered whenever errorMsg is set. The old status
+            allow-list omitted "insecure", so the http:// pre-flight message
+            was set but never displayed — clicking Start camera on a plain
+            http:// origin appeared to do nothing at all. */}
+        {errorMsg && (
           <div
-            id="matter-manual-help"
+            role="status"
             className="flex items-start gap-2 type-footnote text-[var(--text-muted)]"
           >
             <AlertCircle size={12} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
@@ -371,6 +322,86 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
           </div>
         )}
       </div>
+
+      {/* Secondary path: the camera, on demand. */}
+      {!cameraOpen ? (
+        <button
+          onClick={startCamera}
+          disabled={disabled}
+          className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg type-subheadline
+            text-[var(--text-muted)] hover:bg-[var(--hover)] disabled:opacity-40
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+          style={{ border: "1px solid var(--card-bd)" }}
+        >
+          {status === "denied" || status === "no-camera" || status === "error" ? (
+            <>
+              <CameraOff size={15} aria-hidden="true" /> Try the camera again
+            </>
+          ) : (
+            <>
+              <Camera size={15} aria-hidden="true" /> Scan the QR code instead
+            </>
+          )}
+        </button>
+      ) : (
+        <div className="space-y-2">
+          {/* Capped so the viewport never dominates a wide column — a
+              384px square reads as a scanner, a 672px one reads as a void. */}
+          <div
+            className="relative w-full max-w-sm mx-auto aspect-square rounded-xl overflow-hidden"
+            style={{ background: "var(--inset)", border: "1px solid var(--card-bd)" }}
+          >
+            <video
+              ref={videoRef}
+              className="w-full h-full object-cover"
+              // playsInline keeps iOS Safari from going fullscreen on .play()
+              playsInline
+              muted
+              aria-label="QR code camera viewport"
+            />
+
+            {/* Viewfinder overlay (corner brackets) only visible while scanning */}
+            {status === "scanning" && (
+              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                <div
+                  className="w-3/5 aspect-square border-2 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+                  style={{ borderColor: "color-mix(in srgb, var(--brand) 60%, transparent)" }}
+                />
+              </div>
+            )}
+
+            {status === "starting" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[var(--text-muted)]">
+                <Loader2 size={28} className="animate-spin" aria-hidden="true" />
+                <p className="type-footnote">Waiting for camera permission…</p>
+              </div>
+            )}
+
+            {status === "decoded" && (
+              <div
+                className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-system-green"
+                style={{ background: "var(--scrim)" }}
+              >
+                <Loader2 size={28} className="animate-spin" aria-hidden="true" />
+                <p className="type-callout font-medium">QR detected — commissioning…</p>
+              </div>
+            )}
+          </div>
+
+          {status === "scanning" && (
+            <button
+              onClick={() => {
+                stopCamera();
+                setStatus("idle");
+              }}
+              className="block mx-auto type-footnote text-[var(--text-muted)] hover:text-[var(--text)]
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded"
+            >
+              Stop camera
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -44,7 +44,7 @@ const MatterQrScanner = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="dp-card flex items-center justify-center min-h-[280px] type-footnote text-label-secondary">
+      <div className="card flex items-center justify-center py-8 type-footnote text-[var(--text-muted)]">
         Loading scanner…
       </div>
     ),
@@ -122,33 +122,24 @@ export default function AddMatterDevicePage() {
 
   return (
     <div className="max-w-2xl mx-auto px-6 py-8">
-      {/* Header w/ back link to /devices */}
-      <div className="mb-6">
+      {/* Header w/ back link to /devices. WARP-1411: one line of lead copy,
+          not three stacked paragraphs — the network detail moved under the
+          card, where it's still findable but no longer costs above-the-fold
+          space the pairing field needs. */}
+      <div className="mb-5">
         <Link
           href="/devices"
-          className="inline-flex items-center gap-1 type-footnote text-label-secondary hover:text-label-primary"
+          className="inline-flex items-center gap-1 type-footnote text-[var(--text-muted)] hover:text-[var(--text)]"
         >
           <ArrowLeft size={14} aria-hidden="true" />
           Back to devices
         </Link>
-        <h1 className="type-largeTitle font-bold text-label-primary mt-2">
+        <h1 className="type-title-2 font-bold text-[var(--text)] mt-2">
           Add a smart device
         </h1>
-        <p className="type-subheadline text-label-secondary mt-1">
-          Scan the QR code on the device's packaging or label. Most plugs,
-          lights, and switches that say{" "}
-          <em>“Works with Matter”</em> on the box will work.
-        </p>
-        {/* WARP-1035: pre-flight network expectations. The user's phone/
-            computer network was never the constraint (commissioning is
-            box-side); say which network actually matters, naming the
-            real AP SSID — and only promise the Droplet-Wi-Fi handoff
-            when the capability says it works. */}
-        <p className="type-footnote text-label-secondary mt-2">
-          {"Your phone or computer just needs to reach this dashboard — the Droplet does the pairing. " +
-            (bleWifiPairing
-              ? `New devices pair over Bluetooth and join the Droplet's own Wi-Fi (“${caps?.apSsid ?? "Droplet"}”); devices already on your Wi-Fi are added in place.`
-              : "Devices already on your Wi-Fi are added in place.")}
+        <p className="type-subheadline text-[var(--text-muted)] mt-1">
+          Anything that says <em>“Works with Matter”</em> — plugs, lights,
+          switches.
         </p>
       </div>
 
@@ -171,10 +162,23 @@ export default function AddMatterDevicePage() {
               className="mb-4"
             />
           )}
-          <MatterQrScanner
-            onResult={handleCode}
-            disabled={state.phase !== "scan"}
-          />
+          <div className="card p-5">
+            <MatterQrScanner
+              onResult={handleCode}
+              disabled={state.phase !== "scan"}
+            />
+          </div>
+          {/* WARP-1035: pre-flight network expectations, demoted below the
+              card (WARP-1411). The user's phone/computer network was never
+              the constraint — commissioning is box-side — so name the network
+              that actually matters, and only promise the Droplet-Wi-Fi
+              handoff when the capability says it works. */}
+          <p className="type-footnote text-[var(--text-muted)] mt-3">
+            {"The Droplet does the pairing — this device just needs to reach the dashboard. " +
+              (bleWifiPairing
+                ? `New devices pair over Bluetooth and join the Droplet's own Wi-Fi (“${caps?.apSsid ?? "Droplet"}”); devices already on your Wi-Fi are added in place.`
+                : "Devices already on your Wi-Fi are added in place.")}
+          </p>
         </>
       )}
 
@@ -253,17 +257,17 @@ function CommissioningProgress({
   const phase = commissioningPhaseCopy(elapsedS, bleWifiPairing);
 
   return (
-    <div className="bg-fill-quaternary border border-separator-default rounded-xl p-8 text-center space-y-4">
+    <div className="card p-6 text-center space-y-3">
       <Loader2
         size={32}
-        className="mx-auto text-system-blue animate-spin"
+        className="mx-auto text-[var(--brand)] animate-spin"
         aria-hidden="true"
       />
-      <p className="type-callout font-medium text-label-primary">{phase}</p>
-      <p className="type-footnote text-label-secondary">
+      <p className="type-callout font-medium text-[var(--text)]">{phase}</p>
+      <p className="type-footnote text-[var(--text-muted)]">
         Don't unplug the device. This usually takes 10–30 seconds.
       </p>
-      <p className="type-caption2 text-label-tertiary font-mono">
+      <p className="type-caption-1 text-[var(--text-muted)] font-mono">
         {elapsedS}s elapsed
       </p>
     </div>
@@ -280,36 +284,36 @@ function CommissioningSuccess({
   onGoToDevices: () => void;
 }) {
   return (
-    <div className="bg-fill-quaternary border border-separator-default rounded-xl p-8 text-center space-y-5">
+    <div className="card p-6 text-center space-y-4">
       <CheckCircle2
         size={48}
         className="mx-auto text-system-green"
         aria-hidden="true"
       />
       <div>
-        <h2 className="type-title2 font-bold text-label-primary">
+        <h2 className="type-title-3 font-bold text-[var(--text)]">
           Device added
         </h2>
-        <p className="type-subheadline text-label-secondary mt-2">
+        <p className="type-subheadline text-[var(--text-muted)] mt-2">
           Your new Matter device is ready. You can control it from the dashboard
           or by asking the assistant —{" "}
           <em>“turn it off”</em>.
         </p>
-        <p className="type-caption2 text-label-tertiary mt-3 font-mono">
+        <p className="type-caption-1 text-[var(--text-muted)] mt-3 font-mono">
           node {nodeId}
         </p>
       </div>
       <div className="flex justify-center gap-3 pt-2">
         <button
           onClick={onAddAnother}
-          className="px-4 py-2 bg-fill-tertiary border border-separator-default rounded-lg type-callout text-label-primary hover:bg-fill-secondary"
+          className="btn"
         >
           <Lightbulb size={14} className="inline -mt-0.5 mr-1" aria-hidden="true" />
           Add another
         </button>
         <button
           onClick={onGoToDevices}
-          className="px-4 py-2 bg-system-blue text-white rounded-lg type-callout font-medium hover:bg-system-blue/90"
+          className="btn primary"
         >
           Go to devices
         </button>
