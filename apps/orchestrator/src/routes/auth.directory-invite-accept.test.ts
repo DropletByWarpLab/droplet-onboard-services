@@ -556,3 +556,42 @@ describe("WARP-1051 — invite-accept session role matches the canonical invite 
     expect(sessionJwt(accept).role).toBe("guest");
   });
 });
+
+describe("invite-accept auto-login provisions the Nextcloud session token", () => {
+  // The accept handler auto-logs the invitee in ("same shape as
+  // /api/auth/login") and it holds the plaintext password it just gave
+  // ncCreateUser — so it must ALSO seed the per-user NC app-password the
+  // way /auth/login does. Without this, the invitee's first session has no
+  // Redis-stored NC credential: every file tool the AI chat dispatches
+  // (read_file, list_files, ...) returns AUTH_REQUIRED and the Files app
+  // 401s until they log out and back in.
+  it("mints an NC app-password with the chosen password and stores it under the local UUID", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), { ...INVITE });
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(accept.status).toBe(200);
+    const acceptedUserId = accept.body.user.id as string;
+
+    expect(nc.ncLoginWithCredentials).toHaveBeenCalledWith("alice", INVITE_PASSWORD);
+    // Keyed by the local User.id UUID (WARP-485), same TTL as /auth/login.
+    expect(storeNcToken).toHaveBeenCalledWith(acceptedUserId, "nc-app-password", 604800);
+  });
+
+  it("still accepts (200, session minted) when NC session provisioning fails — fail-open like /auth/login", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), { ...INVITE });
+
+    (nc.ncLoginWithCredentials as any).mockRejectedValueOnce(new Error("nextcloud is down"));
+
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+    expect(sessionJwt(accept).username).toBe("alice");
+    expect(storeNcToken).not.toHaveBeenCalled();
+  });
+});

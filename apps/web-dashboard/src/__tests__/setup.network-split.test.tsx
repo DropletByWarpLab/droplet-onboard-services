@@ -2,7 +2,7 @@
  * Onboarding-Flow redesign — the network split's INTEGRATION contract.
  *
  * The old single `internet` step was split into two ordered client-only steps,
- * `wifi` (Home Wi-Fi the box broadcasts) then `address` (the DuckDNS web
+ * `wifi` (the Wi-Fi the box broadcasts) then `address` (the DuckDNS web
  * address). This file used to be `setup.internet.test.tsx` and exercised the
  * single combined step in-flow; the per-component behaviour (validation, the
  * WARP-807/808/809 ladders, field shapes) now lives in
@@ -10,7 +10,7 @@
  *
  * What ONLY the page-level wiring can prove — and so what this file keeps — is
  * that the split is threaded into the state machine correctly:
- *   1. after `twofactor` the wizard lands on WifiStep ("Set up your home Wi-Fi");
+ *   1. after `twofactor` the wizard lands on WifiStep ("Set up your Wi-Fi");
  *   2. advancing the Wi-Fi step (Continue/skip) lands on AddressStep ("Give your
  *      box a web address", with the `.duckdns.org` suffix visible);
  *   3. advancing/skipping the address step lands on `storage` (→ discovery);
@@ -202,8 +202,8 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     render(<SetupPage />);
     await advanceToWifi();
 
-    // First sub-step: Home Wi-Fi (component behaviour covered in WifiStep.test).
-    expect(screen.getByText(/set up your home wi-fi/i)).toBeInTheDocument();
+    // First sub-step: Wi-Fi (component behaviour covered in WifiStep.test).
+    expect(screen.getByText(/set up your wi-fi/i)).toBeInTheDocument();
     // Its skip uses the redesign's dedicated label, not "Skip for now".
     expect(
       screen.getByRole("button", { name: /skip — i'll do this later/i }),

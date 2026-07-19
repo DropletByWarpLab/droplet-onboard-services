@@ -182,7 +182,7 @@ export default function DevicesPage() {
                   <span className="ei">
                     <Wifi size={24} />
                   </span>
-                  <span className="eh">No smart home devices yet</span>
+                  <span className="eh">No smart devices yet</span>
                   <span>
                     Scan a Matter QR code to add your first device. Most plugs, lights, and switches
                     that say <em>“Works with Matter”</em> on the box will work.

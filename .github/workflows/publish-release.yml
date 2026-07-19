@@ -155,6 +155,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ matrix.sysdeps }}
 
+      # WARP-1025: fleet-agent's release_verify/update_poll suites exec the
+      # REAL cosign binary over the WARP-537 golden fixtures (mirrors
+      # ci.yml's python matrix and fleet-agent-tests.yml).
+      - name: Install cosign (fleet-agent release_verify suite)
+        if: matrix.service == 'fleet-agent'
+        uses: sigstore/cosign-installer@v3
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:

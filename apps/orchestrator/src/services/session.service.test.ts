@@ -41,6 +41,7 @@ import {
   createSession,
   checkSession,
   deleteSession,
+  countLiveSessions,
   revokeAllSessions,
   idleLimitSecondsForRole,
   SESSION_KEY_PREFIX,
@@ -314,5 +315,46 @@ describe("deleteSession / revokeAllSessions", () => {
     // a live record instead, so the denylist sweep must NOT run here (it would
     // kill the kept session's refresh token).
     expect(revokeUserSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe("countLiveSessions", () => {
+  // Logout uses this to decide whether the per-user NC app-password can be
+  // revoked (only when the LAST live session ends — the credential is a
+  // single per-user Redis slot shared by every device).
+  it("returns 0 for a user with no sessions", async () => {
+    expect(await countLiveSessions("u-alice")).toBe(0);
+  });
+
+  it("counts live records and reflects deleteSession", async () => {
+    const s1 = await createSession(alice);
+    advanceSeconds(1);
+    const s2 = await createSession(alice);
+    expect(await countLiveSessions("u-alice")).toBe(2);
+
+    await deleteSession("u-alice", s1.sid);
+    expect(await countLiveSessions("u-alice")).toBe(1);
+
+    await deleteSession("u-alice", s2.sid);
+    expect(await countLiveSessions("u-alice")).toBe(0);
+  });
+
+  it("does not count another user's sessions", async () => {
+    await createSession(alice);
+    expect(await countLiveSessions(owner.id)).toBe(0);
+  });
+
+  it("skips and prunes index members whose record expired (GC'd)", async () => {
+    const s1 = await createSession(alice);
+    // Simulate the record dying (TTL GC) while the index member lingers.
+    fake.kv.delete(SESSION_KEY_PREFIX + s1.sid);
+    expect(await countLiveSessions("u-alice")).toBe(0);
+    // The stale member was pruned from the index on the way through.
+    expect(fake.zsets.get(SESSION_INDEX_PREFIX + "u-alice")?.has(s1.sid)).toBe(false);
+  });
+
+  it("returns null when Redis is unreachable (caller picks the failure posture)", async () => {
+    fake.zrange.mockRejectedValueOnce(new Error("connection refused"));
+    expect(await countLiveSessions("u-alice")).toBe(null);
   });
 });

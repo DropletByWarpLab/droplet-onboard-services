@@ -704,6 +704,10 @@ configure_single_box_env() {
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
 #   OLLAMA_URL           compose-internal `ollama` service
+#   RAGAS_OLLAMA_URL     rag-eval judge → the same in-network ollama (/v1);
+#                        the compose host.docker.internal default is
+#                        unreachable here (bundled ollama publishes
+#                        loopback-only on the host)
 #   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
 #   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
@@ -764,6 +768,13 @@ EOF
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
   upsert_env OLLAMA_URL          http://ollama:11434
+  # RAGAS judge → the same in-network `ollama` service. The compose default
+  # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
+  # but the bundled single-box container publishes only 127.0.0.1:11434 on
+  # the host — a loopback bind is unreachable from the bridge-gateway IP on
+  # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
+  # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
+  upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
   upsert_env DROPLET_TPM_BACKEND mock
@@ -883,6 +894,12 @@ EOF
   # persists an operator override INTO this file anyway, so file and env
   # can't diverge on a healthy box.
   upsert_env DROPLET_MATTER_WIFI_PSK_FILE /etc/droplet/ap-psk
+  # WARP-1363: same file-first pattern for the SSID. The env SSID above is
+  # written once at setup and goes stale on an AP rename (claim / wizard
+  # Wi-Fi save) — droplet-openwrt-attach persists the LIVE SSID to
+  # /etc/droplet/ap-ssid on every attach, and the sidecar re-reads it per
+  # commission, so a renamed AP can never strand Matter commissioning.
+  upsert_env DROPLET_MATTER_WIFI_SSID_FILE /etc/droplet/ap-ssid
   # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
   # as the three host services above: the orchestrator's config default is
   # http://host.docker.internal:9090 (docker0), exactly the default WARP-806
@@ -891,5 +908,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

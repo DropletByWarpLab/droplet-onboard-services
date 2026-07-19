@@ -11,19 +11,14 @@ Scheduling: apscheduler interval jobs only (architecture-guard rule 9);
 the long-poll's own wait happens inside one bounded HTTP request, not a
 loop.
 
-# ----------------------------------------------------------------------
-# Update poll — INTENTIONALLY NOT IMPLEMENTED in v1 (WARP-963 scope cut).
-#
-# FLEET_MANAGEMENT_DESIGN.md gives the agent a third duty: poll for a
-# signed release manifest and self-update the compose stack. That half
-# is NOT built here yet: WARP-538 tracks the orchestrator-side update
-# poller — the box already has an owner for "what version should I be
-# on". WARP-961 resolved the unification decision (2026-07-03,
-# docs/ADR-028-fleet-telemetry-and-design-answers.md, Accepted): the
-# poller mounts HERE as one more apscheduler job (signed-manifest poll,
-# WARP-537 verification), NOT as a separate service — tracked by
-# WARP-1025.
-# ----------------------------------------------------------------------
+Update poll (WARP-1025): the stub that used to mark this spot is now the
+real mount, per the ratified ADR-028 / WARP-961 decision — the signed
+release-manifest poll (update_poll.py, WARP-537 trust chain in
+release_verify.py) runs HERE as one more apscheduler job, not as a
+second agent process. It is observe/record-only (no apply, no control
+channel) and carries its OWN opt-in gate (`update_gate`), independent of
+the telemetry gate: the two halves are separate operator consents and
+either can run without the other.
 """
 
 from __future__ import annotations
@@ -41,6 +36,7 @@ from errors import ErrorReporter
 from portal import PortalClient
 from spool import DiskSpool
 from state import StateStore
+from update_poll import UpdatePoller
 
 logger = logging.getLogger("fleet_agent")
 
@@ -82,12 +78,14 @@ class FleetAgent:
         portal: PortalClient,
         collector,
         errors: Optional[ErrorReporter] = None,
+        updates: Optional[UpdatePoller] = None,
     ) -> None:
         self.config = config
         self.state = state
         self.portal = portal
         self.collector = collector
         self.errors = errors or ErrorReporter()
+        self.updates = updates
         self.spool = DiskSpool(state.spool_path, config.spool_max)
         self._register_permanently_failed = False
         # Serializes registration: while it is pending, the 5s/15s/30s
@@ -122,6 +120,20 @@ class FleetAgent:
                 "telemetry enabled but no credentials present: neither a "
                 "persisted identity nor DROPLET_TELEMETRY_PROVISIONING_CODE",
             )
+        return True, ""
+
+    def update_gate(self) -> tuple[bool, str]:
+        """WARP-1025 — the update-poll's own opt-in, independent of the
+        telemetry gate (different consents: checking for signed releases
+        vs sharing telemetry). Both default OFF (ADR-012 default-deny)."""
+        if not self.config.update_poll_enabled:
+            return (
+                False,
+                "update-poll disabled: DROPLET_UPDATE_POLL_ENABLED is not 1 "
+                "(explicit operator opt-in required)",
+            )
+        if self.updates is None:
+            return False, "update-poll enabled but no poller is wired"
         return True, ""
 
     # ------------------------------------------------------------------
@@ -310,6 +322,16 @@ class FleetAgent:
                 },
             )
 
+    @_fail_open
+    async def update_poll_tick(self) -> None:
+        """WARP-1025 — the signed update-poll (ADR-028 mount). Everything
+        expected is a typed outcome inside the poller; anything unexpected
+        is swallowed by `_fail_open`. Either way the box is never touched:
+        the poll observes, records, and reports — nothing else."""
+        if self.updates is None:
+            return
+        await self.updates.poll_once()
+
     # ------------------------------------------------------------------
     # Scheduler wiring
     # ------------------------------------------------------------------
@@ -321,8 +343,37 @@ class FleetAgent:
         return fallback
 
     def build_scheduler(self) -> AsyncIOScheduler:
+        """Mount only the halves whose gates are open: the six telemetry
+        jobs (WARP-963) behind `gate()`, the update-poll job (WARP-1025)
+        behind `update_gate()`. A closed gate mounts nothing — a disabled
+        half has zero egress AND zero disk churn."""
         scheduler = AsyncIOScheduler()
-        jobs = (
+        jobs: list[tuple] = []
+        telemetry_active, _ = self.gate()
+        if telemetry_active:
+            jobs.extend(self._telemetry_jobs())
+        update_active, _ = self.update_gate()
+        if update_active:
+            jobs.append(
+                (
+                    "warp-1025-update-poll",
+                    self.update_poll_tick,
+                    self.config.update_poll_interval_s,
+                )
+            )
+        for job_id, fn, seconds in jobs:
+            scheduler.add_job(
+                fn,
+                "interval",
+                seconds=seconds,
+                id=job_id,
+                max_instances=1,
+                coalesce=True,
+            )
+        return scheduler
+
+    def _telemetry_jobs(self) -> tuple:
+        return (
             (
                 "warp-963-heartbeat",
                 self.heartbeat_tick,
@@ -359,13 +410,3 @@ class FleetAgent:
                 ),
             ),
         )
-        for job_id, fn, seconds in jobs:
-            scheduler.add_job(
-                fn,
-                "interval",
-                seconds=seconds,
-                id=job_id,
-                max_instances=1,
-                coalesce=True,
-            )
-        return scheduler

@@ -97,8 +97,10 @@ export default function ContextPage() {
     );
   }
 
-  // Zero-files onboarding.
-  if (full.files === 0) {
+  // Zero-context onboarding — only when BOTH pipelines are empty. A box
+  // can hold serving chunks without countable file rows (WARP-1394);
+  // "context is empty" over a live index is the lie this gate removes.
+  if (full.files === 0 && full.chunks === 0) {
     return (
       <ShellPage icon={icon} label="Context" title="Context" sub={SUB}>
         <EmptyState />

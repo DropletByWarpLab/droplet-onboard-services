@@ -24,7 +24,69 @@ import { createHash } from "node:crypto";
 
 import type { PrismaClient } from "@prisma/client";
 
+import { decryptColumn, isEncryptedColumn } from "./column-crypto.service.js";
+import { getDeksByIds } from "./document-key.service.js";
+
 export type FileContentSource = "nextcloud" | "brain";
+
+/** Snippet width shared by the SQL LEFT() arm and the post-decrypt truncate. */
+export const CHUNK_SNIPPET_CHARS = 280;
+
+/**
+ * WARP-242 — snippet projection that survives encryption-at-rest. Brain
+ * chunks (sensitivity=sensitive) hold a dcv1 AES-256-GCM blob in `text`;
+ * truncating ciphertext destroys it, so encrypted rows are selected whole
+ * and re-truncated app-side after decrypt-on-read. Plaintext rows keep the
+ * cheap LEFT() snippet. Mirrors the orchestrator's file-search.service.ts.
+ */
+const SNIPPET_SQL = `CASE WHEN "sensitivity" = 'sensitive' THEN text ELSE LEFT(text, ${CHUNK_SNIPPET_CHARS}) END AS snippet`;
+
+/**
+ * WARP-242 — decrypt-on-read for retrieval hits (DEKs keyed
+ * `brain:<brainItemId>`). Rows whose ciphertext cannot be read (DEK
+ * crypto-shredded — e.g. a restored backup carrying chunks for a deleted
+ * document — or an authentication failure) are DROPPED with a warn log:
+ * surfacing base64 garbage to the LLM would be worse than one fewer hit.
+ */
+async function decryptSnippets(
+  prisma: PrismaClient,
+  rows: SearchHit[],
+): Promise<SearchHit[]> {
+  const encrypted = rows.filter((r) => isEncryptedColumn(r.snippet));
+  if (encrypted.length === 0) return rows;
+  const keyIds = [
+    ...new Set(
+      encrypted.flatMap((r) => (r.brainItemId ? [`brain:${r.brainItemId}`] : [])),
+    ),
+  ];
+  const deks = await getDeksByIds(prisma, keyIds);
+  const out: SearchHit[] = [];
+  for (const r of rows) {
+    if (!isEncryptedColumn(r.snippet)) {
+      out.push(r);
+      continue;
+    }
+    const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
+    const dek = keyId ? deks.get(keyId) : undefined;
+    if (!dek) {
+      console.warn("chunk.unreadable.dek_missing", { path: r.path, keyId });
+      continue;
+    }
+    try {
+      out.push({
+        ...r,
+        snippet: decryptColumn(dek, r.snippet, keyId!).slice(0, CHUNK_SNIPPET_CHARS),
+      });
+    } catch (e) {
+      console.warn("chunk.unreadable.decrypt_failed", {
+        path: r.path,
+        keyId,
+        error: String(e),
+      });
+    }
+  }
+  return out;
+}
 
 /**
  * Defense-in-depth guard for the ONE string-interpolated fragment in these
@@ -152,7 +214,7 @@ export async function searchByVector(
            "chunkIdx",
            "pageNumber",
            "brainItemId",
-           LEFT(text, 280) AS snippet,
+           ${SNIPPET_SQL},
            metadata,
            1 - (embedding <=> '${vec}'::vector) AS score
     FROM "FileContentChunk"
@@ -166,7 +228,7 @@ export async function searchByVector(
     }
   ).$queryRawUnsafe(sql, ...args);
 
-  return rows
+  const hits = rows
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
     .map((r) => ({
       source: r.source,
@@ -178,6 +240,9 @@ export async function searchByVector(
       snippet: r.snippet,
       metadata: r.metadata ?? null,
     }));
+  // WARP-242: decrypt-on-read BEFORE fusion/rerank so every downstream
+  // consumer (RRF, cross-encoder passages, LLM tool result) sees plaintext.
+  return decryptSnippets(prisma, hits);
 }
 
 export interface SearchByLexicalParams {
@@ -229,7 +294,7 @@ export async function searchByLexical(
 
   const sql = `SELECT
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
-       LEFT(text, 280) AS snippet,
+       ${SNIPPET_SQL},
        ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
      FROM "FileContentChunk"
      WHERE ${where.join(" AND ")}
@@ -240,7 +305,7 @@ export async function searchByLexical(
       $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
     }
   ).$queryRawUnsafe(sql, ...args);
-  return rows.map((r) => ({
+  const hits = rows.map((r) => ({
     source: r.source,
     path: r.path,
     chunkIdx: r.chunkIdx,
@@ -250,6 +315,10 @@ export async function searchByLexical(
     snippet: r.snippet,
     metadata: r.metadata ?? null,
   }));
+  // WARP-242: encrypted chunks have a NULL text_tsv (generated column) so
+  // they can't match this arm — the decrypt pass is defensive parity with
+  // searchByVector, not a hot path.
+  return decryptSnippets(prisma, hits);
 }
 
 /** Canonical RRF constant from Cormack et al. 2009. */

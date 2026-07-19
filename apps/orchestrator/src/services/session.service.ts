@@ -301,6 +301,33 @@ export async function deleteSession(userId: string, sid: string): Promise<void> 
 }
 
 /**
+ * Count this user's LIVE session records — index members whose record key
+ * still exists; stale members (record TTL'd out) are pruned on the way
+ * through, same idiom as createSession's eviction sweep. Logout uses this
+ * to decide whether the per-user Nextcloud app-password can be revoked
+ * (only when the LAST live session ends — the credential is one shared
+ * Redis slot, not per-device). Returns null when Redis is unreachable so
+ * the caller picks its own failure posture.
+ */
+export async function countLiveSessions(userId: string): Promise<number | null> {
+  const idxKey = SESSION_INDEX_PREFIX + userId;
+  try {
+    const redis = getRedis();
+    const members = await redis.zrange(idxKey, 0, -1);
+    let live = 0;
+    for (const member of members) {
+      const exists = await redis.exists(SESSION_KEY_PREFIX + member);
+      if (exists) live += 1;
+      else await redis.zrem(idxKey, member);
+    }
+    return live;
+  } catch (err) {
+    logger.warn({ err, userId }, "live-session count failed");
+    return null;
+  }
+}
+
+/**
  * Kill every live session record for a user. Returns the number of records
  * actually deleted.
  *

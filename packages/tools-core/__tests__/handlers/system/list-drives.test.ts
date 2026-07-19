@@ -60,6 +60,56 @@ describe("list_drives", () => {
     }
   });
 
+  // WARP-1339: the orchestrator now annotates a pool-backed drive (mounted md
+  // filesystem) with its bare array name — pool: "md127" — instead of dropping
+  // it. The handler is an honest passthrough; this pins that the annotation
+  // reaches chat unstripped, so the agent can tell "your storage pool" from a
+  // standalone drive when answering capacity questions.
+  it("passes the WARP-1339 pool annotation through to chat unstripped", async () => {
+    const body = {
+      drives: [
+        {
+          device: "/dev/md127",
+          mount: "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08",
+          label: "",
+          uuid: "U-POOL-FS",
+          size_bytes: 4_000_000_000_000,
+          used_bytes: 1_000_000_000_000,
+          free_bytes: 3_000_000_000_000,
+          mounted: true,
+          displayName: null,
+          icon: null,
+          notes: null,
+          pool: "md127",
+        },
+        {
+          device: "/dev/sda1",
+          mount: "/mnt/droplet/data",
+          label: "TOSHIBA EXT",
+          uuid: "U-PLAIN",
+          size_bytes: 2_000_000_000_000,
+          used_bytes: 100_000_000_000,
+          free_bytes: 1_900_000_000_000,
+          mounted: true,
+          displayName: null,
+          icon: null,
+          notes: null,
+          pool: null,
+        },
+      ],
+      count: 2,
+      snapshot_at: "2026-07-17T00:00:00Z",
+    };
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const r = await listDrives.handler({}, ctxWithGet(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as typeof body;
+      expect(data.drives[0].pool).toBe("md127");
+      expect(data.drives[1].pool).toBeNull();
+    }
+  });
+
   it("surfaces DRIVES_UNAVAILABLE on a non-2xx response", async () => {
     const get = vi.fn().mockResolvedValue(new Response("nope", { status: 502 }));
     const r = await listDrives.handler({}, ctxWithGet(get));

@@ -18,7 +18,7 @@ FROM python:3.12-slim AS base
 # 29.5; moby/moby#41715) — the reflash runner must bust layers without that
 # flag for these mounts to pay off (see WARP-1065).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
@@ -99,6 +99,32 @@ RUN ( curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp
         --expected-root "${VOSK_MODEL}" \
         --rename-to vosk-model-small-en-us && \
     rm -f /tmp/vosk.zip /tmp/fetch_vosk_model.py
+
+# WARP-1056 — bundle the speaker-embedding model (per-person voiceprints).
+# 3D-Speaker CAM++ speaker-verification model (English, VoxCeleb-trained),
+# Apache-2.0, ~28 MB ONNX export re-hosted by k2-fsa/sherpa-onnx (also
+# Apache-2.0). Runs on CPU via the onnxruntime already pinned in
+# requirements.txt (~36 ms per 4 s utterance).
+#
+# Same supply-chain + egress posture as the Vosk model above:
+#   * The SHA-256 is PINNED here and verified before install — a
+#     swapped/compromised artifact fails the build. Recompute on a bump:
+#       curl -fsSL <url> | sha256sum
+#   * Fetched at BUILD time only. The runtime never downloads model
+#     weights — no new phone-home path (WARP-269 telemetry-free
+#     invariant; ADR-012 audited egress). Single flat .onnx file, so no
+#     archive extraction (and no zip-slip surface) is involved.
+#   * Offline-build tolerant ONLY for a genuine fetch failure: voice-io
+#     starts without the file and the enrollment endpoints answer 503
+#     ("speaker model not installed") until an online rebuild bakes it.
+#     A present-but-tampered file (checksum mismatch) is a HARD failure.
+ARG SPEAKER_MODEL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+ARG SPEAKER_MODEL_SHA256=357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b
+RUN ( curl -fsSL "${SPEAKER_MODEL_URL}" -o /tmp/speaker.onnx \
+        || { echo "speaker model fetch skipped (offline build OK; voiceprint enrollment answers 503 until the model is baked)"; exit 0; } ) && \
+    echo "${SPEAKER_MODEL_SHA256}  /tmp/speaker.onnx" | sha256sum -c - && \
+    mkdir -p /app/models/speaker && \
+    mv /tmp/speaker.onnx /app/models/speaker/campplus-voxceleb-en.onnx
 
 # WARP-236 — shared internal-mTLS helper (same COPY pattern as other services).
 COPY services/_shared/__init__.py /app/_shared/__init__.py

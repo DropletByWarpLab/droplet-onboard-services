@@ -40,9 +40,12 @@ workspace identity everything after hangs off.
 ## Data model (Prisma)
 
 The workspace is the **existing `Workspace` singleton** (`id = 1`, the same row
-`/api/settings/workspace` flips Home↔Business on). Everyone the owner invites
-joins this ONE workspace, so PR #380 EXTENDS that row rather than adding a second
-table (one source of truth for "what is this workspace called"):
+`/api/settings/workspace` records the workspace type + display name on).
+WARP-1341: this is a business-only build — the singleton's `type` is always
+`BUSINESS` (the wizard pins it; the route rejects `"home"`), so there is no
+Home↔Business flip. Everyone the owner invites joins this ONE workspace, so
+PR #380 EXTENDS that row rather than adding a second table (one source of truth
+for "what is this workspace called"):
 
 ```prisma
 model Workspace {

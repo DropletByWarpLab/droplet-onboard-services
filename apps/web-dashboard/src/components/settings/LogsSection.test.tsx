@@ -41,6 +41,13 @@ describe("LogsSection", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the group header via the shell Sect pattern — sentence case, no uppercase eyebrow (WARP-1344)", () => {
+    render(<LogsSection />);
+    const heading = screen.getByRole("heading", { name: "Diagnostics" });
+    expect(heading.className).not.toMatch(/uppercase/);
+    expect(heading.closest(".sect")).not.toBeNull();
+  });
+
   it("downloads the bundle when the button is clicked", async () => {
     render(<LogsSection />);
     fireEvent.click(screen.getByRole("button", { name: /download logs/i }));

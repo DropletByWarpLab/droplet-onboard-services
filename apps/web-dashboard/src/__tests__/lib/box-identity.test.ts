@@ -9,7 +9,11 @@
  * anything that still looks like a bare container id.
  */
 import { describe, it, expect } from "vitest";
-import { boxDisplayHost, LAN_FALLBACK_HOST } from "@/lib/box-identity";
+import {
+  boxDisplayHost,
+  resolveBoxAddress,
+  LAN_FALLBACK_HOST,
+} from "@/lib/box-identity";
 
 describe("boxDisplayHost", () => {
   it("passes a real owner-chosen name through untouched", () => {
@@ -47,5 +51,39 @@ describe("boxDisplayHost", () => {
     // 11 hex chars (too short) and 65 (too long) are not container ids.
     expect(boxDisplayHost("abcdef01234")).toBe("abcdef01234");
     expect(boxDisplayHost("a".repeat(65))).toBe("a".repeat(65));
+  });
+});
+
+/**
+ * WARP-1342 — chrome address resolution. The chip must show the box's real
+ * (VPN-reachable) address instead of stranding on droplet.local whenever the
+ * Device row / env chain missed the issued FQDN.
+ */
+describe("resolveBoxAddress", () => {
+  const FQDN = "d-0123456789abcdef.droplet-us.com";
+
+  it("an owner-chosen box name always wins over the issued FQDN", () => {
+    expect(resolveBoxAddress("aurora-loft", FQDN)).toBe("aurora-loft");
+  });
+
+  it("upgrades the droplet.local fallback to the issued FQDN", () => {
+    expect(resolveBoxAddress("droplet.local", FQDN)).toBe(FQDN);
+    expect(resolveBoxAddress(null, FQDN)).toBe(FQDN);
+    expect(resolveBoxAddress(undefined, FQDN)).toBe(FQDN);
+  });
+
+  it("upgrades a masked container-id hostname to the issued FQDN", () => {
+    expect(resolveBoxAddress("5639146fdc76", FQDN)).toBe(FQDN);
+  });
+
+  it("keeps droplet.local while no FQDN has been issued / loaded", () => {
+    expect(resolveBoxAddress("droplet.local", null)).toBe(LAN_FALLBACK_HOST);
+    expect(resolveBoxAddress(null, undefined)).toBe(LAN_FALLBACK_HOST);
+    expect(resolveBoxAddress(undefined, "")).toBe(LAN_FALLBACK_HOST);
+    expect(resolveBoxAddress(undefined, "   ")).toBe(LAN_FALLBACK_HOST);
+  });
+
+  it("a hostname that is already the FQDN passes through untouched", () => {
+    expect(resolveBoxAddress(FQDN, FQDN)).toBe(FQDN);
   });
 });

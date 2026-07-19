@@ -1,0 +1,35 @@
+[Unit]
+Description=Droplet drive reconcile (pool remount safety net + Nextcloud external storage)
+# WARP-1338 + WARP-1361: one-shot boot-time reconcile. FIRST (WARP-1361) it
+# mounts assembled-but-unmounted DROPLET pool arrays — the udev add can fire
+# while the array is still assembling and nothing re-fires on activation, so
+# this is the safety net that guarantees the pool comes back on every boot.
+# THEN it registers every ELIGIBLE mounted /mnt/droplet/* path with Nextcloud
+# (md-pool mounts, enrolled LUKS drives, trusted.list'd plain drives). Pool
+# mounts are created by droplet-storage-pool.sh outside the udev add path,
+# and mounts on a fleet-upgraded box predate registration entirely — this
+# converges them. Droplet pool arrays are the ONLY thing it mounts (never the
+# install-time drive sweep the installer deliberately avoids, never
+# foreign/untrusted media) and it is idempotent (mounted arrays and existing
+# registrations short-circuit).
+# Wants=, not Requires=docker.service — same P6 posture as
+# droplet-automount@.service: a docker restart must never cascade here.
+Wants=docker.service
+After=docker.service local-fs.target mnt-droplet.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/droplet-automount.sh reconcile
+# The script itself bounds the wait for the Nextcloud container
+# (DROPLET_NC_WAIT_TRIES x DROPLET_NC_WAIT_INTERVAL, default 30 x 10 s) and
+# always exits 0 on a still-warming container; keep the unit timeout above it.
+TimeoutStartSec=360
+# Known-good PATH so docker/blkid/findmnt are found at boot.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# WARP-1338: provisioning's opt-in. Feeds a ROOT unit — install.sh keeps the
+# file root:root 0644, NEVER droplet-writable (WARP-843 root-unit LPE
+# invariant; see tests/openwrt-attach-env-invariant.test.sh).
+EnvironmentFile=-/etc/droplet/automount.env
+
+[Install]
+WantedBy=multi-user.target

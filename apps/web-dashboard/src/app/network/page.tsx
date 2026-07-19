@@ -6,8 +6,8 @@ import {
   AlertCircle,
   CalendarClock,
   CheckCircle2,
+  Gauge,
   Globe,
-  Home,
   Info,
   Loader2,
   Monitor,
@@ -182,7 +182,7 @@ function NetworkPageInner() {
   // state during that window instead of flashing the alarming full-page error.
   const [rebooting, setRebooting] = useState(false);
 
-  // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Home installs
+  // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Most installs
   // default to Simple — the everyday Overview only — while Business installs
   // default to Advanced (the full OpenWrt tab surface). The persona default
   // re-syncs once `isBusiness` resolves (useWorkspace hydrates it from the
@@ -373,7 +373,7 @@ function NetworkPageInner() {
           role="group"
           aria-label="Network view mode"
         >
-          {([["simple", "Simple", Home], ["advanced", "Advanced", SlidersHorizontal]] as const).map(
+          {([["simple", "Simple", Gauge], ["advanced", "Advanced", SlidersHorizontal]] as const).map(
             ([id, label, Icon]) => (
               <button
                 key={id}

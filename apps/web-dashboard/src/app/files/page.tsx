@@ -38,8 +38,11 @@ import {
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
+import { volumeCrumbLabel } from "@/components/FileManager/drive-display";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useFiles } from "@/lib/hooks/useFiles";
+import { useDrives } from "@/lib/hooks/useDrives";
+import { usePools } from "@/lib/hooks/usePools";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
@@ -209,8 +212,40 @@ export default function FilesPage() {
     if (shareFile) loadExistingShares(shareFile.path);
   }, [shareFile, loadExistingShares]);
 
-  const { files, isLoading, refresh } = useFiles(currentPath, space);
+  // WARP-1338: destructure the listing error too — a failed WebDAV listing
+  // (e.g. the 404 a drive tile deep-link hits before the drive is registered
+  // in Nextcloud) must render as a distinct failure state, never masquerade
+  // as the false "This folder is empty".
+  const { files, isLoading, error: listingError, refresh } = useFiles(currentPath, space);
   const fm = useFileManager(currentPath);
+
+  // WARP-1338 (UX review): the not-connected copy is keyed to its CAUSE —
+  // the 404 an unregistered drive actually hits (fetchFiles embeds the HTTP
+  // status in the thrown message) — not merely to being below root, so a
+  // transient failure deep inside a healthy, registered drive never claims
+  // the drive "isn't connected".
+  const driveNotConnected =
+    !!listingError &&
+    currentPath !== "/" &&
+    /\b404\b/.test(
+      listingError instanceof Error ? listingError.message : String(listingError)
+    );
+
+  // WARP-1338 (UX review): a volume deep-link lands on /files?path=
+  // /<mount-tail>; for the live box's legacy pool that tail is the full fs
+  // UUID, and the current-folder crumb rendered it raw — a GUID must never
+  // be the primary location label (WARP-1337). Feed the breadcrumb the SAME
+  // display chain the tiles use for a first-segment volume match. SWR dedupes
+  // these keys with VolumesPanel's own subscriptions.
+  const { drives } = useDrives();
+  const { pools } = usePools();
+  const crumbLabelForSegment = useCallback(
+    (segment: string, index: number) =>
+      index === 0 && space === "personal"
+        ? volumeCrumbLabel(segment, drives, pools)
+        : undefined,
+    [space, drives, pools]
+  );
 
   // WARP-883 — switch space: jump to that space's root and clear selection so
   // the previous space's selection/clipboard doesn't leak across.
@@ -727,6 +762,7 @@ export default function FilesPage() {
           path={currentPath}
           onNavigate={setCurrentPath}
           prefixCrumb={isTeamSpace ? activeSpace?.parentName : undefined}
+          labelForSegment={crumbLabelForSegment}
         />
       </div>
 
@@ -888,6 +924,40 @@ export default function FilesPage() {
                   style={{ color: "var(--text-muted)" }}
                 >
                   Loading...
+                </div>
+              ) : listingError ? (
+                /* WARP-1338 — failed listing ≠ empty folder. A deep-linked
+                   drive path that 404s means the drive isn't registered in
+                   the file browser (yet); everything else is a plain load
+                   failure. Either way: honest copy + a retry, never the
+                   false "This folder is empty". role="alert" because the
+                   failure lands asynchronously after the page has rendered
+                   (PoolAlarmBanner precedent). */
+                <div
+                  role="alert"
+                  className="flex flex-col items-center justify-center h-48 px-6 text-center"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  <p className="type-subheadline mb-1">
+                    {driveNotConnected
+                      ? "This drive isn't connected to the file browser yet"
+                      : "We couldn't load your files"}
+                  </p>
+                  <p
+                    className="type-caption-1 mb-3"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    {driveNotConnected
+                      ? "Its files will show up here once it finishes connecting. Try again in a moment."
+                      : "Something interrupted the connection. Try again in a moment."}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => refresh()}
+                  >
+                    Try again
+                  </button>
                 </div>
               ) : files.length === 0 ? (
                 <div

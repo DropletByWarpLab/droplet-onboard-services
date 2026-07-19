@@ -52,6 +52,13 @@ def fake_io(monkeypatch, tmp_path):
     monkeypatch.setattr(brain_ingest, "mark_brain_item_indexed", _mark)
     monkeypatch.setattr(brain_ingest, "publish", _publish)
     monkeypatch.setattr(brain_ingest, "embed_texts", _embed)
+    # WARP-242: deterministic DEK so the handler can encrypt without a
+    # doc-KEK keyfile or DB (this suite asserts on metadata, not text).
+    import doc_keys
+
+    monkeypatch.setattr(
+        doc_keys, "get_or_create_dek", lambda _key_id: bytes([9] * 32)
+    )
 
     return upserts
 

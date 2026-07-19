@@ -32,6 +32,8 @@ import mimetypes
 import os
 from pathlib import Path
 
+import column_crypto
+import doc_keys
 from chunker import Chunk, chunk_spans, format_chunk_with_header
 from db import (
     delete_chunks_for_brain_item,
@@ -450,6 +452,29 @@ def handle_brain_uploaded(payload: dict) -> None:
     # a bare chunk index.
     doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
 
+    # WARP-242: mint (or fetch) the item's per-document DEK — generated at
+    # first chunk-write — and encrypt every chunk's text under it before it
+    # lands (AAD = the DEK's keyId). sensitivity='sensitive' marks the policy;
+    # the generated text_tsv NULLs itself for these rows. Fails closed: a
+    # missing doc-KEK keyfile must never silently index plaintext.
+    key_id = f"brain:{item_id}"
+    try:
+        dek = doc_keys.get_or_create_dek(key_id)
+    except Exception as e:
+        logger.exception(
+            "brain_ingest: per-document DEK unavailable for %s: %s", item_id, e
+        )
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="encryption_unavailable"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item encryption_unavailable"
+            )
+        _publish_status(user_id, item_id, "failed", reason="encryption_unavailable")
+        return
+
     # Upsert (delete-then-insert to keep brain rows independent of the
     # ncFileId-based unique constraint that the watcher relies on).
     # WARP-435: persist the prefixed text — the exact string the
@@ -489,15 +514,16 @@ def handle_brain_uploaded(payload: dict) -> None:
                 nc_file_id=_synthetic_nc_file_id(item_id),
                 path=path,
                 chunk_idx=idx,
-                # WARP-435: persist the prefixed text — the exact string
-                # the embedder saw — so searchHybrid's lexical arm and the
-                # citation surface both reflect the contextual header.
-                text=prefixed_text,
+                # WARP-242: the stored text is the dcv1 ciphertext of the
+                # WARP-435 prefixed text (the exact string the embedder
+                # saw); the orchestrator/mcp-server decrypt on read.
+                text=column_crypto.encrypt_text(dek, prefixed_text, aad=key_id),
                 embedding=vec,
                 source="brain",
                 brain_item_id=item_id,
                 warnings=warnings,
                 metadata=chunk_metadata,
+                sensitivity="sensitive",
             )
         mark_brain_item_indexed(item_id, status="ready", warnings=warnings)
     except Exception as e:
@@ -677,6 +703,13 @@ def reindex_one(nc_file_id: str) -> dict:
     warnings = list(doc.get("warnings", []))
     synthetic_nc_file_id = _synthetic_nc_file_id(nc_file_id)
 
+    # WARP-242: re-indexed chunks are encrypted exactly like a fresh ingest
+    # (same DEK — the item keeps its identity, so its key is reused). Uses
+    # the shared module connection (autocommit) for the mint; an orphan DEK
+    # row from a rolled-back chunk transaction is harmless and reused later.
+    key_id = f"brain:{nc_file_id}"
+    dek = doc_keys.get_or_create_dek(key_id)
+
     # Atomic DELETE + INSERT inside a single private transaction. A
     # mid-flight failure rolls everything back, including the DELETE,
     # leaving the file's pre-reindex chunks intact — strictly better
@@ -719,26 +752,27 @@ def reindex_one(nc_file_id: str) -> dict:
                     INSERT INTO "FileContentChunk"
                         ("userId", "ncFileId", "path", "chunkIdx", "text",
                          "embedding", "indexedAt", "source", "brainItemId",
-                         "pageNumber", "warnings", "metadata")
+                         "pageNumber", "warnings", "metadata", "sensitivity")
                     VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(),
-                            %s::"FileContentSource", %s, %s, %s, %s::jsonb)
+                            %s::"FileContentSource", %s, %s, %s, %s::jsonb,
+                            %s::"ChunkSensitivity")
                     """,
                     (
                         user_id,
                         synthetic_nc_file_id,
                         path,
                         idx,
-                        # WARP-435: store the prefixed text — the exact
-                        # string the embedder saw — so searchHybrid's
-                        # lexical arm and the citation surface both reflect
-                        # the contextual header (parity with normal ingest).
-                        prefixed_text,
+                        # WARP-242: dcv1 ciphertext of the WARP-435 prefixed
+                        # text (the exact string the embedder saw) — parity
+                        # with normal ingest; decrypt happens on read.
+                        column_crypto.encrypt_text(dek, prefixed_text, aad=key_id),
                         vec,
                         "brain",
                         nc_file_id,
                         None,
                         warnings,
                         _json.dumps(chunk_metadata),
+                        "sensitive",
                     ),
                 )
         conn.commit()

@@ -16,6 +16,13 @@ import {
   wholeDiskName,
   buildConfirmPhrase,
 } from "@/components/setup/steps/StorageStep";
+// WARP-1337: sanitizer for the post-wipe FS label (^[A-Za-z0-9_-]{1,16}$)
+// plus its shadow-mount collision guard.
+import {
+  sanitizeFsLabel,
+  takenVolumeNames,
+  uniqueFsLabel,
+} from "@/components/FileManager/drive-display";
 import { DestructiveConfirm } from "./DestructiveConfirm";
 import { DestructiveConfirm as FactoryResetConfirm } from "@/components/DestructiveConfirm";
 
@@ -123,11 +130,26 @@ function ReformatDriveCard() {
   async function handleReformat() {
     if (!selected) return;
     setOpError(null);
+    // WARP-1337: seed the post-wipe FS label from the customer's name for the
+    // drive (displayName, else its existing FS label — preserved across the
+    // reformat). The label becomes the mount tail, so the reformatted drive
+    // never re-mounts on a GUID. Omitted when nothing usable remains.
+    // Code review: uniquified against the volumes on OTHER disks — the host
+    // script's raw mount at /mnt/droplet/<LABEL> would stack a duplicate over
+    // the existing mount (shadow mount). Every filesystem on the disk being
+    // reformatted is erased by the wipe, so its own labels/mounts are
+    // excluded from the collision check.
+    const label = uniqueFsLabel(
+      sanitizeFsLabel(selected.displayName || selected.label),
+      takenVolumeNames(drives.filter((d) => wholeDiskName(d.device) !== wholeDisk)),
+      wholeDisk,
+    );
     // Step 1 — mint a confirm token (does NOT wipe). The device is the WHOLE
     // disk; the host script refuses the OS disk regardless.
     const token = await adoptDrive({
       device: wholeDisk,
       wipeMethod: "quick",
+      ...(label ? { label } : {}),
       confirmPhrase: buildConfirmPhrase([wholeDisk]),
     });
     // Step 2 — confirm + execute, echoing the token's service + resourceId.

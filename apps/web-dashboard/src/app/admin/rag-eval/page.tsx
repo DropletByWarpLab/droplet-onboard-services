@@ -8,7 +8,13 @@
  *
  * When the proxy returns 503 (rag_eval_unavailable) the rag-eval service
  * isn't running — the `eval` Compose profile is inactive — so we render a
- * banner explaining how to enable it rather than a generic error.
+ * banner explaining how to enable it rather than a generic error. That
+ * full-page banner only applies when we have NO runs loaded: a 503 can
+ * also be a transient proxy timeout while a RAGAS run hogs the container,
+ * and replacing an already-loaded runs list with "enable the profile"
+ * instructions would be wrong. With runs on screen we keep them visible
+ * and show a slim retrying notice instead (RAGAS run-results visibility
+ * fix).
  *
  * Re-skinned to the indigo `.droplet-shell` design language (WARP design
  * handoff); the polling, run/bootstrap, and 503 logic are unchanged.
@@ -164,11 +170,16 @@ function metricPairs(
 ): Array<[string, string]> {
   if (!metrics) return [];
   const out: Array<[string, string]> = [];
+  // Only finite numbers render — a failed run's stats can be null/NaN,
+  // and String(null) leaking into the metric row reads as data.
   for (const [k, v] of Object.entries(metrics)) {
-    if (typeof v === "number") {
+    if (typeof v === "number" && Number.isFinite(v)) {
       out.push([k, formatMetric(v)]);
     } else if (v && typeof v === "object" && "mean" in (v as object)) {
-      out.push([k, formatMetric((v as { mean: unknown }).mean)]);
+      const mean = (v as { mean: unknown }).mean;
+      if (typeof mean === "number" && Number.isFinite(mean)) {
+        out.push([k, formatMetric(mean)]);
+      }
     }
   }
   return out;
@@ -324,7 +335,10 @@ export default function RagEvalPage() {
 
   return (
     <ShellPage icon={icon} label="RAG eval" title="RAG eval" sub={SUB} actions={refreshAction}>
-      {unavailable ? (
+      {/* Full "enable the eval profile" banner only when we hold no runs —
+          with runs already loaded, a 503 is far more likely a transient
+          timeout (RAGAS run in flight) and the past runs must stay visible. */}
+      {unavailable && runs.length === 0 ? (
         <div className="card" style={{ borderColor: "rgba(217,163,92,0.4)" }}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
             <AlertTriangle size={20} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
@@ -369,6 +383,25 @@ docker compose -f docker/docker-compose.yml --env-file .env up -d rag-eval`}
             </button>
           </div>
 
+          {unavailable && (
+            <div
+              className="card"
+              style={{
+                padding: 12,
+                marginBottom: 14,
+                fontSize: 13,
+                color: "var(--text-muted)",
+                borderColor: "rgba(217,163,92,0.4)",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <AlertTriangle size={14} style={{ color: "#d9a35c", flexShrink: 0 }} />
+              rag-eval didn&apos;t respond to the last poll — it may be busy with a run. Retrying
+              automatically.
+            </div>
+          )}
           {actionMsg && (
             <div className="card" style={{ padding: 12, marginBottom: 14, fontSize: 13, color: "var(--text-muted)" }}>
               {actionMsg}

@@ -25,9 +25,9 @@ export function EmptyState() {
           Your AI&apos;s context is empty
         </h2>
         <p className="type-body text-label-secondary">
-          Drop a file into a chat conversation, or open the chat and attach
-          one. We&apos;ll extract, chunk, and index it so your assistant can
-          reason about its content.
+          Drop a file into a chat conversation, or sync files into your
+          Droplet&apos;s storage — either way we&apos;ll extract, chunk, and
+          index them so your assistant can reason about their content.
         </p>
       </div>
       <Link

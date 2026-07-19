@@ -22,7 +22,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Building2, FolderLock, ShieldOff, Users as UsersIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { useWorkspace } from "@/lib/workspace";
 import { fetchAdminFilesUsage, listDepartments } from "@/lib/api";
 import type { AdminFilesUsageResponse, Department } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -66,7 +65,6 @@ function initials(name: string): string {
 export default function AdminFilesPage() {
   const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
-  const { isBusiness } = useWorkspace();
   const isAdminTier = !authLoading && (user?.role === "owner" || user?.role === "admin");
 
   const [usage, setUsage] = useState<AdminFilesUsageResponse | null>(null);
@@ -75,7 +73,7 @@ export default function AdminFilesPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isBusiness || !isAdminTier) return;
+    if (!isAdminTier) return;
     let alive = true;
     setLoading(true);
     Promise.all([fetchAdminFilesUsage(), listDepartments()])
@@ -95,7 +93,7 @@ export default function AdminFilesPage() {
     return () => {
       alive = false;
     };
-  }, [isBusiness, isAdminTier]);
+  }, [isAdminTier]);
 
   const memberCountById = useMemo(() => {
     const map = new Map<string, number>();
@@ -137,8 +135,6 @@ export default function AdminFilesPage() {
   function openLibrary(departmentId: string) {
     router.push(`/files?space=${encodeURIComponent(`dept:${departmentId}`)}`);
   }
-
-  if (!isBusiness) return null;
 
   if (!authLoading && !isAdminTier) {
     return (

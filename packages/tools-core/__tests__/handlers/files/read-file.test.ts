@@ -39,6 +39,10 @@ describe("read_file", () => {
     const r = await readFile.handler({ path: "/notes/x.txt" }, ctxWith(get, { ncToken: "" }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AUTH_REQUIRED");
+    // The message is the model's only recovery signal: it must say HOW to
+    // fix the state (password re-login re-provisions the file credential),
+    // not read as a permissions refusal the model apologizes for.
+    if (!r.ok) expect(r.error.message).toContain("sign back in with their password");
     expect(get).not.toHaveBeenCalled();
   });
 
@@ -121,5 +125,67 @@ describe("read_file", () => {
     const get = vi.fn().mockResolvedValue(new Response("", { status: 404 }));
     const r = await readFile.handler({ path: "/missing" }, ctxWith(get));
     expect(r.ok).toBe(false);
+  });
+});
+
+// ── WARP-1372: the download proxy reports application/octet-stream for
+// plainly-readable files (md/csv/txt on the staging box), and the
+// header-only gate refused every one — killing the search→read→answer
+// path (~12/36 staging eval rows per run). The handler must sniff
+// undeclared content like the file-indexer's watcher does (WARP-1139)
+// instead of trusting the header.
+describe("read_file — octet-stream sniffing (WARP-1372)", () => {
+  it("reads a UTF-8 text file reported as application/octet-stream", async () => {
+    const get = vi.fn().mockResolvedValue(
+      new Response("# Home maintenance log\n\nBoiler serviced 10/02/2026.", {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    );
+    const r = await readFile.handler({ path: "/Home/log.md" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as { content?: string; error?: string };
+      expect(data.error).toBeUndefined();
+      expect(data.content).toContain("Boiler serviced");
+    }
+  });
+
+  it("tolerates a multibyte char split at the sniff boundary", async () => {
+    // 4095 ASCII bytes + 'é' (2 bytes) puts the second byte of the char
+    // exactly past a 4096-byte sniff head — a truncated char is not
+    // evidence of binary content (same rule as watcher.py's sniffer).
+    const body = "a".repeat(4095) + "é — fin";
+    const get = vi.fn().mockResolvedValue(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    );
+    const r = await readFile.handler({ path: "/notes/long.txt" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as { content?: string; error?: string };
+      expect(data.error).toBeUndefined();
+      expect(data.content).toContain("fin");
+    }
+  });
+
+  it("still refuses genuine binary content with the explanatory note", async () => {
+    // PNG-ish header: NUL and high bytes that are not valid UTF-8.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x00, 0x01]);
+    const get = vi.fn().mockResolvedValue(
+      new Response(bytes, {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    );
+    const r = await readFile.handler({ path: "/photo.png" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as { content?: string; error?: string };
+      expect(data.content).toBeUndefined();
+      expect(data.error).toContain("Binary file");
+    }
   });
 });

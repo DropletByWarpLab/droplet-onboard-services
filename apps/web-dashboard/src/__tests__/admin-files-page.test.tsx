@@ -40,14 +40,10 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
-let isBusiness = true;
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: isBusiness ? "business" : "home",
-    isHome: !isBusiness,
-    isBusiness,
-    setWorkspaceType: () => {},
-    homeVariant: "C",
+    workspaceType: "business",
+    isBusiness: true,
   }),
 }));
 
@@ -55,7 +51,6 @@ import AdminFilesPage from "@/app/admin/files/page";
 
 beforeEach(() => {
   authRole = "owner";
-  isBusiness = true;
   fetchAdminFilesUsageMock.mockReset();
   listDepartmentsMock.mockReset();
   pushMock.mockReset();
@@ -100,12 +95,6 @@ beforeEach(() => {
 });
 
 describe("/admin/files — gating", () => {
-  it("renders nothing in Home mode", async () => {
-    isBusiness = false;
-    const { container } = render(<AdminFilesPage />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
   it("shows an admin-required notice for a non-admin caller", async () => {
     authRole = "family";
     render(<AdminFilesPage />);

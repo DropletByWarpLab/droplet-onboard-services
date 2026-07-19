@@ -68,6 +68,23 @@ if [ "$groupfolders_ready" != 1 ]; then
   echo "[droplet] WARP-883: groupfolders did NOT enable after ${gf_tries} attempts (appstore unreachable?) — provisioning the household group only; the next boot's idempotent re-run will reconcile the shared folder" >&2
 fi
 
+# 1b. WARP-1338 — enable the bundled `files_external` app so drive/pool
+#     registrations (`occ files_external:create`, invoked from
+#     services/automount/droplet-automount.sh and
+#     scripts/host/droplet-storage-pool.sh on the host) have a namespace to
+#     land in. Without it every registration fails and the dashboard's drive
+#     tiles deep-link into a WebDAV 404. Unlike groupfolders/onlyoffice,
+#     files_external SHIPS INSIDE the Nextcloud image (no appstore fetch), so
+#     a single retry-free enable is the correct shape — occ no-ops when the
+#     app is already enabled. Never fatal under `set -e`: a transient failure
+#     logs and reconciles on the next boot's idempotent re-run (same posture
+#     as the blocks around it).
+if $OCC app:enable files_external; then
+  echo "[droplet] WARP-1338: files_external enabled (external-storage drive browsing)"
+else
+  echo "[droplet] WARP-1338: files_external did NOT enable — drive tiles won't browse until the next boot's idempotent re-run reconciles it" >&2
+fi
+
 # 2. Ensure the household group exists (idempotent — group:add is a no-op /
 #    harmless error if it already exists, so don't let it abort the script).
 if ! $OCC group:list --output=json | grep -q "\"${HOUSEHOLD_GROUP}\""; then

@@ -144,10 +144,27 @@ export interface MatterControllerCoreOptions {
    * after the sidecar started is still picked up.
    */
   wifiSsid?: string;
+  /**
+   * WARP-1363: file-first SSID, mirroring `wifiPskFile`. The static env
+   * SSID goes stale the moment the AP is renamed (claim / setup-wizard
+   * Wi-Fi save) — the commissionee then scans for a network that no
+   * longer exists and answers NetworkNotFound (proven live on .87:
+   * env said "Droplet", the AP broadcast "WarpLab"). The file is
+   * re-read per commission, so a rename can never strand commissioning.
+   */
+  wifiSsidFile?: string;
   wifiPsk?: string;
   wifiPskFile?: string;
   /** ISO-3166 alpha-2 regulatory domain; defaults to "XX" (unspecified). */
   regulatoryCountryCode?: string;
+  /**
+   * Whether the BLE transport was registered at process start (ble.ts).
+   * Manual pairing codes carry no discovery-capability bits, and
+   * matter.js defaults to mDNS-only when `discoveryCapabilities` is
+   * absent — so without this flag the BLE scanner never runs and a
+   * freshly-reset BLE-first device can never be discovered.
+   */
+  bleCommissioning?: boolean;
   /** Test seam — defaults to constructing the real matter.js controller. */
   createController?: () => ControllerLike;
 }
@@ -160,13 +177,39 @@ export interface MatterControllerCoreOptions {
  */
 export type WifiProvisioningOptions = Pick<
   MatterControllerCoreOptions,
-  "wifiSsid" | "wifiPsk" | "wifiPskFile"
+  "wifiSsid" | "wifiSsidFile" | "wifiPsk" | "wifiPskFile"
 >;
 
 /**
+ * WARP-1363: resolve the SSID a commission would hand the device —
+ * file-first (`wifiSsidFile`, written by droplet-openwrt-attach next to
+ * the AP PSK), env fallback. Exported so /capabilities reports the SAME
+ * apSsid the next commission would actually use.
+ */
+export async function resolveWifiSsid(
+  options: WifiProvisioningOptions,
+): Promise<string> {
+  const ssidFile = (options.wifiSsidFile ?? "").trim();
+  if (ssidFile) {
+    try {
+      const fromFile = (await fs.promises.readFile(ssidFile, "utf8")).trim();
+      if (fromFile) return fromFile;
+    } catch (err) {
+      logger.warn(
+        { err, ssidFile },
+        "DROPLET_MATTER_WIFI_SSID_FILE is set but unreadable — falling back to DROPLET_MATTER_WIFI_SSID",
+      );
+    }
+  }
+  return (options.wifiSsid ?? "").trim();
+}
+
+/**
  * WARP-895: resolve the operational Wi-Fi network a BLE-first device is
- * handed during commissioning. PSK source order: the file
- * (`options.wifiPskFile` — the per-box AP PSK provisioned by
+ * handed during commissioning. SSID source order (WARP-1363): the file
+ * (`options.wifiSsidFile` — live AP SSID persisted by
+ * droplet-openwrt-attach), then `options.wifiSsid`. PSK source order: the
+ * file (`options.wifiPskFile` — the per-box AP PSK provisioned by
  * droplet-openwrt-attach), then `options.wifiPsk`. Returns undefined —
  * commissioning then proceeds on-network-only, exactly as before WARP-895
  * — when no SSID or no PSK is available.
@@ -178,7 +221,7 @@ export type WifiProvisioningOptions = Pick<
 export async function resolveWifiNetwork(
   options: WifiProvisioningOptions,
 ): Promise<{ wifiSsid: string; wifiCredentials: string } | undefined> {
-  const wifiSsid = (options.wifiSsid ?? "").trim();
+  const wifiSsid = await resolveWifiSsid(options);
   if (!wifiSsid) return undefined;
   let psk = "";
   const pskFile = (options.wifiPskFile ?? "").trim();
@@ -481,7 +524,7 @@ export function createMatterControllerCore(
       }
 
       case "set_fan_mode": {
-        // Matter FanModeEnum (spec 4.4.6.1): 0 Off, 1 Low, 2 Medium, 3 High,
+        // Matter FanModeEnum (Fan Control cluster 0x0202, spec §4.4.6): 0 Off, 1 Low, 2 Medium, 3 High,
         // 4 On, 5 Auto.
         const FAN_MODES: Record<string, number> = {
           off: 0,
@@ -625,9 +668,16 @@ export function createMatterControllerCore(
       // 1000 here previously turned a 5000ms scan into a 5ms one that found
       // nothing.
       const timeout = timeoutMs as Duration;
+      // WARP-1362 sibling: an omitted discoveryCapabilities defaults
+      // matter.js's collectScanners() to mDNS-only, so the BLE scanner
+      // never runs even with the transport registered (see commission()).
+      const discoveryCapabilities = {
+        onIpNetwork: true,
+        ...(options.bleCommissioning ? { ble: true } : {}),
+      };
       const devices = await ctl.discoverCommissionableDevices(
         {} as any, // Empty identifier = discover all
-        undefined,
+        discoveryCapabilities,
         undefined,
         timeout,
       );
@@ -659,6 +709,16 @@ export function createMatterControllerCore(
         );
       }
 
+      // Scan every transport we actually have: pairing codes carry no
+      // discovery-capability bits (and we deliberately ignore the QR's —
+      // scanning a superset is harmless, matter.js uses whichever scanner
+      // finds the device first). Omitting this made discovery mDNS-only,
+      // which is exactly the retail BLE-first case WARP-895 exists for.
+      const discoveryCapabilities = {
+        onIpNetwork: true,
+        ...(options.bleCommissioning ? { ble: true } : {}),
+      };
+
       let commissioningOptions: NodeCommissioningOptions;
 
       if (trimmed.startsWith("MT:")) {
@@ -670,6 +730,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { longDiscriminator: qr.discriminator },
+            discoveryCapabilities,
           },
           passcode: qr.passcode,
         };
@@ -680,6 +741,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { shortDiscriminator: manual.shortDiscriminator },
+            discoveryCapabilities,
           },
           passcode: manual.passcode,
         };

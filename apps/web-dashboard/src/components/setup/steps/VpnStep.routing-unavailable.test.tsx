@@ -103,6 +103,9 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
       configured: true,
       endpointConfigured: true,
       endpointHost: "vpn.example.com",
+      // WARP-1391: the toggle only appears once the box has discovered its home
+      // LAN IP (the user-facing mint is HOME mode).
+      homeEndpointHost: "192.168.1.87",
       peerCount: 0,
     });
     render(

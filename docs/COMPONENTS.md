@@ -381,9 +381,14 @@ network. Host-published ports and host-network services are called out.
 ## services/automount
 
 - **Purpose:** udev-triggered bash service: on USB/NVMe insert, mount under
-  `/mnt/droplet/...` and (opt-in `NEXTCLOUD_AUTO_REGISTER=1`) register the drive in
-  Nextcloud via `occ`. Guards against boot/root/loop/small devices. No unit tests
-  (systemd integration; manual validation).
+  `/mnt/droplet/...` and (opt-in `NEXTCLOUD_AUTO_REGISTER=1`, set by provisioning
+  in the root-owned `/etc/droplet/automount.env` — WARP-1338) register the drive in
+  Nextcloud via `occ`. Registration is trust-gated: enrolled/trusted drives and
+  md-pool mounts only, never untrusted hot-plugged sticks. A boot-time oneshot
+  (`droplet-automount-reconcile.service`) registers already-mounted paths.
+  Guards against boot/root/loop/small devices. Hermetic tests live in
+  `services/oled-display/tests/test_automount_script.py` +
+  `test_automount_env_wiring.py`.
 
 ## services/_shared
 
