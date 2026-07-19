@@ -545,4 +545,35 @@ describe("WARP-1262 (security) — '..' path traversal is rejected on every spac
     expect(res.status).toBe(400);
     expect(ncMock.ncDeleteFile).not.toHaveBeenCalled();
   });
+
+  // The listing route (GET /api/files) also threads through rootForSpace and
+  // is the dashboard's most-exposed navigation surface (drive tiles + storage
+  // cards deep-link `?path=`), but had no dedicated traversal regression test.
+  it("list: `..` in ?path (dept space) → 400, NC never called", async () => {
+    const res = await request(app)
+      .get("/api/files")
+      .query({ path: TRAVERSAL, space: `dept:${DEPT_A.id}` });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncListFiles).not.toHaveBeenCalled();
+  });
+
+  it("list: personal `..` is rejected too (fail-closed for every space) → 400", async () => {
+    const res = await request(app).get("/api/files").query({ path: "../../etc/passwd" });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncListFiles).not.toHaveBeenCalled();
+  });
+
+  // Pass the query string pre-encoded and raw (not via `.query({...})`, which
+  // would re-encode the literal `%` and defeat the point) so it decodes to a
+  // `..` segment exactly once, the same way Express's query parser decodes an
+  // incoming request — proving the guard catches it post-decode, not just in
+  // its raw (undecoded) form.
+  it.each([
+    "/api/files?path=%2e%2e%2Fescape",
+    "/api/files?path=..%2fescape",
+  ])("list: encoded traversal (%s) is rejected too → 400", async (url) => {
+    const res = await request(app).get(url);
+    expect(res.status).toBe(400);
+    expect(ncMock.ncListFiles).not.toHaveBeenCalled();
+  });
 });
