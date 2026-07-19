@@ -19,10 +19,10 @@ import { authFetch } from "../auth";
  * (never hide a nav entry we can't classify).
  *
  * Self-contained (no dependency on the Features-panel api helpers) but shares
- * the `/api/modules` SWR key with them: when the Features toggle lands (the
- * WARP-1368 branch mutates this exact key), the nav updates immediately.
- * Standalone (without that mutate) the nav refreshes on the next focus /
- * navigation revalidation, or the poll interval at worst — never a reload.
+ * the `/api/modules` SWR key with them: FeaturesCard mutates this exact key on
+ * a successful toggle (WARP-1397), so the nav updates immediately. Even absent
+ * that mutate the nav still refreshes on the next focus / navigation
+ * revalidation, or the poll interval at worst — never a reload.
  */
 
 const MODULES_KEY = "/api/modules";
