@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, MoreHorizontal, Pencil, Trash2, Shapes, X } from "lucide-react";
+import { Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react";
 import type { MatterDevice, Room } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 import { RoomGlyph } from "./RoomGlyph";
@@ -125,18 +125,6 @@ function RoomHeader({
                   text-[var(--text)] hover:bg-[var(--hover)]"
               >
                 <Pencil size={15} /> Rename room
-              </button>
-              <button
-                role="menuitem"
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  onRename();
-                }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 type-subheadline text-left
-                  text-[var(--text)] hover:bg-[var(--hover)]"
-              >
-                <Shapes size={15} /> Choose icon
               </button>
               <div className="my-1 h-px" style={{ background: "var(--card-bd)" }} />
               <button
