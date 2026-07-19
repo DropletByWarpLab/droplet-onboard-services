@@ -99,8 +99,11 @@ services:
   # ============================================================
   openwrt:
     image: openwrt/rootfs:x86_64-24.10.2
+    # WARP-1385: udp/51820 is no longer published via docker-proxy (it owned the
+    # host port and masqueraded egress with an ephemeral source port, breaking
+    # the direct-punch overlay). The host-level DNAT + source-port-preserving
+    # masquerade in droplet-openwrt-attach replace it. Only ubus stays published.
     ports:
-      - "51820:51820/udp"      # WireGuard listen (customer-facing)
       - "127.0.0.1:8181:80"    # uhttpd / ubus, host-only — routing service
                                # talks to it on host net (Phase L).
                                # Was 8081 until the smart-port PR moved it

@@ -27,6 +27,8 @@ import re
 import secrets
 import shlex
 import re
+import socket
+import struct
 import subprocess
 import threading
 import time
@@ -1929,6 +1931,125 @@ def uplink_ip_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# STUN reflexive-mapping probe (WARP-1385) — the box's own public UDP mapping
+# ---------------------------------------------------------------------------
+# The direct-punch remote-access overlay (ADR-030) needs the box to learn the
+# {ip, port} an upstream NAT assigns to traffic leaving from the WireGuard
+# source port (51820). The orchestrator's overlay connect agent calls this,
+# then hands the mapping to HQ in the `answer` so the phone can aim its
+# WireGuard endpoint at the box.
+#
+# device-bridge runs in the HOST network namespace (root), so it is the one
+# place that can send a STUN Binding request FROM host udp/51820 and read the
+# reflexive mapping back. This is valid only once WARP-1385 Part A removes
+# docker-proxy from host:51820 (wg's socket is in the container netns, so the
+# host port is free).
+#
+# LPE invariant: the STUN server list is INLINED below — device-bridge is root,
+# so it must NEVER read this from a droplet-writable path (a guard test
+# enforces the no-writable-config rule).
+
+# The host UDP source port the box's WireGuard listener uses. The probe MUST
+# originate from it so the observed mapping is the SAME public ip:port the
+# overlay hole-punch will use (Part A preserves this source port on egress).
+STUN_SOURCE_PORT = 51820
+
+# Two public STUN servers (RFC 5389 Binding). Cloudflare answers on 3478;
+# Google's public STUN answers on 19302. Both are registered in
+# docs/security/allowed-egress.yaml (WARP-1385). Tried in order; the first that
+# answers wins.
+_STUN_SERVERS = (
+    ("stun.cloudflare.com", 3478),
+    ("stun.l.google.com", 19302),
+)
+
+# Bounded: one request per server, short timeout, fail closed.
+_STUN_TIMEOUT_S = 3.0
+
+_STUN_MAGIC_COOKIE = 0x2112A442
+_STUN_BINDING_REQUEST = 0x0001
+_STUN_BINDING_SUCCESS = 0x0101
+_STUN_ATTR_MAPPED_ADDRESS = 0x0001
+_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020
+
+
+def _parse_stun_mapped_address(data: bytes, txid: bytes) -> tuple[str, int]:
+    """Parse the reflexive (public) IPv4 {ip, port} out of a STUN Binding
+    Success Response. Prefers XOR-MAPPED-ADDRESS (0x0020); falls back to the
+    legacy MAPPED-ADDRESS (0x0001). Raises ValueError on anything malformed —
+    the caller treats a raise as "this server didn't give me a usable mapping"
+    and fails closed rather than fabricating one."""
+    if len(data) < 20:
+        raise ValueError("STUN response shorter than the 20-byte header")
+    msg_type, msg_len, cookie = struct.unpack(">HHI", data[:8])
+    resp_txid = data[8:20]
+    if msg_type != _STUN_BINDING_SUCCESS:
+        raise ValueError(f"not a Binding Success Response (type={msg_type:#06x})")
+    if cookie != _STUN_MAGIC_COOKIE:
+        raise ValueError("STUN magic cookie mismatch")
+    if resp_txid != txid:
+        raise ValueError("STUN transaction id mismatch (stale/forged response)")
+    body = data[20:20 + msg_len]
+    off = 0
+    while off + 4 <= len(body):
+        attr_type, attr_len = struct.unpack(">HH", body[off:off + 4])
+        val = body[off + 4:off + 4 + attr_len]
+        # Attributes are 32-bit aligned.
+        off += 4 + attr_len + ((4 - (attr_len % 4)) % 4)
+        if attr_type not in (_STUN_ATTR_XOR_MAPPED_ADDRESS, _STUN_ATTR_MAPPED_ADDRESS):
+            continue
+        if len(val) < 8:
+            raise ValueError("mapped-address attribute too short")
+        family = val[1]
+        if family != 0x01:
+            raise ValueError("mapped address is not IPv4")
+        port = struct.unpack(">H", val[2:4])[0]
+        addr = struct.unpack(">I", val[4:8])[0]
+        if attr_type == _STUN_ATTR_XOR_MAPPED_ADDRESS:
+            port ^= (_STUN_MAGIC_COOKIE >> 16)
+            addr ^= _STUN_MAGIC_COOKIE
+        ip = socket.inet_ntoa(struct.pack(">I", addr))
+        return ip, port
+    raise ValueError("no MAPPED-ADDRESS attribute in the STUN response")
+
+
+def _stun_query(host: str, port: int, source_port: int = STUN_SOURCE_PORT,
+                timeout: float = _STUN_TIMEOUT_S) -> tuple[str, int]:
+    """Send ONE STUN Binding request from host UDP <source_port> to host:port
+    and return the reflexive (public) {ip, port}. Raises on timeout / socket
+    error / malformed response — the caller fails closed."""
+    txid = secrets.token_bytes(12)
+    req = struct.pack(">HHI", _STUN_BINDING_REQUEST, 0, _STUN_MAGIC_COOKIE) + txid
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Bind to the WireGuard source port on all host interfaces so the mapping
+        # we observe is the SAME one the wg0 punch uses.
+        sock.bind(("0.0.0.0", source_port))
+        sock.settimeout(timeout)
+        sock.sendto(req, (host, port))
+        data, _addr = sock.recvfrom(2048)
+    finally:
+        sock.close()
+    return _parse_stun_mapped_address(data, txid)
+
+
+def stun_probe_snapshot():
+    """Return (ok, payload). On success payload = {"ip", "port", "server"} — the
+    box's observed public UDP mapping from host udp/51820. On failure ok=False
+    and payload = {"error": ...}. Fails CLOSED — never fabricates a mapping. Each
+    inlined STUN server is tried once, in order, until one answers."""
+    errors = []
+    for host, port in _STUN_SERVERS:
+        try:
+            ip, mapped_port = _stun_query(host, port)
+            return True, {"ip": ip, "port": mapped_port, "server": f"{host}:{port}"}
+        except Exception as e:                                      # noqa: BLE001
+            errors.append(f"{host}:{port}: {e}")
+    return False, {"error": "no STUN response from any server: " + "; ".join(errors)}
+
+
+# ---------------------------------------------------------------------------
 # Host uplink topology (WARP-817) — auto-collapse the onboarding Wi-Fi step
 # ---------------------------------------------------------------------------
 # The routing service's GET /network/topology (ADR-018,
@@ -2969,6 +3090,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, uplink_ip_snapshot())
+            if path == "/host/stun-probe":
+                # WARP-1385: the box's own public UDP mapping (STUN reflexive
+                # {ip, port}) observed from host udp/51820, for the overlay
+                # connect agent's `answer`. Box-internal network detail behind a
+                # udp/51820 socket bind — auth-gated like /host/uplink-ip. Fails
+                # CLOSED with a 502 (never a fabricated mapping) when no STUN
+                # server answers.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                ok, info = stun_probe_snapshot()
+                if not ok:
+                    return self._send(502, info)
+                return self._send(200, info)
             if path == "/host/topology":
                 # WARP-817: host uplink posture, for the onboarding wizard's
                 # auto-collapse decision. Same box-internal-network-detail
