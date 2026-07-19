@@ -646,6 +646,74 @@ describe("createMatterControllerCore", () => {
         ).rejects.toThrow(/unsupported fan mode/i);
       });
 
+      // WARP-897: state derivation for the categories the widgets render.
+      it("derives lock state from DoorLock lockState, never onOff", async () => {
+        const lockEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x000a, revision: 1 }], serverList: [0x0101] },
+            doorLock: { lockState: 1 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, lockEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("lock");
+        expect(device?.state).toBe("locked");
+        expect(device?.attributes.lockState).toBe(1);
+      });
+
+      it("derives cover open/closed from lift hundredths and exposes the position", async () => {
+        const coverEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x0202, revision: 1 }], serverList: [0x0102] },
+            windowCovering: { currentPositionLiftPercent100ths: 10000 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, coverEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("cover");
+        expect(device?.state).toBe("closed");
+        expect(device?.attributes.liftPercent100ths).toBe(10000);
+      });
+
+      it("classifies the 0x002b device type as fan and derives speed state", async () => {
+        const fanEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x002b, revision: 1 }], serverList: [0x0202] },
+            fanControl: { percentCurrent: 40, fanMode: 2 },
+          },
+          commands: {},
+        });
+        const node = fakeNode({ parts: new Map([[1, fanEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("fan");
+        expect(device?.state).toBe("on");
+        expect(device?.attributes.fanPercent).toBe(40);
+        expect(device?.attributes.fanMode).toBe(2);
+      });
+
+      it("exposes color attributes for color-capable lights", async () => {
+        const colorEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x010d, revision: 1 }], serverList: [0x0006, 0x0300] },
+            onOff: { onOff: true },
+            colorControl: { currentHue: 212, currentSaturation: 254, colorTemperatureMireds: 370 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, colorEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.attributes.currentHue).toBe(212);
+        expect(device?.attributes.currentSaturation).toBe(254);
+        expect(device?.attributes.colorTemperatureMireds).toBe(370);
+      });
+
       it("media verbs invoke MediaPlayback as void", async () => {
         const e1 = await ep("play_media");
         expect(e1.commands.mediaPlayback.play).toHaveBeenCalledWith(undefined);

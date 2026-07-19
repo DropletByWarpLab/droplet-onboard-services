@@ -8,6 +8,12 @@ import { ToggleSwitch } from "./ToggleSwitch";
 import { BrightnessSlider } from "./BrightnessSlider";
 import { ClimateControl } from "./ClimateControl";
 import { SensorReading } from "./SensorReading";
+import { ColorControls } from "./ColorControls";
+import { CoverControls } from "./CoverControls";
+import { FanControls } from "./FanControls";
+import { LockControl } from "./LockControl";
+import { MediaControls } from "./MediaControls";
+import { CLUSTER, hasCluster } from "./clusters";
 
 interface DeviceDetailPanelProps {
   device: MatterDevice;
@@ -15,7 +21,9 @@ interface DeviceDetailPanelProps {
   onClose: () => void;
 }
 
-const TOGGLEABLE = new Set(["light", "switch", "fan", "cover"]);
+// WARP-897: covers get real motion controls, not an onOff toggle a
+// WindowCovering never implements.
+const TOGGLEABLE = new Set(["light", "switch", "fan"]);
 
 /**
  * Smart-home device detail side-panel.
@@ -94,6 +102,40 @@ export function DeviceDetailPanel({
               onBrightnessChange={(v) => cmd("set_brightness", { brightness: v })}
             />
           </div>
+        )}
+
+        {/* WARP-897: color for ColorControl-capable lights */}
+        {device.category === "light" &&
+          isConnected &&
+          hasCluster(device, CLUSTER.COLOR_CONTROL) && (
+            <div>
+              <span className="type-caption-1 mb-2 block" style={{ color: "var(--text-muted)" }}>
+                Color
+              </span>
+              <ColorControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
+            </div>
+          )}
+
+        {/* WARP-897: cover motion + position */}
+        {device.category === "cover" && isConnected && (
+          <CoverControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
+        )}
+
+        {/* WARP-897: fan speed + mode */}
+        {device.category === "fan" &&
+          isConnected &&
+          hasCluster(device, CLUSTER.FAN_CONTROL) && (
+            <FanControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
+          )}
+
+        {/* WARP-897: lock / unlock (Tier-2 confirm flows via the page) */}
+        {device.category === "lock" && isConnected && (
+          <LockControl device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
+        )}
+
+        {/* WARP-897: media playback */}
+        {device.category === "media_player" && isConnected && (
+          <MediaControls device={device} onCommand={(_nodeId, c, d) => cmd(c, d)} />
         )}
 
         {/* Climate */}
