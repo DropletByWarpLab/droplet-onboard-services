@@ -10,20 +10,34 @@ import type { Room } from "@/lib/types";
  * WARP-1396 §5.4 — create or rename a room: a name (1–32 speakable chars) and
  * a glyph from the fixed 12-icon set. Six suggested names as one-tap chips on
  * create. No colors, no photos — glyph + name only.
+ *
+ * The room menu offers "Choose icon" as its own entry, so `mode: "icon"` drops
+ * the name field and opens straight onto the picker — the dialog still saves
+ * the room's existing name alongside the newly picked glyph.
  */
+type RoomModalMode = "create" | "rename" | "icon";
+
+const MODE_TITLES: Record<RoomModalMode, string> = {
+  create: "New room",
+  rename: "Rename room",
+  icon: "Choose icon",
+};
+
 interface RoomModalProps {
-  /** Existing room to rename, or null to create. */
+  /** Existing room to rename / re-glyph, or null to create. */
   room: Room | null;
+  mode: RoomModalMode;
   onSave: (name: string, icon: string) => Promise<unknown>;
   onClose: () => void;
 }
 
-export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
+export function RoomModal({ room, mode, onSave, onClose }: RoomModalProps) {
   const headingId = useId();
   const [name, setName] = useState(room?.name ?? "");
   const [icon, setIcon] = useState(room?.icon ?? "home");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const iconOnly = mode === "icon";
 
   const trimmed = name.trim();
   const canSave = trimmed.length > 0 && trimmed.length <= 32 && !saving;
@@ -45,10 +59,10 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
     <Dialog open onClose={onClose} labelledBy={headingId} placement="center">
       <div className="p-5 space-y-4" style={{ minWidth: 320 }}>
         <h2 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
-          {room ? "Rename room" : "New room"}
+          {MODE_TITLES[mode]}
         </h2>
 
-        {!room && (
+        {mode === "create" && (
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Suggested names">
             {SUGGESTED_ROOMS.map((n) => (
               <button
@@ -69,6 +83,7 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
           </div>
         )}
 
+        {!iconOnly && (
         <div>
           <label htmlFor="room-name-input" className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
             Room name
@@ -91,6 +106,7 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
             This is also the name you’ll use when you ask Droplet out loud.
           </p>
         </div>
+        )}
 
         <div>
           <span className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
@@ -103,6 +119,8 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
                 <button
                   key={g.icon}
                   type="button"
+                  // Icon-only mode has no name field, so the picker takes focus.
+                  autoFocus={iconOnly && on}
                   aria-label={g.suggests}
                   aria-pressed={on}
                   onClick={() => setIcon(g.icon)}
@@ -147,7 +165,7 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
               disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--brand-hover)]
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
           >
-            {room ? "Save" : "Create room"}
+            {mode === "create" ? "Create room" : "Save"}
           </button>
         </div>
       </div>

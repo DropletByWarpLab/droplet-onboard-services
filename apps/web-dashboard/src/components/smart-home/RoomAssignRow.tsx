@@ -131,6 +131,7 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
       {creating && onCreateRoom && (
         <RoomModal
           room={null}
+          mode="create"
           onSave={async (name, icon) => {
             const room = await onCreateRoom(name, icon);
             await onSetAlias(device.nodeId, { roomId: room.id });
