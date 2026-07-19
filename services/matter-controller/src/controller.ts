@@ -479,7 +479,7 @@ export function createMatterControllerCore(
       }
 
       case "set_fan_mode": {
-        // Matter FanModeEnum (spec 4.4.6.1): 0 Off, 1 Low, 2 Medium, 3 High,
+        // Matter FanModeEnum (Fan Control cluster 0x0202, spec §4.4.6): 0 Off, 1 Low, 2 Medium, 3 High,
         // 4 On, 5 Auto.
         const FAN_MODES: Record<string, number> = {
           off: 0,
