@@ -16,6 +16,7 @@ import { MediaControls } from "./MediaControls";
 import { CLUSTER, hasCluster } from "./clusters";
 import { RoomAssignRow } from "./RoomAssignRow";
 import { displayName } from "./rooms-model";
+import { useToast } from "@/components/Toast";
 
 interface DeviceDetailPanelProps {
   device: MatterDevice;
@@ -29,6 +30,8 @@ interface DeviceDetailPanelProps {
     patch: { name?: string | null; roomId?: string | null },
   ) => Promise<unknown>;
   onCreateRoom?: (name: string, icon: string) => Promise<Room>;
+  /** Other devices' display names — for the §4.2 duplicate-name warning. */
+  takenNames?: string[];
 }
 
 // WARP-897: covers get real motion controls, not an onOff toggle a
@@ -49,6 +52,7 @@ export function DeviceDetailPanel({
   rooms,
   onSetAlias,
   onCreateRoom,
+  takenNames = [],
 }: DeviceDetailPanelProps) {
   const isOn = device.state === "on" || device.state === "playing";
   const isConnected = device.connectionState === "connected";
@@ -65,15 +69,25 @@ export function DeviceDetailPanel({
   const [nameDraft, setNameDraft] = useState(shown);
   const [renameError, setRenameError] = useState<string | null>(null);
   const canRename = !!onSetAlias;
+  const { toast } = useToast();
+
+  const trimmedDraft = nameDraft.trim();
+  const tooLong = trimmedDraft.length > 32;
+  // §4.2: duplicate names are allowed but warned (never blocked).
+  const isDuplicate =
+    trimmedDraft.length > 0 &&
+    trimmedDraft.toLowerCase() !== shown.toLowerCase() &&
+    takenNames.some((n) => n.toLowerCase() === trimmedDraft.toLowerCase());
 
   async function saveName() {
-    if (!onSetAlias) return;
-    const next = nameDraft.trim();
+    if (!onSetAlias || tooLong) return;
+    const next = trimmedDraft;
     setRenameError(null);
     try {
       // Empty → clear the alias (revert to the product name).
       await onSetAlias(device.nodeId, { name: next.length ? next : null });
       setEditing(false);
+      toast(next.length ? `Renamed to ${next}` : "Name cleared");
     } catch {
       setRenameError("That didn’t save — your name is still here. Try again.");
     }
@@ -96,7 +110,7 @@ export function DeviceDetailPanel({
                 autoFocus
                 aria-label="Device name"
                 value={nameDraft}
-                maxLength={64}
+                maxLength={32}
                 onChange={(e) => {
                   setNameDraft(e.target.value);
                   setRenameError(null);
@@ -147,8 +161,18 @@ export function DeviceDetailPanel({
             {device.category.replace("_", " ")} &middot; {device.state}
           </p>
           {renameError && (
-            <p role="alert" className="type-footnote text-system-red mt-1">
+            <p role="status" className="type-footnote text-system-red mt-1">
               {renameError}
+            </p>
+          )}
+          {editing && isDuplicate && !renameError && (
+            <p role="status" className="type-footnote mt-1" style={{ color: "var(--color-system-orange, #ff9500)" }}>
+              Another device is already called this — voice commands may ask you to pick.
+            </p>
+          )}
+          {editing && (
+            <p className="type-caption-1 mt-1" style={{ color: "var(--text-muted)" }}>
+              This is also the name you’ll use when you ask Droplet out loud.
             </p>
           )}
         </div>

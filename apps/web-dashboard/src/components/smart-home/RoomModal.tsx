@@ -70,13 +70,14 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
         )}
 
         <div>
-          <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
+          <label htmlFor="room-name-input" className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
             Room name
           </label>
           <input
+            id="room-name-input"
             autoFocus
             value={name}
-            maxLength={64}
+            maxLength={32}
             onChange={(e) => {
               setName(e.target.value);
               setError(null);
@@ -121,7 +122,7 @@ export function RoomModal({ room, onSave, onClose }: RoomModalProps) {
 
         {error && (
           <p
-            role="alert"
+            role="status"
             className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
           >
             {error}

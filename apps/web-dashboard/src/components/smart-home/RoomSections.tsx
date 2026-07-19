@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, MoreHorizontal, Pencil, Trash2, Shapes } from "lucide-react";
+import { Plus, MoreHorizontal, Pencil, Trash2, Shapes, X } from "lucide-react";
 import type { MatterDevice, Room } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 import { RoomGlyph } from "./RoomGlyph";
@@ -10,6 +10,7 @@ import { ToggleSwitch } from "./ToggleSwitch";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { RoomLayout, RoomBucket } from "./rooms-model";
 import { bulkLights, anyLightOn } from "./rooms-model";
+import { usePopover, POPOVER_SHEET } from "./usePopover";
 
 interface RoomActions {
   create: (name: string, icon: string) => Promise<unknown>;
@@ -62,7 +63,7 @@ function RoomHeader({
   onRename: () => void;
   onDelete: () => void;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
+  const { open: menuOpen, setOpen: setMenuOpen, close: closeMenu, triggerRef, panelRef, onKeyDown } = usePopover();
   const { room, devices } = bucket;
   const lights = bulkLights(devices);
   const headingId = `room-h-${room.id}`;
@@ -79,7 +80,7 @@ function RoomHeader({
         {room.name}
       </h2>
       <span className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-        {devices.length} {devices.length === 1 ? "device" : "devices"}
+        &middot; {devices.length} {devices.length === 1 ? "device" : "devices"}
       </span>
       <span className="flex-1" />
       {lights.length > 0 && (
@@ -91,6 +92,7 @@ function RoomHeader({
       )}
       <div className="relative">
         <button
+          ref={triggerRef}
           type="button"
           aria-label={`${room.name} options`}
           aria-haspopup="menu"
@@ -104,10 +106,12 @@ function RoomHeader({
         </button>
         {menuOpen && (
           <>
-            <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden="true" />
+            <div className="fixed inset-0 z-10" onClick={closeMenu} aria-hidden="true" />
             <div
+              ref={panelRef}
               role="menu"
-              className="absolute right-0 top-9 z-20 min-w-[168px] py-1 rounded-lg shadow-lg"
+              onKeyDown={onKeyDown}
+              className={`absolute right-0 top-9 z-20 min-w-[168px] py-1 rounded-lg shadow-lg ${POPOVER_SHEET}`}
               style={{ background: "var(--card)", border: "1px solid var(--card-bd)" }}
             >
               <button
@@ -166,12 +170,13 @@ export function RoomSections({
   // null = closed; { room: null } = create; { room } = rename.
   const [modal, setModal] = useState<{ room: Room | null } | null>(null);
   const [deleting, setDeleting] = useState<Room | null>(null);
+  const [nudgeDismissed, setNudgeDismissed] = useState(false);
 
   return (
     <div className="flex flex-col gap-8">
-      {showNudge && (
+      {showNudge && !nudgeDismissed && (
         <div
-          className="card flex items-start gap-4 p-4"
+          className="card flex items-start gap-3 p-4"
           style={{ background: "var(--brand-subtle)" }}
         >
           <div className="flex-1">
@@ -191,6 +196,15 @@ export function RoomSections({
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
           >
             <Plus size={15} /> Create a room
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setNudgeDismissed(true)}
+            className="flex-none w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)]
+              hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+          >
+            <X size={16} />
           </button>
         </div>
       )}
@@ -267,9 +281,7 @@ export function RoomSections({
         <ConfirmDialog
           open
           title={`Delete ${deleting.name}?`}
-          description={`Its ${deleting.deviceCount} ${
-            deleting.deviceCount === 1 ? "device keeps" : "devices keep"
-          } working — they just move back to “No room yet”.`}
+          description={`Its ${deleting.deviceCount} devices keep working — they just move back to “No room yet”.`}
           confirmLabel="Delete room"
           onConfirm={async () => {
             await actions.remove(deleting.id);

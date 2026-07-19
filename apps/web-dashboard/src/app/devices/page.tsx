@@ -9,10 +9,12 @@ import { useScenes } from "@/lib/hooks/useScenes";
 import { useMatterCommandConfirm } from "@/lib/hooks/useMatterCommandConfirm";
 import { useAuth } from "@/lib/auth";
 import { RoomSections } from "@/components/smart-home/RoomSections";
+import { useToast } from "@/components/Toast";
 import {
   flattenGrouped,
   groupByRoom,
   bulkLights,
+  displayName,
 } from "@/components/smart-home/rooms-model";
 import { useRooms } from "@/lib/hooks/useRooms";
 import type { Room } from "@/lib/types";
@@ -71,12 +73,16 @@ export default function DevicesPage() {
   const layout = grouped
     ? groupByRoom(flattenGrouped(grouped), rooms)
     : { rooms: [], unassigned: [] };
+  const { toast } = useToast();
+  const allDevices = grouped ? flattenGrouped(grouped) : [];
 
   // Turn every reachable light/switch in a room on/off (Tier-1, §5.2).
-  function handleBulkLights(_room: Room, devices: MatterDevice[], on: boolean) {
-    for (const d of bulkLights(devices)) {
+  function handleBulkLights(room: Room, devices: MatterDevice[], on: boolean) {
+    const lights = bulkLights(devices);
+    for (const d of lights) {
       request(d.nodeId, on ? "turn_on" : "turn_off");
     }
+    if (lights.length > 0) toast(`${room.name} lights ${on ? "on" : "off"}`);
   }
 
   const actions = (
@@ -204,6 +210,9 @@ export default function DevicesPage() {
           rooms={rooms}
           onSetAlias={setAlias}
           onCreateRoom={createRoom}
+          takenNames={allDevices
+            .filter((d) => d.nodeId !== selectedDevice.nodeId)
+            .map((d) => displayName(d))}
         />
       )}
 

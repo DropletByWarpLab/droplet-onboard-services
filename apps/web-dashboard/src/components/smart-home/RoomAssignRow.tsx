@@ -5,12 +5,15 @@ import { Check, Plus, ChevronDown } from "lucide-react";
 import type { MatterDevice, Room } from "@/lib/types";
 import { RoomGlyph } from "./RoomGlyph";
 import { RoomModal } from "./RoomModal";
+import { usePopover, POPOVER_SHEET } from "./usePopover";
+import { useToast } from "@/components/Toast";
 
 /**
  * WARP-1396 §5.3 — the detail-panel Room row: the device's current room as a
  * chip, tapping opens a picker (radio list of rooms + "New room" creator +
- * "No room"). Selection applies instantly (the alias upsert), the picker
- * closes, and the parent revalidates.
+ * "No room"). Selection applies instantly, toasts "Moved to <room>", and the
+ * parent revalidates. The picker is keyboard-dismissible (Esc + focus return,
+ * arrow-key navigation) and becomes a bottom sheet at 375px.
  */
 interface RoomAssignRowProps {
   device: MatterDevice;
@@ -23,13 +26,15 @@ interface RoomAssignRowProps {
 }
 
 export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomAssignRowProps) {
-  const [open, setOpen] = useState(false);
+  const { open, setOpen, close, triggerRef, panelRef, onKeyDown } = usePopover();
   const [creating, setCreating] = useState(false);
+  const { toast } = useToast();
   const current = rooms.find((r) => r.id === device.roomId) ?? null;
 
-  async function assign(roomId: string | null) {
-    setOpen(false);
+  async function assign(roomId: string | null, roomName: string | null) {
+    close();
     await onSetAlias(device.nodeId, { roomId });
+    toast(roomName ? `Moved to ${roomName}` : "Removed from room");
   }
 
   return (
@@ -39,6 +44,7 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
           Room
         </span>
         <button
+          ref={triggerRef}
           type="button"
           aria-haspopup="listbox"
           aria-expanded={open}
@@ -61,11 +67,13 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
 
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div className="fixed inset-0 z-10" onClick={close} aria-hidden="true" />
           <div
+            ref={panelRef}
             role="listbox"
             aria-label="Assign room"
-            className="absolute right-5 z-20 mt-1 min-w-[220px] max-h-[60vh] overflow-y-auto py-1 rounded-lg shadow-lg"
+            onKeyDown={onKeyDown}
+            className={`absolute right-5 z-20 mt-1 min-w-[220px] max-h-[60vh] overflow-y-auto py-1 rounded-lg shadow-lg ${POPOVER_SHEET}`}
             style={{ background: "var(--card)", border: "1px solid var(--card-bd)" }}
           >
             {rooms.map((r) => {
@@ -76,9 +84,10 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
                   role="option"
                   aria-selected={on}
                   type="button"
-                  onClick={() => void assign(r.id)}
+                  onClick={() => void assign(r.id, r.name)}
                   className="w-full flex items-center gap-2.5 px-3 py-2 type-subheadline text-left
-                    text-[var(--text)] hover:bg-[var(--hover)]"
+                    text-[var(--text)] hover:bg-[var(--hover)] focus-visible:outline-none
+                    focus-visible:bg-[var(--hover)]"
                 >
                   <RoomGlyph icon={r.icon} size={15} />
                   <span className="flex-1 truncate">{r.name}</span>
@@ -91,11 +100,12 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
               <button
                 type="button"
                 onClick={() => {
-                  setOpen(false);
+                  close();
                   setCreating(true);
                 }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 type-subheadline text-left
-                  text-[var(--brand)] hover:bg-[var(--hover)]"
+                  text-[var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none
+                  focus-visible:bg-[var(--hover)]"
               >
                 <Plus size={15} /> New room
               </button>
@@ -106,9 +116,10 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
               role="option"
               aria-selected={!device.roomId}
               type="button"
-              onClick={() => void assign(null)}
+              onClick={() => void assign(null, null)}
               className="w-full flex items-center gap-2.5 px-3 py-2 type-subheadline text-left
-                text-[var(--text-muted)] hover:bg-[var(--hover)]"
+                text-[var(--text-muted)] hover:bg-[var(--hover)] focus-visible:outline-none
+                focus-visible:bg-[var(--hover)]"
             >
               <span className="flex-1">No room</span>
               {!device.roomId && <Check size={15} style={{ color: "var(--brand)" }} />}
@@ -123,6 +134,7 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
           onSave={async (name, icon) => {
             const room = await onCreateRoom(name, icon);
             await onSetAlias(device.nodeId, { roomId: room.id });
+            toast(`Moved to ${room.name}`);
           }}
           onClose={() => setCreating(false)}
         />
