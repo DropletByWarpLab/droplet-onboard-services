@@ -279,6 +279,14 @@ automount_mount_name() {
   [ -n "$label" ] || label="drive"
   short="$(printf '%s' "${uuid:-}" | head -c 8)"
   name="$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-\+//;s/-\+$//')"
+  # A label of "." or ".." (or any run of only dots) survives the charset
+  # filter unchanged — "/mnt/droplet/.." would resolve OUTSIDE the mount
+  # base, and the Nextcloud auto-registration would expose that parent
+  # directory as browsable storage.
+  case "$name" in
+    ''|*[!.]*) : ;;
+    *) name="" ;;
+  esac
   [ -z "$name" ] && name="drive"
   [ -n "$short" ] && name="${name}-${short}"
   printf '%s\n' "$name"
