@@ -73,7 +73,13 @@ export function ChatHistoryRow({
   };
 
   return (
-    <div className="conv-row group relative" data-chat-id={id}>
+    <div
+      // z-20 while the menu is open — .conv-acts' transform creates a stacking
+      // context that traps the menu's z-10, so later sibling rows would
+      // otherwise paint (and hit-test) above the open menu.
+      className={`conv-row group relative ${menuOpen ? "z-20" : ""}`}
+      data-chat-id={id}
+    >
       {renaming ? (
         <div className="conv-search !m-0 !h-9">
           <input

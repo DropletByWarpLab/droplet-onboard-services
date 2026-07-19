@@ -97,4 +97,18 @@ describe("ChatHistoryRow", () => {
     const { container } = render(<ChatHistoryRow {...baseProps} />);
     expect(container.querySelector('[data-chat-id="abc"]')).not.toBeNull();
   });
+
+  it("raises the row above sibling rows while the menu is open", () => {
+    // Regression: .conv-acts' transform traps the menu's z-10 in its own
+    // stacking context, so without a z-index on the open row, later sibling
+    // .conv-row elements paint (and hit-test) above the menu — options were
+    // unclickable and the popover looked broken/disappeared.
+    const { container } = render(<ChatHistoryRow {...baseProps} />);
+    const row = container.querySelector('[data-chat-id="abc"]') as HTMLElement;
+    expect(row.className).not.toMatch(/\bz-20\b/);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    expect(row.className).toMatch(/\bz-20\b/);
+    fireEvent.click(screen.getByRole("menuitem", { name: /export/i }));
+    expect(row.className).not.toMatch(/\bz-20\b/);
+  });
 });
