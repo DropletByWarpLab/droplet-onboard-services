@@ -32,6 +32,7 @@ export function ChatHistoryRow({
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(DISPLAY_TITLE(title));
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const actsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (renaming) {
@@ -39,6 +40,27 @@ export function ChatHistoryRow({
       inputRef.current?.select();
     }
   }, [renaming]);
+
+  // Outside-click / Escape close for the overflow menu — same pattern as
+  // VoiceProfilesSection. The ref wraps trigger + menu so a mousedown on the
+  // trigger doesn't close-then-reopen via its click toggle.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (actsRef.current && !actsRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   const openRename = () => {
     setMenuOpen(false);
@@ -115,7 +137,7 @@ export function ChatHistoryRow({
       )}
 
       {!renaming && (
-        <div className="conv-acts">
+        <div className="conv-acts" ref={actsRef}>
           <button
             type="button"
             aria-label={`More actions for ${DISPLAY_TITLE(title)}`}

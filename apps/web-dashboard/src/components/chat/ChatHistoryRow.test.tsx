@@ -98,6 +98,29 @@ describe("ChatHistoryRow", () => {
     expect(container.querySelector('[data-chat-id="abc"]')).not.toBeNull();
   });
 
+  it("closes the menu on Escape", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("closes the menu on mousedown outside the row's actions", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("keeps the menu open on mousedown inside it (click must still land)", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.mouseDown(screen.getByRole("menuitem", { name: /export/i }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
   it("raises the row above sibling rows while the menu is open", () => {
     // Regression: .conv-acts' transform traps the menu's z-10 in its own
     // stacking context, so without a z-index on the open row, later sibling
