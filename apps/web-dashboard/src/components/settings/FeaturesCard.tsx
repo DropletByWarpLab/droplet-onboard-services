@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { mutate as globalMutate } from "swr";
 import { ToggleSwitch } from "@/components/smart-home/ToggleSwitch";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
@@ -103,10 +102,6 @@ export function FeaturesCard() {
     try {
       await setAppModuleEnabled(mod.id, next);
       toast(`${mod.label} turned ${next ? "on" : "off"}`);
-      // Revalidate the "/api/modules" SWR key the sidebar's useModuleGate reads,
-      // so a switched-off feature's nav entry disappears immediately (WARP-1397)
-      // instead of waiting for the next focus/poll revalidation.
-      void globalMutate("/api/modules");
     } catch {
       // Revert — the server state is the truth.
       setModules((ms) =>
