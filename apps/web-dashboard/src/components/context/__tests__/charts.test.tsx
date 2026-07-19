@@ -101,12 +101,14 @@ describe("<PipelineHealth />", () => {
               files: 3,
               avgSecondsToReady: 0.85,
               failed: 0,
+              source: "brain",
             },
             {
               category: "audio",
               files: 1,
               avgSecondsToReady: null,
               failed: 1,
+              source: "brain",
             },
           ]}
         />,
@@ -136,6 +138,7 @@ describe("<RecentlyIndexed />", () => {
               category: "pdf",
               indexedAt: new Date().toISOString(),
               chunkCount: 4,
+              source: "brain",
             },
             {
               id: "y",
@@ -144,6 +147,7 @@ describe("<RecentlyIndexed />", () => {
               category: "audio",
               indexedAt: new Date().toISOString(),
               chunkCount: 12,
+              source: "brain",
             },
           ]}
         />,

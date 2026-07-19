@@ -251,7 +251,7 @@ generate_env() {
       cp "$newest_backup" "$restore_tmp"
       chmod 600 "$restore_tmp"
       mv "$restore_tmp" "$env_file"
-      log_success "Restored .env from $newest_backup (torn file kept at $torn_copy)"
+      log_success "Restored .env from $newest_backup (torn copy quarantined at $torn_copy until this run completes)"
       log_info "  migrate_env will backfill any keys added since that backup"
       log_divider
       return 0
@@ -284,7 +284,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -371,6 +371,13 @@ generate_env() {
   # logs attribute correctly (`_service:email`). Compose wires the
   # email-indexer's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_EMAIL}.
   service_token_email=$(openssl rand -hex 32)
+  # Bearer ragas_runner.py presents on the orchestrator's
+  # /api/admin/retrieval-eval/search calls (WARP-449 role gate). Same
+  # SERVICE_TOKEN_EMAIL shape: the orchestrator's SERVICE_PRINCIPALS
+  # (middleware/auth.ts) matches it; compose wires the rag-eval
+  # container's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_RAG_EVAL}.
+  # Without it every scheduled + ad-hoc RAGAS run 401s at the first query.
+  service_token_rag_eval=$(openssl rand -hex 32)
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -568,6 +575,14 @@ DROPLET_MATTER_SERVICE_TOKEN=$droplet_matter_service_token
 # WARP-465. Bearer the email-indexer presents on ingest POSTs.
 # Compose wires email-indexer's ORCHESTRATOR_SERVICE_TOKEN to this value.
 SERVICE_TOKEN_EMAIL=$service_token_email
+
+# --- RAG eval service bearer (rag-eval → orchestrator REST) ---
+# Bearer ragas_runner.py presents on /api/admin/retrieval-eval/search
+# (WARP-449 role gate). The orchestrator's SERVICE_PRINCIPALS matches it;
+# compose wires the rag-eval container's ORCHESTRATOR_SERVICE_TOKEN to
+# this value. Rotate both sides in lockstep — change here, recreate
+# orchestrator + rag-eval together.
+SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
@@ -846,6 +861,12 @@ migrate_env() {
   _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
   _migrate_ensure_key JWT_SECRET "$(openssl rand -hex 64)"
+  # RAG-eval auth backfill: existing installs predate the rag-eval service
+  # token; without this key ragas_runner.py's /api/admin/retrieval-eval/search
+  # calls 401 and every RAGAS run dies at the first query. Same consumer pair
+  # as the fresh-install heredoc: orchestrator SERVICE_PRINCIPALS ↔ rag-eval
+  # container ORCHESTRATOR_SERVICE_TOKEN (compose wires it to this value).
+  _migrate_ensure_key SERVICE_TOKEN_RAG_EVAL "$(openssl rand -hex 32)"
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
@@ -988,6 +1009,7 @@ materialize_artifacts() {
   sync_openwrt_password_secret
   sync_switch_password_secret
   sync_audit_signing_key
+  sync_doc_kek_key
   sync_email_fernet_key
 }
 
@@ -1038,6 +1060,45 @@ sync_audit_signing_key() {
   chmod 600 "$tmp"
   mv "$tmp" "$key_file"
   log_success "Generated audit signing key at $key_file (chmod 600)"
+}
+
+# WARP-242 — generate data/secrets/doc-kek.key on first setup.
+#
+# The doc-KEK master key: orchestrator, mcp-server, and file-indexer derive
+# the KEK that wraps per-document chunk-encryption DEKs from these 32 raw
+# bytes (HKDF, info="doc-kek"). Deliberately a keyfile and NOT an .env
+# value — .env ships inside every restic snapshot, so a KEK carried there
+# would make snapshots self-decrypting and crypto-shredding a DEK would not
+# hold against backups. droplet-backup.sh excludes this file from the backup
+# set; the flip side (documented in docs/security/at-rest-encryption.md) is
+# that a restore onto NEW hardware cannot decrypt brain chunks.
+#
+# Same mechanics as sync_audit_signing_key above: raw 32 bytes, mode 0600,
+# single-file compose bind (dir self-heal), idempotent — the existing key is
+# preserved on every re-run or every wrapped DEK on the box goes unreadable.
+# TPM-sealing this key is WARP-1033.
+sync_doc_kek_key() {
+  local secret_dir="$REPO_ROOT/data/secrets"
+  local key_file="$secret_dir/doc-kek.key"
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  # A bare `docker compose up` before setup.sh leaves a Docker-created
+  # DIRECTORY at the single-file mount source — clear it so setup self-heals
+  # (WARP-235 decision-4 pattern).
+  [ -d "$key_file" ] && rm -rf "$key_file"
+
+  if [ -f "$key_file" ] && [ -s "$key_file" ]; then
+    log_success "doc-KEK master key already present at $key_file — skipping"
+    return 0
+  fi
+
+  local tmp="$key_file.tmp"
+  openssl rand 32 > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$key_file"
+  log_success "Generated doc-KEK master key at $key_file (chmod 600)"
 }
 
 # WARP-465 / WARP-235 decision-4 — generate data/secrets/email.key on first

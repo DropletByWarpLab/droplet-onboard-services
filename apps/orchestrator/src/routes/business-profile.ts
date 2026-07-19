@@ -109,17 +109,17 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
         const role = (req as AuthedRequest).user?.role;
         const view = readView(profile, role);
         // WARP-1121 §9.1 — the dashboard gates the interview intro card on
-        // the workspace type (HOME boxes get no business interview). Only
-        // the owner/admin view carries it.
+        // the workspace type. Only the owner/admin view carries it.
+        // WARP-1341: business-only build — a missing row or a read hiccup
+        // resolves to BUSINESS (every workspace IS business now, so the
+        // interview affordances are always correct to show).
         if (role === "owner" || role === "admin") {
-          // Fail-open to HOME: a workspace-read hiccup must not 500 the
-          // profile read (HOME = no interview affordances, the safe side).
-          let workspaceType = "HOME";
+          let workspaceType = "BUSINESS";
           try {
             const ws = await prisma.workspace.findUnique({ where: { id: 1 } });
-            workspaceType = ws?.type ?? "HOME";
+            workspaceType = ws?.type ?? "BUSINESS";
           } catch {
-            /* keep HOME */
+            /* keep BUSINESS */
           }
           (view as Record<string, unknown>).workspaceType = workspaceType;
         }

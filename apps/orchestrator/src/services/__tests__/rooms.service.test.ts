@@ -167,6 +167,15 @@ describe("device aliases", () => {
     expect(await (prisma as any).deviceAlias.findUnique({ where: { nodeId: "n1" } })).toBeNull();
   });
 
+  it("clears the name via name: null (the pencil 'clear name' path) and keeps the room", async () => {
+    const k = await createRoom(prisma, { name: "Kitchen" });
+    await upsertAlias(prisma, "n1", { name: "Kitchen strip", roomId: k.id });
+    // DeviceDetailPanel.saveName() sends { name: null } when the field is cleared;
+    // null must clear the alias name, not throw a 400 (WARP-1396 review fix).
+    const cleared = await upsertAlias(prisma, "n1", { name: null });
+    expect(cleared).toEqual({ nodeId: "n1", name: null, roomId: k.id });
+  });
+
   it("rejects assigning to a non-existent room", async () => {
     await expect(upsertAlias(prisma, "n1", { roomId: "ghost" })).rejects.toThrow(
       /room not found/,

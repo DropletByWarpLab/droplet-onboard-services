@@ -352,7 +352,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     "504":
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
-      "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
+      "The Droplet's smart-device service is still starting up. Give it a few seconds and try again.",
   },
   // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
   // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in

@@ -31,6 +31,7 @@ followed by a wall of text (WARP-520).
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import subprocess
@@ -68,24 +69,40 @@ def _ensure_dirs(target: Path) -> None:
 
 _KEEP_RUNS = int(os.environ.get("RAG_EVAL_KEEP_RUNS", "500"))
 
+# Failure diagnostics: how many trailing output lines run_once() keeps for
+# a non-zero exit, and how many of their chars error_summary() surfaces in
+# the durable record's error string (prefix + tail stays under ~1000 chars
+# — enough for a stack-trace tail, small enough for a list row).
+_TAIL_LINES = 40
+_ERROR_TAIL_CHARS = 800
+
 
 def _prune_old_runs(target: Path, keep: int = _KEEP_RUNS) -> None:
-    """Keep only the newest `keep` result pairs (results-<stamp>.json/.md).
+    """Keep only the newest `keep` result pairs (results-<stamp>.json/.md)
+    and, independently, the newest `keep` record-<stamp>.json files.
 
     GWV-016: the off-hours runs wrote a pair per run forever (~5,800 files/yr)
     with no retention — unbounded growth on an appliance meant to run for years,
     and /runs globs the whole directory on every call.
+
+    Records are pruned as their OWN sorted list, not paired with results:
+    a failed run has a record but no results pair, and evicting its record
+    because successes wrote newer results would silently erase the only
+    trace of the failure.
     """
     try:
         jsons = sorted(target.glob("results-*.json"))
         for old in jsons[:-keep] if keep > 0 else []:
             old.unlink(missing_ok=True)
             old.with_suffix(".md").unlink(missing_ok=True)
+        records = sorted(target.glob("record-*.json"))
+        for old in records[:-keep] if keep > 0 else []:
+            old.unlink(missing_ok=True)
     except Exception:  # pragma: no cover - best-effort janitor
         logger.warning("run-results prune failed", exc_info=True)
 
 
-def run_once(target_dir: Path | None = None) -> Path:
+def run_once(target_dir: Path | None = None, stamp: str | None = None) -> Path:
     """Execute one RAGAS pass. Returns the results.json path.
 
     target_dir:
@@ -94,15 +111,24 @@ def run_once(target_dir: Path | None = None) -> Path:
       flow passes its own per-bootstrap subdir so the aggregator only
       sees the runs that bootstrap just produced — never the rolling
       history written by the hourly scheduler.
+    stamp:
+      Filename stamp for the results pair. Single-run callers (server
+      POST /run, the scheduler tick) pass the runId they minted at
+      admission so results-<runId>.json lookups can never miss — the two
+      clock reads used to be seconds apart. Defaults to a fresh UTC
+      stamp; bootstrap's inner runs rely on that (each pass needs its
+      own filename inside the bootstrap subdir).
 
     Raises:
       subprocess.CalledProcessError: ragas_runner.py exited non-zero.
-        The scheduler logs + swallows; the failure surfaces in the
-        target directory as a missing slot.
+        `.output` carries the last ~40 streamed lines so callers can
+        record WHY, not just "exited non-zero". The scheduler logs +
+        swallows; the failure surfaces as a durable failed record.
     """
     target = target_dir if target_dir is not None else RUNS_DIR
     _ensure_dirs(target)
-    stamp = _utc_stamp()
+    if stamp is None:
+        stamp = _utc_stamp()
     out_json = target / f"results-{stamp}.json"
     out_md = target / f"results-{stamp}.md"
 
@@ -131,19 +157,41 @@ def run_once(target_dir: Path | None = None) -> Path:
     # explicitly rather than `assert` (which `python -O` would strip).
     if proc.stdout is None:  # pragma: no cover
         raise RuntimeError("subprocess stdout pipe unexpectedly None")
+    # Keep the last N lines so a failure can report its cause. A deque with
+    # maxlen bounds memory no matter how chatty the 10-30 min run gets.
+    tail: collections.deque[str] = collections.deque(maxlen=_TAIL_LINES)
     # `with` closes the pipe deterministically once drained, instead of
     # leaving it open until the proc object is GC'd.
     with proc.stdout:
         for line in proc.stdout:
-            logger.info("[ragas] %s", line.rstrip())
+            line = line.rstrip()
+            logger.info("[ragas] %s", line)
+            tail.append(line)
     proc.wait()
     _prune_old_runs(target)  # GWV-016: bound unbounded results-*.json growth
     if proc.returncode != 0:
         # Preserve the existing contract: non-zero exit raises
         # CalledProcessError so the scheduler's _safe_run catches + skips
-        # the slot, and bootstrap counts it as a failure.
-        raise subprocess.CalledProcessError(proc.returncode, cmd)
+        # the slot, and bootstrap counts it as a failure — but now with the
+        # output tail attached so the durable record can say WHY.
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, output="\n".join(tail)
+        )
     return out_json
+
+
+def error_summary(exc: BaseException) -> str:
+    """Render a failed run's exception into the durable record's error
+    string. A CalledProcessError from run_once() carries the streamed
+    output tail in `.output` — surface its last chars so the record
+    answers "why did it fail" without docker-logs archaeology. Anything
+    else keeps plain str(exc)."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        msg = f"ragas_runner exited {exc.returncode}"
+        if exc.output:
+            msg += f": {str(exc.output)[-_ERROR_TAIL_CHARS:]}"
+        return msg
+    return str(exc)
 
 
 def aggregate_to_baselines(

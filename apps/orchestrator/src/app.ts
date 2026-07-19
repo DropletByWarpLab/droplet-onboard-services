@@ -23,6 +23,7 @@ import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
+import { createVoiceProfilesRouter } from "./routes/voice-profiles.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
@@ -282,6 +283,11 @@ export function createApp(
   // Owner+admin only; 503s voice_unavailable when voice-io isn't deployed
   // (macOS dev / non-linux profile) so the setup wizard can auto-skip.
   app.use("/api", createVoiceRouter());
+  // WARP-1056 — per-person voiceprints (Flow B enrollment + profile
+  // rows). Same owner/admin wall + voice_unavailable contract as the
+  // voice router; enrollment validates the person EXISTS in Prisma
+  // before the box records anyone (never creates a person).
+  app.use("/api", createVoiceProfilesRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));

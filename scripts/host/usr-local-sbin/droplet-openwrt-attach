@@ -105,6 +105,33 @@ if [ "${GUEST_ENABLED:-0}" = 1 ]; then
 fi
 # <<< customer_guest_creds
 
+# WARP-1363: persist the LIVE AP SSID host-side for the matter-controller
+# sidecar. The sidecar's DROPLET_MATTER_WIFI_SSID env is written once at
+# setup and goes stale on an AP rename (claim / wizard Wi-Fi save) — the
+# commissionee is then told to join a network that no longer broadcasts
+# (ScanNetworks -> NetworkNotFound, proven live on .87 2026-07-17: env said
+# "Droplet", the AP broadcast "WarpLab"). The sidecar resolves the SSID
+# file-first per commission (DROPLET_MATTER_WIFI_SSID_FILE — same pattern
+# as the WARP-1035 PSK file), so writing the resolved SSID here on EVERY
+# attach keeps Matter provisioning pointed at whatever hostapd actually
+# broadcasts. Not a secret (an SSID is broadcast in the clear) — 0644, in
+# the same /etc/droplet home as ap-psk.
+# >>> persist_ap_ssid (WARP-1363)
+AP_SSID_FILE="${DROPLET_AP_SSID_FILE:-/etc/droplet/ap-ssid}"
+persist_ap_ssid() {
+  ssid_dir="$(dirname "$AP_SSID_FILE")"
+  mkdir -p "$ssid_dir" 2>/dev/null || true
+  if printf '%s
+' "$AP_SSID" > "$AP_SSID_FILE.tmp" 2>/dev/null; then
+    mv "$AP_SSID_FILE.tmp" "$AP_SSID_FILE" 2>/dev/null || true
+    chmod 0644 "$AP_SSID_FILE" 2>/dev/null || true
+  else
+    echo "droplet-openwrt-attach: WARN: could not persist AP SSID to $AP_SSID_FILE — Matter Wi-Fi provisioning may target a stale SSID"
+  fi
+}
+persist_ap_ssid
+# <<< persist_ap_ssid (WARP-1363)
+
 # WARP-986: the dnsmasq-ap instance this script regenerates below is the ONLY
 # resolver AP (Wi-Fi) clients use — the uci hostrecord leg the routing service
 # writes lands in a dnsmasq that is NOT running in single-box AP mode, and the
@@ -421,11 +448,58 @@ fi
 # 22 dBm and Wi-Fi 6, vs iwlwifi/phy1 capped at 3 dBm in AP mode.
 [ -e "/sys/class/ieee80211/$AP_PHY" ] && iw phy "$AP_PHY" set netns "$PID"
 
+# WARP-1364: bridge the main-BSS AP into the host's br-lan so Wi-Fi clients
+# share L2 with the host netns. ADR-022 (matter-controller host sidecar)
+# rests on the host being able to multicast to the Droplet's own Wi-Fi
+# clients "natively" — the routed-AP shape (wlp14s0 holding 192.168.20.1/24
+# inside the container netns with its own dnsmasq-ap) broke that premise:
+# a Matter device provisioned onto the AP joins Wi-Fi, then the sidecar can
+# neither hear its operational mDNS nor route to it, and commissioning
+# aborts at the Reconnect step (proven live on .87, 2026-07-17, GE Cync).
+# Bridged mode: hostapd enslaves the radio into a container-local br-ap,
+# which a veth pair trunks into the host br-lan — one 192.168.20.0/24 L2
+# for wired + Wi-Fi + host. The host-net dnsmasq (already authoritative on
+# br-lan) serves DHCP/DNS; dnsmasq-ap retires; the guest BSS stays routed
+# and isolated in-container exactly as before. DROPLET_AP_BRIDGE=0 forces
+# the legacy routed shape; any bridge-setup failure demotes to routed too,
+# so Wi-Fi never dies harder than the status quo.
+# >>> ap_bridge_veth (WARP-1364)
+AP_BRIDGE="${DROPLET_AP_BRIDGE:-1}"
+if [ "$AP_BRIDGE" = 1 ] && ! ip link show br-lan >/dev/null 2>&1; then
+  echo "droplet-openwrt-attach: WARN: host br-lan not found — falling back to routed AP mode"
+  AP_BRIDGE=0
+fi
+if [ "$AP_BRIDGE" = 1 ]; then
+  # Idempotent across re-attach AND container recreate: a live veth pair has
+  # both ends; a container recreate strands the host end (peer dies with the
+  # old netns) so a missing container end means recreate the pair.
+  if ! ip link show veth-dap >/dev/null 2>&1 || \
+     ! docker exec droplet-openwrt ip link show veth-dapc >/dev/null 2>&1; then
+    ip link del veth-dap 2>/dev/null
+    docker exec droplet-openwrt ip link del veth-dapc 2>/dev/null
+    if ip link add veth-dap type veth peer name veth-dapc && \
+       ip link set veth-dapc netns "$PID"; then
+      echo "droplet-openwrt-attach: created veth-dap<->veth-dapc (host br-lan <-> container br-ap)"
+    else
+      echo "droplet-openwrt-attach: WARN: veth pair creation failed — falling back to routed AP mode"
+      ip link del veth-dap 2>/dev/null
+      AP_BRIDGE=0
+    fi
+  fi
+fi
+if [ "$AP_BRIDGE" = 1 ]; then
+  if ! ip link set veth-dap master br-lan up; then
+    echo "droplet-openwrt-attach: WARN: could not enslave veth-dap into br-lan — falling back to routed AP mode"
+    AP_BRIDGE=0
+  fi
+fi
+# <<< ap_bridge_veth (WARP-1364)
+
 docker exec -i \
   -e CONT_IP="$IP" -e CONT_GW="$GW" \
   -e GATEWAY_IP="$GATEWAY_IP" \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
-  -e AP_IFACE="$AP_IFACE" \
+  -e AP_IFACE="$AP_IFACE" -e AP_BRIDGE="$AP_BRIDGE" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
   -e PUBLIC_FQDN="$PUBLIC_FQDN" \
   -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK="$GUEST_PSK" \
@@ -685,7 +759,15 @@ docker exec -i \
       echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; AP zone may not be active (Wi-Fi clients may not get a lease)"
     fi
   }
-  ap_firewall_zone
+  # WARP-1364: the fw4 AP zone exists to let ROUTED-mode clients DHCP against
+  # dnsmasq-ap and egress via eth0. In bridged mode wlp14s0 is an L2 port on
+  # br-ap — client traffic never enters this netns at L3, DHCP is served by
+  # the host, and the zone would only emit misleading WARNs. Skip it.
+  if [ "${AP_BRIDGE:-0}" = 1 ]; then
+    echo "droplet-openwrt-attach: bridged AP mode — skipping fw4 AP zone (host serves DHCP/DNS)"
+  else
+    ap_firewall_zone
+  fi
   # <<< ap_firewall_zone (WARP-810)
 
   # Guest Wi-Fi firewall zone — mirrors droplet_ap but DEFAULT-DENY on input
@@ -923,11 +1005,20 @@ ETHWD
   # --- ip nat table: masq egress + DNAT ingress for AP clients ----------
   nft list table ip nat >/dev/null 2>&1 || nft add table ip nat
 
-  # postrouting: masq 192.168.20.0/24 going out eth0
+  # postrouting: masq 192.168.20.0/24 going out eth0 — ROUTED mode only. In
+  # bridged mode (WARP-1364) AP clients NAT on the HOST (its existing
+  # 192.168.20.0/24 masquerade), and a container-side masq would only catch
+  # strays; flush it so the container never NATs the bridged subnet.
   nft list chain ip nat postrouting >/dev/null 2>&1 || \
     nft add chain ip nat postrouting "{ type nat hook postrouting priority 100 ; }"
-  nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
-    nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
+  if [ "${AP_BRIDGE:-0}" = 1 ]; then
+    for h in $(nft -a list chain ip nat postrouting 2>/dev/null | grep "192.168.20.0/24" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
+      nft delete rule ip nat postrouting handle $h
+    done
+  else
+    nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
+      nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
+  fi
 
   # Guest subnet masq — same egress NAT, scoped to 192.168.30.0/24. Flush any
   # prior guest masq rule by handle first, then re-add ONLY when guest is on, so
@@ -958,8 +1049,13 @@ ETHWD
   # the rule only fires for clients explicitly hitting the router IP
   # (droplet.local resolves to 192.168.20.1 -> rule kicks in -> dashboard),
   # while everything else passes through to the real internet.
-  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
-  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # WARP-1364: the AP-iface DNAT is ROUTED-mode only. In bridged mode client
+  # packets to 192.168.20.1 terminate on the HOST (docker-proxy publishes
+  # :443/:80 on 0.0.0.0) without ever entering this netns at L3.
+  if [ "${AP_BRIDGE:-0}" != 1 ]; then
+    nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+    nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  fi
   # WireGuard remote-access clients land on the same dashboard. Their peer
   # .conf (apps/orchestrator/src/services/vpn.service.ts) advertises
   # AllowedIPs = 192.168.20.0/24 + the tunnel subnet and DNS = 192.168.20.1,
@@ -982,8 +1078,15 @@ ETHWD
   # HT20 if 40 MHz neighbours preclude it (CCA scan during HT_SCAN state).
   # AC is intentionally absent — 802.11ac is 5 GHz only and would just emit
   # warnings here.
+  # WARP-1364: in bridged mode hostapd itself enslaves the radio into br-ap
+  # (created below) — the veth trunk to host br-lan completes the L2. The
+  # var stays an empty line in routed mode so the CHANGED gate is stable.
+  AP_BRIDGE_CONF=""
+  [ "${AP_BRIDGE:-0}" = 1 ] && AP_BRIDGE_CONF="bridge=br-ap"
+
   cat > /etc/hostapd.conf.new <<HOSTAPD
 interface=$AP_IFACE
+$AP_BRIDGE_CONF
 driver=nl80211
 ssid=$AP_SSID
 hw_mode=g
@@ -1038,6 +1141,14 @@ HOSTAPDGUEST
   # dnsmasq-ap config — regenerate every run so name mappings propagate.
   # NOTE dhcp-option=6 points phones at openwrt itself for DNS, NOT 8.8.8.8,
   # so phones can resolve AP_DOMAIN / AP_HOSTNAME locally.
+  # WARP-1364: ROUTED mode only — in bridged mode the host-net dnsmasq is the
+  # single DHCP/DNS authority for the unified 192.168.20.0/24 (the outer
+  # script ports the local-name answers into lan-dhcp.conf); a second
+  # authoritative DHCP server on one L2 would race it.
+  if [ "${AP_BRIDGE:-0}" = 1 ]; then
+    pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
+    rm -f /etc/dnsmasq-ap.conf /etc/dnsmasq-ap.conf.new
+  else
   cat > /etc/dnsmasq-ap.conf.new <<DNSMASQ
 interface=$AP_IFACE
 bind-interfaces
@@ -1079,10 +1190,35 @@ DNSMASQFQDN
   else
     rm -f /etc/dnsmasq-ap.conf.new
   fi
+  fi
+
+  # >>> ap_bridge_lan (WARP-1364)
+  # Bridged mode: br-ap is the container-local L2 hub — hostapd enslaves the
+  # radio (bridge=br-ap in the conf), the veth trunk (created by the outer
+  # script, enslaved to host br-lan there) completes the path. No IP lives
+  # on this bridge: the L3 gateway for the whole segment is the HOST at
+  # 192.168.20.1. Idempotent.
+  if [ "${AP_BRIDGE:-0}" = 1 ]; then
+    ip link show br-ap >/dev/null 2>&1 || ip link add br-ap type bridge
+    ip link set br-ap up 2>/dev/null
+    if ip link show veth-dapc >/dev/null 2>&1; then
+      ip link set veth-dapc master br-ap up 2>/dev/null
+    else
+      echo "droplet-openwrt-attach: WARN: veth-dapc missing in container — bridged AP has no path to host br-lan"
+    fi
+  fi
+  # <<< ap_bridge_lan (WARP-1364)
 
   # Bring up $AP_IFACE + (re)start daemons only if config changed or not running
+  # WARP-1364: the 192.168.20.1/24 gateway address belongs on $AP_IFACE ONLY
+  # in routed mode. Bridged, the iface is an L2 port — a duplicate .20.1 here
+  # would ARP-fight the host; strip it on transition.
   ip link set "$AP_IFACE" up 2>/dev/null
-  ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
+  if [ "${AP_BRIDGE:-0}" = 1 ]; then
+    ip addr show "$AP_IFACE" | grep -q 192.168.20.1 && ip addr del 192.168.20.1/24 dev "$AP_IFACE" 2>/dev/null
+  else
+    ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
+  fi
 
   # >>> start_hostapd (WARP-826b)
   # Start hostapd and VERIFY it actually came up. The old fire-and-forget
@@ -1194,11 +1330,16 @@ HOSTAPDWD
     -x /tmp/hostapd-keepalive -- /etc/hostapd.conf /run/hostapd.pid
   # ---------------------------------------------------------------------
 
-  if [ "$DNSMASQ_CHANGED" = 1 ]; then
-    pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
-    sleep 1
+  # WARP-1364: routed mode only — bridged mode removed the conf above and the
+  # host-net dnsmasq owns the segment; starting a confless dnsmasq here would
+  # just fail loudly.
+  if [ "${AP_BRIDGE:-0}" != 1 ]; then
+    if [ "$DNSMASQ_CHANGED" = 1 ]; then
+      pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
+      sleep 1
+    fi
+    pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
   fi
-  pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
 
   # --- Guest L3 + dnsmasq -----------------------------------------------
   # Bring up the guest BSS netdev (hostapd created it from the bss= stanza), give
@@ -1280,7 +1421,116 @@ DNSMASQGUEST
 # failed and the failure is visible.
 EXEC_RC=$?
 
-echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
+# WARP-1364: bridged mode moved DHCP/DNS authority for the unified
+# 192.168.20.0/24 to the host-net dnsmasq — which shipped with DNS off
+# (port=0) and no local names, because dnsmasq-ap used to answer them for
+# Wi-Fi clients. Port the WARP-986 name set (AP hostname/domain + validated
+# public FQDN -> 192.168.20.1) into lan-dhcp.conf via a sentinel-managed
+# block, drop port=0, and bounce droplet-host-net only when the file really
+# changed (same CHANGED-gate discipline as hostapd/dnsmasq-ap).
+# >>> host_lan_dns (WARP-1364)
+if [ "$AP_BRIDGE" = 1 ]; then
+  LAN_DHCP_CONF="${DROPLET_LAN_DHCP_CONF:-/etc/droplet-host-net/lan-dhcp.conf}"
+  if [ -f "$LAN_DHCP_CONF" ]; then
+    _lantmp=$(mktemp)
+    sed -e '/^port=0$/d' \
+        -e '/^# >>> droplet-ap-bridge dns/,/^# <<< droplet-ap-bridge dns/d' \
+        "$LAN_DHCP_CONF" > "$_lantmp"
+    {
+      echo "# >>> droplet-ap-bridge dns (WARP-1364) — managed by droplet-openwrt-attach; do not edit by hand"
+      echo "no-resolv"
+      echo "server=1.1.1.1"
+      echo "server=8.8.8.8"
+      echo "address=/$AP_HOSTNAME/192.168.20.1"
+      echo "address=/$AP_DOMAIN/192.168.20.1"
+      [ -n "$PUBLIC_FQDN" ] && echo "address=/$PUBLIC_FQDN/192.168.20.1"
+      echo "# <<< droplet-ap-bridge dns (WARP-1364)"
+    } >> "$_lantmp"
+    if ! cmp -s "$_lantmp" "$LAN_DHCP_CONF"; then
+      cat "$_lantmp" > "$LAN_DHCP_CONF"
+      if systemctl restart droplet-host-net.service; then
+        echo "droplet-openwrt-attach: host br-lan dnsmasq now serves DNS + local names for bridged AP clients"
+      else
+        echo "droplet-openwrt-attach: WARN: droplet-host-net restart failed — bridged AP clients may lack DHCP/DNS" >&2
+      fi
+    fi
+    rm -f "$_lantmp"
+  else
+    echo "droplet-openwrt-attach: WARN: $LAN_DHCP_CONF not found — bridged AP clients get no local-name DNS" >&2
+  fi
+fi
+# <<< host_lan_dns (WARP-1364)
+
+# >>> overlay_wg_host_nat (WARP-1385)
+# HOST-level WireGuard NAT for the direct-punch remote-access overlay
+# (ADR-030 / epic WARP-1382). wg0 lives INSIDE droplet-openwrt.
+#
+# Until WARP-1385 the host published udp/51820 via docker-proxy (compose
+# `51820:51820/udp`). docker-proxy owns the host port and rewrites the
+# container's OUTBOUND wg packets with an EPHEMERAL host source port, so the
+# box's egress NAT mapping never matched the inbound path — the upstream
+# (AT&T) NAT binding for the phone→box direction and the box→phone direction
+# diverged and the hole-punch failed (verified live on .87, 2026-06-10).
+#
+# The compose publish is now REMOVED. These two host rules replace it and,
+# crucially, PRESERVE source port 51820 on egress so inbound and outbound share
+# one public mapping (that shared mapping IS the punch — the box's STUN probe in
+# device-bridge observes it from the SAME source port):
+#   (a) DNAT inbound udp/51820 (arriving on the uplink, destined to the box's
+#       own uplink IP) -> the openwrt container's :51820 where wg0 listens.
+#   (b) source-port-PRESERVING masquerade for container-sourced udp sport 51820
+#       egressing the uplink -> keep source port 51820 on the wire.
+#
+# The rules live in a DEDICATED nft table so they NEVER clobber Docker's own
+# `ip nat` table, and the table is torn down + rebuilt on every attach so a
+# container re-IP is picked up and the rules survive container re-attach (a
+# hot-applied rule would vanish on the next attach — the same discipline the
+# container-side wg0 dashboard DNAT already follows).
+#
+# LIVE-APPLY IS STEFAN-GATED: applying on .87 also needs the compose port
+# removed (done) + `systemctl restart droplet-openwrt-attach`. Code + tests only.
+if command -v nft >/dev/null 2>&1; then
+  # Resolve the openwrt container IP with the SAME validated retry idiom the
+  # GATEWAY_IP DNAT resolution uses above — reject empty / 0.0.0.0 / multi-net
+  # concatenations, since a garbage DNAT target makes the whole `nft add` fail.
+  OVERLAY_OPENWRT_IP=""
+  for _owtry in $(seq 1 30); do
+    _owip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt 2>/dev/null) || true
+    if [[ "$_owip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ "$_owip" != "0.0.0.0" ]; then
+      OVERLAY_OPENWRT_IP="$_owip"; break
+    fi
+    sleep 1
+  done
+  # Uplink iface + source IP via the read-only FIB query — the SAME probe the
+  # device-bridge /host/uplink-ip endpoint uses. The uplink iface scopes both
+  # rules; the uplink IP is the ip-daddr hijack guard on the DNAT (so a stray
+  # udp/51820 seen on br-lan / docker0 can never be hijacked into the container).
+  OVERLAY_UPLINK_LINE=$(ip -o route get 1.1.1.1 2>/dev/null || true)
+  OVERLAY_UPLINK_IFACE=$(printf '%s\n' "$OVERLAY_UPLINK_LINE" | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)
+  OVERLAY_UPLINK_IP=$(printf '%s\n' "$OVERLAY_UPLINK_LINE" | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -1)
+  if [ -n "$OVERLAY_OPENWRT_IP" ] && [ -n "$OVERLAY_UPLINK_IFACE" ] && [ -n "$OVERLAY_UPLINK_IP" ]; then
+    # Idempotent: drop + recreate the whole dedicated table on every attach.
+    nft list table ip droplet_overlay_nat >/dev/null 2>&1 && nft delete table ip droplet_overlay_nat
+    nft add table ip droplet_overlay_nat
+    # priority -110 (= dstnat - 10) so this DNAT lands the conntrack binding
+    # BEFORE Docker's own dstnat chain (-100) can act.
+    nft add chain ip droplet_overlay_nat prerouting "{ type nat hook prerouting priority -110 ; }"
+    # priority 90 (= srcnat - 10) so the source-port-preserving masquerade sets
+    # the conntrack NAT binding BEFORE Docker's generic masquerade (100) picks an
+    # ephemeral port.
+    nft add chain ip droplet_overlay_nat postrouting "{ type nat hook postrouting priority 90 ; }"
+    # (a) inbound punch — guarded by uplink iface AND the box's own uplink IP.
+    nft add rule ip droplet_overlay_nat prerouting iifname "$OVERLAY_UPLINK_IFACE" ip daddr "$OVERLAY_UPLINK_IP" udp dport 51820 dnat to ${OVERLAY_OPENWRT_IP}:51820
+    # (b) outbound punch — PRESERVE source port 51820 on egress out the uplink.
+    nft add rule ip droplet_overlay_nat postrouting oifname "$OVERLAY_UPLINK_IFACE" ip saddr "$OVERLAY_OPENWRT_IP" udp sport 51820 masquerade to :51820
+    echo "droplet-openwrt-attach: installed host WG overlay NAT (dnat udp/51820 -> ${OVERLAY_OPENWRT_IP}:51820, src-port-preserving masq out ${OVERLAY_UPLINK_IFACE})"
+  else
+    echo "droplet-openwrt-attach: WARN: could not resolve openwrt container IP / uplink for host WG overlay NAT — direct remote-access punch will not work until the next successful attach (openwrt_ip='${OVERLAY_OPENWRT_IP}', uplink_iface='${OVERLAY_UPLINK_IFACE}', uplink_ip='${OVERLAY_UPLINK_IP}')" >&2
+  fi
+fi
+# <<< overlay_wg_host_nat (WARP-1385)
+
+echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN, ap_mode=$([ "$AP_BRIDGE" = 1 ] && echo bridged || echo routed))"
 if [ "$EXEC_RC" -ne 0 ]; then
   echo "droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
 fi

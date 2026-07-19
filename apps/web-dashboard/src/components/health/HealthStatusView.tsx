@@ -52,7 +52,7 @@ const SERVICE_LABELS: Record<string, string> = {
   db: "Database",
   redis: "Cache",
   aiGateway: "AI gateway",
-  matter: "Smart home (Matter)",
+  matter: "Smart devices (Matter)",
   router: "Router",
   frigate: "Cameras (Frigate)",
   switch: "Network switch",

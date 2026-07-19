@@ -611,6 +611,22 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // RAGAS eval-runner auth: the rag-eval container's ragas_runner.py
+    // presents this Bearer on GET /api/admin/retrieval-eval/search (the
+    // Python client sends it as ORCHESTRATOR_SERVICE_TOKEN; the
+    // orchestrator stores it as SERVICE_TOKEN_RAG_EVAL — compose wires
+    // both ends to the same `secrets.sh`-generated value). Without it,
+    // every eval search 401s on an AUTH_ENABLED box and the eval scores
+    // empty contexts.
+    token: config.SERVICE_TOKEN_RAG_EVAL,
+    principal: {
+      id: "_service:rag-eval",
+      username: "_service:rag-eval",
+      displayName: "RAG Eval Runner",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {
@@ -725,6 +741,30 @@ export function requireRoleOrMcpService(
   const base = requireRole(...allowed);
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === "_service:mcp" && req.user.role === "service") {
+      next();
+      return;
+    }
+    base(req, res, next);
+  };
+}
+
+/**
+ * Generalisation of `requireRoleOrMcpService`: admit exactly ONE pinned
+ * service principal by id (`serviceId`, e.g. `"_service:rag-eval"`) — the id
+ * AND the `service` role must both match, so the coarse "service" role shared
+ * by every other principal is never enough — otherwise defer to plain
+ * `requireRole(...allowed)` semantics.
+ *
+ * First consumer: the RAGAS eval-runner's `_service:rag-eval` principal on
+ * GET /api/admin/retrieval-eval/search (routes/admin-retrieval-eval.ts).
+ */
+export function requireRoleOrService(
+  serviceId: string,
+  ...allowed: Role[]
+): (req: Request, res: Response, next: NextFunction) => void {
+  const base = requireRole(...allowed);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.user?.id === serviceId && req.user.role === "service") {
       next();
       return;
     }

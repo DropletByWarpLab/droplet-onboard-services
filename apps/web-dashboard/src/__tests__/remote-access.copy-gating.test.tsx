@@ -60,6 +60,9 @@ function statusFixture(overrides: Record<string, unknown> = {}) {
     endpointConfigured: true,
     endpointHost: "casa.droplet-us.com",
     publicFqdn: "casa.droplet-us.com",
+    // WARP-1391: a configured box has discovered its home LAN IP, so the
+    // "Add device" affordance (a HOME-mode mint) is enabled.
+    homeEndpointHost: "192.168.1.87",
     listenPort: 51820,
     addresses: ["10.13.13.1/24"],
     serverPublicKey: "key12345abcdef",
@@ -86,11 +89,11 @@ describe("Remote Access — honest away-from-home copy (WARP-993)", () => {
     await screen.findByText("casa.droplet-us.com");
 
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
-    expect(screen.queryAllByText(/home and away/i)).toHaveLength(0);
+    expect(screen.queryAllByText(/office and away/i)).toHaveLength(0);
     // The low-key forward-looking note is present.
     expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
     expect(screen.queryAllByText(/secure relay/i).length).toBeGreaterThan(0);
-    // The "Away from home" stat no longer instructs a dead-end Connect tap.
+    // The "Away from the office" stat no longer instructs a dead-end Connect tap.
     expect(
       screen.queryAllByText(/turn on connect in the app/i),
     ).toHaveLength(0);

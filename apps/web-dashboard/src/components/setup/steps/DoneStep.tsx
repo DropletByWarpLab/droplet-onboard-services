@@ -108,7 +108,7 @@ export function DoneStep({
           ? `${discoveredCount} device${
               discoveredCount !== 1 ? "s" : ""
             } connected and ready to control.`
-          : "You can add smart home devices later from the Devices page."
+          : "You can add smart devices later from the Devices page."
       }
       redirectTo={null}
       onComplete={() => setPhase("tour")}

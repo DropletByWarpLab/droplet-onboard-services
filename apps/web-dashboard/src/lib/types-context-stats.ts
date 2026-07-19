@@ -10,6 +10,9 @@
  * the orchestrator response shape and this file.
  */
 
+/** WARP-1394 — which ingestion pipeline a row came from. */
+export type ContextSource = "brain" | "nextcloud";
+
 export type MimeCategory =
   | "audio"
   | "video"
@@ -27,6 +30,7 @@ export interface RecentlyIndexedItem {
   category: MimeCategory;
   indexedAt: string;
   chunkCount: number;
+  source: ContextSource;
 }
 
 export interface ContextStatsSummary {
@@ -51,8 +55,10 @@ export interface ThroughputDay {
 export interface PipelineHealthRow {
   category: MimeCategory;
   files: number;
+  /** null on 'nextcloud' rows — timing isn't tracked for synced files. */
   avgSecondsToReady: number | null;
   failed: number;
+  source: ContextSource;
 }
 
 export interface ContextStatsFull extends ContextStatsSummary {
@@ -69,6 +75,7 @@ export interface QueuedItem {
   category: MimeCategory;
   uploadedAt: string;
   reason: string;
+  source: ContextSource;
 }
 
 export interface FailedItem {
@@ -79,4 +86,5 @@ export interface FailedItem {
   failureReason: string | null;
   lastAttemptedAt: string | null;
   recentAttemptCount: number;
+  source: ContextSource;
 }

@@ -953,10 +953,13 @@ sed -n '/# >>> recover_nextcloud_autoinstall (WARP-1064)/,/# <<< recover_nextclo
   "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 sed -n '/# >>> run_nextcloud_post_install_hook (WARP-990)/,/# <<< run_nextcloud_post_install_hook (WARP-990)/p' \
   "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
+sed -n '/# >>> apply_file_indexer_nc_grants (WARP-1328)/,/# <<< apply_file_indexer_nc_grants (WARP-1328)/p' \
+  "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
 
 if grep -q 'wait_for_nextcloud_installed()' "$NC_WORK/funcs.sh" \
    && grep -q 'recover_nextcloud_autoinstall()' "$NC_WORK/funcs.sh" \
-   && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh"; then
+   && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh" \
+   && grep -q 'apply_file_indexer_nc_grants()' "$NC_WORK/funcs.sh"; then
   pass "extracted the WARP-990 + WARP-1064 function bodies from compose.sh"
 else
   fail "could not extract the WARP-990/WARP-1064 function bodies — skipping behavioural asserts"
@@ -1005,6 +1008,15 @@ run_docker_compose() {
       fi
       return 1
       ;;
+    # WARP-1328: the file-indexer oc_* read-grant exec. Records argv; exit
+    # scriptable via $NC_STUB_STATE/grants_rc (default 0). MUST precede the
+    # generic psql arm below.
+    *"GRANT CONNECT"*)
+      n=$(( $(cat "$sd/grants_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/grants_calls"
+      printf '%s' "$*" > "$sd/grants_argv"
+      return "$(cat "$sd/grants_rc" 2>/dev/null || echo 0)"
+      ;;
     # WARP-1064: the recovery's stale-DB probe/recreate (psql in the db
     # service). Report "no stale schema" (empty stdout, rc 0).
     *" db psql"*|*"psql -U"*)
@@ -1043,6 +1055,7 @@ run_nc_case() {
   printf '%s' "$installed_after" > "$sd/installed_after"
   printf '%s' "$hook_rc" > "$sd/hook_rc"
   printf '%s' "${NC_RECOVERY_RC:-1}" > "$sd/recovery_rc"
+  printf '%s' "${NC_GRANTS_RC:-0}" > "$sd/grants_rc"
   printf '%s' "${NC_EP_SERVING_AFTER:-1}" > "$sd/ep_serving_after"
   NC_STUB_STATE="$sd" \
   NEXTCLOUD_OCC_READY_TRIES="${NC_TRIES:-8}" \
@@ -1102,6 +1115,29 @@ if printf '%s' "$NC_HOOK_ARGV" | grep -qF -- "-u 33" \
   pass "hook exec targets the nextcloud service as uid 33 at the mounted path"
 else
   fail "hook exec argv wrong (got: '${NC_HOOK_ARGV}')"
+fi
+
+# WARP-1328: the same bring-up must apply the file-indexer oc_* read grants.
+NC_GRANTS_CALLS="$(cat "$NC_WORK/state/grants_calls" 2>/dev/null || echo 0)"
+NC_GRANTS_ARGV="$(cat "$NC_WORK/state/grants_argv" 2>/dev/null || echo '')"
+if [ "$NC_GRANTS_CALLS" = "1" ]; then
+  pass "file-indexer oc_* grants applied exactly once per bring-up (WARP-1328)"
+else
+  fail "file-indexer oc_* grants exec'd ${NC_GRANTS_CALLS} times (expected exactly 1) — WARP-1328"
+fi
+if printf '%s' "$NC_GRANTS_ARGV" | grep -qF -- "-d nextcloud" \
+   && printf '%s' "$NC_GRANTS_ARGV" | grep -qF "GRANT USAGE ON SCHEMA public" \
+   && printf '%s' "$NC_GRANTS_ARGV" | grep -qF "GRANT SELECT ON public.oc_storages, public.oc_filecache"; then
+  pass "grants exec targets the nextcloud DB with schema USAGE + oc_* SELECT (WARP-1328)"
+else
+  fail "grants exec argv wrong (got: '${NC_GRANTS_ARGV}')"
+fi
+
+# WARP-1328: a failing grant exec must be loud-but-non-fatal, like the hook.
+if NC_GRANTS_RC=1 run_nc_case 1 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "grant failure is non-fatal to setup (WARP-1328)"
+else
+  fail "grant failure aborted the runner — must be non-fatal to setup (WARP-1328)"
 fi
 
 # (B5) Hook fails (exit 7) → NON-FATAL to setup (runner still exits 0) but
@@ -1718,6 +1754,59 @@ if [ "$T9_WIPE_OK" = "true" ]; then
   pass "factory-reset.sh wipes the .env staging/torn siblings (secrets-bearing)"
 else
   fail "factory-reset.sh does not wipe all .env staging/torn siblings (.env.{torn,tmp,migrate,upsert}.*)"
+fi
+
+# (12) BLOCKING (rjouffret WARP-1309 review): the end-of-run "leave nothing
+# stale" sweep in setup.sh runs under `set -euo pipefail`. `rm -f` swallows a
+# missing file but a REAL removal failure (e.g. a root-owned .env.bak.* an
+# earlier privileged run left that a later non-root run cannot unlink) still
+# returns non-zero. As a standalone statement — not in an && / || chain — that
+# non-zero triggers `set -e` and aborts the whole script AFTER a good provision
+# but BEFORE the "Setup Complete" banner, flipping a green provision to a
+# reported failure: the exact inverse of what WARP-1309 guarantees. Every
+# `rm -f "$_stale"` in the sweep must therefore be abort-guarded (`|| true`).
+SETUP_SH="$REPO_ROOT_REAL/scripts/setup.sh"
+T12_SWEEP="$(awk '/Leave nothing stale on the box/{f=1} /--- Done ---/{f=0} f' "$SETUP_SH")"
+T12_TOTAL=$(printf '%s\n' "$T12_SWEEP" | grep -c 'rm -f "\$_stale"' || true)
+T12_GUARDED=$(printf '%s\n' "$T12_SWEEP" | grep 'rm -f "\$_stale"' | grep -c '|| true' || true)
+if [ "$T12_TOTAL" -ge 2 ] && [ "$T12_TOTAL" = "$T12_GUARDED" ]; then
+  pass "setup.sh stale-sweep rm -f calls are abort-guarded (|| true) under set -e"
+else
+  fail "setup.sh stale-sweep has $T12_TOTAL rm -f but only $T12_GUARDED guarded — a failed cleanup rm aborts AFTER provision, before 'Setup Complete'"
+fi
+
+# (13) Regression lock for the sweep's pattern coverage (rjouffret WARP-1309
+# finding #2). Every .env staging pattern the sweep removes carries the SAME
+# device secrets as .env, so each must have a real writer AND must stay covered
+# — a future "simplify" pass must not trim a pattern that an interrupted run
+# can actually strand. Writers (all stage to a `.$$`/`.<epoch>` sibling then
+# rename, leaving the sibling on interruption):
+#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_file.torn.$(date +%s)")
+#   .env.tmp.*     -> secrets.sh atomic .env write             ("$env_write_target.tmp.$$")
+#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_file.migrate.$$")
+#   .env.upsert.*  -> secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
+SECRETS_SH="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
+SINGLEBOX_SH="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+T13_OK=true
+# pattern -> the literal writer idiom that stages onto a "$var<idiom>" sibling
+# (writers prefix with $env_file/$target/$env_write_target, so the ".env." form
+# never appears at the write site — match the distinctive suffix instead).
+T13_check() {
+  local pat="$1" idiom="$2"
+  # (a) the end-of-run sweep removes this secrets-bearing pattern
+  printf '%s\n' "$T12_SWEEP" | grep -qF "$pat" || { T13_OK=false; T13_MISS="$pat (not swept)"; }
+  # (b) a real writer that can strand it exists in secrets.sh or single-box.sh
+  grep -qF "$idiom" "$SECRETS_SH" || grep -qF "$idiom" "$SINGLEBOX_SH" \
+    || { T13_OK=false; T13_MISS="$pat (no writer producing $idiom)"; }
+}
+T13_check '.env.torn.'    '.torn.$(date'
+T13_check '.env.tmp.'     '.tmp.$$'
+T13_check '.env.migrate.' '.migrate.$$'
+T13_check '.env.upsert.'  '.upsert.$$'
+if [ "$T13_OK" = "true" ]; then
+  pass "setup.sh sweep covers every staging pattern that has a real writer (.env.{torn,tmp,migrate,upsert}.*)"
+else
+  fail "setup.sh sweep / writer mismatch for ${T13_MISS:-?} — either an uncovered secrets-bearing stray or a dead pattern"
 fi
 
 # =============================================================================

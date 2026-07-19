@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Check, KeyRound } from "lucide-react";
+import { Sect } from "@/components/shell/primitives";
 import { isPasskeySupported, registerPasskey } from "@/lib/webauthn";
 
 /**
@@ -17,9 +18,9 @@ import { isPasskeySupported, registerPasskey } from "@/lib/webauthn";
  * passkey"). Listing and revoking enrolled passkeys is a follow-up — it needs
  * GET/DELETE credential endpoints not built in this PR.
  *
- * Matches the surrounding settings sections: uppercase type-footnote header +
- * a .card body. All copy is sentence case, no exclamation marks
- * (design copy rules). Motion comes from the .btn token (ease-smooth).
+ * Matches the surrounding settings sections: a shell <Sect> header (sentence
+ * case, WARP-1344) + a .card body. All copy is sentence case, no exclamation
+ * marks (design copy rules). Motion comes from the .btn token (ease-smooth).
  */
 // WARP-1156 — shown when the page isn't a secure context (plain-HTTP
 // droplet.local) and on a SecurityError from the ceremony (origin/RP-ID
@@ -82,12 +83,7 @@ export function PasskeysSection() {
 
   return (
     <section className="mb-10">
-      <h2
-        className="type-footnote uppercase tracking-wider px-1 mb-2"
-        style={{ color: "var(--text-muted)" }}
-      >
-        Passkeys
-      </h2>
+      <Sect title="Passkeys" />
       <div className="card space-y-3">
         <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
           Sign in without a password using your device&apos;s fingerprint, face,

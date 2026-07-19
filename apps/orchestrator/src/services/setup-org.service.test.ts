@@ -139,6 +139,9 @@ describe("setup-org.service — persistOrg", () => {
     // Completion is an EXPLICIT column — never inferred from `slug IS NULL`
     // (CLAUDE.md no-guessing rule; WARP-218 precedent).
     expect(stored.orgConfigured).toBe(true);
+    // WARP-1341: business-only build — the org step pins the singleton
+    // to BUSINESS on both create and update.
+    expect(stored.type).toBe("BUSINESS");
   });
 
   it("normalizes the slug before persisting", async () => {

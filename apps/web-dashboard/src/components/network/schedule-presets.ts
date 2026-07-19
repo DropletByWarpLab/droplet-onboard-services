@@ -54,8 +54,11 @@ export const SCHEDULE_PRESETS = [
     ],
   },
   {
+    // WARP-1341: display name went business-neutral ("Focus mode"); the
+    // wire/registry id stays `homework` — it's persisted in existing
+    // schedules and never user-visible.
     id: "homework",
-    name: "Homework mode",
+    name: "Focus mode",
     kind: "override",
     description: "Block for 90 minutes",
     icon: "Clock",

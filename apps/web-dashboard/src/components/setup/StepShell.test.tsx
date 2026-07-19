@@ -95,7 +95,7 @@ describe("StepShell aurora rail (PR #384)", () => {
     render(
       <StepShell
         current="wifi"
-        title="Set up your home Wi-Fi"
+        title="Set up your Wi-Fi"
         primary={{ label: "Save and continue", onClick: () => primaryClicks++ }}
         skip={{ label: "Skip for now", onClick: () => skipClicks++ }}
       >

@@ -156,8 +156,15 @@ export async function upsertAlias(
 
   let name: string | null = existing?.name ?? null;
   if (input.name !== undefined) {
-    const n = normalizeName(input.name);
-    name = n.length ? n : null;
+    // `null` explicitly clears the alias (docstring contract); only a
+    // non-null value is run through normalizeName. Mirrors the roomId branch
+    // below — DeviceDetailPanel.saveName() sends { name: null } on clear.
+    if (input.name === null) {
+      name = null;
+    } else {
+      const n = normalizeName(input.name);
+      name = n.length ? n : null;
+    }
   }
 
   let roomId: string | null = existing?.roomId ?? null;

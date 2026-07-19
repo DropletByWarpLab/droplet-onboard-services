@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileDeletedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
@@ -223,7 +223,7 @@ def _get_nc_conn():
     """Get or create a connection to the Nextcloud DB (shared Postgres)."""
     global _nc_conn
     import psycopg2
-    from config import DATABASE_URL
+    from config import NEXTCLOUD_DATABASE_URL
 
     with _nc_conn_lock:
         if _nc_conn is not None:
@@ -239,8 +239,9 @@ def _get_nc_conn():
                     pass
                 _nc_conn = None
 
-        nc_url = DATABASE_URL.replace("/droplet", "/nextcloud")
-        _nc_conn = psycopg2.connect(nc_url)
+        # WARP-1327: never derive this inline with str.replace — see
+        # config.derive_nextcloud_db_url for why (it rewrote the username).
+        _nc_conn = psycopg2.connect(NEXTCLOUD_DATABASE_URL)
         _nc_conn.autocommit = True
         return _nc_conn
 
@@ -253,7 +254,10 @@ def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
         conn = _get_nc_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT numeric_id FROM oc_storages WHERE id = %s",
+                # Schema-qualified (WARP-1327/1328): an unqualified name is
+                # silently skipped when the role lacks USAGE on the schema —
+                # "does not exist" instead of "permission denied".
+                "SELECT numeric_id FROM public.oc_storages WHERE id = %s",
                 (f"home::{user}",),
             )
             row = cur.fetchone()
@@ -262,13 +266,16 @@ def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
             storage_id = row[0]
 
             cur.execute(
-                "SELECT fileid FROM oc_filecache WHERE storage = %s AND path = %s",
+                "SELECT fileid FROM public.oc_filecache WHERE storage = %s AND path = %s",
                 (storage_id, cache_path),
             )
             row = cur.fetchone()
             return row[0] if row else None
     except Exception as e:
-        logger.debug("Failed to resolve fileId for %s/%s: %s", user, relpath, e)
+        # WARNING, not debug: a resolution failure means the file will land
+        # `failed / nc_file_id_unresolved` — a 100%-failure condition was
+        # invisible at debug level (WARP-1329 finding).
+        logger.warning("Failed to resolve fileId for %s/%s: %s", user, relpath, e)
         return None
 
 
@@ -284,14 +291,14 @@ def _resolve_gf_file_id(cache_path: str) -> int | None:
         conn = _get_nc_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT fileid FROM oc_filecache WHERE path = %s "
+                "SELECT fileid FROM public.oc_filecache WHERE path = %s "
                 "ORDER BY fileid ASC LIMIT 1",
                 (cache_path,),
             )
             row = cur.fetchone()
             return row[0] if row else None
     except Exception as e:
-        logger.debug("Failed to resolve groupfolder fileId for %s: %s", cache_path, e)
+        logger.warning("Failed to resolve groupfolder fileId for %s: %s", cache_path, e)
         return None
 
 
@@ -379,6 +386,19 @@ class IndexHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._schedule(event.src_path)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        # WARP-1359: Nextcloud WebDAV writes are atomic — the upload lands as
+        # `<name>.ocTransferId….part` (create event filtered by
+        # _is_ignored_basename), then a rename moves it onto the final path.
+        # That rename is the ONLY event a brand-new file ever produces, so it
+        # must index the destination. For a genuine rename the source path's
+        # index must also go, or its chunks linger under the old path.
+        if not _is_ignored_basename(os.path.basename(event.src_path)):
+            self.on_deleted(FileDeletedEvent(event.src_path))
+        self._schedule(event.dest_path)
 
     def on_deleted(self, event):
         if event.is_directory:

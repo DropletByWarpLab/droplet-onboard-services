@@ -237,3 +237,14 @@ CVE-2025-49796
 CVE-2025-7424
 # perl-base; fix→ 5.36.0-7+deb12u3.
 CVE-2023-31484
+
+# langchain-core: 1 fixable HIGH [rag-eval]; fix→ 1.2.22. WARP-1406: the fix
+# lives only in langchain-core 1.x, which ragas==0.2.13 (the version whose
+# metrics API ragas_runner.py is written against) cannot import beside — the
+# 0.3-line cap in services/rag-eval/requirements.txt is what un-broke every
+# appliance RAGAS run. CVE-2026-34070 is a path traversal in the LEGACY
+# load_prompt file-loading helpers, which the runner never calls and feeds no
+# untrusted paths; the container is `eval`-profile-gated, internal-network
+# only, no auth surface. Burn-down: retire when the eval harness moves to a
+# ragas that supports langchain-core 1.x (re-baseline run required).
+CVE-2026-34070

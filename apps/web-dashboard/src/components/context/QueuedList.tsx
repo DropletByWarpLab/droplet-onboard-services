@@ -105,6 +105,10 @@ export function QueuedList({ items, onChange }: Props) {
                   </p>
                 )}
               </div>
+              {/* WARP-1394: Run-now targets the transcription pipeline
+                  (BrainMemoryItem); synced files reindex via the watcher,
+                  so nextcloud rows carry no action. */}
+              {it.source !== "nextcloud" && (
               <button
                 type="button"
                 onClick={() => runNow(it.id)}
@@ -119,6 +123,7 @@ export function QueuedList({ items, onChange }: Props) {
                 )}
                 Run now
               </button>
+              )}
             </li>
           );
         })}

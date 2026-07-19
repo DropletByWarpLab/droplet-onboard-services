@@ -51,6 +51,7 @@ import {
 import {
   createSession,
   deleteSession,
+  countLiveSessions,
   revokeAllSessions,
   checkSession,
 } from "../services/session.service.js";
@@ -1886,6 +1887,34 @@ export function createPublicAuthRouter(
         );
       }
 
+      // Downstream provisioning (NOT authentication): the auto-login below
+      // is "same shape as /api/auth/login", and login seeds the per-user
+      // Nextcloud app-password so file routes and the chat agent's file
+      // tools (read_file, list_files, ...) can act as this user. We hold
+      // the same plaintext we just gave ncCreateUser, so mint + store the
+      // NC token here too — otherwise the invitee's FIRST session has no
+      // NC credential until they log out and back in (file tools return
+      // AUTH_REQUIRED, /api/files 401s). Same fail-open posture as login:
+      // Nextcloud being down must not fail the accept.
+      try {
+        const ncSession = await ncLoginWithCredentials(invite.username, password);
+        if (ncSession) {
+          // Keyed by the local User.id UUID so getNcToken(req.user.id)
+          // hits the same slot (WARP-485).
+          await storeNcToken(userId, ncSession.token, REFRESH_TOKEN_TTL_SECONDS);
+        } else {
+          logger.warn(
+            { userId },
+            "invite-accept: Nextcloud session could not be provisioned; WebDAV/file tools unavailable until next login (ADR-013)",
+          );
+        }
+      } catch (err) {
+        logger.error(
+          { err, userId },
+          "invite-accept: downstream Nextcloud provisioning failed (non-fatal)",
+        );
+      }
+
       // WARP-247 — the invite-accept auto-login is a session mint like any
       // other: record first, sid into both tokens.
       const { sid: inviteSid } = await createSession({ id: userId, role });
@@ -2453,21 +2482,34 @@ export function createProtectedAuthRouter(
       }
 
       // Revoke the stored Nextcloud app-password so it can't outlive the
-      // session. Two code paths:
+      // LAST session. Two code paths:
       //   • JWT sessions: the NC token lives in Redis keyed by user id;
       //     fetch it, ask Nextcloud to revoke, then delete from Redis.
-      //   • Legacy sessions: the cookie IS the NC token; revoke it directly.
+      //     The slot is PER-USER (one credential shared by every device
+      //     session), so revoke only when this logout ended the user's
+      //     last live session — the record for THIS session was already
+      //     dropped by deleteSession above, so any remaining count means
+      //     another device still depends on the credential (its file
+      //     routes and the chat agent's file tools would otherwise start
+      //     failing AUTH_REQUIRED mid-session). An unknown count (Redis
+      //     hiccup → null) revokes anyway: prefer the security invariant
+      //     over cross-device convenience.
+      //   • Legacy sessions: the cookie IS the NC token (per-device by
+      //     nature); revoke it directly.
       const sessionToken = resolveToken(req);
       if (sessionToken && verifyAccessToken(sessionToken) && req.user?.id) {
-        const ncToken = await getNcToken(req.user.id);
-        if (ncToken) {
-          try {
-            await ncDeleteAppPassword(ncToken);
-          } catch {
-            // Non-fatal — token may already be revoked upstream
+        const remaining = await countLiveSessions(req.user.id);
+        if (remaining === null || remaining === 0) {
+          const ncToken = await getNcToken(req.user.id);
+          if (ncToken) {
+            try {
+              await ncDeleteAppPassword(ncToken);
+            } catch {
+              // Non-fatal — token may already be revoked upstream
+            }
           }
+          await deleteNcToken(req.user.id);
         }
-        await deleteNcToken(req.user.id);
       } else if (sessionToken) {
         try {
           await ncDeleteAppPassword(sessionToken);

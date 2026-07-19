@@ -332,7 +332,7 @@ describe("setup VPN step (WARP-174)", () => {
 
     // … but the customer wanders off via the rail instead (flag must clear) …
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Go to Home Wi-Fi" }));
+      fireEvent.click(screen.getByRole("button", { name: "Go to Wi-Fi" }));
     });
     await act(async () => {
       fireEvent.click(
@@ -388,6 +388,9 @@ describe("setup VPN step (WARP-174)", () => {
       configured: true,
       endpointConfigured: true,
       endpointHost: "yourstudio.duckdns.org",
+      // WARP-1391: the one-tap toggle is a HOME-mode mint, so it appears only
+      // once the box has discovered its home-facing LAN IP.
+      homeEndpointHost: "192.168.1.87",
       listenPort: 51820,
       peerCount: 0,
       addresses: ["10.13.13.1/24"],
@@ -411,6 +414,7 @@ describe("setup VPN step (WARP-174)", () => {
       configured: true,
       endpointConfigured: true,
       endpointHost: "yourstudio.duckdns.org",
+      homeEndpointHost: "192.168.1.87",
     });
     createVpnPeerMock.mockResolvedValue({
       peer: {
@@ -449,6 +453,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
+      homeEndpointHost: "192.168.1.87",
     });
     createVpnPeerMock.mockResolvedValue({
       peer: {
@@ -490,6 +495,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
+      homeEndpointHost: "192.168.1.87",
     });
     createVpnPeerMock.mockResolvedValue({
       peer: {
