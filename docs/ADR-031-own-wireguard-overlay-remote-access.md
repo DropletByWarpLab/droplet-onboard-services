@@ -1,4 +1,4 @@
-# ADR-030: Own WireGuard overlay for remote access (direct-first, hole-punched, HQ-signaled)
+# ADR-031: Own WireGuard overlay for remote access (direct-first, hole-punched, HQ-signaled)
 
 - **Status:** Accepted (founder decision, Stefan Cruceru, 2026-07-18) — relay-fallback transport sub-decision pending the WARP-1390 spike
 - **Epic:** [WARP-1382](https://warp-lab.atlassian.net/browse/WARP-1382) · this doc: [WARP-1383](https://warp-lab.atlassian.net/browse/WARP-1383)
@@ -112,9 +112,16 @@ customer-facing change, because no third party is in the customer-facing path.
 - **Signaling is a DoS/abuse surface.** Rendezvous endpoints must be
   PoP-authed with distinct domain-prefix messages (existing `crypto.ts`
   pattern), rate-limited, and audit-logged like provision/claim.
-- **The docker-proxy path on single-box** (wg0 lives in `droplet-openwrt`,
-  UDP 51820 via docker-proxy) must produce NAT mappings consistent with the
-  punch origin — verified on .87 as part of WARP-1385 AC.
+- **The single-box NAT path was rebuilt for the punch** (shipped in
+  WARP-1385): wg0 lives in `droplet-openwrt`, and the original docker-proxy
+  publish of udp/51820 masqueraded the container's *outbound* wg packets with
+  an ephemeral host source port — so the home router's egress mapping never
+  matched the inbound path and hole-punching could not work. The listener is
+  now wired at the host layer by `droplet-openwrt-attach`: DNAT of inbound
+  udp/51820 into the container plus a source-port-preserving masquerade on
+  egress; the compose port-publish is removed. Any future change to the
+  openwrt networking must preserve this src-port-51820 invariant (tcpdump
+  verification recipe in the epic).
 - **IPv6 and app-JWT-vs-host caveats** are tracked in the client stories
   (tokens are minted against the LAN baseURL today).
 
