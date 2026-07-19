@@ -46,8 +46,7 @@ import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
-import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
-import type { AppCapabilities } from "@/lib/api";
+import { useModuleGate } from "@/lib/hooks/useModuleGate";
 
 type NavItem = {
   href: string;
@@ -68,13 +67,24 @@ type NavItem = {
    */
   requiresCapability?: "claudeActivity" | "ragEval";
   /**
-   * Hide unless the named user-facing module is enabled on this Droplet (GET
-   * /api/capabilities — readable by every authenticated role, unlike the
-   * admin-only probe above). WARP-1154/1155: the Projects entry is driven by
-   * this explicit flag, never by catching request errors. The hook fails
-   * open, so the entry only disappears on an explicit `false`.
+   * Hide unless the named user-facing module is EFFECTIVE (available && enabled)
+   * on this Droplet — GET /api/modules, readable by every authenticated role.
+   * WARP-1397: every toggleable module's nav entry carries its registry id
+   * here, so flipping a feature off in Settings → Features removes its nav
+   * entry (no dead, module-gated 404). The gate fails open, so an entry only
+   * disappears on a positive "off". Core modules (chat) are never tagged.
+   * The id must match the orchestrator module-registry id.
    */
-  requiresModule?: keyof AppCapabilities;
+  requiresModule?:
+    | "files"
+    | "email"
+    | "calendar"
+    | "projects"
+    | "knowledge"
+    | "cameras"
+    | "network"
+    | "smart_home"
+    | "voice";
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -120,6 +130,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/files",
         label: "Files",
         icon: FolderOpen,
+        requiresModule: "files",
         // Files sub-nav — the original nesting, now expressed via the
         // generalized `children` mechanism (was the standalone filesSubNav
         // const). Reveals on any /files/* route. "All files" is `exact` so
@@ -138,8 +149,8 @@ const NAV_GROUPS: NavGroup[] = [
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is
       // gated to owner/admin in the UI + server. No unread-count badge (the
       // NavItem type has no count field; out of scope).
-      { href: "/email", label: "Email", icon: Mail },
-      { href: "/calendar", label: "Calendar", icon: CalendarIcon },
+      { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
+      { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
       // ADR-026: native PM surface — sits next to Calendar (both are
       // time/workflow-oriented) and ahead of Knowledge (the read-only search
       // index). Page at /projects renders natively off /api/pm/* under the
@@ -147,7 +158,7 @@ const NAV_GROUPS: NavGroup[] = [
       // WARP-1154/1155: hidden when the orchestrator says the Projects module
       // is off, so the nav never advertises a surface the box won't serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
-      { href: "/knowledge", label: "Knowledge", icon: BookOpen },
+      { href: "/knowledge", label: "Knowledge", icon: BookOpen, requiresModule: "knowledge" },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
       // /context is "what's indexed" by capability density.
@@ -168,6 +179,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/cameras",
         label: "Cameras",
         icon: Video,
+        requiresModule: "cameras",
         children: [
           // Events replaces the old "Clips" entry — same icon, expanded UX.
           // The /clips route still resolves (kept as a redirect) so external
@@ -175,15 +187,15 @@ const NAV_GROUPS: NavGroup[] = [
           { href: "/events", label: "Events", icon: Film },
         ],
       },
-      { href: "/network", label: "Network", icon: Network },
+      { href: "/network", label: "Network", icon: Network, requiresModule: "network" },
       // WARP-302: "Devices" uses Cpu (not Home) so it doesn't visually
       // collide with the Home tab's LayoutDashboard glyph at thumb distance.
-      { href: "/devices", label: "Devices", icon: Cpu },
+      { href: "/devices", label: "Devices", icon: Cpu, requiresModule: "smart_home" },
       // WARP-1055: mic health + guided calibration. A peer surface, not
       // a Settings subpage — calibration is living, health-bearing state
       // (design brief §2). Ordered Cameras · Network · Devices · Voice.
-      { href: "/voice", label: "Voice", icon: Mic },
-      { href: "/remote-access", label: "Remote Access", icon: Globe },
+      { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
+      { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
       // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
       // provider #1 (the Patterson dental PMS Droplet reads directly over its
       // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
@@ -283,14 +295,15 @@ function visibleItems(
   workspace: "home" | "business",
   role: AuthRole | undefined,
   capabilities: { claudeActivity: boolean; ragEval: boolean },
-  modules: AppCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
 ): NavItem[] {
   return items.filter((item) => {
     if (item.workspace && item.workspace !== workspace) return false;
     if (item.roles && (!role || !item.roles.includes(role))) return false;
     if (item.requiresCapability && !capabilities[item.requiresCapability])
       return false;
-    if (item.requiresModule && !modules[item.requiresModule]) return false;
+    // WARP-1397: hide a switched-off feature's nav entry (module not effective).
+    if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
     return true;
   });
 }
@@ -301,7 +314,7 @@ export function Sidebar() {
   const { user, logout } = useAuth();
   const { workspaceType, isBusiness } = useWorkspace();
   const capabilities = useCapabilities();
-  const modules = useAppCapabilities();
+  const isModuleOn = useModuleGate();
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -351,7 +364,7 @@ export function Sidebar() {
       workspaceType,
       user?.role as AuthRole | undefined,
       capabilities,
-      modules,
+      isModuleOn,
     ),
   })).filter((g) => g.items.length > 0);
 
