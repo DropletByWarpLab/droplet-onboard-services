@@ -1,17 +1,78 @@
 {
-  "_comment": "WARP-436 — RAGAS metric baselines, schema-only scaffold.",
-  "_status": "PLACEHOLDER. Populate via the services/rag-eval/ container on a deployed appliance with COMPOSE_PROFILES=...,eval set: `docker exec droplet-rag-eval-1 python /opt/rag-eval/main.py bootstrap --runs 5` writes /data/rag-eval/baselines.candidate.json, then `docker cp` it back here and commit. See services/rag-eval/README.md + docs/RAG_TESTING.md §'Baselines + thresholds'. The integration test in tests/retrieval-eval/run.integration.test.ts treats the all-zero floors as 'recording mode' and skips assertions when zero.",
-  "recorded_at": null,
+  "_comment": "WARP-436 \u2014 RAGAS metric baselines, aggregated by ragas_runner.py aggregate. Per-run mean is the unit sample; floor = p50 \u2212 1.5 \u00d7 IQR.",
+  "recorded_at": "2026-07-19T23:30:45.758150+00:00",
   "judge": "local",
   "n_queries": 20,
-  "n_runs": 0,
-  "runs": [],
+  "n_runs": 5,
+  "runs": [
+    "results-20260719T222502Z.json",
+    "results-20260719T223813Z.json",
+    "results-20260719T225120Z.json",
+    "results-20260719T230429Z.json",
+    "results-20260719T231737Z.json"
+  ],
   "envelopes": {
-    "faithfulness":          { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "llm_context_precision": { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "llm_context_recall":    { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "answer_relevancy":      { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "factual_correctness":   { "floor": 0.0, "p50": null, "p95": null, "iqr": null }
+    "context_recall": {
+      "floor": 0.3,
+      "p50": 0.3,
+      "p95": 0.3,
+      "iqr": 0.0,
+      "n": 5
+    },
+    "factual_correctness": {
+      "floor": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "iqr": 0.0,
+      "n": 5
+    },
+    "faithfulness": {
+      "floor": 0.29487179487179493,
+      "p50": 0.3333333333333333,
+      "p95": 0.3333333333333333,
+      "iqr": 0.025641025641025605,
+      "n": 5
+    },
+    "llm_context_precision_with_reference": {
+      "floor": 0.3968749999603125,
+      "p50": 0.406249999959375,
+      "p95": 0.427916666623875,
+      "iqr": 0.006249999999374978,
+      "n": 5
+    }
   },
-  "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over 5 runs"
+  "envelopes_by_class": {
+    "factual": {
+      "context_recall": {
+        "floor": 0.3,
+        "p50": 0.3,
+        "p95": 0.3,
+        "iqr": 0.0,
+        "n": 5
+      },
+      "factual_correctness": {
+        "floor": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "iqr": 0.0,
+        "n": 5
+      },
+      "faithfulness": {
+        "floor": 0.29487179487179493,
+        "p50": 0.3333333333333333,
+        "p95": 0.3333333333333333,
+        "iqr": 0.025641025641025605,
+        "n": 5
+      },
+      "llm_context_precision_with_reference": {
+        "floor": 0.3968749999603125,
+        "p50": 0.406249999959375,
+        "p95": 0.427916666623875,
+        "iqr": 0.006249999999374978,
+        "n": 5
+      }
+    }
+  },
+  "_threshold_formula": "floor = p50 \u2212 1.5 \u00d7 IQR, computed over N runs",
+  "_status": "PROMOTED 2026-07-19 (WARP-1407 follow-on / WARP-436 batch D): first real envelopes, from bootstrap 20260719T222502Z on droplet-sys \u2014 5 sequential runs over the seeded eval-fixtures corpus (scripts/seed-eval-fixtures.sh; partial WARP-224 set: pdf/zip/png/eml, no audio-video), judge = local Ollama gpt-oss:20b, ragas==0.2.13. answer_relevancy absent by design (skipped_metrics on appliances without OPENAI_API_KEY); factual_correctness envelope is 0.0 at this corpus stage. Re-baseline deliberately after fixture or judge or ragas changes."
 }
