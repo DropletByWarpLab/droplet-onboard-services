@@ -54,11 +54,12 @@ jobs:
         # apscheduler + tzlocal + uvicorn: the services/rag-eval suite imports
         #   main.py (WARP-1061 uvicorn TLS config tests), which pulls in
         #   scheduler_service.py (apscheduler, tzlocal) and lazily uvicorn.
-        #   server.py's fastapi stack stays uninstalled — the app reaches
-        #   uvicorn.Config as the string "server:app", never imported.
+        # fastapi + httpx: the run-results visibility tests exercise
+        #   server.py's /runs + /baselines surface through FastAPI's
+        #   TestClient (httpx-backed), so the fastapi stack is now installed.
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pyyaml datasets pytest apscheduler tzlocal uvicorn
+          pip install pandas pyyaml datasets pytest apscheduler tzlocal uvicorn fastapi httpx
 
       - name: Run pytest (ragas aggregate)
         run: pytest tests/retrieval-eval/ragas/test_aggregate.py -v
