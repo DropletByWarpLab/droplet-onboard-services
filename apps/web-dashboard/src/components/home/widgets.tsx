@@ -866,7 +866,18 @@ export function RemoteAccessWidget(_: WidgetProps) {
     void load();
   }, [load]);
 
-  const blocked = !status?.endpointConfigured;
+  const endpointBlocked = !status?.endpointConfigured;
+  // WARP-1391: the one-tap mint is HOME mode — Endpoint = the box's discovered
+  // home-facing LAN IP (resolveHomeEndpointHost), NOT the away-mode default's
+  // split-horizon public FQDN (that FQDN is public-NXDOMAIN by design —
+  // WARP-954 / ADR-023 — so an away conf shows keepalive but zero handshakes).
+  // Without a discovered home LAN IP a home mint 503s, so the switch must be
+  // inert here too — same posture as remote-access/page.tsx and VpnStep. Only
+  // applies once status has loaded; missing ⇒ "not reachable at home yet" (the
+  // WARP-993 never-over-promise convention). A null status (load failure) is
+  // already covered by endpointBlocked.
+  const homeBlocked = loaded && Boolean(status) && !status?.homeEndpointHost;
+  const blocked = endpointBlocked || homeBlocked;
   const on = peers.length > 0;
   const mine = user?.username
     ? peers.filter((p) => p.userId === user.username)
@@ -878,7 +889,12 @@ export function RemoteAccessWidget(_: WidgetProps) {
     setError(null);
     setSubmitting(true);
     try {
-      const result = await createVpnPeer("This device");
+      // WARP-1391: mint HOME mode explicitly. The orchestrator route defaults to
+      // "away" (a byte-identical pre-hybrid compat contract, PR #897) which bakes
+      // the split-horizon public FQDN Endpoint — public-NXDOMAIN by design, so the
+      // conf shows keepalive but zero handshakes. Home bakes the box LAN IP and
+      // works today; the switch is gated inert on homeEndpointHost above.
+      const result = await createVpnPeer("This device", "home");
       setCreated(result);
       await load();
     } catch (e) {
@@ -917,13 +933,15 @@ export function RemoteAccessWidget(_: WidgetProps) {
 
   const sub = !loaded
     ? "Checking…"
-    : blocked
+    : endpointBlocked
       ? "Web address not ready yet"
-      : submitting
-        ? "Connecting this device…"
-        : on
-          ? `On · ${peers.length} connected device${peers.length === 1 ? "" : "s"}`
-          : "Off · tap to connect this device";
+      : homeBlocked
+        ? "Home address not ready yet"
+        : submitting
+          ? "Connecting this device…"
+          : on
+            ? `On · ${peers.length} connected device${peers.length === 1 ? "" : "s"}`
+            : "Off · tap to connect this device";
 
   const copyConf = () => {
     if (!created) return;

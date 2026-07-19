@@ -536,6 +536,14 @@ export interface VpnStatusInfo {
    *  "from anywhere" surface gates its copy on this; missing ⇒ treat as false
    *  (never over-promise against an older orchestrator). */
   offLanReachable?: boolean;
+  /** WARP-1391: the box's discovered home-facing LAN IP — the Endpoint a
+   *  HOME-mode peer dials directly. Discovered dynamically (DHCP, never
+   *  hardcoded — resolveHomeEndpointHost on the orchestrator); null/absent when
+   *  it can't be discovered yet, in which case a home-mode mint 503s. Every
+   *  user-facing mint surface gates on this: missing ⇒ treat as "not reachable
+   *  at home yet" and show guidance instead of minting a dead config (mirrors
+   *  the WARP-993 offLanReachable never-over-promise convention). */
+  homeEndpointHost?: string | null;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
