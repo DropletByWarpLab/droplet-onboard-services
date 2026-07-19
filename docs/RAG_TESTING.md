@@ -326,7 +326,7 @@ ADR: [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption
 | Metric | What it measures | RAGAS class |
 |---|---|---|
 | Faithfulness | Does every claim in the answer have support in the retrieved contexts? | `Faithfulness` |
-| LLMContextPrecision | Of the chunks retrieved, how many were actually relevant to the gold answer? | `LLMContextPrecision` |
+| LLMContextPrecision | Of the chunks retrieved, how many were actually relevant to the gold answer? | `LLMContextPrecisionWithReference` (WARP-1406: no ragas release exports a bare `LLMContextPrecision`) |
 | LLMContextRecall | Of the chunks needed for the gold answer, how many did retrieval surface? | `LLMContextRecall` |
 | AnswerRelevancy | Is the answer on-topic for the question (independent of correctness)? | `AnswerRelevancy` |
 | FactualCorrectness | How well does the answer match the gold reference answer? | `FactualCorrectness` |
@@ -389,7 +389,7 @@ by `id`. The goldens add two fields the NDCG harness doesn't need:
   `FactualCorrectness` and `AnswerRelevancy`.
 - `reference_contexts` — short prose descriptions of the chunks that
   should appear in the retrieved context, used by `LLMContextRecall`
-  and `LLMContextPrecision`.
+  and `LLMContextPrecisionWithReference`.
 
 Each entry carries a sourcing tag in its comment:
 
