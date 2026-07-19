@@ -51,6 +51,36 @@ The container's local timezone matters because the cron expression is
 written in local time. Set `TZ=America/Los_Angeles` (or your zone)
 either in the compose `environment:` block or in `.env`.
 
+## Seeding the eval fixture corpus (WARP-1407)
+
+The goldens (`tests/retrieval-eval/ragas/goldens.yaml`) are written
+against the WARP-224 fixture corpus, NOT a real user's files — pointed
+at a real corpus, every metric mean reads ~0.0 and baselines can't be
+bootstrapped. Seed the fixtures under a dedicated Nextcloud user so
+eval numbers are stable, golden-comparable, and never pollute anyone's
+real retrieval:
+
+```bash
+# On the appliance host (stack up). Idempotent — re-run after a
+# factory reset or volume wipe.
+./scripts/seed-eval-fixtures.sh
+
+# Then aim the eval at the seeded corpus (recreate, NOT restart —
+# `docker restart` never re-reads env_file):
+#   .env: RAGAS_EVAL_USER=eval-fixtures
+docker compose -p droplet -f docker/docker-compose.yml --env-file .env \
+  up -d --force-recreate --no-deps rag-eval
+```
+
+The script creates NC user `eval-fixtures` (via occ; the user never
+logs in), copies `sample.pdf` / `simple.zip` / the WARP-206 PNG / the
+WARP-224 EML into `files/test-rag-end-to-end/`, runs `occ files:scan`,
+and polls `FileContentChunk` until the indexer has embedded them.
+Audio/video fixtures are not seeded (they need transcribe-now,
+WARP-218); the eval tolerates the partial set. Verify with an ad-hoc
+run: `error_counts` all zero and non-zero `context_recall` /
+`llm_context_precision_with_reference` means.
+
 ## Bootstrap baselines (WARP-436 batch D path)
 
 The "first time `baselines.json` gets populated" workflow is now one
