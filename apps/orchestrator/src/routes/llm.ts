@@ -737,6 +737,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // without the cookie); file tools will then surface
       // AUTH_REQUIRED, which is the same behavior as before WARP-104.
       const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+      if (!ncToken && (req as AuthedRequest).user) {
+        // An authenticated dashboard user with no NC credential is the
+        // signature of an unprovisioned session (passkey/SSO login, cache
+        // restart, or logout on another device) — every ncToken-gated file
+        // tool in this turn will return AUTH_REQUIRED. Loud here so the
+        // failure is greppable at the turn that produced it.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[llm/chat] no Nextcloud credential for this session — file tools will return AUTH_REQUIRED (a password re-login re-provisions it)",
+        );
+      }
       // WARP-202: also forward the caller's username so handlers gated
       // on per-user RBAC (e.g. `search_content`'s pgvector lookup) can
       // scope queries to this user's chunks. The mcp-server's stdio
