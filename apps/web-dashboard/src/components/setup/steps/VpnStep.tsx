@@ -150,7 +150,21 @@ export function VpnStep({
           // than trapping the customer on a half-rendered returning view.
         }
       }
-      // No peer yet → the one-tap toggle is the primary entry.
+      // No peer yet → the one-tap toggle is the primary entry. But the
+      // user-facing mint is HOME mode (WARP-1391): the Endpoint is the box's
+      // discovered home-facing LAN IP (resolveHomeEndpointHost), NOT the
+      // split-horizon public FQDN the away-mode default bakes (that FQDN is
+      // public-NXDOMAIN by design — WARP-954 / ADR-023 — so an away conf shows
+      // keepalive but zero handshakes). When the box hasn't discovered that LAN
+      // IP yet (homeEndpointHost null/absent) a home mint 503s, so DO NOT offer
+      // a dead toggle — surface the same routing-unavailable guidance the
+      // precheck already shows (WARP-1283), and stay honest (missing ⇒ "not
+      // reachable at home yet", the WARP-993 never-over-promise convention).
+      if (!s.homeEndpointHost) {
+        setPrecheckErrorCode("ROUTING_UNAVAILABLE");
+        setPhase("error");
+        return;
+      }
       setPhase("toggle");
     } catch (e) {
       setPrecheckErrorCode(
@@ -180,7 +194,11 @@ export function VpnStep({
       setErrorTone("error");
       setSubmitting(true);
       try {
-        const result = await createVpnPeer(trimmed);
+        // WARP-1391: user-facing surfaces mint HOME mode explicitly. The
+        // orchestrator route defaults to "away" (a byte-identical pre-hybrid
+        // compat contract, PR #897); an omitted mode silently baked a dead
+        // public-NXDOMAIN Endpoint. Home bakes the box LAN IP and works today.
+        const result = await createVpnPeer(trimmed, "home");
         setCreated(result);
         setPhase("created");
       } catch (e) {
@@ -373,7 +391,7 @@ export function VpnStep({
               Why this comes first
             </p>
             <p className="type-footnote text-label-secondary">
-              Your home internet&rsquo;s address can change. A permanent internet
+              Your office internet&rsquo;s address can change. A permanent internet
               address gives the box one reachable endpoint so your devices can
               always find it. Set that up on the internet-address step and this
               lights up automatically.
@@ -403,8 +421,8 @@ export function VpnStep({
         title="Turn on remote access"
         subtitle={
           offLanReachable
-            ? "One tap connects this device to your Droplet from anywhere — the same secure address you use at home. No address to type, no config file, no port-forwarding."
-            : "One tap connects this device to your Droplet on your home network. No address to type, no config file, no port-forwarding. Away-from-home access arrives with the secure relay — coming soon."
+            ? "One tap connects this device to your Droplet from anywhere — the same secure address you use at the office. No address to type, no config file, no port-forwarding."
+            : "One tap connects this device to your Droplet on your office network. No address to type, no config file, no port-forwarding. Away-from-office access arrives with the secure relay — coming soon."
         }
         skip={{ label: "I'll do this later", onClick: onSkip }}
       >
@@ -465,7 +483,7 @@ export function VpnStep({
           <span className="type-caption-1 text-label-quaternary ml-auto">
             {offLanReachable
               ? "same address, on or off your Wi-Fi"
-              : "works on your home Wi-Fi today"}
+              : "works on your office Wi-Fi today"}
           </span>
         </div>
 
@@ -523,16 +541,16 @@ export function VpnStep({
               to import it into your phone&rsquo;s VPN. The box dials{" "}
               <strong>outbound</strong> to the relay, so there&rsquo;s no
               port-forward and no public address to expose, and you land on the
-              same trusted address you use at home.
+              same trusted address you use at the office.
             </p>
           ) : (
             <p>
               Turning this on generates a WireGuard key pair, builds this
               device&rsquo;s private config, and shows you a QR code to import it
               into your phone&rsquo;s VPN. Today the tunnel works while
-              you&rsquo;re on your home network; away-from-home access arrives
-              with the secure relay — coming soon, and this same setup will carry
-              over.
+              you&rsquo;re on your office network; away-from-office access
+              arrives with the secure relay — coming soon, and this same setup
+              will carry over.
             </p>
           )}
         </LearnMoreCard>
@@ -794,17 +812,17 @@ export function VpnStep({
           phone&rsquo;s browser —{" "}
           {offLanReachable
             ? "that’s this Droplet from anywhere."
-            : "that’s this Droplet on your home network."}{" "}
+            : "that’s this Droplet on your office network."}{" "}
           {hasPublicFqdn ? (
             <>
-              Bookmark it: it&rsquo;s the same secure address you use at home,
-              with nothing to install.
+              Bookmark it: it&rsquo;s the same secure address you use at the
+              office, with nothing to install.
             </>
           ) : (
             <>
               Bookmark it: names like{" "}
-              <span className="font-mono">droplet.local</span> only work at home,
-              not over the tunnel.
+              <span className="font-mono">droplet.local</span> only work on the
+              office network, not over the tunnel.
             </>
           )}{" "}
           Lose the phone? Revoke this device from{" "}
@@ -814,13 +832,13 @@ export function VpnStep({
         {offLanReachable ? (
           <p>
             Test it from cellular or another network. While you&rsquo;re on this
-            Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back home — and
+            Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back — and
             you don&rsquo;t need it there; everything already works directly.
           </p>
         ) : (
           <p>
-            This works while you&rsquo;re connected to your home network.
-            Away-from-home access arrives with the secure relay — coming soon;
+            This works while you&rsquo;re connected to your office network.
+            Away-from-office access arrives with the secure relay — coming soon;
             this device will be ready for it.
           </p>
         )}

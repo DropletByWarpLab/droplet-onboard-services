@@ -12,6 +12,34 @@ const inputSchema = {
 
 const MAX_TEXT_CHARS = 10000;
 
+// WARP-1372: bytes sniffed when the content-type header doesn't declare a
+// texty type. Mirrors the file-indexer's sniffer (watcher.py, WARP-1139).
+const SNIFF_BYTES = 4096;
+
+/**
+ * WARP-1372 — is this undeclared content readable text? The download proxy
+ * reports application/octet-stream for plainly-readable files (md/csv/txt),
+ * so the header alone must never be grounds for refusal. UTF-8-decode a
+ * bounded head: a NUL byte or a hard decode error away from the boundary
+ * means genuinely binary; a multibyte char split at the very end is fine.
+ */
+function sniffIsText(bytes: Uint8Array): boolean {
+  const head = bytes.subarray(0, SNIFF_BYTES);
+  if (head.includes(0)) return false;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  // Tolerate up to 3 trailing bytes of a char truncated by the sniff window.
+  for (let trim = 0; trim <= 3 && trim < head.length; trim++) {
+    try {
+      decoder.decode(head.subarray(0, head.length - trim));
+      return true;
+    } catch {
+      // Only a boundary truncation is forgivable — keep trimming; a decode
+      // error that survives all trims is real binary content.
+    }
+  }
+  return false;
+}
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   // TOOLS-03: read_file must enforce the SAME boundary the write
   // file-tools do — an authenticated Nextcloud session (userId+ncToken)
@@ -56,6 +84,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   ) {
     const text = await res.text();
     return { ok: true, data: { path, content: text.slice(0, MAX_TEXT_CHARS) } };
+  }
+  // WARP-1372: sniff only GENERIC/undeclared types — a specifically
+  // declared binary type (image/png, application/pdf) is trusted as-is.
+  const undeclared = contentType === "" || contentType.includes("octet-stream");
+  if (undeclared) {
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (sniffIsText(bytes)) {
+      const text = new TextDecoder("utf-8").decode(bytes);
+      return { ok: true, data: { path, content: text.slice(0, MAX_TEXT_CHARS) } };
+    }
   }
   return {
     ok: true,

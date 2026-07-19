@@ -2,9 +2,12 @@
  * WARP-461 — `memory.recall` LLM tool.
  *
  * Searches the per-workspace `MemoryFact` table for facts whose `fact`
- * text contains the query substring (case-insensitive). Optional
- * `category` filter narrows to one of the six `MemoryFactCategory`
- * values (`Tone | Workflow | Scope | Schedule | Other | Business`).
+ * text contains ANY query term (case-insensitive). Optional `category`
+ * filter narrows to one of the six `MemoryFactCategory` values
+ * (`Tone | Workflow | Scope | Schedule | Other | Business`). WARP-1335:
+ * a keyword miss falls back to the recent active facts (memory is a
+ * small curated set) with `broadened: true`, so the model never wrongly
+ * concludes a fact doesn't exist.
  *
  * Only `active=true` facts are returned. Soft-disabled facts stay in
  * the DB for the evidence chain but don't influence the model.
@@ -43,7 +46,8 @@ const inputSchema = {
   properties: {
     query: {
       type: "string",
-      description: "Substring to search for in fact text. Case-insensitive.",
+      description:
+        "Keywords to search for in fact text (case-insensitive; matches any term). On a miss, recent facts are returned so nothing is silently hidden.",
     },
     category: {
       type: "string",
@@ -89,17 +93,41 @@ async function handler(
       ? Math.min(Math.floor(args.limit), 50)
       : 10;
 
-  const facts = await ctx.prisma.memoryFact.findMany({
+  // WARP-845 — facts the CALLER may read; shared by both queries below.
+  const baseWhere = {
+    active: true,
+    audience: { in: visibleAudiences(ctx.role) },
+    ...(category ? { category } : {}),
+  };
+
+  // WARP-1335 — a single substring match on the whole query missed facts
+  // whose TEXT doesn't contain the query keyword (C02: "accountant" never
+  // matched "Sophie Bergerac … will take over URSSAF"). Match ANY query
+  // term instead; a query word like "the" won't help, but multi-word
+  // queries get far more forgiving.
+  const terms = query.split(/\s+/).filter((t) => t.length > 0);
+
+  let facts = await ctx.prisma.memoryFact.findMany({
     where: {
-      active: true,
-      // WARP-845 — the model only recalls facts the CALLER may read.
-      audience: { in: visibleAudiences(ctx.role) },
-      ...(category ? { category } : {}),
-      fact: { contains: query, mode: "insensitive" },
+      ...baseWhere,
+      OR: terms.map((t) => ({ fact: { contains: t, mode: "insensitive" as const } })),
     },
     orderBy: { addedAt: "desc" },
     take: limit,
   });
+
+  // WARP-1335 — memory is a small curated set; a keyword miss must not
+  // return "nothing" and let the model claim the fact doesn't exist. Fall
+  // back to the recent active facts so the model can see and judge them.
+  let broadened = false;
+  if (facts.length === 0) {
+    facts = await ctx.prisma.memoryFact.findMany({
+      where: baseWhere,
+      orderBy: { addedAt: "desc" },
+      take: limit,
+    });
+    broadened = facts.length > 0;
+  }
 
   return {
     ok: true,
@@ -111,6 +139,9 @@ async function handler(
         addedBy: f.addedBy,
         addedAt: f.addedAt.toISOString(),
       })),
+      // Signals the model that these are the recent facts (keyword miss),
+      // not direct hits — so it judges relevance rather than assuming a match.
+      ...(broadened ? { broadened: true } : {}),
     },
   };
 }

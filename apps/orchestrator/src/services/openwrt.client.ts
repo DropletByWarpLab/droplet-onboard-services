@@ -982,6 +982,9 @@ export type VpnPeerWire = {
   description: string;
   endpoint_host: string;
   persistent_keepalive: string;
+  // WARP-1389 — runtime `latest handshake` epoch (seconds; 0 = never/unknown),
+  // enriched by the routing /vpn/peers read. Absent on older routing builds.
+  latest_handshake?: number;
 };
 
 export type VpnSetupResponse = VpnInterfaceInfo & {
@@ -1054,6 +1057,47 @@ export async function createVpnPeer(opts: {
   if (opts.persistentKeepalive !== undefined) body.persistent_keepalive = opts.persistentKeepalive;
   const res = await postJson("/vpn/peers", body, "VPN create peer");
   return res.json() as Promise<VpnPeerCreateResponse>;
+}
+
+/**
+ * WARP-1385 — install/refresh a direct-punch overlay peer (ADR-030). Unlike
+ * createVpnPeer, the phone brings its OWN key (enrolled via HQ), so this installs
+ * the given `publicKey` with the phone's observed `endpoint` + a keepalive.
+ * Idempotent on the routing side (re-install refreshes the endpoint in place).
+ */
+export async function installOverlayVpnPeer(opts: {
+  interface?: string;
+  publicKey: string;
+  endpoint: string;
+  allowedIps: string[];
+  persistentKeepalive?: number;
+  description?: string;
+}): Promise<{
+  status: "ok";
+  interface: string;
+  public_key: string;
+  endpoint: string;
+  allowed_ips: string[];
+  persistent_keepalive: number;
+}> {
+  const body: Record<string, unknown> = {
+    public_key: opts.publicKey,
+    endpoint: opts.endpoint,
+    allowed_ips: opts.allowedIps,
+  };
+  if (opts.interface) body.interface = opts.interface;
+  if (opts.persistentKeepalive !== undefined)
+    body.persistent_keepalive = opts.persistentKeepalive;
+  if (opts.description !== undefined) body.description = opts.description;
+  const res = await postJson("/vpn/peers/overlay", body, "VPN install overlay peer");
+  return res.json() as Promise<{
+    status: "ok";
+    interface: string;
+    public_key: string;
+    endpoint: string;
+    allowed_ips: string[];
+    persistent_keepalive: number;
+  }>;
 }
 
 export async function deleteVpnPeer(opts: {

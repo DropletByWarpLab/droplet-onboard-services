@@ -14,10 +14,13 @@ cadence/payload table):
     POST {portal}/agents/commands/{id}/result
 
 ``{portal}`` = DROPLET_TELEMETRY_PORTAL_URL (default the Warp Lab
-analytics portal). NOTHING else is ever dialed; every attempt is logged
-on the ``fleet_agent.egress`` logger so the box's own phone-home surface
-is auditable from its logs. Payloads carry operational shape only — no
-file names, no user data, no customer LAN IPs.
+analytics portal). NOTHING else is ever dialed by this client — the
+service's only other egress is the opt-in WARP-1025 update-poll's
+release-manifest fetch, declared in update_poll.py; every attempt on
+either surface is logged on the ``fleet_agent.egress`` logger so the
+box's own phone-home surface is auditable from its logs. Payloads carry
+operational shape only — no file names, no user data, no customer LAN
+IPs.
 
 Wire contract (FROZEN): droplet-analytics
 ``docs/superpowers/agent-api.openapi.yaml`` v1.0.0. Headers per request:

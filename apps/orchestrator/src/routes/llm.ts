@@ -24,6 +24,7 @@ import {
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { decryptChunkRows } from "../services/file-search.service.js";
 import { probeColdModel } from "../services/model-readiness.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -502,7 +503,20 @@ async function buildAttachmentContext(
         select: { text: true },
         take: ATTACHMENT_CHUNK_FETCH_CAP,
       });
-      const fullText = chunks.map((c) => c.text).join("\n").trim();
+      // WARP-242: brain chunks hold dcv1 ciphertext at rest under the item's
+      // per-document DEK — decrypt-on-read BEFORE the text enters the LLM
+      // context. Unreadable chunks (DEK crypto-shredded) are dropped; when
+      // everything is unreadable the empty-body branch below explains the
+      // attachment instead of inlining garbage.
+      const readable = await decryptChunkRows(
+        prisma,
+        chunks.map((c) => ({
+          text: c.text,
+          brainItemId: item.id,
+          path: item.filename,
+        })),
+      );
+      const fullText = readable.map((c) => c.text).join("\n").trim();
       const budget = Math.max(
         0,
         Math.min(ATTACHMENT_PER_ITEM_CHAR_BUDGET, remainingBudget),
@@ -1268,17 +1282,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
 
         // WARP-1120 §8/§9.1 — the role-filtered business block, composed fresh
-        // each request and ONLY while the workspace is a BUSINESS box. A box
-        // re-typed to HOME injects nothing even with a committed profile, so we
-        // short-circuit BEFORE reading (and create-on-read materialising) the
-        // profile. composeBusinessBlock role-filters and gates on type again
+        // each request. WARP-1341: business-only build — a missing singleton
+        // row resolves to BUSINESS (a stale pre-migration HOME row still
+        // short-circuits, matching the migration that removes them).
+        // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
-          const workspaceType = (workspace?.type ?? "HOME") as WorkspaceTypeName;
+          const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
               role,

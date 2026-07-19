@@ -176,12 +176,10 @@ export interface BusinessTypeDef {
   modules: ModuleId[];
 }
 
+// WARP-1341: business-only build — the former "Home" preset is not offered
+// (Prisma's `BusinessType.home` enum value survives for old rows; the data
+// migration re-points those to `custom`, which preserves their toggles).
 export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
-  {
-    id: "home", label: "Home",
-    description: "A household — assistant, files, calendar, smart home, cameras.",
-    modules: ["knowledge", "files", "calendar", "voice", "cameras", "smart_home", "network"],
-  },
   {
     id: "professional_office", label: "Professional office",
     description: "An office — documents, email, projects, scheduling.",

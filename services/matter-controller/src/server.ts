@@ -39,6 +39,7 @@ import express, {
 import pino from "pino";
 import {
   resolveWifiNetwork,
+  resolveWifiSsid,
   type MatterControllerCore,
   type WifiProvisioningOptions,
 } from "./controller.js";
@@ -134,12 +135,14 @@ export function createApp(deps: AppDeps): Express {
   app.get("/capabilities", async (_req, res) => {
     // Request-time resolution (file > env) — same helper the commission
     // path uses, so this answer can never drift from real behaviour.
+    // WARP-1363: apSsid resolves file-first too, so a renamed AP is
+    // reported (and provisioned) correctly with no sidecar restart.
     const wifiNetwork = await resolveWifiNetwork(wifiOptions);
     res.json({
       bleCommissioning: capabilities.bleCommissioning,
       reason: capabilities.reason,
       wifiProvisioning: wifiNetwork !== undefined,
-      apSsid: (wifiOptions.wifiSsid ?? "").trim() || null,
+      apSsid: (await resolveWifiSsid(wifiOptions)) || null,
     });
   });
 

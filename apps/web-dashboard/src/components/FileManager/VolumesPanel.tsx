@@ -1,9 +1,26 @@
 "use client";
 
-import { HardDrive } from "lucide-react";
+import Link from "next/link";
+import { HardDrive, Layers } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
+import { usePools } from "@/lib/hooks/usePools";
 import { Meter } from "@/components/shell/primitives";
-import type { DriveInfo } from "@/lib/types";
+import type { DriveInfo, PoolInfo } from "@/lib/types";
+// WARP-1337: ONE shared display-name chain (displayName → label → GUID-guarded
+// mount tail) — this panel used to skip `displayName` entirely and rendered a
+// pool's raw fs-UUID mount tail as the tile title.
+// WARP-1339: pools and drives were two UNJOINED lists, so a mounted pool
+// surfaced here solely as an anonymous GUID drive tile. The shared join
+// helpers merge the mounted md filesystem into ONE pooled tile instead.
+// WARP-1338: tiles deep-link into the file browser via the SAME
+// driveContentsHref the Storage page's cards use — one target, no drift.
+import {
+  driveContentsHref,
+  driveDisplayName,
+  drivePoolName,
+  isPoolBackedDevice,
+  poolBackingDrive,
+} from "./drive-display";
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
@@ -11,17 +28,6 @@ function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   const value = bytes / Math.pow(1024, i);
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
-}
-
-// Customer-facing name: prefer the filesystem label, fall back to the mount
-// point's last segment so a customer sees "Cameras" or "Cloud Storage" — never
-// /dev/nvme0n1p1. If neither is usable, show a generic "Drive" rather than the
-// raw device path, since the target user is non-technical.
-function displayName(d: DriveInfo): string {
-  const fromMount = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const raw = (d.label || fromMount).replace(/[-_]+/g, " ").trim();
-  if (!raw) return "Drive";
-  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
 function pct(d: DriveInfo): number {
@@ -37,8 +43,67 @@ function meterKind(p: number): "" | "warn" | "danger" {
   return "";
 }
 
+/** One volume tile — shared by the pooled and standalone shapes (same card
+ *  chrome, meter and byte row; only icon + title differ). WARP-1338: the
+ *  whole tile is clickable into the file browser at the volume's registered
+ *  path, via a stretched link — an absolutely-positioned anchor over the
+ *  `relative` card. The tile has no other interactive children, so nothing
+ *  ever nests inside the anchor; hover tints the title with the brand color
+ *  (150 ms, matching the DriveCard title affordance). */
+function VolumeTile({
+  name,
+  icon,
+  drive: d,
+}: {
+  name: string;
+  icon: React.ReactNode;
+  drive: DriveInfo;
+}) {
+  const p = pct(d);
+  return (
+    <div role="listitem" className="card relative group">
+      <div className="card-h">
+        <span className="ci">{icon}</span>
+        <span
+          className="ct transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+          title={name}
+        >
+          {name}
+        </span>
+        <span className="cm">{formatBytes(d.free_bytes)} free</span>
+      </div>
+
+      <Meter pct={p} kind={meterKind(p)} />
+
+      <div
+        className="flex items-center justify-between tabular-nums"
+        style={{
+          marginTop: "10px",
+          fontFamily: "var(--font-mono)",
+          fontSize: "12px",
+          color: "var(--text-muted)",
+        }}
+      >
+        <span style={{ color: "var(--text)" }}>{formatBytes(d.used_bytes)}</span>
+        <span>of {formatBytes(d.size_bytes)}</span>
+      </div>
+
+      <Link
+        href={driveContentsHref(d)}
+        aria-label={`Open ${name}`}
+        className="absolute inset-0 focus-visible:outline-none focus-visible:ring-2"
+        style={{ borderRadius: "inherit" }}
+      />
+    </div>
+  );
+}
+
 export function VolumesPanel() {
   const { drives, isLoading, bridgeError } = useDrives();
+  // WARP-1339: pools feed the join only — a pool with no mounted md
+  // filesystem has nothing browsable (and no honest bytes) to show on the
+  // Files screen, so it stays a Storage-page concern.
+  const { pools } = usePools();
 
   if (isLoading) {
     return (
@@ -58,46 +123,51 @@ export function VolumesPanel() {
     return null;
   }
 
+  // WARP-1339 — ONE tile per pool, carrying the mounted md filesystem's real
+  // fs-level bytes (ADR-019 — never a fabricated raw-member sum) under the
+  // pool's own name.
+  const pooled = pools
+    .map((pool) => ({ pool, drive: poolBackingDrive(pool.device, drives) }))
+    .filter((t): t is { pool: PoolInfo; drive: DriveInfo } => !!t.drive);
+
+  // Plain tiles keep ONLY standalone drives. A pool-backed drive whose pool is
+  // missing from the pools payload (degraded /storage/pools fetch, older
+  // bridge) stays a plain tile — hiding it with no pooled tile to merge into
+  // would lose the volume from the Files screen entirely. Its title is still
+  // GUID-guarded ("Storage pool") via the WARP-1337 chain.
+  const standalone = drives.filter((d) => {
+    const md = drivePoolName(d);
+    return !md || !pools.some((p) => p.device === md);
+  });
+
   return (
     <div
       className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-6"
       role="list"
       aria-label="Storage volumes"
     >
-      {drives.map((d) => {
-        const p = pct(d);
-        const name = displayName(d);
-        return (
-          <div key={d.mount || d.device} role="listitem" className="card">
-            <div className="card-h">
-              <span className="ci">
-                <HardDrive size={15} />
-              </span>
-              <span className="ct" title={name}>
-                {name}
-              </span>
-              <span className="cm">{formatBytes(d.free_bytes)} free</span>
-            </div>
-
-            <Meter pct={p} kind={meterKind(p)} />
-
-            <div
-              className="flex items-center justify-between tabular-nums"
-              style={{
-                marginTop: "10px",
-                fontFamily: "var(--font-mono)",
-                fontSize: "12px",
-                color: "var(--text-muted)",
-              }}
-            >
-              <span style={{ color: "var(--text)" }}>
-                {formatBytes(d.used_bytes)}
-              </span>
-              <span>of {formatBytes(d.size_bytes)}</span>
-            </div>
-          </div>
-        );
-      })}
+      {pooled.map(({ pool, drive }) => (
+        <VolumeTile
+          key={pool.device}
+          // The pool's OWN displayName leads the shared chain; the matched
+          // drive's fs label / GUID-guarded mount tail back it up, so a
+          // nameless pool says "Storage pool" — never its GUID.
+          name={driveDisplayName(
+            { mount: drive.mount, label: drive.label, displayName: pool.displayName },
+            { poolBacked: true },
+          )}
+          icon={<Layers size={15} />}
+          drive={drive}
+        />
+      ))}
+      {standalone.map((d) => (
+        <VolumeTile
+          key={d.mount || d.device}
+          name={driveDisplayName(d, { poolBacked: isPoolBackedDevice(d.device) })}
+          icon={<HardDrive size={15} />}
+          drive={d}
+        />
+      ))}
     </div>
   );
 }

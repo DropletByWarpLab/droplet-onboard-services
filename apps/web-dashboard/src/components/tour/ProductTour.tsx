@@ -115,7 +115,7 @@ function MotifRecap({ health }: { health: SystemHealthStatus | null }) {
     [Wifi, "Wi-Fi"],
     [Globe, "Internet address"],
     [HardDrive, "Drives"],
-    [Lightbulb, "Smart home"],
+    [Lightbulb, "Smart devices"],
     [Camera, "Cameras"],
     [ShieldCheck, "Remote access"],
     [Sparkles, "Private AI"],
@@ -345,7 +345,7 @@ function MotifRemoteVpn({ away }: { away: boolean }) {
         <div className="mt-1.5 type-caption-1 text-label-tertiary">
           {away
             ? "One tap on Connect · same address anywhere"
-            : "Works across your home Wi-Fi · away access coming soon"}
+            : "Works across your office Wi-Fi · away access coming soon"}
         </div>
       </div>
     </div>
@@ -425,15 +425,15 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "Remote access is automatic and private",
     // WARP-993: the honest baseline. Until the box reports offLanReachable
     // (ADR-025 relay live, or a real public endpoint), the secure address only
-    // resolves on the home network — so the default beat never promises away
+    // resolves on the local network — so the default beat never promises away
     // access; it flags the relay as coming soon instead.
-    body: "Your box has its own secure web address on your home network. Open it from any of your devices at home — encrypted, with a green padlock, and nothing extra to install. Away-from-home access arrives with the secure relay — coming soon.",
+    body: "Your box has its own secure web address on your office network. Open it from any of your devices at the office — encrypted, with a green padlock, and nothing extra to install. Away-from-office access arrives with the secure relay — coming soon.",
     motif: (_live) => <MotifRemoteVpn away={false} />,
   },
 ];
 
 /**
- * The remote-access beat with the away-from-home promise, applied ONLY when
+ * The remote-access beat with the away-from-office promise, applied ONLY when
  * the box reports `offLanReachable: true` (WARP-993). Same beat key/shape, so
  * the resume index, beat dots, and tests are unaffected.
  */
@@ -443,7 +443,7 @@ function withAwayRemoteStep(steps: readonly TourStep[]): TourStep[] {
       ? {
           ...s,
           body:
-            "Your box has its own secure web address — the same one at home and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
+            "Your box has its own secure web address — the same one in the office and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
           motif: (_live) => <MotifRemoteVpn away />,
         }
       : s,
@@ -467,7 +467,7 @@ function withFqdnRemoteStep(
       ? {
           ...s,
           body:
-            "Your box answers at its own secure web address, the same one at home and away. When you're out, open the Droplet app and turn on Connect — your phone links straight to the box, encrypted end to end, and you open that same address with a real certificate and a green padlock. No “Not secure” warning, no dynamic DNS, and nothing to install on each device.",
+            "Your box answers at its own secure web address, the same one in the office and away. When you're out, open the Droplet app and turn on Connect — your phone links straight to the box, encrypted end to end, and you open that same address with a real certificate and a green padlock. No “Not secure” warning, no dynamic DNS, and nothing to install on each device.",
           motif: (_live) => <MotifRemoteFqdn fqdn={fqdn} />,
         }
       : s,

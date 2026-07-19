@@ -324,7 +324,12 @@ esac
 exit 0
 """,
 }
-for _tool in ("wipefs", "blkdiscard", "mkfs.ext4", "mount", "mkdir", "mdadm"):
+for _tool in ("wipefs", "blkdiscard", "mkfs.ext4", "mount", "mkdir", "mdadm",
+              "docker"):
+    # docker (WARP-1338): the post-mount Nextcloud registration shells
+    # `docker exec -u 33 <container> php occ ...`; the plain logging stub
+    # answers success with empty output, so files_external:list never matches
+    # and the create path is exercised.
     _STUBS[_tool] = (
         "printf '%s %%s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 0\n" % _tool
     )
@@ -339,11 +344,21 @@ def _posix(p: Path) -> str:
 def _exec_run(operation: str, params: dict, tmp_path: Path,
               mounts: list[tuple[str, str]] | None = None,
               umount_fail: list[str] | None = None,
-              extra_env: dict | None = None):
-    """Run the script WITHOUT dry-run, against the stub toolchain."""
+              extra_env: dict | None = None,
+              stub_overrides: dict | None = None):
+    """Run the script WITHOUT dry-run, against the stub toolchain.
+
+    stub_overrides (same shape as test_automount_script.py's _run_add):
+    per-test stub bodies merged OVER _STUBS before writing. Every _STUBS
+    entry is rewritten on each call, so writing a stub file between two
+    _exec_run calls silently reverts — overrides must travel through here.
+    """
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir(exist_ok=True)
-    for name, body in _STUBS.items():
+    stubs = dict(_STUBS)
+    if stub_overrides:
+        stubs.update(stub_overrides)
+    for name, body in stubs.items():
         stub = stub_dir / name
         stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
                         encoding="utf-8", newline="\n")
@@ -699,6 +714,150 @@ def test_confirm_phrase_with_punctuation_separators_still_passes():
     assert proc.returncode == 0, proc.stderr
 
 
+# ---------------------------------------------------------------------------
+# WARP-1338 — pool/adopted mounts must (a) land at the SAME
+# <label>-<short-uuid> tail droplet-automount.sh derives on reboot (else the
+# Nextcloud registration + the dashboard's driveContentsHref dangle after the
+# first reboot), (b) seed automount's trusted.list with the new fs UUID so
+# the reboot path re-mounts rw (an unlisted plain fs remounts read-only-
+# untrusted under WARP-232), and (c) register with Nextcloud after each
+# host_mount — best-effort, same occ shape as automount, container name from
+# the shared env (default droplet-nextcloud-1).
+#
+# The blkid stub reports UUID cafef00d-848, so short-uuid = "cafef00d" and
+# the automount-derived tail for label "pool" is EXACTLY "pool-cafef00d" —
+# the same literal test_automount_script.py pins for the reboot path
+# (TestNextcloudRegistration::test_md_pool_mount_..._at_stable_name).
+# ---------------------------------------------------------------------------
+
+def _pool_state_env(tmp_path: Path) -> dict:
+    state_dir = tmp_path / "automount-state"
+    state_dir.mkdir(exist_ok=True)
+    return {
+        "DROPLET_AUTOMOUNT_STATE": _posix(state_dir / "mounts.json"),
+    }
+
+
+def _trusted_list(tmp_path: Path) -> list[str]:
+    tl = tmp_path / "automount-state" / "trusted.list"
+    return tl.read_text(encoding="utf-8").split() if tl.exists() else []
+
+
+def test_pool_format_labels_mounts_stable_name_seeds_trust_and_registers(tmp_path):
+    proc, cmds = _exec_run(
+        "pool_format", {"device": "md0", "fstype": "ext4",
+                        "confirm_phrase": "ERASE md0"},
+        tmp_path, extra_env=_pool_state_env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    # (a) the filesystem is labelled so the automount derivation has a stem.
+    mkfs = [c for c in cmds if c.startswith("mkfs.ext4")]
+    assert mkfs and "-L pool" in mkfs[0] and "/dev/md0" in mkfs[0], cmds
+    # (b) creation-time mount tail == automount's reboot derivation.
+    mount_idx = _first(cmds, "mount /dev/md0")
+    assert mount_idx >= 0, cmds
+    assert cmds[mount_idx].endswith("/mnt/droplet/pool-cafef00d"), (
+        "creation-time pool mount tail differs from the automount "
+        "derivation — registration/driveContentsHref dangle on reboot: %r"
+        % cmds[mount_idx]
+    )
+    # (c) fs UUID seeded into automount's trusted.list (reboot re-mounts rw).
+    assert "cafef00d-848" in _trusted_list(tmp_path), _trusted_list(tmp_path)
+    # (d) Nextcloud registration AFTER the mount, in the shared-env container.
+    reg_idx = _first(cmds, "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /pool-cafef00d")
+    assert reg_idx > mount_idx, cmds
+
+
+# Down-container docker stub: every `docker exec … php occ …` call fails, the
+# way a warming/absent Nextcloud container does. Passed via stub_overrides so
+# _exec_run's stub rewrite can't clobber it back to the success stub (the old
+# write-between-two-runs shape did exactly that and re-tested the SUCCESS path).
+_DOWN_DOCKER_STUB = (
+    "printf 'docker %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n"
+)
+
+
+def test_pool_format_registration_failure_is_nonfatal(tmp_path):
+    # A warming/absent Nextcloud container must never fail a pool op that
+    # already formatted + mounted — the boot reconcile converges it later.
+    proc, cmds = _exec_run(
+        "pool_format", {"device": "md0", "fstype": "ext4",
+                        "confirm_phrase": "ERASE md0"},
+        tmp_path, extra_env=_pool_state_env(tmp_path),
+        stub_overrides={"docker": _DOWN_DOCKER_STUB})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    assert _first(cmds, "mount /dev/md0") >= 0, cmds
+    # The failing registration path was genuinely exercised (docker WAS
+    # called and failed) — not short-circuited before the docker exec…
+    assert _first(cmds, "docker exec") >= 0, cmds
+    # …and the script reported it as deferred-to-reconcile, not a failure.
+    assert "deferred" in proc.stderr, proc.stderr
+
+
+def test_pool_format_registers_even_when_hotplug_autoregister_opted_out(tmp_path):
+    # WARP-1338 review: NEXTCLOUD_AUTO_REGISTER scopes the HOT-PLUG paths
+    # (udev automount add + boot reconcile) only. The pool/adopt/reclaim ops
+    # are owner-confirmed dashboard operations — the very "add mounts via the
+    # dashboard instead" alternative the opt-out steers tighter deployments
+    # toward — so they register regardless of the flag (install.sh's env-file
+    # comment is scoped to match). Pin that deliberate behavior here.
+    proc, cmds = _exec_run(
+        "pool_format", {"device": "md0", "fstype": "ext4",
+                        "confirm_phrase": "ERASE md0"},
+        tmp_path, extra_env={
+            **_pool_state_env(tmp_path),
+            "NEXTCLOUD_AUTO_REGISTER": "0",
+        })
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    assert _first(
+        cmds,
+        "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /pool-cafef00d",
+    ) >= 0, cmds
+
+
+def test_adopt_mounts_at_automount_derived_name_and_registers(tmp_path):
+    proc, cmds = _exec_run(
+        "drive_adopt", _adopt_params(label="Family_Photos"), tmp_path,
+        extra_env=_pool_state_env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    mount_idx = _first(cmds, "mount /dev/sdb")
+    assert mount_idx >= 0, cmds
+    # Labelled adopt: <label>-<short-uuid>, exactly what automount re-derives.
+    assert cmds[mount_idx].endswith("/mnt/droplet/Family_Photos-cafef00d"), cmds
+    assert "cafef00d-848" in _trusted_list(tmp_path), _trusted_list(tmp_path)
+    reg_idx = _first(cmds, "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /Family_Photos-cafef00d")
+    assert reg_idx > mount_idx, cmds
+
+
+def test_adopt_without_label_uses_the_drive_stem(tmp_path):
+    # No label -> automount's "drive" fallback stem, same short-uuid tail.
+    proc, cmds = _exec_run(
+        "drive_adopt", _adopt_params(), tmp_path,
+        extra_env=_pool_state_env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    mount_idx = _first(cmds, "mount /dev/sdb")
+    assert mount_idx >= 0, cmds
+    assert cmds[mount_idx].endswith("/mnt/droplet/drive-cafef00d"), cmds
+
+
+def test_reclaim_mounts_at_automount_derived_name_and_registers(tmp_path):
+    proc, cmds = _exec_run(
+        "drive_reclaim",
+        {"device": "sdb", "md": "md127", "fstype": "ext4",
+         "wipe_method": "quick", "label": "Backup",
+         "confirm_phrase": "ERASE sdb"},
+        tmp_path, extra_env=_pool_state_env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    mount_idx = _first(cmds, "mount /dev/sdb")
+    assert mount_idx >= 0, cmds
+    assert cmds[mount_idx].endswith("/mnt/droplet/Backup-cafef00d"), cmds
+    assert "cafef00d-848" in _trusted_list(tmp_path), _trusted_list(tmp_path)
+    reg_idx = _first(cmds, "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /Backup-cafef00d")
+    assert reg_idx > mount_idx, cmds
+
+
 def test_managed_unmount_prunes_the_automount_state(tmp_path):
     # WARP-612 parity: the guarded-eject path "forgets" an unmounted drive by
     # dropping its entry from /var/lib/droplet-automount/mounts.json. A managed
@@ -739,10 +898,13 @@ def test_pool_format_execute_formats_then_mounts(tmp_path):
     proc, cmds = _exec_run("pool_format", _format_params(), tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout).get("ok") is True
-    fmt = _first(cmds, "mkfs.ext4 /dev/md0")
-    # blkid stub answers UUID cafef00d-848 → mount lands at the by-UUID path
-    # under the shared /mnt/droplet namespace (host_mount, WARP-868).
-    mnt = _first(cmds, "mount /dev/md0 /mnt/droplet/cafef00d-848")
+    # WARP-1338: the fs is labelled "pool" and the mount lands at the
+    # automount-derived pool-<short-uuid> tail (blkid stub answers UUID
+    # cafef00d-848), not the old bare-UUID path — so the reboot remount name
+    # is identical. Still under the shared /mnt/droplet namespace
+    # (host_mount, WARP-868).
+    fmt = _first(cmds, "mkfs.ext4 -L pool /dev/md0")
+    mnt = _first(cmds, "mount /dev/md0 /mnt/droplet/pool-cafef00d")
     assert 0 <= fmt < mnt, cmds
     assert _first(cmds, "mkdir") >= 0, cmds
 

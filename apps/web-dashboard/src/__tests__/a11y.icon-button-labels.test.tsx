@@ -36,10 +36,10 @@ describe("WARP-298 icon-only button aria-labels", () => {
     expect(src).toMatch(/aria-label=\{showPassword \? "Hide password" : "Show password"\}/);
   });
 
-  it("BreadcrumbNav home button has aria-label and icon is hidden", () => {
+  it("BreadcrumbNav root button has aria-label and icon is hidden", () => {
     const src = read("components/BreadcrumbNav.tsx");
-    expect(src).toMatch(/aria-label="Home"/);
-    expect(src).toMatch(/Home size=\{14\} aria-hidden="true"/);
+    expect(src).toMatch(/aria-label="My files"/);
+    expect(src).toMatch(/FolderOpen size=\{14\} aria-hidden="true"/);
   });
 
   it("camera detail page Maximize button has aria-label", () => {

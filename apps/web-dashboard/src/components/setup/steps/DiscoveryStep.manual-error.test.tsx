@@ -90,7 +90,7 @@ describe("DiscoveryStep manual pairing — friendly errors (WARP-856)", () => {
     await submitPairingCode("749701123365521327694");
 
     expect(
-      await screen.findByText(/smart-home service is still starting up/i),
+      await screen.findByText(/smart-device service is still starting up/i),
     ).toBeInTheDocument();
     // The controller jargon never reaches the customer.
     expect(

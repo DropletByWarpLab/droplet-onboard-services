@@ -122,6 +122,9 @@ type Chunk = { id: bigint; brainItemId: string | null; userId: string };
 
 const itemStore = new Map<string, Item>();
 const chunkStore = new Map<string, Chunk>();
+// WARP-242: wrapped per-document DEK rows, keyed `${keyId}#${version}` —
+// the DELETE route must crypto-shred the item's key(s) with the row.
+const dekStore = new Map<string, { keyId: string; version: number }>();
 let cuidCounter = 0;
 let chunkCounter = 0n;
 
@@ -258,6 +261,28 @@ vi.mock("@prisma/client", () => {
         },
       ),
     },
+    // WARP-242: crypto-shred target — deleteItem/purgeUserData delete the
+    // per-document DEK rows (all versions for a keyId).
+    documentEncryptionKey: {
+      deleteMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { keyId: string | { in: string[] } };
+        }) => {
+          const ids =
+            typeof where.keyId === "string" ? [where.keyId] : where.keyId.in;
+          let removed = 0;
+          for (const [k, row] of dekStore) {
+            if (ids.includes(row.keyId)) {
+              dekStore.delete(k);
+              removed++;
+            }
+          }
+          return { count: removed };
+        },
+      ),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
@@ -302,6 +327,7 @@ afterAll(async () => {
 beforeEach(() => {
   itemStore.clear();
   chunkStore.clear();
+  dekStore.clear();
   cuidCounter = 0;
   chunkCounter = 0n;
   (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
@@ -511,6 +537,11 @@ describe("DELETE /api/files/brain/:itemId", () => {
     seedChunk(id, "alice");
     seedChunk(id, "alice");
     seedChunk("other-id", "alice");
+    // WARP-242: the item's wrapped DEK (and a stray second version) must be
+    // crypto-shredded with it; an unrelated item's DEK must survive.
+    dekStore.set(`brain:${id}#1`, { keyId: `brain:${id}`, version: 1 });
+    dekStore.set(`brain:${id}#2`, { keyId: `brain:${id}`, version: 2 });
+    dekStore.set("brain:other-id#1", { keyId: "brain:other-id", version: 1 });
 
     const res = await request(app).delete(`/api/files/brain/${id}`);
     expect(res.status).toBe(204);
@@ -523,6 +554,12 @@ describe("DELETE /api/files/brain/:itemId", () => {
     );
     expect(remaining).toEqual([]);
     expect(chunkStore.size).toBe(1);
+
+    // WARP-242 crypto-shred: every DEK version for this item is gone.
+    expect(
+      Array.from(dekStore.values()).filter((d) => d.keyId === `brain:${id}`),
+    ).toEqual([]);
+    expect(dekStore.has("brain:other-id#1")).toBe(true);
 
     // On-disk: per-item dir is gone.
     await expect(stat(storagePath)).rejects.toThrow();

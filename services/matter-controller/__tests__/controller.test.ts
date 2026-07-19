@@ -19,6 +19,7 @@ import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
   resolveWifiNetwork,
+  resolveWifiSsid,
   MATTER_ENV_ID,
   type ControllerLike,
   type MatterControllerCore,
@@ -179,6 +180,7 @@ describe("createMatterControllerCore", () => {
     function coreWithWifi(
       wifi: {
         wifiSsid?: string;
+        wifiSsidFile?: string;
         wifiPsk?: string;
         wifiPskFile?: string;
         regulatoryCountryCode?: string;
@@ -283,6 +285,136 @@ describe("createMatterControllerCore", () => {
       await c.init();
       await c.commission(QR_PAIRING_CODE);
       expect(optionsOf(ctl).commissioning.regulatoryCountryCode).toBe("US");
+    });
+
+    // WARP-1363: the env SSID is written once at setup and goes stale on an
+    // AP rename (claim / wizard Wi-Fi save) — the commissionee then scans
+    // for a network that no longer broadcasts and answers NetworkNotFound
+    // (proven live on .87: env said "Droplet", the AP broadcast "WarpLab").
+    // The SSID therefore resolves file-first per commission, like the PSK.
+    it("prefers the SSID file (live AP SSID) over the stale env SSID and trims it", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "WarpLab\n");
+      try {
+        const ctl = fakeController();
+        const c = coreWithWifi(
+          { wifiSsid: "Droplet", wifiSsidFile: ssidFile, wifiPsk: "s3cret-psk" },
+          ctl,
+        );
+        await c.init();
+        await c.commission(MANUAL_PAIRING_CODE);
+        expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+          wifiSsid: "WarpLab",
+          wifiCredentials: "s3cret-psk",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to the env SSID when the SSID file is absent (attach not yet run)", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi(
+        {
+          wifiSsid: "Droplet",
+          wifiSsidFile: "/nonexistent/ap-ssid",
+          wifiPsk: "s3cret-psk",
+        },
+        ctl,
+      );
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+        wifiSsid: "Droplet",
+        wifiCredentials: "s3cret-psk",
+      });
+    });
+
+    it("resolveWifiSsid mirrors the commission-path resolution for /capabilities apSsid", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "WarpLab\n");
+      try {
+        await expect(
+          resolveWifiSsid({ wifiSsid: "Droplet", wifiSsidFile: ssidFile }),
+        ).resolves.toBe("WarpLab");
+        await expect(
+          resolveWifiSsid({ wifiSsid: "Droplet", wifiSsidFile: "/nonexistent/x" }),
+        ).resolves.toBe("Droplet");
+        await expect(resolveWifiSsid({})).resolves.toBe("");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("an empty SSID file falls back to the env SSID (never provisions a blank SSID)", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "\n");
+      try {
+        const ctl = fakeController();
+        const c = coreWithWifi(
+          { wifiSsid: "Droplet", wifiSsidFile: ssidFile, wifiPsk: "s3cret-psk" },
+          ctl,
+        );
+        await c.init();
+        await c.commission(QR_PAIRING_CODE);
+        expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+          wifiSsid: "Droplet",
+          wifiCredentials: "s3cret-psk",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // WARP-1362: without discoveryCapabilities matter.js runs the mDNS scanner
+  // ONLY — the BLE scanner never starts even with the transport registered,
+  // so a freshly-reset BLE-first device is undiscoverable by pairing code
+  // (proven live on .87: "1 scanners" vs "2 scanners" in PeerCommissioner).
+  describe("discovery capabilities (WARP-1362)", () => {
+    function coreWithBle(ctl: ControllerLike): MatterControllerCore {
+      return createMatterControllerCore({
+        storagePath: ".data/matter-controller-test",
+        adminFabricLabel: "Droplet Test",
+        createController: () => ctl,
+        bleCommissioning: true,
+      });
+    }
+
+    function optionsOf(ctl: ControllerLike) {
+      return (ctl.commissionNode as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("always scans the IP network, and NOT BLE when the transport is absent", async () => {
+      await core.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(controller).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+      });
+    });
+
+    it("adds the BLE scanner for a manual pairing code when BLE is registered", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
+    });
+
+    it("adds the BLE scanner for a QR pairing code too (the QR bits are deliberately superseded)", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
     });
   });
 

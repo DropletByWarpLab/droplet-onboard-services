@@ -9,14 +9,18 @@
 # Usage:
 #   ./scripts/factory-reset.sh [OPTIONS]
 #
-# Before wiping, it emits a final full-device backup (WARP-570) so a mis-run
-# reset stays recoverable. Pass --no-backup to skip that safety net.
+# A reset means a FACTORY-NEW box: by default nothing is saved and nothing
+# stale survives — including previously accumulated device-backup tarballs
+# (operator directive 2026-07-16). Pass --backup to emit a final full-device
+# backup (WARP-570 semantics: the backup gate aborts the reset on failure).
 #
 # Options:
 #   --yes            Skip interactive confirmation (for automation)
 #   --reinstall      After wiping, automatically run setup.sh to re-provision
 #   --purge-images   Also remove built Docker images + dangling images/networks
-#   --no-backup      Skip the pre-reset safety backup (WARP-570)
+#   --backup         Emit a pre-reset full-device backup and KEEP the backups
+#                    dir (WARP-570 gate; aborts the reset if the backup fails)
+#   --no-backup      DEPRECATED no-op — no backup is already the default
 #   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
 #                    registry). DEFAULT (without this flag): RELEASE only — the
 #                    device stays registered/trusted and self-heals (WARP-980).
@@ -50,7 +54,10 @@ SKIP_CONFIRM=false
 REINSTALL=false
 PURGE_IMAGES=false
 FORCE_REMOVE=false
-NO_BACKUP=false
+# A reset means a factory-new box (operator directive 2026-07-16): the
+# WARP-570 pre-reset backup is now OPT-IN via --backup. When it IS requested,
+# the original fail-safe stands — a failed backup aborts the reset.
+DO_BACKUP=false
 # WARP-980 — default reset RELEASES the HQ name (device stays registered +
 # self-heals). --decommission does the full ADR-023 deregister (deletes the
 # device from the fleet registry).
@@ -68,7 +75,9 @@ Options:
   --reinstall      After wiping, automatically run setup.sh to re-provision
   --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
-  --no-backup      Skip the pre-reset full-device safety backup (WARP-570)
+  --backup         Emit a pre-reset full-device safety backup and KEEP the
+                   backups dir (WARP-570 gate: a failed backup aborts the reset)
+  --no-backup      DEPRECATED no-op — no backup is already the default
   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
@@ -81,6 +90,7 @@ What gets deleted:
   - TLS certificates
   - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
+  - Accumulated device-backup tarballs (unless --backup is passed)
 
 What is preserved:
   - Source code and git history
@@ -99,7 +109,8 @@ while [ $# -gt 0 ]; do
     --reinstall)      REINSTALL=true; shift ;;
     --purge-images)   PURGE_IMAGES=true; shift ;;
     --force)          FORCE_REMOVE=true; shift ;;
-    --no-backup)      NO_BACKUP=true; shift ;;
+    --backup)         DO_BACKUP=true; shift ;;
+    --no-backup)      shift ;;  # deprecated no-op — kept so existing automation doesn't break
     --decommission)   DECOMMISSION=true; shift ;;
     -h|--help)        usage ;;
     *)                echo "Unknown option: $1"; usage ;;
@@ -164,15 +175,16 @@ fi
 # =============================================================================
 # Phase 0: Safety backup (WARP-570)
 # =============================================================================
-# Emit a final full-device backup BEFORE any destructive step. The `down -v`
-# in Phase 1 already removes volumes, so this gate MUST run before it — not
-# just before the explicit `docker volume rm` loop. Opt out with --no-backup.
-# If the backup fails we ABORT (fail-safe: never wipe data we couldn't
-# protect) unless the operator explicitly passed --no-backup.
+# OPT-IN (--backup) since 2026-07-16: the default reset is a full-erasure
+# factory-new box with nothing saved. When --backup IS passed, the original
+# WARP-570 fail-safe stands: the backup runs BEFORE any destructive step (the
+# `down -v` in Phase 1 already removes volumes, so this gate MUST run before
+# it), and a failed backup ABORTS the reset — never wipe data we said we'd
+# protect.
 
 BACKUP_SCRIPT="$SCRIPT_DIR/host/device-backup.sh"
-if [ "$NO_BACKUP" = "true" ]; then
-  log_warn "--no-backup: skipping the pre-reset safety backup"
+if [ "$DO_BACKUP" != "true" ]; then
+  log_info "No pre-reset backup (default: a reset leaves nothing on the box) — pass --backup to emit one"
 elif [ ! -f "$BACKUP_SCRIPT" ]; then
   log_warn "device-backup.sh not found — skipping safety backup"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -190,7 +202,7 @@ else
     log_warn "  config/overlay. See manifest 'excluded' for the list."
   else
     log_error "Safety backup FAILED — aborting factory reset."
-    log_error "Re-run with --no-backup to reset anyway (DATA WILL BE LOST)."
+    log_error "Fix the backup, or re-run WITHOUT --backup to reset anyway (DATA WILL BE LOST)."
     exit 1
   fi
   log_divider
@@ -695,6 +707,21 @@ for f in "$REPO_ROOT"/.env.bak.* \
          "$REPO_ROOT"/.env.upsert.*; do
   [ -f "$f" ] && rm -f "$f" && log_success "Removed $(basename "$f")"
 done
+
+# Accumulated device-backup tarballs (WARP-570 / the daily droplet-backup
+# timer). They hold pg_dumps + the aikeys volume — the previous owner's data.
+# A factory-new box must not carry them, so the default reset removes the
+# whole dir. Kept ONLY when this reset itself was run with --backup (the
+# operator explicitly asked for a recovery point). Dir is root-owned 700
+# (created by device-backup.sh under sudo/systemd), hence the sudo.
+DEVICE_BACKUP_DIR="/var/lib/droplet/backups"
+if [ "$DO_BACKUP" != "true" ] && [ -d "$DEVICE_BACKUP_DIR" ]; then
+  if sudo rm -rf "$DEVICE_BACKUP_DIR" 2>/dev/null || rm -rf "$DEVICE_BACKUP_DIR" 2>/dev/null; then
+    log_success "Removed $DEVICE_BACKUP_DIR (prior device backups)"
+  else
+    log_warn "Could not remove $DEVICE_BACKUP_DIR — remove it manually (it holds the prior owner's data)"
+  fi
+fi
 
 # TLS certificates
 # ADR-023 PR-3: explicitly wipe the bootstrap self-signed pair PR-2 stashes as

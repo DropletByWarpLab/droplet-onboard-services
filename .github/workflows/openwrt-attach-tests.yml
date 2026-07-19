@@ -25,6 +25,15 @@ on:
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "scripts/factory-reset.sh"
+      # WARP-1338 review: every file the extended root-EnvironmentFile LPE
+      # guard (tests/openwrt-attach-env-invariant.test.sh) now inspects for
+      # the /etc/droplet/automount.env wiring — an edit to any of them (e.g.
+      # flipping the env file droplet-writable, or pointing a root unit at a
+      # new EnvironmentFile) must re-run the WARP-843 invariant.
+      - "services/automount/install.sh"
+      - "services/automount/droplet-automount@.service"
+      - "services/automount/droplet-automount-reconcile.service"
+      - "services/oled-display/droplet-storage-pool-apply.service"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
       - ".github/workflows/openwrt-attach-tests.yml"
@@ -44,6 +53,11 @@ on:
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "scripts/factory-reset.sh"
+      # WARP-1338 review: see the pull_request paths note above.
+      - "services/automount/install.sh"
+      - "services/automount/droplet-automount@.service"
+      - "services/automount/droplet-automount-reconcile.service"
+      - "services/oled-display/droplet-storage-pool-apply.service"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
       - ".github/workflows/openwrt-attach-tests.yml"

@@ -8,9 +8,14 @@ on the box, ``fleet-agent-state``) and is NEVER tracked in git:
                            /agents/register call. chmod 0600 best-effort
                            (the ingest token is a credential).
   heartbeat-spool.jsonl  — bounded offline spool (see spool.py).
+  update-candidate.json  — latest signature-VERIFIED update candidate
+                           recorded by the WARP-1025 update-poll
+                           (update_poll.py). Only verified manifests are
+                           ever summarized here.
 
 Corrupt state fails OPEN: an unreadable identity.json is treated as
-"not registered" (logged), never as a crash.
+"not registered" (logged), never as a crash; an unreadable candidate
+record is treated as "no candidate yet" and re-recorded on the next poll.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ logger = logging.getLogger("fleet_agent.state")
 
 _IDENTITY_FILE = "identity.json"
 _SPOOL_FILE = "heartbeat-spool.jsonl"
+_UPDATE_CANDIDATE_FILE = "update-candidate.json"
 
 
 @dataclass(frozen=True)
@@ -90,3 +96,31 @@ class StateStore:
             os.chmod(path, 0o600)  # the ingest token is a credential
         except OSError:  # pragma: no cover — best-effort on non-POSIX hosts
             pass
+
+    # ------------------------------------------------------------------
+    # Update candidate (WARP-1025) — latest verified release, not history
+    # ------------------------------------------------------------------
+
+    @property
+    def update_candidate_path(self) -> Path:
+        return self._dir / _UPDATE_CANDIDATE_FILE
+
+    def update_candidate(self) -> Optional[dict]:
+        path = self.update_candidate_path
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else None
+        except (OSError, ValueError) as exc:
+            # Fail open: a corrupt record means "no candidate yet" — the
+            # next poll re-verifies and re-records, never a crash.
+            logger.warning(
+                "update-candidate.json unreadable (%s) — treating as no candidate", exc
+            )
+            return None
+
+    def save_update_candidate(self, payload: dict) -> None:
+        self.update_candidate_path.write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        )

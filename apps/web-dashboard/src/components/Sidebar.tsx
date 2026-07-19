@@ -44,7 +44,6 @@ import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
-import { useWorkspace } from "@/lib/workspace";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
 import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
 import type { AppCapabilities } from "@/lib/api";
@@ -53,12 +52,6 @@ type NavItem = {
   href: string;
   label: string;
   icon: LucideIcon;
-  /**
-   * Restrict visibility by workspace. Default: visible in both.
-   * Phase 3 entries (Roles, Groups, Sessions, Billing) will set
-   * `workspace: "business"` so Home users never see them.
-   */
-  workspace?: "home" | "business";
   /** Restrict visibility by role. Default: visible to all. */
   roles?: Array<NonNullable<AuthRole>>;
   /**
@@ -106,15 +99,14 @@ type NavGroup = {
 
 /* ─────────── Nav definition (re-pointed 2026-05-18 from flat lists) ───────────
    Groups mirror the redesign's Workspace / Operations / Admin IA.
-   Routes are unchanged — only labels and grouping are new. The /users
-   route is rendered with the label "People" to match the Business-mode
-   vocabulary; in Home mode it still reads "People" since "family member"
-   is friendlier than "user" even at home. */
+   Routes are unchanged — only labels and grouping are new. WARP-1341:
+   business-only build, so the landing surface is labelled "Overview"
+   (route stays "/"). */
 const NAV_GROUPS: NavGroup[] = [
   {
     label: "Workspace",
     items: [
-      { href: "/", label: "Home", icon: LayoutDashboard },
+      { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
       {
         href: "/files",
@@ -176,8 +168,8 @@ const NAV_GROUPS: NavGroup[] = [
         ],
       },
       { href: "/network", label: "Network", icon: Network },
-      // WARP-302: "Devices" uses Cpu (not Home) so it doesn't visually
-      // collide with the Home tab's LayoutDashboard glyph at thumb distance.
+      // WARP-302: "Devices" uses Cpu so it doesn't visually collide with
+      // the Overview tab's LayoutDashboard glyph at thumb distance.
       { href: "/devices", label: "Devices", icon: Cpu },
       // WARP-1055: mic health + guided calibration. A peer surface, not
       // a Settings subpage — calibration is living, health-bearing state
@@ -207,13 +199,12 @@ const NAV_GROUPS: NavGroup[] = [
       // with workspace:"business" set.
       { href: "/users", label: "Users", icon: Users },
       // WARP-1270 (T18): company-wide storage usage roster (people +
-      // libraries). Business-only, owner/admin — mirrors the server-side
+      // libraries). Owner/admin — mirrors the server-side
       // `requireRole("owner","admin")` gate on GET /api/admin/files/usage.
       {
         href: "/admin/files",
         label: "Company files",
         icon: FolderLock,
-        workspace: "business",
         roles: ["owner", "admin"],
       },
       // WARP-555: read-only catalog of the assistant's built-in tools.
@@ -261,7 +252,7 @@ const NAV_GROUPS: NavGroup[] = [
         roles: ["owner", "admin"],
       },
       // WARP-246: Trust Center placeholder — visible to every signed-in
-      // household member (support/reference zone, next to Help).
+      // member (support/reference zone, next to Help).
       { href: "/trust", label: "Trust Center", icon: ShieldCheck },
     ],
   },
@@ -271,22 +262,19 @@ const NAV_GROUPS: NavGroup[] = [
 // the cap is iOS convention (7 tabs at 360px crowded each label to
 // ~51px). The four hrefs below win a tab spot; the fifth slot is the
 // "More" trigger that opens the drawer (see below). Everything else
-// from NAV_GROUPS routes through the drawer. Phase 2 will branch this
-// on `workspace` (Files swaps for Cameras in Business).
+// from NAV_GROUPS routes through the drawer.
 const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 
-/** Filter a group's items by current workspace + role. Returns the same
+/** Filter a group's items by role + capabilities. Returns the same
  *  shape with items shaped to render order; empty groups are caller's
  *  responsibility to skip. */
 function visibleItems(
   items: NavItem[],
-  workspace: "home" | "business",
   role: AuthRole | undefined,
   capabilities: { claudeActivity: boolean; ragEval: boolean },
   modules: AppCapabilities,
 ): NavItem[] {
   return items.filter((item) => {
-    if (item.workspace && item.workspace !== workspace) return false;
     if (item.roles && (!role || !item.roles.includes(role))) return false;
     if (item.requiresCapability && !capabilities[item.requiresCapability])
       return false;
@@ -299,7 +287,6 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const { workspaceType, isBusiness } = useWorkspace();
   const capabilities = useCapabilities();
   const modules = useAppCapabilities();
 
@@ -342,13 +329,12 @@ export function Sidebar() {
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
   // Compute the rendered groups once. Empty groups (e.g. Admin when the
-  // user is family/guest in Home mode without the Activity entry) are
-  // filtered out so we don't render a lone caption.
+  // user is family/guest without the Activity entry) are filtered out so
+  // we don't render a lone caption.
   const renderedGroups = NAV_GROUPS.map((g) => ({
     label: g.label,
     items: visibleItems(
       g.items,
-      workspaceType,
       user?.role as AuthRole | undefined,
       capabilities,
       modules,
@@ -409,24 +395,13 @@ export function Sidebar() {
           <span className="type-headline text-label-primary tracking-tight">
             Droplet
           </span>
-          {/* Tiny chip — tells the user which IA they're in. Click-through
-              to /settings/workspace lands in Phase 4. */}
+          {/* Tiny chip — names the workspace mode. WARP-1341: business-only
+              build, so this is static. */}
           <span
-            className={`
-              ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border
-              ${
-                isBusiness
-                  ? "border-accent/30 text-accent bg-accent-subtle"
-                  : "border-separator text-label-tertiary bg-surface-secondary"
-              }
-            `}
-            title={
-              isBusiness
-                ? "Business workspace — full admin surfaces"
-                : "Home workspace — simplified IA"
-            }
+            className="ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle"
+            title="Business workspace — full admin surfaces"
           >
-            {isBusiness ? "Business" : "Home"}
+            Business
           </span>
         </div>
 
@@ -573,17 +548,8 @@ export function Sidebar() {
             <h2 id={moreHeadingId} className="type-headline text-label-primary">
               More
             </h2>
-            <span
-              className={`
-                type-caption-2 px-2 py-0.5 rounded-full border
-                ${
-                  isBusiness
-                    ? "border-accent/30 text-accent bg-accent-subtle"
-                    : "border-separator text-label-tertiary bg-surface-secondary"
-                }
-              `}
-            >
-              {isBusiness ? "Business" : "Home"}
+            <span className="type-caption-2 px-2 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle">
+              Business
             </span>
           </div>
 

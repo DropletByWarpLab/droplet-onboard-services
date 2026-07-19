@@ -55,7 +55,7 @@ export function MoveCopyDialog({
 }: MoveCopyDialogProps) {
   const [tree, setTree] = useState<TreeNode>({
     path: "/",
-    name: "Home",
+    name: "My files",
     children: undefined,
     expanded: true,
   });

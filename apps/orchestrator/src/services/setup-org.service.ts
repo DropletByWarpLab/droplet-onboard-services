@@ -180,6 +180,9 @@ export async function persistOrg(
       where: { id: WORKSPACE_SINGLETON_ID },
       create: {
         id: WORKSPACE_SINGLETON_ID,
+        // WARP-1341: business-only build — the org step IS the moment the
+        // workspace comes into being, and it is always a business one.
+        type: "BUSINESS",
         displayName: input.name,
         slug,
         tz: input.tz,
@@ -189,6 +192,7 @@ export async function persistOrg(
         orgConfigured: true,
       },
       update: {
+        type: "BUSINESS",
         displayName: input.name,
         slug,
         tz: input.tz,
