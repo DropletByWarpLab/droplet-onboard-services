@@ -751,6 +751,21 @@
    Reduced Motion
    ============================================================ */
 
+/* WARP-1395 — color-wheel pending pulse (a soft accent ring breathing while a
+   color write is in flight). Killed by the global reduced-motion rule below,
+   which the component replaces with a static ring. */
+@keyframes cw-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px var(--card-bd),
+      0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 1px var(--card-bd),
+      0 0 0 6px color-mix(in srgb, var(--brand) 0%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -758,5 +773,11 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* Reduced motion: no breathing — a steady accent ring shows "pending". */
+  .cw-pending-ring {
+    animation: none !important;
+    box-shadow: 0 0 0 1px var(--brand) !important;
   }
 }
