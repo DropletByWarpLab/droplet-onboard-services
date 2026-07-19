@@ -1215,6 +1215,20 @@ export interface MatterDevice {
   serialNumber?: string;
   endpoints: MatterEndpointInfo[];
   attributes: Record<string, unknown>;
+  /** WARP-1396 — Droplet-local household identity overlaid by the orchestrator.
+   *  `name` stays the Matter product name; these are the alias + room. */
+  friendlyName?: string | null;
+  roomId?: string | null;
+  roomName?: string | null;
+}
+
+/** WARP-1396 — a household room (Droplet-local). */
+export interface Room {
+  id: string;
+  name: string;
+  icon: string;
+  sortOrder: number;
+  deviceCount: number;
 }
 
 export interface MatterEndpointInfo {
