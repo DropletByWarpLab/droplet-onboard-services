@@ -28,6 +28,7 @@ canonical replacement.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -61,14 +62,18 @@ async def _scheduled_run() -> None:
     loop = asyncio.get_running_loop()
     logger.info("scheduled RAGAS run starting (run_id=%s)", run_id)
     try:
-        # run_once writes results-<stamp>.json itself with its OWN stamp;
-        # the run_id we registered above is only the admission/tracking
-        # key. Both are UTC stamps a second or two apart — acceptable for
-        # an in-memory tracking id (the filesystem artifact is canonical).
-        await loop.run_in_executor(None, runner.run_once)
+        # Pass our run_id as the results-file stamp so runId ==
+        # results-<stamp>.json — the two used to be independent clock
+        # reads seconds apart, and results-<runId>.json lookups (metrics
+        # attach on GET /runs, GET /runs/{id}) could miss.
+        await loop.run_in_executor(
+            None, functools.partial(runner.run_once, stamp=run_id)
+        )
     except Exception as exc:  # noqa: BLE001 — explicit broad catch
         logger.exception("scheduled RAGAS run failed; skipping this slot")
-        STORE.finish(run_id, RunStatus.FAILED, error=str(exc))
+        # error_summary surfaces the subprocess output tail for a
+        # CalledProcessError — "exited non-zero" alone is undebuggable.
+        STORE.finish(run_id, RunStatus.FAILED, error=runner.error_summary(exc))
         return
     STORE.finish(run_id, RunStatus.SUCCEEDED)
     logger.info("scheduled RAGAS run complete (run_id=%s)", run_id)

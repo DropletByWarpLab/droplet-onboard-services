@@ -795,6 +795,19 @@ const envSchema = z.object({
   // droplet-egress-audit.service.
   SERVICE_TOKEN_EGRESS_AUDIT: z.string().default(""),
 
+  // SERVICE_TOKEN_RAG_EVAL — RAGAS eval-runner auth. Bearer the rag-eval
+  // container's ragas_runner.py presents on GET
+  // /api/admin/retrieval-eval/search (it reads the value as
+  // ORCHESTRATOR_SERVICE_TOKEN; compose wires both ends to the same
+  // secrets.sh-generated value). authMiddleware's matchServiceToken sets
+  // `_service:rag-eval`. Empty default = principal disabled (same posture
+  // as SERVICE_TOKEN_EMAIL); deliberately NOT in
+  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s in production,
+  // so a box without the rag-eval profile must still boot. To rotate:
+  // change here AND in the rag-eval container's compose env
+  // (ORCHESTRATOR_SERVICE_TOKEN).
+  SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

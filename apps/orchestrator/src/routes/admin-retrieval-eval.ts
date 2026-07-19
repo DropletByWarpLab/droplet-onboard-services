@@ -11,14 +11,17 @@
  * authenticated user could hit the endpoint, scoped to their own userId
  * via the per-arm `WHERE userId = $1` filter). The route name and mount
  * point live under `/admin/*`, so per ADR-004 §3 / WARP-449 AC #4 it now
- * carries the same `requireRole("owner", "admin")` posture as the other
- * `admin-*` route files — this is dev/eval-only tooling (404s in
- * production) and every sibling admin router already gates on role.
+ * carries the same owner/admin posture as the other `admin-*` route files —
+ * this is dev/eval-only tooling (404s in production) and every sibling
+ * admin router already gates on role. RAGAS eval-runner auth additionally
+ * admits the `_service:rag-eval` service principal (the rag-eval
+ * container's ragas_runner.py), which must name its eval target user via
+ * `?user=` — see the handler comment below.
  */
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRoleOrService } from "../middleware/auth.js";
 
 const logger = createLogger("admin-retrieval-eval");
 
@@ -43,7 +46,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
 
   router.get(
     "/admin/retrieval-eval/search",
-    requireRole("owner", "admin"),
+    requireRoleOrService("_service:rag-eval", "owner", "admin"),
     async (req, res) => {
     if (process.env.NODE_ENV === "production") {
       res.status(404).json({ error: "not_found" });
@@ -53,6 +56,24 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
     if (!user) {
       res.status(401).json({ error: "auth_required" });
       return;
+    }
+    // RAGAS eval-runner auth: the `_service:rag-eval` principal owns no
+    // corpus of its own — every retrieval arm scopes to a username, and a
+    // service id matches no user rows, so every eval search would come back
+    // empty. The eval target user is therefore EXPLICIT configuration
+    // (RAGAS_EVAL_USER on the rag-eval container, forwarded as `?user=`),
+    // never guessed. Human callers keep today's behavior — their own
+    // corpus — and `?user=` is ignored entirely, so this endpoint never
+    // becomes a way for an admin to search someone else's files. Resolved
+    // HERE, before the heavy lazy imports below, so a misconfigured runner
+    // gets a crisp 400 instead of a 500 from half-initialised retrieval.
+    let evalUsername = user.username;
+    if (user.id === "_service:rag-eval") {
+      evalUsername = String(req.query.user ?? "").trim();
+      if (!evalUsername) {
+        res.status(400).json({ error: "eval_user_required" });
+        return;
+      }
     }
     const variant = String(req.query.variant ?? "hybrid") as
       | "vector"
@@ -99,7 +120,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
         // minSimilarity=0 so we don't pre-filter the baseline — let the
         // eval ranker see what vector-only would surface.
         hits = await search.searchByVector(prisma, {
-          userId: user.username,
+          userId: evalUsername,
           vector,
           limit,
           minSimilarity: 0.0,
@@ -107,7 +128,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
       } else if (variant === "rrf") {
         // No rerank pipe — searchHybrid returns RRF top-K.
         hits = await search.searchHybrid(prisma, {
-          userId: user.username,
+          userId: evalUsername,
           vector,
           query,
           limit,
@@ -122,7 +143,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
           url: aiGatewayGrpcUrl,
         });
         hits = await search.searchHybrid(prisma, {
-          userId: user.username,
+          userId: evalUsername,
           vector,
           query,
           limit,
@@ -197,7 +218,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
             : undefined;
 
         hits = await search.searchHybrid(prisma, {
-          userId: user.username,
+          userId: evalUsername,
           vector,
           query,
           limit,

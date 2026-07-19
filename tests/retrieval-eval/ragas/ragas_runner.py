@@ -10,7 +10,10 @@ Requires:
   - The Compose stack up (orchestrator on $API_URL, db, ai-gateway, file-indexer).
   - Fixtures seeded (the existing tests/retrieval-eval/run.integration.test.ts
     beforeAll handles this; otherwise the runner reports degraded results).
-  - AUTH_ENABLED=false in the orchestrator's env (test-lane convention).
+  - AUTH_ENABLED=false in the orchestrator's env (test-lane convention),
+    OR — on auth-enabled appliances — ORCHESTRATOR_SERVICE_TOKEN (service
+    bearer presented to the search endpoint) plus RAGAS_EVAL_USER (whose
+    corpus to evaluate against) in env. See _build_search_request().
   - For RAGAS_JUDGE=local (default): Ollama on http://localhost:11434 with
     the model named in RAGAS_LOCAL_JUDGE_MODEL (default `mistral`).
   - For RAGAS_JUDGE=cloud: OPENAI_API_KEY in env.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import ssl
@@ -141,16 +145,48 @@ def _internal_tls_context() -> ssl.SSLContext | None:
     return ctx
 
 
+def _build_search_request(
+    api_url: str, variant: str, query: str, limit: int
+) -> urllib.request.Request:
+    """Assemble the retrieval-eval search request (URL + auth header).
+
+    Deployed appliances run AUTH_ENABLED=true, where the historic anonymous
+    call 401'd on EVERY query — empty contexts, junk metrics, and nobody
+    noticed until the run-results-visibility work surfaced the files. Two
+    env contracts fix that (compose wires both on the appliance):
+
+      - ORCHESTRATOR_SERVICE_TOKEN: set and non-empty → sent as
+        "Authorization: Bearer <token>" (the rag-eval service principal).
+      - RAGAS_EVAL_USER: set and non-empty → `user=<value>` joins the query
+        string. The search route scopes retrieval to the CALLER's corpus and
+        the service principal owns none, so the orchestrator accepts an
+        explicit eval user from this principal (400 eval_user_required
+        without it).
+
+    With neither set (the offline AUTH_ENABLED=false test lane) the request
+    is byte-for-byte what the pre-fix code sent: same URL, same param
+    order, no extra params, no headers.
+    """
+    params = {"variant": variant, "q": query, "limit": str(limit)}
+    eval_user = os.environ.get("RAGAS_EVAL_USER")
+    if eval_user:
+        params["user"] = eval_user
+    qs = urllib.parse.urlencode(params)
+    url = f"{api_url}/api/admin/retrieval-eval/search?{qs}"
+    headers: dict[str, str] = {}
+    token = os.environ.get("ORCHESTRATOR_SERVICE_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(url, headers=headers)
+
+
 def call_search(
     api_url: str, variant: str, query: str, limit: int
 ) -> list[SearchHit]:
-    qs = urllib.parse.urlencode(
-        {"variant": variant, "q": query, "limit": str(limit)}
-    )
-    url = f"{api_url}/api/admin/retrieval-eval/search?{qs}"
+    req = _build_search_request(api_url, variant, query, limit)
     try:
         with urllib.request.urlopen(
-            url, timeout=SEARCH_TIMEOUT_SEC, context=_internal_tls_context()
+            req, timeout=SEARCH_TIMEOUT_SEC, context=_internal_tls_context()
         ) as resp:
             body = json.loads(resp.read())
     except Exception as e:
@@ -246,6 +282,52 @@ def synthesize_answer(
         return f"[synthesis_error: {type(e).__name__}: {e}]"
 
 
+# ─── summary serialization ─────────────────────────────────────────────
+def _sanitize_nonfinite(obj: Any) -> Any:
+    """Recursively replace non-finite floats (NaN/±Inf) with None (→ null).
+
+    Judge failures leave NaN sample scores (ragas runs with
+    raise_exceptions=False), pandas mean/quantile propagates them, and
+    json.dumps's default allow_nan=True then writes bare `NaN` tokens —
+    which are not JSON. Such files crash the rag-eval service's FastAPI
+    listing endpoints (strict allow_nan=False on serialize). Every
+    results/baselines write goes through this first, with allow_nan=False
+    on the dump as a regression belt.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nonfinite(v) for v in obj]
+    return obj
+
+
+def _render_markdown(summary: dict[str, Any]) -> str:
+    """Render the run summary's Markdown table.
+
+    Stats can be None after _sanitize_nonfinite (judge failures → NaN →
+    null); render those cells as "n/a" instead of crashing on the `:.3f`
+    format specifier.
+    """
+    md_lines = [
+        f"# RAGAS results — variant={summary['variant']} "
+        f"limit={summary['limit']} judge={summary['judge']}",
+        "",
+        f"Queries: {summary['n_queries']}",
+        "",
+        "| Metric | p50 | p95 | mean |",
+        "|---|---|---|---|",
+    ]
+    for metric, stats in summary["metrics"].items():
+        p50, p95, mean = (
+            "n/a" if stats[k] is None else f"{stats[k]:.3f}"
+            for k in ("p50", "p95", "mean")
+        )
+        md_lines.append(f"| {metric} | {p50} | {p95} | {mean} |")
+    return "\n".join(md_lines) + "\n"
+
+
 # ─── runner ─────────────────────────────────────────────────────────────
 def run(
     api_url: str,
@@ -329,6 +411,27 @@ def run(
 
     judge_llm = make_judge_llm(judge)
 
+    # AnswerRelevancy is the ONE metric that requires an EMBEDDINGS model,
+    # and we only pass llm= to evaluate() — ragas falls back to OpenAI
+    # embeddings via OPENAI_API_KEY for it. Appliances run judge=local with
+    # no key (compose sets it empty), where that fallback either NaNs the
+    # whole column or raises and kills the run, depending on the
+    # langchain-openai version. Skip the metric explicitly in that
+    # configuration and record the decision in the summary ("no guessing":
+    # skipped_metrics is an explicit empty list when nothing was skipped).
+    skip_answer_relevancy = judge == "local" and not os.environ.get(
+        "OPENAI_API_KEY"
+    )
+    skipped_metrics: list[str] = (
+        ["answer_relevancy"] if skip_answer_relevancy else []
+    )
+    if skip_answer_relevancy:
+        print(
+            "NOTICE: skipping answer_relevancy — judge=local with no "
+            "OPENAI_API_KEY (the metric needs an embeddings model)",
+            file=sys.stderr,
+        )
+
     print("   evaluating...")
     result = evaluate(
         dataset=ds,
@@ -336,7 +439,7 @@ def run(
             Faithfulness(),
             LLMContextRecall(),
             LLMContextPrecision(),
-            AnswerRelevancy(),
+            *([] if skip_answer_relevancy else [AnswerRelevancy()]),
             FactualCorrectness(),
         ],
         llm=judge_llm,
@@ -391,6 +494,10 @@ def run(
             "search": n_search_errors,
             "synthesis": n_synthesis_errors,
         },
+        # Metrics deliberately not evaluated this run (see the
+        # skip_answer_relevancy block above). Explicit empty list when
+        # nothing was skipped — consumers never infer skips from absence.
+        "skipped_metrics": skipped_metrics,
         "metrics": {
             col: {
                 "p50": float(df[col].quantile(0.5)),
@@ -404,23 +511,14 @@ def run(
         # reads `metrics_by_class[<class>][context_recall|...].mean`.
         "metrics_by_class": metrics_by_class,
     }
-    out_json.write_text(json.dumps(summary, indent=2) + "\n")
+    # NaN-safe write: sanitize THEN dump with allow_nan=False, so any future
+    # non-finite leak fails loudly here instead of writing bare NaN tokens
+    # that crash the rag-eval service's listing endpoints.
+    summary = _sanitize_nonfinite(summary)
+    out_json.write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     print(f"\n   wrote {out_json}")
 
-    md_lines = [
-        f"# RAGAS results — variant={variant} limit={limit} judge={judge}",
-        "",
-        f"Queries: {len(ds)}",
-        "",
-        "| Metric | p50 | p95 | mean |",
-        "|---|---|---|---|",
-    ]
-    for metric, stats in summary["metrics"].items():
-        md_lines.append(
-            f"| {metric} | {stats['p50']:.3f} | "
-            f"{stats['p95']:.3f} | {stats['mean']:.3f} |"
-        )
-    out_md.write_text("\n".join(md_lines) + "\n")
+    out_md.write_text(_render_markdown(summary))
     print(f"   wrote {out_md}")
     return 0
 
@@ -439,7 +537,9 @@ def aggregate_runs(
     `floor = p50 − 1.5 × IQR` per the schema's documented formula. Each
     per-run sample is that run's `metrics.<m>.mean` — each run counts as
     one data point of the metric's central tendency, percentiles across
-    runs.
+    runs. Envelopes are computed per-metric over the runs that carry a
+    FINITE value for it (see _mean_sample); each envelope's `n` records
+    that honest sample count.
 
     N=1 collapses to iqr=0, floor=p50. Cron-driven single runs still call
     this so artifacts always carry a baselines.candidate.json for diff
@@ -475,21 +575,48 @@ def aggregate_runs(
     for r in runs:
         metric_keys.update(r.get("metrics", {}).keys())
 
-    def envelope(samples: list[float]) -> dict[str, float]:
+    def _mean_sample(stats: Any) -> float | None:
+        """`stats["mean"]` as a finite float, else None (sample excluded).
+
+        Tolerates three shapes seen in real runs directories: the metric
+        absent from a run entirely (stats is None — e.g. answer_relevancy
+        skipped on keyless local-judge runs), a pre-sanitizer results file
+        carrying bare NaN tokens (json.loads parses those to float("nan")),
+        and a post-sanitizer file carrying null. None of these may poison
+        the quantiles — they just don't contribute a sample.
+        """
+        if not isinstance(stats, dict):
+            return None
+        v = stats.get("mean")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        return float(v) if math.isfinite(float(v)) else None
+
+    def envelope(samples: list[float]) -> dict[str, float | int]:
         s = pd.Series(samples)
         p50 = float(s.quantile(0.5))
         p95 = float(s.quantile(0.95))
         # IQR = Q3 - Q1; well-defined for n>=2, zero for n=1.
         iqr = float(s.quantile(0.75) - s.quantile(0.25)) if len(s) > 1 else 0.0
         floor = p50 - 1.5 * iqr
-        return {"floor": floor, "p50": p50, "p95": p95, "iqr": iqr}
+        # `n` = runs that contributed a finite sample for THIS metric — the
+        # honest per-metric count (skipped metrics and NaN'd judge runs make
+        # it diverge from the top-level n_runs). Additive next to the
+        # floor/p50/p95/iqr schema the gate consumes.
+        return {
+            "floor": floor,
+            "p50": p50,
+            "p95": p95,
+            "iqr": iqr,
+            "n": len(samples),
+        }
 
-    envelopes: dict[str, dict[str, float]] = {}
+    envelopes: dict[str, dict[str, float | int]] = {}
     for m in sorted(metric_keys):
         samples = [
-            float(r["metrics"][m]["mean"])
+            s
             for r in runs
-            if m in r.get("metrics", {})
+            if (s := _mean_sample(r.get("metrics", {}).get(m))) is not None
         ]
         if samples:
             envelopes[m] = envelope(samples)
@@ -500,15 +627,19 @@ def aggregate_runs(
     for r in runs:
         class_keys.update(r.get("metrics_by_class", {}).keys())
 
-    envelopes_by_class: dict[str, dict[str, dict[str, float]]] = {}
+    envelopes_by_class: dict[str, dict[str, dict[str, float | int]]] = {}
     for cls in sorted(class_keys):
-        per_metric: dict[str, dict[str, float]] = {}
+        per_metric: dict[str, dict[str, float | int]] = {}
         for m in sorted(metric_keys):
             samples = [
-                float(r["metrics_by_class"][cls][m]["mean"])
+                s
                 for r in runs
-                if cls in r.get("metrics_by_class", {})
-                and m in r["metrics_by_class"][cls]
+                if (
+                    s := _mean_sample(
+                        r.get("metrics_by_class", {}).get(cls, {}).get(m)
+                    )
+                )
+                is not None
             ]
             if samples:
                 per_metric[m] = envelope(samples)
@@ -530,7 +661,11 @@ def aggregate_runs(
         "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over N runs",
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2) + "\n")
+    # Same NaN-safe write contract as run(): baselines.json is read by the
+    # rag-eval service's strict (allow_nan=False) serializer, so it must
+    # never carry bare NaN tokens either.
+    summary = _sanitize_nonfinite(summary)
+    out_path.write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     print(
         f"   aggregated {n_runs} runs × {len(envelopes)} metrics "
         f"× {len(envelopes_by_class)} classes → {out_path}"
