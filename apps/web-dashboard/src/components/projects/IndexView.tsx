@@ -227,7 +227,7 @@ export function IndexView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div className="pm-grid-kpi">
-        <Kpi eyebrow="Active projects" value={summary?.activeProjects ?? 0} note="across home" loading={loading} />
+        <Kpi eyebrow="Active projects" value={summary?.activeProjects ?? 0} note="across the workspace" loading={loading} />
         <Kpi eyebrow="Items open" value={summary?.itemsOpen ?? 0} note="backlog → in progress" loading={loading} />
         <Kpi eyebrow="Done this week" value={summary?.doneThisWeek ?? 0} note="last 7 days" dotColor="var(--ok)" loading={loading} />
         <Kpi eyebrow="Overdue" value={summary?.overdue ?? 0} note="needs attention" dotColor="var(--warn)" loading={loading} />

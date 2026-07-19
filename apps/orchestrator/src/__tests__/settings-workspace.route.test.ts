@@ -1,5 +1,5 @@
 /**
- * `/api/settings/workspace` route tests (Home vs Business selector).
+ * `/api/settings/workspace` route tests (business-only build, WARP-1341).
  *
  * WARP-1014 key-shape audit: `Workspace.setBy` stores the username (the
  * schema documents the column as "Nextcloud username from the auth
@@ -66,12 +66,24 @@ describe("GET /api/settings/workspace", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns the HOME default when the singleton row doesn't exist", async () => {
+  it("returns the BUSINESS default when the singleton row doesn't exist (WARP-1341)", async () => {
     findUniqueMock.mockResolvedValueOnce(null);
     const res = await request(app).get("/api/settings/workspace");
     expect(res.status).toBe(200);
-    expect(res.body.workspaceType).toBe("home");
+    expect(res.body.workspaceType).toBe("business");
     expect(res.body.setBy).toBeNull();
+  });
+
+  it("reports a stale pre-migration HOME row as business (WARP-1341)", async () => {
+    findUniqueMock.mockResolvedValueOnce({
+      type: WorkspaceType.HOME,
+      displayName: null,
+      setBy: "romain",
+      setAt: new Date("2026-07-11T00:00:00Z"),
+    });
+    const res = await request(app).get("/api/settings/workspace");
+    expect(res.status).toBe(200);
+    expect(res.body.workspaceType).toBe("business");
   });
 });
 
@@ -102,6 +114,15 @@ describe("POST /api/settings/workspace", () => {
       .post("/api/settings/workspace")
       .send({ workspaceType: "business" });
     expect(res.status).toBe(403);
+    expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects the retired 'home' wire value with 400 (WARP-1341)", async () => {
+    const res = await request(app)
+      .post("/api/settings/workspace")
+      .send({ workspaceType: "home" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_body");
     expect(upsertMock).not.toHaveBeenCalled();
   });
 });

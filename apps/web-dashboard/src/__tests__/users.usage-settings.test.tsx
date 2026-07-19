@@ -28,6 +28,9 @@ vi.mock("@/lib/api", () => ({
   fetchUserUsage: (...a: any[]) => fetchUserUsageMock(...a),
   updateUserUsage: (...a: any[]) => updateUserUsageMock(...a),
   fetchAdminFilesUsage: (...a: any[]) => fetchAdminFilesUsageMock(...a),
+  // WARP-1341: the invite modal's department section fetches on mount
+  // (admin-gated). Empty here — this file exercises the usage settings.
+  listDepartments: vi.fn().mockResolvedValue({ departments: [] }),
   // ShellPage status chip pulls device + health hooks — keep them callable.
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
@@ -40,16 +43,11 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
-// WARP-1270 (T18): the page now reads useWorkspace() unconditionally.
-// isBusiness: false keeps this Home-mode usage-settings flow unchanged
-// (no tab strip, no department-assignment section).
+// WARP-1341: business-only build — useWorkspace() is a static context.
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: "home",
-    isHome: true,
-    isBusiness: false,
-    setWorkspaceType: () => {},
-    homeVariant: "B",
+    workspaceType: "business",
+    isBusiness: true,
   }),
 }));
 

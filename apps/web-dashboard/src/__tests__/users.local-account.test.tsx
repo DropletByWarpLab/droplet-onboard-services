@@ -30,6 +30,9 @@ vi.mock("@/lib/api", () => ({
   createInvite: (...a: any[]) => createInviteMock(...a),
   listInvites: (...a: any[]) => listInvitesMock(...a),
   revokeInvite: vi.fn(),
+  // WARP-1341: the invite modal's department section fetches on mount
+  // (admin-gated). Empty here — this file exercises the create-account flow.
+  listDepartments: vi.fn().mockResolvedValue({ departments: [] }),
   // ShellPage status chip pulls device + health hooks — keep them callable.
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
@@ -47,16 +50,11 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
-// WARP-1270 (T18): the page now reads useWorkspace() unconditionally.
-// isBusiness: false keeps this Home-mode local-account flow unchanged
-// (no tab strip, no department-assignment section).
+// WARP-1341: business-only build — useWorkspace() is a static context.
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: "home",
-    isHome: true,
-    isBusiness: false,
-    setWorkspaceType: () => {},
-    homeVariant: "B",
+    workspaceType: "business",
+    isBusiness: true,
   }),
 }));
 

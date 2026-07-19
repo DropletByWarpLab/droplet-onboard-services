@@ -221,6 +221,10 @@ function commandToDomainService(
     turn_off: "turn_off",
     toggle: "toggle",
     set_brightness: "turn_on",
+    // WARP-1371: the new light writes classify with the other Tier-1 light
+    // services; cover/fan/media command names pass through as themselves.
+    set_color: "turn_on",
+    set_color_temperature: "turn_on",
     set_temperature: "set_temperature",
     // KAN-7: interactive thermostat mode-switch. Maps to climate.set_mode so
     // the safety rules can classify "off" as Tier-2 (confirm) and heat/cool/

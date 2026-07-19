@@ -19,6 +19,7 @@ import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
   resolveWifiNetwork,
+  resolveWifiSsid,
   MATTER_ENV_ID,
   type ControllerLike,
   type MatterControllerCore,
@@ -39,6 +40,17 @@ function fakeEndpoint(overrides: Record<string, unknown> = {}) {
     },
     commands: {
       onOff: { on: vi.fn(), off: vi.fn(), toggle: vi.fn() },
+      colorControl: {
+        moveToHueAndSaturation: vi.fn(),
+        moveToColorTemperature: vi.fn(),
+      },
+      windowCovering: {
+        upOrOpen: vi.fn(),
+        downOrClose: vi.fn(),
+        stopMotion: vi.fn(),
+        goToLiftPercentage: vi.fn(),
+      },
+      mediaPlayback: { play: vi.fn(), pause: vi.fn(), stop: vi.fn() },
     },
     ...overrides,
   };
@@ -168,6 +180,7 @@ describe("createMatterControllerCore", () => {
     function coreWithWifi(
       wifi: {
         wifiSsid?: string;
+        wifiSsidFile?: string;
         wifiPsk?: string;
         wifiPskFile?: string;
         regulatoryCountryCode?: string;
@@ -272,6 +285,136 @@ describe("createMatterControllerCore", () => {
       await c.init();
       await c.commission(QR_PAIRING_CODE);
       expect(optionsOf(ctl).commissioning.regulatoryCountryCode).toBe("US");
+    });
+
+    // WARP-1363: the env SSID is written once at setup and goes stale on an
+    // AP rename (claim / wizard Wi-Fi save) — the commissionee then scans
+    // for a network that no longer broadcasts and answers NetworkNotFound
+    // (proven live on .87: env said "Droplet", the AP broadcast "WarpLab").
+    // The SSID therefore resolves file-first per commission, like the PSK.
+    it("prefers the SSID file (live AP SSID) over the stale env SSID and trims it", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "WarpLab\n");
+      try {
+        const ctl = fakeController();
+        const c = coreWithWifi(
+          { wifiSsid: "Droplet", wifiSsidFile: ssidFile, wifiPsk: "s3cret-psk" },
+          ctl,
+        );
+        await c.init();
+        await c.commission(MANUAL_PAIRING_CODE);
+        expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+          wifiSsid: "WarpLab",
+          wifiCredentials: "s3cret-psk",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to the env SSID when the SSID file is absent (attach not yet run)", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi(
+        {
+          wifiSsid: "Droplet",
+          wifiSsidFile: "/nonexistent/ap-ssid",
+          wifiPsk: "s3cret-psk",
+        },
+        ctl,
+      );
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+        wifiSsid: "Droplet",
+        wifiCredentials: "s3cret-psk",
+      });
+    });
+
+    it("resolveWifiSsid mirrors the commission-path resolution for /capabilities apSsid", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "WarpLab\n");
+      try {
+        await expect(
+          resolveWifiSsid({ wifiSsid: "Droplet", wifiSsidFile: ssidFile }),
+        ).resolves.toBe("WarpLab");
+        await expect(
+          resolveWifiSsid({ wifiSsid: "Droplet", wifiSsidFile: "/nonexistent/x" }),
+        ).resolves.toBe("Droplet");
+        await expect(resolveWifiSsid({})).resolves.toBe("");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("an empty SSID file falls back to the env SSID (never provisions a blank SSID)", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-ssid-"));
+      const ssidFile = join(dir, "ap-ssid");
+      writeFileSync(ssidFile, "\n");
+      try {
+        const ctl = fakeController();
+        const c = coreWithWifi(
+          { wifiSsid: "Droplet", wifiSsidFile: ssidFile, wifiPsk: "s3cret-psk" },
+          ctl,
+        );
+        await c.init();
+        await c.commission(QR_PAIRING_CODE);
+        expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+          wifiSsid: "Droplet",
+          wifiCredentials: "s3cret-psk",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // WARP-1362: without discoveryCapabilities matter.js runs the mDNS scanner
+  // ONLY — the BLE scanner never starts even with the transport registered,
+  // so a freshly-reset BLE-first device is undiscoverable by pairing code
+  // (proven live on .87: "1 scanners" vs "2 scanners" in PeerCommissioner).
+  describe("discovery capabilities (WARP-1362)", () => {
+    function coreWithBle(ctl: ControllerLike): MatterControllerCore {
+      return createMatterControllerCore({
+        storagePath: ".data/matter-controller-test",
+        adminFabricLabel: "Droplet Test",
+        createController: () => ctl,
+        bleCommissioning: true,
+      });
+    }
+
+    function optionsOf(ctl: ControllerLike) {
+      return (ctl.commissionNode as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("always scans the IP network, and NOT BLE when the transport is absent", async () => {
+      await core.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(controller).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+      });
+    });
+
+    it("adds the BLE scanner for a manual pairing code when BLE is registered", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
+    });
+
+    it("adds the BLE scanner for a QR pairing code too (the QR bits are deliberately superseded)", async () => {
+      const ctl = fakeController();
+      const c = coreWithBle(ctl);
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).discovery.discoveryCapabilities).toEqual({
+        onIpNetwork: true,
+        ble: true,
+      });
     });
   });
 
@@ -400,6 +543,23 @@ describe("createMatterControllerCore", () => {
       expect(ep.commands.onOff.on).toHaveBeenCalledOnce();
     });
 
+    // WARP-1366: onOff.on/off/toggle take a VOID request. matter.js validates
+    // the payload against the cluster schema and rejects a substituted {}
+    // (ValidationDatatypeMismatchError) — which made every commissioned
+    // on/off device uncontrollable on the real box. The invocation must pass
+    // NO payload for no-arg commands.
+    it("invokes void commands (on/off/toggle) with no payload, not {}", async () => {
+      const node = fakeNode();
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      const ep = node.parts.get(1) as ReturnType<typeof fakeEndpoint>;
+      await core.sendCommand("1", "turn_on");
+      await core.sendCommand("1", "turn_off");
+      await core.sendCommand("1", "toggle");
+      expect(ep.commands.onOff.on).toHaveBeenCalledWith(undefined);
+      expect(ep.commands.onOff.off).toHaveBeenCalledWith(undefined);
+      expect(ep.commands.onOff.toggle).toHaveBeenCalledWith(undefined);
+    });
+
     it("refuses commands to a disconnected node", async () => {
       const node = fakeNode({ connectionState: NodeStates.Disconnected });
       (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
@@ -414,6 +574,154 @@ describe("createMatterControllerCore", () => {
       await expect(core.sendCommand("1", "warp_drive")).rejects.toThrow(
         /unknown command/i,
       );
+    });
+
+    // WARP-1371: the market-common device command surface. Each case pins the
+    // cluster routing AND the UX->Matter unit conversion.
+    describe("device command surface (WARP-1371)", () => {
+      async function ep(command: string, data?: Record<string, unknown>) {
+        const node = fakeNode();
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        await core.sendCommand("1", command, data);
+        return node.parts.get(1) as ReturnType<typeof fakeEndpoint>;
+      }
+
+      it("set_color converts degrees/percent to Matter 0-254 hue/sat", async () => {
+        const e = await ep("set_color", { hue: 300, saturation: 100 });
+        expect(e.commands.colorControl.moveToHueAndSaturation).toHaveBeenCalledWith({
+          hue: 212,
+          saturation: 254,
+          transitionTime: 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+      });
+
+      it("set_color_temperature converts kelvin to clamped mireds", async () => {
+        const e = await ep("set_color_temperature", { kelvin: 2700 });
+        expect(e.commands.colorControl.moveToColorTemperature).toHaveBeenCalledWith(
+          expect.objectContaining({ colorTemperatureMireds: 370 }),
+        );
+      });
+
+      it("set_color_temperature clamps out-of-band mireds", async () => {
+        const e = await ep("set_color_temperature", { mireds: 9000 });
+        expect(e.commands.colorControl.moveToColorTemperature).toHaveBeenCalledWith(
+          expect.objectContaining({ colorTemperatureMireds: 500 }),
+        );
+      });
+
+      it("cover motion commands invoke the WindowCovering cluster as void", async () => {
+        const e1 = await ep("open_cover");
+        expect(e1.commands.windowCovering.upOrOpen).toHaveBeenCalledWith(undefined);
+        const e2 = await ep("close_cover");
+        expect(e2.commands.windowCovering.downOrClose).toHaveBeenCalledWith(undefined);
+        const e3 = await ep("stop_cover");
+        expect(e3.commands.windowCovering.stopMotion).toHaveBeenCalledWith(undefined);
+      });
+
+      it("set_cover_position inverts percent-open into lift hundredths-closed", async () => {
+        const e = await ep("set_cover_position", { position: 25 });
+        expect(e.commands.windowCovering.goToLiftPercentage).toHaveBeenCalledWith({
+          liftPercent100thsValue: 7500,
+        });
+      });
+
+      it("set_fan_speed writes percentSetting; set_fan_mode maps the enum", async () => {
+        // Fan speed/mode are attribute WRITES — mock the cluster client the
+        // same way the set_hvac_mode tests do.
+        const setAttribute = vi.fn().mockResolvedValue(undefined);
+        const fanEndpoint = fakeEndpoint({
+          getClusterClient: () => ({ setAttribute }),
+        });
+        const node = fakeNode({ parts: new Map([[1, fanEndpoint]]) });
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+
+        await core.sendCommand("1", "set_fan_speed", { percent: 60 });
+        expect(setAttribute).toHaveBeenCalledWith("percentSetting", 60);
+        await core.sendCommand("1", "set_fan_mode", { mode: "auto" });
+        expect(setAttribute).toHaveBeenCalledWith("fanMode", 5);
+        await expect(
+          core.sendCommand("1", "set_fan_mode", { mode: "turbo" }),
+        ).rejects.toThrow(/unsupported fan mode/i);
+      });
+
+      // WARP-897: state derivation for the categories the widgets render.
+      it("derives lock state from DoorLock lockState, never onOff", async () => {
+        const lockEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x000a, revision: 1 }], serverList: [0x0101] },
+            doorLock: { lockState: 1 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, lockEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("lock");
+        expect(device?.state).toBe("locked");
+        expect(device?.attributes.lockState).toBe(1);
+      });
+
+      it("derives cover open/closed from lift hundredths and exposes the position", async () => {
+        const coverEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x0202, revision: 1 }], serverList: [0x0102] },
+            windowCovering: { currentPositionLiftPercent100ths: 10000 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, coverEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("cover");
+        expect(device?.state).toBe("closed");
+        expect(device?.attributes.liftPercent100ths).toBe(10000);
+      });
+
+      it("classifies the 0x002b device type as fan and derives speed state", async () => {
+        const fanEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x002b, revision: 1 }], serverList: [0x0202] },
+            fanControl: { percentCurrent: 40, fanMode: 2 },
+          },
+          commands: {},
+        });
+        const node = fakeNode({ parts: new Map([[1, fanEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.category).toBe("fan");
+        expect(device?.state).toBe("on");
+        expect(device?.attributes.fanPercent).toBe(40);
+        expect(device?.attributes.fanMode).toBe(2);
+      });
+
+      it("exposes color attributes for color-capable lights", async () => {
+        const colorEndpoint = fakeEndpoint({
+          state: {
+            descriptor: { deviceTypeList: [{ deviceType: 0x010d, revision: 1 }], serverList: [0x0006, 0x0300] },
+            onOff: { onOff: true },
+            colorControl: { currentHue: 212, currentSaturation: 254, colorTemperatureMireds: 370 },
+          },
+        });
+        const node = fakeNode({ parts: new Map([[1, colorEndpoint]]) });
+        (controller.getCommissionedNodes as ReturnType<typeof vi.fn>).mockReturnValue([1n]);
+        (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+        const device = await core.getDevice("1");
+        expect(device?.attributes.currentHue).toBe(212);
+        expect(device?.attributes.currentSaturation).toBe(254);
+        expect(device?.attributes.colorTemperatureMireds).toBe(370);
+      });
+
+      it("media verbs invoke MediaPlayback as void", async () => {
+        const e1 = await ep("play_media");
+        expect(e1.commands.mediaPlayback.play).toHaveBeenCalledWith(undefined);
+        const e2 = await ep("pause_media");
+        expect(e2.commands.mediaPlayback.pause).toHaveBeenCalledWith(undefined);
+        const e3 = await ep("stop_media");
+        expect(e3.commands.mediaPlayback.stop).toHaveBeenCalledWith(undefined);
+      });
     });
   });
 

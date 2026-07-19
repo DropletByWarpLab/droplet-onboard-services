@@ -26,7 +26,115 @@ import type { PrismaClient } from "@prisma/client";
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
 
+import { decryptColumn, isEncryptedColumn } from "./column-crypto.service.js";
+import { getDeksByIds } from "./document-key.service.js";
+
 export type FileContentSource = "nextcloud" | "brain";
+
+/** Snippet width shared by the SQL LEFT() arm and the post-decrypt truncate. */
+export const CHUNK_SNIPPET_CHARS = 280;
+
+/**
+ * WARP-242 — snippet projection that survives encryption-at-rest. Brain
+ * chunks (sensitivity=sensitive) hold a dcv1 AES-256-GCM blob in `text`;
+ * truncating ciphertext destroys it, so encrypted rows are selected whole
+ * and re-truncated app-side after decrypt-on-read. Plaintext rows keep the
+ * cheap LEFT() snippet.
+ */
+const SNIPPET_SQL = `CASE WHEN "sensitivity" = 'sensitive' THEN text ELSE LEFT(text, ${CHUNK_SNIPPET_CHARS}) END AS snippet`;
+
+/**
+ * WARP-242 — batch-fetch the per-document DEKs needed to read a row set.
+ * Chunk DEKs are keyed `brain:<brainItemId>` (see DocumentEncryptionKey).
+ */
+async function deksForRows(
+  prisma: PrismaClient,
+  rows: Array<{ brainItemId: string | null }>,
+): Promise<Map<string, Buffer>> {
+  const keyIds = [
+    ...new Set(
+      rows.flatMap((r) => (r.brainItemId ? [`brain:${r.brainItemId}`] : [])),
+    ),
+  ];
+  return getDeksByIds(prisma, keyIds);
+}
+
+/**
+ * WARP-242 — decrypt-on-read for retrieval hits. Rows whose ciphertext
+ * cannot be read (DEK crypto-shredded — e.g. a restored backup carrying
+ * chunks for a deleted document — or an authentication failure) are DROPPED
+ * with a warn log: surfacing base64 garbage to the LLM/dashboard would be
+ * worse than one fewer hit.
+ */
+async function decryptSnippets<
+  T extends { snippet: string; brainItemId: string | null; path: string },
+>(prisma: PrismaClient, rows: T[]): Promise<T[]> {
+  const encrypted = rows.filter((r) => isEncryptedColumn(r.snippet));
+  if (encrypted.length === 0) return rows;
+  const deks = await deksForRows(prisma, encrypted);
+  const out: T[] = [];
+  for (const r of rows) {
+    if (!isEncryptedColumn(r.snippet)) {
+      out.push(r);
+      continue;
+    }
+    const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
+    const dek = keyId ? deks.get(keyId) : undefined;
+    if (!dek) {
+      console.warn("chunk.unreadable.dek_missing", { path: r.path, keyId });
+      continue;
+    }
+    try {
+      out.push({
+        ...r,
+        snippet: decryptColumn(dek, r.snippet, keyId!).slice(0, CHUNK_SNIPPET_CHARS),
+      });
+    } catch (e) {
+      console.warn("chunk.unreadable.decrypt_failed", {
+        path: r.path,
+        keyId,
+        error: String(e),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * WARP-242 — decrypt-on-read for full chunk rows (`text` column), shared by
+ * the /knowledge list route and the chat attachment-context builder. Same
+ * drop-unreadable semantics as {@link decryptSnippets}, without truncation.
+ */
+export async function decryptChunkRows<
+  T extends { text: string; brainItemId: string | null; path: string },
+>(prisma: PrismaClient, rows: T[]): Promise<T[]> {
+  const encrypted = rows.filter((r) => isEncryptedColumn(r.text));
+  if (encrypted.length === 0) return rows;
+  const deks = await deksForRows(prisma, encrypted);
+  const out: T[] = [];
+  for (const r of rows) {
+    if (!isEncryptedColumn(r.text)) {
+      out.push(r);
+      continue;
+    }
+    const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
+    const dek = keyId ? deks.get(keyId) : undefined;
+    if (!dek) {
+      console.warn("chunk.unreadable.dek_missing", { path: r.path, keyId });
+      continue;
+    }
+    try {
+      out.push({ ...r, text: decryptColumn(dek, r.text, keyId!) });
+    } catch (e) {
+      console.warn("chunk.unreadable.decrypt_failed", {
+        path: r.path,
+        keyId,
+        error: String(e),
+      });
+    }
+  }
+  return out;
+}
 
 export interface SearchHit {
   source: FileContentSource;
@@ -159,7 +267,7 @@ export async function searchByVector(
            "chunkIdx",
            "pageNumber",
            "brainItemId",
-           LEFT(text, 280) AS snippet,
+           ${SNIPPET_SQL},
            metadata,
            1 - (embedding <=> '${vec}'::vector) AS score
     FROM "FileContentChunk"
@@ -169,7 +277,7 @@ export async function searchByVector(
   `;
   const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
 
-  return rows
+  const hits = rows
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
     .map((r) => ({
       source: r.source,
@@ -181,6 +289,9 @@ export async function searchByVector(
       snippet: r.snippet,
       metadata: r.metadata ?? null,
     }));
+  // WARP-242: decrypt-on-read BEFORE fusion/rerank so every downstream
+  // consumer (RRF, cross-encoder passages, LLM tool result) sees plaintext.
+  return decryptSnippets(prisma, hits);
 }
 
 /**
@@ -230,14 +341,14 @@ export async function searchByLexical(
 
   const sql = `SELECT
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
-       LEFT(text, 280) AS snippet,
+       ${SNIPPET_SQL},
        ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
      FROM "FileContentChunk"
      WHERE ${where.join(" AND ")}
      ORDER BY score DESC
      LIMIT $${limitParam}`;
   const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
-  return rows.map((r) => ({
+  const hits = rows.map((r) => ({
     source: r.source,
     path: r.path,
     chunkIdx: r.chunkIdx,
@@ -247,6 +358,10 @@ export async function searchByLexical(
     snippet: r.snippet,
     metadata: r.metadata ?? null,
   }));
+  // WARP-242: encrypted chunks have a NULL text_tsv (generated column) so
+  // they can't match this arm — the decrypt pass is defensive parity with
+  // searchByVector, not a hot path.
+  return decryptSnippets(prisma, hits);
 }
 
 /**
@@ -650,7 +765,7 @@ export async function listRecent(
       path,
       "indexedAt",
       "brainItemId",
-      LEFT(text, 280) AS snippet
+      ${SNIPPET_SQL}
     FROM "FileContentChunk"
     WHERE ${where.join(" AND ")}
     ORDER BY source, path, "indexedAt" DESC
@@ -658,10 +773,13 @@ export async function listRecent(
   `;
   const rows = await prisma.$queryRawUnsafe<RawRecentRow[]>(sql, ...args);
 
+  // WARP-242: decrypt-on-read (brain rows carry dcv1 ciphertext).
+  const readable = await decryptSnippets(prisma, rows);
+
   // The DISTINCT ON ordering above groups by file; we re-sort by
   // indexedAt DESC for the dashboard's "newest first" expectation,
   // since DISTINCT ON's ORDER BY is for partitioning, not display order.
-  return [...rows].sort((a, b) => b.indexedAt.getTime() - a.indexedAt.getTime());
+  return [...readable].sort((a, b) => b.indexedAt.getTime() - a.indexedAt.getTime());
 }
 
 /**

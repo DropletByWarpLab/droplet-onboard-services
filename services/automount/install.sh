@@ -10,7 +10,46 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 install -m 755 "$DIR/droplet-automount.sh" /usr/local/bin/droplet-automount.sh
 install -m 644 "$DIR/droplet-automount@.service" /etc/systemd/system/
+install -m 644 "$DIR/droplet-automount-reconcile.service" /etc/systemd/system/
 install -m 644 "$DIR/99-droplet-automount.rules" /etc/udev/rules.d/
+
+# WARP-1338 — Nextcloud-registration opt-in for the automount + storage-pool
+# root units (loaded via EnvironmentFile=). Provisioning opts IN; the
+# in-script default stays 0 (the deliberate opt-out posture), so an operator
+# can flip this file to 0 and re-provisioning preserves that choice — only
+# ownership/mode are re-asserted.
+#
+# ROOT-UNIT LPE INVARIANT (WARP-843): this file feeds ROOT units
+# (droplet-automount@.service, droplet-automount-reconcile.service,
+# droplet-storage-pool-apply.service), and a systemd EnvironmentFile loads
+# EVERY KEY=VALUE line into the unit's environment — so it must be owned
+# root:root and NEVER writable by the droplet user (a droplet-writable
+# EnvironmentFile on a root unit is an arbitrary-env-injection privilege
+# escalation; guard: tests/openwrt-attach-env-invariant.test.sh +
+# services/oled-display/tests/test_automount_env_wiring.py).
+# >>> automount_env_install
+_install_automount_env() {
+  local env_file="${DROPLET_AUTOMOUNT_ENV_FILE:-/etc/droplet/automount.env}"
+  mkdir -p "$(dirname "$env_file")"
+  if [ ! -f "$env_file" ]; then
+    cat > "$env_file" <<'ENV_EOF'
+# Droplet automount -> Nextcloud external-storage registration (WARP-1338).
+# Loaded by ROOT units via EnvironmentFile= — keep this file root:root 0644,
+# never droplet-writable (WARP-843 root-unit LPE invariant).
+# Set NEXTCLOUD_AUTO_REGISTER=0 to opt out of auto-registering HOT-PLUGGED
+# drives (the udev automount + boot-reconcile paths). Owner-confirmed
+# dashboard storage ops (pool format / drive adopt / drive reclaim) always
+# register — they ARE the deliberate "add mounts via the dashboard" path
+# this opt-out steers tighter deployments toward.
+NEXTCLOUD_AUTO_REGISTER=1
+NEXTCLOUD_CONTAINER=droplet-nextcloud-1
+ENV_EOF
+  fi
+  chown root:root "$env_file"
+  chmod 0644 "$env_file"
+}
+_install_automount_env
+# <<< automount_env_install
 
 STATE_DIR="${DROPLET_AUTOMOUNT_STATE_DIR:-/var/lib/droplet-automount}"
 mkdir -p /mnt/droplet "$STATE_DIR" /var/log
@@ -92,6 +131,14 @@ WantedBy=local-fs.target
 MOUNT_EOF
 systemctl daemon-reload
 systemctl enable mnt-droplet.mount >/dev/null 2>&1 || true
+
+# WARP-1338 — boot-time registration reconcile. Enabled for every boot, and
+# started once now (non-blocking, non-fatal) so a fleet-upgraded box whose
+# mounts predate registration converges without waiting for a reboot. This
+# registers ONLY already-mounted trusted/pool paths — it mounts nothing, so
+# it is NOT the install-time drive sweep deliberately avoided below.
+systemctl enable droplet-automount-reconcile.service >/dev/null 2>&1 || true
+systemctl start --no-block droplet-automount-reconcile.service >/dev/null 2>&1 || true
 
 udevadm control --reload-rules
 # Don't trigger a sweep here — we intentionally want the first mount of

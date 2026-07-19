@@ -17,10 +17,11 @@ import {
   Building2,
   ChevronRight,
   Loader2,
+  Mic,
 } from "lucide-react";
+import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
-import { useWorkspace } from "@/lib/workspace";
 import {
   fetchUsers,
   createUser as apiCreateUser,
@@ -149,11 +150,9 @@ function bytesToUnitValue(bytes: string | null): { value: string; unit: StorageU
  */
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
-  const { isBusiness } = useWorkspace();
   const isAdminTier = currentUser?.role === "owner" || currentUser?.role === "admin";
-  // WARP-1270 (T18): "People" / "Departments & teams" tab row — Business
-  // workspace only (design brief §3). Home mode never sees this tab; the
-  // People roster below is unconditionally the whole page in Home mode.
+  // WARP-1270 (T18): "People" / "Departments & teams" tab row (design
+  // brief §3). Business-only build — always rendered.
   const [tab, setTab] = useState<"people" | "departments">("people");
   const [users, setUsers] = useState<RosterUser[]>([]);
   // DASH-001: self-identity compares the LOCAL user UUID (u.userId ↔
@@ -316,15 +315,14 @@ export default function UsersPage() {
   }, [reload]);
 
   // WARP-1270 (T18) — department list for the invite modal's "Add to a
-  // department" section. Business-mode only; best-effort (the invite
-  // modal's core email/role flow must not break if this fails — the
-  // section just doesn't render).
+  // department" section. Best-effort (the invite modal's core email/role
+  // flow must not break if this fails — the section just doesn't render).
   useEffect(() => {
-    if (!isBusiness || isAdmin !== true) return;
+    if (isAdmin !== true) return;
     listDepartments()
       .then((data) => setDepartments(data.departments || []))
       .catch(() => setDepartments([]));
-  }, [isBusiness, isAdmin]);
+  }, [isAdmin]);
 
   const resetInviteForm = () => {
     setInviteEmail("");
@@ -791,48 +789,44 @@ export default function UsersPage() {
         </div>
       )}
 
-      {/* WARP-1270 (T18) — "People" / "Departments & teams" tab row.
-          Business workspace only (design brief §3); Home mode never renders
-          this strip, so the People list below is unconditionally the whole
-          page there. Mirrors the /knowledge tabstrip pattern (same class
-          names, same WAI-ARIA tabs contract) already shipped on this page
-          shell. */}
-      {isBusiness && (
-        <div role="tablist" aria-label="Users view tabs" className="tabstrip">
-          <button
-            type="button"
-            role="tab"
-            id="users-tab-people"
-            aria-selected={tab === "people"}
-            aria-controls="users-panel-people"
-            tabIndex={tab === "people" ? 0 : -1}
-            onClick={() => setTab("people")}
-            className={"tab" + (tab === "people" ? " active" : "")}
-          >
-            <UsersIcon size={14} aria-hidden="true" />
-            People
-          </button>
-          <button
-            type="button"
-            role="tab"
-            id="users-tab-departments"
-            aria-selected={tab === "departments"}
-            aria-controls="users-panel-departments"
-            tabIndex={tab === "departments" ? 0 : -1}
-            onClick={() => setTab("departments")}
-            className={"tab" + (tab === "departments" ? " active" : "")}
-          >
-            <Building2 size={14} aria-hidden="true" />
-            Departments &amp; teams
-          </button>
-        </div>
-      )}
+      {/* WARP-1270 (T18) — "People" / "Departments & teams" tab row
+          (design brief §3). Mirrors the /knowledge tabstrip pattern (same
+          class names, same WAI-ARIA tabs contract) already shipped on this
+          page shell. */}
+      <div role="tablist" aria-label="Users view tabs" className="tabstrip">
+        <button
+          type="button"
+          role="tab"
+          id="users-tab-people"
+          aria-selected={tab === "people"}
+          aria-controls="users-panel-people"
+          tabIndex={tab === "people" ? 0 : -1}
+          onClick={() => setTab("people")}
+          className={"tab" + (tab === "people" ? " active" : "")}
+        >
+          <UsersIcon size={14} aria-hidden="true" />
+          People
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="users-tab-departments"
+          aria-selected={tab === "departments"}
+          aria-controls="users-panel-departments"
+          tabIndex={tab === "departments" ? 0 : -1}
+          onClick={() => setTab("departments")}
+          className={"tab" + (tab === "departments" ? " active" : "")}
+        >
+          <Building2 size={14} aria-hidden="true" />
+          Departments &amp; teams
+        </button>
+      </div>
 
       <div
         role="tabpanel"
         id="users-panel-people"
         aria-labelledby="users-tab-people"
-        hidden={isBusiness && tab !== "people"}
+        hidden={tab !== "people"}
       >
       {/* User list */}
       <div className="card">
@@ -891,6 +885,22 @@ export default function UsersPage() {
                 clearing the ≥ 32 px floor in the ui-ux brief.
               */}
               <div className="flex items-center gap-0.5">
+                {/* WARP-1056 — §5 Flow B entry point: deep-links to the
+                    Voice page with this person preselected (the wizard
+                    itself lives on /voice; enrollment attaches a
+                    voiceprint to this EXISTING person). Local-directory
+                    rows only — a voiceprint is keyed by the local user
+                    id. */}
+                {u.userId && (
+                  <Link
+                    href={`/voice?enroll=${encodeURIComponent(u.userId)}`}
+                    aria-label={`Add voice for ${label}`}
+                    className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                    title="Add voice"
+                  >
+                    <Mic size={14} />
+                  </Link>
+                )}
                 <button
                   onClick={() => openEdit(u)}
                   aria-label={`Edit user ${label}`}
@@ -975,18 +985,16 @@ export default function UsersPage() {
       )}
       </div>
 
-      {isBusiness && (
-        <div
-          role="tabpanel"
-          id="users-panel-departments"
-          aria-labelledby="users-tab-departments"
-          hidden={tab !== "departments"}
-        >
-          {tab === "departments" && (
-            <DepartmentsPanel people={users} isAdminTier={isAdminTier} />
-          )}
-        </div>
-      )}
+      <div
+        role="tabpanel"
+        id="users-panel-departments"
+        aria-labelledby="users-tab-departments"
+        hidden={tab !== "departments"}
+      >
+        {tab === "departments" && (
+          <DepartmentsPanel people={users} isAdminTier={isAdminTier} />
+        )}
+      </div>
 
       {/* Invite modal */}
       {showInvite && (
@@ -1111,11 +1119,11 @@ export default function UsersPage() {
                   </div>
 
                   {/* WARP-1270 (T18) — invite modal "Add to a department"
-                      (design brief §4). Collapsed by default; renders only
-                      in Business mode with at least one department to
-                      offer. Teams render indented under their parent
-                      department, mirroring the Departments tab's tree. */}
-                  {isBusiness && departments.length > 0 && (
+                      (design brief §4). Collapsed by default; renders when
+                      there is at least one department to offer. Teams render
+                      indented under their parent department, mirroring the
+                      Departments tab's tree. */}
+                  {departments.length > 0 && (
                     <div>
                       {!inviteDeptExpanded ? (
                         <button

@@ -68,7 +68,9 @@ const DEVICE_TYPE_CATEGORY: Record<number, SmartHomeCategory> = {
   0x0015: "binary_sensor", // Contact Sensor
   // Climate
   0x0301: "climate",    // Thermostat
-  0x002b: "climate",    // Fan
+  // WARP-897: 0x002b is the Fan device type — it was mislabeled "climate",
+  // which routed it to the thermostat widget and hid the fan controls.
+  0x002b: "fan",        // Fan
   // Media
   0x0028: "media_player", // Basic Video Player
   0x0023: "media_player", // Casting Video Player
@@ -142,10 +144,27 @@ export interface MatterControllerCoreOptions {
    * after the sidecar started is still picked up.
    */
   wifiSsid?: string;
+  /**
+   * WARP-1363: file-first SSID, mirroring `wifiPskFile`. The static env
+   * SSID goes stale the moment the AP is renamed (claim / setup-wizard
+   * Wi-Fi save) — the commissionee then scans for a network that no
+   * longer exists and answers NetworkNotFound (proven live on .87:
+   * env said "Droplet", the AP broadcast "WarpLab"). The file is
+   * re-read per commission, so a rename can never strand commissioning.
+   */
+  wifiSsidFile?: string;
   wifiPsk?: string;
   wifiPskFile?: string;
   /** ISO-3166 alpha-2 regulatory domain; defaults to "XX" (unspecified). */
   regulatoryCountryCode?: string;
+  /**
+   * Whether the BLE transport was registered at process start (ble.ts).
+   * Manual pairing codes carry no discovery-capability bits, and
+   * matter.js defaults to mDNS-only when `discoveryCapabilities` is
+   * absent — so without this flag the BLE scanner never runs and a
+   * freshly-reset BLE-first device can never be discovered.
+   */
+  bleCommissioning?: boolean;
   /** Test seam — defaults to constructing the real matter.js controller. */
   createController?: () => ControllerLike;
 }
@@ -158,13 +177,39 @@ export interface MatterControllerCoreOptions {
  */
 export type WifiProvisioningOptions = Pick<
   MatterControllerCoreOptions,
-  "wifiSsid" | "wifiPsk" | "wifiPskFile"
+  "wifiSsid" | "wifiSsidFile" | "wifiPsk" | "wifiPskFile"
 >;
 
 /**
+ * WARP-1363: resolve the SSID a commission would hand the device —
+ * file-first (`wifiSsidFile`, written by droplet-openwrt-attach next to
+ * the AP PSK), env fallback. Exported so /capabilities reports the SAME
+ * apSsid the next commission would actually use.
+ */
+export async function resolveWifiSsid(
+  options: WifiProvisioningOptions,
+): Promise<string> {
+  const ssidFile = (options.wifiSsidFile ?? "").trim();
+  if (ssidFile) {
+    try {
+      const fromFile = (await fs.promises.readFile(ssidFile, "utf8")).trim();
+      if (fromFile) return fromFile;
+    } catch (err) {
+      logger.warn(
+        { err, ssidFile },
+        "DROPLET_MATTER_WIFI_SSID_FILE is set but unreadable — falling back to DROPLET_MATTER_WIFI_SSID",
+      );
+    }
+  }
+  return (options.wifiSsid ?? "").trim();
+}
+
+/**
  * WARP-895: resolve the operational Wi-Fi network a BLE-first device is
- * handed during commissioning. PSK source order: the file
- * (`options.wifiPskFile` — the per-box AP PSK provisioned by
+ * handed during commissioning. SSID source order (WARP-1363): the file
+ * (`options.wifiSsidFile` — live AP SSID persisted by
+ * droplet-openwrt-attach), then `options.wifiSsid`. PSK source order: the
+ * file (`options.wifiPskFile` — the per-box AP PSK provisioned by
  * droplet-openwrt-attach), then `options.wifiPsk`. Returns undefined —
  * commissioning then proceeds on-network-only, exactly as before WARP-895
  * — when no SSID or no PSK is available.
@@ -176,7 +221,7 @@ export type WifiProvisioningOptions = Pick<
 export async function resolveWifiNetwork(
   options: WifiProvisioningOptions,
 ): Promise<{ wifiSsid: string; wifiCredentials: string } | undefined> {
-  const wifiSsid = (options.wifiSsid ?? "").trim();
+  const wifiSsid = await resolveWifiSsid(options);
   if (!wifiSsid) return undefined;
   let psk = "";
   const pskFile = (options.wifiPskFile ?? "").trim();
@@ -402,6 +447,114 @@ export function createMatterControllerCore(
         return { status: "ok" };
       }
 
+      // WARP-1371: color-capable lights (ColorControl 0x0300). Hue arrives in
+      // UX degrees (0-360) and saturation in percent; Matter wants 0-254 for
+      // both (spec 3.2.7). A light without hue/sat support rejects the invoke
+      // and the raw matter.js error surfaces (honesty contract) rather than a
+      // fabricated ok.
+      case "set_color": {
+        const hueDeg = Number(data?.hue ?? 0);
+        const satPct = Number(data?.saturation ?? 100);
+        const hue = Math.round(((((hueDeg % 360) + 360) % 360) / 360) * 254);
+        const saturation = Math.round(
+          (Math.min(Math.max(satPct, 0), 100) / 100) * 254,
+        );
+        await invokeClusterCommand(endpoint, "colorControl", "moveToHueAndSaturation", {
+          hue,
+          saturation,
+          transitionTime: data?.transition_time ?? 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: tunable-white lights. Accepts UX kelvin (preferred) or raw
+      // mireds; clamped to the 153-500 mired band virtually every retail bulb
+      // supports (6500K-2000K).
+      case "set_color_temperature": {
+        let mireds = Number(data?.mireds ?? 0);
+        if (!mireds) {
+          const kelvin = Number(data?.kelvin ?? 2700);
+          mireds = Math.round(1_000_000 / Math.min(Math.max(kelvin, 2000), 6500));
+        }
+        mireds = Math.min(Math.max(Math.round(mireds), 153), 500);
+        await invokeClusterCommand(endpoint, "colorControl", "moveToColorTemperature", {
+          colorTemperatureMireds: mireds,
+          transitionTime: data?.transition_time ?? 10,
+          optionsMask: 0,
+          optionsOverride: 0,
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: window coverings (WindowCovering 0x0102). The June audit
+      // proved the old path (onOff toggle) always 500s on a real cover —
+      // these are the cluster commands a blind actually implements. The
+      // motion commands are VOID requests (WARP-1366 payload rule applies).
+      case "open_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "upOrOpen");
+        return { status: "ok" };
+
+      case "close_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "downOrClose");
+        return { status: "ok" };
+
+      case "stop_cover":
+        await invokeClusterCommand(endpoint, "windowCovering", "stopMotion");
+        return { status: "ok" };
+
+      // UX position is percent OPEN (100 = fully open); Matter lift is
+      // hundredths-of-percent CLOSED (10000 = fully closed) — invert.
+      case "set_cover_position": {
+        const positionPct = Math.min(Math.max(Number(data?.position ?? 100), 0), 100);
+        await invokeClusterCommand(endpoint, "windowCovering", "goToLiftPercentage", {
+          liftPercent100thsValue: Math.round((100 - positionPct) * 100),
+        });
+        return { status: "ok" };
+      }
+
+      // WARP-1371: fans (FanControl 0x0202). Speed is an attribute write, not
+      // a command — percentSetting (0-100) with fanMode auto-derived by the
+      // device; explicit modes map to the FanModeEnum.
+      case "set_fan_speed": {
+        const percent = Math.min(Math.max(Math.round(Number(data?.percent ?? 100)), 0), 100);
+        await writeClusterAttribute(endpoint, "fanControl", "percentSetting", percent);
+        return { status: "ok" };
+      }
+
+      case "set_fan_mode": {
+        // Matter FanModeEnum (Fan Control cluster 0x0202, spec §4.4.6): 0 Off, 1 Low, 2 Medium, 3 High,
+        // 4 On, 5 Auto.
+        const FAN_MODES: Record<string, number> = {
+          off: 0,
+          low: 1,
+          medium: 2,
+          high: 3,
+          on: 4,
+          auto: 5,
+        };
+        const mode = FAN_MODES[String(data?.mode ?? "")];
+        if (mode === undefined)
+          throw new Error(`Unsupported fan mode: ${String(data?.mode ?? "")}`);
+        await writeClusterAttribute(endpoint, "fanControl", "fanMode", mode);
+        return { status: "ok" };
+      }
+
+      // WARP-1371: media players (MediaPlayback 0x0506) — the three verbs
+      // every speaker/display supports. All VOID requests.
+      case "play_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "play");
+        return { status: "ok" };
+
+      case "pause_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "pause");
+        return { status: "ok" };
+
+      case "stop_media":
+        await invokeClusterCommand(endpoint, "mediaPlayback", "stop");
+        return { status: "ok" };
+
       case "set_temperature": {
         const temp = Number(data?.temperature ?? 21);
         const mode = Number(data?.mode ?? 0); // 0=heat, 1=cool
@@ -549,6 +702,16 @@ export function createMatterControllerCore(
         );
       }
 
+      // Scan every transport we actually have: pairing codes carry no
+      // discovery-capability bits (and we deliberately ignore the QR's —
+      // scanning a superset is harmless, matter.js uses whichever scanner
+      // finds the device first). Omitting this made discovery mDNS-only,
+      // which is exactly the retail BLE-first case WARP-895 exists for.
+      const discoveryCapabilities = {
+        onIpNetwork: true,
+        ...(options.bleCommissioning ? { ble: true } : {}),
+      };
+
       let commissioningOptions: NodeCommissioningOptions;
 
       if (trimmed.startsWith("MT:")) {
@@ -560,6 +723,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { longDiscriminator: qr.discriminator },
+            discoveryCapabilities,
           },
           passcode: qr.passcode,
         };
@@ -570,6 +734,7 @@ export function createMatterControllerCore(
           commissioning,
           discovery: {
             identifierData: { shortDiscriminator: manual.shortDiscriminator },
+            discoveryCapabilities,
           },
           passcode: manual.passcode,
         };
@@ -729,6 +894,40 @@ function readEndpointAttributes(
     }
   } catch { /* cluster not present */ }
 
+  // WARP-897: the state the control widgets render — color, cover position,
+  // fan speed/mode, lock bolt state. Same per-cluster try pattern: absent
+  // clusters simply contribute nothing.
+  try {
+    const color = endpoint.state?.colorControl;
+    if (color !== undefined) {
+      attributes.currentHue = color.currentHue;
+      attributes.currentSaturation = color.currentSaturation;
+      attributes.colorTemperatureMireds = color.colorTemperatureMireds;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const cover = endpoint.state?.windowCovering;
+    if (cover !== undefined) {
+      attributes.liftPercent100ths = cover.currentPositionLiftPercent100ths;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const fan = endpoint.state?.fanControl;
+    if (fan !== undefined) {
+      attributes.fanPercent = fan.percentCurrent ?? fan.percentSetting;
+      attributes.fanMode = fan.fanMode;
+    }
+  } catch { /* cluster not present */ }
+
+  try {
+    const lock = endpoint.state?.doorLock;
+    if (lock !== undefined) {
+      attributes.lockState = lock.lockState;
+    }
+  } catch { /* cluster not present */ }
+
   try {
     const temp = endpoint.state?.temperatureMeasurement;
     if (temp !== undefined) {
@@ -743,8 +942,27 @@ function deriveStateString(
 ): string {
   if (node.connectionState !== NodeStates.Connected) return "unavailable";
 
+  // WARP-897: a lock is its bolt, never its (absent) onOff — DoorLock
+  // lockState: 1 Locked, 2 Unlocked; anything else is honestly reported.
+  if (attributes.lockState !== undefined && attributes.lockState !== null) {
+    const ls = Number(attributes.lockState);
+    if (ls === 1) return "locked";
+    if (ls === 2) return "unlocked";
+    return "not fully locked";
+  }
+  // WARP-897: covers — Matter lift is hundredths CLOSED (10000 = closed).
+  if (
+    attributes.liftPercent100ths !== undefined &&
+    attributes.liftPercent100ths !== null
+  ) {
+    return Number(attributes.liftPercent100ths) >= 9900 ? "closed" : "open";
+  }
   if (attributes.onOff !== undefined) {
     return attributes.onOff ? "on" : "off";
+  }
+  // WARP-897: fans without an onOff cluster — speed is the state.
+  if (attributes.fanPercent !== undefined && attributes.fanPercent !== null) {
+    return Number(attributes.fanPercent) > 0 ? "on" : "off";
   }
   if (attributes.measuredValue !== undefined) {
     return String(Number(attributes.measuredValue) / 100);
@@ -778,7 +996,12 @@ async function invokeClusterCommand(
       `Command '${commandName}' not found on cluster '${clusterName}'`,
     );
   }
-  await fn(args ?? {});
+  // WARP-1366: pass args through UNTOUCHED. onOff.on/off/toggle take a void
+  // request — matter.js validates the payload against the cluster schema and
+  // rejects a substituted {} with ValidationDatatypeMismatchError, which made
+  // every commissioned on/off device uncontrollable (proven live on .87 with
+  // the first end-to-end commissioned GE Cync light).
+  await fn(args);
 }
 
 async function writeClusterAttribute(

@@ -1,20 +1,31 @@
 import {
   createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes,
 } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 /**
  * WARP-233 — app-layer PHI/PII column encryption (deviation D1: pg_tde is not
  * installable on pgvector/pgvector:pg16 and cannot do per-document keys).
+ * Twin of apps/orchestrator/src/services/column-crypto.service.ts —
+ * duplicated (intentionally) because the mcp-server is a standalone process;
+ * keep the wire format and key derivation in lockstep.
  *
  * Wire format `dcv1:` = base64( iv(12) ‖ ciphertext ‖ tag(16) ) — tag LAST,
  * matching Python `cryptography`'s AESGCM layout so services/file-indexer
  * writes blobs this module reads. Deliberately different from
  * encryption.service.ts (iv‖tag‖ct) so the two formats can never be confused.
  *
- * Keys: doc-KEK = HKDF-SHA256(DEVICE_SECRET_KEY, salt="droplet-column-crypto-v1",
- * info="doc-kek"). Per-document DEKs are wrapped by the KEK (AAD = keyId) and
- * persisted in DocumentEncryptionKey (document-key.service.ts). Crypto-shred =
- * delete the row. TPM sealing of the KEK is WARP-1033.
+ * Keys (WARP-242 split — the two ikm sources are deliberate):
+ *   - doc-KEK = HKDF-SHA256(<data/secrets/doc-kek.key bytes>,
+ *     salt="droplet-column-crypto-v1", info="doc-kek"). The keyfile never
+ *     enters a restic snapshot (droplet-backup.sh excludes it), so deleting a
+ *     wrapped DEK crypto-shreds its ciphertext even against restored backups.
+ *     TPM sealing is WARP-1033.
+ *   - email keys = HKDF-SHA256(DEVICE_SECRET_KEY, ...) — must survive a
+ *     disaster-recovery restore, so they stay on the .env-carried secret.
+ * Per-document DEKs are wrapped by the doc-KEK (AAD = keyId) and persisted in
+ * DocumentEncryptionKey (document-key.service.ts). Crypto-shred = delete the
+ * rows.
  */
 
 export const ENC_PREFIX = "dcv1:";
@@ -24,8 +35,9 @@ const IV_LEN = 12;
 const TAG_LEN = 16;
 
 let overrideKeyB64: string | null = null;
+let docKekIkmCache: Buffer | null = null;
 
-function ikm(): Buffer {
+function deviceIkm(): Buffer {
   const raw = overrideKeyB64 ?? (process.env.DEVICE_SECRET_KEY ?? "");
   if (!raw) {
     throw new Error(
@@ -39,15 +51,37 @@ function ikm(): Buffer {
   return buf;
 }
 
-function hkdf(info: string): Buffer {
-  return Buffer.from(hkdfSync("sha256", ikm(), Buffer.from(SALT), Buffer.from(info), 32));
+/** WARP-242 — doc-KEK ikm comes from the dedicated keyfile, never .env
+ *  (see module comment). Fails closed when the file is missing/malformed. */
+function docKekIkm(): Buffer {
+  if (overrideKeyB64) return deviceIkm(); // test seam covers both ikm sources
+  if (docKekIkmCache) return docKekIkmCache;
+  const path = process.env.DOC_KEK_PATH ?? "/data/secrets/doc-kek.key";
+  let buf: Buffer;
+  try {
+    buf = readFileSync(path);
+  } catch (e) {
+    throw new Error(
+      `doc-KEK keyfile unreadable at ${path} — ` +
+        `run scripts/setup.sh (mints data/secrets/doc-kek.key): ${String(e)}`,
+    );
+  }
+  if (buf.length !== 32) {
+    throw new Error(`doc-KEK keyfile at ${path} must be exactly 32 bytes (got ${buf.length}).`);
+  }
+  docKekIkmCache = buf;
+  return buf;
 }
 
-export function deriveDocKek(): Buffer { return hkdf("doc-kek"); }
-export function deriveEmailIndexKey(): Buffer { return hkdf("email-blind-index"); }
+function hkdf(ikm: Buffer, info: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", ikm, Buffer.from(SALT), Buffer.from(info), 32));
+}
+
+export function deriveDocKek(): Buffer { return hkdf(docKekIkm(), "doc-kek"); }
+export function deriveEmailIndexKey(): Buffer { return hkdf(deviceIkm(), "email-blind-index"); }
 /** Column key for User.email at rest (whole-column logical key — derived,
  *  not a stored DEK: no per-user shred story, and sync read/write paths). */
-export function deriveEmailColumnKey(): Buffer { return hkdf("user-email-column"); }
+export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-email-column"); }
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {
@@ -75,12 +109,25 @@ export function wrapDek(kek: Buffer, dek: Buffer, keyId: string): string {
 export function unwrapDek(kek: Buffer, wrapped: string, keyId: string): Buffer {
   return open(kek, Buffer.from(wrapped, "base64"), Buffer.from(keyId));
 }
-export function encryptColumn(key: Buffer, plaintext: string): string {
-  return ENC_PREFIX + seal(key, Buffer.from(plaintext, "utf8")).toString("base64");
+/** WARP-242: optional `aad` binds the ciphertext to its document identity
+ *  (chunk text passes the DEK's keyId, e.g. "brain:<itemId>"). AAD is
+ *  authenticated by the GCM tag but not stored — decrypt must supply the
+ *  same value. Omitting it keeps WARP-233 callers unchanged. */
+export function encryptColumn(key: Buffer, plaintext: string, aad?: string): string {
+  return (
+    ENC_PREFIX +
+    seal(key, Buffer.from(plaintext, "utf8"), aad ? Buffer.from(aad) : undefined).toString(
+      "base64",
+    )
+  );
 }
-export function decryptColumn(key: Buffer, blob: string): string {
+export function decryptColumn(key: Buffer, blob: string, aad?: string): string {
   if (!blob.startsWith(ENC_PREFIX)) throw new Error("column-crypto: missing dcv1: prefix");
-  return open(key, Buffer.from(blob.slice(ENC_PREFIX.length), "base64")).toString("utf8");
+  return open(
+    key,
+    Buffer.from(blob.slice(ENC_PREFIX.length), "base64"),
+    aad ? Buffer.from(aad) : undefined,
+  ).toString("utf8");
 }
 export function isEncryptedColumn(value: string): boolean {
   return value.startsWith(ENC_PREFIX);
@@ -91,7 +138,10 @@ export function emailLookupHash(email: string): string {
     .digest("hex");
 }
 
-/** Test helper — install a known key without touching env. */
+/** Test helper — install a known key without touching env. Overrides BOTH
+ *  ikm sources (DEVICE_SECRET_KEY and the doc-KEK keyfile) and drops the
+ *  keyfile cache so tests never read the real file. */
 export function __setColumnCryptoKeyForTest(keyBase64: string | null): void {
   overrideKeyB64 = keyBase64;
+  docKekIkmCache = null;
 }

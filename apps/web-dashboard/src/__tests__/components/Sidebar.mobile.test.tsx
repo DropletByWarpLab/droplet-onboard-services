@@ -51,21 +51,13 @@ vi.mock("@/lib/theme", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
-// 2026-05-18 — Sidebar consults useWorkspace() to decide which Phase 3
-// (Roles/Groups/Sessions/Billing) entries to surface and to render the
-// "Home"/"Business" pill in the header. Mock with the Home defaults so
-// the existing mobile-drawer expectations (which only know about Phase 1
-// routes) still hold. Phase 3 will add a parallel test file for the
-// Business-mode drawer surface.
+// WARP-1341: business-only build — the provider is static, but keep the
+// module mocked so this suite stays decoupled from its implementation.
 vi.mock("@/lib/workspace", () => ({
   useWorkspace: () => ({
-    workspaceType: "home" as const,
-    setWorkspaceType: vi.fn(),
-    isHome: true,
-    isBusiness: false,
-    homeVariant: "B" as const,
+    workspaceType: "business" as const,
+    isBusiness: true,
   }),
-  getHomeVariant: () => "B" as const,
 }));
 
 // Pathname for active-tab assertions. Tests can override per-case via
@@ -157,10 +149,10 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(tabs.length + 1).toBe(5);
   });
 
-  it("the 5 bottom tabs are Home, Ask AI, Files, Devices, More", () => {
+  it("the 5 bottom tabs are Overview, Ask AI, Files, Devices, More", () => {
     render(<Sidebar />);
     const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
-    expect(within(bottomNav).getByRole("link", { name: /home/i })).toBeInTheDocument();
+    expect(within(bottomNav).getByRole("link", { name: /overview/i })).toBeInTheDocument();
     expect(within(bottomNav).getByRole("link", { name: /ask ai/i })).toBeInTheDocument();
     expect(within(bottomNav).getByRole("link", { name: /files/i })).toBeInTheDocument();
     expect(within(bottomNav).getByRole("link", { name: /devices/i })).toBeInTheDocument();
@@ -249,8 +241,8 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     const filesLink = within(bottomNav).getByRole("link", { name: /files/i });
     expect(filesLink).toHaveAttribute("aria-current", "page");
     // Non-active siblings must NOT carry aria-current.
-    const homeLink = within(bottomNav).getByRole("link", { name: /home/i });
-    expect(homeLink).not.toHaveAttribute("aria-current");
+    const overviewLink = within(bottomNav).getByRole("link", { name: /overview/i });
+    expect(overviewLink).not.toHaveAttribute("aria-current");
   });
 
   it("the mobile <nav> exposes an aria-label landmark", () => {
@@ -406,8 +398,8 @@ describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
     expect(aside).not.toBeNull();
     const settingsLink = within(aside).getByRole("link", { name: /settings/i });
     expect(settingsLink).toHaveAttribute("aria-current", "page");
-    const homeLink = within(aside).getByRole("link", { name: /home/i });
-    expect(homeLink).not.toHaveAttribute("aria-current");
+    const overviewLink = within(aside).getByRole("link", { name: /overview/i });
+    expect(overviewLink).not.toHaveAttribute("aria-current");
   });
 });
 

@@ -955,3 +955,84 @@ describe("storage routes — SMART + eject (WARP-612)", () => {
     });
   });
 });
+
+// =====================================================================
+// WARP-1339 — pool annotation on GET /storage/drives.
+//
+// The mounted md filesystem is the pool's ONLY fs-level capacity/browse
+// source, so it must stay in the list (never dropped server-side) but carry
+// an explicit `pool: "<mdN>"` marker the dashboard can join on (the pools
+// payload names arrays bare — "md127" — while drives carry "/dev/md127").
+// Partitions of the array (md127p1) are tagged with the ARRAY's name.
+// =====================================================================
+describe("GET /api/storage/drives — pool annotation (WARP-1339)", () => {
+  const mdSnapshot = {
+    drives: [
+      {
+        device: "/dev/md127",
+        mount: "/mnt/droplet/a0f10a84-7116-46a7-a3e3-5e00ea1c7d08",
+        label: "",
+        uuid: "U-POOL-FS",
+        size_bytes: 4_000_000_000_000,
+        used_bytes: 1_000_000_000_000,
+        free_bytes: 3_000_000_000_000,
+        mounted: true,
+        fs: "ext4",
+      },
+      {
+        device: "/dev/md127p1",
+        mount: "/mnt/droplet/pool-part",
+        label: "",
+        uuid: "U-POOL-PART",
+        size_bytes: 2_000_000_000_000,
+        used_bytes: 500_000_000_000,
+        free_bytes: 1_500_000_000_000,
+        mounted: true,
+        fs: "ext4",
+      },
+      {
+        device: "/dev/sda1",
+        mount: "/mnt/droplet/data",
+        label: "TOSHIBA EXT",
+        uuid: "U-PLAIN",
+        size_bytes: 2_000_000_000_000,
+        used_bytes: 100_000_000_000,
+        free_bytes: 1_900_000_000_000,
+        mounted: true,
+        fs: "ext4",
+      },
+    ],
+    count: 3,
+    snapshot_at: "2026-07-17T00:00:00Z",
+  };
+
+  it("tags md-node drives with their bare pool name and leaves plain drives untagged", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => mdSnapshot })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const byUuid = new Map(res.body.drives.map((d: any) => [d.uuid, d]));
+    // The md node itself AND a partition of it both join on the bare array
+    // name (the /storage/pools payload's `device` field).
+    expect((byUuid.get("U-POOL-FS") as any).pool).toBe("md127");
+    expect((byUuid.get("U-POOL-PART") as any).pool).toBe("md127");
+    // A plain drive carries an explicit null — the dashboard branches on the
+    // field, never on its absence.
+    expect((byUuid.get("U-PLAIN") as any).pool).toBeNull();
+  });
+
+  it("never drops the pool-backed drive server-side (it is the pool's only capacity source)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => mdSnapshot })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toHaveLength(3);
+    expect(res.body.count).toBe(3);
+  });
+});

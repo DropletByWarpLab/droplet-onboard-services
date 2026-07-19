@@ -44,7 +44,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "list_drives",
   description:
-    "List every data drive mounted under /mnt on the device — NVMe partitions plus any hot-plugged USB drives. Returns device, mount point, label, total/used/free bytes.",
+    "List every data drive mounted under /mnt on the device — NVMe partitions plus any hot-plugged USB drives. Returns device, mount point, label, total/used/free bytes. A drive whose filesystem lives on a storage pool (mdadm array) carries pool: \"<mdN>\" naming its array; pool is null for a standalone drive.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

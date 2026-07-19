@@ -29,6 +29,15 @@ requests==2.32.3          # huggingface_hub's HTTP layer
 # but unavoidable as long as we're on openwakeword < 0.7.
 scikit-learn==1.5.2
 
+# Speaker identification (per-person voiceprints, WARP-1056).
+#
+# Kaldi-compatible 80-dim fbank features for the bundled CAM++ speaker
+# model (see the Dockerfile's speaker-model step) — the EXACT frontend
+# the model was trained/exported against, so no hand-rolled mel math to
+# drift. Tiny wheel (~1 MB), Apache-2.0, manylinux wheels for py3.12.
+# Inference runs on the onnxruntime pinned above.
+kaldi-native-fbank==1.22.3
+
 # Vosk wake backend (default WAKE_ENGINE=vosk, WARP-154).
 #
 # Recognizes the configured wake phrase ("hey droplet") out of the box

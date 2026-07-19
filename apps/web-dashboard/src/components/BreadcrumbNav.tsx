@@ -1,18 +1,31 @@
-import { Building2, ChevronRight, Home } from "lucide-react";
+import { Building2, ChevronRight, FolderOpen } from "lucide-react";
 
 interface BreadcrumbNavProps {
   path: string;
   onNavigate: (path: string) => void;
   /**
-   * WARP-1267 — a non-navigating crumb rendered before "Home", used for team
+   * WARP-1267 — a non-navigating crumb rendered before "My files", used for team
    * spaces: the department name prefixes the breadcrumb ("Engineering /
    * Platform / …") even though Nextcloud mounts the team library flat — the
    * dashboard owns this hierarchy illusion (ADR-029 §D-3).
    */
   prefixCrumb?: string;
+  /**
+   * WARP-1338 (UX review) — display-name override for a crumb. A volume
+   * deep-link lands on /files?path=/<mount-tail>; for a legacy pool the tail
+   * is the full fs UUID, and a GUID must never be the primary location label
+   * (WARP-1337). Returning undefined keeps the raw segment; navigation always
+   * uses the REAL path — the WebDAV listing is keyed by the raw tail.
+   */
+  labelForSegment?: (segment: string, index: number) => string | undefined;
 }
 
-export function BreadcrumbNav({ path, onNavigate, prefixCrumb }: BreadcrumbNavProps) {
+export function BreadcrumbNav({
+  path,
+  onNavigate,
+  prefixCrumb,
+  labelForSegment,
+}: BreadcrumbNavProps) {
   const segments = path.split("/").filter(Boolean);
 
   return (
@@ -29,30 +42,31 @@ export function BreadcrumbNav({ path, onNavigate, prefixCrumb }: BreadcrumbNavPr
       )}
       <button
         onClick={() => onNavigate("/")}
-        aria-label="Home"
+        aria-label="My files"
         className="flex items-center gap-1 type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors flex-shrink-0 min-h-[28px]"
       >
-        <Home size={14} aria-hidden="true" />
-        <span>Home</span>
+        <FolderOpen size={14} aria-hidden="true" />
+        <span>My files</span>
       </button>
 
       {segments.map((segment, idx) => {
         const segmentPath = "/" + segments.slice(0, idx + 1).join("/");
         const isLast = idx === segments.length - 1;
+        const label = labelForSegment?.(segment, idx) ?? segment;
 
         return (
           <span key={segmentPath} className="flex items-center gap-1 flex-shrink-0">
             <ChevronRight size={12} className="text-[color:var(--text-faint)]" />
             {isLast ? (
               <span className="type-subheadline text-[color:var(--text)] font-medium">
-                {segment}
+                {label}
               </span>
             ) : (
               <button
                 onClick={() => onNavigate(segmentPath)}
                 className="type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors"
               >
-                {segment}
+                {label}
               </button>
             )}
           </span>

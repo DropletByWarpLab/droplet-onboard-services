@@ -258,6 +258,77 @@ preflight_member() {
 # tests only; the shipping path is fixed.
 AUTOMOUNT_STATE="${DROPLET_AUTOMOUNT_STATE:-/var/lib/droplet-automount/mounts.json}"
 
+# --- WARP-1338: automount-stable mount names + Nextcloud registration --------
+# droplet-automount.sh is the authority for mount tails on REBOOT — it renames
+# every filesystem to <label>-<short-uuid>. Creation-time mounts here MUST
+# derive the SAME name, or the Nextcloud registration and the dashboard's
+# driveContentsHref deep-links dangle after the first reboot. The container
+# name comes from the same env file the automount units load
+# (/etc/droplet/automount.env, via droplet-storage-pool-apply.service's
+# EnvironmentFile=); the default matches the shipping compose project.
+NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-droplet-nextcloud-1}"
+TRUSTED_LIST="$(dirname "$AUTOMOUNT_STATE")/trusted.list"
+
+# automount_mount_name <label> <uuid> — EXACTLY droplet-automount.sh's
+# derivation (sanitize the label, fall back to "drive", append the first 8
+# UUID chars). Keep the two in lockstep: the hermetic tests cross-pin the
+# "pool-<short-uuid>" literal on both sides
+# (test_storage_pool_script.py <-> test_automount_script.py).
+automount_mount_name() {
+  local label="$1" uuid="$2" name short
+  [ -n "$label" ] || label="drive"
+  short="$(printf '%s' "${uuid:-}" | head -c 8)"
+  name="$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-\+//;s/-\+$//')"
+  [ -z "$name" ] && name="drive"
+  [ -n "$short" ] && name="${name}-${short}"
+  printf '%s\n' "$name"
+}
+
+# trusted_list_add <uuid> — seed automount's trust list with the freshly-made
+# filesystem's UUID so the REBOOT path re-mounts it read-WRITE at the same
+# derived name (an unlisted plain filesystem remounts read-only-untrusted
+# under WARP-232's supply-chain gate — correct for hot-plugged sticks, wrong
+# for a filesystem the owner just created through the confirm-gated flow).
+# Same grep-guarded append shape as install.sh's fleet-upgrade seeding.
+# Best-effort: a failure here must never fail the pool op itself.
+trusted_list_add() {
+  local uuid="$1"
+  [ -n "$uuid" ] || return 0
+  mkdir -p "$(dirname "$TRUSTED_LIST")" 2>/dev/null || return 0
+  if ! grep -qxF "$uuid" "$TRUSTED_LIST" 2>/dev/null; then
+    printf '%s\n' "$uuid" >> "$TRUSTED_LIST" 2>/dev/null \
+      || err "could not seed trusted.list with $uuid (reboot may re-mount read-only)"
+  fi
+  return 0
+}
+
+# nextcloud_register <mount-tail> — register the freshly-mounted filesystem as
+# Nextcloud external storage, using the SAME occ invocation shape as
+# droplet-automount.sh's nextcloud_add (docker exec -u 33 … php occ …), with
+# no applicable scoping (household-wide: browsing acts as each user's OWN
+# Nextcloud account). Best-effort BY DESIGN: a warming/absent container must
+# never fail a pool op that already formatted + mounted — the boot reconcile
+# (droplet-automount.sh reconcile) converges registration later. Idempotent:
+# an existing datadir entry short-circuits (occ json escapes slashes, so
+# normalize before the fixed-string match).
+nextcloud_register() {
+  local name="$1"
+  if ! docker exec -u 33 "$NEXTCLOUD_CONTAINER" php occ app:enable files_external \
+      >/dev/null 2>&1; then
+    err "nextcloud registration deferred for $name (is $NEXTCLOUD_CONTAINER running? the boot reconcile retries)"
+    return 0
+  fi
+  if docker exec -u 33 "$NEXTCLOUD_CONTAINER" php occ files_external:list \
+      --output=json 2>/dev/null | tr -d '\\' \
+      | grep -qF "\"datadir\":\"/host/$name\""; then
+    return 0
+  fi
+  docker exec -u 33 "$NEXTCLOUD_CONTAINER" php occ files_external:create \
+    "/$name" local null::null -c "datadir=/host/$name" >/dev/null 2>&1 \
+    || err "nextcloud files_external:create failed for $name (the boot reconcile retries)"
+  return 0
+}
+
 # --- Host mount-namespace escape (WARP-868) ----------------------------------
 # The data drives are mounted in the HOST (init) mount namespace, but this
 # script runs under droplet-storage-pool-apply.service, whose hardening
@@ -514,9 +585,12 @@ build_cmd() {
       printf 'mdadm --stop %s && mdadm --zero-superblock (members)' "$MD"
       ;;
     pool_format)
-      # mkfs then mount under /mnt/droplet — mirrors drive_adopt's final step
-      # so the dashboard's "Format & mount" promise is kept (WARP-936).
-      printf 'mkfs.%s %s -> mount /mnt/droplet' "${FSTYPE:-ext4}" "$MD"
+      # mkfs (labelled "pool" — WARP-1338 automount-stable naming) then mount
+      # under /mnt/droplet + register with Nextcloud — mirrors drive_adopt's
+      # final step so the dashboard's "Format & mount" promise is kept
+      # (WARP-936).
+      printf 'mkfs.%s -L pool %s -> mount /mnt/droplet -> register nextcloud' \
+        "${FSTYPE:-ext4}" "$MD"
       ;;
     pool_set_level)
       printf 'mdadm --grow %s --level=%s' "$MD" "$LEVEL"
@@ -620,18 +694,30 @@ case "$OP" in
     # <<< pool_destroy member wipe
     ;;
   pool_format)
-    "mkfs.${FSTYPE:-ext4}" "$MD"
+    # WARP-1338: label the filesystem so the automount derivation has a
+    # stable human-meaningful stem ("pool") — the reboot remount then lands
+    # on the SAME pool-<short-uuid> tail as this creation-time mount, and the
+    # dashboard's machine-tail guard keeps the tile titled "Storage pool",
+    # never a GUID.
+    "mkfs.${FSTYPE:-ext4}" -L pool "$MD"
     # Complete the flow (WARP-936 UX review): a formatted-but-unmounted array
     # is indistinguishable from an unformatted one in the dashboard, turning
     # "Format & mount" into a destructive dead-end loop. Mount under the shared
     # /mnt/droplet namespace exactly like drive_adopt step 4 (host_mount so the
     # mount lands in the HOST namespace, not this unit's private one —
     # WARP-868). Reboot persistence comes from the udev automount rule, which
-    # matches md array nodes as of WARP-936.
+    # matches md array nodes as of WARP-936; the name it re-derives is
+    # IDENTICAL to this one (automount_mount_name — WARP-1338).
     pool_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
-    pool_mnt="/mnt/droplet/${pool_uuid:-$(basename "$MD")}"
+    pool_mnt="/mnt/droplet/$(automount_mount_name pool "$pool_uuid")"
     mkdir -p "$pool_mnt"
     host_mount "$MD" "$pool_mnt"
+    # WARP-1338: trust + registration. trusted.list keeps the reboot remount
+    # read-write; the Nextcloud registration makes the pool browsable from
+    # the dashboard's Files screen. Both best-effort — never fail a pool op
+    # that already formatted + mounted.
+    trusted_list_add "$pool_uuid"
+    nextcloud_register "$(basename "$pool_mnt")"
     ;;
   pool_set_level)
     mdadm --grow "$MD" --level="$LEVEL"
@@ -675,10 +761,17 @@ case "$OP" in
     #    WARP-868: use host_mount so the mount lands in the HOST namespace, not
     #    this unit's private slave-propagation namespace (which is destroyed on
     #    unit exit, leaving the drive unmounted until the next udev automount).
+    #    WARP-1338: the tail is automount's own <label>-<short-uuid>
+    #    derivation, so the reboot remount lands on the SAME name (a bare
+    #    <label> tail changed names on the first reboot, dangling the
+    #    Nextcloud registration + dashboard deep-links).
     adopt_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
-    adopt_mnt="/mnt/droplet/${LABEL:-${adopt_uuid:-$(basename "$MD")}}"
+    adopt_mnt="/mnt/droplet/$(automount_mount_name "$LABEL" "$adopt_uuid")"
     mkdir -p "$adopt_mnt"
     host_mount "$MD" "$adopt_mnt"
+    # WARP-1338: keep the reboot remount rw + make it browsable (best-effort).
+    trusted_list_add "$adopt_uuid"
+    nextcloud_register "$(basename "$adopt_mnt")"
     ;;
   drive_reclaim)
     # WARP-1048: reclaim a pool-member disk into standalone use. It is held by
@@ -710,11 +803,15 @@ case "$OP" in
       "mkfs.${FSTYPE:-ext4}" "$MD"
     fi
     # 4) Mount under the shared /mnt/droplet namespace (host_mount, WARP-868) —
-    #    same as adopt; reboot persistence via the udev whole-disk automount.
+    #    same as adopt; reboot persistence via the udev whole-disk automount,
+    #    at the SAME automount-derived tail (WARP-1338, see drive_adopt).
     reclaim_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
-    reclaim_mnt="/mnt/droplet/${LABEL:-${reclaim_uuid:-$(basename "$MD")}}"
+    reclaim_mnt="/mnt/droplet/$(automount_mount_name "$LABEL" "$reclaim_uuid")"
     mkdir -p "$reclaim_mnt"
     host_mount "$MD" "$reclaim_mnt"
+    # WARP-1338: keep the reboot remount rw + make it browsable (best-effort).
+    trusted_list_add "$reclaim_uuid"
+    nextcloud_register "$(basename "$reclaim_mnt")"
     ;;
 esac
 

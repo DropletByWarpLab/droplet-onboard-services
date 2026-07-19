@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 
+// next/link → plain anchor (the global setup stub stringifies children, which
+// would swallow the WARP-1339 pool card's browse-link title). Same per-file
+// override DrivesPanel.test.tsx uses.
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 const { useDrivesMock, usePoolsMock, toastMock, useAuthMock } = vi.hoisted(() => ({
   useDrivesMock: vi.fn(),
   usePoolsMock: vi.fn(),
@@ -43,6 +54,7 @@ vi.mock("@/lib/api", () => ({
   updatePoolLabel: updatePoolLabelMock,
 }));
 
+import type { DiskInfo, PoolInfo } from "@/lib/types";
 import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
 
 const drive = (over: Record<string, unknown> = {}) => ({
@@ -93,6 +105,27 @@ describe("DrivesPanel — real pools replace the fake pooled sum (BUG-3)", () =>
   });
 
   it("renders a real pool with its level + usable capacity when one exists", () => {
+    // WARP-1339: "usable capacity" is the mounted md filesystem's REAL
+    // fs-level numbers (ADR-019 — never a fabricated raw-member sum), joined
+    // from the drives list onto the pool card.
+    useDrivesMock.mockReturnValue({
+      drives: [
+        drive({
+          device: "/dev/md0",
+          pool: "md0",
+          mount: "/mnt/droplet/pool",
+          label: "",
+          uuid: "u-md0",
+          size_bytes: 4 * 1024 ** 4,
+          used_bytes: 1 * 1024 ** 4,
+          free_bytes: 3 * 1024 ** 4,
+        }),
+      ],
+      disks: [],
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
     usePoolsMock.mockReturnValue({
       pools: [
         {
@@ -111,6 +144,10 @@ describe("DrivesPanel — real pools replace the fake pooled sum (BUG-3)", () =>
     expect(screen.getByText("Vault")).toBeInTheDocument();
     // RAID level is surfaced (mirrors-mode capacity ≠ raw sum).
     expect(screen.getByText(/raid 1/i)).toBeInTheDocument();
+    // The capacity meter renders the md filesystem's actual bytes.
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(poolsList).toHaveTextContent(/1\.0 TB of 4\.0 TB/);
+    expect(poolsList).toHaveTextContent(/3\.0 TB free/);
   });
 
   it("shows a degraded-array banner when a pool is degraded", () => {
@@ -195,6 +232,143 @@ describe("DrivesPanel — real pools replace the fake pooled sum (BUG-3)", () =>
     // siblings without spaces, so the WARP-936 format-footer copy right
     // after the chip would defeat a word-boundary regex on the joined string.
     expect(within(poolsList).getByText(/^1 drive$/i)).toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-1339 — ONE pooled entry instead of pool card + anonymous GUID
+// drive tile. The mounted md filesystem is annotated pool:"<mdN>" by the
+// orchestrator (bare array name — the /storage/pools join key); the panel
+// merges it INTO the pool card (capacity + browse link) and excludes it
+// from the drives grid. The merge shape was previously tested NOWHERE.
+// =====================================================================
+describe("DrivesPanel — one pooled entry with real capacity (WARP-1339)", () => {
+  const TIB = 1024 ** 4;
+  const GUID = "a0f10a84-7116-46a7-a3e3-5e00ea1c7d08";
+  const activePool: PoolInfo = {
+    device: "md127",
+    level: "raid1",
+    status: "active",
+    members: ["sdb", "sdc"],
+    displayName: null,
+    notes: null,
+  };
+  const mdDrive = () =>
+    drive({
+      device: "/dev/md127",
+      pool: "md127",
+      mount: `/mnt/droplet/${GUID}`,
+      label: "",
+      uuid: "U-POOL-FS",
+      size_bytes: 4 * TIB,
+      used_bytes: 1 * TIB,
+      free_bytes: 3 * TIB,
+    });
+
+  function setupMerged({
+    drives = [mdDrive()],
+    pools = [activePool],
+    disks = [],
+  }: {
+    drives?: unknown[];
+    pools?: PoolInfo[];
+    disks?: DiskInfo[];
+  } = {}) {
+    useDrivesMock.mockReturnValue({
+      drives,
+      disks,
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    usePoolsMock.mockReturnValue({
+      pools,
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    return render(<DrivesPanel />);
+  }
+
+  it("renders ONE pooled entry with the md filesystem's capacity — no separate DriveCard", () => {
+    setupMerged();
+    // The pool card carries the real fs-level meter (ADR-019 usable capacity).
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(poolsList).toHaveTextContent(/1\.0 TB of 4\.0 TB/);
+    expect(poolsList).toHaveTextContent(/3\.0 TB free/);
+    // The md drive is NOT doubled into the drives grid: with no standalone
+    // drive left the grid shows its calm empty state instead of a GUID card.
+    expect(screen.queryByRole("list", { name: /mounted drives/i })).toBeNull();
+    expect(screen.getByText(/plug in a drive/i)).toBeInTheDocument();
+    // The GUID mount tail is never rendered anywhere (ADR-002).
+    expect(screen.queryByText(new RegExp(GUID.slice(0, 8), "i"))).not.toBeInTheDocument();
+  });
+
+  it("gives the pool card the matched drive's browse link", () => {
+    setupMerged();
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    const link = within(poolsList).getByRole("link", { name: /open storage pool/i });
+    // driveContentsHref of the matched md drive — the automounter registers
+    // the pool's fs in Nextcloud under its mount tail like any drive.
+    expect(link).toHaveAttribute(
+      "href",
+      expect.stringContaining(`/files?path=%2F${GUID.slice(0, 8)}`),
+    );
+  });
+
+  it("keeps mapping standalone drives into the grid — only the pool-backed one is excluded", () => {
+    setupMerged({ drives: [mdDrive(), drive()] });
+    const grid = screen.getByRole("list", { name: /mounted drives/i });
+    const cards = within(grid).getAllByRole("listitem");
+    expect(cards).toHaveLength(1);
+    // The standalone /dev/sda drive card survives (titled from its FS label).
+    expect(within(grid).getByText("DISK")).toBeInTheDocument();
+  });
+
+  it("still merges via the md-device regex when the orchestrator predates the pool field", () => {
+    const legacy = { ...mdDrive(), pool: undefined };
+    setupMerged({ drives: [legacy] });
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(poolsList).toHaveTextContent(/3\.0 TB free/);
+    expect(screen.queryByRole("list", { name: /mounted drives/i })).toBeNull();
+  });
+
+  it("keeps the md drive in the grid when its pool is missing from the pools payload", () => {
+    // Degraded /storage/pools fetch (or bridge gap): hiding the drive with no
+    // pool card to merge into would lose the volume everywhere. Honest
+    // fallback: render it as a drive (GUID-guarded title says Storage pool).
+    setupMerged({ pools: [] });
+    const grid = screen.getByRole("list", { name: /mounted drives/i });
+    expect(within(grid).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  // AC4 — DEGRADED-EDGE REGRESSION GUARD: only drives whose DEVICE is the md
+  // node are hidden from the grid. A dropped member disk (state pool_member,
+  // out of the degraded array) must STAY visible with its Reclaim action, and
+  // the degraded banner must still fire.
+  it("keeps a dropped member visible with Reclaim + fires the degraded banner (merge shape)", () => {
+    setupMerged({
+      drives: [mdDrive()],
+      pools: [{ ...activePool, status: "degraded" as const }],
+      disks: [
+        {
+          name: "sda",
+          size_bytes: 2 * TIB,
+          state: "pool_member",
+          fstype: "linux_raid_member",
+          bus: "sata",
+          model: "WDC WD20EARZ",
+          md: "md127",
+        },
+      ],
+    });
+    // The degraded banner still fires.
+    expect(screen.getByRole("alert")).toHaveTextContent(/degraded/i);
+    // The dropped member stays in Available drives with its Reclaim action.
+    expect(screen.getByRole("button", { name: /^reclaim$/i })).toBeInTheDocument();
+    // And the pool card still shows the (still-mounted) array's capacity.
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(poolsList).toHaveTextContent(/3\.0 TB free/);
   });
 });
 

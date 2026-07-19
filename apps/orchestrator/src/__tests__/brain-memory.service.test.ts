@@ -139,9 +139,18 @@ describe("brain-memory.service", () => {
 
     const items = [...aliceItems, ...bobItems];
     const chunks = [...aliceChunks, ...bobChunks];
+    // WARP-242: one wrapped DEK per item — alice's must be crypto-shredded
+    // with her data, bob's must survive.
+    const dekRows = [
+      { keyId: "brain:i1", version: 1 }, // alice's i1 (bob's i1 shares the id in this fixture; fine — the shred keys off alice's item ids)
+      { keyId: "brain:i2", version: 1 },
+      { keyId: "brain:untouched", version: 1 },
+    ];
 
     const fakePrisma = {
       brainMemoryItem: {
+        findMany: async ({ where }: { where: { userId: string } }) =>
+          items.filter((i) => i.userId === where.userId).map((i) => ({ id: i.id })),
         deleteMany: async ({ where }: { where: { userId: string } }) => {
           const before = items.length;
           for (let i = items.length - 1; i >= 0; i--) {
@@ -167,6 +176,17 @@ describe("brain-memory.service", () => {
           return { count: before - chunks.length };
         },
       },
+      documentEncryptionKey: {
+        deleteMany: async ({
+          where,
+        }: {
+          where: { keyId: { in: string[] } };
+        }) => {
+          for (let i = dekRows.length - 1; i >= 0; i--) {
+            if (where.keyId.in.includes(dekRows[i].keyId)) dekRows.splice(i, 1);
+          }
+        },
+      },
     };
 
     const result = await svc.purgeUserData(
@@ -178,6 +198,8 @@ describe("brain-memory.service", () => {
     expect(result.chunks).toBe(3);
     expect(items).toEqual([{ id: "i1", userId: "bob" }]);
     expect(chunks).toEqual([{ id: 4n, userId: "bob", source: "brain" }]);
+    // WARP-242: alice's DEKs are gone (crypto-shred), unrelated keys remain.
+    expect(dekRows).toEqual([{ keyId: "brain:untouched", version: 1 }]);
 
     // On-disk: alice tree gone, bob untouched.
     const aliceGone = await stat(join(tmpRoot, "alice")).catch(() => null);
@@ -189,9 +211,13 @@ describe("brain-memory.service", () => {
   it("purgeUserData is idempotent — safe to call on a user with no data", async () => {
     const fakePrisma = {
       brainMemoryItem: {
+        findMany: async () => [],
         deleteMany: async () => ({ count: 0 }),
       },
       fileContentChunk: {
+        deleteMany: async () => ({ count: 0 }),
+      },
+      documentEncryptionKey: {
         deleteMany: async () => ({ count: 0 }),
       },
     };

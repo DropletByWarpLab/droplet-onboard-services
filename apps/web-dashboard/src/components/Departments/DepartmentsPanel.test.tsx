@@ -208,6 +208,30 @@ describe("DepartmentsPanel — list + detail", () => {
   });
 });
 
+describe("DepartmentsPanel — select focus visibility (WCAG 2.4.7)", () => {
+  // fieldStyle sets `border: 1px solid var(--border)` INLINE, which outranks any
+  // stylesheet `focus:border-*` rule — so the visible focus treatment MUST be a
+  // ring (box-shadow), which an inline border cannot defeat. Pin that on all
+  // three converted selects. (WARP-1347)
+  it("all three converted selects carry a focus ring, not the inline-border-defeated focus:border", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    const rightsSelect = await screen.findByLabelText(/rights for priya nair/i);
+    const personSelect = await screen.findByLabelText(/^person to add$/i);
+    const newMemberRightSelect = screen.getByLabelText(/^rights for new member$/i);
+
+    for (const el of [rightsSelect, personSelect, newMemberRightSelect]) {
+      expect(el.className).toContain("focus:ring-2");
+      expect(el.className).toContain("focus:ring-[var(--brand)]");
+      expect(el.className).not.toContain("focus:border-[var(--brand)]");
+    }
+  });
+});
+
 describe("DepartmentsPanel — create department", () => {
   it("shows a live mono slug preview and submits the create payload", async () => {
     listDepartmentsMock.mockResolvedValue({ departments: [] });

@@ -34,11 +34,14 @@ vi.mock("@/lib/api", async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Endpoint configured, no peer → land on the one-tap toggle.
+  // Endpoint configured, home endpoint discovered, no peer → land on the
+  // one-tap toggle. WARP-1391: the user-facing mint is HOME mode, so the toggle
+  // only appears once the box has discovered its home-facing LAN IP.
   fetchVpnStatus.mockResolvedValue({
     configured: true,
     endpointConfigured: true,
     endpointHost: "yourstudio.duckdns.org",
+    homeEndpointHost: "192.168.1.87",
     peerCount: 0,
   });
   // WARP-1039 — no saved name by default: the blocked precheck keeps its
@@ -87,7 +90,10 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
     fireEvent.click(toggle());
 
     await waitFor(() =>
-      expect(createVpnPeer).toHaveBeenCalledWith("This device"),
+      // WARP-1391: the one-tap mint sends HOME mode explicitly (Endpoint = box
+      // LAN IP), not the away-mode default that bakes a dead public-NXDOMAIN
+      // Endpoint.
+      expect(createVpnPeer).toHaveBeenCalledWith("This device", "home"),
     );
     // Lands on the created (QR) view.
     expect(await screen.findByTestId("vpn-qr-wrapper")).toBeInTheDocument();
@@ -142,6 +148,7 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       configured: true,
       endpointConfigured: true,
       endpointHost: "vpn.example.com",
+      homeEndpointHost: "192.168.1.87",
       peerCount: 0,
       offLanReachable: true,
     });
@@ -172,6 +179,7 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       configured: true,
       endpointConfigured: true,
       endpointHost: "vpn.example.com",
+      homeEndpointHost: "192.168.1.87",
       peerCount: 0,
       offLanReachable: true,
     });
