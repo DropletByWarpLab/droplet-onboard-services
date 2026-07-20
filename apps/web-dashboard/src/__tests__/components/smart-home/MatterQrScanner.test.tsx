@@ -37,14 +37,19 @@ describe("MatterQrScanner — idle state", () => {
     vi.clearAllMocks();
   });
 
-  it("shows the start-camera CTA before scanning", () => {
+  it("leads with the pairing code and offers the camera as the secondary path", () => {
     render(<MatterQrScanner onResult={vi.fn()} />);
+    // WARP-1411: the pairing code is the primary path — it is the only one
+    // that works on a machine with no camera, so it must render up front
+    // rather than below an aspect-square viewport.
+    expect(screen.getByLabelText(/enter the pairing code/i)).toBeInTheDocument();
+    // The camera is opt-in behind a CTA; no viewport is reserved while idle.
     expect(
-      screen.getByRole("button", { name: /start camera/i }),
+      screen.getByRole("button", { name: /scan the qr code instead/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/tap to scan a matter device qr code/i),
-    ).toBeInTheDocument();
+      screen.queryByLabelText(/qr code camera viewport/i),
+    ).not.toBeInTheDocument();
   });
 
   it("always renders the manual-entry input below the viewport", () => {
@@ -122,7 +127,9 @@ describe("MatterQrScanner — disabled state (parent commissioning in flight)", 
     render(
       <MatterQrScanner onResult={vi.fn()} disabled />,
     );
-    expect(screen.getByRole("button", { name: /start camera/i })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /scan the qr code instead/i }),
+    ).toBeDisabled();
     // Commission button stays disabled regardless of input value
     const input = screen.getByLabelText(/enter the pairing code/i) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "34970112332" } });
