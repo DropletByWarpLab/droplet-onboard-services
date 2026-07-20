@@ -20,7 +20,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   actorFromRequest,
@@ -173,7 +173,12 @@ export function createScenesRouter(
 
   router.get(
     "/scenes",
-    requireRole("owner", "admin", "family", "guest"),
+    // WARP-1447 (WARP-1439 class): the run_scene / create_scene LLM tools
+    // resolve scene names via this list presenting the `_service:mcp`
+    // principal (role "service"), which plain requireRole 403s — so
+    // run_scene's name resolution was silently dead on the MCP path.
+    // Human roles unchanged (any role reads).
+    requireRoleOrMcpService("owner", "admin", "family", "guest"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
         const scenes = (await prisma.scene.findMany({
@@ -239,7 +244,11 @@ export function createScenesRouter(
     // surfaces — family reads but does NOT author. The earlier guard
     // included family by accident and contradicted the documented
     // contract; tightening to match.
-    requireRole("owner", "admin"),
+    // WARP-1447: also admit the MCP service principal so the create_scene
+    // LLM tool can reach this route (the tool enforces its own two-step
+    // confirmation, and routes/llm.ts narrows write tools to owner/admin
+    // chat users before any dispatch). Human roles unchanged.
+    requireRoleOrMcpService("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = createSceneSchema.safeParse(req.body);
@@ -366,7 +375,14 @@ export function createScenesRouter(
 
   router.post(
     "/scenes/:id/run",
-    requireRole("owner", "admin", "family"),
+    // WARP-1447 (WARP-1439 class): run_scene dispatches through this route
+    // — both the unconfirmed call (which mints the WARP-640 202 token) and
+    // the confirm hop (token in body) — presenting `_service:mcp`, which
+    // plain requireRole 403s. Admitting the MCP principal only lets the
+    // tool path REACH the confirmation gate below; nothing executes
+    // without ?confirm=true or a valid single-use token. Human roles
+    // unchanged.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const scene = (await prisma.scene.findUnique({

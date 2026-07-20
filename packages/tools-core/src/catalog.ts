@@ -112,6 +112,12 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "commission_device",
     "get_command_history",
     "run_scene",
+    // WARP-1447: unpair a Matter device (two-step confirm)
+    "remove_device",
+    // WARP-1447: author a scene from chat (two-step confirm)
+    "create_scene",
+    // WARP-1447: room assignment (auto-creates the room when missing)
+    "assign_device_room",
   ],
   cameras: [
     "list_cameras",
@@ -252,6 +258,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   commission_device: "Set up a new smart home device",
   get_command_history: "See recent actions taken on your smart devices",
   run_scene: "Run a saved routine like 'movie night' or 'goodnight'",
+  remove_device: "Remove a smart home device you no longer use (asks first)",
+  create_scene: "Save a new routine like 'movie night' from a list of device actions",
+  assign_device_room: "Put a smart device in a room, like 'move the lamp to the den'",
   // Cameras
   list_cameras: "See all your security cameras and their status",
   list_discovered_cameras: "See new cameras found but not yet added",

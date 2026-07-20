@@ -37,6 +37,7 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
+import type { PrismaClient } from "@prisma/client";
 import {
   initMatterService,
   shutdownMatterService,
@@ -49,6 +50,7 @@ import {
   discoverDevices,
   subscribeStateChanges,
   subscribeConnectionChanges,
+  setPrismaForMatter,
 } from "../services/matter.service.js";
 
 // WARP-1010: the emitters now take a required actor; these contract tests
@@ -101,7 +103,14 @@ afterEach(async () => {
   await shutdownMatterService();
   vi.unstubAllGlobals();
   recordActivityMock.mockClear();
+  // WARP-1447: never leak the alias-cleanup prisma handle across tests.
+  setPrismaForMatter(null);
 });
+
+/** WARP-1447 — minimal prisma stub for the DeviceAlias cleanup path. */
+function fakeAliasPrisma(deleteMany: ReturnType<typeof vi.fn>): PrismaClient {
+  return { deviceAlias: { deleteMany } } as unknown as PrismaClient;
+}
 
 describe("auth header (X-Droplet-Auth)", () => {
   it("presents the shared token on every data call", async () => {
@@ -321,6 +330,80 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
     });
     await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(false);
     expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-1447 — DeviceAlias cleanup on decommission", () => {
+  it("deletes the alias row keyed by the dead nodeId on success", async () => {
+    installFetchMock({
+      "/devices/7": () => jsonResponse({ status: "decommissioned", nodeId: "7" }),
+    });
+    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
+    setPrismaForMatter(fakeAliasPrisma(deleteMany));
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(true);
+    expect(deleteMany).toHaveBeenCalledWith({ where: { nodeId: "7" } });
+  });
+
+  it("tolerates a device that never had an alias (deleteMany count 0)", async () => {
+    installFetchMock({
+      "/devices/7": () => jsonResponse({ status: "decommissioned", nodeId: "7" }),
+    });
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    setPrismaForMatter(fakeAliasPrisma(deleteMany));
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(true);
+  });
+
+  it("does NOT touch the alias when the sidecar rejects the decommission", async () => {
+    installFetchMock({
+      "/devices/7": () =>
+        jsonResponse(
+          {
+            error: "session busy",
+            errorClass: "Error",
+            errorMessage: "session busy",
+          },
+          500,
+        ),
+    });
+    const deleteMany = vi.fn();
+    setPrismaForMatter(fakeAliasPrisma(deleteMany));
+    await expect(decommissionDevice("7", AI_ACTOR)).rejects.toThrow(/session busy/);
+    expect(deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("does NOT touch the alias on the sidecar's not-commissioned 404", async () => {
+    installFetchMock({
+      "/devices/7": () =>
+        jsonResponse(
+          {
+            error: "Device not found",
+            errorClass: "NotFoundError",
+            errorMessage: "Device not found",
+          },
+          404,
+        ),
+    });
+    const deleteMany = vi.fn();
+    setPrismaForMatter(fakeAliasPrisma(deleteMany));
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(false);
+    expect(deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("a failing alias delete never changes the decommission outcome", async () => {
+    installFetchMock({
+      "/devices/7": () => jsonResponse({ status: "decommissioned", nodeId: "7" }),
+    });
+    const deleteMany = vi.fn().mockRejectedValue(new Error("prisma down"));
+    setPrismaForMatter(fakeAliasPrisma(deleteMany));
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(true);
+  });
+
+  it("skips cleanup entirely when prisma was never wired (boot order safety)", async () => {
+    installFetchMock({
+      "/devices/7": () => jsonResponse({ status: "decommissioned", nodeId: "7" }),
+    });
+    // afterEach resets to null; nothing wired here on purpose.
+    await expect(decommissionDevice("7", AI_ACTOR)).resolves.toBe(true);
   });
 });
 

@@ -35,6 +35,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import type {
@@ -69,6 +70,15 @@ let sidecarReachable = false;
 let sidecarInitialized = false;
 let bridgeAbort: AbortController | null = null;
 const stateEvents = new EventEmitter();
+// WARP-1447: Prisma handle for DeviceAlias cleanup on decommission.
+// Injected at boot (index.ts) following the setPrismaForReindex pattern —
+// this module predates DB access and its call sites don't carry prisma.
+// Null (e.g. in tests that never wire it) → cleanup is skipped.
+let aliasPrisma: PrismaClient | null = null;
+
+export function setPrismaForMatter(client: PrismaClient | null): void {
+  aliasPrisma = client;
+}
 
 function baseUrl(): string {
   // Strip a trailing slash so path joins stay canonical.
@@ -311,6 +321,24 @@ export async function decommissionDevice(
   if (res.status === 404) return false;
   if (!res.ok) throw await toSidecarError(res);
   logger.info("Device decommissioned: %s", nodeIdStr);
+
+  // WARP-1447: drop the device's DeviceAlias row. The alias is keyed by
+  // nodeId, and a decommissioned node's id is dead — re-commissioning
+  // the same physical device mints a NEW nodeId, so keeping the row only
+  // orphans it. deleteMany tolerates absence (no alias was ever set),
+  // and — like the audit row below — a cleanup failure must never
+  // change the decommission outcome: the fabric write already happened.
+  if (aliasPrisma) {
+    try {
+      await aliasPrisma.deviceAlias.deleteMany({ where: { nodeId: nodeIdStr } });
+    } catch (err) {
+      logger.warn(
+        "DeviceAlias cleanup failed for decommissioned node %s (non-fatal): %s",
+        nodeIdStr,
+        err,
+      );
+    }
+  }
 
   // WARP-456: audit row for the destructive write.
   await auditQuietly({

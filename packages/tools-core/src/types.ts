@@ -19,6 +19,8 @@ export interface MatterController {
   sendCommand(nodeId: string, command: string, data?: unknown): Promise<unknown>;
   discover(): Promise<unknown>;
   commission(pairingCode: string): Promise<unknown>;
+  /** WARP-1447 — unpair a device from the fabric (remove_device tool). */
+  decommission(nodeId: string): Promise<unknown>;
   getAuditLog(opts: { entityId?: string; limit?: number }): Promise<unknown>;
 }
 

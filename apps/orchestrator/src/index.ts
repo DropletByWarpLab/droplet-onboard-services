@@ -17,6 +17,7 @@ import { attachClientDispatchBridge } from "./services/client-dispatch.service.j
 import {
   initMatterService,
   shutdownMatterService,
+  setPrismaForMatter,
 } from "./services/matter.service.js";
 import {
   initDeviceRegistration,
@@ -302,6 +303,10 @@ async function main() {
   attachClientDispatchBridge(prisma);
 
   // Initialize Matter controller (non-fatal if unavailable)
+  // WARP-1447: wire prisma for DeviceAlias cleanup on decommission BEFORE
+  // the init attempt — the SSE bridge self-heals a failed init, so
+  // decommissions can succeed later even when this try throws now.
+  setPrismaForMatter(prisma);
   try {
     await initMatterService();
     logger.info("Matter controller initialized");

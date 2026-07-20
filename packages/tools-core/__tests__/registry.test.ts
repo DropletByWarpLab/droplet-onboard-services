@@ -84,6 +84,11 @@ const EXPECTED_TOOL_NAMES = [
   "network_summary",
   // WARP-474 — smart-home scenes (Phase G2)
   "run_scene",
+  // WARP-1447 — smart-home depth: unpair (two-step confirm), scene
+  // authoring (two-step confirm), room assignment (write, no confirm)
+  "remove_device",
+  "create_scene",
+  "assign_device_room",
   // WARP-509 — Plane PM write tools
   "pm_add_work_item_comment",
   "pm_create_work_item",
@@ -249,6 +254,15 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("set_wifi_password")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("set_device_schedule")?.requiresWrite).toBe(true);
     expect(TOOLS.get("set_device_schedule")?.requiresConfirmation).toBe(true);
+    // WARP-1447 — smart-home depth: destructive unpair + scene authoring are
+    // Tier-2; room assignment is a reversible write (no confirm, like
+    // create_reminder).
+    expect(TOOLS.get("remove_device")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("remove_device")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("create_scene")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("create_scene")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("assign_device_room")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("assign_device_room")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
