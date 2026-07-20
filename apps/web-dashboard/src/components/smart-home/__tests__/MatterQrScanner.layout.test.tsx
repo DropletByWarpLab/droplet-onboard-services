@@ -57,4 +57,37 @@ describe("MatterQrScanner layout (WARP-1411)", () => {
     // message uses.
     expect(screen.getByRole("status")).toHaveTextContent(/11 or 21 digits/i);
   });
+
+  it("relabels the camera CTA after an insecure-origin refusal", () => {
+    // jsdom defaults to http://localhost, which isCameraOriginSecure()
+    // treats as secure. Point at a plain http:// host so the HTTPS
+    // pre-flight in startCamera() actually refuses.
+    const realLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...realLocation, protocol: "http:", hostname: "droplet.local" },
+    });
+
+    try {
+      render(<MatterQrScanner onResult={onResult} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: /scan the qr code instead/i }),
+      );
+
+      // The pre-flight ran and refused, so the customer has already pressed
+      // this once. Offering "Scan the QR code instead" again reads as though
+      // it might work this time; it can't.
+      expect(
+        screen.getByRole("button", { name: /try the camera again/i }),
+      ).toBeInTheDocument();
+      // And the reason is actually on screen — the old status allow-list
+      // omitted "insecure", so this message was set but never rendered.
+      expect(screen.getByRole("status")).toHaveTextContent(/needs HTTPS/i);
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: realLocation,
+      });
+    }
+  });
 });

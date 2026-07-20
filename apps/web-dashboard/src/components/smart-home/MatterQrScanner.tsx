@@ -333,7 +333,15 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
             focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
           style={{ border: "1px solid var(--card-bd)" }}
         >
-          {status === "denied" || status === "no-camera" || status === "error" ? (
+          {/* "insecure" belongs with the other already-tried states: the HTTPS
+              pre-flight in startCamera() has run and refused, so the customer
+              has pressed this button and been turned away. Leaving it on the
+              first-run label invites them to press it again expecting the
+              camera to open. */}
+          {status === "denied" ||
+          status === "no-camera" ||
+          status === "error" ||
+          status === "insecure" ? (
             <>
               <CameraOff size={15} aria-hidden="true" /> Try the camera again
             </>
