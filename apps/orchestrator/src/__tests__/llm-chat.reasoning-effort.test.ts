@@ -81,6 +81,13 @@ vi.mock("../services/chat-persistence.service.js", () => ({
   })),
 }));
 
+// WARP-1442 — the streaming path fires a cold-model probe before the agent
+// loop. Stub it to null so the stream:true route tests are deterministic and
+// never reach for a real Ollama (OLLAMA_URL defaults to host.docker.internal).
+vi.mock("../services/model-readiness.service.js", () => ({
+  probeColdModel: vi.fn().mockResolvedValue(null),
+}));
+
 const mockRunAgent = vi.fn();
 vi.mock("../services/llm-agent.service.js", () => ({
   runAgent: (...args: unknown[]) => mockRunAgent(...args),
@@ -196,5 +203,24 @@ describe("POST /api/llm/chat — reasoning_effort resolution (WARP-1442)", () =>
     const res = await postChat(OWNER, { reasoning_effort: "ultra" });
     expect(res.status).toBe(400);
     expect(mockRunAgent).not.toHaveBeenCalled();
+  });
+
+  // WARP-1442 — voice's PRODUCTION path is streaming. The route wires
+  // reasoning_effort into BOTH runAgent sites; every assertion above only
+  // exercised stream:false, so the streaming site was covered by inspection.
+  // These pin it directly on the wire the voice principal actually uses.
+  it("defaults the voice principal to 'low' on the streaming path (stream:true)", async () => {
+    const res = await postChat(VOICE, { stream: true });
+    expect(res.status).toBe(200);
+    // Prove we took the streaming branch, not a stream:false fall-through.
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    expect(agentRequest().reasoning_effort).toBe("low");
+  });
+
+  it("does NOT default a non-voice caller on the streaming path — byte-for-byte unchanged (stream:true)", async () => {
+    const res = await postChat(OWNER, { stream: true });
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    expect(agentRequest().reasoning_effort).toBeUndefined();
   });
 });
