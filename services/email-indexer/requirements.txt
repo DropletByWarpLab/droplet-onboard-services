@@ -18,7 +18,7 @@ paho-mqtt==2.1.0
 # SMTP send for the outbound poller (services/email-indexer/outbound.py).
 # Async to match the rest of the service; supports both implicit-TLS
 # (port 465) and STARTTLS (port 587).
-aiosmtplib==3.0.2
+aiosmtplib==5.1.2
 # asyncpg for read-only WHO-AM-I queries against EmailAccount when the
 # orchestrator surface isn't enough (e.g. listing all accounts at boot
 # without paying an extra HTTP round-trip).
