@@ -49,6 +49,7 @@ from voice.pipeline import (
     classify_tool_choice,
     transcript_is_actionable,
 )
+from voice.activity import ActivityReporter
 from voice.llm import LLMClient, LLMUnavailable, MockLLM
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
@@ -2090,6 +2091,276 @@ class TestClosedLoop:
         pipe.start()
         assert pipe.status().llm_loaded is False
         pipe.stop()
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-626 — streaming, sentence-chunked, per-sentence speak
+# ────────────────────────────────────────────────────────────────────
+
+
+class _StreamingLLM(LLMClient):
+    """Client whose reply_stream yields SCRIPTED deltas — exercises the
+    multi-delta pipeline path so we can prove the chunker spans delta
+    boundaries end to end (the future-proofing for WARP-1442 token
+    streaming)."""
+
+    def __init__(self, deltas, available=True):
+        self._deltas = list(deltas)
+        self._available = available
+        self.requests: list[str] = []
+        self.stream_tool_choices: list = []
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
+        # Present for the abstract contract; the streaming path uses
+        # reply_stream, so this is only the blocking fallback shape.
+        return "".join(self._deltas)
+
+    def reply_stream(self, user_text: str, *, tool_choice=None):
+        self.requests.append(user_text)
+        self.stream_tool_choices.append(tool_choice)
+        for delta in self._deltas:
+            yield delta
+
+
+class _ProbingTTS(TextToSpeech):
+    """TTS that, DURING each synthesize call, records the pipeline state and
+    the result of a re-entrant speak() attempt. Proves the utterance holds
+    ONE speak-lock and stays in 'speaking' across every sentence (the lock
+    isn't released/re-acquired per sentence). Optionally raises on the Nth
+    call to model a mid-utterance synth failure."""
+
+    def __init__(self, raise_on_call: Optional[int] = None):
+        self.pipe: Optional[WakePipeline] = None
+        self._raise_on_call = raise_on_call
+        self.texts_received: list[str] = []
+        self.states_during: list[str] = []
+        self.reentrant_results: list[dict] = []
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def synthesize(self, text: str, voice: Optional[str] = None) -> SynthesizedAudio:
+        self.texts_received.append(text)
+        if self.pipe is not None:
+            self.states_during.append(self.pipe.status().state)
+            # A concurrent speak() must be rejected while the utterance holds
+            # the lock — non-reentrant threading.Lock, same thread here.
+            self.reentrant_results.append(self.pipe.speak("intruder"))
+        if self._raise_on_call is not None and len(self.texts_received) == self._raise_on_call:
+            raise TTSUnavailable("synth failed on chunk (test)")
+        return SynthesizedAudio(
+            pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+        )
+
+
+class _RecordingReporter(ActivityReporter):
+    """Captures emitted activity event types in order."""
+
+    def __init__(self):
+        self.events: list[str] = []
+
+    def report(self, type_, *, at, score=None, threshold=None, model=None) -> None:
+        self.events.append(type_)
+
+
+class TestStreamingChunkedSpeak:
+    """The WARP-626 win: a multi-sentence reply is chunked and each sentence
+    is synthesized + played on its own, under ONE utterance's lock / state /
+    cooldown. `_default_on_transcript` is invoked directly — the same entry
+    the pipeline thread uses after `_finish_transcription` (state is
+    'transcript_ready' at that point)."""
+
+    def _wire(self, monkeypatch, llm, tts, reporter=None, detector=None):
+        _patch_play(monkeypatch)
+        pipe = WakePipeline(
+            detector=detector or MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=tts,
+            llm=llm,
+            activity_reporter=reporter,
+        )
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._state = "transcript_ready"  # what _finish_transcription sets
+        return pipe
+
+    def test_multi_sentence_reply_synthesizes_each_sentence_in_order(self, monkeypatch):
+        reporter = _RecordingReporter()
+        llm = _RecordingLLM(
+            scripted_replies=["The camera is online. The network looks good."],
+        )
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts, reporter)
+        pipe._default_on_transcript("what's the status")
+        # One reply → two sentences → two ordered synth calls.
+        assert tts.texts_received == [
+            "The camera is online.",
+            "The network looks good.",
+        ]
+
+    def test_last_response_reflects_the_full_spoken_reply(self, monkeypatch):
+        llm = _RecordingLLM(
+            scripted_replies=["The camera is online. The network looks good."],
+        )
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts)
+        pipe._default_on_transcript("what's the status")
+        assert pipe.status().last_response == (
+            "The camera is online. The network looks good."
+        )
+
+    def test_multi_delta_stream_chunks_span_delta_boundaries(self, monkeypatch):
+        # The sentence "The camera is online." spans the first two deltas —
+        # the chunker must stitch it back before synth. This is the same
+        # code path that moves first-audio even earlier once WARP-1442 lands
+        # server-side token streaming.
+        llm = _StreamingLLM(deltas=["The camera ", "is online. All ", "good here now."])
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts)
+        pipe._default_on_transcript("status please")
+        assert tts.texts_received == [
+            "The camera is online.",
+            "All good here now.",
+        ]
+        assert llm.requests == ["status please"]  # streamed, not blocking-replied
+
+    def test_single_speak_lock_and_speaking_state_across_sentences(self, monkeypatch):
+        tts = _ProbingTTS()
+        llm = _RecordingLLM(
+            scripted_replies=["First sentence here. Second sentence here."],
+        )
+        pipe = self._wire(monkeypatch, llm, tts)
+        tts.pipe = pipe
+        pipe._default_on_transcript("go now please")
+        assert tts.texts_received == [
+            "First sentence here.",
+            "Second sentence here.",
+        ]
+        # State was 'speaking' during BOTH sentences (never restored between).
+        assert tts.states_during == ["speaking", "speaking"]
+        # A concurrent speak() during EACH sentence was rejected — one lock
+        # held for the whole utterance, not re-acquired per sentence.
+        assert [r.get("error") for r in tts.reentrant_results] == [
+            "already_speaking",
+            "already_speaking",
+        ]
+
+    def test_one_post_speak_cooldown_after_the_last_sentence(self, monkeypatch):
+        tts = _RecordingTTS()
+        llm = _RecordingLLM(
+            scripted_replies=["First one here now. Second one here now."],
+        )
+        pipe = self._wire(
+            monkeypatch, llm, tts,
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+        )
+        before = time.time()
+        pipe._default_on_transcript("go now please")
+        # Cooldown stamped once, at the true end of the utterance.
+        assert pipe._speak_ended_at is not None
+        assert pipe._speak_ended_at >= before
+        assert time.time() - pipe._speak_ended_at < pipe._post_speak_cooldown_s
+        # And wake detection honours it: a high-scoring frame inside the
+        # window does NOT fire a new turn mid-cooldown.
+        fires: list[WakeEvent] = []
+        pipe._on_wake = fires.append
+        pipe._run_wake_detect(_silence_frame())
+        assert fires == []
+
+    def test_wake_answered_emitted_exactly_once_for_multi_sentence(self, monkeypatch):
+        reporter = _RecordingReporter()
+        llm = _RecordingLLM(
+            scripted_replies=["The camera is online. The network looks good."],
+        )
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts, reporter)
+        pipe._default_on_transcript("what's the status")
+        # One outcome row for the whole utterance — not one per sentence.
+        assert reporter.events.count("wake_answered") == 1
+        assert reporter.events.count("wake_heard") == 0
+
+    def test_greeting_single_sentence_speaks_once_via_intent_gate(self, monkeypatch):
+        reporter = _RecordingReporter()
+        llm = _RecordingLLM(scripted_replies=["Good morning to you."])
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts, reporter)
+        pipe._default_on_transcript("good morning")
+        assert tts.texts_received == ["Good morning to you."]
+        assert reporter.events.count("wake_answered") == 1
+        # Intent gate still threads tool_choice="none" through the stream.
+        assert llm.tool_choices == ["none"]
+
+    def test_mid_utterance_tts_failure_arms_cooldown_and_surfaces_error(self, monkeypatch):
+        # Sentence 1 synthesizes + plays; sentence 2's synth blows up. The
+        # partial reply drove the speaker, so the anti-feedback cooldown must
+        # engage, and the fault must surface via /voice/status.
+        reporter = _RecordingReporter()
+        tts = _ProbingTTS(raise_on_call=2)
+        llm = _RecordingLLM(
+            scripted_replies=["First sentence here. Second sentence here."],
+        )
+        pipe = self._wire(
+            monkeypatch, llm, tts, reporter,
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+        )
+        tts.pipe = pipe
+        pipe._default_on_transcript("go now please")
+        # Both sentences were attempted (synth called twice), the second raised.
+        assert tts.texts_received == [
+            "First sentence here.",
+            "Second sentence here.",
+        ]
+        s = pipe.status()
+        assert s.state == "error"
+        assert "synth failed" in (s.error_message or "")
+        # Cooldown armed because sentence 1 drove the speaker.
+        assert pipe._speak_ended_at is not None
+        # A partial/failed reply is honestly "heard", not "answered".
+        assert reporter.events.count("wake_answered") == 0
+        assert reporter.events.count("wake_heard") == 1
+
+    def test_llm_stream_break_mid_utterance_arms_cooldown(self, monkeypatch):
+        # The SSE stream raises after sentence 1 has played. Same contract as
+        # a mid-utterance synth failure: cooldown armed, error surfaced,
+        # "heard" not "answered".
+        def _broken_stream():
+            yield "The camera is online. "
+            raise LLMUnavailable("stream dropped mid-reply (test)")
+
+        class _BrokenStreamLLM(LLMClient):
+            def __init__(self):
+                self.requests = []
+
+            @property
+            def available(self):
+                return True
+
+            def reply(self, user_text, *, tool_choice=None):
+                return ""
+
+            def reply_stream(self, user_text, *, tool_choice=None):
+                self.requests.append(user_text)
+                yield from _broken_stream()
+
+        reporter = _RecordingReporter()
+        llm = _BrokenStreamLLM()
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts, reporter)
+        pipe._default_on_transcript("status please")
+        # Sentence 1 spoke before the break.
+        assert tts.texts_received == ["The camera is online."]
+        s = pipe.status()
+        assert s.state == "error"
+        assert "stream dropped" in (s.error_message or "")
+        assert pipe._speak_ended_at is not None  # cooldown armed after partial audio
+        assert reporter.events.count("wake_heard") == 1
 
 
 # ────────────────────────────────────────────────────────────────────
