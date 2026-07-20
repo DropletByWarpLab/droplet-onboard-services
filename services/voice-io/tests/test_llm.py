@@ -884,3 +884,260 @@ class TestBuildLLMFromEnvTurnShaping:
         monkeypatch.setenv("VOICE_ALLOWED_TOOLS", "   ")
         llm = build_llm_from_env()
         assert llm._allowed_tools == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-626 — incremental SSE consume (reply_stream)
+# ────────────────────────────────────────────────────────────────────
+#
+# `reply_stream()` POSTs with stream:true and parses the orchestrator's
+# SSE (apps/orchestrator/src/types/sse-events.ts): one frame per event,
+# `event: <type>\ndata: <json-without-type>\n\n`. content_delta.text is
+# yielded; tool_call / tool_result / reasoning_step / model_loading are
+# ignored for audio; done stops; a done with stop_reason:"error" (the
+# WARP-854 empty-completion rewrite) raises LLMUnavailable. On any
+# transport failure or a non-streaming response it FALLS BACK to the
+# blocking reply(). Wave-C request shaping rides on the stream request too.
+
+
+def _sse(*frames: tuple[str, dict]) -> bytes:
+    """Encode SSE frames exactly like the orchestrator's encodeSSE():
+    `event: <type>\\ndata: <json payload without the type key>\\n\\n`."""
+    out = []
+    for event_type, payload in frames:
+        out.append(f"event: {event_type}\ndata: {json.dumps(payload)}\n\n")
+    return "".join(out).encode("utf-8")
+
+
+def _install_mock_stream(monkeypatch, handler) -> list:
+    """Patch httpx.stream + httpx.get + httpx.post through one MockTransport.
+
+    reply_stream() uses module-level `httpx.stream`; the blocking fallback
+    uses `httpx.post`; the health probe uses `httpx.get`. Routing all three
+    through the same handler lets a single test drive both the stream path
+    and its fallback."""
+    captured: list[httpx.Request] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    transport = httpx.MockTransport(_record)
+    client = httpx.Client(transport=transport)
+
+    monkeypatch.setattr(httpx, "stream", lambda method, url, **kw: client.stream(method, url, **kw))
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: client.get(url, **kw))
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: client.post(url, **kw))
+    return captured
+
+
+def _sse_response(*frames: tuple[str, dict]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=_sse(*frames),
+    )
+
+
+class TestReplyStreamSSE:
+    def test_yields_content_deltas_in_order(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "The camera "}),
+                ("content_delta", {"text": "is online."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("is the camera up")) == [
+            "The camera ", "is online.",
+        ]
+
+    def test_tool_frames_ignored_for_audio(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "Checking. "}),
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("tool_result", {"id": "t1", "ok": True, "data": []}),
+                ("content_delta", {"text": "All cameras are online."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        # Only the two content deltas are spoken; tool frames are dropped.
+        assert list(llm.reply_stream("check cameras")) == [
+            "Checking. ", "All cameras are online.",
+        ]
+
+    def test_reasoning_step_ignored_for_audio(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("reasoning_step", {"text": "the user wants the time"}),
+                ("content_delta", {"text": "It is 3 p.m."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("what time is it")) == ["It is 3 p.m."]
+
+    def test_done_stops_iteration(self, monkeypatch):
+        # Any frames after `done` are not consumed.
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "Done now."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+                ("content_delta", {"text": "SHOULD NOT APPEAR"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["Done now."]
+
+    def test_warp854_done_error_raises(self, monkeypatch):
+        # An empty completion is rewritten server-side to a done with
+        # stop_reason:error (WARP-854) — reply_stream surfaces it.
+        def handler(req):
+            return _sse_response(
+                ("done", {
+                    "iterations": 1,
+                    "stop_reason": "error",
+                    "error": "empty_completion: the model returned no output.",
+                }),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        with pytest.raises(LLMUnavailable, match="empty_completion"):
+            list(llm.reply_stream("hi"))
+
+    def test_empty_user_text_yields_nothing_no_network(self, monkeypatch):
+        captured = _install_mock_stream(
+            monkeypatch, lambda r: httpx.Response(500),
+        )
+        assert list(OrchestratorLLM(base_url="http://test").reply_stream("")) == []
+        assert captured == []
+
+    def test_blank_data_and_comment_lines_tolerated(self, monkeypatch):
+        # SSE keep-alive comments (": ping") and stray blank frames must
+        # not crash the parser.
+        def handler(req):
+            body = (
+                b": keep-alive ping\n\n"
+                b"event: content_delta\ndata: {\"text\": \"Hi there now.\"}\n\n"
+                b"event: done\ndata: {\"iterations\": 1, \"stop_reason\": \"model_done\"}\n\n"
+            )
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=body,
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["Hi there now."]
+
+
+class TestReplyStreamFallback:
+    def test_transport_error_falls_back_to_blocking_reply(self, monkeypatch):
+        # httpx.stream raises → reply_stream falls back to the blocking
+        # reply() (which posts) and yields it as a single chunk.
+        def _raising_stream(method, url, **kw):
+            raise httpx.ConnectError("stream connect refused")
+
+        def _post(url, **kw):
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "blocking reply won"},
+            })
+        monkeypatch.setattr(httpx, "stream", _raising_stream)
+        monkeypatch.setattr(httpx, "post", _post)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["blocking reply won"]
+
+    def test_non_event_stream_response_parsed_as_single_reply(self, monkeypatch):
+        # Server ignored stream:true and returned a normal JSON body — parse
+        # it via the same extractor and yield the whole reply once.
+        def handler(req):
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "whole reply here"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["whole reply here"]
+
+    def test_non_2xx_falls_back_to_blocking(self, monkeypatch):
+        # 503 on the stream request → fall back to blocking reply(). Same
+        # handler answers both; the blocking reply() then gets the 503 too
+        # and raises — so the fallback surfaces LLMUnavailable, not silence.
+        def handler(req):
+            return httpx.Response(503, json={"detail": "model loading"})
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        with pytest.raises(LLMUnavailable, match="model loading"):
+            list(llm.reply_stream("hi"))
+
+
+class TestReplyStreamRequestShape:
+    """Every Wave-C request shape (ephemeral / max_tokens / allowed_tools /
+    tool_choice) must ride on the STREAMING request too, plus stream:true
+    and an event-stream Accept header."""
+
+    def _capture(self, monkeypatch):
+        bodies: list[dict] = []
+        headers: list[dict] = []
+
+        def handler(req):
+            bodies.append(json.loads(req.content))
+            headers.append(dict(req.headers))
+            return _sse_response(
+                ("content_delta", {"text": "ok now."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        return bodies, headers
+
+    def test_stream_true_and_wave_c_fields_on_tool_turn(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream(
+            "is the front camera online?",
+        ))
+        b = bodies[0]
+        assert b["stream"] is True
+        assert b["ephemeral"] is True
+        assert b["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+        assert b["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_accept_header_is_event_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream("hi"))
+        assert "text/event-stream" in headers[0].get("accept", "")
+
+    def test_tool_choice_none_omits_allowed_tools_on_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream(
+            "good morning", tool_choice="none",
+        ))
+        assert bodies[0]["tool_choice"] == "none"
+        assert "allowed_tools" not in bodies[0]
+
+    def test_bearer_token_attached_on_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(
+            base_url="http://test", bearer_token="secret",
+        ).reply_stream("hi"))
+        assert headers[0].get("authorization") == "Bearer secret"
+
+
+class TestMockReplyStreamFallbackDefault:
+    """The abstract LLMClient provides a default reply_stream that yields
+    the blocking reply() as a single chunk — so MockLLM (and any client
+    that only implements reply()) streams for free."""
+
+    def test_mock_reply_stream_yields_single_blocking_reply(self):
+        m = MockLLM(scripted_replies=["the whole reply"])
+        assert list(m.reply_stream("hi")) == ["the whole reply"]
+        assert m.requests == ["hi"]
+
+    def test_mock_reply_stream_empty_yields_nothing(self):
+        m = MockLLM(scripted_replies=[""])
+        assert list(m.reply_stream("hi")) == []
+
+    def test_mock_reply_stream_threads_tool_choice(self):
+        m = MockLLM(scripted_replies=["ok"])
+        list(m.reply_stream("good morning", tool_choice="none"))
+        assert m.last_tool_choice == "none"

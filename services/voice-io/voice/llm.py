@@ -45,7 +45,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -324,6 +324,23 @@ class LLMClient(ABC):
         `None` (the default) to let the orchestrator's auto-pick apply.
         """
 
+    def reply_stream(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[str]:
+        """Yield the reply as a stream of text pieces (WARP-626).
+
+        Default: delegate to the blocking `reply()` and yield the whole
+        reply as ONE piece. `OrchestratorLLM` overrides this to consume the
+        orchestrator's SSE incrementally, so the pipeline can start speaking
+        sentence 1 before the whole reply is decoded. Every other client
+        (MockLLM, dashboard-driven callbacks) inherits this single-chunk
+        fallback for free — the pipeline's sentence chunker then splits that
+        one piece the same way it would split multiple deltas, so the
+        overlapped-speak path is exercised identically."""
+        text = self.reply(user_text, tool_choice=tool_choice)
+        if text:
+            yield text
+
     @property
     @abstractmethod
     def available(self) -> bool:
@@ -420,9 +437,24 @@ class OrchestratorLLM(LLMClient):
             )
             return False
 
-    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
-        if not user_text or not user_text.strip():
-            return ""
+    def _build_chat_body(
+        self,
+        user_text: str,
+        *,
+        tool_choice: Optional[ToolChoice],
+        stream: bool,
+    ) -> dict[str, Any]:
+        """Assemble the /api/llm/chat request body shared by reply() and
+        reply_stream() so the streaming path carries the IDENTICAL request
+        shape — the only difference is `stream`.
+
+        Wire shape matches `apps/orchestrator/src/routes/llm.ts`
+        `chatRequestSchema` (Zod). Carries all Wave-C turn shaping
+        (WARP-1432): ephemeral + max_tokens + the curated allowed_tools
+        scope + the per-turn tool_choice, plus a fresh "right now"
+        timestamp (rebuilt every call) and the WARP-1119 workspace persona
+        on the greeting fast path.
+        """
         # Build a fresh system prompt on every call so the embedded
         # "right now" timestamp is current. Cheap (string concat +
         # one datetime.now()) — no need to cache.
@@ -446,10 +478,6 @@ class OrchestratorLLM(LLMClient):
             timezone=self._timezone,
             now=now,
         )
-        # Wire shape matches `apps/orchestrator/src/routes/llm.ts`
-        # `chatRequestSchema` (Zod). Unknown fields are stripped server-
-        # side; required: model + messages.
-        #
         # WARP-1432 — voice turn shaping, sent on EVERY turn:
         #   * ephemeral:true — voice has no human session, so a persisted
         #     ChatSession per utterance just litters the chat sidebar
@@ -463,7 +491,7 @@ class OrchestratorLLM(LLMClient):
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_text.strip()},
             ],
-            "stream": False,
+            "stream": stream,
             "max_iter": self._max_iter,
             "ephemeral": True,
             "max_tokens": self._max_tokens,
@@ -486,6 +514,14 @@ class OrchestratorLLM(LLMClient):
         # than reading `[]` as "zero tools".
         if tool_choice != "none" and self._allowed_tools:
             body["allowed_tools"] = self._allowed_tools
+        return body
+
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
+        if not user_text or not user_text.strip():
+            return ""
+        body = self._build_chat_body(
+            user_text, tool_choice=tool_choice, stream=False,
+        )
         try:
             resp = httpx.post(
                 f"{self._base_url}{self._chat_path}",
@@ -512,11 +548,169 @@ class OrchestratorLLM(LLMClient):
 
         return _extract_assistant_text(data)
 
-    def _headers(self) -> dict[str, str]:
-        h = {"Content-Type": "application/json", "Accept": "application/json"}
+    def _headers(self, accept: str = "application/json") -> dict[str, str]:
+        h = {"Content-Type": "application/json", "Accept": accept}
         if self._bearer_token:
             h["Authorization"] = f"Bearer {self._bearer_token}"
         return h
+
+    # ────────────────────────────────────────────────────────────────
+    # WARP-626 — incremental SSE consume
+    # ────────────────────────────────────────────────────────────────
+
+    def reply_stream(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[str]:
+        """Consume the orchestrator's SSE and yield content deltas as they
+        arrive, so the pipeline can synthesize + play sentence 1 before the
+        whole reply is decoded (WARP-626).
+
+        POSTs the SAME Wave-C-shaped body as reply() (via `_build_chat_body`)
+        with stream:true and an event-stream Accept. Parses the frames from
+        `apps/orchestrator/src/types/sse-events.ts` (event on the `event:`
+        line, JSON payload on `data:`):
+          * content_delta → yield `.text`
+          * tool_call / tool_result / reasoning_step / model_loading →
+            ignored for audio (tool activity logged at debug)
+          * done → stop; a done with stop_reason:"error" (the WARP-854
+            empty-completion rewrite) raises LLMUnavailable
+
+        ROBUSTNESS: falls back to the blocking reply() (yielded as one
+        chunk) when the stream can't be opened, returns a non-2xx, or comes
+        back as a non-streaming JSON body — so a server that doesn't stream
+        (today's single-`content_delta` reality) still works. Once content
+        has been yielded, a later transport break is surfaced as
+        LLMUnavailable rather than re-running reply() (which would double
+        the audio).
+        """
+        if not user_text or not user_text.strip():
+            return
+        body = self._build_chat_body(
+            user_text, tool_choice=tool_choice, stream=True,
+        )
+        url = f"{self._base_url}{self._chat_path}"
+        yielded = False
+        try:
+            with httpx.stream(
+                "POST",
+                url,
+                json=body,
+                headers=self._headers(accept="text/event-stream"),
+                timeout=self._timeout_s,
+                **httpx_client_kwargs(),
+            ) as resp:
+                if not resp.is_success:
+                    resp.read()  # drain so the connection releases
+                    logger.info(
+                        "voice stream got %d — falling back to blocking reply()",
+                        resp.status_code,
+                    )
+                    yield from self._blocking_fallback(user_text, tool_choice)
+                    return
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if "text/event-stream" not in ctype:
+                    # Server ignored stream:true (or a proxy buffered it) —
+                    # read the full body + parse it once, same as reply().
+                    raw = resp.read()
+                    try:
+                        data = json.loads(raw)
+                    except (ValueError, json.JSONDecodeError):
+                        logger.info(
+                            "voice stream returned a non-SSE, non-JSON body — "
+                            "falling back to blocking reply()",
+                        )
+                        yield from self._blocking_fallback(user_text, tool_choice)
+                        return
+                    text = _extract_assistant_text(data)
+                    if text:
+                        yield text
+                    return
+                for piece in self._parse_sse(resp):
+                    yielded = True
+                    yield piece
+                return
+        except httpx.HTTPError as exc:
+            if yielded:
+                # Already spoke part of the reply — re-running reply() would
+                # double the audio, so surface the break instead.
+                raise LLMUnavailable(
+                    f"stream interrupted after partial content: {exc}",
+                ) from exc
+            logger.info(
+                "voice stream POST failed (%s) — falling back to blocking reply()",
+                exc,
+            )
+            yield from self._blocking_fallback(user_text, tool_choice)
+            return
+
+    def _blocking_fallback(
+        self, user_text: str, tool_choice: Optional[ToolChoice],
+    ) -> Iterator[str]:
+        """Yield the blocking reply() as a single chunk. reply() may raise
+        LLMUnavailable — that propagates (the pipeline handles it the same
+        way it always has)."""
+        text = self.reply(user_text, tool_choice=tool_choice)
+        if text:
+            yield text
+
+    def _parse_sse(self, resp: "httpx.Response") -> Iterator[str]:
+        """Yield content_delta text pieces from an SSE response. Raises
+        LLMUnavailable on a done error frame; stops after the done frame."""
+        event_type: Optional[str] = None
+        data_lines: list[str] = []
+        for line in resp.iter_lines():
+            if line == "":
+                # Blank line = frame boundary — dispatch what we accumulated.
+                if event_type is not None or data_lines:
+                    stop = yield from self._dispatch_frame(event_type, data_lines)
+                    if stop:
+                        return
+                event_type, data_lines = None, []
+                continue
+            if line.startswith(":"):
+                continue  # SSE comment / keep-alive heartbeat
+            if line.startswith("event:"):
+                event_type = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].lstrip())
+        # A trailing frame with no terminating blank line.
+        if event_type is not None or data_lines:
+            yield from self._dispatch_frame(event_type, data_lines)
+
+    def _dispatch_frame(
+        self, event_type: Optional[str], data_lines: list[str],
+    ) -> Iterator[str]:
+        """Handle one SSE frame: yield content text (if any) and RETURN True
+        when the stream should stop (the `done` frame). Raises LLMUnavailable
+        on a done error frame. The generator's return value is read by the
+        caller via `yield from`."""
+        raw = "\n".join(data_lines)
+        try:
+            payload = json.loads(raw) if raw else {}
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        # The type lives on the `event:` line (encodeSSE strips it from the
+        # data payload); tolerate a `type` in data too for robustness.
+        etype = event_type or payload.get("type")
+        if etype == "content_delta":
+            text = payload.get("text")
+            if isinstance(text, str) and text:
+                yield text
+            return False
+        if etype == "done":
+            if payload.get("stop_reason") == "error":
+                raise LLMUnavailable(
+                    payload.get("error")
+                    or "stream ended with stop_reason=error",
+                )
+            return True
+        # tool_call / tool_result / reasoning_step / model_loading are not
+        # spoken. Log tool activity at debug for diagnosis; drop the rest.
+        if etype in ("tool_call", "tool_result"):
+            logger.debug("voice stream: ignoring %s frame for audio", etype)
+        return False
 
 
 def _extract_error_detail(resp: "httpx.Response") -> str:
