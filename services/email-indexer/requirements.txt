@@ -4,7 +4,7 @@ uvicorn[standard]==0.34.0
 # poller. No `while True` per droplet-architecture-guard rule 9.
 APScheduler==3.10.4
 # aioimaplib is the canonical async IMAP client; supports IDLE.
-aioimaplib==1.1.0
+aioimaplib==2.0.1
 # Fernet decryption of EmailAccount.passwordEnc. Key lives at
 # /data/secrets/email.key (mode 0600, setup.sh-generated).
 cryptography==49.0.0
