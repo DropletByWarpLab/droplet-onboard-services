@@ -724,6 +724,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
       const chatReq = parsed.data;
 
+      // A thread with no user turn is never a legitimate request — every
+      // caller (dashboard replay, voice-io's system+user pair, the setup
+      // wizard's single-message probe) sends one. It's the signature of a
+      // client replay bug: the dashboard's retryMessage once serialized an
+      // empty `messages` array and the agent loop happily answered a blank
+      // thread with a plausible-looking greeting. Distinct code so the
+      // dashboard's pre-stream error path (useChat.ts
+      // friendlyPreStreamError) surfaces the regression visibly.
+      if (!chatReq.messages.some((m) => m.role === "user")) {
+        res.status(400).json({ error: "empty_replay" });
+        return;
+      }
+
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
       // session could drive write tools via curl.
