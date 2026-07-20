@@ -2175,7 +2175,7 @@ services:
     # published here via docker-proxy. docker-proxy owns host:51820 and
     # masquerades the container's OUTBOUND wg packets with an EPHEMERAL host
     # source port, so the box's egress mapping never matches the inbound path and
-    # the direct-punch overlay (ADR-030) can't hole-punch (verified live on .87,
+    # the direct-punch overlay (ADR-031) can't hole-punch (verified live on .87,
     # 2026-06-10). The listener is now wired at the HOST layer by
     # scripts/host/usr-local-sbin/droplet-openwrt-attach: a DNAT of inbound
     # udp/51820 into this container plus a source-port-PRESERVING masquerade on

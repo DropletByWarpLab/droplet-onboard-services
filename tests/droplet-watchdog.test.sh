@@ -355,6 +355,38 @@ run_wd DROPLET_WATCHDOG_XVF_HOST="$WORK/bin/nonexistent-xvf" >/dev/null || true
   && pass "wedge with missing xvf_host tool → heal_failed" \
   || fail "expected heal_failed with missing tool, got $(wd_field voice_dsp status)"
 
+# WARP-1408: the shipped reSpeaker XVF3800 enumerates under Seeed VID 2886, not
+# the raw XMOS 20b1. The presence gate must recognize it — otherwise voice_dsp is
+# not_applicable forever on real hardware and never heals.
+reset_work
+mk_xvf_stub
+mk_usb_dev "1-3" "2886"
+printf 'xhci overrun\nxhci overrun\nxhci overrun\n' > "$WORK/klog"
+run_wd >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "healed" ] \
+  && pass "Seeed 2886 XVF3800 recognized → wedge healed (not not_applicable)" \
+  || fail "expected healed for Seeed 2886, got $(wd_field voice_dsp status)"
+grep -q 'REBOOT 1' "$WORK/xvf.log" 2>/dev/null \
+  && pass "Seeed 2886 wedge issued 'xvf_host REBOOT 1'" \
+  || fail "no REBOOT for Seeed 2886: $(cat "$WORK/xvf.log" 2>/dev/null)"
+
+# A non-XVF USB vendor must NOT be mistaken for voice hardware (no false reboot).
+# xvf.log accumulates across the suite, so assert on the REBOOT-count delta (the
+# cooldown/suspension idiom above), not the file's absence.
+reset_work
+mk_xvf_stub
+mk_usb_dev "1-3" "1234"
+printf 'xhci overrun\nxhci overrun\nxhci overrun\n' > "$WORK/klog"
+rb=0; [ -f "$WORK/xvf.log" ] && rb="$(grep -c 'REBOOT 1' "$WORK/xvf.log" || true)"
+run_wd DROPLET_WATCHDOG_CHECKS="voice_dsp" >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "not_applicable" ] \
+  && pass "unrelated USB vendor stays not_applicable" \
+  || fail "expected not_applicable for vendor 1234, got $(wd_field voice_dsp status)"
+ra=0; [ -f "$WORK/xvf.log" ] && ra="$(grep -c 'REBOOT 1' "$WORK/xvf.log" || true)"
+[ "$rb" = "$ra" ] \
+  && pass "no DSP reboot issued for a non-XVF device" \
+  || fail "xvf_host wrongly invoked for vendor 1234 ($rb → $ra)"
+
 # =============================================================================
 # Phase 4: docker_dns — probe ok, probe fail, pin guidance, escalation
 # =============================================================================

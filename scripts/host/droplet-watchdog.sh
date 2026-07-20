@@ -84,7 +84,11 @@ WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 WD_WIFI_HELPER="${DROPLET_WATCHDOG_WIFI_HELPER:-/usr/local/sbin/droplet-wifi-watchdog}"
 
 WD_USB_SYS="${DROPLET_WATCHDOG_USB_SYS:-/sys/bus/usb/devices}"
-WD_XVF_USB_VENDOR="${DROPLET_WATCHDOG_XVF_USB_VENDOR:-20b1}"
+# XVF3800 USB vendor id(s), space-separated allow-list. The board's XMOS DSP is
+# XMOS VID 20b1, but the shipped reSpeaker XVF3800 4-Mic Array enumerates under
+# Seeed's VID 2886 — match both so the presence gate recognizes real hardware
+# instead of reporting not_applicable and never healing (WARP-1408).
+WD_XVF_USB_VENDOR="${DROPLET_WATCHDOG_XVF_USB_VENDOR:-20b1 2886}"
 WD_XVF_HOST="${DROPLET_WATCHDOG_XVF_HOST:-/usr/local/bin/xvf_host}"
 WD_XVF_COOLDOWN_S="${DROPLET_WATCHDOG_XVF_COOLDOWN_S:-600}"
 WD_KLOG_FILE="${DROPLET_WATCHDOG_KLOG_FILE:-}"
@@ -276,11 +280,17 @@ wd_kernel_log() {
 }
 
 wd_xmos_present() {
-  local d
+  local d id v
   [ -d "$WD_USB_SYS" ] || return 1
   for d in "$WD_USB_SYS"/*/idVendor; do
     [ -f "$d" ] || continue
-    if [ "$(cat "$d" 2>/dev/null)" = "$WD_XVF_USB_VENDOR" ]; then return 0; fi
+    id="$(cat "$d" 2>/dev/null)"
+    # WD_XVF_USB_VENDOR is a space-separated allow-list (XMOS 20b1 + Seeed 2886);
+    # the unquoted expansion below is the intentional split over that list.
+    # shellcheck disable=SC2086
+    for v in $WD_XVF_USB_VENDOR; do
+      [ "$id" = "$v" ] && return 0
+    done
   done
   return 1
 }
@@ -288,7 +298,7 @@ wd_xmos_present() {
 wd_check_voice_dsp() {
   if ! wd_xmos_present; then
     CHECK_OUTCOME=not_applicable
-    CHECK_MESSAGE="no XMOS (idVendor $WD_XVF_USB_VENDOR) USB device — voice hardware absent"
+    CHECK_MESSAGE="no XVF3800 (idVendor in: $WD_XVF_USB_VENDOR) USB device — voice hardware absent"
     return 0
   fi
   local overruns
