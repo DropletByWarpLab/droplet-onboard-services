@@ -60,6 +60,21 @@ from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 logger = logging.getLogger("voice.llm")
 
 
+def _new_httpx_client() -> httpx.Client:
+    """Build the reused httpx.Client for one OrchestratorLLM (WARP-1433).
+
+    Carries the internal-mTLS material (client cert + CA) from
+    ``httpx_client_kwargs()`` ONCE, on the connection pool, instead of the
+    old module-level ``httpx.post``/``httpx.get`` per call — each of which
+    paid a fresh TCP connect + a full mTLS handshake + a CA-file re-read
+    (twice on greeting turns: persona fetch + chat). The client is reused
+    across every reply()/available()/reply_stream() for its lifetime and
+    closed on shutdown. Kept a module-level factory so tests can count
+    constructions + inject a MockTransport.
+    """
+    return httpx.Client(**httpx_client_kwargs())
+
+
 # Per-turn override for the orchestrator's agent loop. "none" forces
 # the model to answer from the system prompt context without calling
 # any tool — the intent gate in `voice.pipeline.classify_tool_choice`
@@ -346,6 +361,14 @@ class LLMClient(ABC):
     def available(self) -> bool:
         """Cheap reachability probe used at startup + /health."""
 
+    def close(self) -> None:
+        """Release any held resources (WARP-1433).
+
+        No-op by default so main.py's shutdown hook can call it on whatever
+        ``build_llm_from_env`` returned. ``OrchestratorLLM`` overrides it to
+        close its pooled httpx.Client; ``MockLLM`` inherits this no-op.
+        """
+
 
 # ────────────────────────────────────────────────────────────────────
 # Orchestrator — production HTTP client
@@ -407,6 +430,11 @@ class OrchestratorLLM(LLMClient):
         # would ride twice on tool-enabled turns. None → pre-persona
         # behavior (tests, __mock__ deployments).
         self._persona_fetcher = persona_fetcher
+        # WARP-1433 — ONE pooled httpx.Client, reused across every
+        # available()/reply()/reply_stream() for this client's lifetime and
+        # closed by close() on shutdown. The mTLS material rides on the pool
+        # (built once here) instead of being re-applied on every request.
+        self._client = _new_httpx_client()
 
     @property
     def available(self) -> bool:
@@ -422,11 +450,10 @@ class OrchestratorLLM(LLMClient):
         orchestrator process up?", not "are my credentials valid?".
         """
         try:
-            resp = httpx.get(
+            resp = self._client.get(
                 f"{self._base_url}{self._health_path}",
                 timeout=2.0,
                 headers=self._headers(),
-                **httpx_client_kwargs(),
             )
             return resp.is_success
         except (httpx.HTTPError, OSError) as exc:
@@ -436,6 +463,15 @@ class OrchestratorLLM(LLMClient):
                 exc,
             )
             return False
+
+    def close(self) -> None:
+        """Close the pooled httpx.Client (WARP-1433).
+
+        Idempotent — httpx.Client tolerates a double close. main.py calls
+        this from its shutdown hook AFTER the pipeline worker has joined, so
+        no reply()/reply_stream() can be in flight.
+        """
+        self._client.close()
 
     def _build_chat_body(
         self,
@@ -523,12 +559,11 @@ class OrchestratorLLM(LLMClient):
             user_text, tool_choice=tool_choice, stream=False,
         )
         try:
-            resp = httpx.post(
+            resp = self._client.post(
                 f"{self._base_url}{self._chat_path}",
                 json=body,
                 timeout=self._timeout_s,
                 headers=self._headers(),
-                **httpx_client_kwargs(),
             )
         except httpx.HTTPError as exc:
             raise LLMUnavailable(f"POST {self._chat_path} failed: {exc}") from exc
@@ -591,13 +626,12 @@ class OrchestratorLLM(LLMClient):
         url = f"{self._base_url}{self._chat_path}"
         yielded = False
         try:
-            with httpx.stream(
+            with self._client.stream(
                 "POST",
                 url,
                 json=body,
                 headers=self._headers(accept="text/event-stream"),
                 timeout=self._timeout_s,
-                **httpx_client_kwargs(),
             ) as resp:
                 if not resp.is_success:
                     resp.read()  # drain so the connection releases

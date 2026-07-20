@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+import voice.llm
 from voice.llm import (
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
@@ -54,12 +55,13 @@ from voice.llm import (
 # ────────────────────────────────────────────────────────────────────
 
 def _install_mock_transport(monkeypatch, handler) -> list:
-    """Patch httpx.get/httpx.post to route through a MockTransport.
+    """Route the OrchestratorLLM's POOLED client through a MockTransport.
 
-    OrchestratorLLM uses module-level `httpx.get` and `httpx.post`
-    (not a long-lived client), so we replace those two functions with
-    versions that use a MockTransport-backed Client. Captures every
-    request for assertions.
+    WARP-1433: OrchestratorLLM builds ONE `httpx.Client` via
+    `voice.llm._new_httpx_client()` and reuses it across
+    available()/reply()/reply_stream(). Patching the factory so it returns a
+    MockTransport-backed client makes every hop route through our handler —
+    no real network. Captures every request for assertions.
     """
     captured: list[httpx.Request] = []
 
@@ -68,16 +70,10 @@ def _install_mock_transport(monkeypatch, handler) -> list:
         return handler(request)
 
     transport = httpx.MockTransport(_record_and_handle)
-    client = httpx.Client(transport=transport)
-
-    def _patched_get(url, **kwargs):
-        return client.get(url, **kwargs)
-
-    def _patched_post(url, **kwargs):
-        return client.post(url, **kwargs)
-
-    monkeypatch.setattr(httpx, "get", _patched_get)
-    monkeypatch.setattr(httpx, "post", _patched_post)
+    monkeypatch.setattr(
+        voice.llm, "_new_httpx_client",
+        lambda: httpx.Client(transport=transport),
+    )
     return captured
 
 
@@ -910,12 +906,12 @@ def _sse(*frames: tuple[str, dict]) -> bytes:
 
 
 def _install_mock_stream(monkeypatch, handler) -> list:
-    """Patch httpx.stream + httpx.get + httpx.post through one MockTransport.
+    """Route the pooled client (stream + get + post) through one MockTransport.
 
-    reply_stream() uses module-level `httpx.stream`; the blocking fallback
-    uses `httpx.post`; the health probe uses `httpx.get`. Routing all three
-    through the same handler lets a single test drive both the stream path
-    and its fallback."""
+    WARP-1433: reply_stream() uses `self._client.stream`, the blocking
+    fallback uses `self._client.post`, and the health probe uses
+    `self._client.get` — all on the ONE pooled client. Patching the factory
+    covers the stream path and its fallback in a single test."""
     captured: list[httpx.Request] = []
 
     def _record(request: httpx.Request) -> httpx.Response:
@@ -923,11 +919,10 @@ def _install_mock_stream(monkeypatch, handler) -> list:
         return handler(request)
 
     transport = httpx.MockTransport(_record)
-    client = httpx.Client(transport=transport)
-
-    monkeypatch.setattr(httpx, "stream", lambda method, url, **kw: client.stream(method, url, **kw))
-    monkeypatch.setattr(httpx, "get", lambda url, **kw: client.get(url, **kw))
-    monkeypatch.setattr(httpx, "post", lambda url, **kw: client.post(url, **kw))
+    monkeypatch.setattr(
+        voice.llm, "_new_httpx_client",
+        lambda: httpx.Client(transport=transport),
+    )
     return captured
 
 
@@ -1034,17 +1029,16 @@ class TestReplyStreamSSE:
 
 class TestReplyStreamFallback:
     def test_transport_error_falls_back_to_blocking_reply(self, monkeypatch):
-        # httpx.stream raises → reply_stream falls back to the blocking
-        # reply() (which posts) and yields it as a single chunk.
-        def _raising_stream(method, url, **kw):
-            raise httpx.ConnectError("stream connect refused")
-
-        def _post(url, **kw):
+        # The STREAM attempt (Accept: text/event-stream) raises a transport
+        # error → reply_stream falls back to the pooled client's blocking
+        # POST, which succeeds and yields as a single chunk.
+        def handler(req):
+            if "text/event-stream" in req.headers.get("accept", ""):
+                raise httpx.ConnectError("stream connect refused")
             return httpx.Response(200, json={
                 "message": {"role": "assistant", "content": "blocking reply won"},
             })
-        monkeypatch.setattr(httpx, "stream", _raising_stream)
-        monkeypatch.setattr(httpx, "post", _post)
+        _install_mock_stream(monkeypatch, handler)
         llm = OrchestratorLLM(base_url="http://test")
         assert list(llm.reply_stream("hi")) == ["blocking reply won"]
 

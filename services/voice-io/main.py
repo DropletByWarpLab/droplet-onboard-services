@@ -79,10 +79,10 @@ from voice.pipeline import (
     MeasurementUnavailable,
     WakePipeline,
 )
-from voice.llm import build_llm_from_env
+from voice.llm import LLMClient, build_llm_from_env
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
-from voice.stt import build_stt_from_env
-from voice.tts import build_tts_from_env
+from voice.stt import MockSTT, StreamingSTT, build_stt_from_env
+from voice.tts import MockTTS, TextToSpeech, build_tts_from_env
 from voice.wake import (
     VOSK_DEFAULT_THRESHOLD,
     VoskWakeWordDetector,
@@ -180,6 +180,11 @@ _pipeline: Optional[WakePipeline] = None
 # request thread. None until startup builds it (and always None under
 # LLM_URL=__mock__).
 _persona_fetcher: Optional[PersonaFetcher] = None
+
+# WARP-1433 — the LLM client (holds the pooled httpx.Client). Module scope
+# so the shutdown hook can close its connection pool. The pipeline holds the
+# same instance; None until startup builds it.
+_llm: Optional[LLMClient] = None
 
 # WARP-1058 — the activity-feed event reporter (voice → orchestrator
 # POST /api/voice/events). Module scope so shutdown can stop its POST
@@ -283,6 +288,62 @@ def _apply_calibration_values(pipeline: WakePipeline, record: dict) -> None:
         pipeline.set_wake_threshold(float(threshold))
 
 
+# WARP-1433 — startup warm-up. The FIRST real voice turn otherwise pays the
+# cold-start cost twice: Piper downloads/loads its ~70 MB voice (tts.py
+# budgets 15 s for this) and Whisper does its CTranslate2 model init. Firing
+# one throwaway synth + one tiny transcribe at boot moves both off the
+# critical path, so the first "hey Droplet" answers promptly.
+_WARMUP_TTS_TEXT = "Ready"  # non-empty: tts.py short-circuits an empty synth
+# 10 ms of int16 silence @ 16 kHz — enough to open a Whisper session and
+# force the model load without transcribing anything meaningful.
+_WARMUP_STT_PCM = b"\x00\x00" * 160
+
+
+def _warm_up_upstreams(
+    stt: Optional[StreamingSTT], tts: Optional[TextToSpeech],
+) -> None:
+    """Prime STT + TTS off the critical path (WARP-1433).
+
+    Best-effort and fire-once: every failure is swallowed (a cold first turn
+    is a latency blip, not an outage), and it no-ops for the __mock__ dev
+    clients and for any upstream that isn't reachable right now. main.py runs
+    this on a background daemon thread after pipeline.start(), so it never
+    blocks startup or /health.
+    """
+    _warm_up_tts(tts)
+    _warm_up_stt(stt)
+
+
+def _warm_up_tts(tts: Optional[TextToSpeech]) -> None:
+    # MockTTS has no real Piper to warm — skip so a dev box does no work.
+    if tts is None or isinstance(tts, MockTTS):
+        return
+    try:
+        if not tts.available:
+            logger.info("voice TTS warm-up skipped — Piper not reachable yet")
+            return
+        tts.synthesize(_WARMUP_TTS_TEXT)
+        logger.info("voice TTS warm-up done — Piper voice loaded")
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice TTS warm-up skipped: %s", exc)
+
+
+def _warm_up_stt(stt: Optional[StreamingSTT]) -> None:
+    # MockSTT has no real Whisper to warm — skip.
+    if stt is None or isinstance(stt, MockSTT):
+        return
+    try:
+        if not stt.available:
+            logger.info("voice STT warm-up skipped — Whisper not reachable yet")
+            return
+        with stt.session() as session:
+            session.send_chunk(_WARMUP_STT_PCM)
+            session.finish()
+        logger.info("voice STT warm-up done — Whisper model initialized")
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice STT warm-up skipped: %s", exc)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # Resolve audio devices on boot so the first /health hit is cheap.
@@ -308,7 +369,7 @@ async def startup() -> None:
     # case (DNS failures, dropped packets). Run them in a worker thread
     # so the FastAPI `/health` endpoint stays responsive within the
     # Dockerfile `HEALTHCHECK --start-period=10s` window.
-    global _pipeline, _persona_fetcher, _activity_reporter
+    global _pipeline, _persona_fetcher, _activity_reporter, _llm
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
@@ -328,6 +389,9 @@ async def startup() -> None:
         if _persona_fetcher is not None:
             await asyncio.to_thread(_persona_fetcher.get_block)
         llm = await asyncio.to_thread(build_llm_from_env, _persona_fetcher)
+        # WARP-1433 — keep a module ref so shutdown() can close its pooled
+        # httpx.Client (the pipeline holds the same instance).
+        _llm = llm
         wake_threshold = resolve_wake_threshold(detector)
         # Announce the EFFECTIVE threshold: boxes that relied on the old
         # compose default (`:-0.3`) silently moved to the engine-aware
@@ -372,19 +436,43 @@ async def startup() -> None:
         # so the very first captured frame runs at the tuned gain.
         apply_stored_calibration(_pipeline)
         await asyncio.to_thread(_pipeline.start)
+        # WARP-1433 — prime STT + TTS off the critical path so the first
+        # real utterance isn't cold. Fire-and-forget on a daemon thread:
+        # best-effort, runs once, never blocks startup or /health.
+        threading.Thread(
+            target=_warm_up_upstreams,
+            args=(stt, tts),
+            name="voice-warmup",
+            daemon=True,
+        ).start()
     except Exception as exc:
         logger.error("wake pipeline failed to start: %s", exc)
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _pipeline, _activity_reporter
+    global _pipeline, _activity_reporter, _llm, _persona_fetcher
     if _pipeline is not None:
         _pipeline.stop()
         _pipeline = None
     if _activity_reporter is not None:
         _activity_reporter.stop()
         _activity_reporter = None
+    # WARP-1433 — close the pooled httpx clients now that the pipeline worker
+    # has joined (no reply()/persona fetch is in flight). Both are
+    # best-effort: shutdown must never raise.
+    if _llm is not None:
+        try:
+            _llm.close()
+        except Exception:  # noqa: BLE001 — shutdown is best-effort
+            logger.debug("llm client close raised", exc_info=True)
+        _llm = None
+    if _persona_fetcher is not None:
+        try:
+            _persona_fetcher.close()
+        except Exception:  # noqa: BLE001 — shutdown is best-effort
+            logger.debug("persona fetcher close raised", exc_info=True)
+        _persona_fetcher = None
 
 
 # ────────────────────────────────────────────────────────────────────
