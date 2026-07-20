@@ -148,6 +148,9 @@ const EXPECTED_TOOL_NAMES = [
   "get_audit_log",
   "get_update_status",
   "apply_update",
+  // WARP-1452 — PIM search (both Tier-1, pure prisma)
+  "search_calendar_events",
+  "search_contacts",
 ];
 
 describe("TOOLS registry", () => {
@@ -278,6 +281,11 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("get_update_status")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("apply_update")?.requiresWrite).toBe(true);
     expect(TOOLS.get("apply_update")?.requiresConfirmation).toBe(true);
+    // WARP-1452 — PIM search tools are Tier-1 pure-prisma reads.
+    expect(TOOLS.get("search_calendar_events")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("search_calendar_events")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("search_contacts")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("search_contacts")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

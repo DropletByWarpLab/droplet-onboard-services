@@ -93,6 +93,8 @@ import createEvent from "./handlers/calendar/create-event.js";
 import listEvents from "./handlers/calendar/list-events.js";
 import updateEvent from "./handlers/calendar/update-event.js";
 import deleteEvent from "./handlers/calendar/delete-event.js";
+// WARP-1452: text search over the local calendar (pure prisma)
+import searchCalendarEvents from "./handlers/calendar/search-events.js";
 
 // reminders
 import createReminder from "./handlers/reminders/create-reminder.js";
@@ -130,6 +132,8 @@ import emailRead from "./handlers/email/read.js";
 import emailSummarizeThread from "./handlers/email/summarize-thread.js";
 import emailDraftReply from "./handlers/email/draft-reply.js";
 import emailSend from "./handlers/email/send.js";
+// WARP-1452: contacts derived on-read from indexed mail senders (pure prisma)
+import searchContacts from "./handlers/email/search-contacts.js";
 
 // Native PM module (ADR-026) — tools dispatch through the orchestrator
 // WARP-509 — write tools
@@ -269,6 +273,8 @@ const allTools: Tool[] = [
   listEvents,
   updateEvent,
   deleteEvent,
+  // WARP-1452: calendar text search (Tier-1, pure prisma)
+  searchCalendarEvents,
   // reminders
   createReminder,
   listReminders,
@@ -293,6 +299,8 @@ const allTools: Tool[] = [
   emailSummarizeThread,
   emailDraftReply,
   emailSend,
+  // WARP-1452: derived contacts search (Tier-1, pure prisma)
+  searchContacts,
   // WARP-461: durable memory facts
   memoryRecall,
   memoryExtractFact,
