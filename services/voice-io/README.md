@@ -2,9 +2,10 @@
 
 The Droplet's always-on voice assistant. Captures mic audio, runs a
 wake-word detector, streams to local STT, hands the transcript to the
-existing orchestrator agent loop (`/api/llm/chat` — same 50-tool
-surface the dashboard chat uses), then pipes the streamed response
-through local TTS to the speaker.
+existing orchestrator agent loop (`/api/llm/chat` — the same agent loop
+the dashboard chat uses, scoped to a curated voice tool set via
+`VOICE_ALLOWED_TOOLS`; see Configuration), then pipes the streamed
+response through local TTS to the speaker.
 
 **Everything on-device.** No cloud wake-word service, no cloud STT, no
 cloud TTS. Matches the same privacy positioning the wizard's AI step
