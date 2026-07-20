@@ -66,6 +66,14 @@ DEFAULT_CLOUD_JUDGE_MODEL = os.environ.get(
 )
 SEARCH_TIMEOUT_SEC = float(os.environ.get("RAGAS_SEARCH_TIMEOUT_SEC", "30"))
 
+# WARP-1407 — baseline-envelope containment margin. aggregate_runs() clamps
+# every envelope's floor to min(sample means) − FLOOR_MARGIN (never above),
+# so a floor built from correlated back-to-back bootstrap runs (IQR ≈ 0)
+# can't degenerate to ≈p50 and reject the next independent run on ordinary
+# judge variance. Not env-tunable on purpose: a per-box margin would make
+# promoted baselines mean different things on different appliances.
+FLOOR_MARGIN = 0.02
+
 # Synthesis prompt is fixed so the `response` column is reproducible across
 # baseline runs. Tuned to the retrieval-eval use case: short, no chain-of-
 # thought, "I don't know" when contexts are empty.
@@ -540,7 +548,8 @@ def aggregate_runs(
       envelopes.<metric> = { floor, p50, p95, iqr }
       envelopes_by_class.<class>.<metric> = { floor, p50, p95, iqr }
 
-    `floor = p50 − 1.5 × IQR` per the schema's documented formula. Each
+    `floor = max(0, min(p50 − 1.5 × IQR, min(samples) − FLOOR_MARGIN))` —
+    the classic formula plus the WARP-1407 containment clamp. Each
     per-run sample is that run's `metrics.<m>.mean` — each run counts as
     one data point of the metric's central tendency, percentiles across
     runs. Envelopes are computed per-metric over the runs that carry a
@@ -605,6 +614,16 @@ def aggregate_runs(
         # IQR = Q3 - Q1; well-defined for n>=2, zero for n=1.
         iqr = float(s.quantile(0.75) - s.quantile(0.25)) if len(s) > 1 else 0.0
         floor = p50 - 1.5 * iqr
+        # WARP-1407 containment clamp: bootstrap runs execute back-to-back
+        # and are CORRELATED samples — their IQR can collapse to ~0, which
+        # degenerates the floor to ≈p50, and the first independent-session
+        # run then "fails" on ordinary judge variance (observed live: a
+        # precision envelope with iqr 0.006 from five same-session runs vs
+        # a 0.30–0.43 spread across sessions). An envelope must at minimum
+        # contain every sample that produced it: never let the floor exceed
+        # the lowest observed sample minus a small margin, and keep it
+        # non-negative (metric means live in [0, 1]).
+        floor = max(0.0, min(floor, min(samples) - FLOOR_MARGIN))
         # `n` = runs that contributed a finite sample for THIS metric — the
         # honest per-metric count (skipped metrics and NaN'd judge runs make
         # it diverge from the top-level n_runs). Additive next to the
@@ -664,7 +683,11 @@ def aggregate_runs(
         "runs": [str(f.name) for f in run_files],
         "envelopes": envelopes,
         "envelopes_by_class": envelopes_by_class,
-        "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over N runs",
+        "_threshold_formula": (
+            "floor = max(0, min(p50 − 1.5 × IQR, min(sample means) − "
+            f"{FLOOR_MARGIN})), computed over N runs (WARP-1407 containment "
+            "clamp)"
+        ),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Same NaN-safe write contract as run(): baselines.json is read by the

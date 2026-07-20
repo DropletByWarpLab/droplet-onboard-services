@@ -100,6 +100,20 @@ WARP-437 per-class assertions in
 `tests/retrieval-eval/run.integration.test.ts:252-304` from recording
 mode to enforced gates.
 
+**Include independent-session runs before promoting (WARP-1407
+lesson).** The bootstrap's 5 runs execute back-to-back — correlated
+samples whose IQR can collapse to ~0, producing floors ≈ p50 that the
+very next fresh-session run "fails" on ordinary judge variance (seen
+live: precision iqr 0.006 across the bootstrap vs a 0.30–0.43 spread
+across sessions). The aggregator now clamps every floor to
+`min(sample means) − FLOOR_MARGIN` as a backstop, but the real fix is
+sample diversity: before promoting, re-run the aggregate over a
+directory that also contains a few single runs from different
+sessions/days (copy the relevant `results-*.json` into a scratch dir
+and point `ragas_runner.py aggregate --results-dir` at it). Exclude
+runs made against a different corpus or `RAGAS_EVAL_USER` — mixing
+corpora poisons the envelope.
+
 ## Ad-hoc single run (shell)
 
 ```bash

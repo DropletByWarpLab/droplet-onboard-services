@@ -1,78 +1,81 @@
 {
   "_comment": "WARP-436 \u2014 RAGAS metric baselines, aggregated by ragas_runner.py aggregate. Per-run mean is the unit sample; floor = p50 \u2212 1.5 \u00d7 IQR.",
-  "recorded_at": "2026-07-19T23:30:45.758150+00:00",
+  "recorded_at": "2026-07-20T01:23:16.484604+00:00",
   "judge": "local",
   "n_queries": 20,
-  "n_runs": 5,
+  "n_runs": 8,
   "runs": [
+    "results-20260719T171313Z.json",
     "results-20260719T222502Z.json",
     "results-20260719T223813Z.json",
     "results-20260719T225120Z.json",
     "results-20260719T230429Z.json",
-    "results-20260719T231737Z.json"
+    "results-20260719T231737Z.json",
+    "results-20260720T004734Z.json",
+    "results-20260720T010345Z.json"
   ],
   "envelopes": {
     "context_recall": {
-      "floor": 0.3,
+      "floor": 0.27999999999999997,
       "p50": 0.3,
       "p95": 0.3,
       "iqr": 0.0,
-      "n": 5
+      "n": 8
     },
     "factual_correctness": {
       "floor": 0.0,
       "p50": 0.0,
       "p95": 0.0,
       "iqr": 0.0,
-      "n": 5
+      "n": 8
     },
     "faithfulness": {
-      "floor": 0.29487179487179493,
+      "floor": 0.16181818181818183,
       "p50": 0.3333333333333333,
-      "p95": 0.3333333333333333,
-      "iqr": 0.025641025641025605,
-      "n": 5
+      "p95": 0.4937499999999999,
+      "iqr": 0.05372752247752244,
+      "n": 8
     },
     "llm_context_precision_with_reference": {
-      "floor": 0.3968749999603125,
-      "p50": 0.406249999959375,
-      "p95": 0.427916666623875,
-      "iqr": 0.006249999999374978,
-      "n": 5
+      "floor": 0.27999999996999997,
+      "p50": 0.40312499995968754,
+      "p95": 0.4238541666242812,
+      "iqr": 0.05505952380401785,
+      "n": 8
     }
   },
   "envelopes_by_class": {
     "factual": {
       "context_recall": {
-        "floor": 0.3,
+        "floor": 0.27999999999999997,
         "p50": 0.3,
         "p95": 0.3,
         "iqr": 0.0,
-        "n": 5
+        "n": 8
       },
       "factual_correctness": {
         "floor": 0.0,
         "p50": 0.0,
         "p95": 0.0,
         "iqr": 0.0,
-        "n": 5
+        "n": 8
       },
       "faithfulness": {
-        "floor": 0.29487179487179493,
+        "floor": 0.16181818181818183,
         "p50": 0.3333333333333333,
-        "p95": 0.3333333333333333,
-        "iqr": 0.025641025641025605,
-        "n": 5
+        "p95": 0.4937499999999999,
+        "iqr": 0.05372752247752244,
+        "n": 8
       },
       "llm_context_precision_with_reference": {
-        "floor": 0.3968749999603125,
-        "p50": 0.406249999959375,
-        "p95": 0.427916666623875,
-        "iqr": 0.006249999999374978,
-        "n": 5
+        "floor": 0.27999999996999997,
+        "p50": 0.40312499995968754,
+        "p95": 0.4238541666242812,
+        "iqr": 0.05505952380401785,
+        "n": 8
       }
     }
   },
-  "_threshold_formula": "floor = p50 \u2212 1.5 \u00d7 IQR, computed over N runs",
-  "_status": "PROMOTED 2026-07-19 (WARP-1407 follow-on / WARP-436 batch D): first real envelopes, from bootstrap 20260719T222502Z on droplet-sys \u2014 5 sequential runs over the seeded eval-fixtures corpus (scripts/seed-eval-fixtures.sh; partial WARP-224 set: pdf/zip/png/eml, no audio-video), judge = local Ollama gpt-oss:20b, ragas==0.2.13. answer_relevancy absent by design (skipped_metrics on appliances without OPENAI_API_KEY); factual_correctness envelope is 0.0 at this corpus stage. Re-baseline deliberately after fixture or judge or ragas changes."
+  "_threshold_formula": "floor = max(0, min(p50 \u2212 1.5 \u00d7 IQR, min(sample means) \u2212 0.02)), computed over N runs (WARP-1407 containment clamp)",
+  "_status": "RE-BASELINED 2026-07-20 (WARP-1407 follow-on): envelopes over 8 CROSS-SESSION runs \u2014 the 5-run bootstrap 20260719T222502Z plus 3 independent seeded single runs (171313Z, 004734Z, 010345Z) \u2014 after the first promote's back-to-back-only envelopes proved overtight (iqr ~0; the first fresh-session run 'failed' floors on ordinary judge variance). Aggregated with the WARP-1407 containment clamp (floor never exceeds min(sample means) \u2212 0.02). Same corpus (eval-fixtures via scripts/seed-eval-fixtures.sh), judge = local Ollama gpt-oss:20b, ragas==0.2.13. answer_relevancy absent by design; factual_correctness envelope 0.0 at this corpus stage. Re-baseline deliberately after fixture/judge/ragas changes, mixing in independent-session runs per services/rag-eval/README.md."
 }
