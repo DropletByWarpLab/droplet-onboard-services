@@ -1018,6 +1018,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         aiGateway: {
           chat: (chatReq, signal) =>
             aiGateway.chat(chatReq, signal, (req as AuthedRequest).user?.id),
+          // WARP-1442 — SERVER-SIDE token streaming. The agent loop only
+          // consumes this when the caller streams (onEvent present, i.e. the
+          // stream=true branch below); the non-streaming path never touches it.
+          // Closes over the same user id for BYOK scoping (WARP-561) and threads
+          // the WARP-329 disconnect signal into the streaming read.
+          chatStream: (chatReq, signal) =>
+            aiGateway.chatStream(chatReq, signal, (req as AuthedRequest).user?.id),
         },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
