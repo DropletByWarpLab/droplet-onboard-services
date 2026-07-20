@@ -2362,6 +2362,47 @@ class TestStreamingChunkedSpeak:
         assert pipe._speak_ended_at is not None  # cooldown armed after partial audio
         assert reporter.events.count("wake_heard") == 1
 
+    def test_mid_utterance_failure_closes_the_sse_stream(self, monkeypatch):
+        # A mid-utterance TTS failure must tear down the LLM reply stream
+        # (GeneratorExit) so the orchestrator sees the client disconnect and
+        # aborts its agent loop (WARP-329) — no reply generated into a void.
+        closed = {"flag": False}
+
+        class _CloseTrackingLLM(LLMClient):
+            def __init__(self):
+                self.requests: list[str] = []
+
+            @property
+            def available(self):
+                return True
+
+            def reply(self, user_text, *, tool_choice=None):
+                return ""
+
+            def reply_stream(self, user_text, *, tool_choice=None):
+                self.requests.append(user_text)
+                try:
+                    yield "First sentence here. Second sentence here. Third one here."
+                except GeneratorExit:
+                    closed["flag"] = True
+                    raise
+
+        tts = _ProbingTTS(raise_on_call=2)  # play sentence 1, fail on sentence 2
+        llm = _CloseTrackingLLM()
+        pipe = self._wire(
+            monkeypatch, llm, tts,
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+        )
+        tts.pipe = pipe
+        pipe._default_on_transcript("go now please")
+        # We bailed after sentence 2's synth raised, with sentence 3 still
+        # pending in the stream — the stream was closed rather than drained.
+        assert closed["flag"] is True
+        assert tts.texts_received == [
+            "First sentence here.",
+            "Second sentence here.",
+        ]
+
 
 # ────────────────────────────────────────────────────────────────────
 # Upstream re-probing — post-reboot resilience.

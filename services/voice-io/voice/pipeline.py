@@ -1141,63 +1141,79 @@ class WakePipeline:
         spoken: list[str] = []
         first_error: Optional[BaseException] = None
         error_kind: Optional[str] = None
+        # Iterate through a handle we can explicitly close: if we bail out
+        # mid-utterance (TTS/playback failure), closing the chunk generator
+        # propagates GeneratorExit into reply_stream, which tears down the
+        # in-flight SSE — the orchestrator then sees the client disconnect
+        # and ABORTS its agent loop (WARP-329) instead of finishing a reply
+        # nobody will hear. On normal completion the generator is already
+        # exhausted, so close() is a no-op.
+        chunk_iter = iter(chunks)
         try:
-            for chunk in chunks:  # may raise LLMUnavailable (SSE stream broke)
-                text = chunk.strip() if chunk else ""
-                if not text:
-                    continue
-                if self._shutdown.is_set():
-                    break
-                # Enter 'speaking' on the FIRST real sentence; hold it for the
-                # rest of the utterance (don't restore between sentences).
-                if prev_state is None:
+            try:
+                for chunk in chunk_iter:  # may raise LLMUnavailable (SSE broke)
+                    text = chunk.strip() if chunk else ""
+                    if not text:
+                        continue
+                    if self._shutdown.is_set():
+                        break
+                    # Enter 'speaking' on the FIRST real sentence; hold it for
+                    # the rest of the utterance (don't restore between them).
+                    if prev_state is None:
+                        with self._lock:
+                            prev_state = self._state
+                            self._state = "speaking"
+                    try:
+                        audio = self._tts.synthesize(text, voice=voice)
+                    except TTSUnavailable as exc:
+                        first_error, error_kind = exc, "tts"
+                        break
+                    spoken.append(text)
                     with self._lock:
-                        prev_state = self._state
-                        self._state = "speaking"
-                try:
-                    audio = self._tts.synthesize(text, voice=voice)
-                except TTSUnavailable as exc:
-                    first_error, error_kind = exc, "tts"
-                    break
-                spoken.append(text)
+                        self._last_response = " ".join(spoken)
+                        self._last_response_at = time.time()
+                    if not audio.pcm:
+                        continue
+                    drove_speaker = True
+                    try:
+                        self._play_pcm(audio)
+                    except Exception as exc:  # noqa: BLE001 — surfaced below
+                        first_error, error_kind = exc, "playback"
+                        break
+                    spoke_any = True
+                    total_duration += audio.duration_s
+            except LLMUnavailable as exc:
+                first_error, error_kind = exc, "llm"
+
+            if first_error is None:
+                # Success (possibly empty — nothing streamed). Restore state +
+                # arm the single post-speak cooldown, only if we actually spoke.
+                self._finish_utterance(prev_state, spoke=spoke_any)
+                return {
+                    "ok": True, "duration_s": total_duration, "spoke_any": spoke_any,
+                }
+
+            # Error path: surface it, and arm the cooldown if we drove the
+            # speaker at all — even a partial reply can bleed into the shared
+            # mic (same contract as speak()'s mid-playback failure).
+            self._set_error(f"voice reply failed ({error_kind}): {first_error}")
+            if drove_speaker:
                 with self._lock:
-                    self._last_response = " ".join(spoken)
-                    self._last_response_at = time.time()
-                if not audio.pcm:
-                    continue
-                drove_speaker = True
-                try:
-                    self._play_pcm(audio)
-                except Exception as exc:  # noqa: BLE001 — surfaced below
-                    first_error, error_kind = exc, "playback"
-                    break
-                spoke_any = True
-                total_duration += audio.duration_s
-        except LLMUnavailable as exc:
-            first_error, error_kind = exc, "llm"
-
-        if first_error is None:
-            # Success (possibly empty — nothing streamed). Restore state +
-            # arm the single post-speak cooldown, only if we actually spoke.
-            self._finish_utterance(prev_state, spoke=spoke_any)
+                    self._speak_ended_at = time.time()
             return {
-                "ok": True, "duration_s": total_duration, "spoke_any": spoke_any,
+                "ok": False,
+                "error": str(first_error),
+                "error_kind": error_kind,
+                "duration_s": total_duration,
+                "spoke_any": spoke_any,
             }
-
-        # Error path: surface it, and arm the cooldown if we drove the
-        # speaker at all — even a partial reply can bleed into the shared mic
-        # (same contract as speak()'s mid-playback failure).
-        self._set_error(f"voice reply failed ({error_kind}): {first_error}")
-        if drove_speaker:
-            with self._lock:
-                self._speak_ended_at = time.time()
-        return {
-            "ok": False,
-            "error": str(first_error),
-            "error_kind": error_kind,
-            "duration_s": total_duration,
-            "spoke_any": spoke_any,
-        }
+        finally:
+            close = getattr(chunk_iter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # pragma: no cover — defensive teardown
+                    logger.debug("chunk generator close raised", exc_info=True)
 
     def _finish_utterance(
         self, prev_state: Optional[PipelineState], *, spoke: bool,
@@ -1229,11 +1245,20 @@ class WakePipeline:
         starts before the rest is synthesized."""
         def _chunks() -> Iterator[str]:
             chunker = SentenceChunker()
-            for delta in self._llm.reply_stream(transcript, tool_choice=tool_choice):
-                for sentence in chunker.push(delta):
+            stream = self._llm.reply_stream(transcript, tool_choice=tool_choice)
+            try:
+                for delta in stream:
+                    for sentence in chunker.push(delta):
+                        yield sentence
+                for sentence in chunker.flush():
                     yield sentence
-            for sentence in chunker.flush():
-                yield sentence
+            finally:
+                # Close the SSE explicitly (not via GC) so an early bail-out
+                # tears the orchestrator stream down deterministically — see
+                # the WARP-329 note in _run_speak_chunks.
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
 
         return self._speak_chunks(_chunks())
 
