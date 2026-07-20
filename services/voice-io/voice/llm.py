@@ -103,6 +103,67 @@ DEFAULT_LLM_TIMEOUT_S = 120.0
 # tool call, then answer" pattern. Override via the request body's
 # max_iter for callers that explicitly need a multi-step plan.
 DEFAULT_LLM_MAX_ITER = 2
+# WARP-1432 — voice turn shaping (client-side request-shape only).
+#
+# gpt-oss:20b (the box's voice model) spends reasoning-channel tokens
+# BEFORE any visible content (apps/orchestrator/src/services/llm-agent
+# .service.ts). A cap that's too low starves the answer and yields an
+# empty completion (WARP-854), so the DEFAULT is deliberately generous:
+# enough for a few hundred reasoning tokens + a short spoken sentence,
+# while still bounding runaway generation. 1024 is ~1/4 of the gateway's
+# hard ceiling (max_tokens le=4096 in routes/llm.ts + ai-gateway
+# schemas.py). Override per-box via VOICE_MAX_TOKENS.
+DEFAULT_VOICE_MAX_TOKENS = 1024
+# The gateway/orchestrator bound (routes/llm.ts:156 — int, 1..4096). A
+# VOICE_MAX_TOKENS outside this range would 400 every reply, so we clamp
+# the ACCEPTED window here and fall back to the default outside it.
+MIN_VOICE_MAX_TOKENS = 1
+MAX_VOICE_MAX_TOKENS = 4096
+
+# The curated tool scope voice advertises on tool-enabled turns. Voice
+# used to inherit the full ~43-tool `_service:voice` set (~5k tokens of
+# schema prefill serialized on EVERY non-greeting turn); this cuts that
+# to the tools a household/office actually asks by voice.
+#
+# Correctness-first (WARP-1432 brief): the set covers every domain the
+# voice persona ADVERTISES — cameras, network, files, smart devices,
+# calendar, reminders (all read) — plus box health and the ONE write
+# tool voice may drive (`control_device`; the sole member of
+# VOICE_WRITE_TOOLS in routes/llm.ts, e.g. "turn off the kitchen
+# lights"). Every other write tool (run_scene, create_reminder,
+# block_network_device, …) is stripped SERVER-SIDE for the voice
+# principal (narrowAllowedToolsForRole), so shipping it here would be
+# misleading dead weight — those are intentionally omitted. The long
+# tail (PM, ERP, data-utility, switch-admin) is dropped outright.
+#
+# Names are the canonical registry names (packages/tools-core/src/
+# registry.ts). Override the whole set per-box via VOICE_ALLOWED_TOOLS.
+DEFAULT_VOICE_ALLOWED_TOOLS: tuple[str, ...] = (
+    # box health — "is everything working?"
+    "get_system_health",
+    # cameras (read) — "is the front camera online?", "any motion?"
+    "list_cameras",
+    "list_camera_events",
+    "get_camera_snapshot",
+    # smart devices — query + the one scoped control tool
+    "list_smart_home_devices",
+    "get_smart_home_device",
+    "control_device",
+    # network (read) — "is the internet up?", "what's connected?"
+    "get_network_status",
+    "list_network_devices",
+    "network_summary",
+    "get_wifi_settings",
+    # files (read) — "find my …", "read me my note"
+    "search_files",
+    "search_content",
+    "list_recent_files",
+    "read_file",
+    # calendar + reminders (read) — the persona promises both
+    "list_events",
+    "list_reminders",
+)
+
 # The voice persona must carry the identity essentials itself: on the
 # intent-gated tool_choice="none" path (greetings, "who are you?") the
 # orchestrator deliberately skips its base system prompt — see the
@@ -184,6 +245,55 @@ def _safe_zone(name: str) -> ZoneInfo:
         return ZoneInfo(DEFAULT_TIMEZONE)
 
 
+def parse_max_tokens(raw: Optional[str]) -> int:
+    """Resolve VOICE_MAX_TOKENS → an int the gateway will accept.
+
+    Unset / empty / non-numeric / out-of-range [1, 4096] all fall back to
+    DEFAULT_VOICE_MAX_TOKENS with a warning. Voice must never break on a
+    fat-fingered env: a garbage cap silently degrades to the known-safe
+    default instead of 400-ing every reply (same defensive posture as
+    `_safe_zone` falling back to UTC)."""
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_VOICE_MAX_TOKENS
+    try:
+        n = int(s)
+    except ValueError:
+        logger.warning(
+            "VOICE_MAX_TOKENS=%r is not an integer — using default %d.",
+            raw,
+            DEFAULT_VOICE_MAX_TOKENS,
+        )
+        return DEFAULT_VOICE_MAX_TOKENS
+    if not (MIN_VOICE_MAX_TOKENS <= n <= MAX_VOICE_MAX_TOKENS):
+        logger.warning(
+            "VOICE_MAX_TOKENS=%d is outside the accepted range %d..%d — "
+            "using default %d.",
+            n,
+            MIN_VOICE_MAX_TOKENS,
+            MAX_VOICE_MAX_TOKENS,
+            DEFAULT_VOICE_MAX_TOKENS,
+        )
+        return DEFAULT_VOICE_MAX_TOKENS
+    return n
+
+
+def parse_allowed_tools(raw: Optional[str]) -> list[str]:
+    """Resolve VOICE_ALLOWED_TOOLS → the scoped tool list voice sends.
+
+    Comma-separated names; each segment trimmed, empty segments dropped.
+    Unset / empty / all-whitespace / all-empty-segments falls back to the
+    curated DEFAULT_VOICE_ALLOWED_TOOLS. This NEVER returns an empty list:
+    an empty `allowed_tools` would be read by the orchestrator as ZERO
+    tools (routes/llm.ts distinguishes `[]` from omitted), zeroing out
+    every non-greeting turn — not what "operator left it blank" means."""
+    names = [seg.strip() for seg in (raw or "").split(",")]
+    names = [n for n in names if n]
+    if not names:
+        return list(DEFAULT_VOICE_ALLOWED_TOOLS)
+    return names
+
+
 class LLMUnavailable(Exception):
     """Raised when the orchestrator's /api/llm/chat can't be reached or
     returns an error. The pipeline catches this and surfaces the
@@ -235,6 +345,8 @@ class OrchestratorLLM(LLMClient):
         system_prompt: str = DEFAULT_LLM_SYSTEM_PROMPT,
         timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
         max_iter: int = DEFAULT_LLM_MAX_ITER,
+        max_tokens: int = DEFAULT_VOICE_MAX_TOKENS,
+        allowed_tools: Optional[list[str]] = None,
         location: Optional[str] = None,
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
@@ -248,6 +360,19 @@ class OrchestratorLLM(LLMClient):
         self._system_prompt = system_prompt
         self._timeout_s = timeout_s
         self._max_iter = max_iter
+        # WARP-1432 — per-turn request shaping. `max_tokens` caps runaway
+        # generation (covers gpt-oss reasoning + a short spoken answer).
+        # `allowed_tools` is the curated scope voice advertises on tool-
+        # enabled turns; None → the correctness-first DEFAULT set. An
+        # explicit [] (a caller opting out) is kept as-is and suppresses
+        # the field so the orchestrator's role default applies instead of
+        # being told "zero tools".
+        self._max_tokens = max_tokens
+        self._allowed_tools = (
+            list(DEFAULT_VOICE_ALLOWED_TOOLS)
+            if allowed_tools is None
+            else list(allowed_tools)
+        )
         # Context-enrichment fields. `location` is a free-form string
         # ("Greenwich, CT, USA") — what the operator set in env, no
         # geocoding. `timezone` is an IANA name; we resolve it to a
@@ -323,9 +448,15 @@ class OrchestratorLLM(LLMClient):
         )
         # Wire shape matches `apps/orchestrator/src/routes/llm.ts`
         # `chatRequestSchema` (Zod). Unknown fields are stripped server-
-        # side; required: model + messages. `allowed_tools` deliberately
-        # omitted so the orchestrator's role-gated default applies —
-        # service-principal (this caller) gets all read tools, no writes.
+        # side; required: model + messages.
+        #
+        # WARP-1432 — voice turn shaping, sent on EVERY turn:
+        #   * ephemeral:true — voice has no human session, so a persisted
+        #     ChatSession per utterance just litters the chat sidebar
+        #     (routes/llm.ts:872, chat-persistence.service.ts:429). Voice
+        #     is always ephemeral.
+        #   * max_tokens — cap runaway generation (see DEFAULT_VOICE_MAX_
+        #     TOKENS: covers gpt-oss reasoning + a short spoken answer).
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -334,6 +465,8 @@ class OrchestratorLLM(LLMClient):
             ],
             "stream": False,
             "max_iter": self._max_iter,
+            "ephemeral": True,
+            "max_tokens": self._max_tokens,
         }
         # Forward the per-turn override when the caller passed one.
         # The intent gate sets "none" for utterances that don't need a
@@ -343,6 +476,16 @@ class OrchestratorLLM(LLMClient):
         # (apps/orchestrator/src/routes/llm.ts) accepts this verbatim.
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
+        # WARP-1432 — scoped tool advertisement. On the greeting fast path
+        # (tool_choice="none") the orchestrator sends ZERO tools, so
+        # allowed_tools is moot — omit it to keep that path exactly as-is.
+        # On every tool-enabled turn, send the curated scope so the model
+        # sees ~1-1.5k tokens of tool schema instead of the full ~43-tool
+        # ~5k prefill. An empty list (a caller that opted out) is left off
+        # entirely so the orchestrator applies its role default rather
+        # than reading `[]` as "zero tools".
+        if tool_choice != "none" and self._allowed_tools:
+            body["allowed_tools"] = self._allowed_tools
         try:
             resp = httpx.post(
                 f"{self._base_url}{self._chat_path}",
@@ -540,10 +683,24 @@ def build_llm_from_env(
     from voice.geo import get_geo
     geo = get_geo()
 
+    # WARP-1432 — voice turn shaping. Both parse defensively (garbage or
+    # out-of-range env → known-safe default) so a fat-fingered value never
+    # breaks the voice loop. VOICE_ALLOWED_TOOLS unset → the curated
+    # DEFAULT scope; VOICE_MAX_TOKENS unset → DEFAULT_VOICE_MAX_TOKENS.
+    max_tokens = parse_max_tokens(os.environ.get("VOICE_MAX_TOKENS"))
+    allowed_tools = parse_allowed_tools(os.environ.get("VOICE_ALLOWED_TOOLS"))
+    logger.info(
+        "voice turn shaping: ephemeral=on, max_tokens=%d, allowed_tools=%d scoped",
+        max_tokens,
+        len(allowed_tools),
+    )
+
     return OrchestratorLLM(
         base_url=raw,
         model=model,
         bearer_token=token,
+        max_tokens=max_tokens,
+        allowed_tools=allowed_tools,
         location=geo.description,
         timezone=geo.timezone,
         persona_fetcher=persona_fetcher,
