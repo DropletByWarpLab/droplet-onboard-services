@@ -75,6 +75,10 @@ from voice.pipeline import (
     DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
+    DEFAULT_VAD_MIN_SPEECH_S,
+    DEFAULT_VAD_SILENCE_S,
+    DEFAULT_VAD_SPEECH_RMS,
+    DEFAULT_VISUAL_DECAY_S,
     DspRestartSkipped,
     MeasurementUnavailable,
     WakePipeline,
@@ -117,6 +121,33 @@ def resolve_wake_threshold(detector: object) -> float:
         if isinstance(detector, VoskWakeWordDetector)
         else DEFAULT_THRESHOLD
     )
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env knob, tolerating the compose empty-string
+    passthrough. Compose ships these as `NAME=${NAME:-}`, so an unset knob
+    arrives as "" — `float("")` would crash, so empty/whitespace selects the
+    default (same posture as the VOICE_INPUT_GAIN / VOICE_FLATLINE_* reads
+    below). An explicit "0" is a real value and is kept."""
+    return float((os.environ.get(name) or "").strip() or str(default))
+
+
+def resolve_vad_config() -> dict[str, float]:
+    """End-of-speech VAD + visual-decay knobs, read from env → the exact
+    kwargs WakePipeline accepts (WARP-1434).
+
+    Before this, main.py never read any of these, so the per-room
+    `VAD_SPEECH_RMS` tuning documented in pipeline.py and the
+    `WAKE_VISUAL_DECAY_S` decay window were unfollowable — the constructor
+    defaults were the only reachable values. Returned as a dict spread
+    straight into `WakePipeline(**resolve_vad_config())` so a mis-key would
+    fail loudly rather than silently ignore a knob."""
+    return {
+        "vad_silence_s": _env_float("VAD_SILENCE_S", DEFAULT_VAD_SILENCE_S),
+        "vad_speech_rms": _env_float("VAD_SPEECH_RMS", DEFAULT_VAD_SPEECH_RMS),
+        "vad_min_speech_s": _env_float("VAD_MIN_SPEECH_S", DEFAULT_VAD_MIN_SPEECH_S),
+        "visual_decay_s": _env_float("WAKE_VISUAL_DECAY_S", DEFAULT_VISUAL_DECAY_S),
+    }
 
 
 # Display-only fallback for /voice/status before the pipeline exists
@@ -424,6 +455,10 @@ async def startup() -> None:
             input_gain=VOICE_INPUT_GAIN,
             flatline_window_s=VOICE_FLATLINE_WINDOW_S,
             flatline_dbfs=VOICE_FLATLINE_DBFS,
+            # WARP-1434 — end-of-speech VAD + visual-decay knobs, now env-wired
+            # (VAD_SILENCE_S / VAD_SPEECH_RMS / VAD_MIN_SPEECH_S /
+            # WAKE_VISUAL_DECAY_S). Previously main never read these.
+            **resolve_vad_config(),
             activity_reporter=_activity_reporter,
             # WARP-1409 — bounded in-app auto-recovery: on a sustained
             # wedge the pipeline issues the same `xvf_host REBOOT 1` heal

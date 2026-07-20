@@ -40,6 +40,7 @@ from voice.pipeline import (
     DEFAULT_FLATLINE_WINDOW_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
+    DEFAULT_VAD_SILENCE_S,
     DEFAULT_VISUAL_DECAY_S,
     RMS_DBFS_FLOOR,
     DspRestartSkipped,
@@ -1584,9 +1585,16 @@ class TestTranscribingFlow:
 
     def test_default_stt_max_record_constant(self):
         # Drift detector — this is the HARD cap on capture length; the
-        # end-of-speech VAD cuts sooner when the room goes quiet. Kept
-        # short so a noisy room (no detectable silence) still stops fast.
-        assert DEFAULT_STT_MAX_RECORD_S == 3.0
+        # end-of-speech VAD cuts sooner when the room goes quiet. WARP-1434:
+        # reconciled to 5.0 as the SINGLE source of truth (code default +
+        # compose + README + overview doc all say 5.0; the box runs 5.0).
+        assert DEFAULT_STT_MAX_RECORD_S == 5.0
+
+    def test_default_vad_silence_constant(self):
+        # WARP-1434 — trimmed 1.0 → 0.6: a full second of trailing dead air
+        # used to end every turn; 0.6 s ends it sooner once the room goes
+        # quiet while still riding out a natural mid-sentence pause.
+        assert DEFAULT_VAD_SILENCE_S == 0.6
 
 
 # ────────────────────────────────────────────────────────────────────
