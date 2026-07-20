@@ -176,6 +176,13 @@ describe("device aliases", () => {
     expect(cleared).toEqual({ nodeId: "n1", name: null, roomId: k.id });
   });
 
+  it("rejects a non-string, non-null name", async () => {
+    // null clears; a number is still a client bug and must not be coerced.
+    await expect(upsertAlias(prisma, "n1", { name: 42 })).rejects.toThrow(
+      /name must be a string/,
+    );
+  });
+
   it("rejects assigning to a non-existent room", async () => {
     await expect(upsertAlias(prisma, "n1", { roomId: "ghost" })).rejects.toThrow(
       /room not found/,

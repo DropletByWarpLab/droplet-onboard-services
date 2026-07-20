@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react";
+import { Plus, MoreHorizontal, Pencil, Trash2, Shapes, X } from "lucide-react";
 import type { MatterDevice, Room } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 import { RoomGlyph } from "./RoomGlyph";
@@ -56,11 +56,13 @@ function RoomHeader({
   bucket,
   onBulkLights,
   onRename,
+  onChooseIcon,
   onDelete,
 }: {
   bucket: RoomBucket;
   onBulkLights: RoomSectionsProps["onBulkLights"];
   onRename: () => void;
+  onChooseIcon: () => void;
   onDelete: () => void;
 }) {
   const { open: menuOpen, setOpen: setMenuOpen, close: closeMenu, triggerRef, panelRef, onKeyDown } = usePopover();
@@ -126,6 +128,18 @@ function RoomHeader({
               >
                 <Pencil size={15} /> Rename room
               </button>
+              <button
+                role="menuitem"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onChooseIcon();
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2 type-subheadline text-left
+                  text-[var(--text)] hover:bg-[var(--hover)]"
+              >
+                <Shapes size={15} /> Choose icon
+              </button>
               <div className="my-1 h-px" style={{ background: "var(--card-bd)" }} />
               <button
                 role="menuitem"
@@ -155,8 +169,12 @@ export function RoomSections({
   onBulkLights,
   actions,
 }: RoomSectionsProps) {
-  // null = closed; { room: null } = create; { room } = rename.
-  const [modal, setModal] = useState<{ room: Room | null } | null>(null);
+  // null = closed; otherwise the room being edited (null = create) + which
+  // face of the dialog to open — rename shows the name field, icon jumps
+  // straight to the glyph picker.
+  const [modal, setModal] = useState<
+    { room: Room | null; mode: "create" | "rename" | "icon" } | null
+  >(null);
   const [deleting, setDeleting] = useState<Room | null>(null);
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
 
@@ -178,7 +196,7 @@ export function RoomSections({
           </div>
           <button
             type="button"
-            onClick={() => setModal({ room: null })}
+            onClick={() => setModal({ room: null, mode: "create" })}
             className="flex-none flex items-center gap-1.5 type-subheadline px-3 py-2 rounded-lg
               bg-[var(--brand)] text-white hover:bg-[var(--brand-hover)]
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
@@ -202,7 +220,7 @@ export function RoomSections({
         <div className="flex justify-end -mb-4">
           <button
             type="button"
-            onClick={() => setModal({ room: null })}
+            onClick={() => setModal({ room: null, mode: "create" })}
             className="flex items-center gap-1.5 type-caption-1 px-2.5 py-1.5 rounded-lg
               text-[var(--text-muted)] hover:bg-[var(--hover)]
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
@@ -217,7 +235,8 @@ export function RoomSections({
           <RoomHeader
             bucket={bucket}
             onBulkLights={onBulkLights}
-            onRename={() => setModal({ room: bucket.room })}
+            onRename={() => setModal({ room: bucket.room, mode: "rename" })}
+            onChooseIcon={() => setModal({ room: bucket.room, mode: "icon" })}
             onDelete={() => setDeleting(bucket.room)}
           />
           {bucket.devices.length === 0 ? (
@@ -256,6 +275,7 @@ export function RoomSections({
       {modal && (
         <RoomModal
           room={modal.room}
+          mode={modal.mode}
           onSave={(name, icon) =>
             modal.room
               ? actions.rename(modal.room.id, { name, icon })
