@@ -19,10 +19,40 @@ approval** — never merged by an agent.
 
 `git diff --stat <base>...HEAD` — list touched workspaces; run only the
 affected suites below. **Fresh worktree?** Run `npm install` and build
-the four `@droplet/*` packages (`shared-types`, `tools-core`,
-`fips-selftest`, `auth-policy`) first, or tsc/vitest fail on missing
-workspace builds. (A ready-built shared worktree may exist under
-`.claude/worktrees/` — check before paying that cost.)
+the five `@droplet/*` packages (`shared-types`, `tools-core`,
+`fips-selftest`, `auth-policy`, `erp-connector` — that last one lives
+under `services/`, not `packages/`) first, or tsc/vitest fail on
+missing workspace builds. (A ready-built shared worktree may exist
+under `.claude/worktrees/` — check before paying that cost.)
+
+**Worktree with NO `node_modules` of its own** (resolution falls
+through to the root checkout's install): do **not** full-`npm install`
+inside the worktree — the competing local tree shadows the root one and
+breaks Vite/vitest resolution. If the root checkout's install predates
+deps your branch needs (symptoms: `TS2307 Cannot find module
+'@droplet/erp-connector'` — the package is real, its types resolve from
+`dist/` — and/or phantom Prisma-drift errors such as `VpnPeer.kind`
+missing), bootstrap a **sparse** worktree `node_modules` instead of
+touching the root checkout:
+
+```bash
+WT=<worktree-root>; MAIN=<root-checkout>
+mkdir -p "$WT/node_modules/@droplet"
+ln -sfn ../../services/erp-connector "$WT/node_modules/@droplet/erp-connector"
+(cd "$WT/services/erp-connector" && npx tsc)           # build dist/ (what CI does pre-typecheck)
+cp -R "$MAIN/node_modules/@prisma/client" "$WT/node_modules/@prisma/client"
+(cd "$WT/apps/orchestrator" && npx prisma generate)    # now writes $WT/node_modules/.prisma
+git -C "$WT" restore apps/orchestrator/package.json package-lock.json
+```
+
+Node walks past per-package misses up to the root, so a sparse tree
+shadows nothing — extend the same pattern (symlink + build) to any
+other workspace dep the root install is missing. Order matters: copy
+`@prisma/client` BEFORE generating, or `prisma generate` resolves the
+root checkout's client and writes into the ROOT install; the final
+`git restore` drops the `@prisma/client` version bump that
+`prisma generate` auto-writes into package.json + lockfile when the
+CLI is newer than the declared range.
 
 ## 2. Typecheck (any TS change)
 
