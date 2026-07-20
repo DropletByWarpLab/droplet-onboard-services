@@ -307,6 +307,96 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     ]);
   });
 
+  it("retryMessage carries the prompt + prior history in the request body AT CALL TIME (serialization snapshot)", async () => {
+    // Production `sendChat` JSON.stringify()s the body synchronously the
+    // moment it's called — the wire carries whatever `messages` holds at
+    // that instant. The reference-based assertion in the test above can't
+    // see this (the mock keeps the array by reference and the deferred
+    // setMessages updater back-fills it before the assertion runs), so
+    // snapshot the payload inside the mock, exactly like the serializer.
+    const callTimeMessages: { role: string; content: string }[][] = [];
+    const snapshot = (req: unknown) => {
+      const r = req as { messages: { role: string; content: string }[] };
+      callTimeMessages.push(JSON.parse(JSON.stringify(r.messages)));
+    };
+    // Turn 1 succeeds, turn 2 fails, turn 3 is the retry of turn 2.
+    mockSendChat.mockImplementationOnce(async (req: unknown) => {
+      snapshot(req);
+      return sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "Hello!" })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
+      ]);
+    });
+    mockSendChat.mockImplementationOnce(async (req: unknown) => {
+      snapshot(req);
+      throw new Error("Failed to fetch");
+    });
+    mockSendChat.mockImplementationOnce(async (req: unknown) => {
+      snapshot(req);
+      return sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "3 devices online." })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
+      ]);
+    });
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hi", "llama3:8b");
+    });
+    await act(async () => {
+      await value!.sendMessage("show devices", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      expect(value!.messages.at(-1)?.error).toBeDefined();
+    });
+    const failedId = value!.messages.at(-1)!.id;
+
+    await act(async () => {
+      await value!.retryMessage(failedId, "llama3:8b");
+    });
+
+    expect(mockSendChat).toHaveBeenCalledTimes(3);
+    // The retry request must replay the surviving history AND the retried
+    // prompt at the moment the request is serialized — an empty (or
+    // prompt-less) payload here is exactly the "LLM answers a generic
+    // greeting on every retry" bug.
+    expect(callTimeMessages[2]).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "Hello!" },
+      { role: "user", content: "show devices" },
+    ]);
+  });
+
+  it("surfaces the orchestrator's 400 empty_replay rejection with its own copy", async () => {
+    // Server-side backstop for the empty-thread replay bug this branch
+    // fixes: the orchestrator now rejects a user-turn-less `messages`
+    // array with 400 { error: "empty_replay" } (routes/llm.ts) instead of
+    // running the agent loop on a blank thread. That rejection must reach
+    // the user as a distinct, actionable error bubble — not the generic
+    // fallback — so a future serialization regression is recognizable.
+    mockSendChat.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "empty_replay" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      expect(value!.messages.at(-1)?.error).toBeDefined();
+    });
+    expect(value!.messages.at(-1)!.error!.message).toBe(
+      "The app sent an empty conversation, so the AI had nothing to answer. Refresh the page and try again.",
+    );
+  });
+
   it("done event with stop_reason='error' marks the assistant turn as an error with retryPrompt", async () => {
     mockSendChat.mockResolvedValueOnce(
       sseResponse([

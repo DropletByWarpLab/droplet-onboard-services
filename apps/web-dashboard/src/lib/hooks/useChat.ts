@@ -285,6 +285,13 @@ function friendlyPreStreamError(status: number, code: string | undefined): strin
   if (code === "turn_already_completed") {
     return "This reply already finished. Open the conversation again to see it.";
   }
+  if (code === "empty_replay") {
+    // The orchestrator's backstop for the empty-thread replay bug this
+    // branch fixes client-side: a request whose `messages` carry no user
+    // turn is rejected before the agent loop (routes/llm.ts). Seeing this
+    // copy means the dashboard serialized a user-turn-less thread again.
+    return "The app sent an empty conversation, so the AI had nothing to answer. Refresh the page and try again.";
+  }
   if (status === 401 || status === 403) {
     return "You're not allowed to do that right now. Try signing in again.";
   }
@@ -769,25 +776,34 @@ export function useChat(options: UseChatOptions = {}) {
       };
 
       // Snapshot the full thread up to this turn so we can hand it to
-      // /api/llm/chat. The route is stateless; replay is on us.
+      // /api/llm/chat. The route is stateless; replay is on us. Build the
+      // snapshot synchronously from the ref-mirror, NEVER inside the
+      // setMessages updater: React defers the updater whenever another
+      // update is already pending — which is every drop-then-send caller
+      // (retryMessage, regenerate, editMessage) — so sendChat would
+      // serialize the request body while replayMessages was still empty,
+      // and the model, seeing a blank thread, answered every retry with
+      // a generic greeting. Skip assistant turns with no content and
+      // ones that ended in an error — replaying "I can't reach the
+      // Droplet…" back to the model would just confuse it.
       const replayMessages: { role: string; content: string }[] = [];
       if (systemPrompt) {
         replayMessages.push({ role: "system", content: systemPrompt });
       }
-      // Existing messages already in state, plus the user turn we just
-      // built. Don't include the empty assistant placeholder, and drop
-      // any prior assistant turn that ended in an error — replaying
-      // "I can't reach the Droplet…" back to the model would just
-      // confuse it.
-      setMessages((prev) => {
-        for (const m of prev) {
-          if (m.role === "assistant" && !m.content) continue;
-          if (m.role === "assistant" && m.error) continue;
-          replayMessages.push({ role: m.role, content: m.content });
-        }
-        replayMessages.push({ role: "user", content });
-        return [...prev, userMessage, assistantMessage];
-      });
+      for (const m of messagesRef.current) {
+        if (m.role === "assistant" && !m.content) continue;
+        if (m.role === "assistant" && m.error) continue;
+        replayMessages.push({ role: m.role, content: m.content });
+      }
+      replayMessages.push({ role: "user", content });
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      // Keep the ref-mirror in lockstep for any synchronous reader that
+      // runs before the commit (e.g. a second retry click this tick).
+      messagesRef.current = [
+        ...messagesRef.current,
+        userMessage,
+        assistantMessage,
+      ];
 
       // WARP-331: tag the in-flight stream with the conversationId it
       // belongs to. `null` here means "this is a draft chat that hasn't
@@ -1131,6 +1147,14 @@ export function useChat(options: UseChatOptions = {}) {
         const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
         return prev.filter((_, k) => k !== i && k !== userIdx);
       });
+      // Mirror the drop into messagesRef synchronously — sendMessage
+      // builds the replay thread from the ref, and the updater above
+      // won't have run yet (same idiom as editMessage).
+      const dropUserIdx =
+        idx > 0 && snapshot[idx - 1].role === "user" ? idx - 1 : idx;
+      messagesRef.current = snapshot.filter(
+        (_, k) => k !== idx && k !== dropUserIdx,
+      );
 
       await sendMessage(retryPrompt, model, systemPrompt, provider);
     },
@@ -1176,6 +1200,13 @@ export function useChat(options: UseChatOptions = {}) {
         const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
         return prev.filter((_, k) => k !== i && k !== userIdx);
       });
+      // Mirror the drop into messagesRef synchronously — sendMessage
+      // builds the replay thread from the ref (see retryMessage).
+      const dropUserIdx =
+        idx > 0 && snapshot[idx - 1].role === "user" ? idx - 1 : idx;
+      messagesRef.current = snapshot.filter(
+        (_, k) => k !== idx && k !== dropUserIdx,
+      );
 
       await sendMessage(prompt, model, systemPrompt, provider);
     },
@@ -1354,6 +1385,9 @@ export function useChat(options: UseChatOptions = {}) {
     // Invalidate any in-flight loadConversation (see loadEpochRef).
     loadEpochRef.current += 1;
     setMessages([]);
+    // Keep the ref-mirror in lockstep so a send in the same tick can't
+    // replay the cleared thread into the new conversation.
+    messagesRef.current = [];
     // WARP-304: starting a new chat must detach from the prior persisted
     // conversation — subsequent sends will mint a fresh one server-side.
     setConversationId(null);
@@ -1454,6 +1488,10 @@ export function useChat(options: UseChatOptions = {}) {
         });
       }
       setMessages(rebuilt);
+      // Keep the ref-mirror in lockstep so a send issued before the commit
+      // (e.g. a pending-prompt auto-send) replays the loaded thread, not
+      // the previous conversation's.
+      messagesRef.current = rebuilt;
       setConversationId(persisted.id);
       conversationIdRef.current = persisted.id;
       setMessagesEpoch((e) => e + 1);
