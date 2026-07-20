@@ -126,6 +126,12 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
+  "search_camera_events",
+  "get_camera_health",
+  "set_camera_detection",
+  "set_detection_zones",
+  "delete_clip",
 ];
 
 describe("TOOLS registry", () => {
@@ -213,6 +219,18 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("get_weather")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresWrite).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresConfirmation).toBe(false);
+    // WARP-1440 — camera reads are Tier-1; detection toggle, zone writes,
+    // and clip deletion are Tier-2 (write + handler-enforced confirmation).
+    expect(TOOLS.get("search_camera_events")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("search_camera_events")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("get_camera_health")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_camera_health")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("set_camera_detection")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_camera_detection")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("set_detection_zones")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_detection_zones")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("delete_clip")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("delete_clip")?.requiresConfirmation).toBe(true);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

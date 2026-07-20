@@ -58,6 +58,13 @@ import listClips from "./handlers/cameras/list-clips.js";
 import exportClip from "./handlers/cameras/export-clip.js";
 import getCameraLiveUrl from "./handlers/cameras/get-camera-live-url.js";
 import shareClip from "./handlers/cameras/share-clip.js";
+// WARP-1440: camera depth — semantic event search, health, detect/record
+// toggle, zones, clip deletion (all via ctx.http.orchestrator).
+import searchCameraEvents from "./handlers/cameras/search-camera-events.js";
+import getCameraHealth from "./handlers/cameras/get-camera-health.js";
+import setCameraDetection from "./handlers/cameras/set-camera-detection.js";
+import setDetectionZones from "./handlers/cameras/set-detection-zones.js";
+import deleteClip from "./handlers/cameras/delete-clip.js";
 
 // switch
 import getSwitchPorts from "./handlers/switch/get-switch-ports.js";
@@ -210,6 +217,12 @@ const allTools: Tool[] = [
   exportClip,
   getCameraLiveUrl,
   shareClip,
+  // WARP-1440: camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
+  searchCameraEvents,
+  getCameraHealth,
+  setCameraDetection,
+  setDetectionZones,
+  deleteClip,
   // switch
   getSwitchPorts,
   getSwitchVlans,

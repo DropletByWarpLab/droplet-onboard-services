@@ -335,6 +335,28 @@ export async function setEventRetain(
   if (!resp.ok) throw new Error(`Frigate retain: ${resp.status}`);
 }
 
+/**
+ * WARP-1440 — permanently delete a single Frigate event (the event row
+ * plus its saved clip + snapshot on disk). Frigate 0.17 exposes
+ * DELETE /api/events/<id> for exactly this; it's the per-event sibling
+ * of the delete-by-window purge in camera-retention-purge.service.ts.
+ *
+ * NOT idempotent: a second delete of the same id is a Frigate 404,
+ * surfaced as the `event_not_found` sentinel (same sentinel-message
+ * style as regenerateEventDescription's "genai_disabled") so the route
+ * layer can answer a clean 404 instead of a generic upstream error.
+ */
+export async function deleteEvent(eventId: string): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}`,
+    { method: "DELETE", signal: timeout() },
+  );
+  if (!resp.ok) {
+    if (resp.status === 404) throw new Error("event_not_found");
+    throw new Error(`Frigate event delete: ${resp.status}`);
+  }
+}
+
 // --- Reviews (Frigate 0.13+) ---
 //
 // "Review items" are Frigate's higher-level abstraction over events:

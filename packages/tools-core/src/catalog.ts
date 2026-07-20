@@ -119,6 +119,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "export_clip",
     "get_camera_live_url",
     "share_clip",
+    "search_camera_events",
+    "get_camera_health",
+    "set_camera_detection",
+    "set_detection_zones",
+    "delete_clip",
   ],
   switch: [
     "get_switch_ports",
@@ -248,6 +253,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   export_clip: "Save a video clip from a camera's recordings",
   get_camera_live_url: "Open a live view of a camera",
   share_clip: "Create a link to share a camera clip with someone",
+  search_camera_events: "Search your camera recordings, like 'delivery truck yesterday'",
+  get_camera_health: "Check that your cameras are streaming and healthy",
+  set_camera_detection: "Turn a camera's detection and recording on or off",
+  set_detection_zones: "Choose the areas of a camera view that trigger motion alerts",
+  delete_clip: "Permanently delete a saved camera clip",
   // Switch
   get_switch_ports: "See what's plugged into each network port",
   get_switch_vlans: "See how your network ports are grouped",

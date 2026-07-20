@@ -47,6 +47,7 @@ import {
   enableDetection,
   disableDetection,
   deleteCamera,
+  deleteEvent,
   addCamera,
   syncCamerasFromDb,
   fetchEvents,
@@ -1057,6 +1058,54 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // --- Delete a single event + its clip (WARP-1440) ---
+  //
+  // Permanently removes the Frigate event, its saved clip, and its
+  // snapshot from disk. Destructive and irreversible, so the guard
+  // follows the two precedents that apply:
+  //
+  //   - Human roles: owner/admin/family — the same set every other
+  //     destructive camera route admits (DELETE /cameras/:name,
+  //     DELETE /cameras/faces/:name, DELETE /cameras/plates/:plate).
+  //   - MCP service principal: admitted via requireRoleOrMcpService,
+  //     mirroring POST /cameras/clips/share — the delete_clip LLM tool
+  //     dispatches through `_service:mcp`, and a plain requireRole
+  //     would 403 it before the delete could run. The unattended-agent
+  //     risk is covered on the tool side: delete_clip is
+  //     requiresConfirmation with a handler-enforced two-step
+  //     (confirmation_required until the user approves and the call is
+  //     re-issued with confirmed: true), same contract as memory_forget.
+  router.delete(
+    "/cameras/events/:eventId",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        if (!isValidEventId(req.params.eventId)) {
+          return res.status(400).json({ error: "Invalid event ID format" });
+        }
+        try {
+          await deleteEvent(req.params.eventId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg === "event_not_found") {
+            return res.status(404).json({ error: "Event not found" });
+          }
+          // Any other Frigate failure (non-2xx, timeout, unreachable) is
+          // an upstream error — surface it as 502 with the message so the
+          // caller can tell "Frigate said no" from "we blew up".
+          logger.warn(
+            { err, eventId: req.params.eventId },
+            "Frigate event delete failed",
+          );
+          return res.status(502).json({ error: msg });
+        }
+        res.json({ status: "deleted", event: req.params.eventId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // --- Reviews (Frigate 0.13+ severity-grouped clusters) ---
   //
   // Same filter shape as /cameras/events but the unit is a Review item
@@ -1573,7 +1622,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // Role: family stays admitted because the delete/disable mint routes admit
   // family; confirmNetworkCommand pins each token to its minting user, so a
   // family member can never confirm an owner/admin-minted subnet token.
-  router.post("/cameras/command/confirm", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1440: the MCP service principal is admitted so set_camera_detection
+  // can complete the WARP-41 disable handshake it starts on /disable — the
+  // token-pinned-to-minting-user rule means `_service:mcp` can only ever
+  // confirm tokens minted by its own 202.
+  router.post("/cameras/command/confirm", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const { confirmationToken, operation } = req.body ?? {};
@@ -1755,7 +1808,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Enable camera ---
-  router.post("/cameras/:name/enable", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1440: requireRoleOrMcpService so the set_camera_detection LLM tool
+  // (dispatching as `_service:mcp`) can toggle; human roles unchanged.
+  router.post("/cameras/:name/enable", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -1775,7 +1830,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Disable camera (Tier 2 — requires confirmation) ---
-  router.post("/cameras/:name/disable", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1440: requireRoleOrMcpService (see /enable). The Tier-2 202 +
+  // confirm handshake below applies to the MCP principal exactly as to humans.
+  router.post("/cameras/:name/disable", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2189,7 +2246,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/cameras/:name/settings", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-1440: requireRoleOrMcpService so the set_detection_zones LLM tool
+  // (dispatching as `_service:mcp`) can write zones; human roles unchanged.
+  router.patch("/cameras/:name/settings", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2399,8 +2458,20 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
    *   Export a time-range clip and stash it in /Clips/<camera>/<ts>.mp4 in
    *   the user's Nextcloud. Returns the resulting Nextcloud path so the
    *   dashboard can deep-link into the Files app.
+   *
+   * WARP-1439 — the export_clip LLM tool dispatches through the MCP service
+   * principal (`_service:mcp`), so the guard is requireRoleOrMcpService,
+   * mirroring POST /cameras/clips/share and DELETE /cameras/events/:eventId.
+   * For that trusted principal ONLY, the per-user Nextcloud credential rides
+   * in headers (same posture as the /api/files routes, WARP-861):
+   *   X-Nextcloud-Token: the user's NC app-password / session token
+   *   X-Nextcloud-User:  the username the export acts as
+   * Human sessions keep the session-based resolution (resolveNcToken +
+   * req.user.username) unchanged. Unlike share, export needs no confirmation
+   * gate: it writes into the caller's own Nextcloud rather than minting a
+   * public URL, so it is not a Tier-2 network command.
    */
-  router.post("/cameras/:name/clips/export", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/:name/clips/export", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2413,9 +2484,21 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!parsed.success) {
         return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
       }
-      const ncToken = await resolveNcToken(req);
+      const isMcp = req.user?.id === "_service:mcp";
+      let ncToken: string | null;
+      let userId: string | undefined;
+      if (isMcp) {
+        // No fallback for the service principal: silently exporting as some
+        // default user would be a privilege escalation, not a convenience.
+        const hdrToken = (req.header("X-Nextcloud-Token") ?? "").trim();
+        const hdrUser = (req.header("X-Nextcloud-User") ?? "").trim();
+        ncToken = hdrToken.length > 0 ? hdrToken : null;
+        userId = hdrUser.length > 0 ? hdrUser : undefined;
+      } else {
+        ncToken = await resolveNcToken(req);
+        userId = req.user?.username;
+      }
       if (!ncToken) return res.status(401).json({ error: "nextcloud_session_missing" });
-      const userId = req.user?.username;
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
 
       const result = await exportClip(ncToken, userId, {
