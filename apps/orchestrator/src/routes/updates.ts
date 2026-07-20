@@ -1,8 +1,9 @@
 /**
  * WARP-540 — `/api/updates/*`: the operator surface over the OTA update
  * agent (WARP-537 verify chain, WARP-538 poller + settings, WARP-539
- * apply/rollback). The dashboard's /settings/updates page is the only
- * intended consumer.
+ * apply/rollback). Consumers: the dashboard's /settings/updates page,
+ * plus (WARP-1450) the get_update_status / apply_update LLM tools on
+ * exactly two of the routes — see the RBAC paragraph below.
  *
  *   GET  /api/updates/status     — current committed release, the pending/
  *                                  in-flight row, the last terminal verdict
@@ -29,9 +30,17 @@
  *
  * RBAC: owner+admin across the WHOLE surface, reads included — same
  * posture as the voice proxy (ADR-004): release SHAs + failure history
- * are operator material, and `service` is denied everywhere. Mutations
- * additionally write a WARP-237 activity row (who forced a check, who
- * applied, who skipped, who moved the window).
+ * are operator material. Service principals are denied everywhere
+ * EXCEPT two routes that additionally admit the MCP server's pinned
+ * `_service:mcp` principal (WARP-1450, requireRoleOrMcpService) so the
+ * get_update_status / apply_update LLM tools can dispatch:
+ * GET /updates/status and POST /updates/apply-now. The route only ever
+ * sees the service principal there, so the TOOL enforces the human's
+ * forwarded role (owner/admin only) before dispatching — the
+ * list_threat_events precedent from WARP-1443; human behavior on every
+ * route is byte-identical. Mutations additionally write a WARP-237
+ * activity row (who forced a check, who applied, who skipped, who
+ * moved the window).
  *
  * Delegation only: this file never touches the update-agent internals —
  * it calls checkForUpdate / applyPendingUpdate / the settings module
@@ -52,7 +61,7 @@
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { config } from "../config.js";
@@ -162,8 +171,18 @@ export function createUpdatesRouter(
   const router = Router();
 
   // Owner/admin across reads AND mutations (see the header comment);
-  // `service` is never in the allowlist, so service principals are denied.
+  // `service` is never in the allowlist, so service principals are denied
+  // on every route that uses this guard.
   const guard = requireRole("owner", "admin");
+
+  // WARP-1450: the two routes the get_update_status / apply_update LLM
+  // tools dispatch through additionally admit the MCP server's pinned
+  // `_service:mcp` principal. This route layer only ever sees that
+  // service principal, so the tool handler enforces the human's
+  // forwarded role (owner/admin only) BEFORE dispatching — same defense
+  // split as list_threat_events (WARP-1443). Human RBAC through this
+  // guard is byte-identical to `guard` above.
+  const mcpToolGuard = requireRoleOrMcpService("owner", "admin");
 
   // In-process single-flight for apply-now — one dispatch at a time per
   // orchestrator process. The DB-side `applying`-row check below covers
@@ -171,9 +190,11 @@ export function createUpdatesRouter(
   let applyNowInFlight = false;
 
   // ── GET /api/updates/status ─────────────────────────────────
+  // WARP-1450: mcpToolGuard (not `guard`) — the get_update_status LLM
+  // tool reads this route as `_service:mcp`.
   router.get(
     "/updates/status",
-    guard,
+    mcpToolGuard,
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
         const [current, pending, lastVerdict, settings] = await Promise.all([
@@ -279,9 +300,12 @@ export function createUpdatesRouter(
   );
 
   // ── POST /api/updates/apply-now ─────────────────────────────
+  // WARP-1450: mcpToolGuard (not `guard`) — the apply_update LLM tool
+  // dispatches through this route as `_service:mcp`; the tool side
+  // gates on the human's forwarded owner/admin role before dispatching.
   router.post(
     "/updates/apply-now",
-    guard,
+    mcpToolGuard,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const runner = deps.getApplyRunner();

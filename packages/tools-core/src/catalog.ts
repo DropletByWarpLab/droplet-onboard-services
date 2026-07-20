@@ -174,7 +174,15 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "erp_schedule_appointment",
   ],
   business: ["business_profile_get"],
-  system: ["get_system_health", "list_drives", "list_storage_pools"],
+  system: [
+    "get_system_health",
+    "list_drives",
+    "list_storage_pools",
+    "get_drive_health",
+    "get_audit_log",
+    "get_update_status",
+    "apply_update",
+  ],
   data: [
     "encode_text",
     "decode_text",
@@ -302,6 +310,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   get_system_health: "Check that your Droplet is running smoothly",
   list_drives: "See your storage drives and free space",
   list_storage_pools: "Check your storage pools and whether any need attention",
+  get_drive_health: "Check your drives' health and temperature",
+  get_audit_log: "See what your Droplet and household have done recently",
+  get_update_status: "Check for software updates and their progress",
+  apply_update: "Install the pending software update (services restart briefly)",
   // Memory
   memory_recall: "Recall things your Droplet remembers about you",
   memory_extract_fact: "Remember a preference so your Droplet recalls it later",

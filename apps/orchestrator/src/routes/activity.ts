@@ -5,9 +5,13 @@
  *   POST /api/activity/export   — sealed JSON-Lines bundle (AC6)
  *   GET  /api/activity/verify   — server-side hash-chain walk (WARP-246)
  *
- * All routes are gated to owner/admin via `requireOwnerOrAdmin` — the
- * activity log can reveal cross-user metadata (other family members'
- * file activity, smart-home commands) so guests/family are kept out.
+ * All routes are gated via `requireOwnerOrAdmin`: owner/admin humans,
+ * plus (WARP-1443) the MCP server's pinned `_service:mcp` principal so
+ * the list_threat_events LLM tool can read the feed — the tool side
+ * enforces the human's forwarded owner/admin role before dispatching
+ * (see the guard's comment below). The activity log can reveal
+ * cross-user metadata (other family members' file activity, smart-home
+ * commands) so guests/family are kept out.
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
