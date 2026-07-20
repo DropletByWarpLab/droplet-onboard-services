@@ -34,6 +34,18 @@ function requireOwnerOrAdmin(
   res: Response,
   next: NextFunction,
 ): void {
+  // WARP-1443: additionally admit the MCP service principal
+  // (`_service:mcp`, same id+role pin as requireRoleOrMcpService in
+  // middleware/auth.ts) so the list_threat_events LLM tool can read the
+  // feed. Defense split: this route only ever sees the service
+  // principal, so the TOOL enforces the human's role (WARP-845
+  // forwarded role, owner/admin only) before dispatching — the same
+  // cross-user-metadata boundary this gate enforces for direct
+  // dashboard calls. Human behavior below is byte-identical.
+  if (req.user?.id === "_service:mcp" && req.user.role === "service") {
+    next();
+    return;
+  }
   const role = req.user?.role;
   if (role === "owner" || role === "admin") {
     next();

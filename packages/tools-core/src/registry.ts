@@ -21,6 +21,13 @@ import networkSummary from "./handlers/network/summary.js";
 import listApDevices from "./handlers/network/list-ap-devices.js";
 import approveAp from "./handlers/network/approve-ap.js";
 import decommissionAp from "./handlers/network/decommission-ap.js";
+// WARP-1443: network depth — bandwidth, VPN peer visibility, threat feed
+// (handler role-gated), Wi-Fi password rotation, per-device schedules.
+import getBandwidthUsage from "./handlers/network/get-bandwidth-usage.js";
+import listVpnPeers from "./handlers/network/list-vpn-peers.js";
+import listThreatEvents from "./handlers/network/list-threat-events.js";
+import setWifiPassword from "./handlers/network/set-wifi-password.js";
+import setDeviceSchedule from "./handlers/network/set-device-schedule.js";
 
 // files
 import listFiles from "./handlers/files/list-files.js";
@@ -183,6 +190,12 @@ const allTools: Tool[] = [
   listApDevices,
   approveAp,
   decommissionAp,
+  // WARP-1443: network depth (reads Tier-1; password/schedule Tier-2)
+  getBandwidthUsage,
+  listVpnPeers,
+  listThreatEvents,
+  setWifiPassword,
+  setDeviceSchedule,
   // files
   listFiles,
   readFile,

@@ -87,8 +87,12 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  // WARP-171: per-route guard. owner + admin only.
-  router.post("/network/wifi/password", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only. WARP-1443: the MCP
+  // principal is additionally admitted so the set_wifi_password tool
+  // reaches the safety layer — set_wifi_password is Tier-2, so the AI
+  // path only ever mints a 202 confirmation token here; the confirm
+  // endpoint that executes it stays human-only. Human RBAC unchanged.
+  router.post("/network/wifi/password", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { iface_section = "default_radio0", password } = req.body;
       if (!password || typeof password !== "string") {

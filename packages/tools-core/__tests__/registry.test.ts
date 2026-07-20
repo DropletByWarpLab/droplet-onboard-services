@@ -132,6 +132,12 @@ const EXPECTED_TOOL_NAMES = [
   "set_camera_detection",
   "set_detection_zones",
   "delete_clip",
+  // WARP-1443 — network depth (reads Tier-1; password/schedule Tier-2)
+  "get_bandwidth_usage",
+  "list_vpn_peers",
+  "list_threat_events",
+  "set_wifi_password",
+  "set_device_schedule",
 ];
 
 describe("TOOLS registry", () => {
@@ -231,6 +237,18 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("set_detection_zones")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresWrite).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresConfirmation).toBe(true);
+    // WARP-1443 — network reads are Tier-1 (list_threat_events additionally
+    // role-gates INSIDE the handler, WARP-845); password/schedule are Tier-2.
+    expect(TOOLS.get("get_bandwidth_usage")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_bandwidth_usage")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("list_vpn_peers")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_vpn_peers")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("list_threat_events")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_threat_events")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("set_wifi_password")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_wifi_password")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("set_device_schedule")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_device_schedule")?.requiresConfirmation).toBe(true);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

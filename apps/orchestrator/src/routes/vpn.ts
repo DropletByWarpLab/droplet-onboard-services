@@ -324,7 +324,17 @@ export function createVpnRouter(
   router.get("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
-      const where = isAdmin(req) ? {} : { userId: user.username };
+      // WARP-1443: the MCP service principal (`_service:mcp`, same id+role
+      // pin as requireRoleOrMcpService) gets the admin (full-list) view on
+      // this GET/list path ONLY — list_vpn_peers is a Tier-1 read and the
+      // row selection carries no key material (peer PUBLIC keys only;
+      // private keys are never stored). The tool enforces the human's
+      // forwarded role before dispatching. VPN write routes stay
+      // human-only (deliberate policy exclusion, WARP-1444).
+      const isMcpService =
+        req.user?.id === "_service:mcp" && req.user.role === "service";
+      const where =
+        isAdmin(req) || isMcpService ? {} : { userId: user.username };
       const peers = await prisma.vpnPeer.findMany({
         where,
         orderBy: { createdAt: "desc" },
