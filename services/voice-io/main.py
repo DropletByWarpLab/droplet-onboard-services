@@ -76,6 +76,7 @@ from voice.pipeline import (
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     DspRestartSkipped,
+    MeasurementUnavailable,
     WakePipeline,
 )
 from voice.llm import build_llm_from_env
@@ -865,9 +866,15 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
 def audio_measure(req: MeasureRequest) -> MeasureResponse:
     """Wizard measurement capture (WARP-1055): noise floor / speech peak.
 
-    Same capture mechanism as /audio/test-record (`measure_input_level`
-    → sounddevice.rec on the picked input) so it coexists with the wake
-    pipeline's stream exactly the way the proven test-record path does.
+    WARP-1410 — measured from the wake pipeline's ALREADY-OPEN capture
+    stream, never a second `sounddevice.rec`. The reSpeaker's hw device is
+    exclusive, so opening a second stream while the assistant is listening
+    always failed with PortAudio -9985 ("Device unavailable") — which
+    dead-ended the wizard's "let's listen to the room" step even on a
+    perfectly healthy mic. Calibration mode (WARP-1059) suppresses wake
+    HANDLING but keeps the stream open, so it never freed the device
+    either. The sounddevice fallback below only runs when there is NO
+    pipeline holding the device (no mic at boot / startup bailed).
     """
     r = _resolve()
     if r.input_device is None:
@@ -881,12 +888,19 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     if not _capture_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
-        result = measure_input_level(
-            duration_s=seconds,
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            device=r.input_device.index,
-        )
+        pipeline = _pipeline
+        if pipeline is not None:
+            try:
+                result = pipeline.measure_input(seconds)
+            except MeasurementUnavailable as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+        else:
+            result = measure_input_level(
+                duration_s=seconds,
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                device=r.input_device.index,
+            )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except _PortAudioError as exc:
