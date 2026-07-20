@@ -1,6 +1,8 @@
 # Screened web access for LLM tools — design (WARP-1427)
 
-**Status:** Draft for review
+**Status:** Decisions 1–2 recorded 2026-07-20 (search provider, no
+per-domain confirmation in v1); question 3 (default weather location)
+still open. Implementation tickets filed (§6).
 **Tickets:** WARP-1427 (this design); parent analysis WARP-1423
 **Tools covered:** `web_fetch`, `web_search`, `get_weather`, `currency_convert` rate refresh
 
@@ -121,28 +123,29 @@ structured errors (`EGRESS_DISABLED` with a dashboard pointer,
 |---|---|---|---|
 | Weather | Open-Meteo (keyless, no account) | NWS (US-only) | Open-Meteo = zero-credential, minimal data class |
 | Rates | ECB daily reference (keyless) | exchangerate.host | ECB is authoritative, 1 fetch/day, EUR-based math |
-| Search | Brave Search API (key, cheap tier) | Self-hosted SearXNG on the edge (no key, more RAM; fits ≥32 GB SKUs) | API = 1 vendor sees queries; SearXNG = privacy-max but operational surface |
+| Search | **DECIDED (Romain, 2026-07-20): Brave Search API** — a paid API; key + billing accepted | Self-hosted SearXNG (rejected: RAM + operational surface on the box) | Queries leave the box to one vendor — reflected in the allowlist entry's data class and the channel's dashboard copy |
 
-Recommendation: phase 1 ships weather + rates (fixed keyless
-destinations, lowest risk); phase 2 `web_fetch` (SSRF + sanitization
-hardening); phase 3 `web_search` after the provider decision.
+Phasing: phase 1 ships weather + rates (fixed keyless destinations,
+lowest risk); phase 2 `web_fetch` (SSRF + sanitization hardening);
+phase 3 `web_search` on Brave.
 
-## 6. Implementation tickets (to be filed on approval)
+## 6. Implementation tickets (filed 2026-07-20)
 
-1. `ambient_data` channel + `services/web-fetch` skeleton + weather/rates
-   tools (+ allowlist entries, audit rows, caching).
-2. `web_fetch` tool + SSRF/sanitization screens + `user-requested-url`
-   allowlist class.
-3. `web_search` tool + provider integration per the §5 decision.
-4. Dashboard: off-LAN settings rows for the two new channels; activity
-   feed rendering for `sub:"web_egress"`.
+1. **WARP-1436** — `ambient_data` channel + `services/web-fetch` skeleton
+   + weather/rates tools (+ allowlist entries, audit rows, caching, and
+   the channel's dashboard settings row).
+2. **WARP-1437** — `web_fetch` tool + SSRF/sanitization screens +
+   `user-requested-url` allowlist class (+ its dashboard copy).
+3. **WARP-1438** — `web_search` tool on the Brave Search API (paid key;
+   per-device secret, never tracked).
 
 ## 7. Open questions
 
-1. Search provider: Brave API vs self-hosted SearXNG (§5) — privacy
-   posture vs operational surface.
-2. Should `web_fetch` verification also require per-domain first-use
-   confirmation in chat (one-time "allow example.com?" prompt persisted
-   as an explicit allow row), or is the channel gate + screening enough?
-3. Home location for default weather: reuse an existing workspace
-   setting or add one (explicit column, never derived)?
+1. ~~Search provider~~ — **decided 2026-07-20: Brave Search API** (paid;
+   key + billing accepted). See §5 and WARP-1438.
+2. ~~Per-domain first-use confirmation for `web_fetch`~~ — **decided
+   2026-07-20: not in v1**; the channel gate + per-request screening is
+   the v1 control. Shelved with full scope in **WARP-1435**.
+3. **Still open** — home location for default weather: reuse an existing
+   workspace setting or add one (explicit column, never derived)?
+   Until decided, `get_weather` requires an explicit `location` argument.
