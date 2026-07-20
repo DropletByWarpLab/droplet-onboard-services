@@ -92,6 +92,24 @@ class _DeviceError(Exception):
     recovering), never this type."""
 
 
+class DspRestartSkipped(Exception):
+    """Raised BY an injected ``dsp_restart`` heal to say "I issued no
+    reboot" (WARP-1409).
+
+    Public, because it is half the contract every heal implements: the
+    bounded auto-recovery loop has to tell a restart that *ran* (and may
+    have failed — that costs an attempt and starts a cooldown) apart from
+    one that never reached the chip at all. `main._auto_restart_dsp`
+    raises it when an operator's POST /voice/restart-processor already
+    holds the DSP lock.
+
+    Explicit signal, never inferred from a falsy/None return: heals are
+    ``Callable[[], Any]`` and the natural ones (`list.append`, a bare
+    subprocess call) already return None, so "returned nothing" cannot
+    mean "did nothing". A skip spends no attempt and arms no cooldown —
+    the next probe tick genuinely retries."""
+
+
 # ────────────────────────────────────────────────────────────────────
 # Intent gate — suppress speculative tool calls
 # ────────────────────────────────────────────────────────────────────
@@ -849,6 +867,12 @@ class WakePipeline:
         wedged_escalated) and stops — a human power cycle is then needed.
         When audio flows again the machine resets to nominal.
 
+        A heal that raises ``DspRestartSkipped`` issued no reboot at all,
+        so the tick costs nothing: the attempt counter and the cooldown
+        clock are handed back and the next tick retries. Only a restart
+        that actually ran — including one that ran and *failed* — spends
+        part of the bounded budget.
+
         No-op when ``_dsp_restart`` is None (feature disabled).
         """
         if self._dsp_restart is None:
@@ -884,6 +908,14 @@ class WakePipeline:
                 )
                 return
             attempt = self._dsp_restart_attempts + 1
+            # Remember the prior bookkeeping so a heal that turns out to
+            # have issued nothing can hand the attempt back untouched.
+            prev_attempts = self._dsp_restart_attempts
+            prev_last_restart_at = self._dsp_last_restart_at
+            prev_recovery = self._dsp_recovery
+            # Claim the attempt BEFORE dropping the lock so a concurrent
+            # tick can't double-issue, and so status() reads
+            # wedged_restarting for the ~seconds the reboot takes.
             self._dsp_restart_attempts = attempt
             self._dsp_last_restart_at = now
             self._dsp_recovery = "restarting"
@@ -896,6 +928,27 @@ class WakePipeline:
         )
         try:
             self._dsp_restart()
+        except DspRestartSkipped as exc:
+            # The heal declined — no `xvf_host REBOOT 1` reached the chip
+            # (an operator restart holds the DSP lock). Release the claim:
+            # a skipped tick must spend none of the bounded budget and arm
+            # no cooldown, or an operator holding that lock across a few
+            # probe ticks could latch `escalated` with zero real reboots
+            # behind it. Compare-and-swap so we only undo OUR claim — a
+            # recovery edge on another thread wins.
+            with self._lock:
+                if (
+                    self._dsp_restart_attempts == attempt
+                    and self._dsp_last_restart_at == now
+                    and self._dsp_recovery == "restarting"
+                ):
+                    self._dsp_restart_attempts = prev_attempts
+                    self._dsp_last_restart_at = prev_last_restart_at
+                    self._dsp_recovery = prev_recovery
+            logger.info(
+                "auto DSP restart skipped (%s) — no attempt spent, retrying "
+                "on the next probe tick", exc,
+            )
         except Exception as exc:
             logger.warning("auto DSP restart attempt %d failed: %s", attempt, exc)
 

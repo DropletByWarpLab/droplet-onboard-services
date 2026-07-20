@@ -42,6 +42,7 @@ from voice.pipeline import (
     DEFAULT_THRESHOLD,
     DEFAULT_VISUAL_DECAY_S,
     RMS_DBFS_FLOOR,
+    DspRestartSkipped,
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
@@ -2575,6 +2576,100 @@ class TestDspAutoRecovery:
         s = pipe.status()
         assert s.dsp_restart_attempts == 0
         assert s.mic_fault is None
+
+    # ── Skipped (never-issued) restarts — WARP-1409 review finding ──
+    # A heal that declines to act (an operator's manual
+    # /voice/restart-processor holds the DSP lock) is NOT an attempt: no
+    # `xvf_host REBOOT 1` reached the chip, so it must spend none of the
+    # bounded budget and arm no cooldown.
+
+    def test_skipped_restart_spends_no_attempt_and_arms_no_cooldown(self):
+        calls = []
+
+        def skip():
+            calls.append(1)
+            raise DspRestartSkipped("a manual restart is in flight")
+
+        pipe = self._wedged_pipe(skip)
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1  # the heal was invoked...
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0      # ...but issued nothing
+        assert s.dsp_last_restart_at is None    # no cooldown armed
+        assert s.mic_fault == "flatlined"       # not "wedged_restarting"
+
+    def test_skip_genuinely_retries_on_the_next_tick(self):
+        # A long cooldown is the sharp end of the bug: if a skip armed
+        # `dsp_last_restart_at`, the retry tick would be suppressed for
+        # an hour for a reboot that never happened.
+        calls = []
+        skipping = [True]
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_cooldown_s=3600.0)
+        pipe._maybe_auto_recover_dsp()          # skipped
+        assert pipe.status().dsp_restart_attempts == 0
+        skipping[0] = False
+        pipe._maybe_auto_recover_dsp()          # must NOT be cooled down
+        assert len(calls) == 1
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.dsp_last_restart_at is not None
+        assert s.mic_fault == "wedged_restarting"
+
+    def test_repeated_skips_never_exhaust_the_budget(self):
+        # The reported failure mode: an operator holding the manual lock
+        # across several probe ticks must not latch wedged_escalated
+        # without a single real reboot behind it.
+        skipping = [True]
+        calls = []
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_max_attempts=1)
+        for _ in range(5):
+            pipe._maybe_auto_recover_dsp()
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault == "flatlined"   # NOT wedged_escalated
+        assert calls == []
+        # The lock frees → the budget is intact and the heal really runs.
+        skipping[0] = False
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+
+    def test_skip_after_a_real_attempt_preserves_the_earlier_attempt(self):
+        # Rollback must restore the PRIOR bookkeeping, not zero it — an
+        # attempt already spent stays spent, and its cooldown clock stays
+        # anchored to the real reboot.
+        calls = []
+        skipping = [False]
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_max_attempts=3)
+        pipe._maybe_auto_recover_dsp()          # real attempt 1
+        first_at = pipe.status().dsp_last_restart_at
+        assert pipe.status().dsp_restart_attempts == 1
+        assert first_at is not None
+        skipping[0] = True
+        pipe._maybe_auto_recover_dsp()          # skipped
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.dsp_last_restart_at == first_at
+        assert s.mic_fault == "wedged_restarting"  # attempt 1 still in flight
+        assert len(calls) == 1
 
 
 class TestInputLevelTracking:

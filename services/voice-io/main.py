@@ -75,6 +75,7 @@ from voice.pipeline import (
     DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
+    DspRestartSkipped,
     WakePipeline,
 )
 from voice.llm import build_llm_from_env
@@ -1033,13 +1034,16 @@ def _auto_restart_dsp() -> None:
     """WARP-1409 — the heal the pipeline's bounded auto-recovery loop
     injects. Shares `_restart_lock` with POST /voice/restart-processor so
     an operator restart and the auto-recovery never issue overlapping DSP
-    reboots: if the lock is held (a manual restart is mid-flight) the auto
-    tick simply skips — the pipeline re-verifies on the next probe tick and
-    retries if still wedged. `restart_dsp` stays module-scoped so the
-    endpoint tests' monkeypatch of `main.restart_dsp` still covers this
-    call site too (WARP-1288)."""
+    reboots: if the lock is held (a manual restart is mid-flight) this
+    raises `DspRestartSkipped` so the pipeline knows no reboot went out —
+    it spends no attempt, arms no cooldown, and retries on the next probe
+    tick. Returning normally means the reboot was genuinely issued.
+    `restart_dsp` stays module-scoped so the endpoint tests' monkeypatch
+    of `main.restart_dsp` still covers this call site too (WARP-1288)."""
     if not _restart_lock.acquire(blocking=False):
-        return
+        raise DspRestartSkipped(
+            "a manual /voice/restart-processor is already in flight"
+        )
     try:
         restart_dsp()
     finally:
