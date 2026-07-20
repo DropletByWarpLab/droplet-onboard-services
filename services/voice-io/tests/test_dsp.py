@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 import main
 from voice import dsp
 from voice.dsp import DspRestartError, restart_dsp
+from voice.pipeline import DspRestartSkipped
 
 
 @pytest.fixture
@@ -178,6 +179,33 @@ class TestRestartProcessorEndpoint:
             main._restart_lock.release()
         # And the lock is released after a normal call — a follow-up works.
         assert client.post("/voice/restart-processor").status_code == 200
+
+    def test_auto_restart_signals_skip_when_the_manual_lock_is_held(
+        self, monkeypatch,
+    ):
+        # WARP-1409 — the auto-recovery heal must say "I issued nothing"
+        # DISTINCTLY from "I rebooted the chip", or the pipeline spends a
+        # bounded attempt (and a cooldown) on a reboot that never ran.
+        calls = []
+        monkeypatch.setattr(main, "restart_dsp", lambda: calls.append(1))
+        assert main._restart_lock.acquire(blocking=False)
+        try:
+            with pytest.raises(DspRestartSkipped):
+                main._auto_restart_dsp()
+        finally:
+            main._restart_lock.release()
+        assert calls == []  # no reboot was issued
+
+    def test_auto_restart_issues_the_reboot_when_the_lock_is_free(
+        self, monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(main, "restart_dsp", lambda: calls.append(1))
+        main._auto_restart_dsp()  # returns normally — no skip signal
+        assert calls == [1]
+        # And the lock is released for the next tick / manual restart.
+        assert main._restart_lock.acquire(blocking=False)
+        main._restart_lock.release()
 
     def test_works_without_a_pipeline(self, client, monkeypatch):
         # The reboot is a USB control write — a box whose wake loop never

@@ -307,6 +307,38 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
+  # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
+  # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged
+  # XVF3800 DSP. Vendored + checksum-verified (scripts/host/xvf/) so DSP recovery
+  # survives a reflash instead of being wiped with /tmp. xvf_host resolves its
+  # dlopen'd libs binary-adjacent, so the libs are co-located with the binary;
+  # /usr/local/bin is bind-mounted read-only into voice-io at /host/usr-local-bin,
+  # so this one install serves BOTH the host watchdog and the container endpoint.
+  local xvf_src
+  case "$(uname -m)" in
+    x86_64) xvf_src="$host_src/xvf/linux_x86_64" ;;
+    *)      xvf_src="" ;;
+  esac
+  if [ -z "$xvf_src" ] || [ ! -f "$xvf_src/xvf_host" ]; then
+    log_warn "xvf_host: no vendored payload for arch $(uname -m) — XVF3800 DSP self-heal unavailable"
+  elif ! ( cd "$xvf_src" && sha256sum -c SHA256SUMS ) >/dev/null 2>&1; then
+    # Never install an unverified control binary. Loud but non-fatal: the box
+    # still boots and the voice_dsp check reports the missing tool honestly.
+    log_error "xvf_host: SHA256 verification FAILED in $xvf_src — refusing to install (DSP self-heal unavailable)"
+  else
+    sudo install -m 0755 "$xvf_src/xvf_host" /usr/local/bin/xvf_host
+    sudo install -m 0644 \
+      "$xvf_src/libcommand_map.so" "$xvf_src/libdevice_usb.so" \
+      "$xvf_src/transport_config.yaml" "$xvf_src/dfu_cmds.yaml" \
+      /usr/local/bin/
+    if [ -x /usr/local/bin/xvf_host ]; then
+      log_success "Installed xvf_host + libs to /usr/local/bin (XVF3800 DSP self-heal survives reflash)"
+    else
+      log_error "xvf_host: install ran but /usr/local/bin/xvf_host is not executable"
+    fi
+  fi
+
   # --- WARP-268 egress-audit collector -------------------------------------
   sudo install -d -m 0755 /usr/local/lib/droplet-egress-audit
   sudo install -m 0644 "$REPO_ROOT/services/egress-audit/"*.py \
@@ -704,6 +736,10 @@ configure_single_box_env() {
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
 #   OLLAMA_URL           compose-internal `ollama` service
+#   RAGAS_OLLAMA_URL     rag-eval judge → the same in-network ollama (/v1);
+#                        the compose host.docker.internal default is
+#                        unreachable here (bundled ollama publishes
+#                        loopback-only on the host)
 #   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
 #   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
@@ -764,6 +800,13 @@ EOF
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
   upsert_env OLLAMA_URL          http://ollama:11434
+  # RAGAS judge → the same in-network `ollama` service. The compose default
+  # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
+  # but the bundled single-box container publishes only 127.0.0.1:11434 on
+  # the host — a loopback bind is unreachable from the bridge-gateway IP on
+  # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
+  # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
+  upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
   upsert_env DROPLET_TPM_BACKEND mock
@@ -897,5 +940,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

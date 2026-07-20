@@ -8,10 +8,12 @@ cover the HTTP-triggered path that apscheduler doesn't see.
 
 Design (per CLAUDE.md "no guessing, ever"):
   - Run status is an EXPLICIT enum field on an in-memory record, never
-    derived from file absence. The filesystem (results-*.json) is the
-    source of truth for COMPLETED runs that survive a restart; this
-    in-memory dict is the source of truth for IN-FLIGHT runs. A rag-eval
-    restart forgets in-flight runs — that's documented and acceptable.
+    derived from file absence. The filesystem is the source of truth for
+    TERMINAL runs that survive a restart: finish() persists a durable
+    record-<runId>.json (succeeded AND failed, runs AND bootstraps) next
+    to the runner's results-*.json. This in-memory dict is the source of
+    truth for IN-FLIGHT runs only. A rag-eval restart forgets in-flight
+    runs — that's documented and acceptable.
   - A single asyncio.Lock-free flag (`_busy`) guards admission. We use a
     plain threading.Lock because the actual run executes in a thread
     executor (`loop.run_in_executor`), so the flag is touched from both
@@ -26,14 +28,16 @@ exclusive.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 
 logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 # IDX-08 — cap the in-memory history so it can't grow unbounded. The hourly
 # cron would otherwise add ~8,760 RunRecords/year with no eviction, despite the
@@ -71,6 +75,49 @@ class RunRecord:
     error: Optional[str] = None
     runs_total: Optional[int] = None
     runs_done: int = 0
+
+
+def _record_payload(rec: RunRecord) -> dict[str, Any]:
+    """Wire/disk shape of a terminal run record. Matches what the server's
+    GET /runs returns for in-memory records, so a record file loaded after
+    a restart is indistinguishable from a live one."""
+    payload: dict[str, Any] = {
+        "runId": rec.run_id,
+        "kind": rec.kind,
+        "status": rec.status.value,
+        "startedAt": rec.started_at.isoformat(),
+        "finishedAt": rec.finished_at.isoformat() if rec.finished_at else None,
+    }
+    if rec.error:
+        payload["error"] = rec.error
+    if rec.kind == "bootstrap":
+        payload["runsTotal"] = rec.runs_total
+        payload["runsDone"] = rec.runs_done
+    return payload
+
+
+def _persist_record(run_id: str, payload: dict[str, Any]) -> None:
+    """Best-effort atomic write of RUNS_DIR/record-<runId>.json.
+
+    Never raises — a full disk or bad mount must not break finish() (the
+    busy-flag clear already happened; losing one record is the lesser
+    evil, and the failure is logged). tmp-file + os.replace so a reader
+    (GET /runs globbing record-*.json) never sees a half-written file.
+    """
+    try:
+        # Imported (and the dir resolved) at CALL time, not module import:
+        # keeps `import run_state` stdlib-only for the unit suite and lets
+        # tests monkeypatch config.RUNS_DIR per-test.
+        import config
+
+        runs_dir = config.RUNS_DIR
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = runs_dir / f"record-{run_id}.json.tmp"
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, runs_dir / f"record-{run_id}.json")
+    except Exception:  # noqa: BLE001 — best-effort by contract
+        logger.warning("failed to persist run record %s", run_id, exc_info=True)
 
 
 class RunStateStore:
@@ -153,13 +200,20 @@ class RunStateStore:
         Always clears `_busy` even if the run_id is unknown to us, so a
         bug in the caller can't wedge the service into a permanently-busy
         state.
+
+        Also persists a durable record-<runId>.json (best-effort, atomic)
+        so terminal runs — crucially FAILED ones, which write no results
+        file — survive both current_run_id clearing and a restart. This is
+        the single choke point covering the HTTP and scheduler paths.
         """
+        payload: Optional[dict[str, Any]] = None
         with self._lock:
             rec = self._records.get(run_id)
             if rec is not None:
                 rec.status = status
                 rec.finished_at = self._now()
                 rec.error = error
+                payload = _record_payload(rec)
             if self._current_run_id == run_id:
                 self._busy = False
                 self._current_run_id = None
@@ -173,6 +227,10 @@ class RunStateStore:
                 )
                 self._busy = False
                 self._current_run_id = None
+        # Outside the lock: file I/O must never delay (or, on error, block)
+        # another try_begin. The record was snapshotted under the lock.
+        if payload is not None:
+            _persist_record(run_id, payload)
 
     def get(self, run_id: str) -> Optional[RunRecord]:
         with self._lock:

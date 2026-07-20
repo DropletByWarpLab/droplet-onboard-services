@@ -40,13 +40,46 @@ GPU-bound and adds nothing for end users.)
    subprocess hits the orchestrator's `/api/admin/retrieval-eval/search`
    for each query, synthesizes answers, scores via the judge LLM, and
    writes `/data/rag-eval/runs/results-<UTC>.json` + `.md`.
-3. Per-run output is isolated under `/data/rag-eval/runs/`. The
-   container never deletes old runs — operator sweeps `runs/` when the
-   volume grows uncomfortably.
+3. Per-run output is isolated under `/data/rag-eval/runs/`. Retention
+   (WARP-1192): after each run the service prunes to the newest 500
+   `results-*.json`/`.md` pairs and — independently — the newest 500
+   `record-*.json` run records (`RAG_EVAL_KEEP_RUNS` overrides the 500).
+   The lists are pruned separately because a failed run has a record but
+   no results pair.
 
 The container's local timezone matters because the cron expression is
 written in local time. Set `TZ=America/Los_Angeles` (or your zone)
 either in the compose `environment:` block or in `.env`.
+
+## Seeding the eval fixture corpus (WARP-1407)
+
+The goldens (`tests/retrieval-eval/ragas/goldens.yaml`) are written
+against the WARP-224 fixture corpus, NOT a real user's files — pointed
+at a real corpus, every metric mean reads ~0.0 and baselines can't be
+bootstrapped. Seed the fixtures under a dedicated Nextcloud user so
+eval numbers are stable, golden-comparable, and never pollute anyone's
+real retrieval:
+
+```bash
+# On the appliance host (stack up). Idempotent — re-run after a
+# factory reset or volume wipe.
+./scripts/seed-eval-fixtures.sh
+
+# Then aim the eval at the seeded corpus (recreate, NOT restart —
+# `docker restart` never re-reads env_file):
+#   .env: RAGAS_EVAL_USER=eval-fixtures
+docker compose -p droplet -f docker/docker-compose.yml --env-file .env \
+  up -d --force-recreate --no-deps rag-eval
+```
+
+The script creates NC user `eval-fixtures` (via occ; the user never
+logs in), copies `sample.pdf` / `simple.zip` / the WARP-206 PNG / the
+WARP-224 EML into `files/test-rag-end-to-end/`, runs `occ files:scan`,
+and polls `FileContentChunk` until the indexer has embedded them.
+Audio/video fixtures are not seeded (they need transcribe-now,
+WARP-218); the eval tolerates the partial set. Verify with an ad-hoc
+run: `error_counts` all zero and non-zero `context_recall` /
+`llm_context_precision_with_reference` means.
 
 ## Bootstrap baselines (WARP-436 batch D path)
 
@@ -66,6 +99,20 @@ it out of the volume and committing into the repo at
 WARP-437 per-class assertions in
 `tests/retrieval-eval/run.integration.test.ts:252-304` from recording
 mode to enforced gates.
+
+**Include independent-session runs before promoting (WARP-1407
+lesson).** The bootstrap's 5 runs execute back-to-back — correlated
+samples whose IQR can collapse to ~0, producing floors ≈ p50 that the
+very next fresh-session run "fails" on ordinary judge variance (seen
+live: precision iqr 0.006 across the bootstrap vs a 0.30–0.43 spread
+across sessions). The aggregator now clamps every floor to
+`min(sample means) − FLOOR_MARGIN` as a backstop, but the real fix is
+sample diversity: before promoting, re-run the aggregate over a
+directory that also contains a few single runs from different
+sessions/days (copy the relevant `results-*.json` into a scratch dir
+and point `ragas_runner.py aggregate --results-dir` at it). Exclude
+runs made against a different corpus or `RAGAS_EVAL_USER` — mixing
+corpora poisons the envelope.
 
 ## Ad-hoc single run (shell)
 
@@ -96,14 +143,16 @@ of apscheduler's `max_instances=1`.
 |----------------------|----------|
 | `POST /run`          | Start one RAGAS pass as a background task. `202 {runId, startedAt}`. `409 {error:"run_in_progress", runId}` if a run/bootstrap is already in flight. |
 | `POST /bootstrap`    | Body `{runs:int}` (default 5, clamped 1..10). Start N sequential runs + aggregate into `baselines.candidate.json` as a background task. `202 {runId, startedAt, runs}`. Same `409` semantics. |
-| `GET /runs`          | Recent runs (newest first, cap ~20). Completed runs from the filesystem (`results-*.json` + top-level `metrics`); in-flight overlaid from memory. |
-| `GET /runs/{runId}`  | Status of one run: `running \| succeeded \| failed \| unknown` (explicit enum — `unknown` when there's neither an in-memory record nor a results file), plus `resultsPath` + `metrics` if the file exists. |
+| `GET /runs`          | Recent runs (newest first, cap 20). Merges durable `record-<runId>.json` files (terminal runs — succeeded AND failed, runs AND bootstraps, written at finish), legacy `results-*.json` with no record (pre-upgrade successes, status inferred `succeeded`), and the in-flight run from memory (highest precedence). `resultsPath` + top-level `metrics` attached when `results-<runId>.json` exists; NaN/Infinity in results files are mapped to `null` on read. |
+| `GET /runs/{runId}`  | Status of one run: `running \| succeeded \| failed \| unknown` (explicit enum). Precedence: in-memory record → `record-<runId>.json` → legacy results file (inferred `succeeded`) → `unknown`. `resultsPath` + `metrics` attached if the results file exists. |
 | `GET /baselines`     | `baselines.candidate.json` if present, else `404 {error:"no_baselines"}`. |
 | `GET /health`        | `200 {status:"ok"}`. |
 
 In-flight state lives in an in-memory dict — a rag-eval restart forgets
-in-flight runs (the filesystem is the source of truth for completed
-runs). That's acceptable and intentional.
+in-flight runs. Terminal runs survive: every finish (succeeded or
+failed) writes an atomic `record-<runId>.json` under `runs/`, so failed
+runs and finished bootstraps stay visible across restarts. That split is
+acceptable and intentional.
 
 `RAG_EVAL_DISABLED=1` skips registering the scheduler's cron job but the
 HTTP server **still serves** — "disabled" means "no automatic schedule",

@@ -43,6 +43,7 @@ vi.mock("../middleware/auth.js", () => ({
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   requireRoleOrMcpService: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireRoleOrService: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePasswordChangeGate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   setAuthPrisma: () => {},
 }));

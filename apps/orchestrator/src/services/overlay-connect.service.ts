@@ -86,8 +86,8 @@ const noopLogger: OverlayLogger = {
 };
 
 /** The PoP fields the box attaches to every overlay message. `sig` is the
- *  base64 device-key signature; `sig_alg` is the algorithm the signer reported
- *  (ecdsa-sha256). `key_fingerprint` is the BOX device key fingerprint. */
+ *  base64 device-key signature; `sig_alg` is HQ's wire enum ("ecdsa-sha256" /
+ *  "rsa-pss"). `key_fingerprint` is the BOX device key fingerprint. */
 interface OverlayPoP {
   key_fingerprint: string;
   sig: string;
@@ -234,6 +234,18 @@ async function overlayFetch(
   }
 }
 
+/** Map the identity daemon's reported algorithm (e.g. "ECDSA-P256-SHA256") to
+ *  HQ's wire enum. HQ's `verifySignatureOverMessage` accepts ONLY
+ *  "ecdsa-sha256" / "rsa-pss" and fails CLOSED on anything else, so passing the
+ *  daemon string through verbatim 401s every overlay call. The tls-issuance
+ *  paths pin the literal for the same reason (see `signChallenge`). */
+function toWireSigAlg(algorithm: string): string {
+  const a = algorithm.trim().toLowerCase();
+  if (a.includes("ecdsa")) return "ecdsa-sha256";
+  if (a.includes("rsa")) return "rsa-pss";
+  return a;
+}
+
 async function signOverlayMessage(
   identity: Identity,
   message: string,
@@ -246,7 +258,7 @@ async function signOverlayMessage(
   return {
     key_fingerprint: keyFingerprint,
     sig: Buffer.from(signed.signature).toString("base64"),
-    sig_alg: signed.algorithm,
+    sig_alg: toWireSigAlg(signed.algorithm),
   };
 }
 

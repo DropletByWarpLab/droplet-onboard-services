@@ -8,7 +8,16 @@ import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { useScenes } from "@/lib/hooks/useScenes";
 import { useMatterCommandConfirm } from "@/lib/hooks/useMatterCommandConfirm";
 import { useAuth } from "@/lib/auth";
-import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
+import { RoomSections } from "@/components/smart-home/RoomSections";
+import { useToast } from "@/components/Toast";
+import {
+  flattenGrouped,
+  groupByRoom,
+  bulkLights,
+  displayName,
+} from "@/components/smart-home/rooms-model";
+import { useRooms } from "@/lib/hooks/useRooms";
+import type { Room } from "@/lib/types";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
 import { DeviceStats } from "@/components/smart-home/DeviceStats";
@@ -59,18 +68,22 @@ export default function DevicesPage() {
     }
   }
 
-  const groups = grouped
-    ? [
-        { title: "Lights", devices: grouped.lights },
-        { title: "Switches", devices: grouped.switches },
-        { title: "Climate", devices: grouped.climate },
-        { title: "Sensors", devices: grouped.sensors },
-        { title: "Media", devices: grouped.media },
-        { title: "Covers", devices: grouped.covers },
-        { title: "Locks", devices: grouped.locks },
-        { title: "Other", devices: grouped.other },
-      ]
-    : [];
+  // WARP-1396 — rooms are the page's primary grouping now.
+  const { rooms, createRoom, renameRoom, removeRoom, setAlias } = useRooms();
+  const layout = grouped
+    ? groupByRoom(flattenGrouped(grouped), rooms)
+    : { rooms: [], unassigned: [] };
+  const { toast } = useToast();
+  const allDevices = grouped ? flattenGrouped(grouped) : [];
+
+  // Turn every reachable light/switch in a room on/off (Tier-1, §5.2).
+  function handleBulkLights(room: Room, devices: MatterDevice[], on: boolean) {
+    const lights = bulkLights(devices);
+    for (const d of lights) {
+      request(d.nodeId, on ? "turn_on" : "turn_off");
+    }
+    if (lights.length > 0) toast(`${room.name} lights ${on ? "on" : "off"}`);
+  }
 
   const actions = (
     <>
@@ -139,15 +152,20 @@ export default function DevicesPage() {
               <DeviceStats grouped={grouped} routineCount={scenes.length} />
             )}
 
-            {groups.map((group) => (
-              <DeviceGroup
-                key={group.title}
-                title={group.title}
-                devices={group.devices}
+            {totalDevices > 0 && (
+              <RoomSections
+                layout={layout}
+                showNudge={rooms.length === 0}
                 onCommand={request}
                 onDeviceClick={setSelectedDevice}
+                onBulkLights={handleBulkLights}
+                actions={{
+                  create: createRoom,
+                  rename: renameRoom,
+                  remove: removeRoom,
+                }}
               />
-            ))}
+            )}
 
             {/* Routines — list + one-tap run (confirm-gated). */}
             {totalDevices > 0 && (
@@ -189,6 +207,12 @@ export default function DevicesPage() {
           device={selectedDevice}
           onCommand={request}
           onClose={() => setSelectedDevice(null)}
+          rooms={rooms}
+          onSetAlias={setAlias}
+          onCreateRoom={createRoom}
+          takenNames={allDevices
+            .filter((d) => d.nodeId !== selectedDevice.nodeId)
+            .map((d) => displayName(d))}
         />
       )}
 

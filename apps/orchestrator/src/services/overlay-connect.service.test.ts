@@ -34,7 +34,12 @@ function makeIdentity() {
       }),
     signWithDeviceKey: async (payload: Uint8Array) => {
       signedPayloads.push(new TextDecoder().decode(payload));
-      return { signature: new Uint8Array([1, 2, 3, 4]), algorithm: "ecdsa-sha256" };
+      // The REAL device-identity daemon reports "ECDSA-P256-SHA256" (see
+      // device-identity.client.ts) — NOT HQ's wire enum. The mock must tell the
+      // truth so the tests prove the service normalizes it to "ecdsa-sha256";
+      // a mock that pre-returns the wire enum hid a live 401 on every overlay
+      // call (HQ verifies fail-closed on unknown sig_alg strings).
+      return { signature: new Uint8Array([1, 2, 3, 4]), algorithm: "ECDSA-P256-SHA256" };
     },
   };
   return { identity, signedPayloads };

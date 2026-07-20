@@ -45,8 +45,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
-import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
-import type { AppCapabilities } from "@/lib/api";
+import { useModuleGate } from "@/lib/hooks/useModuleGate";
 
 type NavItem = {
   href: string;
@@ -61,13 +60,28 @@ type NavItem = {
    */
   requiresCapability?: "claudeActivity" | "ragEval";
   /**
-   * Hide unless the named user-facing module is enabled on this Droplet (GET
-   * /api/capabilities — readable by every authenticated role, unlike the
-   * admin-only probe above). WARP-1154/1155: the Projects entry is driven by
-   * this explicit flag, never by catching request errors. The hook fails
-   * open, so the entry only disappears on an explicit `false`.
+   * Hide unless the named user-facing module is EFFECTIVE (available && enabled)
+   * on this Droplet — GET /api/modules, readable by every authenticated role.
+   * WARP-1397: every toggleable module's nav entry carries its registry id
+   * here, so flipping a feature off in Settings → Features removes its nav
+   * entry (no dead, module-gated 404). The gate fails open, so an entry only
+   * disappears on a positive "off". Core modules (chat) are never tagged.
+   * The id must match the orchestrator module-registry id.
+   *
+   * Applies to TOP-LEVEL items only (visibleItems filters the group items).
+   * Children ride their parent's visibility — to gate a sub-nav entry, gate
+   * its parent, not the child (a child `requiresModule` is currently a no-op).
    */
-  requiresModule?: keyof AppCapabilities;
+  requiresModule?:
+    | "files"
+    | "email"
+    | "calendar"
+    | "projects"
+    | "knowledge"
+    | "cameras"
+    | "network"
+    | "smart_home"
+    | "voice";
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -112,6 +126,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/files",
         label: "Files",
         icon: FolderOpen,
+        requiresModule: "files",
         // Files sub-nav — the original nesting, now expressed via the
         // generalized `children` mechanism (was the standalone filesSubNav
         // const). Reveals on any /files/* route. "All files" is `exact` so
@@ -130,8 +145,8 @@ const NAV_GROUPS: NavGroup[] = [
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is
       // gated to owner/admin in the UI + server. No unread-count badge (the
       // NavItem type has no count field; out of scope).
-      { href: "/email", label: "Email", icon: Mail },
-      { href: "/calendar", label: "Calendar", icon: CalendarIcon },
+      { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
+      { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
       // ADR-026: native PM surface — sits next to Calendar (both are
       // time/workflow-oriented) and ahead of Knowledge (the read-only search
       // index). Page at /projects renders natively off /api/pm/* under the
@@ -139,7 +154,7 @@ const NAV_GROUPS: NavGroup[] = [
       // WARP-1154/1155: hidden when the orchestrator says the Projects module
       // is off, so the nav never advertises a surface the box won't serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
-      { href: "/knowledge", label: "Knowledge", icon: BookOpen },
+      { href: "/knowledge", label: "Knowledge", icon: BookOpen, requiresModule: "knowledge" },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
       // /context is "what's indexed" by capability density.
@@ -160,6 +175,7 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/cameras",
         label: "Cameras",
         icon: Video,
+        requiresModule: "cameras",
         children: [
           // Events replaces the old "Clips" entry — same icon, expanded UX.
           // The /clips route still resolves (kept as a redirect) so external
@@ -167,15 +183,15 @@ const NAV_GROUPS: NavGroup[] = [
           { href: "/events", label: "Events", icon: Film },
         ],
       },
-      { href: "/network", label: "Network", icon: Network },
+      { href: "/network", label: "Network", icon: Network, requiresModule: "network" },
       // WARP-302: "Devices" uses Cpu so it doesn't visually collide with
       // the Overview tab's LayoutDashboard glyph at thumb distance.
-      { href: "/devices", label: "Devices", icon: Cpu },
+      { href: "/devices", label: "Devices", icon: Cpu, requiresModule: "smart_home" },
       // WARP-1055: mic health + guided calibration. A peer surface, not
       // a Settings subpage — calibration is living, health-bearing state
       // (design brief §2). Ordered Cameras · Network · Devices · Voice.
-      { href: "/voice", label: "Voice", icon: Mic },
-      { href: "/remote-access", label: "Remote Access", icon: Globe },
+      { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
+      { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
       // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
       // provider #1 (the Patterson dental PMS Droplet reads directly over its
       // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
@@ -272,13 +288,14 @@ function visibleItems(
   items: NavItem[],
   role: AuthRole | undefined,
   capabilities: { claudeActivity: boolean; ragEval: boolean },
-  modules: AppCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
 ): NavItem[] {
   return items.filter((item) => {
     if (item.roles && (!role || !item.roles.includes(role))) return false;
     if (item.requiresCapability && !capabilities[item.requiresCapability])
       return false;
-    if (item.requiresModule && !modules[item.requiresModule]) return false;
+    // WARP-1397: hide a switched-off feature's nav entry (module not effective).
+    if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
     return true;
   });
 }
@@ -288,7 +305,7 @@ export function Sidebar() {
   const router = useRouter();
   const { user, logout } = useAuth();
   const capabilities = useCapabilities();
-  const modules = useAppCapabilities();
+  const isModuleOn = useModuleGate();
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -337,7 +354,7 @@ export function Sidebar() {
       g.items,
       user?.role as AuthRole | undefined,
       capabilities,
-      modules,
+      isModuleOn,
     ),
   })).filter((g) => g.items.length > 0);
 
@@ -367,16 +384,21 @@ export function Sidebar() {
     }))
     .filter((g) => g.items.length > 0);
 
-  // The four hrefs that survive into the bottom tab bar. Each looked up
-  // against the full nav so the icon + label match the desktop sidebar.
+  // The primary hrefs that survive into the bottom tab bar. WARP-1397: looked
+  // up against the GATED `renderedGroups`, NOT the raw NAV_GROUPS — otherwise a
+  // module-gated primary (/files, /devices) would still render a dead bottom
+  // tab on mobile while the desktop sidebar and "More" drawer correctly hide
+  // it (the exact dead-surface state this gate exists to remove). A primary
+  // whose module is off is dropped; the bar simply shows fewer tabs (the
+  // surface is genuinely gone), and everything non-primary stays in the
+  // drawer.
   const mobileTabs: NavItem[] = MOBILE_PRIMARY_HREFS.map((href) => {
-    for (const g of NAV_GROUPS) {
+    for (const g of renderedGroups) {
       const found = g.items.find((i) => i.href === href);
       if (found) return found;
     }
-    // This shouldn't happen — the constant is hand-curated against NAV_GROUPS.
-    return { href, label: href, icon: LayoutDashboard };
-  });
+    return null;
+  }).filter((x): x is NavItem => x !== null);
 
   return (
     <>

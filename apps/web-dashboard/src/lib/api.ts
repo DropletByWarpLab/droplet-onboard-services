@@ -27,6 +27,7 @@ import type {
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
+  Room,
   FileEntryInfo,
   FileSpaceId,
   FileSpacesResponse,
@@ -2821,6 +2822,63 @@ export async function fetchMatterDevices(): Promise<MatterGrouped> {
 export async function fetchMatterDevice(nodeId: string): Promise<MatterDevice> {
   const res = await authFetch(`${BASE}/api/matter/devices/${nodeId}`);
   if (!res.ok) throw new Error(`Failed to fetch device: ${res.status}`);
+  return res.json();
+}
+
+// --- WARP-1396: rooms + device aliases (the household map) ---
+
+export async function fetchRooms(): Promise<Room[]> {
+  const res = await authFetch(`${BASE}/api/matter/rooms`);
+  if (!res.ok) throw new Error(`Failed to fetch rooms: ${res.status}`);
+  const body = (await res.json()) as { rooms: Room[] };
+  return body.rooms;
+}
+
+async function roomWrite(
+  path: string,
+  method: string,
+  body?: Record<string, unknown>,
+): Promise<Response> {
+  const res = await authFetch(`${BASE}/api/matter/${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const j = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(j.message || `Request failed: ${res.status}`);
+  }
+  return res;
+}
+
+export async function createRoom(name: string, icon: string): Promise<Room> {
+  const res = await roomWrite("rooms", "POST", { name, icon });
+  return res.json();
+}
+
+export async function updateRoom(
+  id: string,
+  patch: { name?: string; icon?: string; sortOrder?: number },
+): Promise<Room> {
+  const res = await roomWrite(`rooms/${encodeURIComponent(id)}`, "PATCH", patch);
+  return res.json();
+}
+
+export async function deleteRoom(id: string): Promise<void> {
+  await roomWrite(`rooms/${encodeURIComponent(id)}`, "DELETE");
+}
+
+/** Rename and/or (re)assign a device's room in one call. `name: null`/`""`
+ *  clears the alias; `roomId: null` moves it to "No room yet". */
+export async function setDeviceAlias(
+  nodeId: string,
+  patch: { name?: string | null; roomId?: string | null },
+): Promise<{ nodeId: string; name: string | null; roomId: string | null }> {
+  const res = await roomWrite(
+    `devices/${encodeURIComponent(nodeId)}/alias`,
+    "PUT",
+    patch,
+  );
   return res.json();
 }
 

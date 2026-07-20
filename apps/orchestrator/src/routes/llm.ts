@@ -250,26 +250,55 @@ function isPrivilegedRole(role: string | undefined): boolean {
   return role === "owner" || role === "admin";
 }
 
-async function narrowAllowedToolsForRole(
+/**
+ * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
+ * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
+ * the one documented, scoped exception (ADR-004 amendment, approved 2026-07-18):
+ * voice may drive the smart-home CONTROL tools so "hey Droplet, turn off the
+ * kitchen lights" works. Every OTHER service principal (email-indexer, etc.)
+ * stays read-only — this gates on the exact principal id, not the coarse
+ * `service` role. Locks are NOT in this set at the tool level, but a
+ * `control_device` lock command is Tier-2 (confirmation_required) and the voice
+ * flow can't complete a confirmation, so locks stay refused via voice until
+ * per-speaker enrollment (WARP-1056) provides an identity to gate on.
+ *
+ * Deliberately just `control_device` — NOT `run_scene`: a routine can contain a
+ * lock command, which would bypass the per-command Tier-2 lock refusal, so
+ * voice-run scenes wait on scene-level lock analysis (follow-up).
+ */
+export const VOICE_WRITE_TOOLS = new Set(["control_device"]);
+
+export function isVoicePrincipal(user: AuthedRequest["user"]): boolean {
+  return user?.id === "_service:voice" && user?.role === "service";
+}
+
+export async function narrowAllowedToolsForRole(
   role: string | undefined,
   requestedAllowed: string[] | undefined,
+  isVoice = false,
 ): Promise<string[] | undefined> {
   if (isPrivilegedRole(role)) {
     return requestedAllowed;
   }
+  // WARP-1398: the voice principal keeps its read tools AND the scoped
+  // smart-home control tools (VOICE_WRITE_TOOLS); every other write tool is
+  // still stripped. All other non-privileged callers lose every write tool.
+  const writeAllowed = (name: string): boolean =>
+    !WRITE_TOOLS.has(name) || (isVoice && VOICE_WRITE_TOOLS.has(name));
   // Distinguish `undefined` (no list supplied → fall through to the
   // role default) from an explicit empty array (caller asked for ZERO
   // tools). `.length` truthiness would conflate the two and grant the
   // full non-write registry for an intentional `allowed_tools: []`.
   if (requestedAllowed !== undefined) {
-    return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
+    return requestedAllowed.filter(writeAllowed);
   }
   // Default for unprivileged users: every tool the live MCP server
-  // advertises, minus write tools. listTools() throws if the child
-  // crashed mid-runtime — fall back to an empty allowed set in that case
-  // so the model sees zero tools rather than something privileged.
+  // advertises, minus write tools (minus all but VOICE_WRITE_TOOLS for
+  // voice). listTools() throws if the child crashed mid-runtime — fall back
+  // to an empty allowed set in that case so the model sees zero tools rather
+  // than something privileged.
   const tools = await mcpClient.listTools().catch(() => []);
-  return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
+  return tools.map((t) => t.name).filter(writeAllowed);
 }
 
 // D-7: enforcement deferred — UserUsagePolicy.llmDailyMessageCap (WARP-1271)
@@ -306,7 +335,10 @@ async function stripWriteToolsForInterview(
 // Takes the RAW request body (not the Zod-parsed shape) because Zod's
 // default object schema strips unrecognized keys, including `tool_calls`
 // — so reading from parsed.data would always be empty.
-function replayedWriteToolAttempt(rawMessages: unknown): boolean {
+export function replayedWriteToolAttempt(
+  rawMessages: unknown,
+  exempt?: Set<string>,
+): boolean {
   if (!Array.isArray(rawMessages)) return false;
   return rawMessages
     .flatMap((m) => {
@@ -318,7 +350,13 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
       if (!c || typeof c !== "object") return false;
       const fn = (c as { function?: { name?: unknown } }).function;
       const name = fn?.name;
-      return typeof name === "string" && WRITE_TOOLS.has(name);
+      // WARP-1398: a replayed write tool the caller is actually allowed (the
+      // voice principal's VOICE_WRITE_TOOLS) is not a spoof.
+      return (
+        typeof name === "string" &&
+        WRITE_TOOLS.has(name) &&
+        !(exempt?.has(name) ?? false)
+      );
     });
 }
 
@@ -686,16 +724,33 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
       const chatReq = parsed.data;
 
+      // A thread with no user turn is never a legitimate request — every
+      // caller (dashboard replay, voice-io's system+user pair, the setup
+      // wizard's single-message probe) sends one. It's the signature of a
+      // client replay bug: the dashboard's retryMessage once serialized an
+      // empty `messages` array and the agent loop happily answered a blank
+      // thread with a plausible-looking greeting. Distinct code so the
+      // dashboard's pre-stream error path (useChat.ts
+      // friendlyPreStreamError) surfaces the regression visibly.
+      if (!chatReq.messages.some((m) => m.role === "user")) {
+        res.status(400).json({ error: "empty_replay" });
+        return;
+      }
+
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
       // session could drive write tools via curl.
       // Reads `req.body.messages` (raw) for the spoof check because
       // Zod strips unrecognized keys (tool_calls) from the parsed shape.
       const role = (req as AuthedRequest).user?.role;
+      // WARP-1398: the voice principal may replay/use its scoped smart-home
+      // control tools; every other non-privileged caller stays write-free.
+      const isVoice = isVoicePrincipal((req as AuthedRequest).user);
       if (
         !isPrivilegedRole(role) &&
         replayedWriteToolAttempt(
           (req.body as { messages?: unknown })?.messages,
+          isVoice ? VOICE_WRITE_TOOLS : undefined,
         )
       ) {
         res.status(403).json({ error: "forbidden_tool_for_role" });
@@ -704,6 +759,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       let allowedForUser = await narrowAllowedToolsForRole(
         role,
         chatReq.allowed_tools,
+        isVoice,
       );
 
       // WARP-1121 (§9.3) — is this turn part of the live onboarding

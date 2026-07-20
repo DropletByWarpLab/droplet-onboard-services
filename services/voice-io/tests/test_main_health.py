@@ -32,6 +32,10 @@ class _FakeStatus:
     input_rms_dbfs: Optional[float] = None
     last_audio_at: Optional[float] = None
     input_flatlined: bool = False
+    # DSP auto-recovery projection (WARP-1409) — /health reads these.
+    mic_fault: Optional[str] = None
+    dsp_restart_attempts: int = 0
+    dsp_last_restart_at: Optional[float] = None
 
 
 class _FakePipeline:
@@ -108,6 +112,48 @@ def test_non_deaf_states_report_ok_200(client, monkeypatch, state):
     body = resp.json()
     assert body["ok"] is True
     assert body["state"] == state
+
+
+# ── DSP auto-recovery projection (WARP-1409) ────────────────────────
+
+def test_health_surfaces_mic_fault_and_restart_counters(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "_pipeline",
+        _FakePipeline(
+            "listening",
+            input_flatlined=True,
+            mic_fault="wedged_restarting",
+            dsp_restart_attempts=2,
+            dsp_last_restart_at=123.0,
+        ),
+    )
+    resp = client.get("/health")
+    # input_flatlined still degrades (predicate unchanged); the new fields
+    # are observability that ride alongside it.
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["micFault"] == "wedged_restarting"
+    assert body["dspRestartAttempts"] == 2
+    assert body["lastDspRestartAt"] == 123.0
+
+
+def test_health_mic_fault_null_when_healthy(client, monkeypatch):
+    _set_pipeline_state(monkeypatch, "listening")
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["micFault"] is None
+    assert body["dspRestartAttempts"] == 0
+    assert body["lastDspRestartAt"] is None
+
+
+def test_health_mic_fault_defaults_without_pipeline(client, monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", None)
+    resp = client.get("/health")
+    body = resp.json()
+    assert body["micFault"] is None
+    assert body["dspRestartAttempts"] == 0
 
 
 def test_no_pipeline_reports_ok_200(client, monkeypatch):

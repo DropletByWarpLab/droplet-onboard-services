@@ -38,6 +38,25 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe("DeviceCard naming (WARP-1396)", () => {
+  it("shows the friendly alias on the card, falling back to product then Matter name", () => {
+    const { rerender } = render(
+      <DeviceCard
+        device={device({ friendlyName: "Kitchen strip", productName: "Cync X", name: "Node-1" })}
+        onCommand={onCommand}
+      />,
+    );
+    expect(screen.getByText("Kitchen strip")).toBeInTheDocument();
+    rerender(
+      <DeviceCard
+        device={device({ friendlyName: null, productName: "Cync X", name: "Node-1" })}
+        onCommand={onCommand}
+      />,
+    );
+    expect(screen.getByText("Cync X")).toBeInTheDocument();
+  });
+});
+
 describe("DeviceCard control widgets (WARP-897)", () => {
   it("shows color controls only for ColorControl-capable lights", () => {
     render(<DeviceCard device={device()} onCommand={onCommand} />);
