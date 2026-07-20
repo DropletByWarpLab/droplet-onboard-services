@@ -939,6 +939,22 @@ def _sse_response(*frames: tuple[str, dict]) -> httpx.Response:
     )
 
 
+class _BreakingByteStream(httpx.SyncByteStream):
+    """Yields one chunk of real SSE bytes, then raises a transport error
+    mid-body — models the orchestrator connection dropping AFTER sentence 1
+    has already been streamed (and, on the pipeline side, already spoken)."""
+
+    def __init__(self, prefix: bytes):
+        self._prefix = prefix
+
+    def __iter__(self):
+        yield self._prefix
+        raise httpx.ReadError("stream dropped mid-body (test)")
+
+    def close(self) -> None:
+        pass
+
+
 class TestReplyStreamSSE:
     def test_yields_content_deltas_in_order(self, monkeypatch):
         def handler(req):
@@ -1070,6 +1086,34 @@ class TestReplyStreamFallback:
         llm = OrchestratorLLM(base_url="http://test")
         with pytest.raises(LLMUnavailable, match="model loading"):
             list(llm.reply_stream("hi"))
+
+    def test_partial_yield_then_break_surfaces_error_no_double_audio(
+        self, monkeypatch,
+    ):
+        # The stream yields sentence 1, then the transport drops mid-body.
+        # Because content was ALREADY yielded (and, upstream, already spoken),
+        # reply_stream must SURFACE the break as LLMUnavailable rather than
+        # re-running the blocking reply() — re-running would replay the whole
+        # answer over the top of the partial audio (double audio). Guards the
+        # `if yielded: raise` branch the other fallbacks (break BEFORE any
+        # yield) never reach.
+        def handler(req):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_BreakingByteStream(
+                    _sse(("content_delta", {"text": "The camera is online. "})),
+                ),
+            )
+        captured = _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        gen = llm.reply_stream("status please")
+        assert next(gen) == "The camera is online. "  # sentence 1 streamed
+        with pytest.raises(LLMUnavailable, match="partial content"):
+            next(gen)
+        # Exactly ONE request was made — the stream POST. The blocking reply()
+        # fallback did NOT re-POST, so the partial audio is never doubled.
+        assert len(captured) == 1
 
 
 class TestReplyStreamRequestShape:
