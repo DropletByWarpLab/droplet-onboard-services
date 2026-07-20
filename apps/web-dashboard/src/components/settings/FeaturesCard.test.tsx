@@ -85,7 +85,8 @@ beforeEach(() => {
 describe("FeaturesCard", () => {
   it("loads and renders module rows grouped by category", async () => {
     render(<FeaturesCard />);
-    await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
+    // Wait for the fetched modules to be painted, not merely requested.
+    await screen.findByText("Ask AI");
 
     expect(screen.getByText("Ask AI")).toBeInTheDocument();
     expect(screen.getByText("Email")).toBeInTheDocument();
@@ -99,7 +100,7 @@ describe("FeaturesCard", () => {
 
   it("pins core modules as always on with no switch", async () => {
     render(<FeaturesCard />);
-    await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
+    await screen.findByText("Always on");
 
     expect(screen.getByText("Always on")).toBeInTheDocument();
     expect(
@@ -109,7 +110,7 @@ describe("FeaturesCard", () => {
 
   it("disables the switch and explains when the backend is not deployed", async () => {
     render(<FeaturesCard />);
-    await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
+    await screen.findByRole("switch", { name: "Email" });
 
     const sw = screen.getByRole("switch", { name: "Email" });
     expect(sw).toBeDisabled();
@@ -120,7 +121,7 @@ describe("FeaturesCard", () => {
 
   it("toggles a module optimistically, PATCHes it, and toasts", async () => {
     render(<FeaturesCard />);
-    await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
+    await screen.findByRole("switch", { name: "Devices" });
 
     const sw = screen.getByRole("switch", { name: "Devices" });
     expect(sw).toHaveAttribute("aria-checked", "false");
@@ -137,7 +138,7 @@ describe("FeaturesCard", () => {
   it("reverts the switch and shows the error line when the PATCH fails", async () => {
     setAppModuleEnabled.mockRejectedValueOnce(new Error("admin_required"));
     render(<FeaturesCard />);
-    await waitFor(() => expect(fetchAppModules).toHaveBeenCalled());
+    await screen.findByRole("switch", { name: "Devices" });
 
     const sw = screen.getByRole("switch", { name: "Devices" });
     fireEvent.click(sw);
