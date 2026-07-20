@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from router import ProviderRouter
-from schemas import ModelInfo
+from schemas import ChatMessage, ChatRequest, ModelInfo
 
 
 class TestProviderResolution:
@@ -150,3 +150,49 @@ class TestListAllModelsDegradedSignal:
         assert result.degraded_providers == ["ollama"]
         assert len(result.models) > 0
         assert all(m.provider in ("anthropic", "openai") for m in result.models)
+
+
+class TestReasoningEffortForwarding:
+    """WARP-1442 — the router threads `reasoning_effort` into the provider's
+    chat kwargs when the caller set one, and passes NOTHING when it's unset so
+    the outbound provider call is byte-for-byte unchanged for every existing
+    caller (voice + dashboard share this path)."""
+
+    @staticmethod
+    def _capture_chat(router: ProviderRouter) -> dict:
+        """Replace the ollama provider's chat with a kwargs-capturing stub."""
+        captured: dict = {}
+
+        async def fake_chat(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True}
+
+        router.ollama.chat = fake_chat  # type: ignore[method-assign]
+        return captured
+
+    @patch("router.check_off_lan_gate", new_callable=AsyncMock)
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_forwards_reasoning_effort_when_set(self, mock_key, mock_gate):
+        router = ProviderRouter()
+        captured = self._capture_chat(router)
+        await router.chat(
+            ChatRequest(
+                model="gpt-oss:20b",
+                messages=[ChatMessage(role="user", content="hi")],
+                reasoning_effort="low",
+            )
+        )
+        assert captured.get("reasoning_effort") == "low"
+
+    @patch("router.check_off_lan_gate", new_callable=AsyncMock)
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_no_reasoning_effort_key_when_unset(self, mock_key, mock_gate):
+        router = ProviderRouter()
+        captured = self._capture_chat(router)
+        await router.chat(
+            ChatRequest(
+                model="gpt-oss:20b",
+                messages=[ChatMessage(role="user", content="hi")],
+            )
+        )
+        assert "reasoning_effort" not in captured
