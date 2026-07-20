@@ -9,6 +9,7 @@ import {
   decideVisionRoute,
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { completeOnce } from "../services/llm-complete.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -206,6 +207,23 @@ const chatRequestSchema = z.object({
   // moved by a turn.
   projectId: z.string().uuid().optional(),
 });
+
+// WARP-1426 — POST /llm/complete. Single-turn, non-agentic completion:
+// system prompt + user text in, completion out. `.strict()` so a caller
+// that tries to smuggle `tools`, `messages`, or any agent-loop field gets
+// a 400 instead of a silently narrowed request. Caps mirror the tool
+// contract: `text` at 24k chars (~6k tokens) keeps a translate/summarize
+// payload inside a small local model's context window; `max_tokens`
+// mirrors the ai-gateway's pydantic bound (schemas.py: ge=1, le=4096).
+const completeRequestSchema = z
+  .object({
+    system: z.string().max(4000).optional(),
+    text: z.string().min(1).max(24000),
+    model: z.string().max(200).optional(),
+    temperature: z.number().min(0).max(1).optional(),
+    max_tokens: z.number().int().min(1).max(4096).optional(),
+  })
+  .strict();
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
 /** WARP-329: assistant row id, set alongside X-Conversation-Id on the same
@@ -1677,6 +1695,60 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
+    },
+  );
+
+  // WARP-1426 — lightweight single-turn completion. Unlike /llm/chat this
+  // NEVER enters the agent loop: no tools are advertised, no conversation
+  // rows are written, no history is replayed. It exists for the
+  // translate_text / summarize_file MCP tools (@droplet/tools-core), which
+  // call it with the mcp-server service principal — hence "service" in the
+  // role list (same posture as /llm/chat above: the route must stay
+  // reachable for service principals; there is no tool surface here to
+  // narrow because nothing is ever dispatched).
+  router.post(
+    "/llm/complete",
+    requireRole("owner", "admin", "family", "guest", "service"),
+    async (req, res) => {
+      const parsed = completeRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid request",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const body = parsed.data;
+      // Same default-model triad as the query-enhancement wiring in
+      // /llm/chat: DEFAULT_MODEL (canonical), then LLM_MODEL (what the box
+      // actually pulled), then the historic hardcoded name.
+      const model =
+        body.model ??
+        process.env.DEFAULT_MODEL ??
+        process.env.LLM_MODEL ??
+        "mistral:7b-instruct";
+      try {
+        const result = await completeOnce({
+          system: body.system,
+          text: body.text,
+          model,
+          temperature: body.temperature,
+          maxTokens: body.max_tokens,
+          // WARP-561: scope BYOK key resolution to the caller when the
+          // request carries a human user; service principals fall through
+          // to the shared/device namespace.
+          userId: (req as AuthedRequest).user?.id,
+        });
+        res.json(result);
+      } catch (err) {
+        // Gateway down, non-OK, or the 120 s belt-and-braces timeout in
+        // completeOnce fired (CPU inference can be slow, but past that the
+        // gateway is considered wedged). Map everything to one stable code
+        // the MCP tools can surface verbatim.
+        // eslint-disable-next-line no-console
+        console.error("[llm/complete] completion failed:", err);
+        res.status(502).json({ error: "llm_unavailable" });
+      }
     },
   );
 

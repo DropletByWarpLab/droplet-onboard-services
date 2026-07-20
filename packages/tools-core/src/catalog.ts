@@ -97,6 +97,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "rename_file",
     "move_file",
     "copy_file",
+    "summarize_file",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -171,6 +172,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "unit_convert",
     "get_current_datetime",
     "date_math",
+    "translate_text",
   ],
 };
 
@@ -224,6 +226,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   rename_file: "Rename a file or folder",
   move_file: "Move a file or folder somewhere else",
   copy_file: "Make a copy of a file or folder",
+  summarize_file: "Get a quick summary of one of your files",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",
@@ -310,6 +313,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   unit_convert: "Convert between units, like miles to kilometers",
   get_current_datetime: "Check today's date and the current time",
   date_math: "Work out dates — add days or count the time between two dates",
+  translate_text: "Translate text into another language",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

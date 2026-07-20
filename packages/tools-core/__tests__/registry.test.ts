@@ -120,6 +120,9 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1425 — forget a memory fact (Tier-2) + countdown timer (Write-tier)
   "memory_forget",
   "set_timer",
+  // WARP-1426 — single-turn-completion tools (both Tier-1)
+  "translate_text",
+  "summarize_file",
 ];
 
 describe("TOOLS registry", () => {
@@ -195,6 +198,12 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("memory_forget")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("set_timer")?.requiresWrite).toBe(true);
     expect(TOOLS.get("set_timer")?.requiresConfirmation).toBe(false);
+    // WARP-1426 — completion-backed tools are Tier-1 (read-only; the LLM
+    // call writes no state).
+    expect(TOOLS.get("translate_text")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("translate_text")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("summarize_file")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("summarize_file")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
