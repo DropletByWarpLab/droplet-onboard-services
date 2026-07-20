@@ -133,17 +133,20 @@ describe("step 1 · who is this (§5)", () => {
         "Your voiceprint is a mathematical summary of how you sound — not a recording. It's created and stored on this box, never uploaded, and deleted the moment you remove it.",
       ),
     ).toBeInTheDocument();
+    // Yourself preselected (§5: when the logged-in user has no voiceprint).
+    // Wait on the preselection itself, not merely on the row existing: the
+    // radio mounts as soon as the people list resolves, and the preselect
+    // effect commits after that. Asserting aria-checked in the gap between
+    // the two is a race that only loses under CI load (WARP-1421).
     await waitFor(() =>
-      expect(screen.getByRole("radio", { name: "Nadia" })).toBeInTheDocument(),
+      expect(screen.getByRole("radio", { name: "Nadia" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      ),
     );
     // Sam is enrolled, Legacy has no local row — neither is pickable.
     expect(screen.queryByRole("radio", { name: /Sam/ })).toBeNull();
     expect(screen.queryByRole("radio", { name: /Legacy/ })).toBeNull();
-    // Yourself preselected (§5: when the logged-in user has no voiceprint).
-    expect(screen.getByRole("radio", { name: "Nadia" })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
     // The chip is the §10 write tier.
     expect(screen.getByText("Write · confirm to apply")).toBeInTheDocument();
   });

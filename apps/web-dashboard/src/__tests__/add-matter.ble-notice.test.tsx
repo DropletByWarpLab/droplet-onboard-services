@@ -179,8 +179,17 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
 
   // UX review (WARP-1035): the pre-flight paragraph is load-bearing
   // instructional copy, not incidental metadata — it must use the
-  // readable secondary label token, not the 0.3-alpha tertiary one
-  // (~1.7:1 at 13 px fails WCAG 1.4.3; see the WARP-611 precedent).
+  // Readable secondary token, not a dim tertiary one (the 0.3-alpha
+  // tertiary measures ~2:1 over white and fails WCAG 1.4.3 at 13 px; see
+  // the WARP-611 precedent).
+  //
+  // WARP-1411 re-pointed this at the indigo ramp's `--text-muted`, which
+  // the rest of the devices surface uses. Measured against the tokens in
+  // shell/indigo-tokens.css: 4.53:1 light (#6b7180 on --bg #f5f6fb) and
+  // 5.52:1 dark (#8a8a94 on --bg #0f1117) — both clear AA. The light
+  // figure is only 0.03 above the 4.5 threshold, so this guard is load-
+  // bearing: darkening the page background or lightening --text-muted
+  // drops the pre-flight copy below AA.
   it("renders the pre-flight copy with readable-contrast secondary label token", async () => {
     capabilitiesSpy.mockResolvedValue({
       bleCommissioning: true,
@@ -192,7 +201,7 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
     const preflight = await screen.findByText(
       /the droplet does the pairing/i,
     );
-    expect(preflight).toHaveClass("text-label-secondary");
+    expect(preflight).toHaveClass("text-[var(--text-muted)]");
     expect(preflight).not.toHaveClass("text-label-tertiary");
   });
 
