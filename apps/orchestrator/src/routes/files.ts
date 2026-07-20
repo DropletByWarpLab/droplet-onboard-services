@@ -1679,8 +1679,19 @@ export function createFilesRouter(
 
   // ── Upload file(s) ──
   // WARP-171: per-route guard. owner + admin + family — household
-  // file writes. service principals never upload (the file-indexer
-  // talks to Nextcloud's WebDAV directly, not through this API).
+  // file writes.
+  //
+  // WARP-1460: also admit the `_service:mcp` principal. The shipped
+  // `write_file` and new `create_document` LLM tools POST a JSON body
+  // `{dir, filename, contentBase64}` to this route (via the nextcloud
+  // HttpClient), NOT a multipart form. Plain `requireRole` 403'd the
+  // service principal AND the handler was multipart-only, so both tools
+  // were dead on the HTTP path. The guard now mirrors the sibling MCP
+  // write routes (DELETE /files, POST /files/move|copy), and the handler
+  // branches on transport (see below). Human role set is unchanged; NC
+  // identity for the service principal still comes from X-Nextcloud-* via
+  // getToken/getUser (WARP-861 idiom — missing either → 401, no admin
+  // fallback), while a human's headers stay ignored (session rules).
   //
   // WARP-1262 (T10): `?space=` is read via the query string ONLY (never
   // multipart body fields) — `requireSpaceAccess` is composed BEFORE
@@ -1689,20 +1700,94 @@ export function createFilesRouter(
   // resolves the operational path, killing the client-side pre-translation.
   router.post(
     "/files/upload",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
     handleUpload,
     async (req, res, next) => {
     try {
-      const rawTargetPath = (req.query.path as string) || "/";
       const space = resolveSpace(req.query.space);
-      const targetPath = await rootForSpace(prisma, space, rawTargetPath);
 
-      const files = req.files as Express.Multer.File[];
-      if (!files || files.length === 0) {
+      // WARP-1460: two transports feed this route. multer only populates
+      // `req.files` for a multipart/form-data request — it calls next()
+      // untouched for a JSON body — so `req.files` presence discriminates the
+      // human dashboard upload (multipart; target dir in `?path=`) from the
+      // write_file / create_document tools (JSON `{dir, filename,
+      // contentBase64}`; target dir in the body `dir` field). Both shapes
+      // normalize to a single {name, buffer, size} list so the post-write
+      // bookkeeping loop below is SHARED and can never diverge between paths.
+      const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+      let rawTargetPath: string;
+      let uploads: { name: string; buffer: Buffer; size: number }[];
+
+      if (files.length > 0) {
+        // Existing multipart path — byte-identical behavior: dir from `?path=`.
+        rawTargetPath = (req.query.path as string) || "/";
+        uploads = files.map((f) => ({
+          name: f.originalname,
+          buffer: f.buffer,
+          size: f.size,
+        }));
+      } else if (
+        typeof (req.body as { contentBase64?: unknown } | undefined)?.contentBase64 ===
+        "string"
+      ) {
+        // NEW JSON single-file path (write_file / create_document). The tools
+        // read the directory from the `dir` body field, NOT `?path=`.
+        // `contentBase64` is a string here (narrowed by the `else if` above).
+        const body = req.body as {
+          dir?: unknown;
+          filename?: unknown;
+          contentBase64: string;
+        };
+        rawTargetPath =
+          typeof body.dir === "string" && body.dir.length > 0 ? body.dir : "/";
+
+        // The JSON body carries a bare basename — reject an empty name, any
+        // path separator, or a `..`/`.` segment so the write is pinned to a
+        // single path segment. (`dir` traversal is caught separately by
+        // rootForSpace below; this guards the FILENAME.)
+        const filename = typeof body.filename === "string" ? body.filename : "";
+        const filenameSegments = filename.split(/[\\/]/);
+        if (
+          filename.length === 0 ||
+          filenameSegments.length > 1 ||
+          filenameSegments.includes("..") ||
+          filename === "."
+        ) {
+          res.status(400).json({
+            error: "filename must be a non-empty basename with no path separators",
+          });
+          return;
+        }
+
+        // Decode base64 strictly — reject non-base64 input, matching
+        // write_file's INVALID_BASE64 posture (re-encode must round-trip).
+        const cleaned = body.contentBase64.replace(/\s+/g, "");
+        const buffer = Buffer.from(cleaned, "base64");
+        if (buffer.toString("base64").replace(/=+$/, "") !== cleaned.replace(/=+$/, "")) {
+          res.status(400).json({ error: "invalid base64 content" });
+          return;
+        }
+
+        // Enforce the 10 MB LLM-write cap on the DECODED bytes (mirrors
+        // @droplet/tools-core's MAX_WRITE_BYTES). The multipart path is capped
+        // upstream by multer's per-request `limits.fileSize`; the JSON path has
+        // no multer, so the ceiling is enforced here.
+        const MAX_JSON_WRITE_BYTES = 10 * 1024 * 1024;
+        if (buffer.byteLength > MAX_JSON_WRITE_BYTES) {
+          res.status(413).json({
+            error: `content too large (max ${MAX_JSON_WRITE_BYTES} bytes)`,
+          });
+          return;
+        }
+
+        uploads = [{ name: filename, buffer, size: buffer.byteLength }];
+      } else {
         res.status(400).json({ error: "No files provided" });
         return;
       }
+
+      const targetPath = await rootForSpace(prisma, space, rawTargetPath);
 
       const token = await getToken(req);
       const user = getUser(req);
@@ -1715,14 +1800,14 @@ export function createFilesRouter(
       const uploadDepartmentId = req.spaceDepartmentId ?? null;
       const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
 
-      for (const file of files) {
-        await ncUploadFile(token, user, targetPath, file.originalname, file.buffer);
+      for (const file of uploads) {
+        await ncUploadFile(token, user, targetPath, file.name, file.buffer);
         const uploadedPath =
           targetPath === "/"
-            ? `/${file.originalname}`
-            : `${targetPath}/${file.originalname}`;
+            ? `/${file.name}`
+            : `${targetPath}/${file.name}`;
         results.push({
-          name: file.originalname,
+          name: file.name,
           path: uploadedPath,
           size: file.size,
         });
@@ -1852,9 +1937,14 @@ export function createFilesRouter(
   // token for that branch. On OCS success a `DepartmentShare` registry row is
   // written for authz/audit on later PUT/DELETE and the "shared by me" list;
   // on OCS failure no row is written and the error surfaces honestly.
+  // WARP-1456: requireRoleOrMcpService so the share_file LLM tool (Tier-2,
+  // handler-enforced confirmation) can dispatch here as `_service:mcp`. The
+  // NC identity still comes from getToken(req) — for the service principal
+  // that is the X-Nextcloud-Token header per the WARP-861 idiom (no header →
+  // 401, no admin fallback). Human role set unchanged.
   router.post(
     "/files/share",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     requireSpaceAccess(prisma, "manager", { resolveSpace: resolveSpaceGuardToken }),
     async (req, res, next) => {
     try {
@@ -2461,9 +2551,15 @@ export function createFilesRouter(
 
   // ── Versions: restore (POST /api/files/versions/restore) ──
   // WARP-1262 (T10): `?space=`/body `space` threading, contributor gate.
+  // WARP-1456: requireRoleOrMcpService so the restore_file_version LLM tool
+  // (Tier-2, handler-enforced confirmation) can dispatch here as
+  // `_service:mcp`. The NC identity still comes from getUser(req)/getToken(req)
+  // — for the service principal those are the X-Nextcloud-User/-Token headers
+  // per the WARP-861 idiom (missing either → 401, no admin fallback). Human
+  // role set unchanged.
   router.post(
     "/files/versions/restore",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
     async (req, res, next) => {
     try {
