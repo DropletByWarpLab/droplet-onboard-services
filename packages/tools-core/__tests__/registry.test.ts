@@ -112,6 +112,11 @@ const EXPECTED_TOOL_NAMES = [
   "timestamp_convert",
   "uuid_generate",
   "regex_test",
+  // WARP-1424 — everyday utility tools (data domain, all Tier-1)
+  "calculate",
+  "unit_convert",
+  "get_current_datetime",
+  "date_math",
 ];
 
 describe("TOOLS registry", () => {
@@ -171,6 +176,15 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("uuid_generate")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("regex_test")?.requiresWrite).toBe(false);
     expect(TOOLS.get("regex_test")?.requiresConfirmation).toBe(false);
+    // WARP-1424 — everyday utility tools are all Tier-1 (no write, no confirm).
+    expect(TOOLS.get("calculate")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("calculate")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("unit_convert")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("unit_convert")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("get_current_datetime")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_current_datetime")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("date_math")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("date_math")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

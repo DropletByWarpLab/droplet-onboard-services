@@ -134,6 +134,12 @@ import formatJson from "./handlers/data/format-json.js";
 import timestampConvert from "./handlers/data/timestamp-convert.js";
 import uuidGenerate from "./handlers/data/uuid-generate.js";
 import regexTest from "./handlers/data/regex-test.js";
+// data (WARP-1424) — everyday utilities (calculator, unit/date/time math),
+// all Tier-1 read/pure-computation. Gap analysis: WARP-1423.
+import calculate from "./handlers/data/calculate.js";
+import unitConvert from "./handlers/data/unit-convert.js";
+import getCurrentDatetime from "./handlers/data/get-current-datetime.js";
+import dateMath from "./handlers/data/date-math.js";
 
 const allTools: Tool[] = [
   // network
@@ -252,6 +258,11 @@ const allTools: Tool[] = [
   timestampConvert,
   uuidGenerate,
   regexTest,
+  // WARP-1424: everyday utility tools (all Tier-1 read/pure-computation)
+  calculate,
+  unitConvert,
+  getCurrentDatetime,
+  dateMath,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

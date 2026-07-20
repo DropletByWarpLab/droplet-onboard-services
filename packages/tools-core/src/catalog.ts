@@ -167,6 +167,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "timestamp_convert",
     "uuid_generate",
     "regex_test",
+    "calculate",
+    "unit_convert",
+    "get_current_datetime",
+    "date_math",
   ],
 };
 
@@ -299,6 +303,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   timestamp_convert: "Convert a timestamp between formats",
   uuid_generate: "Generate a unique ID",
   regex_test: "Test a pattern against some text",
+  // Data (everyday utilities — WARP-1424)
+  calculate: "Do math for you, from tips and percentages to square roots",
+  unit_convert: "Convert between units, like miles to kilometers",
+  get_current_datetime: "Check today's date and the current time",
+  date_math: "Work out dates — add days or count the time between two dates",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns
