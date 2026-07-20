@@ -8,3 +8,9 @@ export {
   type ToolDomain,
 } from "./catalog.js";
 export { confirmationRequired, isConfirmationResponse, passThroughConfirmation } from "./confirmation.js";
+export {
+  TOOL_ROUTES,
+  type ToolClient,
+  type ToolRouteHop,
+  type ToolRouteEntry,
+} from "./tool-routes.js";
