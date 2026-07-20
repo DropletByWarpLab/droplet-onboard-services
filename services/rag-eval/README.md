@@ -51,6 +51,36 @@ The container's local timezone matters because the cron expression is
 written in local time. Set `TZ=America/Los_Angeles` (or your zone)
 either in the compose `environment:` block or in `.env`.
 
+## Seeding the eval fixture corpus (WARP-1407)
+
+The goldens (`tests/retrieval-eval/ragas/goldens.yaml`) are written
+against the WARP-224 fixture corpus, NOT a real user's files — pointed
+at a real corpus, every metric mean reads ~0.0 and baselines can't be
+bootstrapped. Seed the fixtures under a dedicated Nextcloud user so
+eval numbers are stable, golden-comparable, and never pollute anyone's
+real retrieval:
+
+```bash
+# On the appliance host (stack up). Idempotent — re-run after a
+# factory reset or volume wipe.
+./scripts/seed-eval-fixtures.sh
+
+# Then aim the eval at the seeded corpus (recreate, NOT restart —
+# `docker restart` never re-reads env_file):
+#   .env: RAGAS_EVAL_USER=eval-fixtures
+docker compose -p droplet -f docker/docker-compose.yml --env-file .env \
+  up -d --force-recreate --no-deps rag-eval
+```
+
+The script creates NC user `eval-fixtures` (via occ; the user never
+logs in), copies `sample.pdf` / `simple.zip` / the WARP-206 PNG / the
+WARP-224 EML into `files/test-rag-end-to-end/`, runs `occ files:scan`,
+and polls `FileContentChunk` until the indexer has embedded them.
+Audio/video fixtures are not seeded (they need transcribe-now,
+WARP-218); the eval tolerates the partial set. Verify with an ad-hoc
+run: `error_counts` all zero and non-zero `context_recall` /
+`llm_context_precision_with_reference` means.
+
 ## Bootstrap baselines (WARP-436 batch D path)
 
 The "first time `baselines.json` gets populated" workflow is now one
@@ -69,6 +99,20 @@ it out of the volume and committing into the repo at
 WARP-437 per-class assertions in
 `tests/retrieval-eval/run.integration.test.ts:252-304` from recording
 mode to enforced gates.
+
+**Include independent-session runs before promoting (WARP-1407
+lesson).** The bootstrap's 5 runs execute back-to-back — correlated
+samples whose IQR can collapse to ~0, producing floors ≈ p50 that the
+very next fresh-session run "fails" on ordinary judge variance (seen
+live: precision iqr 0.006 across the bootstrap vs a 0.30–0.43 spread
+across sessions). The aggregator now clamps every floor to
+`min(sample means) − FLOOR_MARGIN` as a backstop, but the real fix is
+sample diversity: before promoting, re-run the aggregate over a
+directory that also contains a few single runs from different
+sessions/days (copy the relevant `results-*.json` into a scratch dir
+and point `ragas_runner.py aggregate --results-dir` at it). Exclude
+runs made against a different corpus or `RAGAS_EVAL_USER` — mixing
+corpora poisons the envelope.
 
 ## Ad-hoc single run (shell)
 

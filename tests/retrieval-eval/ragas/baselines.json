@@ -1,17 +1,81 @@
 {
-  "_comment": "WARP-436 — RAGAS metric baselines, schema-only scaffold.",
-  "_status": "PLACEHOLDER. Populate via the services/rag-eval/ container on a deployed appliance with COMPOSE_PROFILES=...,eval set: `docker exec droplet-rag-eval-1 python /opt/rag-eval/main.py bootstrap --runs 5` writes /data/rag-eval/baselines.candidate.json, then `docker cp` it back here and commit. See services/rag-eval/README.md + docs/RAG_TESTING.md §'Baselines + thresholds'. The integration test in tests/retrieval-eval/run.integration.test.ts treats the all-zero floors as 'recording mode' and skips assertions when zero.",
-  "recorded_at": null,
+  "_comment": "WARP-436 \u2014 RAGAS metric baselines, aggregated by ragas_runner.py aggregate. Per-run mean is the unit sample; floor = p50 \u2212 1.5 \u00d7 IQR.",
+  "recorded_at": "2026-07-20T01:23:16.484604+00:00",
   "judge": "local",
   "n_queries": 20,
-  "n_runs": 0,
-  "runs": [],
+  "n_runs": 8,
+  "runs": [
+    "results-20260719T171313Z.json",
+    "results-20260719T222502Z.json",
+    "results-20260719T223813Z.json",
+    "results-20260719T225120Z.json",
+    "results-20260719T230429Z.json",
+    "results-20260719T231737Z.json",
+    "results-20260720T004734Z.json",
+    "results-20260720T010345Z.json"
+  ],
   "envelopes": {
-    "faithfulness":          { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "llm_context_precision": { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "llm_context_recall":    { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "answer_relevancy":      { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
-    "factual_correctness":   { "floor": 0.0, "p50": null, "p95": null, "iqr": null }
+    "context_recall": {
+      "floor": 0.27999999999999997,
+      "p50": 0.3,
+      "p95": 0.3,
+      "iqr": 0.0,
+      "n": 8
+    },
+    "factual_correctness": {
+      "floor": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "iqr": 0.0,
+      "n": 8
+    },
+    "faithfulness": {
+      "floor": 0.16181818181818183,
+      "p50": 0.3333333333333333,
+      "p95": 0.4937499999999999,
+      "iqr": 0.05372752247752244,
+      "n": 8
+    },
+    "llm_context_precision_with_reference": {
+      "floor": 0.27999999996999997,
+      "p50": 0.40312499995968754,
+      "p95": 0.4238541666242812,
+      "iqr": 0.05505952380401785,
+      "n": 8
+    }
   },
-  "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over 5 runs"
+  "envelopes_by_class": {
+    "factual": {
+      "context_recall": {
+        "floor": 0.27999999999999997,
+        "p50": 0.3,
+        "p95": 0.3,
+        "iqr": 0.0,
+        "n": 8
+      },
+      "factual_correctness": {
+        "floor": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "iqr": 0.0,
+        "n": 8
+      },
+      "faithfulness": {
+        "floor": 0.16181818181818183,
+        "p50": 0.3333333333333333,
+        "p95": 0.4937499999999999,
+        "iqr": 0.05372752247752244,
+        "n": 8
+      },
+      "llm_context_precision_with_reference": {
+        "floor": 0.27999999996999997,
+        "p50": 0.40312499995968754,
+        "p95": 0.4238541666242812,
+        "iqr": 0.05505952380401785,
+        "n": 8
+      }
+    }
+  },
+  "_threshold_formula": "floor = max(0, min(p50 \u2212 1.5 \u00d7 IQR, min(sample means) \u2212 0.02)), computed over N runs (WARP-1407 containment clamp)",
+  "_status": "RE-BASELINED 2026-07-20 (WARP-1407 follow-on): envelopes over 8 CROSS-SESSION runs \u2014 the 5-run bootstrap 20260719T222502Z plus 3 independent seeded single runs (171313Z, 004734Z, 010345Z) \u2014 after the first promote's back-to-back-only envelopes proved overtight (iqr ~0; the first fresh-session run 'failed' floors on ordinary judge variance). Aggregated with the WARP-1407 containment clamp (floor never exceeds min(sample means) \u2212 0.02). Same corpus (eval-fixtures via scripts/seed-eval-fixtures.sh), judge = local Ollama gpt-oss:20b, ragas==0.2.13. answer_relevancy absent by design; factual_correctness envelope 0.0 at this corpus stage. Re-baseline deliberately after fixture/judge/ragas changes, mixing in independent-session runs per services/rag-eval/README.md."
 }

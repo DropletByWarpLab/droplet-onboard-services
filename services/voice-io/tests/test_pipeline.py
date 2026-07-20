@@ -42,6 +42,8 @@ from voice.pipeline import (
     DEFAULT_THRESHOLD,
     DEFAULT_VISUAL_DECAY_S,
     RMS_DBFS_FLOOR,
+    DspRestartSkipped,
+    MeasurementUnavailable,
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
@@ -2488,6 +2490,263 @@ def _quiet_pipe(**kwargs) -> WakePipeline:
     )
     pipe._set_state("listening")
     return pipe
+
+
+class TestDspAutoRecovery:
+    """WARP-1409 — bounded in-app auto-recovery of a wedged XVF3800 DSP."""
+
+    def _wedged_pipe(self, restart, **kwargs) -> WakePipeline:
+        # Parked 'listening', flatlines almost immediately, with the
+        # injected heal and (by default) a cooldown-free policy so each
+        # tick re-attempts.
+        kwargs.setdefault("dsp_recovery_cooldown_s", 0.0)
+        pipe = _quiet_pipe(flatline_window_s=0.01, dsp_restart=restart, **kwargs)
+        pipe._on_frame(_silence_frame())  # baseline frame starts the clock
+        time.sleep(0.03)                  # elapse the flatline window
+        assert pipe.status().input_flatlined is True
+        return pipe
+
+    def test_no_restart_callback_is_a_noop(self):
+        pipe = _quiet_pipe(flatline_window_s=0.01)
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.03)
+        assert pipe.status().input_flatlined is True
+        pipe._maybe_auto_recover_dsp()  # dsp_restart is None → no action
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault == "flatlined"
+
+    def test_wedge_triggers_one_restart(self):
+        calls = []
+        pipe = self._wedged_pipe(lambda: calls.append(1))
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.mic_fault == "wedged_restarting"
+        assert s.dsp_last_restart_at is not None
+
+    def test_cooldown_suppresses_back_to_back_restart(self):
+        calls = []
+        pipe = self._wedged_pipe(
+            lambda: calls.append(1), dsp_recovery_cooldown_s=3600.0,
+        )
+        pipe._maybe_auto_recover_dsp()  # attempt 1
+        pipe._maybe_auto_recover_dsp()  # inside cooldown → skipped
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+
+    def test_bounded_attempts_then_escalates(self):
+        calls = []
+        pipe = self._wedged_pipe(
+            lambda: calls.append(1), dsp_recovery_max_attempts=2,
+        )
+        pipe._maybe_auto_recover_dsp()  # attempt 1
+        pipe._maybe_auto_recover_dsp()  # attempt 2
+        pipe._maybe_auto_recover_dsp()  # cap reached → escalate, no call
+        assert len(calls) == 2
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 2
+        assert s.mic_fault == "wedged_escalated"
+        pipe._maybe_auto_recover_dsp()  # stays escalated, still no call
+        assert len(calls) == 2
+
+    def test_failing_restart_still_counts_and_escalates(self):
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("xvf_host missing")
+
+        pipe = self._wedged_pipe(boom, dsp_recovery_max_attempts=1)
+        pipe._maybe_auto_recover_dsp()  # attempt 1 (exception caught)
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+        pipe._maybe_auto_recover_dsp()  # cap → escalate
+        assert pipe.status().mic_fault == "wedged_escalated"
+
+    def test_recovery_resets_the_machine(self):
+        calls = []
+        pipe = self._wedged_pipe(lambda: calls.append(1))
+        pipe._maybe_auto_recover_dsp()
+        assert pipe.status().dsp_restart_attempts == 1
+        # Real audio returns → no longer flatlined.
+        pipe._on_frame(_audio_frame(1000))
+        assert pipe.status().input_flatlined is False
+        pipe._maybe_auto_recover_dsp()  # recovery edge → reset to nominal
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault is None
+
+    # ── Skipped (never-issued) restarts — WARP-1409 review finding ──
+    # A heal that declines to act (an operator's manual
+    # /voice/restart-processor holds the DSP lock) is NOT an attempt: no
+    # `xvf_host REBOOT 1` reached the chip, so it must spend none of the
+    # bounded budget and arm no cooldown.
+
+    def test_skipped_restart_spends_no_attempt_and_arms_no_cooldown(self):
+        calls = []
+
+        def skip():
+            calls.append(1)
+            raise DspRestartSkipped("a manual restart is in flight")
+
+        pipe = self._wedged_pipe(skip)
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1  # the heal was invoked...
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0      # ...but issued nothing
+        assert s.dsp_last_restart_at is None    # no cooldown armed
+        assert s.mic_fault == "flatlined"       # not "wedged_restarting"
+
+    def test_skip_genuinely_retries_on_the_next_tick(self):
+        # A long cooldown is the sharp end of the bug: if a skip armed
+        # `dsp_last_restart_at`, the retry tick would be suppressed for
+        # an hour for a reboot that never happened.
+        calls = []
+        skipping = [True]
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_cooldown_s=3600.0)
+        pipe._maybe_auto_recover_dsp()          # skipped
+        assert pipe.status().dsp_restart_attempts == 0
+        skipping[0] = False
+        pipe._maybe_auto_recover_dsp()          # must NOT be cooled down
+        assert len(calls) == 1
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.dsp_last_restart_at is not None
+        assert s.mic_fault == "wedged_restarting"
+
+    def test_repeated_skips_never_exhaust_the_budget(self):
+        # The reported failure mode: an operator holding the manual lock
+        # across several probe ticks must not latch wedged_escalated
+        # without a single real reboot behind it.
+        skipping = [True]
+        calls = []
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_max_attempts=1)
+        for _ in range(5):
+            pipe._maybe_auto_recover_dsp()
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 0
+        assert s.mic_fault == "flatlined"   # NOT wedged_escalated
+        assert calls == []
+        # The lock frees → the budget is intact and the heal really runs.
+        skipping[0] = False
+        pipe._maybe_auto_recover_dsp()
+        assert len(calls) == 1
+        assert pipe.status().dsp_restart_attempts == 1
+
+    def test_skip_after_a_real_attempt_preserves_the_earlier_attempt(self):
+        # Rollback must restore the PRIOR bookkeeping, not zero it — an
+        # attempt already spent stays spent, and its cooldown clock stays
+        # anchored to the real reboot.
+        calls = []
+        skipping = [False]
+
+        def heal():
+            if skipping[0]:
+                raise DspRestartSkipped("a manual restart is in flight")
+            calls.append(1)
+
+        pipe = self._wedged_pipe(heal, dsp_recovery_max_attempts=3)
+        pipe._maybe_auto_recover_dsp()          # real attempt 1
+        first_at = pipe.status().dsp_last_restart_at
+        assert pipe.status().dsp_restart_attempts == 1
+        assert first_at is not None
+        skipping[0] = True
+        pipe._maybe_auto_recover_dsp()          # skipped
+        s = pipe.status()
+        assert s.dsp_restart_attempts == 1
+        assert s.dsp_last_restart_at == first_at
+        assert s.mic_fault == "wedged_restarting"  # attempt 1 still in flight
+        assert len(calls) == 1
+
+
+class TestWindowedMeasure:
+    """WARP-1410 — wizard measurements read the wake loop's ALREADY-OPEN
+    stream. Opening a second one on the reSpeaker's exclusive hw device
+    raised PortAudio -9985 for the whole time the assistant was listening,
+    which dead-ended the calibration wizard on a healthy mic."""
+
+    def test_collects_rms_and_peak_from_live_frames(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        for _ in range(4):
+            pipe._on_frame(_audio_frame(1000))
+        result = pipe._finish_measure()
+        # Constant-1000 frames → RMS == peak == 1000 → 20·log10(1000/32768).
+        assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.05)
+        assert result["peak_dbfs"] == pytest.approx(-30.31, abs=0.05)
+
+    def test_peak_tracks_the_loudest_frame(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_audio_frame(8000))
+        pipe._on_frame(_silence_frame())
+        result = pipe._finish_measure()
+        # Peak comes from the loud frame; RMS is diluted by the silent ones,
+        # which is exactly what the wizard's speech-peak step needs.
+        assert result["peak_dbfs"] == pytest.approx(-12.26, abs=0.05)
+        assert result["rms_dbfs"] < result["peak_dbfs"]
+
+    def test_no_frames_raises_measurement_unavailable(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        with pytest.raises(MeasurementUnavailable):
+            pipe._finish_measure()
+
+    def test_non_capturing_state_refuses_to_measure(self):
+        pipe = _quiet_pipe()
+        pipe._set_state("no_mic")
+        with pytest.raises(MeasurementUnavailable):
+            pipe._start_measure()
+
+    def test_concurrent_measurement_refused(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        with pytest.raises(MeasurementUnavailable):
+            pipe._start_measure()
+
+    def test_collector_is_disarmed_after_finish(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        pipe._on_frame(_audio_frame(1000))
+        pipe._finish_measure()
+        assert pipe._measure_collector is None
+        # Frames after the window must not accumulate anywhere.
+        pipe._on_frame(_audio_frame(1000))
+        assert pipe._measure_collector is None
+
+    def test_measure_input_blocks_then_returns_live_levels(self):
+        pipe = _quiet_pipe()
+        stop = threading.Event()
+
+        def feeder():
+            while not stop.is_set():
+                pipe._on_frame(_audio_frame(1000))
+                time.sleep(0.005)
+
+        t = threading.Thread(target=feeder, daemon=True)
+        t.start()
+        try:
+            result = pipe.measure_input(0.08)
+        finally:
+            stop.set()
+            t.join(timeout=1.0)
+        assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.5)
+        assert pipe._measure_collector is None
 
 
 class TestInputLevelTracking:

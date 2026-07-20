@@ -22,6 +22,7 @@ import pytest
 # Allow `import ragas_runner` without installing the package.
 sys.path.insert(0, str(Path(__file__).parent))
 from ragas_runner import (
+    FLOOR_MARGIN,
     _build_search_request,
     _render_markdown,
     _sanitize_nonfinite,
@@ -68,8 +69,13 @@ def _strict_loads(text: str) -> dict:
 
 # ─── tests ──────────────────────────────────────────────────────────────────
 
-def test_n1_iqr_zero_floor_equals_p50(tmp_path: Path) -> None:
-    """n=1: IQR must be 0.0, floor must equal p50."""
+def test_n1_iqr_zero_floor_is_p50_minus_margin(tmp_path: Path) -> None:
+    """n=1: IQR must be 0.0 and the floor sits _FLOOR_MARGIN below p50.
+
+    WARP-1407: floor used to degenerate to exactly p50 here, so the very
+    next run "failed" the gate on any downward judge noise at all. The
+    containment clamp caps the floor at min(samples) − margin.
+    """
     _write_run(
         tmp_path,
         "results-001.json",
@@ -81,7 +87,7 @@ def test_n1_iqr_zero_floor_equals_p50(tmp_path: Path) -> None:
     data = _read_out(out)
     env = data["envelopes"]["faithfulness"]
     assert env["iqr"] == pytest.approx(0.0)
-    assert env["floor"] == pytest.approx(env["p50"])
+    assert env["floor"] == pytest.approx(0.8 - FLOOR_MARGIN)
     assert env["p50"] == pytest.approx(0.8)
 
 
@@ -108,7 +114,11 @@ def test_n5_known_means_quantile_iqr_floor(tmp_path: Path) -> None:
     s = pd.Series(means)
     expected_p50 = float(s.quantile(0.5))
     expected_iqr = float(s.quantile(0.75) - s.quantile(0.25))
-    expected_floor = expected_p50 - 1.5 * expected_iqr
+    # WARP-1407 containment clamp: the floor is the classic p50 − 1.5·IQR
+    # but never above the lowest observed sample minus the margin.
+    expected_floor = min(
+        expected_p50 - 1.5 * expected_iqr, min(means) - FLOOR_MARGIN
+    )
     expected_p95 = float(s.quantile(0.95))
 
     out = tmp_path / "baselines.json"
@@ -120,6 +130,53 @@ def test_n5_known_means_quantile_iqr_floor(tmp_path: Path) -> None:
     assert env["iqr"] == pytest.approx(expected_iqr)
     assert env["floor"] == pytest.approx(expected_floor)
     assert env["p95"] == pytest.approx(expected_p95)
+
+
+def test_floor_clamped_below_min_sample_on_correlated_runs(
+    tmp_path: Path,
+) -> None:
+    """WARP-1407: correlated (back-to-back bootstrap) samples collapse the
+    IQR, degenerating the classic floor to ≈p50 — observed live when the
+    first independent-session run scored below a floor built from five
+    same-session runs with iqr 0.006. The containment clamp guarantees the
+    floor never exceeds min(samples) − FLOOR_MARGIN."""
+    means = [0.40, 0.406, 0.406, 0.41, 0.43]
+    for i, m in enumerate(means, 1):
+        _write_run(
+            tmp_path,
+            f"results-{i:03d}.json",
+            metrics={"faithfulness": {"p50": m, "p95": m, "mean": m}},
+        )
+    out = tmp_path / "baselines.json"
+    assert aggregate_runs(tmp_path, out, "local") == 0
+    env = _read_out(out)["envelopes"]["faithfulness"]
+
+    s = pd.Series(means)
+    classic = float(s.quantile(0.5)) - 1.5 * float(
+        s.quantile(0.75) - s.quantile(0.25)
+    )
+    # Tight spread → the classic formula would sit ABOVE min − margin;
+    # the clamp must win.
+    assert classic > min(means) - FLOOR_MARGIN
+    assert env["floor"] == pytest.approx(min(means) - FLOOR_MARGIN)
+    # Every sample that produced the envelope clears its own floor.
+    assert all(m >= env["floor"] for m in means)
+
+
+def test_floor_never_negative(tmp_path: Path) -> None:
+    """All-zero samples (e.g. factual_correctness on the partial fixture
+    corpus) must yield floor 0.0, not −FLOOR_MARGIN — metric means live in
+    [0, 1] and a negative floor would just be noise in the file."""
+    for i in range(1, 4):
+        _write_run(
+            tmp_path,
+            f"results-{i:03d}.json",
+            metrics={"factual_correctness": {"p50": 0.0, "p95": 0.0, "mean": 0.0}},
+        )
+    out = tmp_path / "baselines.json"
+    assert aggregate_runs(tmp_path, out, "local") == 0
+    env = _read_out(out)["envelopes"]["factual_correctness"]
+    assert env["floor"] == pytest.approx(0.0)
 
 
 def test_per_class_envelopes_present_and_isolated(tmp_path: Path) -> None:
@@ -233,7 +290,8 @@ def test_missing_class_in_some_runs(tmp_path: Path) -> None:
         expected_factual_p50
     ), "factual p50 should be computed from A+B only"
 
-    # analytical must come from run C only (mean [0.6]) → iqr=0, floor=p50
+    # analytical must come from run C only (mean [0.6]) → iqr=0,
+    # floor=p50−margin (WARP-1407 containment clamp)
     expected_analytical_p50 = analytical_mean
     assert by_class["analytical"]["faithfulness"]["p50"] == pytest.approx(
         expected_analytical_p50
@@ -386,11 +444,12 @@ def test_aggregate_tolerates_nan_null_and_missing_metrics(tmp_path: Path) -> Non
     assert faith["n"] == 2
 
     # answer_relevancy: run-2 null and run-3 absence both skipped →
-    # single sample 0.8 from run 1 → iqr=0, floor=p50, honest n=1.
+    # single sample 0.8 from run 1 → iqr=0, floor=p50−margin (WARP-1407
+    # containment clamp), honest n=1.
     ar = data["envelopes"]["answer_relevancy"]
     assert ar["p50"] == pytest.approx(0.8)
     assert ar["iqr"] == pytest.approx(0.0)
-    assert ar["floor"] == pytest.approx(ar["p50"])
+    assert ar["floor"] == pytest.approx(0.8 - FLOOR_MARGIN)
     assert ar["n"] == 1
 
     # Per-class path filters the same way: run-1's NaN factual sample is

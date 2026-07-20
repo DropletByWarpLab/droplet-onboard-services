@@ -75,6 +75,8 @@ from voice.pipeline import (
     DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
+    DspRestartSkipped,
+    MeasurementUnavailable,
     WakePipeline,
 )
 from voice.llm import build_llm_from_env
@@ -359,6 +361,11 @@ async def startup() -> None:
             flatline_window_s=VOICE_FLATLINE_WINDOW_S,
             flatline_dbfs=VOICE_FLATLINE_DBFS,
             activity_reporter=_activity_reporter,
+            # WARP-1409 — bounded in-app auto-recovery: on a sustained
+            # wedge the pipeline issues the same `xvf_host REBOOT 1` heal
+            # as the dashboard button, sharing its lock (see
+            # _auto_restart_dsp) so the two never overlap.
+            dsp_restart=_auto_restart_dsp,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -410,6 +417,14 @@ class HealthResponse(BaseModel):
     inputRmsDbfs: Optional[float] = None
     lastAudioAt: Optional[float] = None
     inputFlatlined: bool = False
+    # WARP-1409. Explicit mic-fault + the auto-recovery loop's counters.
+    # `micFault` projects the recovery state machine (None | flatlined |
+    # wedged_restarting | wedged_escalated | no_mic | error) — observability
+    # only; the `degraded` predicate is unchanged. `dspRestartAttempts` /
+    # `lastDspRestartAt` expose the bounded auto-restart for operators.
+    micFault: Optional[str] = None
+    dspRestartAttempts: int = 0
+    lastDspRestartAt: Optional[float] = None
     # WARP-1119 (§14). Greeting-path persona fetch observability: whether
     # the last GET /api/persona/prompt succeeded + wall time of the last
     # attempt (None/None = never attempted, e.g. __mock__ deployments).
@@ -468,6 +483,12 @@ class VoiceStatusResponse(BaseModel):
     input_rms_dbfs: Optional[float] = None
     last_audio_at: Optional[float] = None
     input_flatlined: bool = False
+    # WARP-1409 — explicit mic-fault + auto-recovery counters (snake_case
+    # on the /voice/status wire; the dashboard's health card reads these to
+    # distinguish transient / wedged-restarting / wedged-escalated).
+    mic_fault: Optional[str] = None
+    dsp_restart_attempts: int = 0
+    dsp_last_restart_at: Optional[float] = None
     # Calibration mode (WARP-1059). True while the wizard's suppression
     # window is live — wakes are counted (last_wake_at still updates,
     # which the wizard's step-3 ticker rides) but not handled (no
@@ -586,6 +607,9 @@ def health(response: Response) -> HealthResponse:
     input_rms_dbfs: Optional[float] = None
     last_audio_at: Optional[float] = None
     input_flatlined = False
+    mic_fault: Optional[str] = None
+    dsp_restart_attempts = 0
+    dsp_last_restart_at: Optional[float] = None
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
         s = _pipeline.status()
@@ -597,6 +621,9 @@ def health(response: Response) -> HealthResponse:
         input_rms_dbfs = s.input_rms_dbfs
         last_audio_at = s.last_audio_at
         input_flatlined = s.input_flatlined
+        mic_fault = s.mic_fault
+        dsp_restart_attempts = s.dsp_restart_attempts
+        dsp_last_restart_at = s.dsp_last_restart_at
     # Both 'error' and 'no_mic' are stuck-and-deaf: _on_frame drops every
     # frame for state in ('error', 'no_mic') (voice/pipeline.py), so the
     # assistant can't hear a wake word in either. 'error' latches on a
@@ -629,6 +656,10 @@ def health(response: Response) -> HealthResponse:
         inputRmsDbfs=input_rms_dbfs,
         lastAudioAt=last_audio_at,
         inputFlatlined=input_flatlined,
+        # WARP-1409 — explicit mic-fault + auto-recovery counters (observability).
+        micFault=mic_fault,
+        dspRestartAttempts=dsp_restart_attempts,
+        lastDspRestartAt=dsp_last_restart_at,
         # WARP-1119 — persona-fetch observability (never degrades health).
         personaFetchOk=_persona_fetcher.fetch_ok if _persona_fetcher else None,
         personaLastFetchAt=(
@@ -677,6 +708,9 @@ def voice_status() -> VoiceStatusResponse:
         input_rms_dbfs=s.input_rms_dbfs,
         last_audio_at=s.last_audio_at,
         input_flatlined=s.input_flatlined,
+        mic_fault=s.mic_fault,
+        dsp_restart_attempts=s.dsp_restart_attempts,
+        dsp_last_restart_at=s.dsp_last_restart_at,
         calibration_mode=s.calibration_mode,
         calibration_mode_expires_at=s.calibration_mode_expires_at,
     )
@@ -832,9 +866,15 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
 def audio_measure(req: MeasureRequest) -> MeasureResponse:
     """Wizard measurement capture (WARP-1055): noise floor / speech peak.
 
-    Same capture mechanism as /audio/test-record (`measure_input_level`
-    → sounddevice.rec on the picked input) so it coexists with the wake
-    pipeline's stream exactly the way the proven test-record path does.
+    WARP-1410 — measured from the wake pipeline's ALREADY-OPEN capture
+    stream, never a second `sounddevice.rec`. The reSpeaker's hw device is
+    exclusive, so opening a second stream while the assistant is listening
+    always failed with PortAudio -9985 ("Device unavailable") — which
+    dead-ended the wizard's "let's listen to the room" step even on a
+    perfectly healthy mic. Calibration mode (WARP-1059) suppresses wake
+    HANDLING but keeps the stream open, so it never freed the device
+    either. The sounddevice fallback below only runs when there is NO
+    pipeline holding the device (no mic at boot / startup bailed).
     """
     r = _resolve()
     if r.input_device is None:
@@ -848,12 +888,19 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     if not _capture_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
-        result = measure_input_level(
-            duration_s=seconds,
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            device=r.input_device.index,
-        )
+        pipeline = _pipeline
+        if pipeline is not None:
+            try:
+                result = pipeline.measure_input(seconds)
+            except MeasurementUnavailable as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+        else:
+            result = measure_input_level(
+                duration_s=seconds,
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                device=r.input_device.index,
+            )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except _PortAudioError as exc:
@@ -995,6 +1042,26 @@ def post_voice_calibration(req: CalibrationApplyRequest) -> dict:
 # "already restarting, wait" apart from a real fault (503). Same sync-def
 # threadpool + non-blocking-lock pattern as _capture_lock above.
 _restart_lock = threading.Lock()
+
+
+def _auto_restart_dsp() -> None:
+    """WARP-1409 — the heal the pipeline's bounded auto-recovery loop
+    injects. Shares `_restart_lock` with POST /voice/restart-processor so
+    an operator restart and the auto-recovery never issue overlapping DSP
+    reboots: if the lock is held (a manual restart is mid-flight) this
+    raises `DspRestartSkipped` so the pipeline knows no reboot went out —
+    it spends no attempt, arms no cooldown, and retries on the next probe
+    tick. Returning normally means the reboot was genuinely issued.
+    `restart_dsp` stays module-scoped so the endpoint tests' monkeypatch
+    of `main.restart_dsp` still covers this call site too (WARP-1288)."""
+    if not _restart_lock.acquire(blocking=False):
+        raise DspRestartSkipped(
+            "a manual /voice/restart-processor is already in flight"
+        )
+    try:
+        restart_dsp()
+    finally:
+        _restart_lock.release()
 
 
 @app.post("/voice/restart-processor", response_model=RestartProcessorResponse)
