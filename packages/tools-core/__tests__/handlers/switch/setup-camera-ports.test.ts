@@ -2,10 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import setupCameraPorts from "../../../src/handlers/switch/setup-camera-ports.js";
 import type { ToolContext } from "../../../src/types.js";
 
+// WARP-1462: dispatches through `ctx.http.orchestrator`
+// (`POST /api/switch/setup/cameras`), never the bearer-less
+// `ctx.http.switchSvc` the switch service 403s.
 function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      switchSvc: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
+      orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
+      switchSvc: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
       routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
@@ -23,13 +27,16 @@ describe("setup_camera_ports", () => {
     expect(setupCameraPorts.requiresConfirmation).toBe(true);
   });
 
-  it("forwards a partial body", async () => {
+  it("forwards a partial body to /api/switch/setup/cameras (WARP-1462)", async () => {
     const post = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const ctx = ctxWithPost(post);
     await setupCameraPorts.handler(
       { vlan_id: 200, camera_ports: [1, 2] },
-      ctxWithPost(post),
+      ctx,
     );
-    expect(post).toHaveBeenCalledWith("/setup/cameras", { vlan_id: 200, camera_ports: [1, 2] });
+    expect(post).toHaveBeenCalledWith("/api/switch/setup/cameras", { vlan_id: 200, camera_ports: [1, 2] });
+    // WARP-1462: never call the switch service directly (the 403 seam).
+    expect(ctx.http.switchSvc.post).not.toHaveBeenCalled();
   });
 
   it("returns confirmation_required on 202", async () => {

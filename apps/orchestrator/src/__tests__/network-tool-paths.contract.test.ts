@@ -78,6 +78,12 @@ import { registerPhoneHomeRoutes } from "../routes/network-phone-home.routes.js"
 import { registerDeviceRoutes, type DeviceDeps } from "../routes/network-devices.routes.js";
 import { createNetworkThroughputRouter } from "../routes/network-throughput.js";
 import { createApsRouter } from "../routes/aps.js";
+// WARP-1443 tools (list_threat_events / list_vpn_peers / set_device_schedule)
+// dispatch to these three routers; without them mounted the contract asserts
+// against an incomplete table and false-reds those tools' paths.
+import { createActivityRouter } from "../routes/activity.js";
+import { createVpnRouter } from "../routes/vpn.js";
+import { registerScheduleRoutes, type ScheduleDeps } from "../routes/network-schedules.routes.js";
 
 // CJS-safe path resolution (this package builds to CommonJS — import.meta is
 // a tsc error here). Same candidates idiom as ap-device.schema.test.ts so the
@@ -173,10 +179,18 @@ function buildRouteTable(): Array<{ method: string; path: string }> {
   registerDeviceRoutes(router, {
     networkDeviceService: {} as DeviceDeps["networkDeviceService"],
   });
+  // WARP-1443: schedules register onto the same router; deps are handler-time
+  // only, so a stub scheduleApi is fine for route-stack introspection.
+  registerScheduleRoutes(router, {
+    scheduleApi: {} as ScheduleDeps["scheduleApi"],
+  });
   return [
     ...collectRoutes(router),
     ...collectRoutes(createNetworkThroughputRouter(prisma)),
     ...collectRoutes(createApsRouter(prisma)),
+    // WARP-1443: list_threat_events → /api/activity, list_vpn_peers → /api/vpn/peers.
+    ...collectRoutes(createActivityRouter(prisma)),
+    ...collectRoutes(createVpnRouter(prisma)),
   ];
 }
 

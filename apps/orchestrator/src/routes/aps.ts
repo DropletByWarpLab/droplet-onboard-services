@@ -14,7 +14,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   approveAp,
   decommissionAp,
@@ -137,9 +137,15 @@ export function createApsRouter(prisma: PrismaClient): Router {
   // is null when the routing layer didn't surface one (mocks, older
   // routing builds, GET fallback) — dashboard treats that as "no op
   // tracking, just refresh".
+  //
+  // WARP-1461: the approve_ap LLM tool (handler-confirmation / Tier-2)
+  // dispatches through this route as the `_service:mcp` principal, which
+  // plain requireRole 403s — admit that exact principal (same owner/admin
+  // human set). The guard flip only lets the principal REACH the handler;
+  // approve_ap's own confirmation flow is unchanged.
   router.post(
     "/aps/:mac/approve",
-    requireRole("owner", "admin"),
+    requireRoleOrMcpService("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = approveSchema.safeParse(req.body);
@@ -171,9 +177,15 @@ export function createApsRouter(prisma: PrismaClient): Router {
   // can poll the apply/rollback state. operationId is null for the
   // idempotent already-DECOMMISSIONED short-circuit (no in-flight
   // routing call to track).
+  //
+  // WARP-1461: the decommission_ap LLM tool (handler-confirmation /
+  // Tier-2) dispatches through this route as the `_service:mcp`
+  // principal, which plain requireRole 403s — admit that exact principal
+  // (same owner/admin human set). The guard flip only lets the principal
+  // REACH the handler; the tool's confirmation flow is unchanged.
   router.post(
     "/aps/:mac/decommission",
-    requireRole("owner", "admin"),
+    requireRoleOrMcpService("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const mac = macFromParam(req);

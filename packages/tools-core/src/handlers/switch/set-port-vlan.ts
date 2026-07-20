@@ -2,6 +2,16 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { isConfirmationResponse, passThroughConfirmation } from "../../confirmation.js";
 import { annotateDryRun } from "./dry-run.js";
 
+/**
+ * WARP-1462 (phantom-target class): route through the orchestrator's
+ * `POST /api/switch/vlans/:vlanId/membership` proxy instead of the switch
+ * service (:8081) directly — `ctx.http.switchSvc` sends no bearer and the
+ * switch service 403s every call. The orchestrator target auto-injects the
+ * service-principal bearer; the write route admits `_service:mcp`
+ * (requireRoleOrMcpService). Request body (`{ ports }`) and the plan-only
+ * annotation are unchanged; a Tier-2 202 confirmation envelope from the
+ * orchestrator is passed through as `confirmation_required`.
+ */
 const inputSchema = {
   type: "object",
   properties: {
@@ -39,8 +49,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "INVALID_ARGS", message: "ports must be an array" },
     };
   }
-  const res = await ctx.http.switchSvc.post(
-    `/vlans/${vlanId}/membership`,
+  const res = await ctx.http.orchestrator.post(
+    `/api/switch/vlans/${vlanId}/membership`,
     { ports: args.ports },
   );
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);
@@ -48,7 +58,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return {
       ok: false,
       status: "error",
-      error: { code: "SET_VLAN_FAILED", message: `switch returned ${res.status}` },
+      error: { code: "SET_VLAN_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
   const data = await res.json();

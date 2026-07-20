@@ -10,7 +10,7 @@
 import type { Router } from "express";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface DeviceDeps {
   networkDeviceService: ReturnType<typeof createNetworkDeviceService>;
@@ -122,7 +122,12 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.patch("/network/groups/:id", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1461: the set_phone_home_blocking LLM tool (handler-confirmation /
+  // Tier-2) toggles a group's `blockPhoneHome` flag through this route as the
+  // `_service:mcp` principal, which plain requireRole 403s — admit that exact
+  // principal (same owner/admin human set). The guard flip only lets the
+  // principal REACH the handler; the tool's confirmation flow is unchanged.
+  router.patch("/network/groups/:id", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { name, color, icon, blockPhoneHome } = req.body ?? {};
       const patch: { name?: string; color?: string; icon?: string; blockPhoneHome?: boolean } = {};

@@ -613,7 +613,12 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   // household-admin capability — guard it like the mutating matter routes.
   // Without this, ANY authenticated principal could pass ?userId=<other>/
   // ?entityId=<device> and read every user's lock/unlock history (IDOR).
-  router.get("/matter/audit", requireRole("owner", "admin"), async (req, res, next) => {
+  //
+  // WARP-1461: the get_command_history LLM tool dispatches through this route
+  // presenting the `_service:mcp` principal, which plain requireRole 403s —
+  // admit that exact principal (same owner/admin human set; chat users
+  // without owner/admin never see the tool).
+  router.get("/matter/audit", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId =

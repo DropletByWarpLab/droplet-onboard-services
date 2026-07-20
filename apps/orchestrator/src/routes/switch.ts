@@ -24,7 +24,7 @@ import {
   evaluateNetworkCommand,
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("switch-routes");
@@ -335,7 +335,12 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/switch/vlans/:vlanId/membership", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1462: admit the pinned `_service:mcp` principal so the set_port_vlan
+  // LLM tool (which dispatches here via the MCP service bearer) reaches the
+  // Tier-2 safety layer instead of 403ing in front of it. Human RBAC is
+  // unchanged (owner/admin pass, others 403); the safety tier still classifies,
+  // confirms, and audits every call. The phantom-target class WARP-1439 fixed.
+  router.post("/switch/vlans/:vlanId/membership", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
       const vlanId = parseInt(req.params.vlanId);
@@ -356,7 +361,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- PoE enable/disable ---
 
-  router.post("/switch/poe/:port/enable", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1462: admit `_service:mcp` so the set_port_poe LLM tool reaches the
+  // Tier-2 safety layer (phantom-target fix). Human RBAC unchanged.
+  router.post("/switch/poe/:port/enable", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
@@ -372,7 +379,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/switch/poe/:port/disable", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1462: admit `_service:mcp` so the set_port_poe LLM tool reaches the
+  // Tier-2 safety layer (phantom-target fix). Human RBAC unchanged.
+  router.post("/switch/poe/:port/disable", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
@@ -390,7 +399,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- WAN Detection ---
 
-  router.post("/switch/wan/detect", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1462: admit `_service:mcp` so the detect_wan_port LLM tool reaches the
+  // Tier-2 safety layer (phantom-target fix). Human RBAC unchanged.
+  router.post("/switch/wan/detect", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
       const result = await evalSwitchCommand(prisma, "switch_wan_detect", {}, userId);
@@ -404,7 +415,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- Camera Setup ---
 
-  router.post("/switch/setup/cameras", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-1462: admit `_service:mcp` so the setup_camera_ports LLM tool reaches
+  // the Tier-2 safety layer (phantom-target fix). Human RBAC unchanged.
+  router.post("/switch/setup/cameras", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
       const { vlan_id, camera_ports, uplink_ports } = req.body || {};

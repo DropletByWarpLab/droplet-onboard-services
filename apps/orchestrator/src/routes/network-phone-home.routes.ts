@@ -15,7 +15,7 @@
  */
 import type { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   getPhoneHomeSettings,
   getPhoneHomeView,
@@ -47,9 +47,14 @@ export function registerPhoneHomeRoutes(router: Router, deps: PhoneHomeDeps): vo
     },
   );
 
+  // WARP-1461: the set_phone_home_blocking LLM tool (handler-confirmation /
+  // Tier-2) writes the master/cameras egress toggles through this route as the
+  // `_service:mcp` principal, which plain requireRole 403s — admit that exact
+  // principal (same owner/admin human set). The guard flip only lets the
+  // principal REACH the handler; the tool's confirmation flow is unchanged.
   router.patch(
     "/network/phone-home",
-    requireRole("owner", "admin"),
+    requireRoleOrMcpService("owner", "admin"),
     async (req, res, next) => {
       try {
         const body = req.body;
