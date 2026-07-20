@@ -2,7 +2,7 @@
  * Sidebar module-capability gating (WARP-1154/1155).
  *
  * The Projects nav entry is driven by the orchestrator's explicit module
- * capability (GET /api/capabilities → { projects }) — never by catching PM
+ * gate (GET /api/modules via useModuleGate) — never by catching PM
  * request errors. Pins:
  *
  *   - `projects: true`  → the Projects entry renders (desktop sidebar).
@@ -70,9 +70,13 @@ vi.mock("@/lib/hooks/useCapabilities", () => ({
   useCapabilities: () => ({ claudeActivity: false, ragEval: false }),
 }));
 
-const modulesRef = { current: { projects: true } as { projects: boolean } };
-vi.mock("@/lib/hooks/useAppCapabilities", () => ({
-  useAppCapabilities: () => modulesRef.current,
+// WARP-1397: the sidebar gates via useModuleGate (GET /api/modules), which
+// supersedes the old useAppCapabilities/{projects} capability. Drive the gate
+// directly — a module is "on" unless the orchestrator explicitly reports false
+// (fail-open: an unlisted module stays visible).
+const modulesRef = { current: { projects: true } as Record<string, boolean> };
+vi.mock("@/lib/hooks/useModuleGate", () => ({
+  useModuleGate: () => (moduleId: string) => modulesRef.current[moduleId] !== false,
 }));
 
 import { Sidebar } from "@/components/Sidebar";

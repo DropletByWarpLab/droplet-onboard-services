@@ -18,10 +18,13 @@
 #DROPLET_WATCHDOG_ESCALATE_AFTER=2
 #DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=5
 
-# XVF3800 voice DSP: path to the xvf_host control tool. The tool historically
-# lived at /tmp/xvf/xvf_host on lab boxes — /tmp does not survive a reboot, so
-# install it somewhere durable and point this at it.
+# XVF3800 voice DSP self-heal. setup.sh (scripts/lib/single-box.sh) now installs
+# the vendored, checksum-verified xvf_host + its libs durably to /usr/local/bin
+# (WARP-1408) — so the baked defaults below are correct on a stock box. Override
+# only for a non-standard tool location or to widen the USB vendor allow-list
+# (space-separated: XMOS 20b1 + the Seeed reSpeaker XVF3800's own VID 2886).
 #DROPLET_WATCHDOG_XVF_HOST=/usr/local/bin/xvf_host
+#DROPLET_WATCHDOG_XVF_USB_VENDOR="20b1 2886"
 #DROPLET_WATCHDOG_XHCI_THRESHOLD=3
 
 # Docker DNS probe: hostname to resolve, and (optionally) which running

@@ -7,7 +7,7 @@
  * - Tier 3: All commands logged to audit trail
  */
 
-import { Router } from "express";
+import { Router, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import {
   getCommissionedDevices,
@@ -26,6 +26,15 @@ import {
   confirmCommand,
   getAuditLog,
 } from "../services/safety-tier.service.js";
+import {
+  listRooms,
+  createRoom,
+  updateRoom,
+  deleteRoom,
+  upsertAlias,
+  enrichGrouped,
+  RoomValidationError,
+} from "../services/rooms.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   actorFromRequest,
@@ -247,7 +256,9 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isMatterInitialized()) {
         return res.json(DISCONNECTED_DEVICES);
       }
-      const grouped = await getCommissionedDevices();
+      // WARP-1396: overlay each device's Droplet-local friendly name + room
+      // (the sidecar owns fabric state; this only adds household identity).
+      const grouped = await enrichGrouped(prisma, await getCommissionedDevices());
       res.json(grouped);
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
@@ -618,6 +629,82 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // --- Rooms + device aliases (WARP-1396) ---------------------------------
+  // The household map. Reads are any-authenticated (same as /matter/devices);
+  // writes are the same household-admin set as the mutating matter routes. All
+  // are Droplet-local metadata (Postgres), never Matter fabric state; a rename
+  // NEVER writes the Matter nodeLabel — the alias survives re-commissioning.
+  function roomError(err: unknown, res: Response, next: NextFunction) {
+    if (err instanceof RoomValidationError) {
+      return res
+        .status(err.status)
+        .json({ error: err.code, message: err.message });
+    }
+    next(err);
+  }
+
+  router.get("/matter/rooms", async (_req, res, next) => {
+    try {
+      res.json({ rooms: await listRooms(prisma) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/matter/rooms",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const { name, icon } = req.body ?? {};
+        res.status(201).json(await createRoom(prisma, { name, icon }));
+      } catch (err) {
+        roomError(err, res, next);
+      }
+    },
+  );
+
+  router.patch(
+    "/matter/rooms/:id",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const { name, icon, sortOrder } = req.body ?? {};
+        res.json(await updateRoom(prisma, req.params.id, { name, icon, sortOrder }));
+      } catch (err) {
+        roomError(err, res, next);
+      }
+    },
+  );
+
+  router.delete(
+    "/matter/rooms/:id",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        await deleteRoom(prisma, req.params.id);
+        res.status(204).end();
+      } catch (err) {
+        roomError(err, res, next);
+      }
+    },
+  );
+
+  // Rename and/or (re)assign a room in one call. requireRoleOrMcpService so the
+  // assistant can organize devices too (same admit set as commission/command).
+  router.put(
+    "/matter/devices/:nodeId/alias",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const { name, roomId } = req.body ?? {};
+        res.json(await upsertAlias(prisma, req.params.nodeId, { name, roomId }));
+      } catch (err) {
+        roomError(err, res, next);
+      }
+    },
+  );
 
   return router;
 }

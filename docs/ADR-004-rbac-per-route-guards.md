@@ -100,6 +100,37 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 
 Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include `service` on any write row.
 
+#### Voice smart-home control exception (WARP-1398 amendment)
+
+> **Status of this note:** added 2026-07-18 by WARP-1398, approved by Stefan.
+> A single, scoped exception to the read-only default above.
+>
+> The always-on voice assistant runs as the **`_service:voice`** principal. So
+> that "hey Droplet, turn off the kitchen lights" works, `_service:voice` — and
+> ONLY that exact principal id, never the coarse `service` role — is granted the
+> smart-home **control** write tool (`control_device`) on top of its read tools.
+> Every other service principal (`_service:mcp`, `_service:email`, …) stays
+> read-only.
+>
+> Enforced in `routes/llm.ts`: `narrowAllowedToolsForRole(role, requested, isVoice)`
+> keeps `VOICE_WRITE_TOOLS = {control_device}` for the voice principal and strips
+> every other write tool; the replay spoof-guard exempts the same set. The grant
+> is deliberately narrow:
+>
+> - **No `run_scene`** — a routine can contain a lock command, which would bypass
+>   the per-command lock refusal below. Voice-run scenes wait on scene-level lock
+>   analysis.
+> - **Locks refused via voice.** `control_device` *can* carry a lock command, but
+>   locks are Tier-2 (the matter safety layer answers `confirmation_required`) and
+>   the voice flow has no way to complete a confirmation — and there is no speaker
+>   authentication until per-speaker enrollment (WARP-1056). So a voice lock/unlock
+>   is refused at the Tier-2 gate, matching the WARP-336 voice design ("verbal
+>   confirm for everything except locks; locks refused via voice").
+> - **No network/file/system writes** — only the smart-home control tool.
+>
+> Human RBAC is unchanged; this widens exactly one non-human principal by exactly
+> one tool, with the lock carve-out preserved.
+
 #### Managed-switch control surface (WARP-559)
 
 > **Status of this note:** added 2026-05-31 by WARP-559. The switch
