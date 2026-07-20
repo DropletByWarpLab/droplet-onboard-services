@@ -154,6 +154,12 @@ const chatRequestSchema = z.object({
   // out-of-range number must 400 here instead of 422ing at the gateway
   // and surfacing as a 500.
   max_tokens: z.number().int().min(1).max(4096).optional(),
+  // WARP-1442 — optional gpt-oss reasoning-effort control. Mirrors the
+  // ai-gateway's pydantic Literal (low|medium|high); an out-of-range value
+  // 400s here rather than 422ing at the gateway. Unset by an explicit caller
+  // means the route may still apply the `_service:voice` server-side default
+  // (see VOICE_REASONING_EFFORT); every non-voice caller stays unchanged.
+  reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
@@ -270,6 +276,38 @@ export const VOICE_WRITE_TOOLS = new Set(["control_device"]);
 
 export function isVoicePrincipal(user: AuthedRequest["user"]): boolean {
   return user?.id === "_service:voice" && user?.role === "service";
+}
+
+type ReasoningEffort = "low" | "medium" | "high";
+
+/**
+ * WARP-1442 — the reasoning-effort default applied to the always-on voice
+ * principal when it sends no explicit value. Voice replies are one short
+ * spoken sentence, so the gpt-oss reasoning channel is wasted decode latency;
+ * defaulting to "low" trims the inaudible reasoning-token overhead WITHOUT any
+ * voice-io change (the whole knob stays server-side). Read from
+ * `VOICE_REASONING_EFFORT` at call time (like DEFAULT_MODEL below) so it's
+ * per-deployment overridable and testable. Anything other than a valid level
+ * falls back to "low" — the point is trimming voice latency, so a misconfigured
+ * env must not silently restore heavy reasoning.
+ */
+function voiceReasoningEffortDefault(): ReasoningEffort {
+  const v = (process.env.VOICE_REASONING_EFFORT ?? "").trim().toLowerCase();
+  return v === "medium" || v === "high" ? v : "low";
+}
+
+/**
+ * WARP-1442 — resolve the effective reasoning effort for a turn. An explicit
+ * caller value always wins; otherwise the voice principal gets the server-side
+ * default and every other caller gets `undefined` (no field forwarded → the
+ * gateway request is byte-for-byte unchanged for the dashboard / wizard).
+ */
+export function resolveReasoningEffort(
+  explicit: ReasoningEffort | undefined,
+  isVoice: boolean,
+): ReasoningEffort | undefined {
+  if (explicit) return explicit;
+  return isVoice ? voiceReasoningEffortDefault() : undefined;
 }
 
 export async function narrowAllowedToolsForRole(
@@ -746,6 +784,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // WARP-1398: the voice principal may replay/use its scoped smart-home
       // control tools; every other non-privileged caller stays write-free.
       const isVoice = isVoicePrincipal((req as AuthedRequest).user);
+      // WARP-1442 — resolve the reasoning-effort knob once for this turn. The
+      // voice principal defaults to "low" (server-side) when it sends nothing;
+      // an explicit value always wins; every other caller resolves to
+      // undefined so its gateway request is byte-for-byte unchanged. Passed to
+      // both the streaming and non-streaming runAgent calls below.
+      const reasoningEffort = resolveReasoningEffort(
+        chatReq.reasoning_effort,
+        isVoice,
+      );
       if (
         !isPrivilegedRole(role) &&
         replayedWriteToolAttempt(
@@ -1573,6 +1620,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-849 — forward the caller's completion budget (the
             // schema accepted it but the loop never received it).
             max_tokens: chatReq.max_tokens,
+            // WARP-1442 — resolved reasoning effort (voice → "low" default).
+            reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
@@ -1627,6 +1676,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // setup wizard's sample probe relies on this so its raised
           // reasoning-safe budget actually reaches Ollama.
           max_tokens: chatReq.max_tokens,
+          // WARP-1442 — resolved reasoning effort (voice → "low" default).
+          reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
