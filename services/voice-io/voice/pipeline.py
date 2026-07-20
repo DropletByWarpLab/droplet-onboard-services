@@ -92,6 +92,13 @@ class _DeviceError(Exception):
     recovering), never this type."""
 
 
+class MeasurementUnavailable(Exception):
+    """A windowed input measurement could not be taken from the live
+    capture stream (WARP-1410): the pipeline isn't delivering frames
+    (no_mic / error / not started), or another measurement is already
+    collecting. Public — the API layer maps it to an operational 503."""
+
+
 # ────────────────────────────────────────────────────────────────────
 # Intent gate — suppress speculative tool calls
 # ────────────────────────────────────────────────────────────────────
@@ -545,6 +552,13 @@ class WakePipeline:
         # flatline clock never compares against timestamps from before a
         # device recovery.
         self._audio_watch_started_at: Optional[float] = None
+        # Windowed-measurement collector (WARP-1410). None = not
+        # collecting; otherwise a list the pipeline thread appends
+        # (sumsq, samples, peak) to for every captured frame. This is how
+        # the calibration wizard measures WITHOUT opening a second
+        # PortAudio stream on a device the wake loop already holds
+        # exclusively (the -9985 that used to dead-end the wizard).
+        self._measure_collector: Optional[list[tuple[float, int, float]]] = None
 
         self._thread: Optional[threading.Thread] = None
         self._probe_thread: Optional[threading.Thread] = None
@@ -980,6 +994,85 @@ class WakePipeline:
         return until is not None and now < until
 
     # ──────────────────────────────────────────────────────────────
+    # Windowed input measurement (WARP-1410)
+    # ──────────────────────────────────────────────────────────────
+
+    def _start_measure(self) -> None:
+        """Arm the per-frame collector. Raises MeasurementUnavailable if
+        the pipeline isn't capturing or a measurement is already running."""
+        with self._lock:
+            if self._measure_collector is not None:
+                raise MeasurementUnavailable(
+                    "A measurement is already in progress — try again in "
+                    "a moment."
+                )
+            if self._state in ("error", "no_mic", "idle"):
+                raise MeasurementUnavailable(
+                    "The microphone isn't capturing right now "
+                    f"(state={self._state}) — no live audio to measure."
+                )
+            self._measure_collector = []
+
+    def _finish_measure(self) -> dict[str, float]:
+        """Disarm the collector and reduce it to RMS + peak in dBFS."""
+        with self._lock:
+            collected = self._measure_collector
+            self._measure_collector = None
+        if not collected:
+            raise MeasurementUnavailable(
+                "No audio arrived during the measurement window — the "
+                "microphone stopped delivering audio."
+            )
+        sumsq = math.fsum(c[0] for c in collected)
+        samples = sum(c[1] for c in collected)
+        peak = max(c[2] for c in collected)
+        if samples <= 0:  # pragma: no cover — defensive
+            raise MeasurementUnavailable(
+                "No audio samples arrived during the measurement window."
+            )
+        rms = math.sqrt(max(0.0, sumsq) / samples)
+        return {
+            "rms_dbfs": (
+                max(RMS_DBFS_FLOOR, 20.0 * math.log10(rms / _INT16_FULL_SCALE))
+                if rms > 0.0
+                else RMS_DBFS_FLOOR
+            ),
+            "peak_dbfs": (
+                max(RMS_DBFS_FLOOR, 20.0 * math.log10(peak / _INT16_FULL_SCALE))
+                if peak > 0.0
+                else RMS_DBFS_FLOOR
+            ),
+        }
+
+    def measure_input(self, duration_s: float) -> dict[str, float]:
+        """Measure the live input over `duration_s`; return RMS + peak dBFS.
+
+        Reads the wake loop's ALREADY-OPEN capture stream rather than
+        opening a second one. The reSpeaker's hw device is exclusive, so
+        the old `sounddevice.rec` path raised PortAudio -9985 ("Device
+        unavailable") for the entire time the assistant was listening —
+        i.e. always — which is what dead-ended the calibration wizard's
+        "measure the room" step even on a perfectly healthy mic. Note that
+        calibration mode (WARP-1059) suppresses wake HANDLING but keeps the
+        stream open, so it never freed the device either.
+
+        Values are RAW / pre-gain, the same domain contract as
+        `input_rms_dbfs`, so the wizard's noise-floor compare needs no gain
+        math. Blocks for the window (called from the API threadpool) and is
+        interrupted by stop().
+        """
+        self._start_measure()
+        try:
+            self._shutdown.wait(max(0.0, float(duration_s)))
+            return self._finish_measure()
+        finally:
+            # Idempotent teardown: _finish_measure normally clears it, but
+            # an interrupted window must never leave the collector armed
+            # (it would grow unbounded on the pipeline thread).
+            with self._lock:
+                self._measure_collector = None
+
+    # ──────────────────────────────────────────────────────────────
     # Status — atomic snapshot
     # ──────────────────────────────────────────────────────────────
 
@@ -1303,6 +1396,17 @@ class WakePipeline:
         # Sum of squares in float64 (int16² overflows int16/int32 sums).
         sumsq = float(np.einsum("i,i->", frame, frame, dtype=np.float64))
         frame_rms = math.sqrt(sumsq / n)
+        # WARP-1410 — feed an in-flight windowed measurement from this same
+        # already-open stream (never a second one). `list.append` is atomic
+        # under the GIL, so the pipeline thread needs no lock here; the
+        # collector is swapped in/out under _lock by _start/_finish_measure.
+        # Peak costs an extra pass, so it's only computed while collecting.
+        # Widen to int32 first: abs(-32768) overflows int16.
+        collector = self._measure_collector
+        if collector is not None:
+            collector.append(
+                (sumsq, n, float(np.abs(frame.astype(np.int32)).max())),
+            )
         frame_dbfs = (
             max(RMS_DBFS_FLOOR, 20.0 * math.log10(frame_rms / _INT16_FULL_SCALE))
             if frame_rms > 0.0

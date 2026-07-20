@@ -42,6 +42,7 @@ from voice.pipeline import (
     DEFAULT_THRESHOLD,
     DEFAULT_VISUAL_DECAY_S,
     RMS_DBFS_FLOOR,
+    MeasurementUnavailable,
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
@@ -2488,6 +2489,82 @@ def _quiet_pipe(**kwargs) -> WakePipeline:
     )
     pipe._set_state("listening")
     return pipe
+
+
+class TestWindowedMeasure:
+    """WARP-1410 — wizard measurements read the wake loop's ALREADY-OPEN
+    stream. Opening a second one on the reSpeaker's exclusive hw device
+    raised PortAudio -9985 for the whole time the assistant was listening,
+    which dead-ended the calibration wizard on a healthy mic."""
+
+    def test_collects_rms_and_peak_from_live_frames(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        for _ in range(4):
+            pipe._on_frame(_audio_frame(1000))
+        result = pipe._finish_measure()
+        # Constant-1000 frames → RMS == peak == 1000 → 20·log10(1000/32768).
+        assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.05)
+        assert result["peak_dbfs"] == pytest.approx(-30.31, abs=0.05)
+
+    def test_peak_tracks_the_loudest_frame(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_audio_frame(8000))
+        pipe._on_frame(_silence_frame())
+        result = pipe._finish_measure()
+        # Peak comes from the loud frame; RMS is diluted by the silent ones,
+        # which is exactly what the wizard's speech-peak step needs.
+        assert result["peak_dbfs"] == pytest.approx(-12.26, abs=0.05)
+        assert result["rms_dbfs"] < result["peak_dbfs"]
+
+    def test_no_frames_raises_measurement_unavailable(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        with pytest.raises(MeasurementUnavailable):
+            pipe._finish_measure()
+
+    def test_non_capturing_state_refuses_to_measure(self):
+        pipe = _quiet_pipe()
+        pipe._set_state("no_mic")
+        with pytest.raises(MeasurementUnavailable):
+            pipe._start_measure()
+
+    def test_concurrent_measurement_refused(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        with pytest.raises(MeasurementUnavailable):
+            pipe._start_measure()
+
+    def test_collector_is_disarmed_after_finish(self):
+        pipe = _quiet_pipe()
+        pipe._start_measure()
+        pipe._on_frame(_audio_frame(1000))
+        pipe._finish_measure()
+        assert pipe._measure_collector is None
+        # Frames after the window must not accumulate anywhere.
+        pipe._on_frame(_audio_frame(1000))
+        assert pipe._measure_collector is None
+
+    def test_measure_input_blocks_then_returns_live_levels(self):
+        pipe = _quiet_pipe()
+        stop = threading.Event()
+
+        def feeder():
+            while not stop.is_set():
+                pipe._on_frame(_audio_frame(1000))
+                time.sleep(0.005)
+
+        t = threading.Thread(target=feeder, daemon=True)
+        t.start()
+        try:
+            result = pipe.measure_input(0.08)
+        finally:
+            stop.set()
+            t.join(timeout=1.0)
+        assert result["rms_dbfs"] == pytest.approx(-30.31, abs=0.5)
+        assert pipe._measure_collector is None
 
 
 class TestInputLevelTracking:
