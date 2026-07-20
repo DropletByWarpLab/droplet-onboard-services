@@ -107,14 +107,14 @@ function makeMemoryCache() {
 }
 
 describe("createEnhancementDeps (WARP-437 production factory)", () => {
-  const orig = process.env.WARP_437_ENHANCEMENT_ENABLED;
+  const orig = process.env.QUERY_ENHANCEMENT_ENABLED;
   afterEach(() => {
-    if (orig === undefined) delete process.env.WARP_437_ENHANCEMENT_ENABLED;
-    else process.env.WARP_437_ENHANCEMENT_ENABLED = orig;
+    if (orig === undefined) delete process.env.QUERY_ENHANCEMENT_ENABLED;
+    else process.env.QUERY_ENHANCEMENT_ENABLED = orig;
   });
 
-  it("returns undefined when WARP_437_ENHANCEMENT_ENABLED is not '1'", () => {
-    delete process.env.WARP_437_ENHANCEMENT_ENABLED;
+  it("returns undefined when QUERY_ENHANCEMENT_ENABLED is not '1'", () => {
+    delete process.env.QUERY_ENHANCEMENT_ENABLED;
     const out = createEnhancementDeps({
       aiGatewayGrpcUrl: "ai-gateway:50051",
       defaultModel: "test-model",
@@ -124,7 +124,7 @@ describe("createEnhancementDeps (WARP-437 production factory)", () => {
 
   it("returns undefined for any non-'1' value (e.g. 'true', '0', '')", () => {
     for (const v of ["true", "0", "", "yes"]) {
-      process.env.WARP_437_ENHANCEMENT_ENABLED = v;
+      process.env.QUERY_ENHANCEMENT_ENABLED = v;
       const out = createEnhancementDeps({
         aiGatewayGrpcUrl: "ai-gateway:50051",
         defaultModel: "test-model",
@@ -134,7 +134,7 @@ describe("createEnhancementDeps (WARP-437 production factory)", () => {
   });
 
   it("returns a deps object with all 4 methods when flag is '1'", () => {
-    process.env.WARP_437_ENHANCEMENT_ENABLED = "1";
+    process.env.QUERY_ENHANCEMENT_ENABLED = "1";
     const out = createEnhancementDeps({
       aiGatewayGrpcUrl: "ai-gateway:50051",
       defaultModel: "test-model",

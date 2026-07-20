@@ -74,7 +74,7 @@ Orchestrator computes enhancement and threads it to retrieval via the MCP
 **Two things are intentionally NOT yet active:**
 
 1. **Production wiring is behind a flag.** `EnhancementDeps` is wired into the
-   orchestrator's agent loop but gated by `WARP_437_ENHANCEMENT_ENABLED=1`
+   orchestrator's agent loop but gated by `QUERY_ENHANCEMENT_ENABLED=1`
    (default off). Set it per-environment + recreate the orchestrator container
    to turn enhancement on. Until then the agent loop runs the WARP-286 path
    byte-for-byte.
@@ -157,7 +157,7 @@ The whole program is currently gated on **one artifact: a populated
    (`short ≥ baseline × 1.05`, `analytical context_recall ≥ baseline × 1.10`,
    `conversational must not regress`, full corpus `≥ baseline × 1.03`).
 4. **Turn on WARP-437 enhancement in production** — set
-   `WARP_437_ENHANCEMENT_ENABLED=1` on the target environment + recreate the
+   `QUERY_ENHANCEMENT_ENABLED=1` on the target environment + recreate the
    orchestrator. Watch the next eval runs for per-class deltas.
 5. **Start WARP-438 CRAG-lite** — now fully unblocked.
 6. **WARP-439 multimodal** — independent; start whenever `droplet-local-LLM`

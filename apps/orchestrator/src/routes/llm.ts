@@ -946,7 +946,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       // WARP-437 follow-up — production-wire EnhancementDeps behind a
       // feature flag. `createEnhancementDeps` returns `undefined` unless
-      // `WARP_437_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
+      // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
       // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
       // already canonicalised the env var name for the eval harness.

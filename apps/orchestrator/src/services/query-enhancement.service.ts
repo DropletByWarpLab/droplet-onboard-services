@@ -196,7 +196,7 @@ function tryParseJsonArray(text: string): string[] | null {
 // Production binding (WARP-437 follow-up — keep below the unit-tested core).
 // The factory below wires `hydeRewrite`, `multiQueryExpand`, `classifyQuery`
 // into an `EnhancementDeps` consumable by the agent loop. Feature-flagged via
-// WARP_437_ENHANCEMENT_ENABLED — when the env var is not "1", the factory
+// QUERY_ENHANCEMENT_ENABLED — when the env var is not "1", the factory
 // returns `undefined` and the agent loop falls back to baseline retrieval.
 // ---------------------------------------------------------------------------
 
@@ -268,7 +268,7 @@ function makeRedisClassifierCache(): ClassifyQueryCache {
 export function createEnhancementDeps(
   opts: EnhancementFactoryOptions,
 ): EnhancementDeps | undefined {
-  if (process.env.WARP_437_ENHANCEMENT_ENABLED !== "1") return undefined;
+  if (process.env.QUERY_ENHANCEMENT_ENABLED !== "1") return undefined;
 
   const embedder = new EmbeddingClient({ url: opts.aiGatewayGrpcUrl });
   const classifier = new QueryClassifierClient({ url: opts.aiGatewayGrpcUrl });
