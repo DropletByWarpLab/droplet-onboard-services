@@ -149,7 +149,8 @@ export interface OffLanChannelDefault {
     | "cloud_model_escape"
     | "outbound_email"
     | "telemetry"
-    | "web_fetch";
+    | "web_fetch"
+    | "ambient_data";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -160,6 +161,10 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   { key: "outbound_email", enabled: true, requiresAdmin: true },
   { key: "telemetry", enabled: true, requiresAdmin: true },
   { key: "web_fetch", enabled: false, requiresAdmin: true },
+  // WARP-1436 — Weather & currency data (Open-Meteo, European Central
+  // Bank). Gates GET /api/web/weather + /api/web/rates. OFF by default,
+  // same sovereignty posture as web_fetch: the operator opts in.
+  { key: "ambient_data", enabled: false, requiresAdmin: true },
 ];
 
 /**

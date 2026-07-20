@@ -148,6 +148,10 @@ import getCurrentDatetime from "./handlers/data/get-current-datetime.js";
 import dateMath from "./handlers/data/date-math.js";
 // data (WARP-1426): translation via the orchestrator's single-turn completion
 import translateText from "./handlers/data/translate-text.js";
+// data (WARP-1436): ambient web data (weather/rates) via the screened
+// /api/web routes — ambient_data off-LAN channel, fail-closed.
+import getWeather from "./handlers/data/get-weather.js";
+import currencyConvert from "./handlers/data/currency-convert.js";
 
 const allTools: Tool[] = [
   // network
@@ -279,6 +283,9 @@ const allTools: Tool[] = [
   dateMath,
   // WARP-1426: translation (Tier-1; single-turn completion via orchestrator)
   translateText,
+  // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
+  getWeather,
+  currencyConvert,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

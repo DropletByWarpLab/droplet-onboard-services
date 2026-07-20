@@ -200,6 +200,44 @@ entries:
     review_by: 2027-07-04
     code_refs: [services/ai-gateway/providers/anthropic_cloud.py, services/ai-gateway/providers/openai_cloud.py]
 
+  - id: ambient-weather-open-meteo
+    kind: egress
+    service: web-fetch
+    destination:
+      hosts: [api.open-meteo.com, geocoding-api.open-meteo.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      get_weather LLM tool: keyless Open-Meteo geocoding + forecast. The
+      user-supplied place name is the only content sent. Reachable only
+      when the `web` compose profile AND the ambient_data off-LAN channel
+      are enabled (both default off); every request audit-logged.
+    ticket: WARP-1436
+    added: 2026-07-20
+    review_by: 2027-07-20
+    code_refs: [services/web-fetch/providers.py]
+
+  - id: ambient-rates-ecb
+    kind: egress
+    service: web-fetch
+    destination:
+      hosts: [www.ecb.europa.eu]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      currency_convert LLM tool: ECB daily reference rates (one fixed XML
+      document, no user content in the request). Gated by the `web`
+      compose profile + ambient_data off-LAN channel; served from a 24h
+      cache with a staleness stamp when offline.
+    ticket: WARP-1436
+    added: 2026-07-20
+    review_by: 2027-07-20
+    code_refs: [services/web-fetch/providers.py]
+
   - id: ntp-openwrt-pool
     kind: egress
     service: openwrt-router

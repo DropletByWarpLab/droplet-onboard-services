@@ -46,3 +46,31 @@ export async function outboundEmailGate(
     throw err;
   }
 }
+
+/**
+ * WARP-1436 — true only when the `ambient_data` off-LAN channel
+ * ("Weather & currency data (Open-Meteo, European Central Bank)") is
+ * explicitly enabled. Gates GET /api/web/weather and /api/web/rates.
+ *
+ * Deliberate divergence from `outboundEmailGate`: this gate NEVER
+ * throws — a DB error resolves to `false` (closed). Ambient data is a
+ * pure convenience read with no operator-remediation split between
+ * "disabled" and "gate unavailable"; both must simply refuse egress
+ * (451), so the caller gets one fail-closed boolean.
+ */
+export async function ambientDataGate(
+  prisma: OffLanGatePrisma,
+): Promise<boolean> {
+  try {
+    const row = await prisma.offLanAllowlistChannel.findUnique({
+      where: { key: OffLanChannelKey.ambient_data },
+    });
+    return row?.enabled === true;
+  } catch (err) {
+    logger.warn(
+      { err },
+      "ambient_data off-LAN gate read failed — failing closed (no egress)",
+    );
+    return false;
+  }
+}

@@ -671,6 +671,18 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- Ambient web data (WARP-1436) ---
+  // WEB_FETCH_URL — compose-internal base URL of the services/web-fetch
+  // allowlisted fetcher (weather via api.open-meteo.com, currency rates
+  // via www.ecb.europa.eu). Fronted by GET /api/web/weather + /rates,
+  // which gate every call on the `ambient_data` off-LAN channel.
+  WEB_FETCH_URL: z.string().default("http://web-fetch:8010"),
+  // WEB_FETCH_SERVICE_TOKEN — outbound bearer for /api/web/* → web-fetch.
+  // Optional (minted by setup.sh like the other SERVICE_TOKEN_* secrets);
+  // when unset the /api/web routes fail CLOSED with 502 rather than call
+  // the fetcher unauthenticated.
+  WEB_FETCH_SERVICE_TOKEN: z.string().default(""),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

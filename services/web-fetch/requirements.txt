@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+# httpx is the canonical Python HTTP client across services (camera-discovery,
+# routing, ops-console). All outbound calls go through providers.create_client
+# with a 10 s timeout; destinations are fixed constants registered in
+# docs/security/allowed-egress.yaml.
+httpx==0.28.1

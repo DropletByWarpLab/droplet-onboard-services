@@ -2863,6 +2863,10 @@ enum OffLanChannelKey {
   outbound_email
   telemetry
   web_fetch
+  /// WARP-1436 — "Weather & currency data (Open-Meteo, European Central
+  /// Bank)": the /api/web/weather + /api/web/rates routes' egress gate,
+  /// fronting the services/web-fetch allowlisted fetcher.
+  ambient_data
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.

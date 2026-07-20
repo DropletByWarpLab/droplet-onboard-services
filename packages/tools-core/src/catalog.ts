@@ -173,6 +173,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "get_current_datetime",
     "date_math",
     "translate_text",
+    "get_weather",
+    "currency_convert",
   ],
 };
 
@@ -314,6 +316,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   get_current_datetime: "Check today's date and the current time",
   date_math: "Work out dates — add days or count the time between two dates",
   translate_text: "Translate text into another language",
+  // Data (ambient web data — WARP-1436)
+  get_weather: "Check the weather and forecast for any place",
+  currency_convert: "Convert money between currencies using daily rates",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

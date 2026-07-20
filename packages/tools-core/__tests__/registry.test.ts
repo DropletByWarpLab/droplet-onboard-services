@@ -123,6 +123,9 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1426 — single-turn-completion tools (both Tier-1)
   "translate_text",
   "summarize_file",
+  // WARP-1436 — ambient web data via screened egress (both Tier-1)
+  "get_weather",
+  "currency_convert",
 ];
 
 describe("TOOLS registry", () => {
@@ -204,6 +207,12 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("translate_text")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresWrite).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresConfirmation).toBe(false);
+    // WARP-1436 — ambient web-data tools are Tier-1 (read-only; egress is
+    // gated + audited server-side, not a state write).
+    expect(TOOLS.get("get_weather")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_weather")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("currency_convert")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("currency_convert")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
