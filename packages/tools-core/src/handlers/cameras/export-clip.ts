@@ -54,14 +54,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "INVALID_ARGS", message: "export_window_exceeds_30_minutes" },
     };
   }
+  // WARP-1439 — route through the ORCHESTRATOR, not the cameras service:
+  // the cameras (camera-discovery) service has no /clips/export endpoint at
+  // all; the real machinery is the orchestrator's
+  // POST /api/cameras/:name/clips/export (camera in the path, body
+  // {starts_at, ends_at}). Same pattern as share_clip/delete_clip. The
+  // per-user Nextcloud credential rides in the X-Nextcloud-Token /
+  // X-Nextcloud-User headers, honored by the orchestrator ONLY for the MCP
+  // service principal (mirrors the /api/files routes, WARP-861). Success
+  // `data` is the orchestrator's export result — camelCase
+  // { ncPath, bytes, durationSec } instead of the snake_case { nc_path }
+  // shape this handler previously (wrongly) assumed the cameras service
+  // would return.
   const headers: Record<string, string> = {
     "X-Nextcloud-Token": ctx.ncToken,
     "X-Nextcloud-User": ctx.userId,
   };
-  const res = await ctx.http.cameras.post(
-    "/clips/export",
+  const res = await ctx.http.orchestrator.post(
+    `/api/cameras/${encodeURIComponent(camera)}/clips/export`,
     {
-      camera,
       starts_at: startsAt.toISOString(),
       ends_at: endsAt.toISOString(),
     },
@@ -71,7 +82,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return {
       ok: false,
       status: "error",
-      error: { code: "EXPORT_FAILED", message: `cameras returned ${res.status}` },
+      error: { code: "EXPORT_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
   const data = await res.json();
