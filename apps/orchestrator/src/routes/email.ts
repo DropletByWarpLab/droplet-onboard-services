@@ -9,6 +9,16 @@
  *   PATCH  /api/email/drafts/:id                     — edit draft
  *   POST   /api/email/drafts/:id/send                — queue send
  *
+ * WARP-1453 — the five email LLM tools (email_search / email_read /
+ * email_summarize_thread / email_draft_reply / email_send) reach the
+ * threads, analysis, draft-create, and send routes as the trusted
+ * `_service:mcp` principal. Those five routes admit it via
+ * `requireRoleOrMcpService` (human role sets unchanged) and scope
+ * accounts by the forwarded `X-Droplet-User` identity — see
+ * `effectiveUser()` / `assertAccountAccessible()` below. All other
+ * routes here (accounts list, draft patch, ingest, claim/status)
+ * keep their original guards.
+ *
  * Send-tier (POST .../drafts/:id/send) is gated by the WARP-467/468
  * `outbound_email` off-LAN channel. When the channel is disabled
  * (sovereignty default for off-LAN escape; outbound email is ON by
@@ -20,7 +30,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
@@ -35,23 +45,95 @@ function isPrivilegedRole(req: Request): boolean {
   return req.user?.role === "owner" || req.user?.role === "admin";
 }
 
+// WARP-1453 — the five email LLM tools dispatch through the mcp-server,
+// which calls back into these routes presenting the WARP-339 service
+// bearer (`_service:mcp`). Same trusted-principal check as files.ts.
+function isMcpService(req: Request): boolean {
+  return req.user?.id === "_service:mcp" && req.user.role === "service";
+}
+
+/**
+ * WARP-1453 — thrown when a request reaches an email tool route without a
+ * resolvable human identity. The router-level error handler below maps it
+ * to 401 (fail closed — the service principal must never default to acting
+ * as anyone, same posture as files.ts getUser()).
+ */
+class MissingDropletUserError extends Error {
+  constructor() {
+    super("X-Droplet-User header required for service-principal email calls");
+    this.name = "MissingDropletUserError";
+  }
+}
+
+/**
+ * WARP-1453 — the effective human identity (Droplet username) a request
+ * acts as. For the trusted mcp service principal ONLY, the username is
+ * taken from the `X-Droplet-User` header the tool handlers forward
+ * (`ctx.userId`, threaded from the chat session via MCP `_meta.userId`).
+ * Missing/blank header → MissingDropletUserError → 401, never a fallback.
+ * For every other caller the header is IGNORED and the session's own
+ * username rules — a human session cannot spoof another user this way.
+ */
+function effectiveUser(req: Request): string {
+  if (isMcpService(req)) {
+    const forwarded = (req.header("x-droplet-user") ?? "").trim();
+    if (!forwarded) throw new MissingDropletUserError();
+    return forwarded;
+  }
+  const username = req.user?.username;
+  // authMiddleware guarantees req.user on these routes; an absent username
+  // is an invariant break — refuse rather than act as anyone (files.ts
+  // MissingAuthUserError posture).
+  if (!username) throw new MissingDropletUserError();
+  return username;
+}
+
 // IDOR guard: confirm the requester is allowed to touch the named account.
 // Returns the account row (id-only) on success, or null on 404/403 — the
 // caller writes the response. Owner/admin pass regardless of ownership;
 // family-and-below must own the account. Returns 404 (not 403) on a foreign
 // account to avoid leaking the existence of other households' rows.
+//
+// WARP-1453: for the mcp service principal the check runs AS the forwarded
+// `X-Droplet-User` — that username is resolved against the User directory
+// (fail closed: unknown user → null → 404, missing header → 401) and the
+// resolved row's canonical role/id drive the exact same privileged/ownership
+// decision the human would get calling the route directly. `forwardedRoles`
+// is the route's HUMAN role set: a forwarded identity whose canonical role
+// falls outside it is refused (404) so the service path can never widen a
+// route's human RBAC (e.g. a forwarded family user on the owner/admin-only
+// send route). Identity is resolved BEFORE the account read so a header-less
+// service call 401s without leaking account existence.
 async function assertAccountAccessible(
   prisma: PrismaClient,
   req: Request,
   accountId: string,
+  forwardedRoles: readonly string[] = ["owner", "admin", "family"],
 ): Promise<{ id: string; userId: string | null } | null> {
+  let privileged: boolean;
+  let scopeUserId: string | null;
+  if (isMcpService(req)) {
+    const username = effectiveUser(req); // throws → 401 when the header is absent
+    const user = (await prisma.user.findUnique({
+      where: { username },
+      select: { id: true, role: true },
+    })) as { id: string; role: string } | null;
+    if (!user) return null; // unknown forwarded identity — fail closed
+    if (!forwardedRoles.includes(user.role)) return null; // human set mirror
+    privileged = user.role === "owner" || user.role === "admin";
+    scopeUserId = user.id;
+  } else {
+    privileged = isPrivilegedRole(req);
+    scopeUserId = req.user?.id ?? null;
+  }
   const account = (await prisma.emailAccount.findUnique({
     where: { id: accountId },
     select: { id: true, userId: true },
   })) as { id: string; userId: string | null } | null;
   if (!account) return null;
-  if (isPrivilegedRole(req)) return account;
-  if (account.userId && account.userId === req.user?.id) return account;
+  if (privileged) return account;
+  if (account.userId && scopeUserId && account.userId === scopeUserId)
+    return account;
   return null;
 }
 
@@ -180,7 +262,10 @@ export function createEmailRouter(
 
   router.get(
     "/email/:accountId/threads",
-    requireRole("owner", "admin", "family"),
+    // WARP-1453: `email_search` dispatches here as `_service:mcp` — admit
+    // the trusted mcp principal (identity via X-Droplet-User, resolved in
+    // assertAccountAccessible). Human role set unchanged.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const account = await assertAccountAccessible(
@@ -228,7 +313,8 @@ export function createEmailRouter(
 
   router.get(
     "/email/:accountId/threads/:threadId",
-    requireRole("owner", "admin", "family"),
+    // WARP-1453: `email_read` dispatches here as `_service:mcp`.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const account = await assertAccountAccessible(
@@ -261,7 +347,8 @@ export function createEmailRouter(
 
   router.post(
     "/email/:accountId/drafts",
-    requireRole("owner", "admin", "family"),
+    // WARP-1453: `email_draft_reply` dispatches here as `_service:mcp`.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = createDraftSchema.safeParse(req.body);
@@ -375,7 +462,10 @@ export function createEmailRouter(
 
   router.post(
     "/email/drafts/:id/send",
-    requireRole("owner", "admin"),
+    // WARP-1453: `email_send` dispatches here as `_service:mcp`. Send keeps
+    // the narrower owner/admin human set; the forwarded identity's canonical
+    // role is re-checked in assertAccountAccessible.
+    requireRoleOrMcpService("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const draft = (await prisma.emailDraft.findUnique({
@@ -388,10 +478,13 @@ export function createEmailRouter(
         // Belt-and-braces: send-tier is already gated to owner/admin
         // (per route guard), but apply the same account-access check so
         // a future role widening doesn't silently re-open IDOR.
+        // WARP-1453: the mcp path mirrors the owner/admin human set for
+        // the forwarded identity — a forwarded family user cannot send.
         const account = await assertAccountAccessible(
           prisma,
           req,
           draft.accountId,
+          ["owner", "admin"],
         );
         if (!account) {
           res.status(404).json({ error: "Draft not found" });
@@ -458,7 +551,10 @@ export function createEmailRouter(
           refs: {
             draftId: queued.id,
             accountId: queued.accountId,
-            actor: req.user?.username ?? null,
+            // WARP-1453: attribute the EFFECTIVE human — for the mcp
+            // service principal this is the forwarded X-Droplet-User,
+            // not "_service:mcp".
+            actor: effectiveUser(req),
           },
           actor: actorFromRequest(req),
         });
@@ -743,7 +839,8 @@ export function createEmailRouter(
   // (see services/email-analysis.service.ts).
   router.get(
     "/email/:accountId/threads/:threadId/analysis",
-    requireRole("owner", "admin", "family"),
+    // WARP-1453: `email_summarize_thread` dispatches here as `_service:mcp`.
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const account = await assertAccountAccessible(
@@ -791,6 +888,19 @@ export function createEmailRouter(
         );
         next(err);
       }
+    },
+  );
+
+  // WARP-1453 — map the fail-closed identity sentinel to 401. Every tool
+  // route funnels errors through next(err); a service-principal call
+  // without X-Droplet-User must re-present with an identity, not 500.
+  router.use(
+    (err: unknown, _req: Request, res: Response, next: NextFunction): void => {
+      if (err instanceof MissingDropletUserError) {
+        res.status(401).json({ error: err.message });
+        return;
+      }
+      next(err);
     },
   );
 
