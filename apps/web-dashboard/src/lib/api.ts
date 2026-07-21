@@ -3011,6 +3011,22 @@ export async function decommissionMatterDevice(nodeId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to decommission device: ${res.status}`);
 }
 
+/**
+ * WARP-1469: nudge a still-paired but offline device to reconnect now. The
+ * controller answers immediately ({ status: "reconnecting" }); the actual
+ * result lands later via the /api/matter/devices/events SSE stream (the
+ * device list flips connectionState), so callers just revalidate + poll.
+ */
+export async function reconnectMatterDevice(
+  nodeId: string,
+): Promise<{ status: string; nodeId: string }> {
+  const res = await authFetch(`${BASE}/api/matter/devices/${nodeId}/reconnect`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to reconnect device: ${res.status}`);
+  return res.json();
+}
+
 // --- Models ---
 
 export async function fetchModels(): Promise<ModelsResponse> {
@@ -3032,6 +3048,63 @@ export async function fetchModels(): Promise<ModelsResponse> {
 export async function fetchModelsPage(): Promise<ModelsPagePayload> {
   const res = await authFetch(`${BASE}/api/models`);
   if (!res.ok) throw new Error(`Failed to fetch models page: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1112 — change the box's active local chat model (`PATCH
+ * /api/models/active`). Owner/admin only (the orchestrator enforces the
+ * role; a 403 surfaces here as an error). `model` must be an installed local
+ * model tag — the server validates against the live list and 400s
+ * `not_installed` otherwise. Returns the new active model + whether it
+ * actually changed (a no-op re-select returns `changed:false`).
+ */
+export async function setActiveModel(
+  model: string,
+): Promise<{ activeModel: string; changed: boolean }> {
+  const res = await authFetch(`${BASE}/api/models/active`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) {
+    // Surface the orchestrator's typed error so the page can word it
+    // honestly (not_installed / ai_service_unreachable / 403).
+    let detail = `Failed to set active model: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail || body?.error) detail = body.detail ?? body.error;
+    } catch {
+      /* non-JSON error body — keep the status-code message */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-836 — measure a local model's throughput (`POST /api/models/:name/
+ * benchmark`). Owner/admin only. Explicit by design: benchmarking loads the
+ * model (and with one-model-at-a-time can briefly evict the resident chat
+ * model), so it's never run automatically. Returns the measured tokens/sec.
+ */
+export async function benchmarkModel(
+  name: string,
+): Promise<{ tokensPerSec: number; measuredAt: string }> {
+  const res = await authFetch(
+    `${BASE}/api/models/${encodeURIComponent(name)}/benchmark`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    let detail = `Failed to measure model speed: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail || body?.error) detail = body.detail ?? body.error;
+    } catch {
+      /* non-JSON error body — keep the status-code message */
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

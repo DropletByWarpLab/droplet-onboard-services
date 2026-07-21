@@ -6,6 +6,8 @@ import {
   sendMatterCommand,
   discoverMatterDevices,
   commissionMatterDevice,
+  decommissionMatterDevice,
+  reconnectMatterDevice,
 } from "../api";
 import type {
   MatterGrouped,
@@ -90,6 +92,23 @@ export function useSmartHome() {
     return result;
   }
 
+  // WARP-1469: unpair a device from the Droplet. The backend force-removes
+  // from the local fabric even when the device is offline, so an orphaned
+  // entry can always be cleared. Revalidate so it drops out of the list.
+  async function remove(nodeId: string) {
+    await decommissionMatterDevice(nodeId);
+    mutate(DEVICES_KEY);
+  }
+
+  // WARP-1469: nudge an offline device to reconnect now. The device list
+  // reflects the new connectionState via the SSE bridge + the 4s poll, so
+  // we revalidate immediately and let those carry the eventual outcome.
+  async function reconnect(nodeId: string) {
+    const result = await reconnectMatterDevice(nodeId);
+    mutate(DEVICES_KEY);
+    return result;
+  }
+
   const totalDevices = grouped
     ? Object.values(grouped).reduce(
         (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
@@ -111,6 +130,8 @@ export function useSmartHome() {
     error,
     command,
     commission,
+    remove,
+    reconnect,
     refresh,
   };
 }

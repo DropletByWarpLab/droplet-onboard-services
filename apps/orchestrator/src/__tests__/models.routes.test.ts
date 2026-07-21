@@ -19,6 +19,7 @@ vi.mock("../config.js", () => ({
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),
   cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheDel: vi.fn().mockResolvedValue(undefined),
 }));
 
 const listModelsMock = vi.fn();
@@ -26,22 +27,86 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
 }));
 
+// WARP-1112 — the active-model PATCH audits via recordActivity. Mock it so
+// tests don't touch the real activity singleton (which needs a DB).
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
+// WARP-836 — stub only the Ollama metrics *probe* (network); keep the real
+// `metricsFor` so the enrichment name-matching is exercised for real.
+const { fetchLocalModelMetricsMock } = vi.hoisted(() => ({
+  fetchLocalModelMetricsMock: vi.fn(),
+}));
+vi.mock("../services/model-metrics.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-metrics.service.js")>();
+  return {
+    ...actual,
+    fetchLocalModelMetrics: () => fetchLocalModelMetricsMock(),
+  };
+});
+
+// WARP-836 — stub only the benchmark generation (network); keep benchCacheKey
+// real so route + page-summary agree on the cache key.
+const { benchmarkModelMock } = vi.hoisted(() => ({
+  benchmarkModelMock: vi.fn(),
+}));
+vi.mock("../services/model-benchmark.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-benchmark.service.js")>();
+  return {
+    ...actual,
+    benchmarkModel: (name: string) => benchmarkModelMock(name),
+  };
+});
+
 import { createModelsRouter } from "../routes/models.js";
 import { getModelsPagePayload } from "../services/models-summary.service.js";
+import { benchCacheKey } from "../services/model-benchmark.service.js";
 
-function buildApp(asUser: { username?: string; role?: string }) {
+/**
+ * Minimal prisma stub backing the `ai.model.chat` WorkspaceSetting. Starts at
+ * `initialActive` (null = unset) and mutates on upsert so a GET-after-PATCH
+ * round-trips in-test.
+ */
+function createPrismaMock(initialActive: string | null = null) {
+  let active = initialActive;
+  return {
+    workspaceSetting: {
+      findUnique: vi.fn(async () =>
+        active == null ? null : { valueJson: active },
+      ),
+      upsert: vi.fn(async ({ update }: { update: { valueJson: string } }) => {
+        active = update.valueJson;
+        return {};
+      }),
+    },
+    _active: () => active,
+  };
+}
+
+function buildApp(
+  asUser: { username?: string; role?: string },
+  prismaMock: ReturnType<typeof createPrismaMock> = createPrismaMock(),
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as unknown as { user?: typeof asUser }).user = asUser;
     next();
   });
-  app.use("/api", createModelsRouter());
+  app.use("/api", createModelsRouter(prismaMock as never));
   return app;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: metrics probe returns nothing → rows keep honest null placeholders.
+  fetchLocalModelMetricsMock.mockResolvedValue(new Map());
 });
 
 describe("WARP-471 — models page payload", () => {
@@ -137,6 +202,48 @@ describe("WARP-471 — models page payload", () => {
   });
 });
 
+describe("WARP-836 — honest metrics enrichment", () => {
+  it("enriches local rows with real Ollama metrics (disk/params/quant/vram)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+        { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+      ],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(
+      new Map([
+        ["gpt-oss:20b", { gbOnDisk: 13.8, parameterSize: "20.9B", quantization: "MXFP4", loaded: true, vramGb: 12.7 }],
+        ["llama3.2:3b", { gbOnDisk: 2.0, parameterSize: "3.2B", quantization: "Q4_K_M", loaded: false, vramGb: null }],
+      ]),
+    );
+    const payload = await getModelsPagePayload();
+    const gpt = payload.local.find((m) => m.name === "gpt-oss:20b")!;
+    expect(gpt.gbOnDisk).toBe(13.8);
+    expect(gpt.parameterSize).toBe("20.9B");
+    expect(gpt.quantization).toBe("MXFP4");
+    expect(gpt.loaded).toBe(true);
+    expect(gpt.vramGb).toBe(12.7);
+    // disk bar = share of the 15.8 GB store → 13.8/15.8 ≈ 87%.
+    expect(gpt.diskBarPct).toBe(87);
+    const llama = payload.local.find((m) => m.name === "llama3.2:3b")!;
+    expect(llama.loaded).toBe(false);
+    expect(llama.vramGb).toBeNull();
+  });
+
+  it("keeps honest null metrics when the Ollama probe returns nothing", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [{ id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 }],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(new Map());
+    const payload = await getModelsPagePayload();
+    expect(payload.local[0].gbOnDisk).toBeNull();
+    expect(payload.local[0].parameterSize).toBeNull();
+    expect(payload.local[0].quantization).toBeNull();
+    expect(payload.local[0].vramGb).toBeNull();
+    expect(payload.local[0].diskBarPct).toBeNull();
+  });
+});
+
 describe("WARP-471 — /api/models route", () => {
   it("GET returns 200 + payload shape", async () => {
     listModelsMock.mockResolvedValue({
@@ -188,10 +295,221 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.status).toBe(404);
   });
 
-  it("DELETE /api/models/:name 404s — read-only enforcement", async () => {
+  it("DELETE /api/models/:name 404s — no delete/pull on this surface", async () => {
     listModelsMock.mockResolvedValue({ models: [] });
     const app = buildApp({ username: "stefan", role: "owner" });
     const res = await request(app).delete("/api/models/llama3.1");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("WARP-1112 — PATCH /api/models/active", () => {
+  const installed = {
+    models: [
+      { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+    ],
+  };
+
+  it("owner sets an installed model → 200, persists, audits", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "owner" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "llama3.2:3b" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeModel: "llama3.2:3b", changed: true });
+    expect(prisma._active()).toBe("llama3.2:3b");
+    expect(prisma.workspaceSetting.upsert).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("admin is allowed too", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp(
+      { username: "ada", role: "admin" },
+      createPrismaMock(null),
+    );
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "gpt-oss:20b" });
+    expect(res.status).toBe(200);
+  });
+
+  it("re-selecting the current model is a no-op (no write, no audit)", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const prisma = createPrismaMock("gpt-oss:20b");
+    const app = buildApp({ username: "stefan", role: "owner" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "gpt-oss:20b" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeModel: "gpt-oss:20b", changed: false });
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a model that isn't installed → 400 not_installed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "owner" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "gemma4:26b" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_installed");
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cloud model — the active model is local-only → 400", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+        { id: "claude-sonnet", provider: "anthropic", name: "claude-sonnet", context_window: 200000 },
+      ],
+    });
+    const app = buildApp(
+      { username: "stefan", role: "owner" },
+      createPrismaMock(null),
+    );
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "claude-sonnet" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_installed");
+  });
+
+  it("empty / missing model → 400", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp(
+      { username: "stefan", role: "owner" },
+      createPrismaMock(null),
+    );
+    const blank = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "  " });
+    expect(blank.status).toBe(400);
+    const missing = await request(app).patch("/api/models/active").send({});
+    expect(missing.status).toBe(400);
+  });
+
+  it("members (family) are forbidden → 403", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "kid", role: "family" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "gpt-oss:20b" });
+    expect(res.status).toBe(403);
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+  });
+
+  it("gateway unreachable → 503 (can't confirm installed, so refuse)", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "owner" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "gpt-oss:20b" });
+    expect(res.status).toBe(503);
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+  });
+
+  it("GET /api/models surfaces the active model when it's installed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const prisma = createPrismaMock("llama3.2:3b");
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBe("llama3.2:3b");
+  });
+
+  it("GET /api/models resolves activeModel to null when the stored tag isn't installed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    // Stored model was since removed from the box.
+    const prisma = createPrismaMock("gemma4:26b");
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBeNull();
+  });
+});
+
+describe("WARP-836 — POST /api/models/:name/benchmark", () => {
+  const installed = {
+    models: [
+      { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+    ],
+  };
+  const result = {
+    tokensPerSec: 42.5,
+    evalCount: 96,
+    evalDurationMs: 2259,
+    measuredAt: "2026-07-20T00:00:00.000Z",
+  };
+
+  it("owner measures an installed model → 200 + result, caches + busts page cache", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    benchmarkModelMock.mockResolvedValue(result);
+    const { cacheSet, cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(200);
+    expect(res.body.tokensPerSec).toBe(42.5);
+    expect(vi.mocked(cacheSet)).toHaveBeenCalledWith(
+      benchCacheKey("gpt-oss:20b"),
+      result,
+      expect.any(Number),
+    );
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+  });
+
+  it("members (family) are forbidden → 403", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp({ username: "kid", role: "family" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(403);
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a model that isn't installed → 400", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gemma4%3A26b/benchmark");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_installed");
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a failed measurement → 502 benchmark_failed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    benchmarkModelMock.mockResolvedValue(null);
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("benchmark_failed");
+  });
+
+  it("gateway unreachable → 503", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(503);
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("GET /api/models surfaces a cached tokensPerSec + benchmarkedAt", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const { cacheGet } = await import("../services/cache.service.js");
+    // Route reads the page-cache key first (miss), then the bench key per row.
+    vi.mocked(cacheGet)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(result as never);
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.local[0].tokensPerSec).toBe(42.5);
+    expect(res.body.local[0].benchmarkedAt).toBe(result.measuredAt);
   });
 });
