@@ -10,8 +10,22 @@
  * Read tier from the LLM's perspective — it ONLY writes a row to the
  * EmailDraft table, never sends mail. The dashboard can show / edit /
  * confirm; only `email_send` actually dispatches SMTP.
+ *
+ * WARP-1453 — role-gated (owner/admin/family, the route's human set)
+ * and identity-forwarding: X-Droplet-User = ctx.userId so the
+ * orchestrator scopes accounts by the acting human, not `_service:mcp`.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+
+/** WARP-845 — audience ladder (same table as handlers/memory/recall.ts). */
+const ROLE_RANK: Record<string, number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  service: 1,
+  guest: 0,
+};
+const FAMILY_RANK = 1;
 
 const inputSchema = {
   type: "object",
@@ -50,6 +64,26 @@ async function handler(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // WARP-1453 — role gate FIRST; absent role → guest view → FORBIDDEN
+  // with zero HTTP.
+  if ((ROLE_RANK[ctx.role ?? ""] ?? 0) < FAMILY_RANK) {
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "FORBIDDEN",
+        message: "email drafting is available to owner, admin, and family roles only",
+      },
+    };
+  }
+  // WARP-1453 — no user identity to forward → fail closed, zero HTTP.
+  if (!ctx.userId) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "AUTH_REQUIRED", message: "auth_required" },
+    };
+  }
   const accountId = typeof args.accountId === "string" ? args.accountId : "";
   if (!accountId) {
     return {
@@ -69,7 +103,8 @@ async function handler(
   const res = await ctx.http.orchestrator.post(
     `/api/email/${encodeURIComponent(accountId)}/drafts`,
     payload,
-    { headers: { Accept: "application/json" } },
+    // WARP-1453: forwarded acting-human identity (see header comment).
+    { headers: { Accept: "application/json", "X-Droplet-User": ctx.userId } },
   );
   if (!res.ok) {
     let detail: string | null = null;

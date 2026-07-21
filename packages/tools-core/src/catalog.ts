@@ -145,7 +145,13 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "detect_wan_port",
     "setup_camera_ports",
   ],
-  calendar: ["create_event", "list_events", "update_event", "delete_event"],
+  calendar: [
+    "create_event",
+    "list_events",
+    "update_event",
+    "delete_event",
+    "search_calendar_events",
+  ],
   reminders: ["create_reminder", "list_reminders", "complete_reminder", "set_timer"],
   notifications: ["send_notification", "list_notifications"],
   email: [
@@ -154,6 +160,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "email_summarize_thread",
     "email_draft_reply",
     "email_send",
+    "search_contacts",
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
   pm: [
@@ -298,6 +305,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_events: "See what's on your calendar",
   update_event: "Change an event on your calendar",
   delete_event: "Remove an event from your calendar",
+  search_calendar_events: "Search your calendar for events by keyword",
   // Reminders
   create_reminder: "Set a reminder for yourself",
   list_reminders: "See your reminders",
@@ -324,6 +332,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   email_summarize_thread: "Get a quick summary of an email conversation",
   email_draft_reply: "Draft a reply to an email for you to review",
   email_send: "Send an email you've approved",
+  search_contacts: "Find people you email, with their addresses",
   // Project tracker
   pm_create_work_item: "Add a new task to your project tracker",
   pm_update_work_item: "Update the details of a task",

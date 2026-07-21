@@ -3,8 +3,22 @@
  *
  * Fetch the full thread (with ordered messages) for a given thread id.
  * Read tier.
+ *
+ * WARP-1453 — role-gated (owner/admin/family, the route's human set)
+ * and identity-forwarding: X-Droplet-User = ctx.userId so the
+ * orchestrator scopes accounts by the acting human, not `_service:mcp`.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+
+/** WARP-845 — audience ladder (same table as handlers/memory/recall.ts). */
+const ROLE_RANK: Record<string, number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  service: 1,
+  guest: 0,
+};
+const FAMILY_RANK = 1;
 
 const inputSchema = {
   type: "object",
@@ -26,6 +40,26 @@ async function handler(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // WARP-1453 — role gate FIRST; absent role → guest view → FORBIDDEN
+  // with zero HTTP.
+  if ((ROLE_RANK[ctx.role ?? ""] ?? 0) < FAMILY_RANK) {
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "FORBIDDEN",
+        message: "email threads are readable by owner, admin, and family roles only",
+      },
+    };
+  }
+  // WARP-1453 — no user identity to forward → fail closed, zero HTTP.
+  if (!ctx.userId) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "AUTH_REQUIRED", message: "auth_required" },
+    };
+  }
   const accountId = typeof args.accountId === "string" ? args.accountId : "";
   const threadId = typeof args.threadId === "string" ? args.threadId : "";
   if (!accountId || !threadId) {
@@ -40,7 +74,8 @@ async function handler(
   }
   const res = await ctx.http.orchestrator.get(
     `/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}`,
-    { headers: { Accept: "application/json" } },
+    // WARP-1453: forwarded acting-human identity (see header comment).
+    { headers: { Accept: "application/json", "X-Droplet-User": ctx.userId } },
   );
   if (res.status === 404) {
     return {
