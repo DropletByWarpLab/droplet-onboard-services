@@ -12,30 +12,25 @@ const inputSchema = {
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const limit = Math.max(1, Math.min(200, Number(args.limit) || 30));
   const camera = typeof args.camera === "string" ? args.camera : undefined;
+  // WARP-1439: route through the orchestrator, not camera-discovery.
+  // camera-discovery never implemented any event/clip routes, so the old
+  // ctx.http.cameras binding 404'd on every call. The orchestrator's
+  // GET /api/cameras/clips already does the has_clip filtering and builds
+  // the exact per-clip shape this tool used to assemble locally (id,
+  // camera, label, score, start_time, end_time, thumbnail_url, clip_url).
   const url = camera
-    ? `/cameras/${encodeURIComponent(camera)}/events?limit=${limit}`
-    : `/events/recent?limit=${limit}`;
-  const res = await ctx.http.cameras.get(url, { headers: { Accept: "application/json" } });
+    ? `/api/cameras/clips?limit=${limit}&camera=${encodeURIComponent(camera)}`
+    : `/api/cameras/clips?limit=${limit}`;
+  const res = await ctx.http.orchestrator.get(url, { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
-      error: { code: "CLIPS_FAILED", message: `cameras returned ${res.status}` },
+      error: { code: "CLIPS_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
-  const events = (await res.json()) as Array<Record<string, unknown>>;
-  const clips = events
-    .filter((e) => e.has_clip === true)
-    .map((e) => ({
-      id: e.id,
-      camera: e.camera,
-      label: e.label,
-      score: e.score,
-      start_time: e.start_time,
-      end_time: e.end_time,
-      thumbnail_url: `/api/cameras/events/${e.id}/thumbnail`,
-      clip_url: `/api/cameras/clips/event/${e.id}`,
-    }));
+  const body = (await res.json()) as { clips?: Array<Record<string, unknown>> };
+  const clips = Array.isArray(body?.clips) ? body.clips : [];
   return { ok: true, data: { count: clips.length, clips } };
 }
 
