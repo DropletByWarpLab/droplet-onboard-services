@@ -34,6 +34,8 @@ import createDirectory from "./handlers/files/create-directory.js";
 import renameFile from "./handlers/files/rename-file.js";
 import moveFile from "./handlers/files/move-file.js";
 import copyFile from "./handlers/files/copy-file.js";
+// WARP-1426: summarize a file via the orchestrator's single-turn completion
+import summarizeFile from "./handlers/files/summarize-file.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -144,6 +146,8 @@ import calculate from "./handlers/data/calculate.js";
 import unitConvert from "./handlers/data/unit-convert.js";
 import getCurrentDatetime from "./handlers/data/get-current-datetime.js";
 import dateMath from "./handlers/data/date-math.js";
+// data (WARP-1426): translation via the orchestrator's single-turn completion
+import translateText from "./handlers/data/translate-text.js";
 
 const allTools: Tool[] = [
   // network
@@ -180,6 +184,8 @@ const allTools: Tool[] = [
   renameFile,
   moveFile,
   copyFile,
+  // WARP-1426: file summarization (read_file semantics + /api/llm/complete)
+  summarizeFile,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,
@@ -271,6 +277,8 @@ const allTools: Tool[] = [
   unitConvert,
   getCurrentDatetime,
   dateMath,
+  // WARP-1426: translation (Tier-1; single-turn completion via orchestrator)
+  translateText,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
