@@ -147,6 +147,43 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     expect(result.message.content).toBe("Paris.");
   });
 
+  it("streams inline <reasoning> (qwen3/deepseek): steps before content, stripped from the answer", async () => {
+    // Inline-reasoning models emit <reasoning>…</reasoning> in the CONTENT
+    // channel (not a separate field). Split the tags across chunks to prove the
+    // emitter holds partial tags back and never leaks them into content_delta.
+    const { deps, events } = collectingDeps(() =>
+      streamOf(
+        contentChunks([
+          "<reason",
+          "ing>Weigh the options.</reason",
+          "ing>The ans",
+          "wer is 42.",
+        ]),
+      ),
+    );
+    const result = await runAgent(deps, { ...REQ, captureReasoning: true });
+
+    const steps = events.filter((e) => e.type === "reasoning_step");
+    expect(steps).toHaveLength(1);
+    expect(steps[0].type === "reasoning_step" && steps[0].text).toBe(
+      "Weigh the options.",
+    );
+    const answer = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(answer).toBe("The answer is 42.");
+    // No reasoning tag/text leaked into the streamed content (WARP-495).
+    expect(answer).not.toContain("<reasoning>");
+    expect(answer).not.toContain("Weigh");
+    // reasoning_step precedes the first content_delta (WARP-458).
+    expect(events.findIndex((e) => e.type === "reasoning_step")).toBeLessThan(
+      events.findIndex((e) => e.type === "content_delta"),
+    );
+    expect(result.message.content).toBe("The answer is 42.");
+    expect(result.message.reasoning).toBe("Weigh the options.");
+  });
+
   it("does NOT emit reasoning_step on the wire when captureReasoning is false, but still persists it", async () => {
     const { deps, events } = collectingDeps(() =>
       streamOf([
