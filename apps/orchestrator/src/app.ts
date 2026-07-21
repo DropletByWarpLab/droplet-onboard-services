@@ -471,7 +471,7 @@ export function createApp(
   app.use("/api", createToolsRouter(prisma, toolStepDispatcher));
 
   // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
-  app.use("/api", createModelsRouter());
+  app.use("/api", createModelsRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

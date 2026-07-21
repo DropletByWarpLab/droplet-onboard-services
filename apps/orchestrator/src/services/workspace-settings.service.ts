@@ -41,7 +41,8 @@ export interface WorkspaceSettingDefault {
     | "memory_privacy"
     | "off_lan"
     | "hardware"
-    | "appearance";
+    | "appearance"
+    | "ai";
   type:
     | "string"
     | "number"
@@ -124,6 +125,16 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "appearance.theme", section: "appearance", type: "enum", value: "system" },
   { key: "appearance.density", section: "appearance", type: "enum", value: "comfortable" },
   { key: "appearance.landing", section: "appearance", type: "enum", value: "home" },
+
+  // ── ai ──
+  // WARP-1112 — the active local model the box uses for chat. Changed
+  // from the /models surface (PATCH /api/models/active), which validates
+  // the tag is actually installed before writing. Empty string is the
+  // explicit "unset" state (WARP-218 discipline: no meaning-by-absence) —
+  // the orchestrator + dashboard then fall back to LLM_MODEL / the single
+  // installed model. NOT editable via the generic /api/settings PATCH:
+  // `ai` is intentionally absent from that route's SECTION_VALUES.
+  { key: "ai.model.chat", section: "ai", type: "string", value: "" },
 ];
 
 export interface SeedResult {
