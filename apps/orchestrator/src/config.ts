@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createLogger } from "./lib/logger.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -17,13 +18,16 @@ export function isWeakJwtSecret(s: string): boolean {
   return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
 }
 
+const configLogger = createLogger("config");
+
 /** PURE — resolve the agent iteration limits, clamping DEFAULT down to CAP
- *  when misconfigured: a bad env must not silently break chat (same
- *  philosophy as voiceReasoningEffortDefault). Exported for tests. */
+ *  when misconfigured: a bad env must not silently break chat. A
+ *  misconfigured env clamps with a structured warning instead of crashing
+ *  boot or silently misbehaving. Exported for tests. */
 export function resolveAgentIterLimits(
   defaultIter: number,
   capIter: number,
-  warn: (msg: string) => void = console.warn,
+  warn: (msg: string) => void = (msg) => configLogger.warn(msg),
 ): { defaultIter: number; capIter: number } {
   if (defaultIter > capIter) {
     warn(
