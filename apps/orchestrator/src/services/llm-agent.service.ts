@@ -807,13 +807,26 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   let toolSchemasJsonLen = JSON.stringify(tools).length;
   let finalizeReason: "context_budget" | "repetition" | null = null;
 
-  // Spec §4 — repetition early-stop. Key = tool name + canonicalized args
-  // (sorted keys, so {"a":1,"b":2} and {"b":2,"a":1} collide as intended).
+  // Spec §4 repetition early-stop. Key = tool name + DEEP-canonicalized args:
+  // object keys sorted recursively so {a:1,b:2} and {b:2,a:1} collide as
+  // intended, while nested payload differences (which a flat replacer
+  // array would erase) keep genuinely different calls distinct.
   const executedCallCounts = new Map<string, number>();
+  const canonicalJson = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+    if (v !== null && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      return `{${Object.keys(o)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(v) ?? "null";
+  };
   const canonicalCallKey = (
     name: string,
     args: Record<string, unknown>,
-  ): string => `${name}:${JSON.stringify(args, Object.keys(args).sort())}`;
+  ): string => `${name}:${canonicalJson(args)}`;
 
   // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
   // iterations, so a model that keeps naming an unknown tool every turn

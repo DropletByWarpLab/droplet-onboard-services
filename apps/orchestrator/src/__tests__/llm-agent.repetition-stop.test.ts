@@ -18,7 +18,10 @@ const sameCall = {
   ],
 };
 
-function makeDeps(turns: unknown[]) {
+function makeDeps(
+  turns: unknown[],
+  poolToolNames: string[] = ["search_content"],
+) {
   const chat = vi.fn().mockImplementation(async () => ({
     ok: true,
     json: async () => ({
@@ -35,9 +38,9 @@ function makeDeps(turns: unknown[]) {
     mcp: {
       listTools: vi
         .fn()
-        .mockResolvedValue([
-          { name: "search_content", description: "d", inputSchema: {} },
-        ]),
+        .mockResolvedValue(
+          poolToolNames.map((name) => ({ name, description: "d", inputSchema: {} })),
+        ),
       callTool,
     } as never,
     aiGateway: { chat } as never,
@@ -95,6 +98,97 @@ describe("runAgent — repetition early-stop (spec §4)", () => {
       messages: [{ role: "user", content: "find people" }],
     });
     expect(callTool).toHaveBeenCalledTimes(2);
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  // Regression: a flat `JSON.stringify(args, Object.keys(args).sort())`
+  // replacer array applies the top-level key whitelist at EVERY nesting
+  // level, so nested object keys vanish and two calls with different
+  // nested payloads (e.g. different `zones[].name`) both serialize to the
+  // same string and falsely collide as "repetition".
+  it("nested args that differ are not repetition", async () => {
+    const zoneCall = (id: string, zoneName: string) => ({
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id,
+          type: "function",
+          function: {
+            name: "set_detection_zones",
+            arguments: JSON.stringify({
+              camera: "front_door",
+              zones: [{ name: zoneName }],
+            }),
+          },
+        },
+      ],
+    });
+    const { deps, chat, callTool } = makeDeps(
+      [
+        zoneCall("c1", "driveway"),
+        zoneCall("c2", "backyard"),
+        { role: "assistant", content: "zones updated" },
+      ],
+      ["set_detection_zones"],
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "update the detection zones" }],
+      allowed_tools: ["set_detection_zones"],
+      max_iter: 10,
+    });
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(result.stop_reason).toBe("model_done");
+    const allMessages = chat.mock.calls.flatMap(
+      (c) => (c[0] as { messages: { content: unknown }[] }).messages,
+    );
+    expect(
+      allMessages.some((m) => String(m.content).includes("REPEATED_CALL")),
+    ).toBe(false);
+  });
+
+  it("top-level key order does not defeat detection", async () => {
+    const callA = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "c1",
+          type: "function",
+          function: { name: "search_content", arguments: '{"a":1,"b":{"x":2}}' },
+        },
+      ],
+    };
+    const callB = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "c2",
+          type: "function",
+          function: { name: "search_content", arguments: '{"b":{"x":2},"a":1}' },
+        },
+      ],
+    };
+    const { deps, chat, callTool } = makeDeps([
+      callA,
+      callB,
+      { role: "assistant", content: "done" },
+    ]);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "run it" }],
+      max_iter: 10,
+    });
+    expect(callTool).toHaveBeenCalledTimes(1);
+    const lastReq = chat.mock.calls[chat.mock.calls.length - 1]![0] as {
+      messages: { content: unknown }[];
+    };
+    expect(
+      lastReq.messages.filter((m) => String(m.content).includes("REPEATED_CALL"))
+        .length,
+    ).toBe(1);
     expect(result.stop_reason).toBe("model_done");
   });
 });
