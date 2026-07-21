@@ -94,6 +94,13 @@ jobs:
             node-global:
               - "package.json"
               - "package-lock.json"
+            # Shared python code (services/_shared/** — serve.py, internal_tls,
+            # healthcheck, fips_selftest) is imported by every python service,
+            # so a change there re-proves ALL_PYTHON: the python-side analog of
+            # node-global. Closes the #1204 gap where a services/_shared-only PR
+            # ran no python leg at all.
+            python-global:
+              - "services/_shared/**"
             tools-core-mcp-server:
               - "packages/tools-core/**"
               - "packages/fips-selftest/**"
@@ -103,6 +110,13 @@ jobs:
               - "apps/orchestrator/**"
               - "packages/tools-core/**"
               - "packages/fips-selftest/**"
+              # The orchestrator imports @droplet/shared-types and
+              # @droplet/auth-policy from source (like the dashboard), so a
+              # type/contract break in these packages surfaces in this leg's
+              # tsc. Closes the #1204 gap where an auth-policy-only PR skipped
+              # the orchestrator leg (auth-policy has no dedicated workflow).
+              - "packages/shared-types/**"
+              - "packages/auth-policy/**"
               - "services/mcp-server/**"
               - "services/erp-connector/**"
             web-dashboard:
@@ -168,8 +182,12 @@ jobs:
               node=$(jq -c --argjson all "$ALL_NODE" \
                 '[.[] | select(. as $s | $all | index($s))] | sort' <<<"$CHANGED")
             fi
-            python=$(jq -c --argjson all "$ALL_PYTHON" \
-              '[.[] | select(. as $s | $all | index($s))] | sort' <<<"$CHANGED")
+            if jq -e 'index("python-global")' <<<"$CHANGED" >/dev/null; then
+              python=$(jq -c . <<<"$ALL_PYTHON")
+            else
+              python=$(jq -c --argjson all "$ALL_PYTHON" \
+                '[.[] | select(. as $s | $all | index($s))] | sort' <<<"$CHANGED")
+            fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
           # needs_pythonpath) so the python job's include matrix keeps the
