@@ -45,6 +45,20 @@ import {
   type OverlayEnrollInput,
 } from "../services/overlay-connect.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import {
+  FixedWindowRateLimiter,
+  MAX_ACTIVE_QR_OVERLAY_DEVICES,
+  OVERLAY_LINK_TOKEN_TTL_MS,
+  WG_PUBLIC_KEY_RE,
+  fingerprintShort,
+  generateLinkToken,
+  hashToken,
+  overlayLabelSchema,
+  parseP256Spki,
+  signKeyFingerprint,
+  verifyStatusPop,
+} from "../services/overlay-link.service.js";
 
 const logger = createLogger("vpn-route");
 
@@ -187,12 +201,136 @@ const overlayEnrollSchema = z.object({
   label: z.string().trim().min(1).max(64),
 });
 
+// ── WARP-1474 — dashboard-QR overlay device linking ──
+//
+// A tamper-evident audit entry emitted for every overlay-enroll action AND for
+// every 4xx on the two enroll routes (completeness). Injected so route tests
+// capture rows deterministically; production wires it to the signed-activity
+// recorder below.
+export interface OverlayAuditEntry {
+  /** lowercase overlay_<verb> — reuses the existing activity taxonomy. */
+  event: string;
+  method: string;
+  route: string;
+  status: number;
+  /** owner user id, or `ip:<addr>` for the unauthenticated by-token path. */
+  clientId: string;
+  refs?: Record<string, unknown>;
+}
+export type OverlayAuditFn = (entry: OverlayAuditEntry) => void;
+
+/** Default audit sink — one signed ActivityRow per entry under the EXISTING
+ *  `network` kind (no new ActivityKind; ADR-014). recordActivity is a no-op that
+ *  returns null before the recorder is wired, so importing this in tests is
+ *  side-effect-free. */
+function defaultOverlayAudit(entry: OverlayAuditEntry): void {
+  const isOwner = !!entry.clientId && !entry.clientId.startsWith("ip:");
+  void recordActivity({
+    kind: "network",
+    severity: entry.status >= 400 ? "warn" : "ok",
+    sourceIcon: "shield",
+    what: `Overlay ${entry.event}`,
+    sub: `${entry.method} ${entry.route} → ${entry.status}`,
+    actor: isOwner ? { type: "user", id: entry.clientId } : { type: "anonymous" },
+    refs: {
+      event: entry.event,
+      method: entry.method,
+      route: entry.route,
+      status: entry.status,
+      clientId: entry.clientId,
+      ...(entry.refs ?? {}),
+    },
+  });
+}
+
+/** DoS caps for the QR-link flow. GLOBAL + per-token are the real backstop; the
+ *  per-owner / per-IP caps stop a single principal monopolising the budget. */
+export interface OverlayRateLimits {
+  windowMs: number;
+  mintPerOwner: number;
+  mintGlobal: number;
+  byTokenPerIp: number;
+  byTokenPerToken: number;
+  byTokenGlobal: number;
+  /** hard cap on concurrently-active QR-enrolled overlay devices. */
+  maxActiveQrDevices: number;
+}
+
+const DEFAULT_OVERLAY_RATE_LIMITS: OverlayRateLimits = {
+  windowMs: 60_000,
+  mintPerOwner: 5,
+  mintGlobal: 30,
+  byTokenPerIp: 20,
+  byTokenPerToken: 10,
+  byTokenGlobal: 120,
+  maxActiveQrDevices: MAX_ACTIVE_QR_OVERLAY_DEVICES,
+};
+
+// Body for POST /vpn/overlay/devices/by-token. The PEM is validated separately
+// (parseP256Spki) so an oversized / wrong-curve key is a clean 400; zod covers
+// the token, the WireGuard key shape, and the label charset here.
+const byTokenSchema = z.object({
+  token: z.string().min(1),
+  wg_public_key: z
+    .string()
+    .regex(WG_PUBLIC_KEY_RE, "must be a base64 WireGuard public key"),
+  sign_public_key_pem: z.string().min(1),
+  label: overlayLabelSchema,
+});
+
+/** Pull HQ's device reference out of the enroll broker's opaque result. */
+function extractDeviceId(result: unknown): string | null {
+  if (result && typeof result === "object") {
+    const r = result as Record<string, unknown>;
+    for (const k of ["device_id", "device_ref", "deviceId", "id"]) {
+      if (typeof r[k] === "string") return r[k] as string;
+    }
+  }
+  return null;
+}
+
 export function createVpnRouter(
   prisma: PrismaClient,
-  opts: { overlayEnroll?: OverlayEnrollFn } = {},
+  opts: {
+    overlayEnroll?: OverlayEnrollFn;
+    now?: () => Date;
+    recordOverlayAudit?: OverlayAuditFn;
+    overlayRateLimits?: Partial<OverlayRateLimits>;
+  } = {},
 ): Router {
   const router = Router();
   const overlayEnroll = opts.overlayEnroll ?? defaultOverlayEnroll;
+  const now = opts.now ?? (() => new Date());
+  const audit = opts.recordOverlayAudit ?? defaultOverlayAudit;
+  const limits: OverlayRateLimits = {
+    ...DEFAULT_OVERLAY_RATE_LIMITS,
+    ...(opts.overlayRateLimits ?? {}),
+  };
+  // One limiter instance per router; real-time clock (independent of the domain
+  // `now` so a test that pins `now` doesn't freeze the rate windows).
+  const rl = new FixedWindowRateLimiter();
+
+  // Audit EVERY 4xx on the two enroll routes (mint + by-token). Hooks the
+  // response `finish` so it fires whether the 4xx came from requireRole, the
+  // rate limiter, boundary validation, or the handler.
+  const clientIdForAudit = (req: Request): string =>
+    req.user?.id ?? `ip:${req.ip ?? "unknown"}`;
+  const auditEvery4xx =
+    (route: string) =>
+    (req: Request, res: Response, next: NextFunction): void => {
+      res.on("finish", () => {
+        if (res.statusCode >= 400 && res.statusCode < 500) {
+          audit({
+            event: "overlay_enroll_4xx",
+            method: req.method,
+            route,
+            status: res.statusCode,
+            clientId: clientIdForAudit(req),
+          });
+        }
+      });
+      next();
+    };
 
   // ── POST /api/vpn/overlay/devices ──
   // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
@@ -225,6 +363,395 @@ export function createVpnRouter(
         return res.status(200).json(result);
       } catch (err) {
         logger.warn({ err }, "overlay device enroll failed");
+        return next(err);
+      }
+    },
+  );
+
+  // ══ WARP-1474 — dashboard-QR overlay device linking (ADR-030) ══════════════
+  //
+  // Flow: owner mints a QR (POST link-tokens) → phone scans + redeems it with NO
+  // bearer (POST devices/by-token), which STAGES a PendingOverlayEnrollment and
+  // performs NO HQ vouch and installs NO wg0 peer → the phone polls its coarse
+  // state (GET …/status, PoP-guarded) → the owner reviews the pending list and
+  // approves/denies. ONLY on approve does the box call the identical WARP-1385
+  // enrollOverlayDevice broker to vouch the device to HQ.
+
+  const ROUTE_MINT = "/vpn/overlay/link-tokens";
+  const ROUTE_BY_TOKEN = "/vpn/overlay/devices/by-token";
+
+  // ── POST /api/vpn/overlay/link-tokens ── (owner) mint a QR link token.
+  router.post(
+    ROUTE_MINT,
+    auditEvery4xx(ROUTE_MINT),
+    requireRole("owner", "admin"),
+    (req: Request, res: Response, next: NextFunction) => {
+      // Per-owner then global cap. Owner first so one owner hitting their cap
+      // doesn't consume another owner's slice of the global budget.
+      const ownerId = req.user?.id ?? "unknown";
+      if (
+        !rl.check(`mint:owner:${ownerId}`, limits.mintPerOwner, limits.windowMs) ||
+        !rl.check("mint:global", limits.mintGlobal, limits.windowMs)
+      ) {
+        return res.status(429).json({ error: "rate_limited" });
+      }
+      return next();
+    },
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const createdBy = req.user?.id ?? "unknown";
+        const { token, tokenHash } = generateLinkToken();
+        // Single-active-per-owner: flip any prior AVAILABLE token for this owner
+        // to expired so exactly one QR can be redeemed at a time.
+        await prisma.overlayLinkToken.updateMany({
+          where: { createdBy, state: "available" },
+          data: { state: "expired" },
+        });
+        const parsedLabel = overlayLabelSchema.safeParse(req.body?.label);
+        const expiresAt = new Date(now().getTime() + OVERLAY_LINK_TOKEN_TTL_MS);
+        await prisma.overlayLinkToken.create({
+          data: {
+            tokenHash, // ONLY the hash is persisted — never the plaintext token
+            state: "available",
+            expiresAt,
+            createdBy,
+            label: parsedLabel.success ? parsedLabel.data : null,
+          },
+        });
+        const server = await resolveEndpointHost();
+        const boxName =
+          config.DROPLET_BOX_NAME || config.DROPLET_PUBLIC_FQDN || "Droplet";
+        audit({
+          event: "overlay_link_mint",
+          method: req.method,
+          route: ROUTE_MINT,
+          status: 201,
+          clientId: createdBy,
+          refs: { tokenHash },
+        });
+        // Token returned ONCE, in plaintext, right here — never again.
+        return res.status(201).json({
+          token,
+          server,
+          box_name: boxName,
+          expires_at: expiresAt.toISOString(),
+        });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── POST /api/vpn/overlay/devices/by-token ── (NO bearer) redeem + stage.
+  router.post(
+    ROUTE_BY_TOKEN,
+    auditEvery4xx(ROUTE_BY_TOKEN),
+    (req: Request, res: Response, next: NextFunction) => {
+      // Global then per-IP cap BEFORE any body work — the DoS backstop.
+      if (
+        !rl.check("bytoken:global", limits.byTokenGlobal, limits.windowMs) ||
+        !rl.check(
+          `bytoken:ip:${req.ip ?? "unknown"}`,
+          limits.byTokenPerIp,
+          limits.windowMs,
+        )
+      ) {
+        return res.status(429).json({ error: "rate_limited" });
+      }
+      return next();
+    },
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        // Boundary-validate BEFORE touching the token — a malformed body must
+        // never consume a token or create a row.
+        const parsed = byTokenSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "invalid_request",
+            details: parsed.error.flatten(),
+          });
+        }
+        // Keep the EXACT validated PEM bytes un-trimmed so sha256(pem) stays
+        // byte-identical to the box vouch + HQ recompute.
+        const pem = parsed.data.sign_public_key_pem;
+        if (!parseP256Spki(pem).ok) {
+          return res.status(400).json({ error: "invalid_sign_key" });
+        }
+        const tokenHash = hashToken(parsed.data.token);
+        // Per-token cap — bounds redeem attempts against a single QR (hijack /
+        // brute-force backstop).
+        if (
+          !rl.check(
+            `bytoken:token:${tokenHash}`,
+            limits.byTokenPerToken,
+            limits.windowMs,
+          )
+        ) {
+          return res.status(429).json({ error: "rate_limited" });
+        }
+        const fp = signKeyFingerprint(pem);
+        const nowDate = now();
+
+        // Atomic consume: exactly one AVAILABLE + unexpired row flips to
+        // consumed, binding the first redeemer's fingerprint. count === 1 ⇒ we
+        // won the redeem.
+        const consumed = await prisma.overlayLinkToken.updateMany({
+          where: { tokenHash, state: "available", expiresAt: { gt: nowDate } },
+          data: { state: "consumed", consumedAt: nowDate, boundSignFp: fp },
+        });
+        if (consumed.count === 1) {
+          const tokenRow = await prisma.overlayLinkToken.findUnique({
+            where: { tokenHash },
+          });
+          const pending = await prisma.pendingOverlayEnrollment.create({
+            data: {
+              linkTokenId: tokenRow?.id ?? "",
+              signKeyFingerprint: fp,
+              signPublicKeyPem: pem,
+              wgPublicKey: parsed.data.wg_public_key,
+              label: parsed.data.label,
+              presentedAt: nowDate,
+              state: "pending",
+            },
+          });
+          audit({
+            event: "overlay_enroll_by_token_pending",
+            method: req.method,
+            route: ROUTE_BY_TOKEN,
+            status: 202,
+            clientId: clientIdForAudit(req),
+            refs: { tokenHash, fingerprint: fp, label: parsed.data.label },
+          });
+          return res
+            .status(202)
+            .json({ state: "pending", pending_id: pending.id });
+        }
+
+        // count === 0 — classify against the fresh token state.
+        const tokenRow = await prisma.overlayLinkToken.findUnique({
+          where: { tokenHash },
+        });
+        if (!tokenRow) {
+          return res.status(401).json({ error: "unknown_token" });
+        }
+        if (tokenRow.state === "consumed") {
+          const existing = await prisma.pendingOverlayEnrollment.findFirst({
+            where: { linkTokenId: tokenRow.id },
+          });
+          if (tokenRow.boundSignFp === fp) {
+            // Same device re-redeeming — idempotent, return the same pending id.
+            if (existing) {
+              return res
+                .status(202)
+                .json({ state: "pending", pending_id: existing.id });
+            }
+            return res.status(410).json({ error: "gone" });
+          }
+          // A DIFFERENT device tried to redeem an already-bound token — flag the
+          // owner-visible conflict on the pending row + audit + owner alert.
+          if (existing && !existing.conflict) {
+            await prisma.pendingOverlayEnrollment.update({
+              where: { id: existing.id },
+              data: { conflict: true },
+            });
+          }
+          audit({
+            event: "overlay_enroll_token_conflict",
+            method: req.method,
+            route: ROUTE_BY_TOKEN,
+            status: 409,
+            clientId: clientIdForAudit(req),
+            refs: { tokenHash, fingerprint: fp, ownerAlert: true },
+          });
+          return res.status(409).json({ error: "token_conflict" });
+        }
+        // state 'expired' (superseded) OR 'available' but past TTL (findUnique
+        // re-read fresh, so an 'available' row with count 0 is expired-by-time).
+        audit({
+          event: "overlay_enroll_expired",
+          method: req.method,
+          route: ROUTE_BY_TOKEN,
+          status: 410,
+          clientId: clientIdForAudit(req),
+          refs: { tokenHash },
+        });
+        return res.status(410).json({ error: "expired" });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── GET /api/vpn/overlay/devices/by-token/:pending_id/status ── (NO bearer).
+  // Client proves possession of the sign key with X-Overlay-PoP; reveals only
+  // the coarse state. Unknown id AND bad PoP both 401 — no existence leak.
+  router.get(
+    "/vpn/overlay/devices/by-token/:pending_id/status",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const pop = req.header("X-Overlay-PoP");
+        if (!pop) {
+          return res.status(401).json({ error: "pop_required" });
+        }
+        const pending = await prisma.pendingOverlayEnrollment.findUnique({
+          where: { id: req.params.pending_id },
+        });
+        if (
+          !pending ||
+          !verifyStatusPop(pending.signPublicKeyPem, pending.id, pop)
+        ) {
+          return res.status(401).json({ error: "unauthorized" });
+        }
+        return res.status(200).json({ state: pending.state });
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── GET /api/vpn/overlay/pending-enrollments ── (owner) review queue.
+  router.get(
+    "/vpn/overlay/pending-enrollments",
+    requireRole("owner", "admin"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const rows = await prisma.pendingOverlayEnrollment.findMany({
+          orderBy: { presentedAt: "desc" },
+        });
+        return res.json(
+          rows.map((r) => ({
+            id: r.id,
+            label: r.label,
+            // first 8 hex of sha256(pem) — the owner eyeball-matches this.
+            fingerprint_short: fingerprintShort(r.signPublicKeyPem),
+            presented_at: r.presentedAt,
+            state: r.state,
+            conflict: r.conflict,
+          })),
+        );
+      } catch (err) {
+        return next(err);
+      }
+    },
+  );
+
+  // ── POST /api/vpn/overlay/pending-enrollments/:id/approve ── (owner).
+  router.post(
+    "/vpn/overlay/pending-enrollments/:id/approve",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const pending = await prisma.pendingOverlayEnrollment.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!pending) {
+          return res.status(404).json({ error: "not_found" });
+        }
+        if (pending.state === "approved") {
+          // Idempotent re-approve — return the recorded HQ device ref.
+          return res
+            .status(200)
+            .json({ state: "approved", device_id: pending.hqDeviceRef ?? null });
+        }
+        if (pending.state !== "pending") {
+          return res
+            .status(409)
+            .json({ error: `cannot approve a ${pending.state} enrollment` });
+        }
+        // Hard cap on concurrently-active QR-enrolled overlay devices — reject
+        // over cap BEFORE vouching anything to HQ.
+        const activeCount = await prisma.pendingOverlayEnrollment.count({
+          where: { state: "approved" },
+        });
+        if (activeCount >= limits.maxActiveQrDevices) {
+          audit({
+            event: "overlay_enroll_cap_reached",
+            method: req.method,
+            route: "/vpn/overlay/pending-enrollments/:id/approve",
+            status: 409,
+            clientId: req.user?.id ?? "unknown",
+            refs: { pending_id: pending.id, cap: limits.maxActiveQrDevices },
+          });
+          return res
+            .status(409)
+            .json({ error: "overlay_device_cap_reached" });
+        }
+        if (!config.HQ_ISSUANCE_URL) {
+          return res.status(503).json({
+            error:
+              "The box hasn't linked to its fleet directory yet — remote-access enrollment turns on automatically once it does.",
+          });
+        }
+        // The IDENTICAL box→HQ vouch the owner-JWT /devices route uses.
+        const result = await overlayEnroll({
+          wgPublicKey: pending.wgPublicKey,
+          signPublicKeyPem: pending.signPublicKeyPem,
+          label: pending.label,
+        });
+        const deviceId = extractDeviceId(result);
+        const nowDate = now();
+        await prisma.pendingOverlayEnrollment.update({
+          where: { id: pending.id },
+          data: {
+            state: "approved",
+            approvedBy: req.user?.id ?? null,
+            enrolledAt: nowDate,
+            hqDeviceRef: deviceId,
+          },
+        });
+        // Stamp provenance on the resulting overlay peer if it already exists
+        // (the connect agent also backfills it when it first installs the peer).
+        await prisma.vpnPeer.updateMany({
+          where: { publicKey: pending.wgPublicKey },
+          data: {
+            linkTokenEnrolledBy: req.user?.id ?? null,
+            linkTokenId: pending.linkTokenId,
+            linkTokenLabel: pending.label,
+            enrolledAt: nowDate,
+          },
+        });
+        audit({
+          event: "overlay_enroll_approved",
+          method: req.method,
+          route: "/vpn/overlay/pending-enrollments/:id/approve",
+          status: 200,
+          clientId: req.user?.id ?? "unknown",
+          refs: { device_id: deviceId, pending_id: pending.id },
+        });
+        return res.status(200).json({ state: "approved", device_id: deviceId });
+      } catch (err) {
+        logger.warn({ err }, "overlay pending-enrollment approve failed");
+        return next(err);
+      }
+    },
+  );
+
+  // ── POST /api/vpn/overlay/pending-enrollments/:id/deny ── (owner).
+  router.post(
+    "/vpn/overlay/pending-enrollments/:id/deny",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const pending = await prisma.pendingOverlayEnrollment.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!pending) {
+          return res.status(404).json({ error: "not_found" });
+        }
+        await prisma.pendingOverlayEnrollment.update({
+          where: { id: pending.id },
+          data: { state: "denied" },
+        });
+        audit({
+          event: "overlay_enroll_denied",
+          method: req.method,
+          route: "/vpn/overlay/pending-enrollments/:id/deny",
+          status: 200,
+          clientId: req.user?.id ?? "unknown",
+          refs: { pending_id: pending.id },
+        });
+        return res.status(200).json({ state: "denied" });
+      } catch (err) {
         return next(err);
       }
     },
