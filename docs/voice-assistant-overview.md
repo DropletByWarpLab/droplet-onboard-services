@@ -14,9 +14,10 @@ channel 0 and the echo-cancellation residual on channel 1). Inside the
 voice-io container a single background thread consumes 80 ms frames and runs
 a state machine (`services/voice-io/voice/pipeline.py`). Every frame is fed
 to the wake-word detector — by default a grammar-constrained Vosk recognizer
-that only knows the phrase "hey droplet" plus an unknown-word bucket
-(`services/voice-io/voice/wake.py`; threshold 0.7 is the minimum per-word
-confidence, so TV and ambient speech rarely false-fire).
+that only knows the phrases "droplet" and "hey droplet" plus an unknown-word
+bucket (`services/voice-io/voice/wake.py`; it fires on either, and threshold
+0.7 is the minimum per-word confidence, so TV and ambient speech rarely
+false-fire).
 
 On wake, the next utterance streams to a local Whisper container
 (wyoming-faster-whisper, small.en, int8 CPU) with an energy-based
@@ -72,12 +73,17 @@ time and score, last transcript, last spoken reply, per-stage loaded flags.
 
 ## The wake word
 
-"Hey droplet" — recognized out of the box by the grammar-constrained Vosk
-engine (no per-phrase model training, no licensing). Engine fallback: if the
-Vosk model is missing, openWakeWord takes over with "hey jarvis" as the
+"Droplet" **or** "Hey Droplet" — both recognized out of the box by the
+grammar-constrained Vosk engine (no per-phrase model training, no licensing).
+`WAKE_WORD` is a comma-separated list of phrases (default `droplet,hey
+droplet`) and the box wakes on ANY of them; each fires scored on its own
+window, so the shorter "droplet" and the two-word "hey droplet" both carry
+real per-word confidence evidence (WARP-1431). "Hey Droplet" remains the
+primary spoken form in the UI copy. Engine fallback: if the Vosk model is
+missing, openWakeWord takes over (single-model) with "hey jarvis" as the
 closest bundled phonetic shape, and `/voice/status` exposes
-`using_wake_fallback` so a UI can say "configured: hey droplet (currently
-answering to hey jarvis)".
+`using_wake_fallback` so a UI can say "configured: droplet/hey droplet
+(currently answering to hey jarvis)".
 
 ## Latency character
 
@@ -136,7 +142,7 @@ today (see limitations).
 | Setting | What it does |
 | --- | --- |
 | `WAKE_ENGINE` | `vosk` (default) or `openwakeword` |
-| `WAKE_WORD` | any English phrase under vosk |
+| `WAKE_WORD` | comma-separated wake phrases (default `droplet,hey droplet`); any English phrase(s) under vosk, wakes on any |
 | `WAKE_THRESHOLD` | default 0.7 (vosk) / 0.3 (openwakeword) |
 | `WAKE_DEBOUNCE_S` | wake re-trigger suppression window |
 | `VOICE_INPUT_DEVICE` / `VOICE_OUTPUT_DEVICE` | pin specific hardware |

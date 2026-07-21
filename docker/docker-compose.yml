@@ -1726,11 +1726,13 @@ services:
       # requires a real shared secret or every /api/llm/chat 401s.
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
-      # phrase out of the box — no per-phrase training, no licensing fee
-      # — so "hey droplet" works on every box. Automatically falls back
-      # to openWakeWord (hey_jarvis) if the bundled Vosk model is absent.
+      # phrases out of the box — no per-phrase training, no licensing fee
+      # — so "droplet" and "hey droplet" both work on every box.
+      # Automatically falls back to openWakeWord (hey_jarvis) if the
+      # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
+      # of phrases; the box wakes on ANY of them (WARP-1431).
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-hey_droplet}
+      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized
@@ -1748,6 +1750,27 @@ services:
       - STT_URL=${STT_URL:-tcp://wyoming-faster-whisper:10300}
       - STT_LANGUAGE=${STT_LANGUAGE:-en}
       - STT_MAX_RECORD_S=${STT_MAX_RECORD_S:-5.0}
+      # WARP-1434 — end-of-speech VAD for the STT capture window. Once the
+      # user starts talking, the capture ends after a short run of trailing
+      # silence instead of always holding the mic for the full
+      # STT_MAX_RECORD_S. Empty passthrough: effective defaults live in
+      # services/voice-io/voice/pipeline.py (single source of truth).
+      #   VAD_SILENCE_S    — trailing silence (s) that ends the turn (default
+      #                      0.6). Raise if the box cuts people off mid-pause.
+      #   VAD_SPEECH_RMS   — int16 frame RMS above which a frame counts as
+      #                      speech (default 700; between a ~400 room floor and
+      #                      ~1000+ speech). Tune per room — this is the knob
+      #                      the pipeline docstring points operators at.
+      #   VAD_MIN_SPEECH_S — min cumulative speech before end-of-speech may
+      #                      fire (default 0.4), so the wake-word tail + a pause
+      #                      before the command don't end the turn early.
+      - VAD_SILENCE_S=${VAD_SILENCE_S:-}
+      - VAD_SPEECH_RMS=${VAD_SPEECH_RMS:-}
+      - VAD_MIN_SPEECH_S=${VAD_MIN_SPEECH_S:-}
+      # WARP-1434 — how long (s) the wake_detected / transcript_ready UI hints
+      # linger before decaying back to 'listening' so the dashboard's pulse
+      # animation has time to play (default 2.0). Empty passthrough.
+      - WAKE_VISUAL_DECAY_S=${WAKE_VISUAL_DECAY_S:-}
       # TTS — synthesizes the LLM's reply via Piper. Same Wyoming
       # protocol as STT, different port. Set TTS_URL=__mock__ for a dev
       # box with no Piper container (the pipeline will accept speak()
@@ -1768,6 +1791,25 @@ services:
       # Override via env if the appliance has a larger/different model
       # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
+      # WARP-1432 — voice turn shaping (client-side request shape only).
+      # Empty passthrough: the effective defaults live in
+      # services/voice-io/voice/llm.py (single source of truth), same
+      # pattern as WAKE_THRESHOLD above.
+      #   VOICE_MAX_TOKENS — per-turn generation cap (default 1024).
+      #   Voice always sends ephemeral:true too (no env — it's a
+      #   constant: voice has no persisted session). The box's gpt-oss
+      #   voice model spends reasoning tokens before visible content, so
+      #   the cap is generous (covers reasoning + a short spoken answer);
+      #   too low → empty completion. Gateway hard-caps at 4096.
+      - VOICE_MAX_TOKENS=${VOICE_MAX_TOKENS:-}
+      #   VOICE_ALLOWED_TOOLS — comma-separated tool names the voice
+      #   assistant may use on tool-enabled turns. Empty → the curated
+      #   in-code default (box health, cameras, network, files, smart
+      #   devices + control_device, calendar, reminders) instead of the
+      #   full ~43-tool set, cutting ~5k → ~1-1.5k tokens of schema
+      #   prefill per turn. The greeting fast path (tool_choice="none")
+      #   sends zero tools regardless.
+      - VOICE_ALLOWED_TOOLS=${VOICE_ALLOWED_TOOLS:-}
       # Context the LLM gets in its system prompt at every reply():
       # current local time + the device's location. Both auto-detected
       # via voice/geo.py (free IP-geolocation lookup at startup,
@@ -1793,9 +1835,13 @@ services:
   # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
   # voice-io streams post-wake audio to. Same `small.en` default
   # the file-indexer service uses; the named volume mount shares the
-  # download path so we don't pay the 470 MB download twice. Whisper
-  # itself is pure CPU here; if a future profile needs CUDA, set
-  # WHISPER_DEVICE=cuda (image auto-detects).
+  # download path so we don't pay the 470 MB download twice. Whisper runs
+  # CPU-only in every current deployment shape — the single-box's dGPU is
+  # Ollama's and its iGPU is Frigate's, so there is deliberately no device
+  # knob. (WARP-1434 removed a stale "set WHISPER_DEVICE=cuda — image
+  # auto-detects" comment here: that env var was wired into neither the
+  # command nor the environment, and the image does not auto-detect a
+  # device — it takes an explicit --device it was never given.)
   wyoming-faster-whisper:
     # Pinned (WARP-844 follow-up): the Wyoming wire format differs across
     # image versions (v1 inline-data vs v2 data_length framing), so a
@@ -1814,13 +1860,18 @@ services:
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+    # WARP-1434 — the CTranslate2 thread count MUST track the CPU quota
+    # (cpus: ${WHISPER_CPUS:-2.0} below). The old --cpu-threads 4 inside a
+    # 2.0-core cap oversubscribed: 4 compute threads contending for 2 cores
+    # adds context-switch churn without speeding transcription. Default 2 =
+    # the quota; if you raise WHISPER_CPUS, raise WHISPER_CPU_THREADS to match.
     command: >
       --model ${WHISPER_MODEL:-small.en}
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
       --compute-type ${WHISPER_COMPUTE:-int8}
-      --cpu-threads ${WHISPER_CPU_THREADS:-4}
+      --cpu-threads ${WHISPER_CPU_THREADS:-2}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
