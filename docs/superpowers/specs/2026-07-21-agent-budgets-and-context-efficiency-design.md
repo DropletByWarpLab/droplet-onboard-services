@@ -238,3 +238,49 @@ per-session from Romain, so measurement runs are scheduled with him.
 - **Zod-at-module-init reading config:** config must be importable before the
   route module — already true today (`config.ts` is imported throughout at
   boot); noted for the implementer.
+
+## Corrections (2026-07-21, implementation review)
+
+1. **§2 formula corrected to transcript-only accounting.** The design text
+   above ("serialized messages plus `toolSchemasJson`") was implemented as
+   written and turned out to be wrong: the shipping 70-tool chat scope
+   serializes to ~12k tokens of schemas on its own, so folding that into the
+   in-loop guard's estimate left almost no headroom for the transcript at the
+   16k default window — the guard fired on iteration 1 of essentially every
+   tool turn, capping the agent at one iteration. The shipped guard estimates
+   `JSON.stringify(messages).length` only. This is not a gap: the route-side
+   WARP-1118 estimator (`context-budget.service.ts`, invoked from
+   `routes/llm.ts` before the agent loop starts) already budgets the FULL
+   initial request — system blocks + tool schemas + history — against the
+   same window. The in-loop guard's job is narrower: bound mid-turn
+   transcript growth on top of that already-budgeted starting point.
+
+2. **§3 conversation continuity is inert through `/api/llm/chat`.** The
+   continuity rule ("the domains of any tools already called earlier in the
+   conversation stay advertised") reads `tool_calls` off replayed assistant
+   messages in `req.messages` — but `/api/llm/chat`'s request schema
+   (`chatRequestSchema` in `routes/llm.ts`) has no `tool_calls` field on its
+   message objects, so zod strips it from every replayed turn before
+   `agentMessages` is built. Continuity therefore only ever works *within* a
+   single turn's own iterations (where the loop pushes the model's raw
+   message object, tool_calls intact) — never *across* separate HTTP
+   requests replaying prior history. Fixing this needs route-side
+   reconstruction of `tool_calls` from the persisted trace, which is
+   DE-SCOPED from this branch and is a prerequisite to flipping
+   `TOOL_SELECTION_MODE` in the §6 phase-3 measurement (a cross-turn
+   follow-up would otherwise eat a self-heal iteration on every turn that
+   needs a previously-used domain). Within-turn domain expansion via the
+   WARP-642 self-heal guard is unaffected by this gap.
+
+3. **§4's stated no-exemption rationale doesn't hold.** The reasoning above
+   ("transient tool errors produce different error payloads, and the model
+   changing its mind produces different args") is wrong on its own terms: the
+   repetition key (`canonicalCallKey`) is computed from the call's `(tool
+   name, canonicalized args)` — never from the result/error payload — so a
+   transient failure followed by an identical retry is indistinguishable from
+   a genuine duplicate call by construction, regardless of what the two
+   error payloads looked like. The no-exemption decision itself still
+   stands (no legitimate identical-args retry pattern has surfaced in this
+   tool set), but that stated justification must not be relied on or cited
+   again — a future change that wants an exemption needs its own analysis of
+   the args-only key, not this paragraph.
