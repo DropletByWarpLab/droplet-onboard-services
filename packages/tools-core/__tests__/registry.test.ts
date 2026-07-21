@@ -117,6 +117,9 @@ const EXPECTED_TOOL_NAMES = [
   "unit_convert",
   "get_current_datetime",
   "date_math",
+  // WARP-1425 — forget a memory fact (Tier-2) + countdown timer (Write-tier)
+  "memory_forget",
+  "set_timer",
 ];
 
 describe("TOOLS registry", () => {
@@ -185,6 +188,13 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("get_current_datetime")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("date_math")?.requiresWrite).toBe(false);
     expect(TOOLS.get("date_math")?.requiresConfirmation).toBe(false);
+    // WARP-1425 — memory_forget disables a stored fact (Tier-2: write +
+    // confirm, like memory_extract_fact); set_timer creates a Reminder row
+    // (Write-tier, no confirm — same tier as create_reminder).
+    expect(TOOLS.get("memory_forget")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("memory_forget")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("set_timer")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_timer")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

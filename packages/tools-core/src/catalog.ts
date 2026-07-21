@@ -129,7 +129,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "setup_camera_ports",
   ],
   calendar: ["create_event", "list_events", "update_event", "delete_event"],
-  reminders: ["create_reminder", "list_reminders", "complete_reminder"],
+  reminders: ["create_reminder", "list_reminders", "complete_reminder", "set_timer"],
   notifications: ["send_notification", "list_notifications"],
   email: [
     "email_search",
@@ -138,7 +138,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "email_draft_reply",
     "email_send",
   ],
-  memory: ["memory_recall", "memory_extract_fact"],
+  memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
   pm: [
     "pm_create_work_item",
     "pm_update_work_item",
@@ -260,6 +260,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   create_reminder: "Set a reminder for yourself",
   list_reminders: "See your reminders",
   complete_reminder: "Mark a reminder as done",
+  set_timer: "Set a quick countdown timer, like 10 minutes for pasta",
   // Notifications
   send_notification: "Send yourself a notification on the dashboard",
   list_notifications: "See notifications you've received",
@@ -270,6 +271,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Memory
   memory_recall: "Recall things your Droplet remembers about you",
   memory_extract_fact: "Remember a preference so your Droplet recalls it later",
+  memory_forget: "Make your Droplet forget something it remembered",
   // Email
   email_search: "Search your email",
   email_read: "Open and read an email conversation",

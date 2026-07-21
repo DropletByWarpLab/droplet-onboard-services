@@ -76,6 +76,8 @@ import deleteEvent from "./handlers/calendar/delete-event.js";
 import createReminder from "./handlers/reminders/create-reminder.js";
 import listReminders from "./handlers/reminders/list-reminders.js";
 import completeReminder from "./handlers/reminders/complete-reminder.js";
+// WARP-1425: countdown timer over the Reminder model (server-side now+duration)
+import setTimer from "./handlers/reminders/set-timer.js";
 
 // notifications
 import sendNotification from "./handlers/notifications/send-notification.js";
@@ -90,6 +92,8 @@ import listStoragePools from "./handlers/system/list-storage-pools.js";
 // WARP-461: durable memory facts (Phase B4)
 import memoryRecall from "./handlers/memory/recall.js";
 import memoryExtractFact from "./handlers/memory/extract.js";
+// WARP-1425: forget a remembered fact (soft-disable; Tier-2 confirm flow)
+import memoryForget from "./handlers/memory/forget.js";
 
 // WARP-466: D2 email tools
 import emailSearch from "./handlers/email/search.js";
@@ -213,6 +217,8 @@ const allTools: Tool[] = [
   createReminder,
   listReminders,
   completeReminder,
+  // WARP-1425: countdown timer (cancel/list ride complete_reminder/list_reminders)
+  setTimer,
   // notifications
   sendNotification,
   listNotifications,
@@ -229,6 +235,8 @@ const allTools: Tool[] = [
   // WARP-461: durable memory facts
   memoryRecall,
   memoryExtractFact,
+  // WARP-1425: forget a remembered fact (Tier-2: write + confirmation)
+  memoryForget,
   // WARP-509: native PM (write tools — requiresWrite + requiresConfirmation)
   pmCreateWorkItem,
   pmUpdateWorkItem,
