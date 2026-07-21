@@ -32,9 +32,12 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+import voice.llm
 from voice.llm import (
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_VOICE_ALLOWED_TOOLS,
+    DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
     MockLLM,
     OrchestratorLLM,
@@ -42,6 +45,8 @@ from voice.llm import (
     _extract_error_detail,
     build_llm_from_env,
     build_system_prompt,
+    parse_allowed_tools,
+    parse_max_tokens,
 )
 
 
@@ -50,12 +55,13 @@ from voice.llm import (
 # ────────────────────────────────────────────────────────────────────
 
 def _install_mock_transport(monkeypatch, handler) -> list:
-    """Patch httpx.get/httpx.post to route through a MockTransport.
+    """Route the OrchestratorLLM's POOLED client through a MockTransport.
 
-    OrchestratorLLM uses module-level `httpx.get` and `httpx.post`
-    (not a long-lived client), so we replace those two functions with
-    versions that use a MockTransport-backed Client. Captures every
-    request for assertions.
+    WARP-1433: OrchestratorLLM builds ONE `httpx.Client` via
+    `voice.llm._new_httpx_client()` and reuses it across
+    available()/reply()/reply_stream(). Patching the factory so it returns a
+    MockTransport-backed client makes every hop route through our handler —
+    no real network. Captures every request for assertions.
     """
     captured: list[httpx.Request] = []
 
@@ -64,16 +70,10 @@ def _install_mock_transport(monkeypatch, handler) -> list:
         return handler(request)
 
     transport = httpx.MockTransport(_record_and_handle)
-    client = httpx.Client(transport=transport)
-
-    def _patched_get(url, **kwargs):
-        return client.get(url, **kwargs)
-
-    def _patched_post(url, **kwargs):
-        return client.post(url, **kwargs)
-
-    monkeypatch.setattr(httpx, "get", _patched_get)
-    monkeypatch.setattr(httpx, "post", _patched_post)
+    monkeypatch.setattr(
+        voice.llm, "_new_httpx_client",
+        lambda: httpx.Client(transport=transport),
+    )
     return captured
 
 
@@ -577,3 +577,605 @@ class TestSystemPromptWiringIntoReply:
         llm.reply("b")
         assert "12:00 PM" in captured[0]
         assert "1:00 PM" in captured[1]
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-1432 — voice turn shaping (ephemeral + max_tokens + allowed_tools)
+# ────────────────────────────────────────────────────────────────────
+#
+# Every non-greeting voice turn used to inherit the full ~43-tool
+# `_service:voice` set (~5k tokens of schema prefill) and mint a
+# throwaway ChatSession. These pin the three client-side request-shape
+# changes: `ephemeral:true` on every turn, a `max_tokens` cap, and a
+# curated `allowed_tools` scope that cuts the prefill long tail. The
+# orchestrator's chatRequestSchema already accepts all three
+# (apps/orchestrator/src/routes/llm.ts) — this is purely about voice-io
+# SENDING them.
+
+def _capture_chat_body(monkeypatch) -> dict:
+    """Route reply() through a mock transport and hand back the parsed
+    POST body of the chat call (the last non-health request)."""
+    bodies: list[dict] = []
+
+    def handler(req):
+        if req.url.path == "/api/orchestrator/health":
+            return httpx.Response(200, json={"status": "ok"})
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={
+            "message": {"role": "assistant", "content": "ok"},
+            "trace": [], "iterations": 1, "stop_reason": "model_done",
+        })
+
+    _install_mock_transport(monkeypatch, handler)
+    return bodies
+
+
+class TestEphemeralAlwaysSent:
+    """`ephemeral:true` is dead-safe and high-value: without it every
+    utterance mints a throwaway ChatSession + litters the chat sidebar
+    (routes/llm.ts:872). Voice must ALWAYS send it — on tool turns AND
+    on the greeting fast path."""
+
+    def test_reply_sends_ephemeral_true_on_tool_turn(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert bodies[0]["ephemeral"] is True
+
+    def test_reply_sends_ephemeral_true_on_greeting(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert bodies[0]["ephemeral"] is True
+
+
+class TestMaxTokensCap:
+    """A `max_tokens` cap prevents runaway generation. gpt-oss:20b spends
+    reasoning-channel tokens BEFORE visible content, so the default must
+    be generous enough to cover reasoning + a short spoken answer (too
+    low → empty completion, WARP-854)."""
+
+    def test_reply_sends_default_max_tokens(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("what time is it")
+        assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_max_tokens_is_generous_but_within_gateway_bound(self):
+        # ai-gateway/orchestrator hard-cap max_tokens at 4096 (routes/
+        # llm.ts:156). The default must sit under that AND leave real
+        # room for reasoning + answer (WARP-854 anti-starvation).
+        assert 512 <= DEFAULT_VOICE_MAX_TOKENS <= 4096
+
+    def test_configured_max_tokens_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", max_tokens=2048).reply("hi")
+        assert bodies[0]["max_tokens"] == 2048
+
+    def test_max_tokens_also_sent_on_greeting(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+
+
+class TestAllowedToolsScope:
+    """A curated `allowed_tools` scope replaces the inherited ~43-tool set
+    on tool-enabled turns. On the greeting fast path (tool_choice="none")
+    the orchestrator sends ZERO tools, so allowed_tools is moot and MUST
+    be omitted to keep that path exactly as-is."""
+
+    def test_reply_sends_default_scope_on_tool_turn(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert bodies[0]["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_reply_sends_default_scope_when_tool_choice_auto(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("hi", tool_choice="auto")
+        assert bodies[0]["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_allowed_tools_omitted_on_greeting_fast_path(self, monkeypatch):
+        # The intent-gate fast path stays exactly as-is: zero tools sent,
+        # so allowed_tools is moot and must not appear.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert "allowed_tools" not in bodies[0]
+        assert bodies[0]["tool_choice"] == "none"
+
+    def test_configured_scope_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(
+            base_url="http://test",
+            allowed_tools=["list_cameras", "get_system_health"],
+        ).reply("is the camera up?")
+        assert bodies[0]["allowed_tools"] == ["list_cameras", "get_system_health"]
+
+    def test_empty_explicit_scope_omits_field(self, monkeypatch):
+        # An explicit [] at the class level means "send no allowed_tools
+        # field" (the caller opted out), NOT allowed_tools:[] which the
+        # orchestrator would read as ZERO tools.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", allowed_tools=[]).reply("hi")
+        assert "allowed_tools" not in bodies[0]
+
+    def test_camera_question_routes_with_list_cameras_in_scope(self, monkeypatch):
+        # Representative household tool question — the tool that answers
+        # it must be in the default scope or voice silently loses cameras.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert "list_cameras" in bodies[0]["allowed_tools"]
+
+
+class TestDefaultScopeContract:
+    """The curated default is correctness-first: it must cover every
+    domain the voice persona ADVERTISES (cameras, network, files, smart
+    devices, calendar, reminders + box health), and it must not carry
+    write tools that the `_service:voice` principal can't drive anyway
+    (they'd be stripped server-side — dead weight in the prefill)."""
+
+    def test_covers_every_persona_promised_domain(self):
+        # DEFAULT_LLM_SYSTEM_PROMPT promises cameras, network, files,
+        # smart devices, calendar, and reminders (read-only). Each must
+        # have at least its primary read tool in scope.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        assert "list_cameras" in scope          # cameras
+        assert "get_network_status" in scope    # network
+        assert "search_files" in scope          # files
+        assert "list_smart_home_devices" in scope  # smart devices
+        assert "list_events" in scope           # calendar
+        assert "list_reminders" in scope        # reminders
+        assert "get_system_health" in scope     # box health
+
+    def test_includes_the_one_scoped_voice_control_tool(self):
+        # `control_device` is the sole write tool voice may drive
+        # (VOICE_WRITE_TOOLS in routes/llm.ts) — "hey Droplet, turn off
+        # the kitchen lights". It survives the server-side write strip,
+        # so it belongs in scope.
+        assert "control_device" in DEFAULT_VOICE_ALLOWED_TOOLS
+
+    def test_excludes_write_tools_stripped_for_voice(self):
+        # These are requiresWrite tools NOT in VOICE_WRITE_TOOLS — the
+        # orchestrator strips them for the voice principal, so shipping
+        # them in the default would be misleading dead weight.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        for stripped in (
+            "run_scene",
+            "block_network_device",
+            "write_file",
+            "delete_file",
+            "email_send",
+            "restart_router",
+            "create_reminder",
+        ):
+            assert stripped not in scope
+
+    def test_excludes_the_long_tail(self):
+        # The whole point (WARP-1432) is cutting the rarely-voice-used
+        # long tail — PM, ERP, data-utility, switch-admin tools.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        for tail in (
+            "pm_list_work_items",
+            "erp_find_patient",
+            "uuid_generate",
+            "regex_test",
+            "set_port_vlan",
+            "convert_data_format",
+        ):
+            assert tail not in scope
+
+    def test_no_duplicate_tool_names(self):
+        assert len(DEFAULT_VOICE_ALLOWED_TOOLS) == len(set(DEFAULT_VOICE_ALLOWED_TOOLS))
+
+
+class TestParseMaxTokens:
+    """VOICE_MAX_TOKENS parsing: unset/garbage/out-of-range all fall back
+    to the known-safe default with a warning (voice never breaks on a
+    fat-fingered env), a valid int is honored."""
+
+    def test_none_returns_default(self):
+        assert parse_max_tokens(None) == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_empty_returns_default(self):
+        assert parse_max_tokens("") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_whitespace_returns_default(self):
+        assert parse_max_tokens("   \n\t ") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_valid_int_is_used(self):
+        assert parse_max_tokens("2048") == 2048
+
+    def test_surrounding_whitespace_stripped(self):
+        assert parse_max_tokens("  2048  ") == 2048
+
+    def test_non_numeric_falls_back_to_default(self):
+        assert parse_max_tokens("abc") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_zero_out_of_range_falls_back(self):
+        # Below the gateway's ge=1 bound — a 0 cap would empty every reply.
+        assert parse_max_tokens("0") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_negative_falls_back(self):
+        assert parse_max_tokens("-100") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_above_gateway_ceiling_falls_back(self):
+        # Above the orchestrator/gateway le=4096 bound — sending it would
+        # 400 every voice reply, so fall back rather than guarantee failure.
+        assert parse_max_tokens("99999") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_float_string_falls_back(self):
+        assert parse_max_tokens("1024.5") == DEFAULT_VOICE_MAX_TOKENS
+
+
+class TestParseAllowedTools:
+    """VOICE_ALLOWED_TOOLS parsing: comma-separated names, whitespace
+    trimmed, empty segments dropped; unset/all-empty falls back to the
+    curated default (never an empty list — that would zero out tools)."""
+
+    def test_none_returns_default(self):
+        assert parse_allowed_tools(None) == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_empty_returns_default(self):
+        assert parse_allowed_tools("") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_whitespace_returns_default(self):
+        assert parse_allowed_tools("   ") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_all_empty_segments_returns_default(self):
+        # ",,, ," carries no real names — treat as "operator said nothing".
+        assert parse_allowed_tools(",,, ,") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_comma_separated_names_parsed(self):
+        assert parse_allowed_tools("a,b,c") == ["a", "b", "c"]
+
+    def test_segments_are_trimmed(self):
+        assert parse_allowed_tools("list_cameras, get_system_health") == [
+            "list_cameras",
+            "get_system_health",
+        ]
+
+    def test_empty_segments_dropped(self):
+        assert parse_allowed_tools("a,,b, ,c") == ["a", "b", "c"]
+
+    def test_single_name(self):
+        assert parse_allowed_tools("list_cameras") == ["list_cameras"]
+
+
+class TestBuildLLMFromEnvTurnShaping:
+    """build_llm_from_env wires VOICE_MAX_TOKENS + VOICE_ALLOWED_TOOLS
+    through to the OrchestratorLLM, same as it does LLM_MODEL / token."""
+
+    def test_default_build_uses_default_cap_and_scope(self, monkeypatch, stub_geo):
+        for k in ("LLM_URL", "VOICE_MAX_TOKENS", "VOICE_ALLOWED_TOOLS"):
+            monkeypatch.delenv(k, raising=False)
+        llm = build_llm_from_env()
+        assert isinstance(llm, OrchestratorLLM)
+        assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+        assert llm._allowed_tools == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_voice_max_tokens_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_TOKENS", "2048")
+        llm = build_llm_from_env()
+        assert llm._max_tokens == 2048
+
+    def test_voice_max_tokens_env_invalid_falls_back(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_TOKENS", "not-a-number")
+        llm = build_llm_from_env()
+        assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_voice_allowed_tools_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv(
+            "VOICE_ALLOWED_TOOLS", "list_cameras, get_system_health",
+        )
+        llm = build_llm_from_env()
+        assert llm._allowed_tools == ["list_cameras", "get_system_health"]
+
+    def test_voice_allowed_tools_env_empty_uses_default(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_ALLOWED_TOOLS", "   ")
+        llm = build_llm_from_env()
+        assert llm._allowed_tools == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-626 — incremental SSE consume (reply_stream)
+# ────────────────────────────────────────────────────────────────────
+#
+# `reply_stream()` POSTs with stream:true and parses the orchestrator's
+# SSE (apps/orchestrator/src/types/sse-events.ts): one frame per event,
+# `event: <type>\ndata: <json-without-type>\n\n`. content_delta.text is
+# yielded; tool_call / tool_result / reasoning_step / model_loading are
+# ignored for audio; done stops; a done with stop_reason:"error" (the
+# WARP-854 empty-completion rewrite) raises LLMUnavailable. On any
+# transport failure or a non-streaming response it FALLS BACK to the
+# blocking reply(). Wave-C request shaping rides on the stream request too.
+
+
+def _sse(*frames: tuple[str, dict]) -> bytes:
+    """Encode SSE frames exactly like the orchestrator's encodeSSE():
+    `event: <type>\\ndata: <json payload without the type key>\\n\\n`."""
+    out = []
+    for event_type, payload in frames:
+        out.append(f"event: {event_type}\ndata: {json.dumps(payload)}\n\n")
+    return "".join(out).encode("utf-8")
+
+
+def _install_mock_stream(monkeypatch, handler) -> list:
+    """Route the pooled client (stream + get + post) through one MockTransport.
+
+    WARP-1433: reply_stream() uses `self._client.stream`, the blocking
+    fallback uses `self._client.post`, and the health probe uses
+    `self._client.get` — all on the ONE pooled client. Patching the factory
+    covers the stream path and its fallback in a single test."""
+    captured: list[httpx.Request] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    transport = httpx.MockTransport(_record)
+    monkeypatch.setattr(
+        voice.llm, "_new_httpx_client",
+        lambda: httpx.Client(transport=transport),
+    )
+    return captured
+
+
+def _sse_response(*frames: tuple[str, dict]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=_sse(*frames),
+    )
+
+
+class _BreakingByteStream(httpx.SyncByteStream):
+    """Yields one chunk of real SSE bytes, then raises a transport error
+    mid-body — models the orchestrator connection dropping AFTER sentence 1
+    has already been streamed (and, on the pipeline side, already spoken)."""
+
+    def __init__(self, prefix: bytes):
+        self._prefix = prefix
+
+    def __iter__(self):
+        yield self._prefix
+        raise httpx.ReadError("stream dropped mid-body (test)")
+
+    def close(self) -> None:
+        pass
+
+
+class TestReplyStreamSSE:
+    def test_yields_content_deltas_in_order(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "The camera "}),
+                ("content_delta", {"text": "is online."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("is the camera up")) == [
+            "The camera ", "is online.",
+        ]
+
+    def test_tool_frames_ignored_for_audio(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "Checking. "}),
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("tool_result", {"id": "t1", "ok": True, "data": []}),
+                ("content_delta", {"text": "All cameras are online."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        # Only the two content deltas are spoken; tool frames are dropped.
+        assert list(llm.reply_stream("check cameras")) == [
+            "Checking. ", "All cameras are online.",
+        ]
+
+    def test_reasoning_step_ignored_for_audio(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("reasoning_step", {"text": "the user wants the time"}),
+                ("content_delta", {"text": "It is 3 p.m."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("what time is it")) == ["It is 3 p.m."]
+
+    def test_done_stops_iteration(self, monkeypatch):
+        # Any frames after `done` are not consumed.
+        def handler(req):
+            return _sse_response(
+                ("content_delta", {"text": "Done now."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+                ("content_delta", {"text": "SHOULD NOT APPEAR"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["Done now."]
+
+    def test_warp854_done_error_raises(self, monkeypatch):
+        # An empty completion is rewritten server-side to a done with
+        # stop_reason:error (WARP-854) — reply_stream surfaces it.
+        def handler(req):
+            return _sse_response(
+                ("done", {
+                    "iterations": 1,
+                    "stop_reason": "error",
+                    "error": "empty_completion: the model returned no output.",
+                }),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        with pytest.raises(LLMUnavailable, match="empty_completion"):
+            list(llm.reply_stream("hi"))
+
+    def test_empty_user_text_yields_nothing_no_network(self, monkeypatch):
+        captured = _install_mock_stream(
+            monkeypatch, lambda r: httpx.Response(500),
+        )
+        assert list(OrchestratorLLM(base_url="http://test").reply_stream("")) == []
+        assert captured == []
+
+    def test_blank_data_and_comment_lines_tolerated(self, monkeypatch):
+        # SSE keep-alive comments (": ping") and stray blank frames must
+        # not crash the parser.
+        def handler(req):
+            body = (
+                b": keep-alive ping\n\n"
+                b"event: content_delta\ndata: {\"text\": \"Hi there now.\"}\n\n"
+                b"event: done\ndata: {\"iterations\": 1, \"stop_reason\": \"model_done\"}\n\n"
+            )
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=body,
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["Hi there now."]
+
+
+class TestReplyStreamFallback:
+    def test_transport_error_falls_back_to_blocking_reply(self, monkeypatch):
+        # The STREAM attempt (Accept: text/event-stream) raises a transport
+        # error → reply_stream falls back to the pooled client's blocking
+        # POST, which succeeds and yields as a single chunk.
+        def handler(req):
+            if "text/event-stream" in req.headers.get("accept", ""):
+                raise httpx.ConnectError("stream connect refused")
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "blocking reply won"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["blocking reply won"]
+
+    def test_non_event_stream_response_parsed_as_single_reply(self, monkeypatch):
+        # Server ignored stream:true and returned a normal JSON body — parse
+        # it via the same extractor and yield the whole reply once.
+        def handler(req):
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "whole reply here"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("hi")) == ["whole reply here"]
+
+    def test_non_2xx_falls_back_to_blocking(self, monkeypatch):
+        # 503 on the stream request → fall back to blocking reply(). Same
+        # handler answers both; the blocking reply() then gets the 503 too
+        # and raises — so the fallback surfaces LLMUnavailable, not silence.
+        def handler(req):
+            return httpx.Response(503, json={"detail": "model loading"})
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        with pytest.raises(LLMUnavailable, match="model loading"):
+            list(llm.reply_stream("hi"))
+
+    def test_partial_yield_then_break_surfaces_error_no_double_audio(
+        self, monkeypatch,
+    ):
+        # The stream yields sentence 1, then the transport drops mid-body.
+        # Because content was ALREADY yielded (and, upstream, already spoken),
+        # reply_stream must SURFACE the break as LLMUnavailable rather than
+        # re-running the blocking reply() — re-running would replay the whole
+        # answer over the top of the partial audio (double audio). Guards the
+        # `if yielded: raise` branch the other fallbacks (break BEFORE any
+        # yield) never reach.
+        def handler(req):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_BreakingByteStream(
+                    _sse(("content_delta", {"text": "The camera is online. "})),
+                ),
+            )
+        captured = _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        gen = llm.reply_stream("status please")
+        assert next(gen) == "The camera is online. "  # sentence 1 streamed
+        with pytest.raises(LLMUnavailable, match="partial content"):
+            next(gen)
+        # Exactly ONE request was made — the stream POST. The blocking reply()
+        # fallback did NOT re-POST, so the partial audio is never doubled.
+        assert len(captured) == 1
+
+
+class TestReplyStreamRequestShape:
+    """Every Wave-C request shape (ephemeral / max_tokens / allowed_tools /
+    tool_choice) must ride on the STREAMING request too, plus stream:true
+    and an event-stream Accept header."""
+
+    def _capture(self, monkeypatch):
+        bodies: list[dict] = []
+        headers: list[dict] = []
+
+        def handler(req):
+            bodies.append(json.loads(req.content))
+            headers.append(dict(req.headers))
+            return _sse_response(
+                ("content_delta", {"text": "ok now."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        return bodies, headers
+
+    def test_stream_true_and_wave_c_fields_on_tool_turn(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream(
+            "is the front camera online?",
+        ))
+        b = bodies[0]
+        assert b["stream"] is True
+        assert b["ephemeral"] is True
+        assert b["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+        assert b["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_accept_header_is_event_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream("hi"))
+        assert "text/event-stream" in headers[0].get("accept", "")
+
+    def test_tool_choice_none_omits_allowed_tools_on_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(base_url="http://test").reply_stream(
+            "good morning", tool_choice="none",
+        ))
+        assert bodies[0]["tool_choice"] == "none"
+        assert "allowed_tools" not in bodies[0]
+
+    def test_bearer_token_attached_on_stream(self, monkeypatch):
+        bodies, headers = self._capture(monkeypatch)
+        list(OrchestratorLLM(
+            base_url="http://test", bearer_token="secret",
+        ).reply_stream("hi"))
+        assert headers[0].get("authorization") == "Bearer secret"
+
+
+class TestMockReplyStreamFallbackDefault:
+    """The abstract LLMClient provides a default reply_stream that yields
+    the blocking reply() as a single chunk — so MockLLM (and any client
+    that only implements reply()) streams for free."""
+
+    def test_mock_reply_stream_yields_single_blocking_reply(self):
+        m = MockLLM(scripted_replies=["the whole reply"])
+        assert list(m.reply_stream("hi")) == ["the whole reply"]
+        assert m.requests == ["hi"]
+
+    def test_mock_reply_stream_empty_yields_nothing(self):
+        m = MockLLM(scripted_replies=[""])
+        assert list(m.reply_stream("hi")) == []
+
+    def test_mock_reply_stream_threads_tool_choice(self):
+        m = MockLLM(scripted_replies=["ok"])
+        list(m.reply_stream("good morning", tool_choice="none"))
+        assert m.last_tool_choice == "none"
