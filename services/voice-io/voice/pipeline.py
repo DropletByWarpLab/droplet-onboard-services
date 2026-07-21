@@ -256,12 +256,16 @@ def transcript_is_actionable(transcript: str) -> bool:
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 3.0  # hard cap on captured audio per wake. The
+DEFAULT_STT_MAX_RECORD_S = 5.0  # hard cap on captured audio per wake. The
                                 # end-of-speech VAD cuts sooner when the room
                                 # goes quiet; this cap guarantees the capture
                                 # always stops (e.g. in a room with continuous
                                 # background audio where no silence is ever
-                                # detected). Overridable via STT_MAX_RECORD_S.
+                                # detected). WARP-1434: this 5.0 is the SINGLE
+                                # source of truth — compose, the README, and
+                                # the overview doc all ship 5.0 and the box
+                                # runs 5.0; the old 3.0 code default was drift.
+                                # Overridable via STT_MAX_RECORD_S.
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Calibration mode (WARP-1059, from WARP-1055 review F6). While the
 # dashboard wizard measures (noise floor / speech peak / echo / wake
@@ -296,7 +300,12 @@ DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 # their statement instead of always holding the mic for the full
 # max-record window. Energy-based on frame RMS; the max-record window
 # stays the hard cap for noisy rooms where a clean silence never arrives.
-DEFAULT_VAD_SILENCE_S = 1.0       # trailing silence (s) that ends the turn
+DEFAULT_VAD_SILENCE_S = 0.6       # trailing silence (s) that ends the turn.
+                                  # WARP-1434: trimmed 1.0 → 0.6 — a full
+                                  # second of dead air used to end every turn;
+                                  # 0.6 s still rides out a natural pause but
+                                  # stops promptly once the speaker finishes.
+                                  # Overridable per-room via VAD_SILENCE_S.
 DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech"
                                   # (sits between a typical room floor ~400
                                   # and normal speech ~1000+; tune per-room

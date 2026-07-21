@@ -1750,6 +1750,27 @@ services:
       - STT_URL=${STT_URL:-tcp://wyoming-faster-whisper:10300}
       - STT_LANGUAGE=${STT_LANGUAGE:-en}
       - STT_MAX_RECORD_S=${STT_MAX_RECORD_S:-5.0}
+      # WARP-1434 — end-of-speech VAD for the STT capture window. Once the
+      # user starts talking, the capture ends after a short run of trailing
+      # silence instead of always holding the mic for the full
+      # STT_MAX_RECORD_S. Empty passthrough: effective defaults live in
+      # services/voice-io/voice/pipeline.py (single source of truth).
+      #   VAD_SILENCE_S    — trailing silence (s) that ends the turn (default
+      #                      0.6). Raise if the box cuts people off mid-pause.
+      #   VAD_SPEECH_RMS   — int16 frame RMS above which a frame counts as
+      #                      speech (default 700; between a ~400 room floor and
+      #                      ~1000+ speech). Tune per room — this is the knob
+      #                      the pipeline docstring points operators at.
+      #   VAD_MIN_SPEECH_S — min cumulative speech before end-of-speech may
+      #                      fire (default 0.4), so the wake-word tail + a pause
+      #                      before the command don't end the turn early.
+      - VAD_SILENCE_S=${VAD_SILENCE_S:-}
+      - VAD_SPEECH_RMS=${VAD_SPEECH_RMS:-}
+      - VAD_MIN_SPEECH_S=${VAD_MIN_SPEECH_S:-}
+      # WARP-1434 — how long (s) the wake_detected / transcript_ready UI hints
+      # linger before decaying back to 'listening' so the dashboard's pulse
+      # animation has time to play (default 2.0). Empty passthrough.
+      - WAKE_VISUAL_DECAY_S=${WAKE_VISUAL_DECAY_S:-}
       # TTS — synthesizes the LLM's reply via Piper. Same Wyoming
       # protocol as STT, different port. Set TTS_URL=__mock__ for a dev
       # box with no Piper container (the pipeline will accept speak()
@@ -1814,9 +1835,13 @@ services:
   # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
   # voice-io streams post-wake audio to. Same `small.en` default
   # the file-indexer service uses; the named volume mount shares the
-  # download path so we don't pay the 470 MB download twice. Whisper
-  # itself is pure CPU here; if a future profile needs CUDA, set
-  # WHISPER_DEVICE=cuda (image auto-detects).
+  # download path so we don't pay the 470 MB download twice. Whisper runs
+  # CPU-only in every current deployment shape — the single-box's dGPU is
+  # Ollama's and its iGPU is Frigate's, so there is deliberately no device
+  # knob. (WARP-1434 removed a stale "set WHISPER_DEVICE=cuda — image
+  # auto-detects" comment here: that env var was wired into neither the
+  # command nor the environment, and the image does not auto-detect a
+  # device — it takes an explicit --device it was never given.)
   wyoming-faster-whisper:
     # Pinned (WARP-844 follow-up): the Wyoming wire format differs across
     # image versions (v1 inline-data vs v2 data_length framing), so a
@@ -1835,13 +1860,18 @@ services:
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+    # WARP-1434 — the CTranslate2 thread count MUST track the CPU quota
+    # (cpus: ${WHISPER_CPUS:-2.0} below). The old --cpu-threads 4 inside a
+    # 2.0-core cap oversubscribed: 4 compute threads contending for 2 cores
+    # adds context-switch churn without speeding transcription. Default 2 =
+    # the quota; if you raise WHISPER_CPUS, raise WHISPER_CPU_THREADS to match.
     command: >
       --model ${WHISPER_MODEL:-small.en}
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
       --compute-type ${WHISPER_COMPUTE:-int8}
-      --cpu-threads ${WHISPER_CPU_THREADS:-4}
+      --cpu-threads ${WHISPER_CPU_THREADS:-2}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
