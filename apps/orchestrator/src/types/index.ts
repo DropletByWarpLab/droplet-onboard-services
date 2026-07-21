@@ -84,6 +84,13 @@ export interface ChatRequest {
   provider?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+  // WARP-1442 — optional gpt-oss reasoning-effort control, forwarded to the
+  // ai-gateway which sets a top-level `reasoning_effort` on the Ollama
+  // /v1/chat/completions request for the gpt-oss family (a no-op for other
+  // models). Unset → current behavior byte-for-byte. The orchestrator route
+  // defaults it to "low" for the `_service:voice` principal, server-side, so
+  // voice-io sends nothing new.
+  reasoning_effort?: "low" | "medium" | "high";
   // The ai-gateway is a pure provider router as of WARP-104 — it never
   // dispatches tools itself. The orchestrator owns the agent loop
   // end-to-end (MCP-backed); see services/ai-gateway/router.py and
@@ -106,6 +113,41 @@ export interface ChatResponse {
     completion_tokens: number;
     total_tokens: number;
   };
+}
+
+/**
+ * WARP-1442 — one OpenAI-compatible streaming chunk from the ai-gateway's
+ * `/ai/chat` SSE (`stream:true`). The gateway passes Ollama's
+ * `/v1/chat/completions` stream through verbatim, so each chunk carries a
+ * `choices[0].delta` with an INCREMENTAL slice of the turn:
+ *
+ *   - `delta.content`          — a fragment of the user-visible answer.
+ *   - `delta.reasoning_content`— a fragment of the gpt-oss reasoning channel
+ *                                (harmony "analysis"); never user-visible.
+ *   - `delta.tool_calls[]`     — tool-call fragments keyed by `index`; the
+ *                                function `arguments` arrive as partial JSON
+ *                                strings that the CONSUMER concatenates per
+ *                                index into one valid call.
+ *   - `finish_reason`          — set on the terminal chunk of the turn
+ *                                (`stop` | `length` | `tool_calls`).
+ *
+ * This is the RESPONSE side only; the request shape stays `ChatRequest`.
+ */
+export interface ChatStreamChunk {
+  choices?: Array<{
+    delta?: {
+      role?: string;
+      content?: string | null;
+      reasoning_content?: string | null;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        type?: "function";
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
 }
 
 export interface ModelCapabilities {
@@ -139,6 +181,12 @@ export interface ModelsResponse {
   // service" state instead of the WARP-849 "still downloading" copy.
   degraded_providers?: string[];
   degraded?: boolean;
+  // WARP-1112 (additive, optional for back-compat): the installed local
+  // model the box answers with by default (`ai.model.chat` setting), or null
+  // when unset / no longer installed. Stamped by the orchestrator's
+  // GET /llm/models so the dashboard chat can default its picker to the
+  // active model instead of just "the first one in the list".
+  defaultModel?: string | null;
 }
 
 // WARP-311: legacy SessionInfo / SessionDetail / SessionListResponse /

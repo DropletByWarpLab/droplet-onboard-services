@@ -38,6 +38,8 @@ vi.mock("../services/matter.service.js", () => ({
   // returns boolean since WARP-850); resolve `true` so the success path is
   // exercised.
   decommissionDevice: vi.fn().mockResolvedValue(true),
+  // WARP-1469: same boolean contract as decommissionDevice (false → 404).
+  reconnectDevice: vi.fn().mockResolvedValue(true),
   subscribeStateChanges: vi.fn().mockReturnValue(() => {}),
   subscribeConnectionChanges: vi.fn().mockReturnValue(() => {}),
 }));
@@ -164,6 +166,25 @@ describe("MCP principal on commission/decommission", () => {
     expect(res.body).toMatchObject({ status: "decommissioned", nodeId: "103" });
     expect(matterService.decommissionDevice).toHaveBeenCalledOnce();
   });
+
+  it("POST /api/matter/devices/:nodeId/reconnect as _service:mcp passes the guard: 200 (WARP-1469)", async () => {
+    const res = await request(buildApp(mcpPrincipal)).post(
+      "/api/matter/devices/113/reconnect",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "reconnecting", nodeId: "113" });
+    expect(matterService.reconnectDevice).toHaveBeenCalledOnce();
+  });
+
+  it("reconnect 404s when the node isn't commissioned (false → 404)", async () => {
+    vi.mocked(matterService.reconnectDevice).mockResolvedValueOnce(false);
+    const res = await request(buildApp(mcpPrincipal)).post(
+      "/api/matter/devices/114/reconnect",
+    );
+
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("the guard admits exactly the MCP principal", () => {
@@ -194,6 +215,15 @@ describe("the guard admits exactly the MCP principal", () => {
 
     expect(res.status).toBe(403);
     expect(matterService.commissionDevice).not.toHaveBeenCalled();
+  });
+
+  it("voice stays 403 on reconnect too (WARP-1469)", async () => {
+    const res = await request(buildApp(voicePrincipal)).post(
+      "/api/matter/devices/115/reconnect",
+    );
+
+    expect(res.status).toBe(403);
+    expect(matterService.reconnectDevice).not.toHaveBeenCalled();
   });
 });
 

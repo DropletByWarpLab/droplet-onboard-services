@@ -17,6 +17,8 @@ import {
   fetchMatterCapabilities,
   sendMatterCommand,
   confirmMatterCommand,
+  decommissionMatterDevice,
+  reconnectMatterDevice,
 } from "./api";
 import { authFetch } from "./auth";
 
@@ -134,6 +136,41 @@ describe("sendMatterCommand (KAN-5)", () => {
       res({ ok: false, status: 429, json: { error: "Rate limited", blocked: true } }),
     );
     await expect(sendMatterCommand("12345", "toggle")).rejects.toThrow(/rate limited/i);
+  });
+});
+
+describe("device lifecycle (WARP-1469)", () => {
+  it("decommissionMatterDevice DELETEs /api/matter/devices/:id", async () => {
+    authFetchMock.mockResolvedValue(res({ ok: true, status: 200, json: {} }));
+    await expect(decommissionMatterDevice("12345")).resolves.toBeUndefined();
+    expect(authFetchMock).toHaveBeenCalledWith(
+      "/api/matter/devices/12345",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("decommissionMatterDevice throws on a non-2xx", async () => {
+    authFetchMock.mockResolvedValue(res({ ok: false, status: 503, json: {} }));
+    await expect(decommissionMatterDevice("12345")).rejects.toThrow(/decommission/i);
+  });
+
+  it("reconnectMatterDevice POSTs /api/matter/devices/:id/reconnect and returns the body", async () => {
+    authFetchMock.mockResolvedValue(
+      res({ ok: true, status: 200, json: { status: "reconnecting", nodeId: "12345" } }),
+    );
+    await expect(reconnectMatterDevice("12345")).resolves.toEqual({
+      status: "reconnecting",
+      nodeId: "12345",
+    });
+    expect(authFetchMock).toHaveBeenCalledWith(
+      "/api/matter/devices/12345/reconnect",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("reconnectMatterDevice throws on a non-2xx (e.g. 404 not commissioned)", async () => {
+    authFetchMock.mockResolvedValue(res({ ok: false, status: 404, json: {} }));
+    await expect(reconnectMatterDevice("12345")).rejects.toThrow(/reconnect/i);
   });
 });
 
