@@ -34,6 +34,15 @@ export function createRequestLogger(opts: {
         "req.headers.authorization",
         "req.headers.cookie",
         'res.headers["set-cookie"]',
+        // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
+        // it's returned to the owner ONCE and only its sha256 hash is persisted.
+        // Redact it (and the client sign-key PEM) on any request/response body
+        // that a future serializer or a `req.log.info({ req/res })` call might
+        // emit, so a token can never ride out of the box in a log bundle.
+        "req.body.token",
+        "req.body.sign_public_key_pem",
+        'req.headers["x-overlay-pop"]',
+        "res.body.token",
       ],
     },
     mixin() {

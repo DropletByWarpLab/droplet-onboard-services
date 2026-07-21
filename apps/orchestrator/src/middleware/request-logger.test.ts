@@ -114,3 +114,28 @@ describe("requestLogger credential redaction (WARP-1015)", () => {
     expect(completion.req.headers.cookie).toBe("[Redacted]");
   });
 });
+
+describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
+  // The overlay QR link token is bearer-equivalent (returned once; only its
+  // sha256 hash is stored). The client status PoP header is a live signature.
+  // Neither may ever land in a log line.
+  const POP = "SECRET-OVERLAY-POP-SIGNATURE-base64==";
+
+  it("redacts the X-Overlay-PoP request header", () => {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = mockReq("POP-ID", { "x-overlay-pop": POP });
+    const res = mockRes();
+    runWithRequestId("POP-ID", () => {
+      logger(req as never, res as never);
+    });
+    res.emit("finish");
+    const output = lines.join("");
+    expect(output).not.toContain(POP);
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.headers["x-overlay-pop"]).toBe("[Redacted]");
+  });
+});

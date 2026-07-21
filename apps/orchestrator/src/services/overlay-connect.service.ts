@@ -162,6 +162,17 @@ export interface OverlayVpnPeerRow {
   kind: string;
 }
 
+/** WARP-1474 — the approved dashboard-QR enrollment a newly-installed overlay
+ *  peer inherits its provenance from (createdBy / linkTokenId / label /
+ *  enrolledAt). Optional on the structural surface so overlay-connect tests that
+ *  predate the QR flow keep passing without providing it. */
+export interface OverlayPendingEnrollmentRow {
+  linkTokenId: string;
+  label: string;
+  approvedBy: string | null;
+  enrolledAt: Date | null;
+}
+
 /** Structural Prisma surface — tests pass a minimal in-memory stub. */
 export interface OverlayConnectPrisma {
   vpnPeer: {
@@ -176,6 +187,13 @@ export interface OverlayConnectPrisma {
     findMany(args: {
       where: Record<string, unknown>;
     }): Promise<OverlayVpnPeerRow[]>;
+  };
+  // WARP-1474: present in production; used to stamp QR-enroll provenance onto the
+  // overlay peer the FIRST time it's installed after an owner approval.
+  pendingOverlayEnrollment?: {
+    findFirst(args: {
+      where: Record<string, unknown>;
+    }): Promise<OverlayPendingEnrollmentRow | null>;
   };
 }
 
@@ -417,6 +435,17 @@ export async function installOrRefreshOverlayPeer(
     where: { publicKey: offer.clientPublicKey },
   });
 
+  // WARP-1474: if this key was linked via the dashboard-QR flow, stamp the
+  // approved enrollment's provenance onto the peer row so the audit trail shows
+  // who linked which QR. Best-effort + guarded — a peer from the owner-JWT
+  // /devices path (no pending row) or a runtime without the model just gets no
+  // provenance, never an error.
+  const provenance = await resolveOverlayProvenance(
+    prisma,
+    offer.clientPublicKey,
+    now,
+  );
+
   let row: OverlayVpnPeerRow;
   let assignedIp: string;
   if (existing) {
@@ -445,6 +474,7 @@ export async function installOrRefreshOverlayPeer(
         lastSessionAt: now,
         revokedAt: null,
         deviceLabel: offer.clientLabel ?? existing_label_fallback(existing),
+        ...provenance,
       },
     });
   } else {
@@ -459,6 +489,7 @@ export async function installOrRefreshOverlayPeer(
         mode: "away",
         kind: "overlay",
         lastSessionAt: now,
+        ...provenance,
       },
     });
   }
@@ -485,6 +516,33 @@ const OVERLAY_PEER_USER = "overlay";
 
 function existing_label_fallback(row: OverlayVpnPeerRow): string {
   return (row as { deviceLabel?: string }).deviceLabel ?? "Remote device";
+}
+
+/** WARP-1474 — look up the approved dashboard-QR enrollment for this key and
+ *  return the VpnPeer provenance columns to stamp. Returns {} (no provenance)
+ *  when the model isn't present, no approved row matches, or the lookup faults —
+ *  provenance is metadata, never a reason to fail a reconnect. */
+async function resolveOverlayProvenance(
+  prisma: OverlayConnectPrisma,
+  publicKey: string,
+  now: Date,
+): Promise<Record<string, unknown>> {
+  const model = prisma.pendingOverlayEnrollment;
+  if (!model?.findFirst) return {};
+  try {
+    const approved = await model.findFirst({
+      where: { wgPublicKey: publicKey, state: "approved" },
+    });
+    if (!approved) return {};
+    return {
+      linkTokenEnrolledBy: approved.approvedBy ?? null,
+      linkTokenId: approved.linkTokenId,
+      linkTokenLabel: approved.label,
+      enrolledAt: approved.enrolledAt ?? now,
+    };
+  } catch {
+    return {};
+  }
 }
 
 // --- One connect tick (poll → probe → answer → install) --------------------

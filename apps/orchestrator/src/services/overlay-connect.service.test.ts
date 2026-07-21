@@ -9,6 +9,7 @@ import {
   probeBoxEndpoint,
   expireIdleOverlayPeers,
   enrollOverlayDevice,
+  installOrRefreshOverlayPeer,
   type OverlayConnectDeps,
   type OverlayVpnPeerRow,
 } from "./overlay-connect.service.js";
@@ -712,5 +713,72 @@ describe("enrollOverlayDevice", () => {
     expect(signedPayloads[0]).toBe(
       `droplet-overlay-enroll:v1:droplet-abc:${expectedFp}:${wgKey}`,
     );
+  });
+});
+
+// --- WARP-1474: QR-enroll provenance backfill on peer install --------------
+
+describe("installOrRefreshOverlayPeer — dashboard-QR provenance", () => {
+  const offer = {
+    sessionId: "sess-1",
+    clientEndpoint: "198.51.100.9:41000",
+    clientPublicKey: "QRPHONEKEY",
+    clientLabel: "Alice iPhone",
+  };
+
+  it("stamps the approved enrollment's provenance onto a freshly-created peer", async () => {
+    const prisma = makePrisma() as ReturnType<typeof makePrisma> & {
+      pendingOverlayEnrollment?: unknown;
+    };
+    const enrolledAt = new Date("2026-07-21T09:00:00.000Z");
+    (prisma as { pendingOverlayEnrollment?: unknown }).pendingOverlayEnrollment = {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) =>
+        where.wgPublicKey === "QRPHONEKEY" && where.state === "approved"
+          ? {
+              linkTokenId: "tok-1",
+              label: "Alice iPhone",
+              approvedBy: "owner-1",
+              enrolledAt,
+            }
+          : null,
+    };
+    const { peers } = makePeers();
+    const row = await installOrRefreshOverlayPeer(
+      {
+        config: baseConfig(),
+        identity: makeIdentity().identity,
+        prisma,
+        peers,
+        allocateIp: async () => "10.13.13.9",
+        now: () => FIXED_NOW,
+      } as OverlayConnectDeps,
+      offer,
+    );
+    expect(row).toMatchObject({
+      linkTokenEnrolledBy: "owner-1",
+      linkTokenId: "tok-1",
+      linkTokenLabel: "Alice iPhone",
+      enrolledAt,
+    });
+  });
+
+  it("installs without provenance (and never throws) when there's no approved row", async () => {
+    const prisma = makePrisma();
+    (prisma as { pendingOverlayEnrollment?: unknown }).pendingOverlayEnrollment = {
+      findFirst: async () => null,
+    };
+    const { peers } = makePeers();
+    const row = await installOrRefreshOverlayPeer(
+      {
+        config: baseConfig(),
+        identity: makeIdentity().identity,
+        prisma,
+        peers,
+        allocateIp: async () => "10.13.13.9",
+        now: () => FIXED_NOW,
+      } as OverlayConnectDeps,
+      offer,
+    );
+    expect((row as unknown as Record<string, unknown>).linkTokenId).toBeUndefined();
   });
 });
