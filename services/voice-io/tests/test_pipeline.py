@@ -2673,6 +2673,19 @@ class TestIntentClassifier:
         "hey droplet",
         "hey assistant",
         "hello jarvis",
+        # WARP-1431 — a bare "droplet" (the wake word said alone) is an
+        # attention/greeting utterance the persona answers, same as
+        # "hey droplet". Recognized as a standalone greeting and as a
+        # bare address prefix on liveness / who-are-you check-ins.
+        "droplet",
+        "Droplet",
+        "droplet.",
+        "droplet!",
+        "droplet, are you there",
+        "droplet can you hear me",
+        "droplet, who are you",
+        "droplet what can you do",
+        "hey droplet, are you there",
         "good morning",
         "good evening",
         "good afternoon, jarvis",
@@ -2730,6 +2743,12 @@ class TestIntentClassifier:
         "hey jarvis, what cameras do I have",
         "hey jarvis, turn off the lights",
         "hello, is the system OK",
+        # WARP-1431 — a bare "droplet" prefix must NOT swallow a real
+        # command into the no-tools gate: these still route to the agent
+        # loop so the tool actually fires.
+        "droplet turn off the lights",
+        "droplet what cameras do I have",
+        "droplet list my cameras",
         # Empty / nonsense
         "",
         "   ",

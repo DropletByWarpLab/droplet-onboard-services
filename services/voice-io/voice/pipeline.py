@@ -155,13 +155,16 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
     # may stand alone or take an optional "there" suffix ("hi there",
     # "hello there", "hey there") — applied uniformly to all three so a
     # new greeting word can't be added on one branch but forgotten on
-    # the other. The optional wake-word prefix ("hey jarvis", "hey
-    # droplet") matches the way users naturally re-trigger after the
-    # wake fires.
+    # the other. The wake-word address may be spoken WITH an optional
+    # "hey"/"hello" ("hey droplet", "hello jarvis") OR bare ("droplet") —
+    # the box now wakes on a bare "droplet" too (WARP-1431), so someone
+    # who woke it that way and just says "droplet" is answered from the
+    # persona rather than routed to a tool. Applied uniformly to the
+    # three address words for the same forget-a-branch reason.
     re.compile(
         r"^\s*((hi|hello|hey)(\s+there)?|yo|sup|"
-        r"hey\s+(jarvis|droplet|assistant)|"
-        r"hello\s+(jarvis|droplet|assistant))"
+        r"(hey|hello)\s+(jarvis|droplet|assistant)|"
+        r"(jarvis|droplet|assistant))"
         r"[\s!.,?]*$",
         re.IGNORECASE,
     ),
@@ -172,10 +175,12 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"[\s!.,?]*$",
         re.IGNORECASE,
     ),
-    # Liveness check-ins: "can you hear me?" / "are you there?" with
-    # optional wake-word prefix.
+    # Liveness check-ins: "can you hear me?" / "are you there?" with an
+    # optional wake-word address prefix — "hey" is itself optional so a
+    # bare "droplet, are you there" works alongside "hey droplet, are you
+    # there" (WARP-1431).
     re.compile(
-        r"^\s*(hey\s+(jarvis|droplet|assistant)[,\s]+)?"
+        r"^\s*((hey\s+)?(jarvis|droplet|assistant)[,\s]+)?"
         r"(can you hear me|are you there|you there|are you listening|"
         r"do you hear me|hello\?\s*are you there)"
         r"[\s!.,?]*$",
@@ -202,9 +207,12 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     # Who-are-you / capability queries that the persona prompt already
-    # answers.
+    # answers — with the same optional wake-word address prefix so
+    # "droplet, who are you" / "hey droplet, what can you do" are gated
+    # too (WARP-1431).
     re.compile(
-        r"^\s*(who are you|what(?:'s|s| is)? your name|"
+        r"^\s*((hey\s+)?(jarvis|droplet|assistant)[,\s]+)?"
+        r"(who are you|what(?:'s|s| is)? your name|"
         r"what are you|what can you do|"
         r"are you (jarvis|droplet|an assistant|there))"
         r"[\s!.,?]*$",

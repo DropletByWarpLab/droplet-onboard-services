@@ -514,6 +514,10 @@ class OrchestratorLLM(LLMClient):
             timezone=self._timezone,
             now=now,
         )
+        # Wire shape matches `apps/orchestrator/src/routes/llm.ts`
+        # `chatRequestSchema` (Zod). Unknown fields are stripped server-
+        # side; required: model + messages.
+        #
         # WARP-1432 — voice turn shaping, sent on EVERY turn:
         #   * ephemeral:true — voice has no human session, so a persisted
         #     ChatSession per utterance just litters the chat sidebar
