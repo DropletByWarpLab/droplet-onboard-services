@@ -211,6 +211,10 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/matter/commission", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/matter/devices/123/command", allowed: ["owner", "admin", "family"] },
   { method: "delete", path: "/api/matter/devices/123", allowed: ["owner", "admin", "family"] },
+  // WARP-1469: reconnect nudge — same human-role posture as the other
+  // mutating matter routes. (The MCP-service admission is covered separately
+  // in matter-mcp-service-rbac.test.ts, as with commission/command/delete.)
+  { method: "post", path: "/api/matter/devices/123/reconnect", allowed: ["owner", "admin", "family"] },
 
   // ── files (write) ── (owner + admin + family) ──
   { method: "post", path: "/api/files/upload", allowed: ["owner", "admin", "family"] },

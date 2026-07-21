@@ -3011,6 +3011,22 @@ export async function decommissionMatterDevice(nodeId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to decommission device: ${res.status}`);
 }
 
+/**
+ * WARP-1469: nudge a still-paired but offline device to reconnect now. The
+ * controller answers immediately ({ status: "reconnecting" }); the actual
+ * result lands later via the /api/matter/devices/events SSE stream (the
+ * device list flips connectionState), so callers just revalidate + poll.
+ */
+export async function reconnectMatterDevice(
+  nodeId: string,
+): Promise<{ status: string; nodeId: string }> {
+  const res = await authFetch(`${BASE}/api/matter/devices/${nodeId}/reconnect`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to reconnect device: ${res.status}`);
+  return res.json();
+}
+
 // --- Models ---
 
 export async function fetchModels(): Promise<ModelsResponse> {
