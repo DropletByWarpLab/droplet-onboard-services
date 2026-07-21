@@ -56,6 +56,7 @@ import mqtt_bridge
 import orchestrator_client
 from idle import IdleDeps, start_account_idle_loop
 from outbound import StatusCallback, send_one_draft
+from outbound_gate import OutboundGate
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("email-indexer")
@@ -76,6 +77,7 @@ class OrchestratorStatusCallback(StatusCallback):
 
 
 _status_callback = OrchestratorStatusCallback()
+_outbound_gate = OutboundGate()
 _idle_deps = IdleDeps(
     ingest=orchestrator_client.ingest_message,
     publish_new_mail=mqtt_bridge.publish_new_mail,
@@ -97,8 +99,17 @@ async def _refresh_accounts() -> None:
 async def _drain_outbound() -> None:
     """One outbound-poller tick: reconcile stuck `sending` drafts, then claim +
     SMTP-send every queued draft (the claim makes a lost-callback re-send
-    impossible — WARP-890)."""
-    await orchestrator_client.reconcile_stale_sending()
+    impossible — WARP-890). WARP-1470: when the orchestrator reports the email
+    module disabled, pause the pump and re-probe periodically instead of 404-ing
+    every tick."""
+    if not _outbound_gate.should_probe():
+        return
+    reconciled = await orchestrator_client.reconcile_stale_sending()
+    transition = _outbound_gate.record(module_disabled=reconciled is None)
+    if transition:
+        logger.info(transition)
+    if reconciled is None:
+        return  # email module disabled — nothing to drain
     drafts = await db.list_queued_drafts()
     for draft in drafts:
         await send_one_draft(draft, _status_callback)

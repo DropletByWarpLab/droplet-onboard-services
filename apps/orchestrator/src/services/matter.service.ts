@@ -325,6 +325,53 @@ export async function decommissionDevice(
   return true;
 }
 
+// --- Reconnect (nudge an offline device) ---
+
+/**
+ * WARP-1469: ask the controller to force an immediate reconnect for a
+ * still-paired but offline device. matter.js otherwise leaves a dropped
+ * node parked in WaitingForDeviceDiscovery and only re-probes ~every 10
+ * minutes, so a device the user just power-cycled or carried back into
+ * range reads as "offline" for minutes with no way to nudge it. The
+ * sidecar's triggerReconnect() schedules the attempt now; the eventual
+ * result arrives over the connection_changed SSE bridge.
+ *
+ * @returns false when the sidecar reports the node isn't commissioned
+ * (its 404) — the route maps that to its own 404, mirroring getDevice /
+ * decommissionDevice.
+ */
+export async function reconnectDevice(
+  nodeIdStr: string,
+  actor: ActivityActor,
+): Promise<boolean> {
+  const res = await internalFetch(
+    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}/reconnect`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    },
+  );
+  if (res.status === 404) return false;
+  if (!res.ok) throw await toSidecarError(res);
+  logger.info("Reconnect triggered: %s", nodeIdStr);
+
+  // WARP-456: audit row — a reconnect nudge is a household action worth
+  // recording (who tried to bring a device back online, and when). Uses
+  // auditQuietly for the same reason decommission does: a Prisma hiccup
+  // must not turn a successful reconnect into a false 500.
+  await auditQuietly({
+    kind: "smart_home",
+    severity: "ok",
+    sourceIcon: "plug",
+    what: "Requested reconnect of Matter device",
+    actor,
+    sub: `nodeId ${nodeIdStr}`,
+    refs: { nodeId: nodeIdStr },
+  });
+  return true;
+}
+
 // --- Device listing ---
 
 export async function getCommissionedDevices(): Promise<MatterGrouped> {
