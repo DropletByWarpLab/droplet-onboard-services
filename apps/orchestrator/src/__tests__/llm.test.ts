@@ -164,7 +164,7 @@ describe("LLM routes", () => {
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [], degraded: true });
+      expect(res.body).toEqual({ models: [], degraded: true, defaultModel: null });
     });
 
     it("degrades on a timeout (AbortSignal.timeout fired)", async () => {
@@ -173,7 +173,7 @@ describe("LLM routes", () => {
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [], degraded: true });
+      expect(res.body).toEqual({ models: [], degraded: true, defaultModel: null });
     });
 
     it("does NOT cache the empty fallback (list self-heals next request)", async () => {
@@ -182,7 +182,7 @@ describe("LLM routes", () => {
       );
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ models: [], degraded: true });
+      expect(res.body).toEqual({ models: [], degraded: true, defaultModel: null });
       // The degraded path must not poison the cache — otherwise the empty list
       // would be served for the full TTL even after the gateway recovers.
       expect(mockCacheSet).not.toHaveBeenCalled();

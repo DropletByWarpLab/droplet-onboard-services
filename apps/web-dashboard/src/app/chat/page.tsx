@@ -227,7 +227,7 @@ export default function ChatPage() {
     window.history.replaceState(null, "", next.toString());
   }, [conversationId]);
   const chatInputRef = useRef<ChatInputHandle>(null);
-  const { models } = useModels();
+  const { models, defaultModel } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
   const { tools: slashTools } = useToolCatalog();
@@ -258,13 +258,19 @@ export default function ChatPage() {
     stickyScrollToBottom,
   } = useStickyScroll();
 
-  // Auto-select the first available model
+  // Auto-select the box's active model (WARP-1112), then the first local
+  // model, then any model. `defaultModel` names the model the household chose
+  // on /models — honour it so a new chat opens on that model instead of just
+  // "the first one in the list".
   useEffect(() => {
     if (!selectedModel && models.length > 0) {
-      const local = models.find((m) => m.provider === "ollama");
-      setSelectedModel(local?.id ?? models[0].id);
+      const preferred =
+        (defaultModel && models.find((m) => m.id === defaultModel)) ||
+        models.find((m) => m.provider === "ollama") ||
+        models[0];
+      setSelectedModel(preferred.id);
     }
-  }, [models, selectedModel]);
+  }, [models, defaultModel, selectedModel]);
 
   // Restore the model a loaded conversation was held in — but only when
   // that model is still available on the gateway (an old chat may name a
