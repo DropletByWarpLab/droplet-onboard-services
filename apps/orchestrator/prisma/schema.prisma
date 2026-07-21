@@ -2385,12 +2385,19 @@ model WorkspaceSetting {
 ///   - `off_lan`         — VPN / remote-access posture (DDNS, peers).
 ///   - `hardware`        — feature flags for cameras, switch, display.
 ///   - `appearance`      — theme, density, dashboard layout.
+///   - `ai`              — active local model choice (WARP-1112). Managed
+///                         from the /models surface, NOT the generic
+///                         Settings page — deliberately kept out of the
+///                         settings route's SECTION_VALUES so the only
+///                         writer is PATCH /api/models/active (which
+///                         validates the model is actually installed).
 enum SettingSection {
   workspace
   memory_privacy
   off_lan
   hardware
   appearance
+  ai
 }
 
 /// WARP-457: type tag for `WorkspaceSetting.valueJson`. The route
