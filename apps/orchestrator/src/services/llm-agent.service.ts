@@ -27,6 +27,7 @@ import type {
   McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
@@ -699,13 +700,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // it impossible by construction.
   const toolChoice: "auto" | "none" = req.tool_choice ?? "auto";
   const allTools = toolChoice === "none" ? [] : await deps.mcp.listTools();
-  // Distinguish `undefined` (no restriction → every tool) from an explicit
-  // empty array (caller asked for ZERO tools). Truthiness on `.length`
-  // would conflate the two and silently advertise the full registry for an
-  // intentional `allowed_tools: []`.
+  // Distinguish `undefined` (no restriction → the default chat scope) from
+  // an explicit empty array (caller asked for ZERO tools). Truthiness on
+  // `.length` would conflate the two and silently advertise the default
+  // scope for an intentional `allowed_tools: []`.
+  //
+  // WARP-1424: with no explicit `allowed_tools`, chat advertises the
+  // registry minus the specialist/admin exclusion set — the full ~127-tool
+  // registry no longer fits the shipping 16K window (see chat-tool-scope.ts
+  // and the WARP-1118 canary). External MCP clients are unaffected; an
+  // explicit `allowed_tools` still selects freely from the full registry.
   const filtered = req.allowed_tools
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-    : allTools;
+    : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name));
   const tools = filtered.map((t) => ({
     type: "function" as const,
     function: {
