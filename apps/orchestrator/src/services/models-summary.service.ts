@@ -64,6 +64,13 @@ export interface ModelsPagePayload {
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /**
+   * WARP-1112 — the installed local model the box answers with by default
+   * (the `ai.model.chat` setting), or null when unset / the stored tag is
+   * no longer installed. Set by the /api/models route (merged fresh, not
+   * part of the cached payload), never fabricated here.
+   */
+  activeModel?: string | null;
+  /**
    * WARP-1289 — honesty flag, mirroring WARP-1284's `degraded` on
    * GET /api/llm/models: true when `local` can't be trusted as complete
    * because the ai-gateway was unreachable OR the gateway reported its

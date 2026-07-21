@@ -3035,6 +3035,37 @@ export async function fetchModelsPage(): Promise<ModelsPagePayload> {
   return res.json();
 }
 
+/**
+ * WARP-1112 — change the box's active local chat model (`PATCH
+ * /api/models/active`). Owner/admin only (the orchestrator enforces the
+ * role; a 403 surfaces here as an error). `model` must be an installed local
+ * model tag — the server validates against the live list and 400s
+ * `not_installed` otherwise. Returns the new active model + whether it
+ * actually changed (a no-op re-select returns `changed:false`).
+ */
+export async function setActiveModel(
+  model: string,
+): Promise<{ activeModel: string; changed: boolean }> {
+  const res = await authFetch(`${BASE}/api/models/active`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) {
+    // Surface the orchestrator's typed error so the page can word it
+    // honestly (not_installed / ai_service_unreachable / 403).
+    let detail = `Failed to set active model: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail || body?.error) detail = body.detail ?? body.error;
+    } catch {
+      /* non-JSON error body — keep the status-code message */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function sendChat(
   request: ChatRequest & {
     signal?: AbortSignal;
