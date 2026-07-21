@@ -20,7 +20,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
-import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import {
@@ -33,6 +33,11 @@ import {
   resolveActiveChatModel,
   localModelIdentifiers,
 } from "../services/active-model.service.js";
+import {
+  benchmarkModel,
+  benchCacheKey,
+  BENCH_CACHE_TTL,
+} from "../services/model-benchmark.service.js";
 
 const logger = createLogger("models-route");
 
@@ -167,6 +172,63 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         res.json({ activeModel: tag, changed: true });
       } catch (err) {
         logger.warn({ err }, "PATCH /models/active failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/models/:name/benchmark ─────────────────────────────
+  // Measure a local model's tokens/sec (WARP-836). owner/admin, explicit:
+  // benchmarking loads the model, which (max_loaded_models=1) can evict the
+  // resident chat model — so this is never automatic. Runs a short fixed
+  // generation, reads Ollama's own decode timing, caches the result, and
+  // busts the page cache so the next GET shows the number.
+  router.post(
+    "/models/:name/benchmark",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const name = (req.params.name ?? "").trim();
+        if (!name) {
+          return res.status(400).json({ error: "model name is required" });
+        }
+
+        let installed: Set<string>;
+        try {
+          const listed = await aiGateway.listModels();
+          installed = localModelIdentifiers(listed.models);
+        } catch (err) {
+          logger.warn({ err }, "POST /models/benchmark: gateway unreachable");
+          return res.status(503).json({
+            error: "ai_service_unreachable",
+            detail:
+              "Couldn't reach the AI service to confirm the model is installed. Try again in a moment.",
+          });
+        }
+        if (!installed.has(name)) {
+          return res.status(400).json({
+            error: "not_installed",
+            detail: `Model "${name}" isn't installed on this Droplet.`,
+          });
+        }
+
+        const result = await benchmarkModel(name);
+        if (!result) {
+          return res.status(502).json({
+            error: "benchmark_failed",
+            detail:
+              "Couldn't measure this model's speed just now. Give it a moment and try again.",
+          });
+        }
+
+        await cacheSet(benchCacheKey(name), result, BENCH_CACHE_TTL);
+        // Bust the 30s page cache so the freshly-measured tok/s shows on the
+        // next GET /api/models instead of waiting out the TTL.
+        await cacheDel(MODELS_PAGE_CACHE_KEY);
+
+        res.json(result);
+      } catch (err) {
+        logger.warn({ err }, "POST /models/benchmark failed");
         next(err);
       }
     },

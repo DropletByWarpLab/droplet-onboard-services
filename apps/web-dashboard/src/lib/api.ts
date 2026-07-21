@@ -3066,6 +3066,32 @@ export async function setActiveModel(
   return res.json();
 }
 
+/**
+ * WARP-836 — measure a local model's throughput (`POST /api/models/:name/
+ * benchmark`). Owner/admin only. Explicit by design: benchmarking loads the
+ * model (and with one-model-at-a-time can briefly evict the resident chat
+ * model), so it's never run automatically. Returns the measured tokens/sec.
+ */
+export async function benchmarkModel(
+  name: string,
+): Promise<{ tokensPerSec: number; measuredAt: string }> {
+  const res = await authFetch(
+    `${BASE}/api/models/${encodeURIComponent(name)}/benchmark`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    let detail = `Failed to measure model speed: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail || body?.error) detail = body.detail ?? body.error;
+    } catch {
+      /* non-JSON error body — keep the status-code message */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function sendChat(
   request: ChatRequest & {
     signal?: AbortSignal;

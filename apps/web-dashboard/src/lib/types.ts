@@ -243,6 +243,9 @@ export interface LocalModelRow {
   loaded?: boolean;
   /** Graphics memory the resident model uses (GB); null when not loaded. */
   vramGb?: number | null;
+  /** ISO timestamp of the last throughput benchmark (drives tokensPerSec);
+   *  null when never measured. */
+  benchmarkedAt?: string | null;
 }
 
 /** One opt-in cloud provider. Read-only on this surface — enabling a provider

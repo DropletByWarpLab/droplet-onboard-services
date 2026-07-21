@@ -3,15 +3,27 @@
 /**
  * WARP-836 — one local LLM card on the Models page (rendered 2-up).
  *
- * Informational card. Metrics are now measured from Ollama (disk size,
- * parameter count, quantization, and resident/graphics-memory) — see
- * model-metrics.service. Anything Ollama doesn't report renders an honest
- * "—", never a fabricated value; tokens/sec has no at-rest source so it is
- * intentionally not shown. The status chip maps the backend lifecycle enum to
- * home-user language: ready → "running", loading → "loading", error → "error".
+ * Informational card. Metrics are measured from Ollama (disk size, parameter
+ * count, quantization, resident/graphics-memory) — see model-metrics.service.
+ * Throughput (tokens/sec) has no at-rest source, so owners/admins MEASURE it on
+ * demand (WARP-836): the "Measure speed" button runs a short benchmark and the
+ * result is cached. Anything unmeasured renders an honest "—", never fabricated.
+ * The status chip maps the backend lifecycle enum to home-user language:
+ * ready → "running", loading → "loading", error → "error".
  */
 
-import { BookOpen, Cpu, Gauge, HardDrive, Layers, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import {
+  BookOpen,
+  Cpu,
+  Gauge,
+  HardDrive,
+  Layers,
+  Loader2,
+  ShieldCheck,
+  Zap,
+} from "lucide-react";
+import { benchmarkModel } from "@/lib/api";
 import type { LocalModelRow } from "@/lib/types";
 
 const DASH = "—";
@@ -53,7 +65,17 @@ const STATUS_META: Record<
   },
 };
 
-export function LocalModelCard({ model }: { model: LocalModelRow }) {
+export function LocalModelCard({
+  model,
+  canManage = false,
+  onBenchmarked,
+}: {
+  model: LocalModelRow;
+  /** Owner/admin — only they can measure throughput. */
+  canManage?: boolean;
+  /** Called after a successful measurement so the page can refresh. */
+  onBenchmarked?: () => void;
+}) {
   const status = STATUS_META[model.status];
   const gb = model.gbOnDisk != null ? `${model.gbOnDisk} GB` : DASH;
   // Parameter count · quantization, e.g. "20.9B · MXFP4". DASH when neither
@@ -72,6 +94,32 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
       ? "on disk"
       : DASH;
   const hasMeter = model.diskBarPct != null;
+
+  // Throughput — measured on demand (WARP-836). `localTps` shows the just-
+  // measured value immediately even if the page payload hasn't refreshed yet
+  // (or Redis is unavailable to cache it).
+  const [measuring, setMeasuring] = useState(false);
+  const [localTps, setLocalTps] = useState<number | null>(null);
+  const [benchError, setBenchError] = useState<string | null>(null);
+  const tps = localTps ?? model.tokensPerSec;
+  const speed = tps != null ? `${tps} tok/s` : "not measured";
+
+  async function measure() {
+    if (measuring) return;
+    setMeasuring(true);
+    setBenchError(null);
+    try {
+      const { tokensPerSec } = await benchmarkModel(model.name);
+      setLocalTps(tokensPerSec);
+      onBenchmarked?.();
+    } catch (e) {
+      setBenchError(
+        e instanceof Error ? e.message : "Couldn’t measure speed. Try again.",
+      );
+    } finally {
+      setMeasuring(false);
+    }
+  }
 
   return (
     <div className="card flex flex-col gap-3.5" style={{ padding: "16px" }}>
@@ -163,6 +211,47 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
           local-only
         </span>
       </div>
+
+      {/* Throughput — no honest at-rest source, so it's MEASURED on demand.
+          Owners/admins get a button; everyone sees the last measurement. */}
+      <div className="flex items-center gap-2 type-caption-1" style={{ color: "var(--text-muted)" }}>
+        <span className="inline-flex items-center gap-1" title="Generation speed">
+          <Zap size={12} strokeWidth={2} aria-hidden />
+          <span className="tabular-nums">{speed}</span>
+        </span>
+        {canManage && (
+          <button
+            type="button"
+            onClick={measure}
+            disabled={measuring}
+            className="type-caption-1 font-medium"
+            style={{
+              color: measuring ? "var(--text-muted)" : "var(--brand)",
+              cursor: measuring ? "progress" : "pointer",
+            }}
+          >
+            {measuring ? (
+              <span className="inline-flex items-center gap-1">
+                <Loader2 size={12} className="animate-spin" aria-hidden />
+                Measuring…
+              </span>
+            ) : tps != null ? (
+              "Re-measure"
+            ) : (
+              "Measure speed"
+            )}
+          </button>
+        )}
+      </div>
+      {benchError && (
+        <p
+          className="type-caption-2"
+          role="alert"
+          style={{ color: "var(--system-red, #ff3b30)" }}
+        >
+          {benchError}
+        </p>
+      )}
     </div>
   );
 }

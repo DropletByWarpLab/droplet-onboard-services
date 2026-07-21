@@ -16,10 +16,15 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import { cacheGet } from "./cache.service.js";
 import {
   fetchLocalModelMetrics,
   metricsFor,
 } from "./model-metrics.service.js";
+import {
+  benchCacheKey,
+  type BenchmarkResult,
+} from "./model-benchmark.service.js";
 
 export interface LocalModelInfo {
   name: string;
@@ -49,6 +54,9 @@ export interface LocalModelInfo {
   loaded?: boolean;
   /** Graphics memory the resident model uses (GB), or null when not loaded. */
   vramGb?: number | null;
+  /** ISO timestamp of the last on-demand throughput benchmark (drives
+   *  `tokensPerSec`), or null when never measured. */
+  benchmarkedAt?: string | null;
 }
 
 export interface CloudProviderInfo {
@@ -177,6 +185,22 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       }
     } catch {
       // Metrics are a best-effort enrichment — never fail the page for them.
+    }
+
+    // WARP-836 — surface the last MEASURED throughput (tokens/sec) from the
+    // benchmark cache. We only READ a prior on-demand measurement here; never
+    // auto-run a benchmark on a page load (it would load/evict models).
+    try {
+      for (const row of local) {
+        if (row.provider !== "ollama") continue;
+        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.name));
+        if (bench) {
+          row.tokensPerSec = bench.tokensPerSec;
+          row.benchmarkedAt = bench.measuredAt;
+        }
+      }
+    } catch {
+      // Cache miss / no Redis — tok/s stays "—" until the user measures.
     }
   } catch {
     local = [];

@@ -223,7 +223,14 @@ export default function ModelsPage() {
               )}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {local.map((m) => (
-                  <LocalModelCard key={m.name} model={m} />
+                  <LocalModelCard
+                    key={m.name}
+                    model={m}
+                    canManage={canManage}
+                    onBenchmarked={() => {
+                      void refresh();
+                    }}
+                  />
                 ))}
               </div>
             </>

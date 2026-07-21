@@ -19,6 +19,7 @@ vi.mock("../config.js", () => ({
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),
   cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheDel: vi.fn().mockResolvedValue(undefined),
 }));
 
 const listModelsMock = vi.fn();
@@ -49,8 +50,23 @@ vi.mock("../services/model-metrics.service.js", async (importActual) => {
   };
 });
 
+// WARP-836 — stub only the benchmark generation (network); keep benchCacheKey
+// real so route + page-summary agree on the cache key.
+const { benchmarkModelMock } = vi.hoisted(() => ({
+  benchmarkModelMock: vi.fn(),
+}));
+vi.mock("../services/model-benchmark.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-benchmark.service.js")>();
+  return {
+    ...actual,
+    benchmarkModel: (name: string) => benchmarkModelMock(name),
+  };
+});
+
 import { createModelsRouter } from "../routes/models.js";
 import { getModelsPagePayload } from "../services/models-summary.service.js";
+import { benchCacheKey } from "../services/model-benchmark.service.js";
 
 /**
  * Minimal prisma stub backing the `ai.model.chat` WorkspaceSetting. Starts at
@@ -417,5 +433,83 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
     const res = await request(app).get("/api/models");
     expect(res.status).toBe(200);
     expect(res.body.activeModel).toBeNull();
+  });
+});
+
+describe("WARP-836 — POST /api/models/:name/benchmark", () => {
+  const installed = {
+    models: [
+      { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+    ],
+  };
+  const result = {
+    tokensPerSec: 42.5,
+    evalCount: 96,
+    evalDurationMs: 2259,
+    measuredAt: "2026-07-20T00:00:00.000Z",
+  };
+
+  it("owner measures an installed model → 200 + result, caches + busts page cache", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    benchmarkModelMock.mockResolvedValue(result);
+    const { cacheSet, cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(200);
+    expect(res.body.tokensPerSec).toBe(42.5);
+    expect(vi.mocked(cacheSet)).toHaveBeenCalledWith(
+      benchCacheKey("gpt-oss:20b"),
+      result,
+      expect.any(Number),
+    );
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+  });
+
+  it("members (family) are forbidden → 403", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp({ username: "kid", role: "family" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(403);
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a model that isn't installed → 400", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gemma4%3A26b/benchmark");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_installed");
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a failed measurement → 502 benchmark_failed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    benchmarkModelMock.mockResolvedValue(null);
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("benchmark_failed");
+  });
+
+  it("gateway unreachable → 503", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/benchmark");
+    expect(res.status).toBe(503);
+    expect(benchmarkModelMock).not.toHaveBeenCalled();
+  });
+
+  it("GET /api/models surfaces a cached tokensPerSec + benchmarkedAt", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const { cacheGet } = await import("../services/cache.service.js");
+    // Route reads the page-cache key first (miss), then the bench key per row.
+    vi.mocked(cacheGet)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(result as never);
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.local[0].tokensPerSec).toBe(42.5);
+    expect(res.body.local[0].benchmarkedAt).toBe(result.measuredAt);
   });
 });
