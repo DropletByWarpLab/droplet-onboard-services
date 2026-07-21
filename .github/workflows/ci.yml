@@ -29,6 +29,8 @@ name: ci
 #     main-push gated there.
 #
 # ── CI budget optimization (2026-07, $100/month Actions limit) ──
+# Canonical rationale + rules for future CI changes: docs/ci-cost-budget.md
+# (read it BEFORE adding triggers, legs, or paths — CI spend is capped).
 # PR runs are PATH-AWARE: the `detect` job maps changed files to affected
 # legs (same dorny/paths-filter + dynamic-matrix pattern as docker-build.yml)
 # and only those legs run. ci-summary still reports on EVERY PR — a leg
