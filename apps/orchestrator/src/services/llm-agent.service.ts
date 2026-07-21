@@ -418,6 +418,20 @@ class AgentStreamAborted extends Error {
   }
 }
 
+/**
+ * Thrown when the token stream errors AFTER content/reasoning was already
+ * emitted. We must NOT fall back to the blocking path in that case — replaying
+ * would double-emit the answer and corrupt the persisted content. This surfaces
+ * as an honest error turn instead (the same outcome the blocking path would
+ * reach if its connection died mid-answer).
+ */
+class AgentStreamPartialError extends Error {
+  constructor(readonly cause: unknown) {
+    super("stream_interrupted");
+    this.name = "AgentStreamPartialError";
+  }
+}
+
 /** Name-based abort check (mirrors routes/llm.ts — robust to error re-wrapping). */
 function isAbortError(err: unknown): boolean {
   return (
@@ -577,7 +591,17 @@ async function consumeChatStream(
   },
 ): Promise<{ asst: ChatMessage }> {
   const { emit, captureReasoning, signal } = opts;
-  const content = new StreamingContentEmitter(emit, captureReasoning);
+  // Track whether we've put ANYTHING on the wire this turn. If the stream errors
+  // AFTER we've emitted, the loop must NOT fall back to blocking chat() (that
+  // would replay + double-emit the answer) — we surface an error turn instead.
+  let emittedAny = false;
+  const trackedEmit = (e: SSEEvent) => {
+    if (e.type === "content_delta" || e.type === "reasoning_step") {
+      emittedAny = true;
+    }
+    emit(e);
+  };
+  const content = new StreamingContentEmitter(trackedEmit, captureReasoning);
   let reasoningBuf = "";
   let channelReasoningEmitted = false;
   let sawContent = false;
@@ -589,34 +613,43 @@ async function consumeChatStream(
     channelReasoningEmitted = true;
     if (captureReasoning) {
       const step = reasoningBuf.trim();
-      if (step) emit({ type: "reasoning_step", text: step });
+      if (step) trackedEmit({ type: "reasoning_step", text: step });
     }
   };
 
-  for await (const chunk of stream) {
-    // WARP-329 — a mid-stream disconnect stops draining; breaking the for-await
-    // calls the iterator's `.return()`, tearing down the Ollama stream.
-    if (signal?.aborted) break;
-    const choice = chunk.choices?.[0];
-    if (!choice) continue;
-    const delta = choice.delta ?? {};
-    if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
-      reasoningBuf += delta.reasoning_content;
-    }
-    if (Array.isArray(delta.tool_calls)) {
-      for (const tc of delta.tool_calls) {
-        accumulateToolCall(toolCalls, toolOrder, tc);
+  try {
+    for await (const chunk of stream) {
+      // WARP-329 — a mid-stream disconnect stops draining; breaking the
+      // for-await calls the iterator's `.return()`, tearing down the Ollama
+      // stream.
+      if (signal?.aborted) break;
+      const choice = chunk.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        reasoningBuf += delta.reasoning_content;
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          accumulateToolCall(toolCalls, toolOrder, tc);
+        }
+      }
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        // gpt-oss streams the reasoning channel fully before content — flush it
+        // as a step so reasoning_step precedes content_delta (WARP-458 order).
+        if (!sawContent) {
+          flushChannelReasoning();
+          sawContent = true;
+        }
+        content.push(delta.content);
       }
     }
-    if (typeof delta.content === "string" && delta.content.length > 0) {
-      // gpt-oss streams the reasoning channel fully before content — flush it
-      // as a step so reasoning_step precedes content_delta (WARP-458 order).
-      if (!sawContent) {
-        flushChannelReasoning();
-        sawContent = true;
-      }
-      content.push(delta.content);
-    }
+  } catch (err) {
+    if (signal?.aborted || isAbortError(err)) throw new AgentStreamAborted();
+    // Nothing emitted yet → let the loop fall back to blocking chat(). Already
+    // emitted → a fallback would double the answer, so make it an error turn.
+    if (emittedAny) throw new AgentStreamPartialError(err);
+    throw err;
   }
 
   if (signal?.aborted) throw new AgentStreamAborted();
@@ -764,8 +797,23 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         streamedTurn = true;
       } catch (err) {
         if (req.signal?.aborted || isAbortError(err)) return abortedResult(iter);
-        // Streaming transport failed — fall back to the blocking path so the
-        // turn still completes. Streaming is additive, never a new failure mode.
+        if (err instanceof AgentStreamPartialError) {
+          // The stream died AFTER partial content was emitted — falling back to
+          // blocking would double the answer. Surface an honest error turn (the
+          // same outcome a blocking connection death would reach).
+          const error = "stream_interrupted";
+          emit({ type: "done", iterations: iter, stop_reason: "error", error });
+          return {
+            message: { role: "assistant", content: "" },
+            trace,
+            iterations: iter,
+            stop_reason: "error",
+            error,
+          };
+        }
+        // Stream failed BEFORE emitting anything (e.g. gateway non-200 at open)
+        // — fall back to the blocking path so the turn still completes.
+        // Streaming is additive, never a new failure mode.
         // eslint-disable-next-line no-console
         console.warn(
           "[agent] streaming chat failed, falling back to blocking:",
