@@ -7,7 +7,7 @@
  * - Tier 3: All commands logged to audit trail
  */
 
-import { Router, type Response, type NextFunction } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import {
   getCommissionedDevices,
@@ -684,7 +684,11 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/matter/rooms",
-    requireRole("owner", "admin", "family"),
+    // WARP-1447: the assign_device_room LLM tool auto-creates a missing room
+    // on "move the lamp to the den", so admit the MCP service principal like
+    // the alias route below (same admit set; human RBAC unchanged — chat
+    // users without write roles never see the tool).
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req, res, next) => {
       try {
         const { name, icon } = req.body ?? {};
@@ -723,17 +727,31 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
   // Rename and/or (re)assign a room in one call. requireRoleOrMcpService so the
   // assistant can organize devices too (same admit set as commission/command).
+  // WARP-1447: registered under PUT (dashboard) AND PATCH (assign_device_room)
+  // — the tools-core HttpClient deliberately exposes only get/post/patch/
+  // delete, and upsertAlias is a partial update, so PATCH is the honest verb
+  // for the tool path. Same guard and handler; behavior is identical.
+  const upsertAliasRoute = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const { name, roomId } = req.body ?? {};
+      res.json(await upsertAlias(prisma, req.params.nodeId, { name, roomId }));
+    } catch (err) {
+      roomError(err, res, next);
+    }
+  };
   router.put(
     "/matter/devices/:nodeId/alias",
     requireRoleOrMcpService("owner", "admin", "family"),
-    async (req, res, next) => {
-      try {
-        const { name, roomId } = req.body ?? {};
-        res.json(await upsertAlias(prisma, req.params.nodeId, { name, roomId }));
-      } catch (err) {
-        roomError(err, res, next);
-      }
-    },
+    upsertAliasRoute,
+  );
+  router.patch(
+    "/matter/devices/:nodeId/alias",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    upsertAliasRoute,
   );
 
   return router;

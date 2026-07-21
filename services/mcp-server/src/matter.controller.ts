@@ -43,22 +43,17 @@
  *
  * Auth posture (layered)
  * ----------------------
- * The orchestrator's `/api/matter/*` WRITE routes ARE role-gated:
- * `requireRole("owner","admin","family")` on commission, command,
- * decommission (`apps/orchestrator/src/routes/matter.ts:233,286,368,428`).
- * The effective model is three layers:
+ * The orchestrator's `/api/matter/*` WRITE routes (commission, command,
+ * decommission) are gated by `requireRoleOrMcpService("owner","admin",
+ * "family")` — human sessions need one of those roles, and the
+ * `_service:mcp` principal this file presents is explicitly admitted
+ * (WARP-339 closed the earlier gap where plain `requireRole` 403'd every
+ * MCP write). The effective model is three layers:
  *   1. `routes/llm.ts` narrows the LLM's tool list by the chat user's
  *      role (WRITE_TOOLS) before any dispatch;
  *   2. the mcp-server re-checks `canCallTool` at `tools/call` (RBAC + JWT);
- *   3. the orchestrator route enforces `requireRole` again — and the mcp
- *      hop presents the `service` principal (see the Auth note above).
- *      `requireRole("owner","admin","family")` does NOT include `service`,
- *      so every Matter WRITE call from the MCP/voice path returns 403 today.
- *      Matter write tools (commission, control-device, decommission) are
- *      therefore non-functional via MCP until this gap is resolved
- *      (tracked as WARP-339).
- * (Earlier revisions of this comment claimed the routes were
- * unauthenticated — that is no longer true; corrected per TOOLS-06.)
+ *   3. the orchestrator route admits the request as either a
+ *      sufficiently-roled human or the MCP service principal.
  */
 import type { HttpClient, MatterController } from "@droplet/tools-core";
 
@@ -173,6 +168,22 @@ export function createMatterController(http: HttpClient): MatterController {
         pairing_code: pairingCode,
       });
       return readJsonOrThrow(resp, "commission");
+    },
+
+    /**
+     * WARP-1447 — DELETE /matter/devices/:nodeId — unpair (decommission)
+     * a device from the fabric. 200 `{ status: "decommissioned", nodeId }`
+     * on success; 404 when no such node is commissioned — surfaced as a
+     * throw (the remove_device handler maps it to DEVICE_NOT_FOUND).
+     */
+    async decommission(nodeId: string) {
+      const resp = await http.delete(
+        `/api/matter/devices/${encodeURIComponent(nodeId)}`,
+      );
+      if (resp.status === 404) {
+        throw new Error(`decommission: no device with node ID ${nodeId}`);
+      }
+      return readJsonOrThrow(resp, "decommission");
     },
 
     /**

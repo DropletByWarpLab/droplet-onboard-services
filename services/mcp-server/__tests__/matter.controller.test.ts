@@ -1,7 +1,7 @@
 /**
  * matter.controller — orchestrator HTTP proxy.
  *
- * The 6 methods on MatterController each map to one orchestrator route.
+ * The 7 methods on MatterController each map to one orchestrator route.
  * These tests stub HttpClient and verify:
  *   - correct path + method + body
  *   - 2xx body passes through unchanged
@@ -258,6 +258,52 @@ describe("matter.controller.commission", () => {
     });
     const ctrl = createMatterController(client);
     await expect(ctrl.commission("11111111111")).rejects.toThrow(/PASE failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decommission (WARP-1447)
+// ---------------------------------------------------------------------------
+
+describe("matter.controller.decommission", () => {
+  it("DELETEs /matter/devices/:nodeId and returns the body verbatim", async () => {
+    const body = { status: "decommissioned", nodeId: "7" };
+    const { client, calls } = stubClient({ delete: jsonResponse(200, body) });
+    const ctrl = createMatterController(client);
+    const result = await ctrl.decommission("7");
+    expect(result).toEqual(body);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("delete");
+    expect(calls[0].path).toBe("/api/matter/devices/7");
+  });
+
+  it("throws a not-found-shaped error on 404 (node not commissioned)", async () => {
+    // The remove_device handler maps this message to DEVICE_NOT_FOUND —
+    // the phrasing is load-bearing.
+    const { client } = stubClient({
+      delete: jsonResponse(404, { error: "Device not found" }),
+    });
+    const ctrl = createMatterController(client);
+    await expect(ctrl.decommission("99999")).rejects.toThrow(
+      /no device with node ID 99999/,
+    );
+  });
+
+  it("throws with the orchestrator's error message on 5xx", async () => {
+    const { client } = stubClient({
+      delete: jsonResponse(503, { error: "Matter controller not started" }),
+    });
+    const ctrl = createMatterController(client);
+    await expect(ctrl.decommission("7")).rejects.toThrow(
+      /Matter controller not started/,
+    );
+  });
+
+  it("URL-encodes the nodeId to avoid injection via odd chars", async () => {
+    const { client, calls } = stubClient({ delete: jsonResponse(200, {}) });
+    const ctrl = createMatterController(client);
+    await ctrl.decommission("1/2/etc/passwd");
+    expect(calls[0].path).toBe("/api/matter/devices/1%2F2%2Fetc%2Fpasswd");
   });
 });
 

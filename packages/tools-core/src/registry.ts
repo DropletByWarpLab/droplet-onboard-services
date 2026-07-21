@@ -53,6 +53,12 @@ import commissionDevice from "./handlers/smart-home/commission-device.js";
 import getCommandHistory from "./handlers/smart-home/get-command-history.js";
 // WARP-474: G2 smart-home scenes
 import runScene from "./handlers/smart-home/run-scene.js";
+// WARP-1447: unpair a Matter device (Tier-2: write + handler-enforced confirm)
+import removeDevice from "./handlers/smart-home/remove-device.js";
+// WARP-1447: author a scene from chat (two-step confirm; POST /api/scenes)
+import createScene from "./handlers/smart-home/create-scene.js";
+// WARP-1447: room assignment ("move the lamp to the den"; auto-creates rooms)
+import assignDeviceRoom from "./handlers/smart-home/assign-device-room.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -219,6 +225,13 @@ const allTools: Tool[] = [
   getCommandHistory,
   // WARP-474: G2 smart-home scenes (run by name or id)
   runScene,
+  // WARP-1447: unpair a Matter device (Tier-2: write + handler-enforced confirm)
+  removeDevice,
+  // WARP-1447: create a scene from chat (two-step confirm)
+  createScene,
+  // WARP-1447: put a device in a room (write tier, no confirmation —
+  // reversible household bookkeeping, same posture as create_reminder)
+  assignDeviceRoom,
   // cameras
   listCameras,
   listDiscoveredCameras,

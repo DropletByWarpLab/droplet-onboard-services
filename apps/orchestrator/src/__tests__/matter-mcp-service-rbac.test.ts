@@ -54,8 +54,41 @@ function createPrismaMock() {
       create: vi.fn().mockResolvedValue({ id: "audit-1" }),
       findMany: vi.fn().mockResolvedValue([]),
     },
-  } as unknown as PrismaClient;
+    // WARP-1447: rooms + aliases, for the assign_device_room guard coverage
+    // below. Real rooms.service functions run against these mocks.
+    room: {
+      aggregate: vi.fn().mockResolvedValue({ _max: { sortOrder: null } }),
+      create: vi
+        .fn()
+        .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ id: "room-1", ...data }),
+        ),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ id: "room-1", name: "Den", icon: "home", sortOrder: 1 }),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    deviceAlias: {
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ nodeId: "77", name: "Kitchen strip", roomId: null }),
+      upsert: vi
+        .fn()
+        .mockImplementation(
+          ({
+            where,
+            update,
+          }: {
+            where: { nodeId: string };
+            update: { name: string | null; roomId: string | null };
+          }) =>
+            Promise.resolve({ nodeId: where.nodeId, name: update.name, roomId: update.roomId }),
+        ),
+      delete: vi.fn(),
+    },
+  };
 }
+type PrismaMock = ReturnType<typeof createPrismaMock>;
 
 const mcpPrincipal: AuthUser = {
   id: "_service:mcp",
@@ -85,14 +118,14 @@ const owner: AuthUser = {
   role: "owner",
 };
 
-function buildApp(user: AuthUser): express.Express {
+function buildApp(user: AuthUser, prisma: PrismaMock = createPrismaMock()): express.Express {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as Request & { user: AuthUser }).user = user;
     next();
   });
-  app.use("/api", createMatterRouter(createPrismaMock()));
+  app.use("/api", createMatterRouter(prisma as unknown as PrismaClient));
   return app;
 }
 
@@ -276,6 +309,67 @@ describe("WARP-1010 actor attribution threads from the route layer", () => {
       type: "ai",
       id: null,
     });
+  });
+});
+
+// WARP-1447 — the assign_device_room LLM tool dispatches through the MCP
+// service principal: room auto-create (POST /matter/rooms) moved from
+// requireRole to requireRoleOrMcpService, and the alias route gained a PATCH
+// registration (the tools-core HttpClient exposes no put()). Same exact-
+// principal posture as the command routes: voice/guest stay excluded.
+describe("WARP-1447 rooms-create + alias PATCH admit exactly the MCP principal", () => {
+  it("POST /api/matter/rooms as _service:mcp passes the guard: 201", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(mcpPrincipal, prisma))
+      .post("/api/matter/rooms")
+      .send({ name: "Den" });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ id: "room-1", name: "Den" });
+    expect(prisma.room.create).toHaveBeenCalledOnce();
+  });
+
+  it("POST /api/matter/rooms as voice stays 403 (create never reached)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(voicePrincipal, prisma))
+      .post("/api/matter/rooms")
+      .send({ name: "Den" });
+
+    expect(res.status).toBe(403);
+    expect(prisma.room.create).not.toHaveBeenCalled();
+  });
+
+  it("human RBAC unchanged: guest stays 403 on rooms create", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(guest, prisma))
+      .post("/api/matter/rooms")
+      .send({ name: "Den" });
+
+    expect(res.status).toBe(403);
+    expect(prisma.room.create).not.toHaveBeenCalled();
+  });
+
+  it("PATCH /api/matter/devices/:nodeId/alias as _service:mcp assigns the room and PRESERVES the stored alias name when the body omits `name`", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(mcpPrincipal, prisma))
+      .patch("/api/matter/devices/77/alias")
+      .send({ roomId: "room-1" });
+
+    expect(res.status).toBe(200);
+    // upsertAlias keeps the existing alias name ("Kitchen strip") because the
+    // `name` key is absent from the body — the tool's contract.
+    expect(res.body).toEqual({ nodeId: "77", name: "Kitchen strip", roomId: "room-1" });
+    expect(prisma.deviceAlias.upsert).toHaveBeenCalledOnce();
+  });
+
+  it("PATCH alias as voice stays 403 (no upsert)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(voicePrincipal, prisma))
+      .patch("/api/matter/devices/77/alias")
+      .send({ roomId: "room-1" });
+
+    expect(res.status).toBe(403);
+    expect(prisma.deviceAlias.upsert).not.toHaveBeenCalled();
   });
 });
 
