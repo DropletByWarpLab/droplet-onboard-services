@@ -345,6 +345,46 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     expect(deltas).toHaveLength(1);
   });
 
+  it("does NOT fall back (no double-emit) when the stream dies AFTER partial content", async () => {
+    // Blocking chat would answer in full — falling back after partial content
+    // was already streamed would replay + double the answer. Instead the turn
+    // must surface an honest error and never touch chat().
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          { message: { role: "assistant", content: "FULL BLOCKING ANSWER" } },
+        ],
+      }),
+    });
+    async function* dyingStream(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "Partial" } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat, chatStream: () => dyingStream() } as never,
+      onEvent: (e: SSEEvent) => events.push(e),
+    };
+    const result = await runAgent(deps, REQ);
+
+    expect(chat).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("stream_interrupted");
+    const joined = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(joined).toBe("Partial");
+    expect(joined).not.toContain("FULL BLOCKING");
+    const done = events.find((e) => e.type === "done");
+    expect(done && done.type === "done" && done.stop_reason).toBe("error");
+  });
+
   it("uses the blocking path (no streaming) when onEvent is present but chatStream is absent", async () => {
     const chat = vi.fn().mockResolvedValue({
       ok: true,
