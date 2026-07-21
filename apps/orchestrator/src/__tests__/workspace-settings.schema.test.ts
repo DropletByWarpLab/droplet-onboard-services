@@ -87,7 +87,7 @@ describe("WARP-457 schema: workspace settings", () => {
     expect(block![0]).toMatch(/@@index\(\[section\]\)/);
   });
 
-  it("declares SettingSection enum with the 5 canonical members", () => {
+  it("declares SettingSection enum with the 6 canonical members", () => {
     const schema = readSchema();
     expect(schema).toMatch(/^enum SettingSection \{/m);
     const block = schema.match(/enum SettingSection \{[\s\S]*?\n\}/);
@@ -98,6 +98,10 @@ describe("WARP-457 schema: workspace settings", () => {
       "off_lan",
       "hardware",
       "appearance",
+      // WARP-1112 — active local model choice (`ai.model.chat`), managed
+      // from /models. Deliberately NOT in the settings route's
+      // SECTION_VALUES; PATCH /api/models/active is the only writer.
+      "ai",
     ]) {
       // Match the bare token on its own line to avoid substring
       // matches (e.g. `memory_privacy` accidentally matching `memory`).
