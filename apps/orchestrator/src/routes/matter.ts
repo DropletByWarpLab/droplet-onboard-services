@@ -16,6 +16,7 @@ import {
   discoverDevices,
   commissionDevice,
   decommissionDevice,
+  reconnectDevice,
   subscribeStateChanges,
   subscribeConnectionChanges,
   isMatterInitialized,
@@ -602,6 +603,35 @@ export function createMatterRouter(prisma: PrismaClient): Router {
         return res.status(404).json({ error: "Device not found" });
       }
       res.json({ status: "decommissioned", nodeId: req.params.nodeId });
+    } catch (err) {
+      next(err);
+    }
+    },
+  );
+
+  // --- Reconnect an offline device ---
+  // WARP-1469: nudge a still-paired but offline device to reconnect now
+  // instead of waiting for matter.js's ~10-min WaitingForDeviceDiscovery
+  // re-probe. Same guard posture as the other mutating matter routes
+  // (owner/admin/family + the MCP service principal for a future
+  // reconnect_device tool). Not destructive — the pairing is untouched —
+  // but it drives the controller, so it stays out of the read-only tier.
+  router.post(
+    "/matter/devices/:nodeId/reconnect",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    async (req, res, next) => {
+    try {
+      if (!isMatterInitialized()) {
+        return res.status(503).json({ error: "Matter controller not started" });
+      }
+      if (!isValidNodeId(req.params.nodeId)) {
+        return res.status(400).json({ error: "Invalid node ID format" });
+      }
+      const found = await reconnectDevice(req.params.nodeId, matterActor(req));
+      if (!found) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      res.json({ status: "reconnecting", nodeId: req.params.nodeId });
     } catch (err) {
       next(err);
     }
