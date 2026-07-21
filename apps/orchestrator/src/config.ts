@@ -17,6 +17,24 @@ export function isWeakJwtSecret(s: string): boolean {
   return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
 }
 
+/** PURE — resolve the agent iteration limits, clamping DEFAULT down to CAP
+ *  when misconfigured: a bad env must not silently break chat (same
+ *  philosophy as voiceReasoningEffortDefault). Exported for tests. */
+export function resolveAgentIterLimits(
+  defaultIter: number,
+  capIter: number,
+  warn: (msg: string) => void = console.warn,
+): { defaultIter: number; capIter: number } {
+  if (defaultIter > capIter) {
+    warn(
+      `config: AGENT_MAX_ITER_DEFAULT (${defaultIter}) exceeds ` +
+        `AGENT_MAX_ITER_CAP (${capIter}); clamping default to ${capIter}`,
+    );
+    return { defaultIter: capIter, capIter };
+  }
+  return { defaultIter, capIter };
+}
+
 // WARP-580 (part 2) — device/service secrets a PRODUCTION boot must carry
 // non-empty. Their schema defaults are "" so dev laptops + the vitest suite
 // run with zero env setup, but on a shipped box an empty value means either a
@@ -112,6 +130,14 @@ const envSchema = z.object({
   // doesn't degrade blocks the model could actually carry. This configures the
   // window only — it is NOT a model swap and does not touch the One-Model Rule.
   OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
+  // Agent step-budget knobs (2026-07-21 agent-budgets spec §1). DEFAULT is
+  // the per-turn iteration count when the caller sends no `max_iter`; CAP is
+  // the ceiling both the /api/llm/chat zod schema and the agent loop's clamp
+  // enforce. Both enforcement points read the SAME resolved value
+  // (config.agentMaxIter) so they can never drift. `.positive()`: zero
+  // iterations is meaningless, so zod rejects it at boot.
+  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(5),
+  AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
   // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
   // is an EXPLICIT boolean, never derived from the days var's emptiness.
   BUSINESS_PROFILE_REVIEW_ENABLED: z
@@ -1002,5 +1028,9 @@ export const config = {
       return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 3;
     })(),
   },
+  agentMaxIter: resolveAgentIterLimits(
+    parsed.AGENT_MAX_ITER_DEFAULT,
+    parsed.AGENT_MAX_ITER_CAP,
+  ),
 };
 export type Config = typeof config;
