@@ -181,6 +181,12 @@ export interface ModelsResponse {
   // service" state instead of the WARP-849 "still downloading" copy.
   degraded_providers?: string[];
   degraded?: boolean;
+  // WARP-1112 (additive, optional for back-compat): the installed local
+  // model the box answers with by default (`ai.model.chat` setting), or null
+  // when unset / no longer installed. Stamped by the orchestrator's
+  // GET /llm/models so the dashboard chat can default its picker to the
+  // active model instead of just "the first one in the list".
+  defaultModel?: string | null;
 }
 
 // WARP-311: legacy SessionInfo / SessionDetail / SessionListResponse /
