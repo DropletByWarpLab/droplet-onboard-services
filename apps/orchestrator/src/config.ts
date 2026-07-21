@@ -142,6 +142,11 @@ const envSchema = z.object({
   // iterations is meaningless, so zod rejects it at boot.
   AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(5),
   AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  // Spec §3 — relevance-based tool selection kill switch. "off" (default)
+  // advertises the full effective pool exactly as before; "domains" narrows
+  // per-turn via tool-selection.service.ts. The shipped default flips only
+  // after the spec §6 phase-3 eval says so.
+  TOOL_SELECTION_MODE: z.enum(["off", "domains"]).default("off"),
   // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
   // is an EXPLICIT boolean, never derived from the days var's emptiness.
   BUSINESS_PROFILE_REVIEW_ENABLED: z

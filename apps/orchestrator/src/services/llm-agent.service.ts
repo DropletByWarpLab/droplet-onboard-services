@@ -31,6 +31,11 @@ import type {
 } from "./mcp-client.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
+  selectAdvertisedTools,
+  domainOfTool,
+  toolNamesForDomain,
+} from "./tool-selection.service.js";
+import {
   ITERATION_MIN_HEADROOM,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
@@ -294,6 +299,15 @@ export interface AgentRequest {
    * DEFAULT_CONTEXT_WINDOW (conservative fallback for direct callers).
    */
   context_window?: number;
+  /**
+   * Spec §3 — relevance-based tool selection. "domains" narrows the
+   * advertised tools per-turn (core set + rule-matched + conversation-
+   * continuity domains); a filtered-but-allowed call self-heals via the
+   * WARP-642 guard. Unset/"off" → full-pool advertisement, byte-for-byte
+   * today's behavior. Only ever SUBSETS the pool this loop already resolved
+   * (allowed_tools / chat scope) — RBAC is decided before this field.
+   */
+  tool_selection_mode?: "off" | "domains";
 }
 
 export interface AgentTraceEntry {
@@ -741,14 +755,37 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const filtered = req.allowed_tools
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
     : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name));
-  const tools = filtered.map((t) => ({
+  const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
     function: {
       name: t.name,
       description: t.description,
       parameters: t.inputSchema as Record<string, unknown>,
     },
-  }));
+  });
+  // Spec §3 — per-turn relevance selection. `filtered` (the effective pool
+  // after RBAC/chat-scope) stays the ceiling: the self-heal branch below may
+  // re-admit pool tools that selection dropped, but NOTHING outside it.
+  const fullPoolNames = new Set(filtered.map((t) => t.name));
+  let activeTools = filtered;
+  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+    const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
+    const conversationToolNames = req.messages.flatMap((m) =>
+      m.role === "assistant" && m.tool_calls
+        ? m.tool_calls.map((tc) => tc.function.name)
+        : [],
+    );
+    const sel = selectAdvertisedTools({
+      mode: "domains",
+      userMessage:
+        typeof lastUser?.content === "string" ? lastUser.content : "",
+      pool: filtered.map((t) => t.name),
+      conversationToolNames,
+    });
+    const selected = new Set(sel.advertised);
+    activeTools = filtered.filter((t) => selected.has(t.name));
+  }
+  let tools = activeTools.map(toSpec);
   // WARP-642 — the exact set of tool names the model was advertised this
   // turn. Used to catch hallucinated tool names (e.g. gpt-oss:20b inventing
   // `knowledge_base_search` instead of the real `search_content`) BEFORE we
@@ -759,8 +796,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // WARP-642). We intercept here and feed back an error that LISTS the
   // available tools so the model can recover within the same loop, on the
   // remaining iterations, without a round-trip to the MCP child.
-  const advertisedNames = new Set(tools.map((t) => t.function.name));
-  const availableToolList = tools.map((t) => t.function.name).join(", ");
+  let advertisedNames = new Set(tools.map((t) => t.function.name));
+  let availableToolList = tools.map((t) => t.function.name).join(", ");
 
   // Spec §2/§4 — when set, the NEXT model call is a finalization pass: zero
   // tools, tool_choice "none", plus a one-time system nudge. A flag rather
@@ -1017,6 +1054,48 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // sends zero tools, so this branch never fires on greeting-style
       // turns (the model is given nothing to mis-name).
       if (!advertisedNames.has(call.function.name)) {
+        if (fullPoolNames.has(call.function.name)) {
+          // Spec §3 self-heal — a REAL pool tool that selection filtered
+          // out. Expand its whole domain for the remaining iterations and
+          // tell the model to retry: one lost iteration, not a failed turn.
+          // Deliberately NOT counted as a guard hit (the model named a real
+          // tool) and not a real dispatch either.
+          const domain = domainOfTool(call.function.name);
+          const domainNames = new Set(
+            domain ? toolNamesForDomain(domain) : [call.function.name],
+          );
+          const keep = new Set([
+            ...advertisedNames,
+            call.function.name,
+            ...domainNames,
+          ]);
+          tools = filtered.filter((t) => keep.has(t.name)).map(toSpec);
+          advertisedNames = new Set(tools.map((t) => t.function.name));
+          availableToolList = tools.map((t) => t.function.name).join(", ");
+          toolSchemasJsonLen = JSON.stringify(tools).length;
+          const heal = {
+            status: "error" as const,
+            error: {
+              code: "TOOL_NOW_AVAILABLE",
+              message:
+                `The tool '${call.function.name}' is now available. ` +
+                `Call it again with the same arguments.`,
+            },
+          };
+          trace.push({
+            tool_call_id: call.id,
+            tool: call.function.name,
+            args,
+            result: heal,
+          });
+          emit({ type: "tool_result", id: call.id, ok: false, data: heal });
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(heal).slice(0, 8000),
+          });
+          continue;
+        }
         // FINDING 3 (security) — `call.function.name` is model-controlled
         // (steerable via prompt injection) and a degenerate huge name could
         // bloat history. Sanitize before reflecting it into the
