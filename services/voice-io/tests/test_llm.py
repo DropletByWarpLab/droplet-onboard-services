@@ -35,6 +35,8 @@ import pytest
 from voice.llm import (
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_VOICE_ALLOWED_TOOLS,
+    DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
     MockLLM,
     OrchestratorLLM,
@@ -42,6 +44,8 @@ from voice.llm import (
     _extract_error_detail,
     build_llm_from_env,
     build_system_prompt,
+    parse_allowed_tools,
+    parse_max_tokens,
 )
 
 
@@ -577,3 +581,306 @@ class TestSystemPromptWiringIntoReply:
         llm.reply("b")
         assert "12:00 PM" in captured[0]
         assert "1:00 PM" in captured[1]
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-1432 — voice turn shaping (ephemeral + max_tokens + allowed_tools)
+# ────────────────────────────────────────────────────────────────────
+#
+# Every non-greeting voice turn used to inherit the full ~43-tool
+# `_service:voice` set (~5k tokens of schema prefill) and mint a
+# throwaway ChatSession. These pin the three client-side request-shape
+# changes: `ephemeral:true` on every turn, a `max_tokens` cap, and a
+# curated `allowed_tools` scope that cuts the prefill long tail. The
+# orchestrator's chatRequestSchema already accepts all three
+# (apps/orchestrator/src/routes/llm.ts) — this is purely about voice-io
+# SENDING them.
+
+def _capture_chat_body(monkeypatch) -> dict:
+    """Route reply() through a mock transport and hand back the parsed
+    POST body of the chat call (the last non-health request)."""
+    bodies: list[dict] = []
+
+    def handler(req):
+        if req.url.path == "/api/orchestrator/health":
+            return httpx.Response(200, json={"status": "ok"})
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={
+            "message": {"role": "assistant", "content": "ok"},
+            "trace": [], "iterations": 1, "stop_reason": "model_done",
+        })
+
+    _install_mock_transport(monkeypatch, handler)
+    return bodies
+
+
+class TestEphemeralAlwaysSent:
+    """`ephemeral:true` is dead-safe and high-value: without it every
+    utterance mints a throwaway ChatSession + litters the chat sidebar
+    (routes/llm.ts:872). Voice must ALWAYS send it — on tool turns AND
+    on the greeting fast path."""
+
+    def test_reply_sends_ephemeral_true_on_tool_turn(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert bodies[0]["ephemeral"] is True
+
+    def test_reply_sends_ephemeral_true_on_greeting(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert bodies[0]["ephemeral"] is True
+
+
+class TestMaxTokensCap:
+    """A `max_tokens` cap prevents runaway generation. gpt-oss:20b spends
+    reasoning-channel tokens BEFORE visible content, so the default must
+    be generous enough to cover reasoning + a short spoken answer (too
+    low → empty completion, WARP-854)."""
+
+    def test_reply_sends_default_max_tokens(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("what time is it")
+        assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_max_tokens_is_generous_but_within_gateway_bound(self):
+        # ai-gateway/orchestrator hard-cap max_tokens at 4096 (routes/
+        # llm.ts:156). The default must sit under that AND leave real
+        # room for reasoning + answer (WARP-854 anti-starvation).
+        assert 512 <= DEFAULT_VOICE_MAX_TOKENS <= 4096
+
+    def test_configured_max_tokens_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", max_tokens=2048).reply("hi")
+        assert bodies[0]["max_tokens"] == 2048
+
+    def test_max_tokens_also_sent_on_greeting(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+
+
+class TestAllowedToolsScope:
+    """A curated `allowed_tools` scope replaces the inherited ~43-tool set
+    on tool-enabled turns. On the greeting fast path (tool_choice="none")
+    the orchestrator sends ZERO tools, so allowed_tools is moot and MUST
+    be omitted to keep that path exactly as-is."""
+
+    def test_reply_sends_default_scope_on_tool_turn(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert bodies[0]["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_reply_sends_default_scope_when_tool_choice_auto(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("hi", tool_choice="auto")
+        assert bodies[0]["allowed_tools"] == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_allowed_tools_omitted_on_greeting_fast_path(self, monkeypatch):
+        # The intent-gate fast path stays exactly as-is: zero tools sent,
+        # so allowed_tools is moot and must not appear.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply(
+            "good morning", tool_choice="none",
+        )
+        assert "allowed_tools" not in bodies[0]
+        assert bodies[0]["tool_choice"] == "none"
+
+    def test_configured_scope_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(
+            base_url="http://test",
+            allowed_tools=["list_cameras", "get_system_health"],
+        ).reply("is the camera up?")
+        assert bodies[0]["allowed_tools"] == ["list_cameras", "get_system_health"]
+
+    def test_empty_explicit_scope_omits_field(self, monkeypatch):
+        # An explicit [] at the class level means "send no allowed_tools
+        # field" (the caller opted out), NOT allowed_tools:[] which the
+        # orchestrator would read as ZERO tools.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", allowed_tools=[]).reply("hi")
+        assert "allowed_tools" not in bodies[0]
+
+    def test_camera_question_routes_with_list_cameras_in_scope(self, monkeypatch):
+        # Representative household tool question — the tool that answers
+        # it must be in the default scope or voice silently loses cameras.
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("is the front camera online?")
+        assert "list_cameras" in bodies[0]["allowed_tools"]
+
+
+class TestDefaultScopeContract:
+    """The curated default is correctness-first: it must cover every
+    domain the voice persona ADVERTISES (cameras, network, files, smart
+    devices, calendar, reminders + box health), and it must not carry
+    write tools that the `_service:voice` principal can't drive anyway
+    (they'd be stripped server-side — dead weight in the prefill)."""
+
+    def test_covers_every_persona_promised_domain(self):
+        # DEFAULT_LLM_SYSTEM_PROMPT promises cameras, network, files,
+        # smart devices, calendar, and reminders (read-only). Each must
+        # have at least its primary read tool in scope.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        assert "list_cameras" in scope          # cameras
+        assert "get_network_status" in scope    # network
+        assert "search_files" in scope          # files
+        assert "list_smart_home_devices" in scope  # smart devices
+        assert "list_events" in scope           # calendar
+        assert "list_reminders" in scope        # reminders
+        assert "get_system_health" in scope     # box health
+
+    def test_includes_the_one_scoped_voice_control_tool(self):
+        # `control_device` is the sole write tool voice may drive
+        # (VOICE_WRITE_TOOLS in routes/llm.ts) — "hey Droplet, turn off
+        # the kitchen lights". It survives the server-side write strip,
+        # so it belongs in scope.
+        assert "control_device" in DEFAULT_VOICE_ALLOWED_TOOLS
+
+    def test_excludes_write_tools_stripped_for_voice(self):
+        # These are requiresWrite tools NOT in VOICE_WRITE_TOOLS — the
+        # orchestrator strips them for the voice principal, so shipping
+        # them in the default would be misleading dead weight.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        for stripped in (
+            "run_scene",
+            "block_network_device",
+            "write_file",
+            "delete_file",
+            "email_send",
+            "restart_router",
+            "create_reminder",
+        ):
+            assert stripped not in scope
+
+    def test_excludes_the_long_tail(self):
+        # The whole point (WARP-1432) is cutting the rarely-voice-used
+        # long tail — PM, ERP, data-utility, switch-admin tools.
+        scope = set(DEFAULT_VOICE_ALLOWED_TOOLS)
+        for tail in (
+            "pm_list_work_items",
+            "erp_find_patient",
+            "uuid_generate",
+            "regex_test",
+            "set_port_vlan",
+            "convert_data_format",
+        ):
+            assert tail not in scope
+
+    def test_no_duplicate_tool_names(self):
+        assert len(DEFAULT_VOICE_ALLOWED_TOOLS) == len(set(DEFAULT_VOICE_ALLOWED_TOOLS))
+
+
+class TestParseMaxTokens:
+    """VOICE_MAX_TOKENS parsing: unset/garbage/out-of-range all fall back
+    to the known-safe default with a warning (voice never breaks on a
+    fat-fingered env), a valid int is honored."""
+
+    def test_none_returns_default(self):
+        assert parse_max_tokens(None) == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_empty_returns_default(self):
+        assert parse_max_tokens("") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_whitespace_returns_default(self):
+        assert parse_max_tokens("   \n\t ") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_valid_int_is_used(self):
+        assert parse_max_tokens("2048") == 2048
+
+    def test_surrounding_whitespace_stripped(self):
+        assert parse_max_tokens("  2048  ") == 2048
+
+    def test_non_numeric_falls_back_to_default(self):
+        assert parse_max_tokens("abc") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_zero_out_of_range_falls_back(self):
+        # Below the gateway's ge=1 bound — a 0 cap would empty every reply.
+        assert parse_max_tokens("0") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_negative_falls_back(self):
+        assert parse_max_tokens("-100") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_above_gateway_ceiling_falls_back(self):
+        # Above the orchestrator/gateway le=4096 bound — sending it would
+        # 400 every voice reply, so fall back rather than guarantee failure.
+        assert parse_max_tokens("99999") == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_float_string_falls_back(self):
+        assert parse_max_tokens("1024.5") == DEFAULT_VOICE_MAX_TOKENS
+
+
+class TestParseAllowedTools:
+    """VOICE_ALLOWED_TOOLS parsing: comma-separated names, whitespace
+    trimmed, empty segments dropped; unset/all-empty falls back to the
+    curated default (never an empty list — that would zero out tools)."""
+
+    def test_none_returns_default(self):
+        assert parse_allowed_tools(None) == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_empty_returns_default(self):
+        assert parse_allowed_tools("") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_whitespace_returns_default(self):
+        assert parse_allowed_tools("   ") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_all_empty_segments_returns_default(self):
+        # ",,, ," carries no real names — treat as "operator said nothing".
+        assert parse_allowed_tools(",,, ,") == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_comma_separated_names_parsed(self):
+        assert parse_allowed_tools("a,b,c") == ["a", "b", "c"]
+
+    def test_segments_are_trimmed(self):
+        assert parse_allowed_tools("list_cameras, get_system_health") == [
+            "list_cameras",
+            "get_system_health",
+        ]
+
+    def test_empty_segments_dropped(self):
+        assert parse_allowed_tools("a,,b, ,c") == ["a", "b", "c"]
+
+    def test_single_name(self):
+        assert parse_allowed_tools("list_cameras") == ["list_cameras"]
+
+
+class TestBuildLLMFromEnvTurnShaping:
+    """build_llm_from_env wires VOICE_MAX_TOKENS + VOICE_ALLOWED_TOOLS
+    through to the OrchestratorLLM, same as it does LLM_MODEL / token."""
+
+    def test_default_build_uses_default_cap_and_scope(self, monkeypatch, stub_geo):
+        for k in ("LLM_URL", "VOICE_MAX_TOKENS", "VOICE_ALLOWED_TOOLS"):
+            monkeypatch.delenv(k, raising=False)
+        llm = build_llm_from_env()
+        assert isinstance(llm, OrchestratorLLM)
+        assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+        assert llm._allowed_tools == list(DEFAULT_VOICE_ALLOWED_TOOLS)
+
+    def test_voice_max_tokens_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_TOKENS", "2048")
+        llm = build_llm_from_env()
+        assert llm._max_tokens == 2048
+
+    def test_voice_max_tokens_env_invalid_falls_back(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_TOKENS", "not-a-number")
+        llm = build_llm_from_env()
+        assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
+
+    def test_voice_allowed_tools_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv(
+            "VOICE_ALLOWED_TOOLS", "list_cameras, get_system_health",
+        )
+        llm = build_llm_from_env()
+        assert llm._allowed_tools == ["list_cameras", "get_system_health"]
+
+    def test_voice_allowed_tools_env_empty_uses_default(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_ALLOWED_TOOLS", "   ")
+        llm = build_llm_from_env()
+        assert llm._allowed_tools == list(DEFAULT_VOICE_ALLOWED_TOOLS)

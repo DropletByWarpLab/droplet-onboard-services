@@ -1770,6 +1770,25 @@ services:
       # Override via env if the appliance has a larger/different model
       # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
+      # WARP-1432 — voice turn shaping (client-side request shape only).
+      # Empty passthrough: the effective defaults live in
+      # services/voice-io/voice/llm.py (single source of truth), same
+      # pattern as WAKE_THRESHOLD above.
+      #   VOICE_MAX_TOKENS — per-turn generation cap (default 1024).
+      #   Voice always sends ephemeral:true too (no env — it's a
+      #   constant: voice has no persisted session). The box's gpt-oss
+      #   voice model spends reasoning tokens before visible content, so
+      #   the cap is generous (covers reasoning + a short spoken answer);
+      #   too low → empty completion. Gateway hard-caps at 4096.
+      - VOICE_MAX_TOKENS=${VOICE_MAX_TOKENS:-}
+      #   VOICE_ALLOWED_TOOLS — comma-separated tool names the voice
+      #   assistant may use on tool-enabled turns. Empty → the curated
+      #   in-code default (box health, cameras, network, files, smart
+      #   devices + control_device, calendar, reminders) instead of the
+      #   full ~43-tool set, cutting ~5k → ~1-1.5k tokens of schema
+      #   prefill per turn. The greeting fast path (tool_choice="none")
+      #   sends zero tools regardless.
+      - VOICE_ALLOWED_TOOLS=${VOICE_ALLOWED_TOOLS:-}
       # Context the LLM gets in its system prompt at every reply():
       # current local time + the device's location. Both auto-detected
       # via voice/geo.py (free IP-geolocation lookup at startup,
