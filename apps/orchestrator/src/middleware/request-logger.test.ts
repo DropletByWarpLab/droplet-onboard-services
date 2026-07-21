@@ -138,4 +138,34 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
     const completion = JSON.parse(lines[lines.length - 1]);
     expect(completion.req.headers["x-overlay-pop"]).toBe("[Redacted]");
   });
+
+  // AC2 defense-in-depth: some clients pass the redeem token in the query
+  // string, which pino-std-serializers DOES emit under `req.query`. Without
+  // `req.query.token` in the redact list it rides straight into the log line.
+  it("redacts req.query.token (a token passed as a query param)", () => {
+    const SECRET_TOKEN = "PLAINTEXT-OVERLAY-LINK-TOKEN-q1w2e3";
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    // pino-http's default req serializer emits `req.query`, so force a
+    // serialize via an explicit `req.log.info({ req })` — the exact shape a
+    // future body/query-logging serializer would produce.
+    const req = Object.assign(mockReq("QTOK-ID"), {
+      query: { token: SECRET_TOKEN },
+    }) as unknown as ReturnType<typeof mockReq> & {
+      query: { token: string };
+      log: { info: (obj: unknown, msg: string) => void };
+    };
+    const res = mockRes();
+    runWithRequestId("QTOK-ID", () => {
+      logger(req as never, res as never);
+      req.log.info({ req }, "explicit req serialize");
+    });
+    const output = lines.join("");
+    expect(output).not.toContain(SECRET_TOKEN);
+    const line = JSON.parse(lines[lines.length - 1]);
+    expect(line.req.query.token).toBe("[Redacted]");
+  });
 });

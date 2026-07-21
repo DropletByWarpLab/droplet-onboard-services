@@ -21,10 +21,12 @@ vi.mock("../config.js", () => ({
 }));
 
 import { createVpnRouter } from "../routes/vpn.js";
+import { createRequestLogger } from "../middleware/request-logger.js";
 import { config } from "../config.js";
 import {
   buildStatusPopMessage,
   signKeyFingerprint,
+  OVERLAY_LINK_TOKEN_TTL_MS,
 } from "../services/overlay-link.service.js";
 
 const VALID_WG_KEY = "A".repeat(43) + "=";
@@ -126,6 +128,7 @@ function buildApp(opts: {
   audit?: AuditEntry[];
   rateLimits?: any;
   user?: { id: string; username: string; role: string } | null;
+  now?: () => Date;
 } = {}) {
   const prisma = opts.prisma ?? createPrismaMock();
   const audit = opts.audit ?? [];
@@ -149,6 +152,7 @@ function buildApp(opts: {
       overlayEnroll: opts.overlayEnroll ?? vi.fn(async () => ({ device_ref: "hq-dev-1" })),
       recordOverlayAudit: (e: AuditEntry) => audit.push(e),
       overlayRateLimits: opts.rateLimits,
+      now: opts.now,
     }),
   );
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
@@ -276,6 +280,40 @@ describe("POST /api/vpn/overlay/devices/by-token (redeem — NO bearer)", () => 
       token, wg_public_key: VALID_WG_KEY, sign_public_key_pem: pem, label: "Phone",
     });
     expect(res.status).toBe(410);
+  });
+
+  it("the 410 expiry path stages NOTHING (no PendingOverlayEnrollment row)", async () => {
+    // AC4: a rejected redeem must never leave a staged pending row behind — the
+    // owner's review queue must stay clean of expired attempts.
+    const { app, prisma } = buildApp();
+    const token = await freshToken(app);
+    await mint(app); // supersede the first token → state 'expired'
+    const { pem } = p256();
+    const res = await request(app).post("/api/vpn/overlay/devices/by-token").send({
+      token, wg_public_key: VALID_WG_KEY, sign_public_key_pem: pem, label: "Phone",
+    });
+    expect(res.status).toBe(410);
+    expect(prisma._pendings).toHaveLength(0);
+  });
+
+  it("time-based TTL: an 'available' token past expiresAt → 410 and stages nothing", async () => {
+    // AC4: prove the TTL is enforced TRANSACTIONALLY by the `expiresAt > now`
+    // predicate on the atomic consume, NOT by the GC sweep or the single-active
+    // supersession flip. Pin a mutable clock, mint at T0 (expiresAt = T0 + TTL),
+    // then advance PAST the TTL without ever superseding the row.
+    let clock = new Date("2026-01-01T00:00:00.000Z");
+    const { app, prisma } = buildApp({ now: () => clock });
+    const token = await freshToken(app);
+    clock = new Date(clock.getTime() + OVERLAY_LINK_TOKEN_TTL_MS + 1_000);
+    const { pem } = p256();
+    const res = await request(app).post("/api/vpn/overlay/devices/by-token").send({
+      token, wg_public_key: VALID_WG_KEY, sign_public_key_pem: pem, label: "Phone",
+    });
+    expect(res.status).toBe(410);
+    // The row was NEVER superseded — it is still 'available', so the 410 came
+    // purely from the time predicate, not a state flip.
+    expect(prisma._linkTokens[0].state).toBe("available");
+    expect(prisma._pendings).toHaveLength(0);
   });
 
   it("unknown token → 401", async () => {
@@ -514,5 +552,68 @@ describe("rate limiting + trust-proxy hardening", () => {
     let last = 0;
     for (let i = 0; i < 4; i++) last = (await mint(app)).status;
     expect(last).toBe(429);
+  });
+});
+
+describe("request-logging redaction — routes driven THROUGH the logger (WARP-1474 AC2)", () => {
+  // Mount the REAL request logger in front of the REAL vpn router and drive the
+  // mint + by-token routes end-to-end, capturing every emitted log line. The
+  // plaintext link token (minted once) and the client sign-key PEM must never
+  // ride out in a log line — the redaction contract, proven at runtime rather
+  // than via an isolated serializer double.
+  function buildLoggedApp(lines: string[]) {
+    const prisma = createPrismaMock();
+    const app = express();
+    app.set("trust proxy", 1);
+    app.use(express.json());
+    app.use(
+      createRequestLogger({
+        dest: { write: (s: string) => lines.push(s) },
+        level: "info",
+      }),
+    );
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as any).user = {
+        id: "owner-1",
+        username: "alice",
+        role: "owner",
+        displayName: "alice",
+      };
+      next();
+    });
+    app.use(
+      "/api",
+      createVpnRouter(prisma, {
+        overlayEnroll: vi.fn(async () => ({ device_ref: "x" })),
+        recordOverlayAudit: () => {},
+      }),
+    );
+    return { app, prisma };
+  }
+
+  it("mint + by-token flow never emits the plaintext token or the sign-key PEM", async () => {
+    const lines: string[] = [];
+    const { app } = buildLoggedApp(lines);
+
+    // Mint returns the plaintext token ONCE.
+    const mintRes = await request(app).post("/api/vpn/overlay/link-tokens").send({});
+    expect(mintRes.status).toBe(201);
+    const token: string = mintRes.body.token;
+
+    // Redeem it — token + PEM travel in the JSON request body.
+    const { pem } = p256();
+    const redeemRes = await request(app).post("/api/vpn/overlay/devices/by-token").send({
+      token, wg_public_key: VALID_WG_KEY, sign_public_key_pem: pem, label: "Phone",
+    });
+    expect(redeemRes.status).toBe(202);
+
+    // The logger MUST have emitted request-completed lines (guard against a
+    // silent logger that would make the assertions below vacuous)…
+    const output = lines.join("");
+    expect(output.length).toBeGreaterThan(0);
+    // …and none of them may carry the token or the PEM.
+    expect(output).not.toContain(token);
+    expect(output).not.toContain(pem);
+    expect(output).not.toContain("PUBLIC KEY");
   });
 });
