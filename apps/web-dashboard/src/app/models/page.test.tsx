@@ -50,6 +50,17 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ),
 }));
 
+// WARP-1112 — the active-model picker + auth context have their own tests
+// (ActiveModelPicker.test.tsx). Here we stub the picker to null and give
+// useAuth a stable no-user value, so these WARP-836 status/state tests stay
+// focused on the existing surface and don't double-render model names.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: null }),
+}));
+vi.mock("@/components/models/ActiveModelPicker", () => ({
+  ActiveModelPicker: () => null,
+}));
+
 import ModelsPage from "./page";
 
 function payload(over: Partial<ModelsPagePayload> = {}): ModelsPagePayload {
