@@ -34,6 +34,7 @@ description: |
 | oled-display   | —     | `display` | PyPortal screen service (sim backend when no `/dev/ttyACM*`) |
 | switch         | :8081 | `full`, `single-box` | Managed switch control       |
 | camera-discovery | —   | `full`, `single-box` | ONVIF/RTSP scanner           |
+| web-fetch      | —     | `web`  | Ambient-data fetcher (weather/rates) for LLM tools (WARP-1436) |
 | email-indexer  | —     | `full` | Mailbox indexer for RAG                    |
 | ollama         | 127.0.0.1:11434 | `single-box` | Local LLM inference on the single-box shape |
 | openwrt        | 127.0.0.1:8181→80 | `single-box` | In-container OpenWrt (router UI/ubus) |

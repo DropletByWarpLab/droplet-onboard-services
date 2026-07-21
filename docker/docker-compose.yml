@@ -1541,6 +1541,37 @@ services:
     cpus: ${FRIGATE_CPUS:-2.0}
     pids_limit: ${FRIGATE_PIDS_LIMIT:-1024}
 
+  # --- Ambient-data web fetcher (WARP-1436) ---
+  # The ONLY component with outbound HTTP for the get_weather /
+  # currency_convert LLM tools (Open-Meteo + ECB, keyless — see
+  # docs/security/allowed-egress.yaml and docs/screened-web-access-design.md).
+  # Opt-in twice over: the `web` compose profile AND the ambient_data
+  # off-LAN channel both default off. Bridge-net on purpose: no LAN
+  # membership, no host ports — only the orchestrator talks to it
+  # (bearer service token).
+  web-fetch:
+    build:
+      context: ..
+      dockerfile: services/web-fetch/Dockerfile
+    expose:
+      - "8010"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot
+      # gate + OpenSSL config to the literal OFF posture (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - WEB_FETCH_SERVICE_TOKEN=${WEB_FETCH_SERVICE_TOKEN:-}
+    profiles: ["web"]
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${WEB_FETCH_MEM_LIMIT:-256m}
+    cpus: ${WEB_FETCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
     build:

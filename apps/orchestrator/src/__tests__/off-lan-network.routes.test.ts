@@ -102,6 +102,7 @@ describe("WARP-468 — GET /api/network/off-lan", () => {
       outbound_email: 0,
       telemetry: 0,
       web_fetch: 0,
+      ambient_data: 0,
     });
     expect(res.body.sampleCount).toBe(0);
   });

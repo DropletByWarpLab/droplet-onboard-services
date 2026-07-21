@@ -260,6 +260,8 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
     "outbound_email",
     "telemetry",
     "web_fetch",
+    // WARP-1436 — Weather & currency data (Open-Meteo, European Central Bank).
+    "ambient_data",
   ] as const;
   type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
   const isOffLanKey = (k: string): k is OffLanKey =>

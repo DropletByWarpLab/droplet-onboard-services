@@ -215,10 +215,15 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,eval,*) build_services+=(rag-eval) ;;
   esac
+  case ",${active_profiles}," in
+    *,web,*) build_services+=(web-fetch) ;;
+  esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
   # Deliberately NOT in build_services (accounted for here, not built):
   #   rag-eval    — appended above only when the eval profile is active
+  #   web-fetch   — appended above only when the web profile is active
+  #                 (WARP-1436 screened ambient-data fetcher)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -240,7 +245,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,openwrt,ops-console,fleet-agent" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,openwrt,ops-console,fleet-agent" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then

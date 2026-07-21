@@ -29,6 +29,8 @@ const OFF_LAN_CHANNEL_KEYS = [
   "outbound_email",
   "telemetry",
   "web_fetch",
+  // WARP-1436 — Weather & currency data (Open-Meteo, European Central Bank).
+  "ambient_data",
 ] as const;
 type ChannelKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
 const channelKeyEnum = z.enum(OFF_LAN_CHANNEL_KEYS);
@@ -108,14 +110,15 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
         });
 
         // Roll up bytes per channel. Initialize every channel to 0 so
-        // the dashboard's bar chart renders all five bars even when
-        // some channels haven't recorded any traffic yet.
+        // the dashboard's bar chart renders every channel's bar even
+        // when some channels haven't recorded any traffic yet.
         const totals: Record<ChannelKey, bigint> = {
           software_updates: 0n,
           cloud_model_escape: 0n,
           outbound_email: 0n,
           telemetry: 0n,
           web_fetch: 0n,
+          ambient_data: 0n,
         };
         for (const r of rows as Array<{ channel: ChannelKey; bytes: bigint }>) {
           totals[r.channel] += r.bytes;
