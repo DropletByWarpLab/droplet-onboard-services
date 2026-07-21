@@ -28,13 +28,23 @@ name: ci
 #     ad-hoc dep set (see rag-eval-tests.yml) and stay path-filtered +
 #     main-push gated there.
 #
-# ── FOLLOW-UPS (intentionally NOT in this workflow's first PR) ──
-#   1. Retire the PR triggers on the per-service workflows once ci-summary
-#      is the required check (until then PR-time CI cost roughly doubles).
-#   2. Drop publish-release.yml's duplicate inline gate jobs in favor of
-#      this workflow.
+# ── CI budget optimization (2026-07, $100/month Actions limit) ──
+# PR runs are PATH-AWARE: the `detect` job maps changed files to affected
+# legs (same dorny/paths-filter + dynamic-matrix pattern as docker-build.yml)
+# and only those legs run. ci-summary still reports on EVERY PR — a leg
+# skipped because its paths didn't change counts as success; a leg skipped
+# for any other reason fails the summary (fail-closed, see ci-summary).
+# Main pushes are NOT filtered: every merge still gets the full-matrix
+# canary, so the always-green-main record stays honest.
+# The per-service workflows' PR triggers are retired (they were exact
+# duplicates of these legs — the old "cost roughly doubles" follow-up);
+# their push-to-main triggers remain as an independent post-merge canary
+# and to satisfy scripts/check-ci-coverage.sh. orchestrator-tests.yml
+# still runs on PRs for its pg-integration job only (no ci.yml leg runs
+# against a real Postgres).
 # Do not silently expand or shrink the leg list — the summary is only as
-# honest as the surface it aggregates.
+# honest as the surface it aggregates. A new leg needs BOTH a matrix entry
+# in the plan step below AND a filter entry in detect.
 
 on:
   push:
@@ -53,8 +63,140 @@ permissions:
   contents: read
 
 jobs:
+  # Maps changed paths to affected legs on PRs. On push/dispatch it always
+  # emits the full leg lists (post-merge full canary). Filters mirror the
+  # per-service workflows' `paths:` lists plus the workspace glue each leg
+  # actually consumes.
+  detect:
+    name: detect affected legs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter lists PR files via the API
+    outputs:
+      node-suites: ${{ steps.plan.outputs.node-suites }}
+      python-services: ${{ steps.plan.outputs.python-services }}
+      python-matrix: ${{ steps.plan.outputs.python-matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Map changed paths to affected legs
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            # ci.yml itself changed — re-prove every leg.
+            workflow:
+              - ".github/workflows/ci.yml"
+            # Root npm workspace manifests feed every node leg's `npm ci`.
+            node-global:
+              - "package.json"
+              - "package-lock.json"
+            tools-core-mcp-server:
+              - "packages/tools-core/**"
+              - "packages/fips-selftest/**"
+              - "services/mcp-server/**"
+              - "apps/orchestrator/prisma/**"
+            orchestrator:
+              - "apps/orchestrator/**"
+              - "packages/tools-core/**"
+              - "packages/fips-selftest/**"
+              - "services/mcp-server/**"
+              - "services/erp-connector/**"
+            web-dashboard:
+              - "apps/web-dashboard/**"
+              # The dashboard's @droplet/* deps resolve from source (see the
+              # typecheck step comment below), so type breaks in these
+              # packages surface in this leg.
+              - "packages/shared-types/**"
+              - "packages/auth-policy/**"
+              - "scripts/check-dashboard-classes.sh"
+            matter-controller:
+              - "services/matter-controller/**"
+              - "packages/fips-selftest/**"
+            erp-connector:
+              - "services/erp-connector/**"
+            ai-gateway:
+              - "services/ai-gateway/**"
+              - "proto/**"
+            routing:
+              - "services/routing/**"
+            switch:
+              - "services/switch/**"
+            camera-discovery:
+              - "services/camera-discovery/**"
+            email-indexer:
+              - "services/email-indexer/**"
+            ops-console:
+              - "services/ops-console/**"
+            fleet-agent:
+              - "services/fleet-agent/**"
+              # WARP-1025: release_verify runs over the WARP-537 golden
+              # fixtures shared with the orchestrator's update-agent.
+              - "apps/orchestrator/src/services/update-agent/__fixtures__/**"
+            file-indexer:
+              - "services/file-indexer/**"
+            voice-io:
+              - "services/voice-io/**"
+            device-identity-svc:
+              - "services/device-identity-svc/**"
+              - "proto/**"
+
+      - name: Decide which legs run
+        id: plan
+        env:
+          CHANGED: ${{ steps.filter.outputs.changes || '[]' }}
+          ALL_NODE: >-
+            ["tools-core-mcp-server","orchestrator","web-dashboard",
+            "matter-controller","erp-connector"]
+          ALL_PYTHON: >-
+            ["ai-gateway","routing","switch","camera-discovery",
+            "email-indexer","ops-console","fleet-agent","file-indexer",
+            "voice-io","device-identity-svc"]
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+             || jq -e 'index("workflow")' <<<"$CHANGED" >/dev/null; then
+            node=$(jq -c . <<<"$ALL_NODE")
+            python=$(jq -c . <<<"$ALL_PYTHON")
+          else
+            if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
+              node=$(jq -c . <<<"$ALL_NODE")
+            else
+              node=$(jq -c --argjson all "$ALL_NODE" \
+                '[.[] | select(. as $s | $all | index($s))] | sort' <<<"$CHANGED")
+            fi
+            python=$(jq -c --argjson all "$ALL_PYTHON" \
+              '[.[] | select(. as $s | $all | index($s))] | sort' <<<"$CHANGED")
+          fi
+          # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
+          # needs_pythonpath) so the python job's include matrix keeps the
+          # exact shape of publish-release.yml's gate-python (WARP-970 mirror).
+          python_matrix=$(jq -c '[.[] | {service: .}
+            + (if . == "file-indexer"
+               then {sysdeps: "libpq-dev ffmpeg libmagic1"} else {} end)
+            + (if . == "voice-io"
+               then {sysdeps: "libportaudio2 alsa-utils"} else {} end)
+            + (if . == "device-identity-svc"
+               then {sysdeps: "libtss2-dev pkg-config", reqs: "requirements.txt",
+                     extra_pip: "pytest", needs_pythonpath: "1"} else {} end)]' \
+            <<<"$python")
+          {
+            echo "node-suites=$node"
+            echo "python-services=$python"
+            echo "python-matrix=$python_matrix"
+          } >> "$GITHUB_OUTPUT"
+          echo "node legs: $node"
+          echo "python legs: $python"
+
   node:
     name: node / ${{ matrix.suite }}
+    needs: detect
+    # An empty dynamic matrix is a workflow error, not a skip — guard here.
+    # ci-summary treats this skip as success iff the suite list is empty.
+    if: needs.detect.outputs.node-suites != '[]'
     runs-on: ubuntu-latest
     # Mirrors the per-suite workflows' hung-test ceiling (15 min there for a
     # warm-cache single suite); 20 gives cold-cache headroom per leg.
@@ -64,12 +206,7 @@ jobs:
       # reading it) needs the full picture, not the first failure.
       fail-fast: false
       matrix:
-        suite:
-          - tools-core-mcp-server
-          - orchestrator
-          - web-dashboard
-          - matter-controller
-          - erp-connector
+        suite: ${{ fromJSON(needs.detect.outputs.node-suites) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -220,38 +357,21 @@ jobs:
 
   python:
     name: python / ${{ matrix.service }} pytest
+    needs: detect
+    # Same empty-matrix guard as the node job above.
+    if: needs.detect.outputs.python-services != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      # Exact mirror of gate-python in publish-release.yml (#786; both lists
+      # The full list (emitted by detect on push/dispatch) is the exact
+      # mirror of gate-python in publish-release.yml (#786; both lists
       # expanded together by WARP-970) — the python services with
-      # per-service test workflows.
+      # per-service test workflows. The include objects (incl. sysdeps /
+      # reqs / extra_pip / needs_pythonpath for file-indexer, voice-io and
+      # device-identity-svc) are built in detect's plan step.
       matrix:
-        include:
-          - service: ai-gateway
-          - service: routing
-          - service: switch
-          - service: camera-discovery
-          # WARP-970 coverage gate — same requirements-dev.txt +
-          # bare-pytest shape as the legs above, no sysdeps.
-          - service: email-indexer
-          - service: ops-console
-          - service: fleet-agent
-          - service: file-indexer
-            # libpq for psycopg build, ffmpeg + libmagic for content sniffing
-            # (mirrors file-indexer-tests.yml)
-            sysdeps: libpq-dev ffmpeg libmagic1
-          - service: voice-io
-            # portaudio/alsa import-time deps (mirrors voice-io-tests.yml)
-            sysdeps: libportaudio2 alsa-utils
-          - service: device-identity-svc
-            # tpm2-pytss builds against tss2-esapi headers
-            # (mirrors device-identity-svc-tests.yml)
-            sysdeps: libtss2-dev pkg-config
-            reqs: requirements.txt
-            extra_pip: pytest
-            needs_pythonpath: "1"
+        include: ${{ fromJSON(needs.detect.outputs.python-matrix) }}
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -292,13 +412,15 @@ jobs:
 
   # THE required check (WARP-968/969 merge policy). Runs even when legs fail
   # (`if: always()`) so it ALWAYS reports — no more PRs hung on "Expected".
-  # Fails closed: anything other than success on any leg (failure, cancelled,
-  # skipped) fails the summary.
+  # Fails closed: a leg job may be skipped ONLY because detect proved its
+  # suite list empty (path-aware PR runs); any failure, cancellation, or
+  # skip with a non-empty suite list fails the summary. detect itself must
+  # have succeeded — otherwise the "nothing affected" claim is untrusted.
   ci-summary:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [node, python]
+    needs: [detect, node, python]
     if: always()
     steps:
       - name: Report leg results
@@ -306,12 +428,36 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: echo "${NEEDS_JSON}"
 
-      - name: All legs succeeded
-        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
-        run: echo "ci-summary — every leg succeeded"
-
-      - name: At least one leg failed, was cancelled, or was skipped
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+      - name: Verdict
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          NODE_RESULT: ${{ needs.node.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          NODE_SUITES: ${{ needs.detect.outputs.node-suites }}
+          PYTHON_SERVICES: ${{ needs.detect.outputs.python-services }}
         run: |
-          echo "::error::ci-summary — at least one CI leg did not succeed (see the job list above)"
-          exit 1
+          set -eu
+          fail=0
+          if [ "$DETECT_RESULT" != "success" ]; then
+            echo "::error::ci-summary — detect did not succeed ($DETECT_RESULT)"
+            fail=1
+          fi
+          check_leg() { # $1=name $2=result $3=suite-list
+            case "$2" in
+              success) echo "$1: success ($3)" ;;
+              skipped)
+                if [ "$3" = "[]" ]; then
+                  echo "$1: skipped — no affected suites"
+                else
+                  echo "::error::ci-summary — $1 was skipped but its suite list is $3"
+                  fail=1
+                fi ;;
+              *)
+                echo "::error::ci-summary — $1 did not succeed ($2)"
+                fail=1 ;;
+            esac
+          }
+          check_leg node "$NODE_RESULT" "$NODE_SUITES"
+          check_leg python "$PYTHON_RESULT" "$PYTHON_SERVICES"
+          [ "$fail" -eq 0 ] || exit 1
+          echo "ci-summary — every triggered leg succeeded"

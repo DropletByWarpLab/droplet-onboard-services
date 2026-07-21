@@ -4,14 +4,11 @@ name: fleet-agent-tests
 # (respx portal, injected fake collectors — no real network or /proc).
 
 on:
-  pull_request:
-    paths:
-      - "services/fleet-agent/**"
-      # WARP-1025: the release_verify suite runs over the WARP-537 golden
-      # fixtures shared with the orchestrator's update-agent — regenerated
-      # fixtures must re-prove the Python port too.
-      - "apps/orchestrator/src/services/update-agent/__fixtures__/**"
-      - ".github/workflows/fleet-agent-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `fleet-agent` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:

@@ -6,11 +6,11 @@ name: device-identity-svc-tests
 # tests, which is what we cover on PR-time CI.
 
 on:
-  pull_request:
-    paths:
-      - "services/device-identity-svc/**"
-      - "proto/**"
-      - ".github/workflows/device-identity-svc-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `device-identity-svc` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:

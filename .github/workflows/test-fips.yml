@@ -101,13 +101,51 @@ jobs:
   # can no longer load — demonstrating the build-time gate is NOT a no-op. This
   # is the runtime-*capability* counterpart to docker-build.yml's PRESENT gate;
   # it does not gate merges by itself (docker-build.yml owns the required check).
+  #
+  # CI budget optimization (2026-07): like fips-stack below, the OpenSSL
+  # FIPS-module compile is additionally gated on the FIPS option paths —
+  # this workflow's trigger list is broad (apps/**, services/**, …) and the
+  # sabotage proof ran its multi-minute throwaway build on every ordinary
+  # app PR (~1,400 runs/month). The Docker-free logic check of the harness
+  # (tests/fips-sabotage-logic.test.sh) still runs unconditionally in
+  # fips-lint above.
   fips-sabotage:
     runs-on: ubuntu-latest
     # Compiles the OpenSSL FIPS module in a throwaway build (minutes cold).
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter lists PR files via the API
     steps:
       - uses: actions/checkout@v7
+
+      # Keep this filter list in lockstep with fips-stack's below (same
+      # rationale: only FIPS-option-path changes pay for a real build).
+      - name: Detect FIPS-option-path changes
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@v4
+        id: gate
+        with:
+          # push events diff against the previous main commit by default.
+          filters: |
+            fips:
+              - "scripts/setup.sh"
+              - "scripts/lib/secrets.sh"
+              - "scripts/lib/compose.sh"
+              - "docker/docker-compose.yml"
+              - "docker/docker-compose.test.override.yml"
+              - "docker/fips/**"
+              - "docker/openssl-fips.cnf"
+              - "docker/nginx/**"
+              - "services/_shared/fips_selftest.py"
+              - "packages/fips-selftest/**"
+              - "services/device-identity-svc/**"
+              - "tests/integration/fips-stack.test.sh"
+              - "tests/fips-sabotage.test.sh"
+              - ".github/workflows/test-fips.yml"
+
       - name: Deliberate-sabotage proof (removing fips.so breaks the gate)
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
         run: bash tests/fips-sabotage.test.sh
 
   # WARP-317 full-stack FIPS ACTIVATION smoke test: boots the real compose

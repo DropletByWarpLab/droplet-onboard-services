@@ -12,8 +12,9 @@ name: docker-build
 #                     buildable services drift from the filter list below.
 #   build           — matrix, one image per runner. Layer cache lives at
 #                     ghcr.io/<repo>/buildcache:<image>; PRs read it, pushes
-#                     to main rebuild every image and refresh it (post-merge,
-#                     so their wall-clock blocks nobody). The orchestrator
+#                     to main rebuild the AFFECTED images and refresh their
+#                     cache (post-merge, so their wall-clock blocks nobody),
+#                     and a weekly schedule rebuilds the full fleet. The orchestrator
 #                     image is additionally smoke-booted (WARP-1246): a
 #                     require() of dist/index.js inside the image proves the
 #                     runtime stage's COPY set actually resolves at boot.
@@ -112,6 +113,13 @@ on:
       - "apps/orchestrator/**"
       - "apps/web-dashboard/**"
       - "services/**"
+  # Weekly full rebuild of every image's GHCR layer cache. Push runs now
+  # rebuild only AFFECTED images (CI budget optimization, 2026-07 — see the
+  # plan step), which keeps each cache exactly as fresh as its build inputs;
+  # this scheduled pass is the belt-and-braces heal for anything the
+  # per-image filters miss, and doubles as a weekly full-fleet Trivy scan.
+  schedule:
+    - cron: "23 2 * * 6" # Saturday 02:23 UTC
 
 concurrency:
   group: docker-build-${{ github.ref }}
@@ -171,8 +179,11 @@ jobs:
       # (py-shared, node-workspace) exist only as YAML anchors; the plan
       # step intersects matches with buildable images, so helpers never
       # reach the matrix.
+      # Runs on pull_request AND push: PRs diff against the base branch,
+      # push events diff against the previous main commit (dorny default).
+      # Scheduled/dispatch runs skip it and rebuild everything.
       - name: Map changed paths to affected images
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -273,15 +284,19 @@ jobs:
           CHANGED: ${{ steps.filter.outputs.changes }}
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Post-merge runs rebuild everything so every image's GHCR layer
-            # cache stays fresh, not just the images the merge touched.
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+             && [ "${{ github.event_name }}" != "push" ]; then
+            # schedule / workflow_dispatch: full-fleet cache refresh + scan.
             images="$BUILDABLE"
           elif jq -e 'index("global")' <<<"$CHANGED" >/dev/null; then
             images="$BUILDABLE"
           else
             # Intersect matched filters with buildable images (drops the
-            # anchor-only helper filters).
+            # anchor-only helper filters). Push runs used to rebuild
+            # everything for cache freshness; since a cache only goes stale
+            # when its own build inputs change, affected-only refresh keeps
+            # every cache fresh at a fraction of the cost (CI budget
+            # optimization, 2026-07). The weekly schedule heals any gap.
             images=$(jq -c --argjson b "$BUILDABLE" '[.[] | select(. as $s | $b | index($s))] | sort' <<<"$CHANGED")
           fi
           echo "images=$images" >> "$GITHUB_OUTPUT"
@@ -373,7 +388,9 @@ jobs:
           load: true
           tags: droplet-ci/${{ matrix.image }}:scan
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
-          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
+          # Push AND scheduled/dispatch runs refresh the cache; PR runs stay
+          # read-only so GHCR sees no per-PR cache churn.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
 
       # WARP-1246: smoke-boot the orchestrator image. Build + Trivy never
       # EXECUTE the runtime stage, so a broken run-stage COPY set ships green:

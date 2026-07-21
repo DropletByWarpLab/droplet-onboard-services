@@ -3,10 +3,11 @@ name: file-indexer-tests
 # Pytest for services/file-indexer. Path-filtered.
 
 on:
-  pull_request:
-    paths:
-      - "services/file-indexer/**"
-      - ".github/workflows/file-indexer-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `file-indexer` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:
