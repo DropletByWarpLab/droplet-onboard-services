@@ -435,7 +435,6 @@ export function DeviceDetailPanel({
           title="Remove this device?"
           description={`This unpairs ${shown} from your Droplet and removes it from every room and routine. You can add it back later with its pairing code.`}
           confirmLabel="Remove device"
-          confirmedIdentifier={shown}
           variant="destructive"
           onConfirm={() => onRemove(device.nodeId)}
           onCancel={() => setConfirm(null)}
@@ -447,7 +446,6 @@ export function DeviceDetailPanel({
           title="Re-pair this device?"
           description={`This removes ${shown} and takes you to the add-device screen so you can pair it again — use this if it was factory-reset or won’t come back online.`}
           confirmLabel="Remove & re-pair"
-          confirmedIdentifier={shown}
           variant="destructive"
           onConfirm={() => onRepair(device.nodeId)}
           onCancel={() => setConfirm(null)}
