@@ -75,6 +75,7 @@ function fakeNode(overrides: Record<string, unknown> = {}) {
     connectionState: NodeStates.Connected,
     events: { attributeChanged, stateChanged },
     decommission: vi.fn().mockResolvedValue(undefined),
+    triggerReconnect: vi.fn(),
     ...overrides,
   };
 }
@@ -480,6 +481,33 @@ describe("createMatterControllerCore", () => {
       const node = fakeNode();
       (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
       await expect(core.decommission("1")).resolves.toBe(true);
+    });
+  });
+
+  describe("reconnect (WARP-1469)", () => {
+    it("triggers a non-blocking reconnect on the paired node", async () => {
+      const node = fakeNode({ connectionState: NodeStates.Disconnected });
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await expect(core.reconnect("1")).resolves.toBe(true);
+      expect(node.triggerReconnect).toHaveBeenCalledOnce();
+    });
+
+    it("returns false without touching getNode when the node isn't commissioned", async () => {
+      // Same guard as decommission: an uncommissioned nodeId is the
+      // route's 404, not a matter.js getNode throw surfaced as a 500.
+      (controller.isNodeCommissioned as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      await expect(core.reconnect("1")).resolves.toBe(false);
+      expect(controller.getNode).not.toHaveBeenCalled();
+    });
+
+    it("does not decommission or remove the node — reconnect keeps the pairing", async () => {
+      const node = fakeNode({ connectionState: NodeStates.Disconnected });
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await core.reconnect("1");
+      expect(node.decommission).not.toHaveBeenCalled();
+      expect(controller.removeNode).not.toHaveBeenCalled();
     });
   });
 

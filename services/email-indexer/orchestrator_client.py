@@ -126,10 +126,15 @@ async def claim_draft(draft_id: str) -> bool:
     return False
 
 
-async def reconcile_stale_sending() -> int:
+async def reconcile_stale_sending() -> Optional[int]:
     """WARP-890: ask the orchestrator to fail-out drafts stranded in `sending`
     past the grace window (a claimed draft whose terminal callback never landed).
-    Best-effort — returns the count reconciled, or 0 on error."""
+    Best-effort — returns the count reconciled, or 0 on error.
+
+    WARP-1470: returns None (instead of a count) when the orchestrator reports the
+    email module is disabled (404 {"error":"module_disabled"}), so the caller can
+    pause the outbound pump instead of hammering a gated route every tick.
+    """
     headers = _auth_headers()
     if headers is None:
         return 0
@@ -145,5 +150,11 @@ async def reconcile_stale_sending() -> int:
             return int(resp.json().get("reconciled", 0))
         except Exception:  # noqa: BLE001
             return 0
+    if resp.status_code == 404:
+        try:
+            if resp.json().get("error") == "module_disabled":
+                return None
+        except Exception:  # noqa: BLE001
+            pass
     logger.warning("reconcile-stale-sending non-2xx: status=%d", resp.status_code)
     return 0
