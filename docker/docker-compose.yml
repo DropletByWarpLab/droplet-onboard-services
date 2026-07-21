@@ -1567,6 +1567,10 @@ services:
       - WEB_FETCH_SERVICE_TOKEN=${WEB_FETCH_SERVICE_TOKEN:-}
     profiles: ["web"]
     restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${WEB_FETCH_MEM_LIMIT:-256m}
+    cpus: ${WEB_FETCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
