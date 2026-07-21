@@ -1398,6 +1398,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           ) {
             return false;
           }
+          // Spec §3 — a TOOL_NOW_AVAILABLE heal means selection filtered the
+          // tool out; it was never actually dispatched, so it must not read
+          // as "the tool kept failing" either.
+          if (
+            typeof r.error === "object" &&
+            r.error !== null &&
+            (r.error as { code?: unknown }).code === "TOOL_NOW_AVAILABLE"
+          ) {
+            return false;
+          }
           // Handler envelopes report status:"error" / ok:false; the
           // dispatch-throw path (ORCH-05) reports a string `error`.
           // confirmation_required is a UX pause, not a failure.

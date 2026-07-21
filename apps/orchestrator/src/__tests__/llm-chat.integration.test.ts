@@ -238,6 +238,62 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.body.error).toContain("empty_completion");
   });
 
+  it("non-streaming rewrites a blank context_budget finalize even with prior tool activity (agent-budgets)", async () => {
+    // The §2 guard can finalize BLANK after real tool activity earlier in
+    // the turn: a huge transcript trips the guard on iteration 1, the
+    // finalize pass (zero tools) then answers with nothing. The pre-fix
+    // WARP-854 gate required an EMPTY trace to rewrite, so this exact case
+    // — a non-empty trace, blank final content, stop_reason context_budget
+    // — used to persist as a silent "completed" empty bubble.
+    mockChat
+      .mockResolvedValueOnce({
+        // iter 0 — the model dispatches a real, advertised tool.
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_budget",
+                    type: "function",
+                    function: { name: "list_network_devices", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        // iter 1 — the §2 guard has already fired (finalize pass: zero
+        // tools), and the model answers with nothing.
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "" } }],
+        }),
+      });
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "ollama/qwen3",
+        messages: [
+          // Comfortably over the default 16384-window guard threshold
+          // (~55k chars) on its own, so the guard fires on iteration 1
+          // regardless of the (small, fail-open in this test harness)
+          // system-prompt overhead.
+          { role: "user", content: "x".repeat(70000) },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.stop_reason).toBe("error");
+    expect(res.body.error).toContain("empty_completion");
+  });
+
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
     mockChat
       .mockResolvedValueOnce({

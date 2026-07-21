@@ -99,6 +99,39 @@ describe("runAgent — tool selection (spec §3)", () => {
     expect(result.message.content).toBe("done");
   });
 
+  it("a healed-then-dispatched tool is not named as a failing tool on iteration_limit (TOOL_NOW_AVAILABLE exclusion)", async () => {
+    const callControl = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "c1",
+          type: "function",
+          function: { name: "control_device", arguments: "{}" },
+        },
+      ],
+    };
+    // maxIter 2: iter 0 heals (no dispatch, TOOL_NOW_AVAILABLE trace entry);
+    // iter 1 dispatches successfully but is ALSO the last iteration (the
+    // response is still a tool_calls turn, never a plain answer), so the
+    // loop exhausts and falls into the WARP-1012 honest-fallback path.
+    const { deps, chat, callTool } = makeDeps([callControl, callControl]);
+    const result = await runAgent(deps, {
+      model: "m",
+      // "hello there" matches no rule → core-only advertisement.
+      messages: [{ role: "user", content: "hello there" }],
+      tool_selection_mode: "domains",
+      max_iter: 2,
+    });
+    expect(toolNames(chat.mock.calls[0]![0])).not.toContain("control_device");
+    expect(toolNames(chat.mock.calls[1]![0])).toContain("control_device");
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(result.stop_reason).toBe("iteration_limit");
+    // The heal was never a real failure and the real dispatch succeeded —
+    // the fallback text must not single out control_device as a failing tool.
+    expect(result.message.content).not.toContain("control_device");
+  });
+
   it("selection never resurrects a tool outside allowed_tools", async () => {
     const { deps, chat } = makeDeps([{ role: "assistant", content: "hi" }]);
     await runAgent(deps, {
