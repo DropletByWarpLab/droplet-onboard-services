@@ -43,6 +43,12 @@ import moveFile from "./handlers/files/move-file.js";
 import copyFile from "./handlers/files/copy-file.js";
 // WARP-1426: summarize a file via the orchestrator's single-turn completion
 import summarizeFile from "./handlers/files/summarize-file.js";
+// WARP-1456/1458: document tools — versions (list/restore), public share,
+// and empty docx/xlsx creation from committed OOXML seed templates.
+import listFileVersions from "./handlers/files/list-file-versions.js";
+import restoreFileVersion from "./handlers/files/restore-file-version.js";
+import shareFile from "./handlers/files/share-file.js";
+import createDocument from "./handlers/files/create-document.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -227,6 +233,12 @@ const allTools: Tool[] = [
   copyFile,
   // WARP-1426: file summarization (read_file semantics + /api/llm/complete)
   summarizeFile,
+  // WARP-1456: versions + share (restore/share Tier-2 confirm); WARP-1458:
+  // create_document (Write-tier). Depend on the WARP-1460 upload-route fix.
+  listFileVersions,
+  restoreFileVersion,
+  shareFile,
+  createDocument,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,

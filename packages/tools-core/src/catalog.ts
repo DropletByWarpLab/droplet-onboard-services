@@ -103,6 +103,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "move_file",
     "copy_file",
     "summarize_file",
+    "list_file_versions",
+    "restore_file_version",
+    "share_file",
+    "create_document",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -265,6 +269,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   move_file: "Move a file or folder somewhere else",
   copy_file: "Make a copy of a file or folder",
   summarize_file: "Get a quick summary of one of your files",
+  list_file_versions: "See previous saved versions of a file",
+  restore_file_version: "Roll a file back to an earlier version",
+  share_file: "Create a shareable link to a file",
+  create_document: "Create a new blank Word doc or spreadsheet",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",

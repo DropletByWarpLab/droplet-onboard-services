@@ -180,12 +180,13 @@ describe("WARP-861 — files routes for the mcp service principal", () => {
   });
 
   it("keeps plain requireRole routes closed to the service principal", async () => {
-    // /files/share is NOT tool-reachable and stays human-only.
+    // Empty-trash is NOT tool-reachable and stays human-only. (POST
+    // /files/share moved off this pin when WARP-1456 made it a share_file
+    // tool route — see files-share-versions-mcp-guards.test.ts.)
     const res = await request(buildApp(MCP))
-      .post("/api/files/share")
+      .delete("/api/files/trash")
       .set("X-Nextcloud-Token", "nct-user-cred")
-      .set("X-Nextcloud-User", "alice")
-      .send({ path: "/x" });
+      .set("X-Nextcloud-User", "alice");
     expect(res.status).toBe(403);
   });
 });

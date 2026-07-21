@@ -151,6 +151,11 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1452 — PIM search (both Tier-1, pure prisma)
   "search_calendar_events",
   "search_contacts",
+  // WARP-1456 — file versions + share; WARP-1458 — create_document
+  "list_file_versions",
+  "restore_file_version",
+  "share_file",
+  "create_document",
 ];
 
 describe("TOOLS registry", () => {
@@ -286,6 +291,16 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("search_calendar_events")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("search_contacts")?.requiresWrite).toBe(false);
     expect(TOOLS.get("search_contacts")?.requiresConfirmation).toBe(false);
+    // WARP-1456 — list is Tier-1; restore + share are Tier-2 (destructive/
+    // public-link footgun). WARP-1458 — create_document is a plain write.
+    expect(TOOLS.get("list_file_versions")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_file_versions")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("restore_file_version")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("restore_file_version")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("share_file")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("share_file")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("create_document")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("create_document")?.requiresConfirmation).toBe(false);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
