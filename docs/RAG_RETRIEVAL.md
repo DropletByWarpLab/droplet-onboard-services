@@ -485,7 +485,8 @@ The spec gates that activate once baselines exist:
 ### Production wiring status
 
 The agent loop's `EnhancementDeps` is wired in production behind the
-`WARP_437_ENHANCEMENT_ENABLED=1` feature flag (default OFF). When the
+`QUERY_ENHANCEMENT_ENABLED=1` feature flag (default OFF; named
+`WARP_437_ENHANCEMENT_ENABLED` before 2026-07). When the
 flag is unset or any value other than `"1"`, `createEnhancementDeps` in
 `apps/orchestrator/src/services/query-enhancement.service.ts` returns
 `undefined` and the agent loop runs byte-for-byte the WARP-286 path.
