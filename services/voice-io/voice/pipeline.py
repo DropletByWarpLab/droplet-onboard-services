@@ -65,13 +65,14 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import numpy as np
 
 from voice.activity import ActivityReporter
 from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
+from voice.text_chunk import SentenceChunker
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
@@ -154,13 +155,16 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
     # may stand alone or take an optional "there" suffix ("hi there",
     # "hello there", "hey there") — applied uniformly to all three so a
     # new greeting word can't be added on one branch but forgotten on
-    # the other. The optional wake-word prefix ("hey jarvis", "hey
-    # droplet") matches the way users naturally re-trigger after the
-    # wake fires.
+    # the other. The wake-word address may be spoken WITH an optional
+    # "hey"/"hello" ("hey droplet", "hello jarvis") OR bare ("droplet") —
+    # the box now wakes on a bare "droplet" too (WARP-1431), so someone
+    # who woke it that way and just says "droplet" is answered from the
+    # persona rather than routed to a tool. Applied uniformly to the
+    # three address words for the same forget-a-branch reason.
     re.compile(
         r"^\s*((hi|hello|hey)(\s+there)?|yo|sup|"
-        r"hey\s+(jarvis|droplet|assistant)|"
-        r"hello\s+(jarvis|droplet|assistant))"
+        r"(hey|hello)\s+(jarvis|droplet|assistant)|"
+        r"(jarvis|droplet|assistant))"
         r"[\s!.,?]*$",
         re.IGNORECASE,
     ),
@@ -171,10 +175,12 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"[\s!.,?]*$",
         re.IGNORECASE,
     ),
-    # Liveness check-ins: "can you hear me?" / "are you there?" with
-    # optional wake-word prefix.
+    # Liveness check-ins: "can you hear me?" / "are you there?" with an
+    # optional wake-word address prefix — "hey" is itself optional so a
+    # bare "droplet, are you there" works alongside "hey droplet, are you
+    # there" (WARP-1431).
     re.compile(
-        r"^\s*(hey\s+(jarvis|droplet|assistant)[,\s]+)?"
+        r"^\s*((hey\s+)?(jarvis|droplet|assistant)[,\s]+)?"
         r"(can you hear me|are you there|you there|are you listening|"
         r"do you hear me|hello\?\s*are you there)"
         r"[\s!.,?]*$",
@@ -201,9 +207,12 @@ _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     # Who-are-you / capability queries that the persona prompt already
-    # answers.
+    # answers — with the same optional wake-word address prefix so
+    # "droplet, who are you" / "hey droplet, what can you do" are gated
+    # too (WARP-1431).
     re.compile(
-        r"^\s*(who are you|what(?:'s|s| is)? your name|"
+        r"^\s*((hey\s+)?(jarvis|droplet|assistant)[,\s]+)?"
+        r"(who are you|what(?:'s|s| is)? your name|"
         r"what are you|what can you do|"
         r"are you (jarvis|droplet|an assistant|there))"
         r"[\s!.,?]*$",
@@ -247,12 +256,16 @@ def transcript_is_actionable(transcript: str) -> bool:
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 3.0  # hard cap on captured audio per wake. The
+DEFAULT_STT_MAX_RECORD_S = 5.0  # hard cap on captured audio per wake. The
                                 # end-of-speech VAD cuts sooner when the room
                                 # goes quiet; this cap guarantees the capture
                                 # always stops (e.g. in a room with continuous
                                 # background audio where no silence is ever
-                                # detected). Overridable via STT_MAX_RECORD_S.
+                                # detected). WARP-1434: this 5.0 is the SINGLE
+                                # source of truth — compose, the README, and
+                                # the overview doc all ship 5.0 and the box
+                                # runs 5.0; the old 3.0 code default was drift.
+                                # Overridable via STT_MAX_RECORD_S.
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Calibration mode (WARP-1059, from WARP-1055 review F6). While the
 # dashboard wizard measures (noise floor / speech peak / echo / wake
@@ -287,7 +300,12 @@ DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 # their statement instead of always holding the mic for the full
 # max-record window. Energy-based on frame RMS; the max-record window
 # stays the hard cap for noisy rooms where a clean silence never arrives.
-DEFAULT_VAD_SILENCE_S = 1.0       # trailing silence (s) that ends the turn
+DEFAULT_VAD_SILENCE_S = 0.6       # trailing silence (s) that ends the turn.
+                                  # WARP-1434: trimmed 1.0 → 0.6 — a full
+                                  # second of dead air used to end every turn;
+                                  # 0.6 s still rides out a natural pause but
+                                  # stops promptly once the speaker finishes.
+                                  # Overridable per-room via VAD_SILENCE_S.
 DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech"
                                   # (sits between a typical room floor ~400
                                   # and normal speech ~1000+; tune per-room
@@ -1075,6 +1093,191 @@ class WakePipeline:
                     else "listening"
                 )
             self._speak_ended_at = time.time()
+
+    # ──────────────────────────────────────────────────────────────
+    # Streaming speak — synthesize + play sentence chunks as ONE utterance
+    # (WARP-626)
+    # ──────────────────────────────────────────────────────────────
+
+    def _speak_chunks(
+        self, chunks: Iterable[str], voice: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Synthesize + play a STREAM of sentence chunks as ONE utterance.
+
+        The multi-sentence sibling of speak(). Everything the shared
+        reSpeaker mic/speaker needs is held ONCE for the whole utterance,
+        never per-sentence:
+
+          * ONE non-blocking `_speak_lock` acquire — a concurrent
+            POST /voice/say (or a second wake→speak) sees `already_speaking`,
+            not a per-sentence race.
+          * State goes to 'speaking' on the first real sentence and stays
+            there until the last; the pipeline thread is busy here so wake
+            detection can't run, and status() reports 'speaking' throughout.
+          * `_speak_ended_at` is stamped ONCE at the true end, so the 2 s
+            post-speak cooldown fires once after the LAST sentence.
+
+        Playback is SEQUENTIAL per sentence (synth 1 → play 1 → synth 2 →
+        play 2 …): first-audio starts right after sentence 1 — the WARP-626
+        win — at the cost of a minor inter-sentence synth gap. A
+        producer/consumer overlap (synthesize N+1 while N plays) is a
+        localized future swap of the play loop below; the load-bearing
+        lock/state/cooldown guards live here, not per-sentence, so that
+        swap stays safe.
+
+        `chunks` is consumed lazily and MAY raise LLMUnavailable mid-stream
+        (the SSE broke) — that's surfaced like a synth failure. Returns a
+        result dict: ok / duration_s / spoke_any / error / error_kind.
+        """
+        if self._tts is None or not self._tts_available:
+            return {
+                "ok": False, "error": "TTS unavailable",
+                "duration_s": 0.0, "spoke_any": False,
+            }
+        # ONE lock for the WHOLE utterance. Non-blocking so a second speaker
+        # never queues audio to play out of order (same contract as speak()).
+        if not self._speak_lock.acquire(blocking=False):
+            return {
+                "ok": False, "error": "already_speaking",
+                "duration_s": 0.0, "spoke_any": False,
+            }
+        try:
+            return self._run_speak_chunks(chunks, voice)
+        finally:
+            self._speak_lock.release()
+
+    def _run_speak_chunks(
+        self, chunks: Iterable[str], voice: Optional[str],
+    ) -> dict[str, Any]:
+        """Drive the sequential synth→play loop under the already-held
+        `_speak_lock`. Caller (`_speak_chunks`) owns the lock lifecycle."""
+        prev_state: Optional[PipelineState] = None  # None until first chunk
+        spoke_any = False
+        drove_speaker = False
+        total_duration = 0.0
+        spoken: list[str] = []
+        first_error: Optional[BaseException] = None
+        error_kind: Optional[str] = None
+        # Iterate through a handle we can explicitly close: if we bail out
+        # mid-utterance (TTS/playback failure), closing the chunk generator
+        # propagates GeneratorExit into reply_stream, which tears down the
+        # in-flight SSE — the orchestrator then sees the client disconnect
+        # and ABORTS its agent loop (WARP-329) instead of finishing a reply
+        # nobody will hear. On normal completion the generator is already
+        # exhausted, so close() is a no-op.
+        chunk_iter = iter(chunks)
+        try:
+            try:
+                for chunk in chunk_iter:  # may raise LLMUnavailable (SSE broke)
+                    text = chunk.strip() if chunk else ""
+                    if not text:
+                        continue
+                    if self._shutdown.is_set():
+                        break
+                    # Enter 'speaking' on the FIRST real sentence; hold it for
+                    # the rest of the utterance (don't restore between them).
+                    if prev_state is None:
+                        with self._lock:
+                            prev_state = self._state
+                            self._state = "speaking"
+                    try:
+                        audio = self._tts.synthesize(text, voice=voice)
+                    except TTSUnavailable as exc:
+                        first_error, error_kind = exc, "tts"
+                        break
+                    spoken.append(text)
+                    with self._lock:
+                        self._last_response = " ".join(spoken)
+                        self._last_response_at = time.time()
+                    if not audio.pcm:
+                        continue
+                    drove_speaker = True
+                    try:
+                        self._play_pcm(audio)
+                    except Exception as exc:  # noqa: BLE001 — surfaced below
+                        first_error, error_kind = exc, "playback"
+                        break
+                    spoke_any = True
+                    total_duration += audio.duration_s
+            except LLMUnavailable as exc:
+                first_error, error_kind = exc, "llm"
+
+            if first_error is None:
+                # Success (possibly empty — nothing streamed). Restore state +
+                # arm the single post-speak cooldown, only if we actually spoke.
+                self._finish_utterance(prev_state, spoke=spoke_any)
+                return {
+                    "ok": True, "duration_s": total_duration, "spoke_any": spoke_any,
+                }
+
+            # Error path: surface it, and arm the cooldown if we drove the
+            # speaker at all — even a partial reply can bleed into the shared
+            # mic (same contract as speak()'s mid-playback failure).
+            self._set_error(f"voice reply failed ({error_kind}): {first_error}")
+            if drove_speaker:
+                with self._lock:
+                    self._speak_ended_at = time.time()
+            return {
+                "ok": False,
+                "error": str(first_error),
+                "error_kind": error_kind,
+                "duration_s": total_duration,
+                "spoke_any": spoke_any,
+            }
+        finally:
+            close = getattr(chunk_iter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # pragma: no cover — defensive teardown
+                    logger.debug("chunk generator close raised", exc_info=True)
+
+    def _finish_utterance(
+        self, prev_state: Optional[PipelineState], *, spoke: bool,
+    ) -> None:
+        """Close out a successful utterance: restore the pre-speak state and
+        stamp the SINGLE post-speak cooldown. No-op when nothing was spoken
+        (prev_state is None → we never entered 'speaking', so there's no
+        state to restore and no TTS bleed to guard against)."""
+        if prev_state is None:
+            return
+        with self._lock:
+            if self._state == "speaking":
+                self._state = (
+                    prev_state if prev_state in ("listening", "transcript_ready")
+                    else "listening"
+                )
+            if spoke:
+                self._speak_ended_at = time.time()
+
+    def _speak_reply_stream(
+        self, transcript: str, *, tool_choice: Optional[ToolChoice],
+    ) -> dict[str, Any]:
+        """Stream the LLM reply → sentence-chunk it → speak each chunk as a
+        single utterance (WARP-626). The generator pulls SSE deltas lazily
+        and feeds them through a SentenceChunker, so sentence 1 is
+        synthesized + played while later sentences are still arriving. When
+        the LLM delivers the whole reply in one delta (today's reality),
+        the chunker still splits it into sentences so playback of sentence 1
+        starts before the rest is synthesized."""
+        def _chunks() -> Iterator[str]:
+            chunker = SentenceChunker()
+            stream = self._llm.reply_stream(transcript, tool_choice=tool_choice)
+            try:
+                for delta in stream:
+                    for sentence in chunker.push(delta):
+                        yield sentence
+                for sentence in chunker.flush():
+                    yield sentence
+            finally:
+                # Close the SSE explicitly (not via GC) so an early bail-out
+                # tears the orchestrator stream down deterministically — see
+                # the WARP-329 note in _run_speak_chunks.
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+
+        return self._speak_chunks(_chunks())
 
     # ──────────────────────────────────────────────────────────────
     # Calibration live-apply (WARP-1055)
@@ -2035,35 +2238,25 @@ class WakePipeline:
             logger.info(
                 "intent gate matched (no tools): transcript=%r", transcript,
             )
-        try:
-            reply = self._llm.reply(transcript, tool_choice=tool_choice)
-        except LLMUnavailable as exc:
-            self._set_error(f"LLM call failed: {exc}")
-            logger.warning("LLM call failed for transcript %r: %s", transcript, exc)
-            self._emit_activity(
-                "wake_heard",
-                score=wake_score, threshold=self._threshold, model=wake_model,
+        # WARP-626 — stream the reply, sentence-chunk it, and speak each
+        # chunk so first-audio starts after sentence 1 instead of after the
+        # whole reply is synthesized. `_speak_reply_stream` owns the LLM
+        # stream + chunker + single-utterance speak: ONE `_speak_lock` hold,
+        # ONE 'speaking' state, ONE post-speak cooldown. It catches
+        # LLMUnavailable (SSE broke) + TTS/playback failures and surfaces
+        # them via /voice/status, so the wake loop keeps running.
+        result = self._speak_reply_stream(transcript, tool_choice=tool_choice)
+        spoke = bool(result.get("ok") and result.get("spoke_any"))
+        if not spoke and result.get("error"):
+            logger.warning(
+                "voice reply for %r did not complete (%s): %s",
+                transcript, result.get("error_kind"), result.get("error"),
             )
-            return
-
-        if not reply:
-            logger.info("LLM returned empty reply for %r", transcript)
-            self._emit_activity(
-                "wake_heard",
-                score=wake_score, threshold=self._threshold, model=wake_model,
-            )
-            return
-
-        # Speak the reply. speak() handles its own state transitions +
-        # last_response field + post-speak state restoration.
-        result = self.speak(reply)
-        if not result.get("ok"):
-            logger.warning("speak after LLM reply failed: %s", result.get("error"))
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
-        # actually HEARD a reply; a failed playback is honestly just
-        # "Heard the wake word" (the fault itself surfaces via
+        # actually HEARD a reply; a failed / empty / rejected reply is
+        # honestly just "Heard the wake word" (the fault itself surfaces via
         # error_message / health, not the feed).
         self._emit_activity(
-            "wake_answered" if result.get("ok") else "wake_heard",
+            "wake_answered" if spoke else "wake_heard",
             score=wake_score, threshold=self._threshold, model=wake_model,
         )

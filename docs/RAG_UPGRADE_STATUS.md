@@ -14,8 +14,9 @@ an explicit descriptive name — e.g. "WARP-438 CRAG-lite retrieval grading", no
 "Phase 4" or "ADR-003 Phase 4". The phase numbers below exist only to map onto
 the ADR's structure; always name the work for what it does.
 
-_Last updated: 2026-05-29 (after WARP-437 query enhancement merged + the
-`services/rag-eval/` evaluation service shipped)._
+_Last updated: 2026-07-19 (after the WARP-1406/WARP-1407 rag-eval appliance
+pipeline landed and the first real RAGAS baselines were committed to
+`tests/retrieval-eval/ragas/baselines.json`)._
 
 ---
 
@@ -30,11 +31,12 @@ infrastructure that gates them.
 | # | Work (WARP ticket) | State | Where |
 |---|---|---|---|
 | 1 | Ingest enrichment — sentence-aware chunking + contextual headers ([WARP-435](https://warp-lab.atlassian.net/browse/WARP-435)) | **Merged** (batch C deferred) | `services/file-indexer/chunker.py`, `extractors/*.py` |
-| 2 | RAGAS evaluation harness ([WARP-436](https://warp-lab.atlassian.net/browse/WARP-436)) | **Merged**; baselines still placeholder | `tests/retrieval-eval/ragas/` |
+| 2 | RAGAS evaluation harness ([WARP-436](https://warp-lab.atlassian.net/browse/WARP-436)) | **Done** — real baselines committed 2026-07-20 | `tests/retrieval-eval/ragas/` |
 | 3 | Query enhancement — HyDE + multi-query + adaptive routing ([WARP-437](https://warp-lab.atlassian.net/browse/WARP-437)) | **Merged** ([#271](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/271)), shipping dark | orchestrator + mcp-server + ai-gateway + tools-core |
-| 4 | CRAG-lite retrieval grading ([WARP-438](https://warp-lab.atlassian.net/browse/WARP-438)) | **To Do** — unblocked once baselines land | not started |
+| 4 | CRAG-lite retrieval grading ([WARP-438](https://warp-lab.atlassian.net/browse/WARP-438)) | **To Do** — unblocked, next to start | not started |
 | 5 | Multimodal — VLM caption-first indexing ([WARP-439](https://warp-lab.atlassian.net/browse/WARP-439)) | **To Do** — cross-repo blocker | not started |
 | — | Evaluation service (runs the harness on the appliance) | **Merged** ([#299](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/299)) | `services/rag-eval/` |
+| — | rag-eval appliance pipeline + first real baselines ([WARP-1406](https://warp-lab.atlassian.net/browse/WARP-1406) / [WARP-1407](https://warp-lab.atlassian.net/browse/WARP-1407)) | **Merged** ([#1140](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1140), [#1144](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1144), [#1151](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1151), [#1152](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1152)) | `services/rag-eval/`, `tests/retrieval-eval/ragas/baselines.json` |
 
 ---
 
@@ -50,16 +52,22 @@ dev laptop. No code blocker; it's a verification step.
 
 Docs: [`docs/RAG_RETRIEVAL.md` § "Ingest enrichment"](RAG_RETRIEVAL.md).
 
-### 2. RAGAS evaluation harness — WARP-436 — Merged (baselines pending)
+### 2. RAGAS evaluation harness — WARP-436 — Done
 
 Adds faithfulness / context-precision / context-recall / answer-relevancy /
 factual-correctness on top of NDCG@10, judged by a local Ollama model (or cloud
-opt-in). Shipped batches A/B/C/E. **Batch D** — populating
-`tests/retrieval-eval/ragas/baselines.json` with real envelopes — was the one
-remaining piece. It is no longer blocked on CI: the `services/rag-eval/` service
-(below) populates it with a single `bootstrap --runs 5` command on the
-appliance. Until that runs, the file holds all-zero floors and the integration
-test treats them as "recording mode" (logs metrics, asserts nothing).
+opt-in). All batches have landed. **Batch D** — populating
+`tests/retrieval-eval/ragas/baselines.json` with real envelopes — completed on
+2026-07-20 via the WARP-1406/WARP-1407 rag-eval appliance pipeline (see
+"Evaluation infrastructure" below): envelopes over 8 cross-session runs on the
+seeded eval-fixtures corpus, floors `context_recall` 0.28 /
+`llm_context_precision_with_reference` 0.28 / `faithfulness` 0.16
+(`factual_correctness` 0.0 at this corpus stage), computed with the WARP-1407
+containment clamp (floor never exceeds min sample mean − 0.02). The
+`RAGAS_ENABLED=1` integration test enforces these floors automatically now
+that the file exists — recording mode is over for the top-level RAGAS
+assertions. (The per-class WARP-437 NDCG test is a separate, still-recording
+gate — see phase 3.)
 
 Docs: [`docs/RAG_TESTING.md` § "RAGAS metrics"](RAG_TESTING.md).
 
@@ -80,7 +88,11 @@ Orchestrator computes enhancement and threads it to retrieval via the MCP
    byte-for-byte.
 2. **Per-class eval gates are in recording mode.** The per-class NDCG/RAGAS
    assertions in `tests/retrieval-eval/run.integration.test.ts` log deltas but
-   don't fail, pending real baselines (see phase 2).
+   don't fail. Real baselines have now landed (see phase 2), so flipping these
+   assertions to enforcing is the next actionable step — see "Critical path"
+   below. Note that `envelopes_by_class` in `baselines.json` currently covers
+   only the `factual` class; the flip likely needs a per-class envelope
+   backfill for the other classes first.
 
 Docs: [`docs/RAG_RETRIEVAL.md` § "Query enhancement"](RAG_RETRIEVAL.md),
 design spec + plan under `docs/superpowers/` (see "Pointers" below).
@@ -88,11 +100,10 @@ design spec + plan under `docs/superpowers/` (see "Pointers" below).
 ### 4. CRAG-lite retrieval grading — WARP-438 — To Do
 
 A `cross-encoder/ms-marco-MiniLM` grader between retrieval and generation, with a
-multi-query re-query fallback on low-confidence verdicts (no web search). **Hard
-blockers:** WARP-436 baselines (faithfulness gate) + WARP-437 (multi-query is the
-fallback). WARP-437 is now merged, so the only remaining blocker is the
-baselines — which the eval service unblocks. Once baselines land, this is the
-next phase to start.
+multi-query re-query fallback on low-confidence verdicts (no web search). **Both
+hard blockers are cleared:** WARP-437 query enhancement is merged, and the
+WARP-436 baselines landed on 2026-07-20 via the WARP-1406/WARP-1407 rag-eval
+appliance pipeline. This is the next phase to start.
 
 The WARP-437 work left reusable foundations for it: `multiQueryExpand`, the
 lazy-singleton gRPC pattern (`services/ai-gateway/query_classifier.py` is the
@@ -127,40 +138,60 @@ eval lives in a service. Opt-in via Compose profile `eval`.
 
 Service docs: [`services/rag-eval/README.md`](../services/rag-eval/README.md).
 
-### In-flight follow-ups on the eval service
+### Follow-ups on the eval service — all merged
 
 | Ticket | What | PR | State |
 |---|---|---|---|
-| [WARP-519](https://warp-lab.atlassian.net/browse/WARP-519) | HTTP trigger + orchestrator proxy + dashboard for ad-hoc runs | [#315](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/315) | In review |
-| [WARP-520](https://warp-lab.atlassian.net/browse/WARP-520) | Stream subprocess output instead of buffering | [#312](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/312) | In review |
-| [WARP-521](https://warp-lab.atlassian.net/browse/WARP-521) | Unit tests for `aggregate_runs()` quantile/IQR/floor math | [#313](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/313) | In review |
+| [WARP-519](https://warp-lab.atlassian.net/browse/WARP-519) | HTTP trigger + orchestrator proxy + dashboard for ad-hoc runs | [#315](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/315) | **Merged** |
+| [WARP-520](https://warp-lab.atlassian.net/browse/WARP-520) | Stream subprocess output instead of buffering | [#312](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/312) | **Merged** |
+| [WARP-521](https://warp-lab.atlassian.net/browse/WARP-521) | Unit tests for `aggregate_runs()` quantile/IQR/floor math | [#313](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/313) | **Merged** |
 
-These three touch disjoint files and merge in any order.
+### Appliance pipeline hardening + first real baselines — WARP-1406 / WARP-1407
+
+Landed 2026-07-19/20, closing the program's last gating artifact:
+
+- **WARP-1406 appliance RAGAS run fixes**
+  ([#1140](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1140)) —
+  service-token auth for the runner's orchestrator calls + durable run records,
+  so unattended appliance runs work and their results stay visible afterwards.
+- **WARP-1407 eval-fixture seeding**
+  ([#1144](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1144)) —
+  one-command seeded corpus (`scripts/seed-eval-fixtures.sh`,
+  `RAGAS_EVAL_USER=eval-fixtures`) so every run scores the same 20-query corpus.
+- **First real baselines promoted**
+  ([#1151](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1151)),
+  then **re-baselined with the containment clamp**
+  ([#1152](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1152))
+  after the initial back-to-back-only envelopes proved overtight (IQR ~0 made
+  ordinary judge variance "fail" the floors). `baselines.json` now carries
+  envelopes over 8 cross-session runs; floor = max(0, min(p50 − 1.5 × IQR,
+  min sample mean − 0.02)).
 
 ---
 
 ## Critical path — what to do next
 
-The whole program is currently gated on **one artifact: a populated
-`baselines.json`**. The ordered path to keep moving:
+The artifact the whole program was gated on — a populated
+`tests/retrieval-eval/ragas/baselines.json` — **landed on 2026-07-20**
+(8 cross-session appliance runs via the WARP-1406/WARP-1407 rag-eval pipeline,
+committed in [#1151](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1151)
+/ [#1152](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/1152)).
+The top-level RAGAS floor assertions enforce automatically now that the file
+exists. The ordered path from here:
 
-1. **Merge the eval-service follow-ups** (WARP-519 / 520 / 521) — all in review,
-   no conflicts.
-2. **Deploy the eval service on the test/staging appliance:** set
-   `COMPOSE_PROFILES=...,eval`, bring up `rag-eval`, run
-   `bootstrap --runs 5`, copy the resulting `baselines.candidate.json` to
-   `tests/retrieval-eval/ragas/baselines.json`, commit it (PR titled
-   `chore(rag-eval): rebaseline RAGAS — initial baselines`).
-3. **Flip WARP-437's per-class gates out of recording mode** — once baselines
-   exist, change the assertions in
-   `tests/retrieval-eval/run.integration.test.ts` from logging to enforcing
+1. **Flip WARP-437's per-class gates out of recording mode** — change the
+   per-class assertions in `tests/retrieval-eval/run.integration.test.ts` from
+   logging to enforcing
    (`short ≥ baseline × 1.05`, `analytical context_recall ≥ baseline × 1.10`,
    `conversational must not regress`, full corpus `≥ baseline × 1.03`).
-4. **Turn on WARP-437 enhancement in production** — set
+   `envelopes_by_class` in `baselines.json` currently covers only the
+   `factual` class — backfill the other classes' envelopes as part of this.
+2. **Turn on WARP-437 enhancement per environment** — set
    `WARP_437_ENHANCEMENT_ENABLED=1` on the target environment + recreate the
    orchestrator. Watch the next eval runs for per-class deltas.
-5. **Start WARP-438 CRAG-lite** — now fully unblocked.
-6. **WARP-439 multimodal** — independent; start whenever `droplet-local-LLM`
+3. **Start WARP-438 CRAG-lite retrieval grading** — now fully unblocked (both
+   hard blockers cleared).
+4. **WARP-439 multimodal** — independent; start whenever `droplet-local-LLM`
    lands the `moondream` pre-pull.
 
 A separate, low-priority cleanup: WARP-435 batch C (live re-index + NDCG gate)
