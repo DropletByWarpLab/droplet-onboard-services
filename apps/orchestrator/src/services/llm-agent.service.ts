@@ -807,6 +807,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   let toolSchemasJsonLen = JSON.stringify(tools).length;
   let finalizeReason: "context_budget" | "repetition" | null = null;
 
+  // Spec §4 — repetition early-stop. Key = tool name + canonicalized args
+  // (sorted keys, so {"a":1,"b":2} and {"b":2,"a":1} collide as intended).
+  const executedCallCounts = new Map<string, number>();
+  const canonicalCallKey = (
+    name: string,
+    args: Record<string, unknown>,
+  ): string => `${name}:${JSON.stringify(args, Object.keys(args).sort())}`;
+
   // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
   // iterations, so a model that keeps naming an unknown tool every turn
   // (ignoring the UNKNOWN_TOOL recovery message) would otherwise run the
@@ -1141,6 +1149,41 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         continue;
       }
 
+      // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
+      // call is neither a guard hit nor a real dispatch, so the WARP-642
+      // circuit breaker is unaffected.
+      const callKey = canonicalCallKey(call.function.name, args);
+      const priorCalls = executedCallCounts.get(callKey) ?? 0;
+      executedCallCounts.set(callKey, priorCalls + 1);
+      if (priorCalls >= 1) {
+        const nudge = {
+          status: "error" as const,
+          error: {
+            code: "REPEATED_CALL",
+            message:
+              `You already called '${call.function.name}' with these exact ` +
+              `arguments; its result is in the conversation above. Use that ` +
+              `result or answer the user — do not repeat the call.`,
+          },
+        };
+        trace.push({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          args,
+          result: nudge,
+        });
+        emit({ type: "tool_result", id: call.id, ok: false, data: nudge });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(nudge).slice(0, 8000),
+        });
+        if (priorCalls >= 2) {
+          finalizeReason = finalizeReason ?? "repetition";
+        }
+        continue;
+      }
+
       // FINDING 2 — emit the tool_call chip only AFTER the guard passes, so
       // guard-rejected (never-dispatched) calls don't render a misleading
       // chip on the dashboard. Guard hits still surface via their own
@@ -1304,6 +1347,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             | null
             | undefined;
           if (r === null || typeof r !== "object") return false;
+          // Spec §4 — a REPEATED_CALL nudge means the call was never
+          // re-dispatched this turn (its prior result already succeeded);
+          // it must not read as "the tool kept failing".
+          if (
+            typeof r.error === "object" &&
+            r.error !== null &&
+            (r.error as { code?: unknown }).code === "REPEATED_CALL"
+          ) {
+            return false;
+          }
           // Handler envelopes report status:"error" / ok:false; the
           // dispatch-throw path (ORCH-05) reports a string `error`.
           // confirmation_required is a UX pause, not a failure.
