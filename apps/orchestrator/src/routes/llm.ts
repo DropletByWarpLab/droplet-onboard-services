@@ -28,6 +28,11 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { decryptChunkRows } from "../services/file-search.service.js";
 import { probeColdModel } from "../services/model-readiness.service.js";
+import {
+  readActiveChatModel,
+  resolveActiveChatModel,
+  localModelIdentifiers,
+} from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -680,9 +685,29 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // already returns an empty local list on the same failure.
   router.get("/llm/models", async (_req, res, next) => {
     try {
+      // WARP-1112 — stamp the box's active local model as `defaultModel` on
+      // whatever list we return, so the dashboard chat can default its picker
+      // to it (instead of just "the first model in the list"). Merged fresh —
+      // NOT part of the cached object — so a PATCH /api/models/active takes
+      // effect on the next poll without a cache-invalidation dance. A
+      // settings-read hiccup degrades to `defaultModel: null`, never an error.
+      const stampDefault = async (
+        resp: ModelsResponse,
+      ): Promise<ModelsResponse> => {
+        try {
+          const active = resolveActiveChatModel(
+            await readActiveChatModel(prisma),
+            localModelIdentifiers(resp.models),
+          );
+          return { ...resp, defaultModel: active };
+        } catch {
+          return { ...resp, defaultModel: null };
+        }
+      };
+
       const cached = await cacheGet<ModelsResponse>(MODELS_CACHE_KEY);
       if (cached) {
-        res.json(cached);
+        res.json(await stampDefault(cached));
         return;
       }
 
@@ -709,7 +734,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // "can't reach the AI service", not "no model pulled yet".
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
         const empty: ModelsResponse = { models: [], degraded: true };
-        res.json(empty);
+        res.json(await stampDefault(empty));
         return;
       }
       // WARP-1284: the gateway answered, but reported that its LOCAL Ollama
@@ -725,11 +750,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,
         );
-        res.json({ ...models, degraded: true });
+        res.json(await stampDefault({ ...models, degraded: true }));
         return;
       }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
-      res.json(models);
+      res.json(await stampDefault(models));
     } catch (err) {
       next(err);
     }
@@ -1012,7 +1037,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       // WARP-437 follow-up — production-wire EnhancementDeps behind a
       // feature flag. `createEnhancementDeps` returns `undefined` unless
-      // `WARP_437_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
+      // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
       // default no-enhancement path runs (byte-for-byte WARP-286).
       // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
       // already canonicalised the env var name for the eval harness.

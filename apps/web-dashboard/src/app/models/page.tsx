@@ -1,17 +1,19 @@
 "use client";
 
 /**
- * WARP-836 — Models (`/models`)
+ * WARP-836 / WARP-1112 — Models (`/models`)
  *
- * A read-only status surface for the appliance's AI compute: the local LLMs
- * Ollama is serving, the opt-in cloud providers (off by default), and a small
- * strip of KPIs. Backs FEATURES.md §2.11.
+ * A status surface for the appliance's AI compute: the local LLMs Ollama is
+ * serving, the opt-in cloud providers (off by default), and a small strip of
+ * KPIs. Backs FEATURES.md §2.11.
  *
- * STATUS-ONLY by design (one-model rule, architecture-guard #13). There is no
- * pull / swap / benchmark / delete / "add model" control anywhere — the only
- * way a model changes is via setup.sh's .env, never a runtime click. The cloud
- * toggles are shown but DISABLED: enabling a provider is a Settings action (the
- * off-LAN allowlist) that logs to Activity and requires admin.
+ * WARP-1112 added the one write on this page: owners/admins can change the
+ * *active local model* (which installed model the box answers with by default)
+ * via the ActiveModelPicker → PATCH /api/models/active. It never pulls, swaps,
+ * benchmarks, or deletes — it only re-points chat at a model already on the box
+ * (the catalog/download story is separate). Members see the active model
+ * read-only. The cloud toggles remain shown-but-DISABLED: enabling a provider
+ * is a Settings action (the off-LAN allowlist) that logs to Activity.
  *
  * Honesty contract: metrics ai-gateway doesn't expose yet (per-model disk,
  * tokens/sec, role, GPU, average latency) render as "—"/"Unavailable", and
@@ -35,16 +37,27 @@ import { Cpu, ServerCrash, XCircle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge } from "@/components/shell/primitives";
 import { useModelsPage } from "@/lib/hooks/useModelsPage";
+import { useAuth } from "@/lib/auth";
 import { KpiStrip } from "@/components/models/KpiStrip";
 import { LocalModelCard } from "@/components/models/LocalModelCard";
+import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
 import { CloudProviderRow } from "@/components/models/CloudProviderRow";
 
-// Honesty-contract copy — verbatim, sets the read-only local-first framing.
+// Honesty-contract copy — local-first framing. Owners/admins can change the
+// active local model here (WARP-1112); members see it read-only.
 const SUB =
-  "The AI models your Droplet uses. Local inference runs on the box; cloud models are opt-in and off by default. This page is read-only.";
+  "The AI models your Droplet uses. Local inference runs on the box; cloud models are opt-in and off by default.";
+
+/** Owner/admin can change the active model; everyone else sees it read-only.
+ *  Mirrors the orchestrator's requireRole("owner","admin") on the write. */
+function isAdminRole(role?: string): boolean {
+  return role === "owner" || role === "admin";
+}
 
 export default function ModelsPage() {
   const { data, error, isLoading, refresh } = useModelsPage();
+  const { user } = useAuth();
+  const canManage = isAdminRole(user?.role);
 
   const icon = <Cpu size={15} />;
 
@@ -141,6 +154,20 @@ export default function ModelsPage() {
           localCount={local.length}
         />
 
+        {/* WARP-1112 — active-model selector. Only shown when we actually
+            know the installed set (not during an outage/empty state), so we
+            never render a picker over a list we couldn't read. */}
+        {!localEmpty && (
+          <ActiveModelPicker
+            models={local}
+            activeModel={data.activeModel ?? null}
+            canManage={canManage}
+            onChanged={() => {
+              void refresh();
+            }}
+          />
+        )}
+
         {/* Local section */}
         <section aria-labelledby="models-local-heading">
           <div className="sect">
@@ -196,7 +223,14 @@ export default function ModelsPage() {
               )}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {local.map((m) => (
-                  <LocalModelCard key={m.name} model={m} />
+                  <LocalModelCard
+                    key={m.name}
+                    model={m}
+                    canManage={canManage}
+                    onBenchmarked={() => {
+                      void refresh();
+                    }}
+                  />
                 ))}
               </div>
             </>

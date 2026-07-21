@@ -54,6 +54,16 @@ const NDCG_IMPROVEMENT_THRESHOLD = 1.1;
 /** Result depth for the metric. WARP-286 §Eval harness pins this. */
 const NDCG_K = 10;
 
+/**
+ * WARP-437 query-enhancement gates (design spec §Eval gate), enforced since
+ * the 2026-07-20 RAGAS baselines landed. The NDCG-expressible gates live in
+ * the per-class test; the analytical gate is RAGAS context_recall and lives
+ * in the RAGAS test (NDCG@10 cannot express it).
+ */
+const FACTUAL_ENHANCED_NDCG_GATE = 1.05;
+const FULL_CORPUS_ENHANCED_NDCG_GATE = 1.03;
+const ANALYTICAL_CONTEXT_RECALL_GATE = 1.1;
+
 interface RelevantMatch {
   source: "nextcloud" | "brain";
   path?: string;
@@ -244,19 +254,26 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
     );
   }, 600_000);
 
-  // WARP-437 — per-class NDCG@10, baseline vs enhanced. RECORDING MODE:
-  // logs deltas but does not enforce a gate until per-class envelopes are
-  // populated in tests/retrieval-eval/ragas/baselines.json. The 20-minute
-  // timeout accommodates 65 queries × 2 passes; the enhanced pass runs an
-  // LLM call per query on local Ollama.
-  it("per-class NDCG@10 — baseline vs enhanced (WARP-437 recording mode)", async () => {
+  // WARP-437 — per-class NDCG@10, baseline vs enhanced. ENFORCING since the
+  // 2026-07-20 RAGAS baselines landed: factual ≥ ×1.05, conversational must
+  // not regress, full corpus ≥ ×1.03 (design spec §Eval gate). The
+  // analytical gate is RAGAS context_recall (≥ ×1.10) and lives in the
+  // RAGAS test below. The 20-minute timeout accommodates 65 queries × 2
+  // passes; the enhanced pass runs an LLM call per query on local Ollama.
+  it("per-class NDCG@10 — baseline vs enhanced (WARP-437 gates)", async () => {
     const byClass = groupByClass(queries);
     const classes = Object.keys(byClass);
+    const mean = (xs: number[]) =>
+      xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
 
     const results: Record<
       string,
       { baseline: number; enhanced: number; delta: number }
     > = {};
+    // Pooled per-query values across every class — the full-corpus gate is
+    // over the corpus mean, not the mean of class means.
+    const pooledBaselineN: number[] = [];
+    const pooledEnhancedN: number[] = [];
 
     for (const c of classes) {
       const baselineN: number[] = [];
@@ -269,8 +286,8 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
         baselineN.push(ndcgAtK(base, q));
         enhancedN.push(ndcgAtK(enh, q));
       }
-      const mean = (xs: number[]) =>
-        xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+      pooledBaselineN.push(...baselineN);
+      pooledEnhancedN.push(...enhancedN);
       const baseline = mean(baselineN);
       const enhanced = mean(enhancedN);
       results[c] = {
@@ -291,16 +308,34 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
       );
     }
 
-    // RECORDING MODE: do not assert per-class deltas. Once
-    // tests/retrieval-eval/ragas/baselines.json carries populated per-class
-    // envelopes, switch this to enforce per WARP-437 spec:
-    //   - short        : enhanced ≥ baseline × 1.05
-    //   - analytical   : context_recall(enhanced) ≥ baseline × 1.10 (RAGAS)
-    //   - conversational: if regress, default-off the preset
-    //   - full corpus  : enhanced ≥ baseline × 1.03
-    // The always-true assertion keeps the test green in CI; the console.log
-    // is the artifact.
-    expect(Object.keys(results).length).toBeGreaterThan(0);
+    // Full-corpus gate — pooled per-query NDCG across every class.
+    const pooledBaseline = mean(pooledBaselineN);
+    const pooledEnhanced = mean(pooledEnhancedN);
+    // eslint-disable-next-line no-console
+    console.log(
+      `  full-corpus     baseline=${pooledBaseline.toFixed(4)}  enhanced=${pooledEnhanced.toFixed(4)}`,
+    );
+    expect(pooledEnhanced).toBeGreaterThanOrEqual(
+      pooledBaseline * FULL_CORPUS_ENHANCED_NDCG_GATE,
+    );
+
+    // Per-class gates. queries.yaml pins the class fixtures — a missing
+    // class means the fixture set broke, so assert presence rather than
+    // skipping silently.
+    const factual = results["factual"];
+    expect(factual).toBeDefined();
+    expect(factual!.enhanced).toBeGreaterThanOrEqual(
+      factual!.baseline * FACTUAL_ENHANCED_NDCG_GATE,
+    );
+
+    // Conversational must not regress. If this fires, the spec remediation
+    // is defaulting-off the conversational preset in presetForClass — not
+    // loosening this gate.
+    const conversational = results["conversational"];
+    expect(conversational).toBeDefined();
+    expect(conversational!.enhanced).toBeGreaterThanOrEqual(
+      conversational!.baseline,
+    );
   }, 1_200_000);
 
   // WARP-436 — RAGAS metrics layered on top of NDCG@10. Gated by env so
@@ -338,6 +373,10 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
       expect(existsSync(resultsJson)).toBe(true);
       const results = JSON.parse(readFileSync(resultsJson, "utf8")) as {
         metrics: Record<string, { mean: number; p50: number; p95: number }>;
+        metrics_by_class?: Record<
+          string,
+          Record<string, { mean: number }>
+        >;
       };
 
       // If baselines.json exists, assert every metric's mean is within the
@@ -368,6 +407,49 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
         );
         expect(stats.mean).toBeGreaterThanOrEqual(floor);
       }
+
+      // WARP-437 analytical gate — RAGAS context_recall, enhanced
+      // (multi-query preset) vs baseline hybrid, analytical class only:
+      // enhanced ≥ baseline × ANALYTICAL_CONTEXT_RECALL_GATE (design spec
+      // §Eval gate). Second runner pass against the hybrid-enhanced variant
+      // of the same endpoint; per-class slices come from `metrics_by_class`.
+      const resultsEnhancedJson = resolve(ragasDir, "results-enhanced.json");
+      const argsEnhanced = [
+        runner,
+        "--variant", "hybrid-enhanced",
+        "--limit", "10",
+        "--judge", RAGAS_JUDGE,
+        "--api-url", API_URL,
+        "--out", resultsEnhancedJson,
+        "--out-md", resolve(ragasDir, "results-enhanced.md"),
+      ];
+      // eslint-disable-next-line no-console
+      console.log(`\n[RAGAS] ${pythonBin} ${argsEnhanced.join(" ")}`);
+      execSync(
+        `${pythonBin} ${argsEnhanced.map((a) => JSON.stringify(a)).join(" ")}`,
+        { stdio: "inherit" },
+      );
+      const enhanced = JSON.parse(
+        readFileSync(resultsEnhancedJson, "utf8"),
+      ) as {
+        metrics_by_class?: Record<string, Record<string, { mean: number }>>;
+      };
+      const baseRecall =
+        results.metrics_by_class?.analytical?.context_recall?.mean;
+      const enhRecall =
+        enhanced.metrics_by_class?.analytical?.context_recall?.mean;
+      // Both slices must exist — queries.yaml pins 10 analytical queries,
+      // so a missing slice means the fixture set or runner broke.
+      expect(typeof baseRecall).toBe("number");
+      expect(typeof enhRecall).toBe("number");
+      // eslint-disable-next-line no-console
+      console.log(
+        `[RAGAS] analytical context_recall: baseline=${baseRecall!.toFixed(3)} ` +
+          `enhanced=${enhRecall!.toFixed(3)} gate=×${ANALYTICAL_CONTEXT_RECALL_GATE}`,
+      );
+      expect(enhRecall!).toBeGreaterThanOrEqual(
+        baseRecall! * ANALYTICAL_CONTEXT_RECALL_GATE,
+      );
     },
     // Judge LLM call per metric per query → can be slow on local mistral.
     1_800_000,
