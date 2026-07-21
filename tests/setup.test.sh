@@ -1825,10 +1825,11 @@ echo ""
 echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml ---"
 
 # Keep in sync with the exclusion rationale beside the drift guard in
-# scripts/lib/compose.sh: rag-eval is appended at runtime only when the eval
-# profile is active; openwrt (single-box), ops-console (ops) and fleet-agent
-# (telemetry) are profile-gated services no default provision pre-builds.
-BUILD_LIST_EXCLUSIONS="rag-eval,openwrt,ops-console,fleet-agent"
+# scripts/lib/compose.sh: rag-eval / web-fetch are appended at runtime only
+# when their profile (eval / web) is active; openwrt (single-box), ops-console
+# (ops) and fleet-agent (telemetry) are profile-gated services no default
+# provision pre-builds.
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,openwrt,ops-console,fleet-agent"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

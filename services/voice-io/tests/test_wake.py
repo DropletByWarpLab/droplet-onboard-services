@@ -192,15 +192,16 @@ class TestOpenWakeWordDetector:
 # ────────────────────────────────────────────────────────────────────
 
 class TestBuildDetectorFromEnv:
-    def test_default_is_hey_droplet(self, monkeypatch):
-        # Branded wake word as the default. The actual model load
-        # falls back to a bundled openwakeword model at runtime if the
-        # trained .onnx isn't on disk yet — that's tested in
-        # TestFallback below.
+    def test_default_primary_is_droplet(self, monkeypatch):
+        # Default WAKE_WORD is "droplet,hey droplet" (WARP-1431). On the
+        # openWakeWord fallback path (no Vosk model on disk) the single-model
+        # engine takes the FIRST configured phrase verbatim as its requested
+        # word; the actual model load still falls back to a bundled model at
+        # runtime if no trained .onnx is present (see TestFallback).
         monkeypatch.delenv("WAKE_WORD", raising=False)
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.requested_wake_word == "hey_droplet"
+        assert det.requested_wake_word == "droplet"
 
     def test_mock_when_wake_word_is_double_underscore_mock(self, monkeypatch):
         monkeypatch.setenv("WAKE_WORD", "__mock__")
@@ -730,6 +731,179 @@ class TestVoskWakeWordDetector:
         assert state["accepts"] == 3
         assert det.loaded is True
 
+    # ── WARP-1431: accept BOTH "droplet" and "hey droplet" ──────────
+    # The detector generalizes from one phrase to a LIST of phrases: it
+    # grammar-constrains to every phrase + "[unk]", fires if ANY phrase
+    # matches as a whole-token run, and scores the BEST (max) min-conf
+    # window across all phrases. The three gates (finalize, per-word
+    # confidence, timing plausibility) apply to whichever phrase matched.
+
+    def test_single_string_wake_word_back_compat(self, monkeypatch, tmp_path):
+        # The historical single-string constructor shape is preserved:
+        # grammar has just that phrase + "[unk]", and the label keeps its
+        # exact spelling ("hey_droplet") so /voice/status + the fire key
+        # are unchanged.
+        self._install_fake_vosk(
+            monkeypatch, accept_seq=[False], partial_obj={"partial": ""},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        det.predict(_silence_frame())  # triggers lazy load → builds _rec
+        assert json.loads(det._rec.grammar) == ["hey droplet", "[unk]"]
+        assert det.model_name == "hey_droplet"
+        assert det.requested_wake_word == "hey_droplet"
+
+    def test_grammar_contains_all_phrases_and_unk(self, monkeypatch, tmp_path):
+        # A LIST of phrases grammar-constrains to every phrase + "[unk]"
+        # so Vosk can decode either "droplet" or "hey droplet".
+        self._install_fake_vosk(
+            monkeypatch, accept_seq=[False], partial_obj={"partial": ""},
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        det.predict(_silence_frame())
+        assert json.loads(det._rec.grammar) == ["droplet", "hey droplet", "[unk]"]
+
+    def test_model_name_reflects_configured_phrase_list(self, monkeypatch, tmp_path):
+        # Multi-phrase detectors report the comma-joined spoken phrases and
+        # never fall back (Vosk matches the real phrases directly).
+        self._install_fake_vosk(monkeypatch, accept_seq=[False])
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.model_name == "droplet,hey droplet"
+        assert det.requested_wake_word == "droplet,hey droplet"
+        assert det.using_fallback is False
+
+    def test_bare_droplet_fires_whole_token(self, monkeypatch, tmp_path):
+        # "droplet" alone must wake — scored on its single-word window with
+        # plausible timing (span ≥ the 0.2 s geometry floor).
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "droplet",
+                "result": [
+                    {"word": "droplet", "conf": 0.93, "start": 0.10, "end": 0.55},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {"droplet,hey droplet": 0.93}
+
+    def test_bare_droplet_fires_without_timing_data(self, monkeypatch, tmp_path):
+        # Timing is an EXTRA signal, never a requirement — a bare "droplet"
+        # with only confidence still fires.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "droplet",
+                "result": [{"word": "droplet", "conf": 0.9}],
+            },
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {"droplet,hey droplet": 0.9}
+
+    def test_hey_droplet_still_fires_with_both_phrases_configured(
+        self, monkeypatch, tmp_path,
+    ):
+        # The two-word phrase keeps firing when both are configured; here
+        # the min per-word conf (0.88) is the score either window yields.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.95, "start": 0.10, "end": 0.30},
+                    {"word": "droplet", "conf": 0.88, "start": 0.42, "end": 0.85},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {"droplet,hey droplet": 0.88}
+
+    def test_reports_best_window_across_phrases(self, monkeypatch, tmp_path):
+        # "_phrase_confidence" returns the BEST (max) min-conf window across
+        # all phrases. On "hey droplet" the bare-"droplet" window (0.95)
+        # beats the 2-word window's min (min(0.70, 0.95) = 0.70), so the
+        # detector reports 0.95 — the strongest acoustic evidence available.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.70, "start": 0.10, "end": 0.30},
+                    {"word": "droplet", "conf": 0.95, "start": 0.42, "end": 0.85},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {"droplet,hey droplet": 0.95}
+
+    def test_droplets_trailing_token_does_not_fire(self, monkeypatch, tmp_path):
+        # Whole-word rule holds for the bare phrase: "droplets" contains
+        # "droplet" as a substring but NOT as a whole token → no fire.
+        # Mirrors test_does_not_fire_on_substring_only_match.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={"text": "droplets", "result": []},
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {}
+
+    def test_clipped_bare_droplet_rejected_by_timing_floor(
+        self, monkeypatch, tmp_path,
+    ):
+        # A sub-200 ms "droplet" (span < the 0.2 s span floor) is the
+        # documented false-accept defense — it must NOT fire even at full
+        # confidence. This is the new (honest, logged) failure mode the
+        # bare phrase introduces vs. the two-word "hey droplet".
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "droplet",
+                "result": [
+                    {"word": "droplet", "conf": 0.99, "start": 0.10, "end": 0.25},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {}
+
+    def test_multi_phrase_finalize_gate_still_holds(self, monkeypatch, tmp_path):
+        # The TV false-accept finalize gate survives the generalization: a
+        # bare-"droplet" PARTIAL that the decoder revises to [unk] on flush
+        # must not fire, and the recognizer is reset.
+        state = self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[False],
+            partial_obj={"partial": "droplet"},
+            final_obj={"text": "[unk]", "result": []},
+        )
+        det = VoskWakeWordDetector(
+            wake_word=["droplet", "hey droplet"], model_path=str(tmp_path),
+        )
+        assert det.predict(_silence_frame()) == {}
+        assert state["finals"] == 1
+        assert state["resets"] == 1
+
 
 # ────────────────────────────────────────────────────────────────────
 # build_detector_from_env — WAKE_ENGINE selection + Vosk/oww fallback
@@ -745,18 +919,20 @@ class TestBuildDetectorVoskEngine:
         monkeypatch.setenv("VOSK_MODEL_PATH", str(model_dir))
         det = build_detector_from_env()
         assert isinstance(det, VoskWakeWordDetector)
-        assert det.requested_wake_word == "hey_droplet"
+        # Default is the comma-separated phrase list (WARP-1431).
+        assert det.requested_wake_word == "droplet,hey droplet"
         assert det.using_fallback is False
 
     def test_vosk_engine_falls_back_to_openwakeword_when_model_absent(self, monkeypatch):
         # Vosk requested but no model on disk → openWakeWord so wake
-        # stays armed (nothing regresses on a stripped image).
+        # stays armed (nothing regresses on a stripped image). The
+        # single-model fallback engine takes the first configured phrase.
         monkeypatch.delenv("WAKE_WORD", raising=False)
         monkeypatch.setenv("WAKE_ENGINE", "vosk")
         monkeypatch.setenv("VOSK_MODEL_PATH", "/nonexistent-vosk-model-xyz")
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.requested_wake_word == "hey_droplet"
+        assert det.requested_wake_word == "droplet"
 
     def test_openwakeword_engine_forced_even_with_vosk_model(self, monkeypatch, tmp_path):
         model_dir = tmp_path / "vosk-model-small-en-us"
@@ -775,3 +951,60 @@ class TestBuildDetectorVoskEngine:
         monkeypatch.setenv("VOSK_MODEL_PATH", str(model_dir))
         det = build_detector_from_env()
         assert isinstance(det, VoskWakeWordDetector)
+
+
+# ────────────────────────────────────────────────────────────────────
+# build_detector_from_env — comma-separated WAKE_WORD (WARP-1431)
+# ────────────────────────────────────────────────────────────────────
+
+class TestBuildDetectorMultiPhrase:
+    """WAKE_WORD is a comma-separated phrase list. The factory splits on
+    commas, strips, lowercases, maps underscores→spaces, drops empties,
+    and dedupes (order-preserving) before handing the list to the Vosk
+    detector. The __mock__ lever and single-value configs still work.
+    """
+
+    def _with_vosk_model(self, monkeypatch, tmp_path):
+        model_dir = tmp_path / "vosk-model-small-en-us"
+        model_dir.mkdir()
+        monkeypatch.setenv("VOSK_MODEL_PATH", str(model_dir))
+        monkeypatch.delenv("WAKE_ENGINE", raising=False)
+
+    def test_default_parses_to_droplet_and_hey_droplet(self, monkeypatch, tmp_path):
+        self._with_vosk_model(monkeypatch, tmp_path)
+        monkeypatch.delenv("WAKE_WORD", raising=False)
+        det = build_detector_from_env()
+        assert isinstance(det, VoskWakeWordDetector)
+        assert det._phrases == [["droplet"], ["hey", "droplet"]]
+        assert det.requested_wake_word == "droplet,hey droplet"
+
+    def test_comma_list_stripped_lowercased_underscored(self, monkeypatch, tmp_path):
+        # Whitespace around commas, mixed case, and underscore spelling all
+        # normalize to the same spoken phrases.
+        self._with_vosk_model(monkeypatch, tmp_path)
+        monkeypatch.setenv("WAKE_WORD", "  Droplet , Hey_Droplet  \n")
+        det = build_detector_from_env()
+        assert det._phrases == [["droplet"], ["hey", "droplet"]]
+
+    def test_duplicate_and_empty_segments_dropped(self, monkeypatch, tmp_path):
+        # Empty segments (doubled/trailing commas) vanish and a repeated
+        # phrase appears once — the grammar shouldn't carry dead entries.
+        self._with_vosk_model(monkeypatch, tmp_path)
+        monkeypatch.setenv("WAKE_WORD", "droplet,,droplet, hey droplet ,")
+        det = build_detector_from_env()
+        assert det._phrases == [["droplet"], ["hey", "droplet"]]
+        assert det.requested_wake_word == "droplet,hey droplet"
+
+    def test_single_value_still_works(self, monkeypatch, tmp_path):
+        # A single phrase (no comma) is a one-element list.
+        self._with_vosk_model(monkeypatch, tmp_path)
+        monkeypatch.setenv("WAKE_WORD", "hey_droplet")
+        det = build_detector_from_env()
+        assert det._phrases == [["hey", "droplet"]]
+
+    def test_mock_lever_still_honored(self, monkeypatch, tmp_path):
+        # __mock__ short-circuits before phrase parsing.
+        self._with_vosk_model(monkeypatch, tmp_path)
+        monkeypatch.setenv("WAKE_WORD", "__mock__")
+        det = build_detector_from_env()
+        assert isinstance(det, MockWakeWordDetector)
