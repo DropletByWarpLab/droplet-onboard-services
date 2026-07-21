@@ -109,4 +109,55 @@ describe("runAgent — tool selection (spec §3)", () => {
     });
     expect(toolNames(chat.mock.calls[0]![0])).toEqual(["search_content"]);
   });
+
+  it("a call outside allowed_tools stays UNKNOWN_TOOL — never self-heals", async () => {
+    const callControl = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "c1",
+          type: "function",
+          function: { name: "control_device", arguments: "{}" },
+        },
+      ],
+    };
+    const { deps, chat, callTool } = makeDeps([
+      callControl, // iter 0: outside the RBAC-narrowed pool → guard, not heal
+      { role: "assistant", content: "done" }, // iter 1: terminate cleanly
+    ]);
+    const result = await runAgent(deps, {
+      model: "m",
+      // Matches the "network" domain rule so the run isn't core-only, but
+      // control_device (smart-home) is excluded from the pool entirely by
+      // allowed_tools — the self-heal ceiling must hold regardless.
+      messages: [{ role: "user", content: "check the network devices" }],
+      tool_selection_mode: "domains",
+      allowed_tools: ["search_content", "list_network_devices"],
+    });
+
+    // Never dispatched to MCP.
+    expect(callTool).not.toHaveBeenCalled();
+
+    // The tool_result fed back to the model carries UNKNOWN_TOOL, not the
+    // self-heal TOOL_NOW_AVAILABLE code.
+    const toolReply = messages_(chat.mock.calls[1]![0]).find(
+      (m) => m.role === "tool" && m.tool_call_id === "c1",
+    ) as { content: string } | undefined;
+    expect(toolReply).toBeDefined();
+    const parsed = JSON.parse(toolReply!.content);
+    expect(parsed.error.code).toBe("UNKNOWN_TOOL");
+
+    // No subsequent chat request ever advertises control_device.
+    for (const call of chat.mock.calls) {
+      expect(toolNames(call[0])).not.toContain("control_device");
+    }
+    expect(result.stop_reason).toBe("model_done");
+    expect(result.message.content).toBe("done");
+  });
 });
+
+function messages_(call: unknown) {
+  return (call as { messages: { role: string; tool_call_id?: string; content: string }[] })
+    .messages;
+}
