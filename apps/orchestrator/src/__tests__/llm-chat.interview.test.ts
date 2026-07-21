@@ -19,7 +19,11 @@ import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
 const h = vi.hoisted(() => ({
-  config: { AUTH_ENABLED: false, OLLAMA_CONTEXT_LENGTH: 16384 },
+  config: {
+    AUTH_ENABLED: false,
+    OLLAMA_CONTEXT_LENGTH: 16384,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
+  },
 }));
 vi.mock("../config.js", () => ({ config: h.config }));
 

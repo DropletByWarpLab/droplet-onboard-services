@@ -27,7 +27,7 @@ import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 vi.mock("@prisma/client", () => ({
