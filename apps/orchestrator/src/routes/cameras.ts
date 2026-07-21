@@ -896,7 +896,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Trigger a discovery scan ---
-  router.post("/cameras/scan", requireRole("owner", "admin", "family"), async (_req, res) => {
+  //
+  // WARP-1462: admit the MCP service principal alongside the human roles. The
+  // scan_for_cameras LLM tool dispatches through `_service:mcp`; a plain
+  // requireRole would 403 it before the scan could run (the phantom-target
+  // class WARP-1439 fixed for the read tools). Same human set as before —
+  // requiresWrite is enforced tool-side, and a discovery scan is non-destructive.
+  router.post("/cameras/scan", requireRoleOrMcpService("owner", "admin", "family"), async (_req, res) => {
     try {
       // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
       // Forward it like /drivers/fix below, else this proxied call 403s and

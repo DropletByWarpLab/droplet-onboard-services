@@ -69,6 +69,12 @@ vi.mock("../services/network-safety.service.js", () => ({
   evaluateNetworkCommand: vi.fn(),
   confirmNetworkCommand: vi.fn(),
 }));
+// WARP-1462: the scan route proxies camera-discovery via internalFetch; mock it
+// so the guard-admission assertions never touch the network.
+vi.mock("../lib/internal-tls.js", () => ({
+  internalFetch: vi.fn(),
+  internalBaseUrl: (u: string) => u,
+}));
 
 import { createCamerasRouter } from "../routes/cameras.js";
 import { enableDetection, disableDetection } from "../services/frigate.client.js";
@@ -77,6 +83,7 @@ import {
   evaluateNetworkCommand,
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
+import { internalFetch } from "../lib/internal-tls.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 const mockEnable = vi.mocked(enableDetection);
@@ -84,6 +91,7 @@ const mockDisable = vi.mocked(disableDetection);
 const mockUpdateSettings = vi.mocked(updateCameraSettings);
 const mockEvaluate = vi.mocked(evaluateNetworkCommand);
 const mockConfirm = vi.mocked(confirmNetworkCommand);
+const mockInternalFetch = vi.mocked(internalFetch);
 
 const mcpPrincipal: AuthUser = {
   id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service",
@@ -174,5 +182,36 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
     const denied = await request(buildApp(guest)).post("/api/cameras/front/enable");
     expect(denied.status).toBe(403);
     expect(mockEnable).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /cameras/scan guard admits the MCP service principal (WARP-1462)", () => {
+  it("MCP principal reaches the scan proxy (not 401/403)", async () => {
+    mockInternalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ status: "scan_complete", known: 0, pending: 0 }), {
+        status: 200,
+      }),
+    );
+    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/scan");
+
+    expect([401, 403]).not.toContain(res.status);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("scan_complete");
+    expect(mockInternalFetch).toHaveBeenCalled();
+  });
+
+  it("human roles unchanged: owner reaches the proxy, guest is 403", async () => {
+    mockInternalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ status: "scan_complete", known: 0, pending: 0 }), {
+        status: 200,
+      }),
+    );
+    const ok = await request(buildApp(owner)).post("/api/cameras/scan");
+    expect(ok.status).toBe(200);
+
+    const denied = await request(buildApp(guest)).post("/api/cameras/scan");
+    expect(denied.status).toBe(403);
+    // Guest is rejected at the guard — the proxy only ran for the owner call.
+    expect(mockInternalFetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -78,10 +78,9 @@ import { registerPhoneHomeRoutes } from "../routes/network-phone-home.routes.js"
 import { registerDeviceRoutes, type DeviceDeps } from "../routes/network-devices.routes.js";
 import { createNetworkThroughputRouter } from "../routes/network-throughput.js";
 import { createApsRouter } from "../routes/aps.js";
-// WARP-1443 tools call outside the /api/network prefix: list_threat_events
-// hits the signed activity feed, list_vpn_peers the VPN surface, and
-// set_device_schedule the WARP-94 schedules CRUD. Same app.ts-mounted
-// modules, introspected the same way.
+// WARP-1443 tools (list_threat_events / list_vpn_peers / set_device_schedule)
+// dispatch to these three routers; without them mounted the contract asserts
+// against an incomplete table and false-reds those tools' paths.
 import { createActivityRouter } from "../routes/activity.js";
 import { createVpnRouter } from "../routes/vpn.js";
 import { registerScheduleRoutes, type ScheduleDeps } from "../routes/network-schedules.routes.js";
@@ -180,6 +179,8 @@ function buildRouteTable(): Array<{ method: string; path: string }> {
   registerDeviceRoutes(router, {
     networkDeviceService: {} as DeviceDeps["networkDeviceService"],
   });
+  // WARP-1443: schedules register onto the same router; deps are handler-time
+  // only, so a stub scheduleApi is fine for route-stack introspection.
   registerScheduleRoutes(router, {
     scheduleApi: {} as ScheduleDeps["scheduleApi"],
   });
@@ -187,6 +188,7 @@ function buildRouteTable(): Array<{ method: string; path: string }> {
     ...collectRoutes(router),
     ...collectRoutes(createNetworkThroughputRouter(prisma)),
     ...collectRoutes(createApsRouter(prisma)),
+    // WARP-1443: list_threat_events → /api/activity, list_vpn_peers → /api/vpn/peers.
     ...collectRoutes(createActivityRouter(prisma)),
     ...collectRoutes(createVpnRouter(prisma)),
   ];
