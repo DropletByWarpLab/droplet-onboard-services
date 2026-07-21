@@ -143,6 +143,11 @@ const EXPECTED_TOOL_NAMES = [
   "list_threat_events",
   "set_wifi_password",
   "set_device_schedule",
+  // WARP-1450 — appliance ops (reads Tier-1 incl. role-gated audit; apply Tier-2)
+  "get_drive_health",
+  "get_audit_log",
+  "get_update_status",
+  "apply_update",
 ];
 
 describe("TOOLS registry", () => {
@@ -263,6 +268,16 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("create_scene")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresWrite).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresConfirmation).toBe(false);
+    // WARP-1450 — appliance ops: reads are Tier-1 (audit/update-status also
+    // role-gate the human INSIDE the handler); apply_update is Tier-2.
+    expect(TOOLS.get("get_drive_health")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_drive_health")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("get_audit_log")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_audit_log")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("get_update_status")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_update_status")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("apply_update")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("apply_update")?.requiresConfirmation).toBe(true);
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

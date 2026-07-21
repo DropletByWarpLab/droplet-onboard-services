@@ -272,9 +272,13 @@ const MATRIX: GuardedRoute[] = [
 
   // WARP-540: OTA update operator surface — owner+admin only INCLUDING
   // the GETs (voice-proxy posture: release SHAs, failure history, and the
-  // maintenance window are operator material, not household reading), and
-  // `service` is denied everywhere. Mutations additionally audit via
-  // recordActivity (asserted in routes/updates.test.ts).
+  // maintenance window are operator material, not household reading).
+  // WARP-1450: the pinned `_service:mcp` principal is additionally admitted
+  // on GET /updates/status + POST /updates/apply-now (the two LLM-tool
+  // routes; see updates-mcp-guards.test.ts) — this matrix is a synthetic
+  // requireRole harness covering HUMAN roles only, so its rows are
+  // unchanged. Mutations additionally audit via recordActivity (asserted
+  // in routes/updates.test.ts).
   { method: "get", path: "/api/updates/status", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/updates/history", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/updates/settings", allowed: ["owner", "admin"] },
