@@ -50,7 +50,7 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
 const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = [
   { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|heating|temperature|dim|brightness|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
-  { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|blocked?|unblock|bandwidth|devices?)\b/i, domains: ["network"] },
+  { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?)\b/i, domains: ["network"] },
   { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell)\b/i, domains: ["cameras"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule)\b/i, domains: ["calendar"] },
   { pattern: /\b(remind(er)?s?|tasks?|to-?dos?)\b/i, domains: ["reminders"] },

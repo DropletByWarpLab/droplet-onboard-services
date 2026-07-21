@@ -81,6 +81,17 @@ describe("selectAdvertisedTools (spec §3)", () => {
     });
     for (const name of r.advertised) expect(tiny).toContain(name);
   });
+
+  it("matches the bare verb 'block' to the network domain (regression: blocked? typo)", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "please block that iPad",
+      pool: POOL,
+      conversationToolNames: [],
+    });
+    expect(r.advertised).toContain("list_network_devices");
+    expect(r.advertised).toContain("get_network_status");
+  });
 });
 
 describe("catalog helpers", () => {
