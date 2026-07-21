@@ -9,16 +9,11 @@ name: web-dashboard-tests
 # so type/build regressions were shipping green (WARP-1261/#1007, WARP-1267/#1026).
 
 on:
-  # Re-enabled 2026-06-10: Actions minutes are flowing again (docker-build's
-  # ~18-min job has run green on every PR/push since 2026-06-05). The month
-  # this sat dispatch-only let three dashboard suites rot red on main.
-  pull_request:
-    paths:
-      - "apps/web-dashboard/**"
-      - "package.json"
-      - "package-lock.json"
-      - "scripts/check-dashboard-classes.sh"
-      - ".github/workflows/web-dashboard-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `web-dashboard` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:

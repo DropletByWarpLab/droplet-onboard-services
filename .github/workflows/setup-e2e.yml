@@ -18,6 +18,18 @@ name: setup-e2e
 # since the cache-refresh fix, PR #989) and ~31 min cold. timeout-minutes
 # below stays at 60 purely as the hung-run bound.
 
+# TRIGGER SCOPE (CI budget optimization, 2026-07): the WARP-971
+# "first-run regression surfaces" entry `apps/orchestrator/**` was dropped
+# from BOTH triggers — it made this ~20-min job fire on nearly every
+# backend PR (~330 PR runs + ~160 push runs / month, the single biggest
+# line item after ci.yml). What it insured against is covered elsewhere:
+# a tsc break in the orchestrator image build is caught by ci.yml's
+# orchestrator typecheck leg on the same PR, and a broken run-stage COPY
+# set is caught post-merge by docker-build.yml's smoke-boot of the
+# orchestrator image (WARP-1246). The residual risk — an orchestrator
+# change breaking the setup.sh FLOW specifically — is covered by the
+# nightly scheduled run below within 24h, before any manual OTA publish.
+
 on:
   pull_request:
     paths:
@@ -28,14 +40,6 @@ on:
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
-      # -- first-run regression surfaces (WARP-971) --
-      # The orchestrator Dockerfile COPYs the whole app dir into the build
-      # context and `tsc` compiles src/**/* (tests included per tsconfig
-      # `include`), prisma/ feeds `db:generate`, and scripts/ + data/ ship
-      # in the image — so every file under the dir feeds the image build
-      # this workflow exercises. No "minus tests" carve-out exists that
-      # wouldn't skip files the build actually consumes.
-      - "apps/orchestrator/**"
       # The first-run wizard surfaces of the web-dashboard. Its Dockerfile
       # COPYs the app and runs the Next.js production build, so a wizard
       # page/component that breaks the build breaks setup.sh's build phase.
@@ -54,9 +58,13 @@ on:
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
-      - "apps/orchestrator/**"
       - "apps/web-dashboard/src/app/setup/**"
       - "apps/web-dashboard/src/components/setup/**"
+  # Nightly canary over the whole setup flow — catches what the narrowed
+  # path triggers above no longer see (e.g. orchestrator source changes
+  # that break the image build inside setup.sh's build phase).
+  schedule:
+    - cron: "47 3 * * *"
   workflow_dispatch:
 
 concurrency:

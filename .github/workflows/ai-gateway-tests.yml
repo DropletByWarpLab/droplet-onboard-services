@@ -3,11 +3,11 @@ name: ai-gateway-tests
 # Pytest for services/ai-gateway. Path-filtered.
 
 on:
-  pull_request:
-    paths:
-      - "services/ai-gateway/**"
-      - "proto/**"
-      - ".github/workflows/ai-gateway-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `ai-gateway` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:

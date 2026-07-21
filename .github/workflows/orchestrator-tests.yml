@@ -1,21 +1,22 @@
 name: orchestrator-tests
 
-# Vitest for apps/orchestrator. Path-filtered so dashboard-only or service-only
-# PRs don't trigger a Prisma generate + Node install for no reason.
+# Real-Postgres integration lane for apps/orchestrator (WARP-1026).
 #
-# Note: the orchestrator depends on @droplet/tools-core and @droplet/mcp-server
-# (workspace packages). The MCP client test (`mcp-client.service.test.ts`)
-# spawns `services/mcp-server/dist/index.js` as a child process, so we build
-# both workspace packages before running vitest.
+# The orchestrator UNIT suite (npm ci + Prisma generate + workspace builds +
+# tsc --noEmit + vitest) runs in ci.yml's path-aware `orchestrator` leg on
+# every PR and main push — its duplicate job here was retired in the 2026-07
+# CI budget optimization. What remains is the coverage no ci.yml leg has:
+# the pg-gated vitest files against a real service-container Postgres.
+#
+# Paths are only what the pg lane consumes: the app itself (source,
+# migrations, prisma schema) and the root npm workspace manifests. The old
+# workspace-dep paths (tools-core, mcp-server, fips-selftest, erp-connector)
+# belonged to the retired unit job — the pg lane never builds those dists.
 
 on:
   pull_request:
     paths:
       - "apps/orchestrator/**"
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -23,10 +24,6 @@ on:
     branches: [main]
     paths:
       - "apps/orchestrator/**"
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "services/erp-connector/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -37,67 +34,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  vitest:
-    runs-on: ubuntu-latest
-    # A hung test must fail the job fast, not burn the 6h default runner
-    # allocation. npm ci + Prisma generate + workspace builds + vitest, no
-    # Docker — 15 min is a generous ceiling for the suite.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies (npm workspaces, root install)
-        run: npm ci
-
-      # Vitest imports from @prisma/client; without `prisma generate` the
-      # suite crashes with "Cannot find module .prisma/client". The same
-      # generated client is reused by services/mcp-server (shared
-      # node_modules/.prisma/client).
-      - name: Generate Prisma client
-        run: npm run -w @droplet/orchestrator db:generate
-
-      # Build the workspace packages the orchestrator depends on. mcp-client
-      # tests spawn services/mcp-server/dist/index.js as a child process.
-      - name: Build @droplet/fips-selftest
-        run: npm run -w @droplet/fips-selftest build
-
-      - name: Build @droplet/tools-core
-        run: npm run -w @droplet/tools-core build
-
-      - name: Build @droplet/mcp-server
-        run: npm run -w @droplet/mcp-server build
-
-      # WARP-1137: erp.service imports @droplet/erp-connector; its types
-      # resolve from dist/, so build before typecheck (TS2307 otherwise).
-      - name: Build @droplet/erp-connector
-        run: npm run -w @droplet/erp-connector build
-
-      # WARP-537: the update-agent verify suite execs the REAL cosign
-      # binary over golden fixtures (src/services/update-agent/verify.test.ts)
-      # — mocked exit codes would prove nothing about cryptographic
-      # rejection. Resolution is `cosign` on PATH (or DROPLET_COSIGN_BIN).
-      - name: Install cosign (update-agent verify suite)
-        uses: sigstore/cosign-installer@v3
-
-      # WARP-1011: vitest transforms via esbuild and never typechecks —
-      # mirrors ci.yml's orchestrator leg (this workflow retires when
-      # ci-summary becomes the required check, WARP-1007).
-      - name: Typecheck (tsc --noEmit)
-        run: npm run -w @droplet/orchestrator typecheck
-
-      - name: Run vitest
-        run: npm run -w @droplet/orchestrator test
-
-  # WARP-1026: real-Postgres lane. The unit `vitest` job above runs with
-  # mocked Prisma and structurally cannot catch chain forks — those are
-  # READ COMMITTED visibility artifacts. This job applies the full
+  # WARP-1026: real-Postgres lane. The unit suite (ci.yml's orchestrator
+  # leg) runs with mocked Prisma and structurally cannot catch chain
+  # forks — those are READ COMMITTED visibility artifacts. This job applies the full
   # migration set to a service-container Postgres and runs only the
   # pg-gated files (src/**/*.pg.test.ts, self-gated on RUN_PG_INTEGRATION).
   #

@@ -10,11 +10,11 @@ name: matter-controller-tests
 # otherwise ship with its 40 tests never running in CI.
 
 on:
-  pull_request:
-    paths:
-      - "services/matter-controller/**"
-      - "packages/fips-selftest/**"
-      - ".github/workflows/matter-controller-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `matter-controller` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:

@@ -2,7 +2,8 @@ name: publish-release
 
 # WARP-536 — CI half of the OTA update system (WARP-534).
 #
-# On every push to main: re-run the must-pass test suites (gate), build
+# On demand (workflow_dispatch from main — see the manual-only note
+# below): re-run the must-pass test suites (gate), build
 # every appliance app image, push to GHCR tagged by commit sha, capture
 # the immutable digests, pack the tracked runtime configs, generate the
 # design-schema-v1 release.json, cosign-sign it, and publish everything
@@ -17,18 +18,21 @@ name: publish-release
 # every run of this workflow fails at "Sign release manifest". That is
 # the intended fail-closed posture — do not stub the signature.
 #
-# ── KNOWN COST / FOLLOW-UP ──
-# The gate jobs duplicate the per-package push-to-main workflows
-# (orchestrator-tests.yml, web-dashboard-tests.yml, *-tests.yml for the
-# Python services). Those are path-filtered, so for any given push some
-# may not run at all — the gate is what actually guarantees "tests green
-# before publish". Follow-up (tracked in the WARP-536 PR): consolidate
-# the push-to-main checks into one ci.yml matrix and drop this inline
-# gate.
+# ── MANUAL-ONLY UNTIL THE KEY CEREMONY (CI budget optimization, 2026-07) ──
+# This workflow used to run on every push to main. Because the signing
+# secrets don't exist yet, every run burned the full gate + a no-cache
+# 13-image build/push/sign/SBOM pipeline (~2 runner-hours) and then failed
+# at "Sign release manifest" — ~400 doomed runs in the 30 days before this
+# change, against a $100/month Actions budget. Until the key ceremony
+# provisions COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, publishing is dispatch-only:
+# run it from main once the sha you want to ship is green on ci-summary.
+# When re-enabling a per-merge (or tag-triggered) flow after the ceremony,
+# also drop the inline gate jobs in favor of the ci.yml full-matrix push run
+# (the WARP-536 follow-up) — they re-prove what ci-summary already proved
+# for the same sha.
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 # One release at a time, never cancelled mid-publish: a cancelled run
 # could leave images pushed but no signed manifest, or a half-uploaded

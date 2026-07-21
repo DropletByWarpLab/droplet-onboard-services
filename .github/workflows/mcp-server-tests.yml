@@ -7,15 +7,11 @@ name: mcp-server-tests
 # process — the workspace must be built before tests run.
 
 on:
-  pull_request:
-    paths:
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "apps/orchestrator/prisma/schema.prisma"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/mcp-server-tests.yml"
+  # PR-time coverage for this suite is owned by ci.yml's path-aware
+  # `tools-core-mcp-server` leg (CI budget optimization, 2026-07): the pull_request
+  # trigger here was retired as an exact duplicate of that leg.
+  # Push-to-main stays as an independent post-merge canary and to
+  # satisfy scripts/check-ci-coverage.sh.
   push:
     branches: [main]
     paths:
