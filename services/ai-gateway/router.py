@@ -187,6 +187,13 @@ class ProviderRouter:
         )
         if request.tools:
             kwargs["tools"] = request.tools
+        # WARP-1442 — forward the reasoning-effort knob ONLY when the caller set
+        # one. Leaving the kwarg absent (not None) when unset keeps the outbound
+        # provider call byte-for-byte identical to the pre-WARP-1442 behavior for
+        # every existing caller; the local provider is the one place that decides
+        # whether the target model actually supports it.
+        if request.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = request.reasoning_effort
 
         return await provider.chat(
             messages=request.messages,

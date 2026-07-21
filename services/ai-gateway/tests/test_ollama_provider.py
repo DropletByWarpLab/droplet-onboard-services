@@ -735,6 +735,118 @@ class TestStreamingProvider503Path:
 
 
 # ---------------------------------------------------------------------------
+# WARP-1442 — streaming chat content contract
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingProviderContent:
+    """The streaming path yields Ollama's OpenAI-compat SSE chunks in order,
+    VERBATIM: content, reasoning_content, and tool_call fragments all pass
+    through untouched.
+
+    The gateway never accumulates tool-call fragments, folds reasoning into
+    content, or dispatches tools — the orchestrator agent loop owns all of that
+    (ADR-011 / WARP-104). This test pins that the streaming transport is a
+    faithful passthrough so the loop's by-index accumulation + reasoning
+    separation have exactly the frames they expect. reasoning_effort rides the
+    streaming body for gpt-oss, identical to the non-streaming path.
+    """
+
+    # One turn's worth of Ollama OpenAI-compat streaming SSE: two content
+    # fragments, a reasoning-channel fragment, a tool-call fragment (args split
+    # so the orchestrator must concatenate by index), then the terminal [DONE].
+    SSE_BODY = (
+        'data: {"choices":[{"delta":{"role":"assistant","content":"Hel"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        'data: {"choices":[{"delta":{"reasoning_content":"analysing"}}]}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        '"type":"function","function":{"name":"get_x","arguments":"{}"}}]}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    @staticmethod
+    def _stub_limits(provider: OllamaLocalProvider) -> None:
+        provider._limits.num_parallel = 1
+        provider._limits._last_refresh = time.monotonic()
+        provider._sema = asyncio.Semaphore(1)
+        provider._sema_size = 1
+
+    @respx.mock
+    async def test_streaming_yields_chunks_in_order_verbatim(self, provider):
+        self._stub_limits(provider)
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(200, text=self.SSE_BODY)
+        )
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+        )
+        frames = [frame async for frame in gen]
+
+        # Each yielded frame is a full SSE frame: "data: {json}\n\n".
+        payloads = [f[len("data: ") :].strip() for f in frames]
+        assert payloads[-1] == "[DONE]"
+        parsed = [json.loads(p) for p in payloads[:-1]]
+
+        # Order is preserved fragment-for-fragment.
+        assert parsed[0]["choices"][0]["delta"]["content"] == "Hel"
+        assert parsed[1]["choices"][0]["delta"]["content"] == "lo"
+        # reasoning_content is a SEPARATE delta field — never folded into content.
+        assert parsed[2]["choices"][0]["delta"]["reasoning_content"] == "analysing"
+        assert "content" not in parsed[2]["choices"][0]["delta"]
+        # Tool-call fragment passes through verbatim, INDEX intact so the
+        # orchestrator can accumulate args by index.
+        tc = parsed[3]["choices"][0]["delta"]["tool_calls"][0]
+        assert tc["index"] == 0
+        assert tc["function"]["name"] == "get_x"
+
+    @respx.mock
+    async def test_streaming_body_sets_stream_true_and_reasoning_effort(self, provider):
+        self._stub_limits(provider)
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, text=self.SSE_BODY)
+
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+            reasoning_effort="low",
+        )
+        _ = [frame async for frame in gen]
+        # WARP-1442a keeps working on the streaming request too.
+        assert captured["body"]["stream"] is True
+        assert captured["body"]["reasoning_effort"] == "low"
+
+    @respx.mock
+    async def test_streaming_early_break_tears_down_cleanly(self, provider):
+        # A client disconnect mid-stream: consume one frame, then close the
+        # generator. The `async with client.stream()` + semaphore context must
+        # unwind without raising (WARP-329 teardown).
+        self._stub_limits(provider)
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(200, text=self.SSE_BODY)
+        )
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+        )
+        first = None
+        async for frame in gen:
+            first = frame
+            break
+        await gen.aclose()
+        assert first is not None and first.startswith("data: ")
+        # The semaphore slot was released on teardown (not leaked).
+        assert provider._sema._value == 1
+
+
+# ---------------------------------------------------------------------------
 # WARP-1284 (F1/F2) — list_models failure seam + metadata timeout
 # ---------------------------------------------------------------------------
 
@@ -799,3 +911,108 @@ class TestListModelsFailureSeam:
         await provider.list_models()
         assert captured["timeout"] == _TAGS_TIMEOUT_S
         assert _TAGS_TIMEOUT_S <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# WARP-1442 — gpt-oss reasoning-effort control on the outbound Ollama request
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningEffort:
+    """The knob is set as a TOP-LEVEL `reasoning_effort` field on the
+    OpenAI-compat /v1/chat/completions body — the same shape as temperature /
+    max_tokens (see the GW-12 note in ollama_local.chat), so it reaches Ollama
+    on the exact path this provider already uses. It is applied ONLY for the
+    gpt-oss family (the reasoning-capable model this stack serves), so every
+    other model's request is byte-for-byte unchanged and we never risk a 400
+    on a field a non-reasoning model doesn't understand. Unset → the field is
+    never added (back-compat)."""
+
+    @staticmethod
+    def _capture_post():
+        """Returns (route_handler, captured_dict). Mounted via respx side_effect."""
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "cmpl-1",
+                    "object": "chat.completion",
+                    "model": "gpt-oss:20b",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        return handler, captured
+
+    @staticmethod
+    def _stub_limits(provider: OllamaLocalProvider) -> None:
+        provider._limits.num_parallel = 1
+        provider._limits._last_refresh = time.monotonic()
+        provider._sema = asyncio.Semaphore(1)
+        provider._sema_size = 1
+
+    @respx.mock
+    async def test_low_effort_set_on_body_for_gpt_oss(self, provider):
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="low",
+        )
+        assert captured["body"]["reasoning_effort"] == "low"
+
+    @respx.mock
+    async def test_effort_passed_through_verbatim_for_gpt_oss(self, provider):
+        # A different level proves we forward the caller's value, not a constant.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="high",
+        )
+        assert captured["body"]["reasoning_effort"] == "high"
+
+    @respx.mock
+    async def test_no_reasoning_effort_key_when_unset(self, provider):
+        # Byte-for-byte back-compat: an unset knob must NOT add the field, even
+        # for a gpt-oss model. This is the dashboard/default path.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+        )
+        assert "reasoning_effort" not in captured["body"]
+
+    @respx.mock
+    async def test_effort_ignored_for_non_reasoning_model(self, provider):
+        # No-op guard: a non-gpt-oss model's request stays byte-for-byte
+        # unchanged even when an effort is passed, so a model that doesn't
+        # support the field never receives it.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            reasoning_effort="low",
+        )
+        assert "reasoning_effort" not in captured["body"]

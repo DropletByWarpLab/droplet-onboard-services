@@ -78,6 +78,13 @@ import { registerPhoneHomeRoutes } from "../routes/network-phone-home.routes.js"
 import { registerDeviceRoutes, type DeviceDeps } from "../routes/network-devices.routes.js";
 import { createNetworkThroughputRouter } from "../routes/network-throughput.js";
 import { createApsRouter } from "../routes/aps.js";
+// WARP-1443 tools call outside the /api/network prefix: list_threat_events
+// hits the signed activity feed, list_vpn_peers the VPN surface, and
+// set_device_schedule the WARP-94 schedules CRUD. Same app.ts-mounted
+// modules, introspected the same way.
+import { createActivityRouter } from "../routes/activity.js";
+import { createVpnRouter } from "../routes/vpn.js";
+import { registerScheduleRoutes, type ScheduleDeps } from "../routes/network-schedules.routes.js";
 
 // CJS-safe path resolution (this package builds to CommonJS — import.meta is
 // a tsc error here). Same candidates idiom as ap-device.schema.test.ts so the
@@ -173,10 +180,15 @@ function buildRouteTable(): Array<{ method: string; path: string }> {
   registerDeviceRoutes(router, {
     networkDeviceService: {} as DeviceDeps["networkDeviceService"],
   });
+  registerScheduleRoutes(router, {
+    scheduleApi: {} as ScheduleDeps["scheduleApi"],
+  });
   return [
     ...collectRoutes(router),
     ...collectRoutes(createNetworkThroughputRouter(prisma)),
     ...collectRoutes(createApsRouter(prisma)),
+    ...collectRoutes(createActivityRouter(prisma)),
+    ...collectRoutes(createVpnRouter(prisma)),
   ];
 }
 
