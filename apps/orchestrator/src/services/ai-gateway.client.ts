@@ -3,6 +3,7 @@ import { getRequestId } from "../lib/request-context.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import type {
   ChatRequest,
+  ChatStreamChunk,
   ModelCapabilities,
   ModelInfo,
   ModelsResponse,
@@ -170,6 +171,83 @@ export async function chat(
     throw new Error(`AI Gateway error ${res.status}: ${body}`);
   }
   return res;
+}
+
+/**
+ * WARP-1442 — SERVER-SIDE token streaming. POSTs `/ai/chat` with `stream:true`
+ * and yields the gateway's OpenAI-compat SSE chunks as they arrive, so the
+ * orchestrator agent loop can emit `content_delta` INCREMENTALLY instead of one
+ * delta after the full blocking decode. The gateway passes Ollama's
+ * `/v1/chat/completions` stream through verbatim (`services/ai-gateway`
+ * `_stream_chat` → `StreamingResponse`), so each frame is one
+ * `ChatStreamChunk`.
+ *
+ * Reuses `chat()` for the request itself — same headers, mTLS routing, and the
+ * WARP-329 client-disconnect `signal` (which carries no timeout on the
+ * streaming path, since inference can legitimately take minutes). Throws on a
+ * non-OK status so the agent loop can fall back to the blocking `chat()`. On
+ * early termination (the consumer `break`s / the client disconnects) the
+ * `finally` cancels the body so the connection to the gateway — and thus the
+ * upstream Ollama stream — tears down.
+ */
+export async function* chatStream(
+  request: ChatRequest,
+  signal?: AbortSignal,
+  userId?: string,
+): AsyncGenerator<ChatStreamChunk, void, unknown> {
+  const res = await chat({ ...request, stream: true }, signal, userId);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`AI Gateway streaming error ${res.status}: ${body}`);
+  }
+  if (!res.body) {
+    throw new Error("AI Gateway streaming response had no body");
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseFrame = function* (frame: string): Generator<ChatStreamChunk> {
+    const line = frame.trim();
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+    try {
+      yield JSON.parse(payload) as ChatStreamChunk;
+    } catch {
+      // Skip a malformed frame rather than tearing down the whole turn.
+    }
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // The gateway emits `data: {json}\n\n` frames; split on newlines and
+      // parse each `data:` line (ignore keep-alives / blank separators). Stop
+      // cleanly on the terminating `[DONE]`.
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const rawLine = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (rawLine.trim() === "data: [DONE]" || rawLine.trim() === "data:[DONE]") {
+          return;
+        }
+        yield* parseFrame(rawLine);
+      }
+    }
+    // Flush a trailing frame that arrived without a terminating newline.
+    if (buffer.trim()) yield* parseFrame(buffer);
+  } finally {
+    // WARP-329 — cancel the body so an early break (client disconnect) tears
+    // down the connection to the gateway, which closes the Ollama stream.
+    try {
+      await reader.cancel();
+    } catch {
+      /* already closed */
+    }
+  }
 }
 
 export async function saveKey(

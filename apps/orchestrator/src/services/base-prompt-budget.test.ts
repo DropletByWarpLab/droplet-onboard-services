@@ -32,24 +32,30 @@ import {
   DEFAULT_CONTEXT_WINDOW,
 } from "./context-budget.service.js";
 import { IDENTITY_MAX_CHARS } from "./identity-prompt.js";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 
 /** buildMemoryFactsBlock's MEMORY_FACTS_CHAR_BUDGET (routes/llm.ts). Kept as
  *  a literal here (the const is route-local, not exported) so the invariant
  *  is complete; a change to the route budget should update this in lockstep. */
 const MEMORY_FACTS_CHAR_BUDGET = 2000;
 
-/** Serialize the full registry to the wire tools[] shape the model sees
- *  (llm-agent.service.ts). The owner role is advertised every tool, so the
- *  full registry IS the worst case. */
-function serializeAllToolSchemas(): string {
-  const tools = Array.from(TOOLS.values()).map((t) => ({
-    type: "function" as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema,
-    },
-  }));
+/** Serialize the DEFAULT CHAT advertisement to the wire tools[] shape the
+ *  model sees (llm-agent.service.ts): the registry minus the WARP-1424
+ *  chat-scope exclusions (chat-tool-scope.ts). Since the WARP-1423 rollout
+ *  the full registry no longer fits the shipping window, so the scoped set
+ *  IS what goes on the wire for an owner chat turn — and therefore the
+ *  worst case this canary must budget. */
+function serializeChatToolSchemas(): string {
+  const tools = Array.from(TOOLS.values())
+    .filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
+    .map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      },
+    }));
   return JSON.stringify(tools);
 }
 
@@ -66,11 +72,11 @@ describe("worst-case fixed system-block budget", () => {
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 
-  it("fits the fixed blocks + full owner tools[] under the shipping window minus reserve", () => {
+  it("fits the fixed blocks + default chat tools[] under the shipping window minus reserve", () => {
     // GROUND TRUTH (WARP-1118 §10, corrected 2026-07-08): the bundled box runs
     // OLLAMA_CONTEXT_LENGTH=16384 (docker-compose.yml, the WARP-854 fix). The
     // orchestrator estimator budgets against that window minus OUTPUT_RESERVE.
-    const toolSchemasJson = serializeAllToolSchemas();
+    const toolSchemasJson = serializeChatToolSchemas();
     const worstCaseChars =
       IDENTITY_MAX_CHARS +
       PERSONA_PROMPT_MAX_CHARS +
@@ -81,11 +87,26 @@ describe("worst-case fixed system-block budget", () => {
     const worstCaseTokens = estimateTokensFromChars(worstCaseChars);
     const effectiveWindow = DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE;
 
-    // The fixed blocks + the entire owner tool registry fit under the
-    // effective window with room for history — the WARP-854 overflow is gone
-    // at the shipping window (it only occurred at Ollama's 4096 default).
+    // The fixed blocks + the scoped chat advertisement fit under the
+    // effective window with room for history. Growing the advertised set
+    // (registering a tool without adding it to chat-tool-scope.ts) spends
+    // this headroom — when this assertion trips, either scope the new tool
+    // out of chat or make a deliberate, measured budget decision here.
     expect(worstCaseTokens).toBeLessThan(effectiveWindow);
-    // Regression ceiling on the serialized tool schemas (growth tripwire).
-    expect(toolSchemasJson.length).toBeLessThan(60000);
+    // Regression ceiling on the FULL registry serialization (growth
+    // tripwire for the MCP-facing surface, which advertises everything).
+    // Re-baselined 2026-07 for the WARP-1423 rollout (94 → ~127 tools,
+    // ~85K chars serialized).
+    const fullRegistryJson = JSON.stringify(
+      Array.from(TOOLS.values()).map((t) => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      })),
+    );
+    expect(fullRegistryJson.length).toBeLessThan(100000);
   });
 });
