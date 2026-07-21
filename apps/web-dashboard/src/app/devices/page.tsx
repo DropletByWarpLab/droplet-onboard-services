@@ -39,6 +39,8 @@ export default function DevicesPage() {
     isRefreshing,
     error,
     command,
+    remove,
+    reconnect,
     refresh,
   } = useSmartHome();
   useSmartHomeEvents();
@@ -75,6 +77,14 @@ export default function DevicesPage() {
     : { rooms: [], unassigned: [] };
   const { toast } = useToast();
   const allDevices = grouped ? flattenGrouped(grouped) : [];
+
+  // WARP-1469: keep the open detail panel in sync with live polling (the SSE
+  // bridge + 4s refresh) so a reconnect visibly flips the device back online.
+  // Falls back to the click-time snapshot while the device is still in the
+  // list; once it's removed, `selectedDevice` closing takes over.
+  const liveSelected = selectedDevice
+    ? allDevices.find((d) => d.nodeId === selectedDevice.nodeId) ?? selectedDevice
+    : null;
 
   // Turn every reachable light/switch in a room on/off (Tier-1, §5.2).
   function handleBulkLights(room: Room, devices: MatterDevice[], on: boolean) {
@@ -202,9 +212,9 @@ export default function DevicesPage() {
         )}
       </div>
 
-      {selectedDevice && (
+      {selectedDevice && liveSelected && (
         <DeviceDetailPanel
-          device={selectedDevice}
+          device={liveSelected}
           onCommand={request}
           onClose={() => setSelectedDevice(null)}
           rooms={rooms}
@@ -213,6 +223,31 @@ export default function DevicesPage() {
           takenNames={allDevices
             .filter((d) => d.nodeId !== selectedDevice.nodeId)
             .map((d) => displayName(d))}
+          // WARP-1469 — device lifecycle. Remove force-clears even an offline
+          // device; reconnect nudges matter.js; re-pair removes + routes into
+          // add-device for a factory-reset unit that won't come back.
+          onRemove={async (nodeId) => {
+            try {
+              await remove(nodeId);
+            } catch {
+              // Re-throw so <ConfirmDialog> stays open for a retry.
+              toast("Couldn’t remove the device. Please try again.");
+              throw new Error("remove failed");
+            }
+            setSelectedDevice(null);
+            toast("Device removed");
+          }}
+          onReconnect={reconnect}
+          onRepair={async (nodeId) => {
+            try {
+              await remove(nodeId);
+            } catch {
+              toast("Couldn’t remove the device. Please try again.");
+              throw new Error("re-pair failed");
+            }
+            setSelectedDevice(null);
+            router.push("/devices/add-matter");
+          }}
         />
       )}
 

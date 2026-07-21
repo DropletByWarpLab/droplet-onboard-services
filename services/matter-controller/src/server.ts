@@ -10,6 +10,7 @@
  *   GET    /devices                  grouped commissioned devices
  *   GET    /devices/:nodeId          single device or 404
  *   POST   /devices/:nodeId/command  { command, data } → { status }
+ *   POST   /devices/:nodeId/reconnect force a reconnect → { status }
  *   DELETE /devices/:nodeId          decommission
  *   POST   /commission               { pairing_code } → { nodeId }
  *   GET    /discover?timeout=ms      { devices, count }
@@ -245,6 +246,30 @@ export function createApp(deps: AppDeps): Express {
     }
     try {
       res.json(await core.sendCommand(req.params.nodeId, command, data));
+    } catch (err) {
+      res.status(500).json(errorBody(err));
+    }
+  });
+
+  // WARP-1469: nudge a still-paired but offline device to reconnect now
+  // instead of waiting for matter.js's ~10-min WaitingForDeviceDiscovery
+  // re-probe. Non-blocking on the controller side — success/failure of the
+  // actual reconnection arrives later over the /events SSE stream.
+  app.post("/devices/:nodeId/reconnect", async (req, res) => {
+    if (!requireInitialized(res)) return;
+    if (!validNodeIdOr400(req, res)) return;
+    try {
+      const found = await core.reconnect(req.params.nodeId);
+      if (!found) {
+        // Same contract as GET/DELETE /devices/:nodeId — an
+        // uncommissioned node is a 404, not an internal error.
+        return res.status(404).json({
+          error: "Device not found",
+          errorClass: "NotFoundError",
+          errorMessage: "Device not found",
+        } satisfies SidecarErrorBody);
+      }
+      res.json({ status: "reconnecting", nodeId: req.params.nodeId });
     } catch (err) {
       res.status(500).json(errorBody(err));
     }
