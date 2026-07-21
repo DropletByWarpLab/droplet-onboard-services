@@ -10,6 +10,7 @@ import {
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
@@ -1448,12 +1449,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
         // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives.
+        // does, so the estimate reflects what the model actually receives:
+        // an explicit allowed set verbatim, otherwise the WARP-1424 default
+        // chat scope (registry minus chat-tool-scope.ts exclusions).
         const effectiveTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
             )
-          : Array.from(TOOLS.values());
+          : Array.from(TOOLS.values()).filter(
+              (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+            );
         const toolSchemasJson = JSON.stringify(
           effectiveTools.map((t) => ({
             type: "function" as const,
