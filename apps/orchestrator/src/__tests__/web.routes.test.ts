@@ -161,6 +161,36 @@ function webFetchCalls(): Array<[string, RequestInit]> {
       typeof c[0] === "string" && (c[0] as string).startsWith("http://web-fetch:8010"),
   );
 }
+
+/**
+ * One-shot response queue consumed ONLY by calls targeting web-fetch. A
+ * plain mockResolvedValueOnce is not poller-safe: on slow CI runners a
+ * background poller tick lands mid-test and eats the queued response, so
+ * the route under test falls through to the bare mock and 502s (the
+ * "expected 502 to be 200" weather flake). Dispatching on the URL makes
+ * the queue immune to unrelated fetches; poller fetches reject and are
+ * caught/logged by their owners exactly like a down service.
+ */
+const webFetchQueue: Array<{ kind: "resolve" | "reject"; value: unknown }> = [];
+function queueWebFetchResponse(response: unknown): void {
+  webFetchQueue.push({ kind: "resolve", value: response });
+}
+function queueWebFetchError(err: Error): void {
+  webFetchQueue.push({ kind: "reject", value: err });
+}
+function installUrlDispatchedFetch(): void {
+  webFetchQueue.length = 0;
+  mockFetch.mockImplementation((url: unknown) => {
+    if (typeof url === "string" && url.startsWith("http://web-fetch:8010")) {
+      const next = webFetchQueue.shift();
+      if (!next) return Promise.reject(new Error("unmocked web-fetch call"));
+      return next.kind === "resolve"
+        ? Promise.resolve(next.value)
+        : Promise.reject(next.value);
+    }
+    return Promise.reject(new Error("unrelated fetch (background poller)"));
+  });
+}
 const FRESH_ENTRY = () => ({ data: WEATHER_BODY, fetchedAt: Date.now() });
 const STALE_WEATHER_ENTRY = () => ({
   data: WEATHER_BODY,
@@ -188,6 +218,7 @@ describe("GET /api/web/*", () => {
     mockGate.mockResolvedValue(true);
     mockCacheGet.mockResolvedValue(null);
     mockCacheSet.mockResolvedValue(undefined);
+    installUrlDispatchedFetch();
     vi.stubGlobal("fetch", mockFetch);
   });
 
@@ -235,7 +266,7 @@ describe("GET /api/web/*", () => {
 
   describe("weather", () => {
     it("happy path: calls web-fetch with bearer auth, caches, returns stale:false, audits allowed", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(200, WEATHER_BODY));
+      queueWebFetchResponse(jsonResponse(200, WEATHER_BODY));
       const res = await request(app)
         .get("/api/web/weather?location=Paris")
         .set("x-test-role", "owner");
@@ -283,7 +314,7 @@ describe("GET /api/web/*", () => {
     });
 
     it("maps upstream 404 to 404 location_not_found", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(404, { detail: "location_not_found" }));
+      queueWebFetchResponse(jsonResponse(404, { detail: "location_not_found" }));
       const res = await request(app)
         .get("/api/web/weather?location=Nowhereville")
         .set("x-test-role", "owner");
@@ -295,7 +326,7 @@ describe("GET /api/web/*", () => {
 
     it("upstream down + retained cache → 200 stale:true, audited served_stale", async () => {
       mockCacheGet.mockResolvedValue(STALE_WEATHER_ENTRY());
-      mockFetch.mockRejectedValueOnce(new Error("ECONNREFUSED web-fetch"));
+      queueWebFetchError(new Error("ECONNREFUSED web-fetch"));
       const res = await request(app)
         .get("/api/web/weather?location=Paris")
         .set("x-test-role", "owner");
@@ -310,7 +341,7 @@ describe("GET /api/web/*", () => {
     });
 
     it("upstream down + no cache → 502 weather_unavailable, audited provider_error", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("ECONNREFUSED web-fetch"));
+      queueWebFetchError(new Error("ECONNREFUSED web-fetch"));
       const res = await request(app)
         .get("/api/web/weather?location=Paris")
         .set("x-test-role", "owner");
@@ -342,7 +373,7 @@ describe("GET /api/web/*", () => {
 
   describe("rates", () => {
     it("defaults the base to EUR", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(200, RATES_BODY));
+      queueWebFetchResponse(jsonResponse(200, RATES_BODY));
       const res = await request(app).get("/api/web/rates").set("x-test-role", "owner");
 
       expect(res.status).toBe(200);
@@ -366,7 +397,7 @@ describe("GET /api/web/*", () => {
     });
 
     it("normalizes a lowercase base to uppercase", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(200, { ...RATES_BODY, base: "USD" }));
+      queueWebFetchResponse(jsonResponse(200, { ...RATES_BODY, base: "USD" }));
       const res = await request(app)
         .get("/api/web/rates?base=usd")
         .set("x-test-role", "owner");
@@ -386,7 +417,7 @@ describe("GET /api/web/*", () => {
     });
 
     it("maps an upstream 400 to 400 unknown_currency", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(400, { detail: "unknown_currency" }));
+      queueWebFetchResponse(jsonResponse(400, { detail: "unknown_currency" }));
       const res = await request(app)
         .get("/api/web/rates?base=XXX")
         .set("x-test-role", "owner");
@@ -397,7 +428,7 @@ describe("GET /api/web/*", () => {
 
     it("upstream down + retained cache → 200 stale:true", async () => {
       mockCacheGet.mockResolvedValue(STALE_RATES_ENTRY());
-      mockFetch.mockRejectedValueOnce(new Error("ECONNREFUSED web-fetch"));
+      queueWebFetchError(new Error("ECONNREFUSED web-fetch"));
       const res = await request(app).get("/api/web/rates").set("x-test-role", "guest");
 
       expect(res.status).toBe(200);
@@ -409,7 +440,7 @@ describe("GET /api/web/*", () => {
     });
 
     it("upstream down + no cache → 502 rates_unavailable", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("ECONNREFUSED web-fetch"));
+      queueWebFetchError(new Error("ECONNREFUSED web-fetch"));
       const res = await request(app).get("/api/web/rates").set("x-test-role", "owner");
 
       expect(res.status).toBe(502);
@@ -449,7 +480,7 @@ describe("GET /api/web/*", () => {
 
   describe("role guard", () => {
     it("admits the service principal (role=service)", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(200, WEATHER_BODY));
+      queueWebFetchResponse(jsonResponse(200, WEATHER_BODY));
       const res = await request(app)
         .get("/api/web/weather?location=Paris")
         .set("x-test-role", "service");
@@ -457,7 +488,7 @@ describe("GET /api/web/*", () => {
     });
 
     it.each(["owner", "admin", "family", "guest"])("admits the %s role", async (role) => {
-      mockFetch.mockResolvedValueOnce(jsonResponse(200, WEATHER_BODY));
+      queueWebFetchResponse(jsonResponse(200, WEATHER_BODY));
       const res = await request(app)
         .get("/api/web/weather?location=Paris")
         .set("x-test-role", role);
