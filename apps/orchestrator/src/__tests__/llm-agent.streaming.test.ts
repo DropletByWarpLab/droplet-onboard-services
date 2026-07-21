@@ -476,4 +476,167 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     expect(result.stop_reason).toBe("error");
     expect(result.error).toBe("client_aborted");
   });
+
+  // -- KNOWN DIVERGENCE (WARP-1442 follow-up): content + tool_calls same turn --
+  //
+  // Documents (does not endorse) the one back-compat gap in the streaming path.
+  // When a model streams visible content AND THEN tool_calls in the SAME turn,
+  // the emitter puts the preamble on the wire as content_delta as it arrives,
+  // but the blocking path SUPPRESSES that preamble (a tool-call turn content is
+  // pushed into messages as loop context, never emitted or persisted as the
+  // answer). So the summed deltas the client renders EXCEED the persisted final
+  // content; a reload heals it.
+  //
+  // Ships anyway: UNREACHABLE on the shipped path. The gpt-oss harmony format
+  // puts tool calls on the commentary channel with an EMPTY final channel, so no
+  // delta.content is produced on a tool-call turn (see the "accumulates BY
+  // INDEX" test: its tool-call chunks carry no content). It diverges only for
+  // hypothetical non-harmony models that interleave a preamble with tool_calls.
+  //
+  // No clean guard: matching the blocking suppression means holding ALL content
+  // until the turn is known non-tool, but a turn is only known non-tool at its
+  // terminal chunk, so buffer-until-terminal defeats progressive streaming for
+  // the COMMON (pure-content) turn, regressing the shipped gpt-oss path. Product
+  // call deferred to the WARP-1442 follow-up; this pins CURRENT behaviour so a
+  // future change is a conscious, reviewed decision, not silent drift.
+  it("KNOWN DIVERGENCE: streams a content preamble that precedes tool_calls in the same turn (blocking suppresses it)", async () => {
+    const callTool = vi.fn().mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ devices: [] }) }],
+      isError: false,
+    });
+    const chatStream = vi
+      .fn()
+      // iteration 1: a VISIBLE preamble, then a tool call, in one turn.
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { content: "Let me check the network. " } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "c1",
+                      type: "function",
+                      function: { name: "list_network_devices", arguments: "{}" },
+                    },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          },
+        ]),
+      )
+      // iteration 2: the terminal answer.
+      .mockReturnValueOnce(streamOf(contentChunks(["No devices found."])));
+
+    const { deps, events } = collectingDeps(chatStream, {
+      callTool,
+      tools: [
+        {
+          name: "list_network_devices",
+          description: "...",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+    });
+    const result = await runAgent(deps, {
+      model: "gpt-oss:20b",
+      messages: [{ role: "user", content: "show devices" }],
+    });
+
+    // The tool still dispatches and the loop iterates: the tool path is intact.
+    expect(callTool).toHaveBeenCalledWith("list_network_devices", {}, undefined);
+    expect(result.stop_reason).toBe("model_done");
+
+    // The preamble WAS streamed as content_delta, BEFORE the tool_call event.
+    const preambleIdx = events.findIndex(
+      (e) => e.type === "content_delta" && e.text === "Let me check the network.",
+    );
+    const toolCallIdx = events.findIndex((e) => e.type === "tool_call");
+    expect(preambleIdx).toBeGreaterThanOrEqual(0);
+    expect(preambleIdx).toBeLessThan(toolCallIdx);
+
+    // THE DIVERGENCE: summed content_delta INCLUDES the preamble, but the
+    // persisted answer is the terminal turn ONLY.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("Let me check the network.No devices found.");
+    expect(result.message.content).toBe("No devices found.");
+    expect(streamed).not.toBe(result.message.content);
+  });
 });
+
+// -- Byte-identity across EVERY chunk boundary (WARP-1442 invariant #1) -------
+//
+// The core contract: the streamed content_delta events MUST sum byte-for-byte
+// to the single persisted message.content, no matter WHERE the token boundaries
+// fall, including mid-word, mid-reasoning-tag, and mid-harmony-citation-token.
+// This exhaustively splits each tricky answer at every 2-way cut point (plus a
+// 3-way sweep) and asserts join(content_delta) equals the one-shot persisted
+// content every time. A non-monotonic transform in the emitter (one that
+// rewrites an already-emitted prefix) would surface here as a truncated or
+// mismatched sum on some split.
+describe("runAgent - streamed content_delta sums to message.content at every chunk boundary", () => {
+  function splitAt(s: string, cuts: number[]): ChatStreamChunk[] {
+    const bounds = [0, ...cuts, s.length];
+    const parts: string[] = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+      parts.push(s.slice(bounds[i], bounds[i + 1]));
+    }
+    return contentChunks(parts);
+  }
+
+  async function joinDeltas(chunks: ChatStreamChunk[]) {
+    const t = collectingDeps(() => streamOf(chunks));
+    const r = await runAgent(t.deps, { ...REQ, captureReasoning: true });
+    const joined = t.events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    return { joined, content: r.message.content };
+  }
+
+  const OPEN = String.fromCharCode(0x3010);
+  const CLOSE = String.fromCharCode(0x3011);
+  const DAGGER = String.fromCharCode(0x2020);
+  const tok = (n: string, s: string) => OPEN + n + DAGGER + "source=" + s + CLOSE;
+
+  const RAWS: Array<{ label: string; raw: string }> = [
+    { label: "collapsing double space", raw: "Hello,  world!  Nice  day." },
+    { label: "3+ newline collapse", raw: "Para one.\n\n\n\nPara two." },
+    { label: "single harmony token", raw: "The code is " + tok("3", "kb") + " confirmed." },
+    { label: "two harmony tokens", raw: "See " + tok("1", "a") + " and " + tok("2", "b") + " end." },
+    { label: "inline reasoning strip", raw: "Before <reasoning>hidden</reasoning> after." },
+    { label: "multi inline reasoning", raw: "A <reasoning>one</reasoning> B <reasoning>two</reasoning> C." },
+    { label: "leading+trailing space", raw: "   padded on both sides   " },
+    { label: "reasoning then harmony", raw: "X <reasoning>r</reasoning> Y " + tok("9", "z") + " Z." },
+  ];
+
+  for (const { label, raw } of RAWS) {
+    it(`sums correctly for: ${label}`, async () => {
+      const base = await joinDeltas(contentChunks([raw]));
+      const expected = base.content;
+      expect(base.joined).toBe(expected);
+
+      for (let i = 1; i < raw.length; i++) {
+        const { joined, content } = await joinDeltas(splitAt(raw, [i]));
+        expect(joined, `2-way cut @${i}`).toBe(expected);
+        expect(content, `persist @${i}`).toBe(expected);
+      }
+
+      for (let i = 1; i < raw.length - 1; i += 3) {
+        for (let j = i + 1; j < raw.length; j += 3) {
+          const { joined, content } = await joinDeltas(splitAt(raw, [i, j]));
+          expect(joined, `3-way cut @${i},${j}`).toBe(expected);
+          expect(content, `persist @${i},${j}`).toBe(expected);
+        }
+      }
+    });
+  }
+});
+
