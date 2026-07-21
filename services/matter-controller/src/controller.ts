@@ -248,6 +248,17 @@ export interface MatterControllerCore {
   commission(pairingCode: string): Promise<{ nodeId: string }>;
   /** @returns false when the nodeId isn't commissioned (route maps to 404). */
   decommission(nodeIdStr: string): Promise<boolean>;
+  /**
+   * WARP-1469: force an immediate reconnect attempt for a still-paired
+   * but offline device. matter.js otherwise parks a dropped node in
+   * WaitingForDeviceDiscovery and only re-probes ~every 10 minutes, so a
+   * device the user just power-cycled or carried back into range stays
+   * "offline" in the UI for minutes. Non-blocking: triggerReconnect()
+   * schedules the attempt and the `connection_changed` SSE event reports
+   * the outcome.
+   * @returns false when the nodeId isn't commissioned (route maps to 404).
+   */
+  reconnect(nodeIdStr: string): Promise<boolean>;
   listDevices(): Promise<MatterGrouped>;
   getDevice(nodeIdStr: string): Promise<MatterCommissionedDevice | null>;
   sendCommand(
@@ -771,6 +782,23 @@ export function createMatterControllerCore(
         await ctl.removeNode(nodeId, false);
       }
       logger.info("Device decommissioned: %s", nodeIdStr);
+      return true;
+    },
+
+    async reconnect(nodeIdStr: string): Promise<boolean> {
+      const ctl = requireController();
+      const nodeId = NodeId(BigInt(nodeIdStr));
+      // Mirror decommission/getDevice's guard: an uncommissioned nodeId
+      // surfaces as the route's 404, not an untyped matter.js getNode
+      // throw the HTTP layer could only report as a 500.
+      if (!ctl.isNodeCommissioned(nodeId)) return false;
+      const node = await ctl.getNode(nodeId);
+      // Non-blocking (matter.js PairedNode.triggerReconnect): schedules an
+      // immediate reconnect and returns. matter.js self-guards against a
+      // reconnect already in flight, so a double-tap is a safe no-op. The
+      // `connection_changed` SSE event carries the eventual result.
+      node.triggerReconnect();
+      logger.info("Reconnect triggered for node: %s", nodeIdStr);
       return true;
     },
 

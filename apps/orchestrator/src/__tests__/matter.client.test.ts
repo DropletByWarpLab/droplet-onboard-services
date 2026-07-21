@@ -46,6 +46,7 @@ import {
   getCommissionedDevices,
   commissionDevice,
   decommissionDevice,
+  reconnectDevice,
   sendMatterCommand,
   discoverDevices,
   subscribeStateChanges,
@@ -222,6 +223,24 @@ describe("WARP-456 activity wrappers stay orchestrator-side", () => {
     );
   });
 
+  it("records an ok row on reconnect with the caller's actor (WARP-1469)", async () => {
+    installFetchMock({
+      "/devices/7/reconnect": () =>
+        jsonResponse({ status: "reconnecting", nodeId: "7" }),
+    });
+    await expect(
+      reconnectDevice("7", { type: "user", id: "u-1" }),
+    ).resolves.toBe(true);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "smart_home",
+        severity: "ok",
+        what: "Requested reconnect of Matter device",
+        actor: { type: "user", id: "u-1" },
+      }),
+    );
+  });
+
   it("records success and failure rows for commands, preserving an ai actor", async () => {
     installFetchMock({
       "/devices/7/command": () => jsonResponse({ status: "ok" }),
@@ -312,6 +331,33 @@ describe("audit failures never change a Matter operation's outcome (pr-reviewer 
     await expect(sendMatterCommand("7", "turn_on", AI_ACTOR)).resolves.toEqual({
       status: "ok",
     });
+  });
+
+  it("reconnect still succeeds when the audit row write throws (WARP-1469)", async () => {
+    // The sidecar already triggered the reconnect — a Prisma hiccup on
+    // the audit row must not surface as a false 500.
+    installFetchMock({
+      "/devices/7/reconnect": () =>
+        jsonResponse({ status: "reconnecting", nodeId: "7" }),
+    });
+    recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
+    await expect(reconnectDevice("7", AI_ACTOR)).resolves.toBe(true);
+  });
+
+  it("reconnect maps the sidecar's 404 to false without writing an audit row (WARP-1469)", async () => {
+    installFetchMock({
+      "/devices/7/reconnect": () =>
+        jsonResponse(
+          {
+            error: "Device not found",
+            errorClass: "NotFoundError",
+            errorMessage: "Device not found",
+          },
+          404,
+        ),
+    });
+    await expect(reconnectDevice("7", AI_ACTOR)).resolves.toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
   it("decommission maps the sidecar's 404 to false without writing an audit row", async () => {

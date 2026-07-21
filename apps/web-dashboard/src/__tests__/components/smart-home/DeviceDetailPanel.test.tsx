@@ -40,8 +40,14 @@ describe("DeviceDetailPanel — connection-state warning (WARP-299)", () => {
       />,
     );
 
-    // Locate the notice via its copy.
-    const notice = screen.getByText(/disconnected/i).closest("div");
+    // Locate the notice via its copy. WARP-1469 wrapped the heading +
+    // connection-state caption in a new (unstyled) inner <div>, so a bare
+    // .closest("div") now lands on that wrapper instead of the styled
+    // container. Walk up to the orange container itself, regardless of any
+    // intermediate wrappers, via an attribute-substring selector.
+    const notice = screen
+      .getByText(/disconnected/i)
+      .closest('[class*="bg-system-orange/10"]');
     expect(notice).not.toBeNull();
     expect(notice?.className).toMatch(/bg-system-orange\/10/);
     expect(notice?.className).toMatch(/border-system-orange\/20/);

@@ -31,6 +31,7 @@ function fakeCore(overrides: Partial<MatterControllerCore> = {}): MatterControll
     discover: vi.fn().mockResolvedValue([]),
     commission: vi.fn().mockResolvedValue({ nodeId: "7" }),
     decommission: vi.fn().mockResolvedValue(true),
+    reconnect: vi.fn().mockResolvedValue(true),
     listDevices: vi.fn().mockResolvedValue({
       lights: [], switches: [], sensors: [], climate: [],
       media: [], covers: [], locks: [], other: [],
@@ -265,6 +266,36 @@ describe("device routes", () => {
       .set("X-Droplet-Auth", TOKEN);
     expect(res.status).toBe(404);
     expect(res.body.errorClass).toBe("NotFoundError");
+  });
+
+  it("reconnects a device (WARP-1469)", async () => {
+    const core = fakeCore();
+    const res = await request(buildApp(core))
+      .post("/devices/7/reconnect")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "reconnecting", nodeId: "7" });
+    expect(core.reconnect).toHaveBeenCalledWith("7");
+  });
+
+  it("404s when reconnecting a node that isn't commissioned", async () => {
+    const core = fakeCore({
+      reconnect: vi.fn().mockResolvedValue(false),
+    });
+    const res = await request(buildApp(core))
+      .post("/devices/7/reconnect")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(404);
+    expect(res.body.errorClass).toBe("NotFoundError");
+  });
+
+  it("503s reconnect when the controller isn't initialized", async () => {
+    const core = fakeCore({ isInitialized: vi.fn().mockReturnValue(false) });
+    const res = await request(buildApp(core))
+      .post("/devices/7/reconnect")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(503);
+    expect(core.reconnect).not.toHaveBeenCalled();
   });
 
   it("400s on a 20-digit nodeId above the uint64 ceiling", async () => {
