@@ -2,9 +2,10 @@
 
 The Droplet's always-on voice assistant. Captures mic audio, runs a
 wake-word detector, streams to local STT, hands the transcript to the
-existing orchestrator agent loop (`/api/llm/chat` — same 50-tool
-surface the dashboard chat uses), then pipes the streamed response
-through local TTS to the speaker.
+existing orchestrator agent loop (`/api/llm/chat` — the same agent loop
+the dashboard chat uses, scoped to a curated voice tool set via
+`VOICE_ALLOWED_TOOLS`; see Configuration), then pipes the streamed
+response through local TTS to the speaker.
 
 **Everything on-device.** No cloud wake-word service, no cloud STT, no
 cloud TTS. Matches the same privacy positioning the wizard's AI step
@@ -86,18 +87,24 @@ USB mic in after the box has already booted.
 | `DEVICE_RESCAN_INTERVAL` | `5` | Seconds between hot-plug rescans. |
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Where to POST chat turns. |
 | `ORCHESTRATOR_TOKEN` | *(empty)* | Bearer token for orchestrator. Set in compose from the same secret the rest of the stack uses. |
-| `WAKE_ENGINE` | `vosk` | Which wake-word backend to use. `vosk` (default) recognizes the `WAKE_WORD` phrase out of the box via a grammar-constrained Vosk model — no per-phrase training, no licensing fee — so "hey droplet" works on every box. `openwakeword` uses the bundled-ONNX engine (`hey_jarvis`/`alexa`/`hey_mycroft`) instead. If `vosk` is selected but its model dir is missing, the service automatically falls back to openWakeWord so wake stays armed. |
-| `WAKE_WORD` | `hey_droplet` | The wake phrase. Under the default `vosk` engine it's recognized directly (underscores map to spaces: `hey_droplet` → "hey droplet"); any in-vocabulary English phrase works with no training. Under `openwakeword` it must be a bundled model name (`hey_jarvis`, `alexa`, `hey_mycroft`) or a custom `<name>.onnx` in `/app/models/`. Set to `__mock__` for a dev box with no wake runtime. |
+| `WAKE_ENGINE` | `vosk` | Which wake-word backend to use. `vosk` (default) recognizes the `WAKE_WORD` phrases out of the box via a grammar-constrained Vosk model — no per-phrase training, no licensing fee — so "droplet" and "hey droplet" both work on every box. `openwakeword` uses the bundled-ONNX engine (`hey_jarvis`/`alexa`/`hey_mycroft`) instead. If `vosk` is selected but its model dir is missing, the service automatically falls back to openWakeWord so wake stays armed. |
+| `WAKE_WORD` | `droplet,hey droplet` | The wake phrase(s) — a **comma-separated list**; the box wakes on ANY of them (WARP-1431). Default wakes on both "Droplet" and "Hey Droplet". Under the default `vosk` engine each phrase is recognized directly (underscores map to spaces: `hey_droplet` → "hey droplet"); any in-vocabulary English phrase works with no training. Under `openwakeword` (single-model) only the **first** phrase is used and must be a bundled model name (`hey_jarvis`, `alexa`, `hey_mycroft`) or a custom `<name>.onnx` in `/app/models/`. Set to `__mock__` for a dev box with no wake runtime. |
 | `VOSK_MODEL_PATH` | `/app/models/vosk-model-small-en-us` | Directory of the Vosk model (baked into the image by the Dockerfile). Override to point at a larger/different Vosk model. |
 | `WAKE_THRESHOLD` | engine-aware (`0.7` vosk / `0.3` openWakeWord) | Detector confidence threshold (0 – 1). Unset/empty picks a default that matches the engine's score semantics (`resolve_wake_threshold` in `main.py`). Under `vosk` the score is the **minimum per-word confidence** of the finalized phrase match — a partial-hypothesis match is flushed (`FinalResult`) and re-checked before it may fire, and a match with no per-word confidence evidence never fires — so a genuinely spoken "hey droplet" scores ~0.9+ while TV/ambient speech shoehorned into the grammar lands lower; `0.7` gates the false accepts. Lower it toward `0.5` if real wakes get missed at distance; raise it if false wakes persist. openWakeWord scores are sigmoid outputs — its default stays `0.3`. |
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
 | `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
 | `STT_LANGUAGE` | `en` | Language code for transcription. |
-| `STT_MAX_RECORD_S` | `3.0` | **Hard cap** on seconds of audio captured per wake. The end-of-speech VAD ends the capture sooner once you stop talking; this cap guarantees it always stops — even in a room with continuous background audio where no silence is ever detected. Kept short so the box doesn't feel like it "keeps listening". |
+| `STT_MAX_RECORD_S` | `5.0` | **Hard cap** on seconds of audio captured per wake. The end-of-speech VAD ends the capture sooner once you stop talking; this cap guarantees it always stops — even in a room with continuous background audio where no silence is ever detected. `5.0` is the single source of truth (code default + compose + the overview doc all agree, and the box runs 5.0). |
+| `VAD_SILENCE_S` | `0.6` | End-of-speech VAD: seconds of trailing silence that end the capture once the user has started talking, so the box stops the moment they finish rather than always holding the mic for the full `STT_MAX_RECORD_S`. Raise it if the box cuts people off during a natural mid-sentence pause. |
+| `VAD_SPEECH_RMS` | `700` | int16 frame RMS above which a frame counts as "speech" — sits between a typical room floor (~400) and normal speech (~1000+). **The per-room tuning knob**: lower it in a quiet room where speech reads soft, raise it in a loud one where the floor creeps up. |
+| `VAD_MIN_SPEECH_S` | `0.4` | Minimum cumulative speech (s) before end-of-speech may fire, so the wake-word tail plus a pause before the command doesn't end the turn early. |
+| `WAKE_VISUAL_DECAY_S` | `2.0` | How long the `wake_detected` / `transcript_ready` UI hints linger on `/voice/status` before decaying back to `listening`, so the dashboard's wake + transcript pulse animations have time to play. |
 | `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
 | `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
 | `VOICE_FLATLINE_WINDOW_S` | `240` | Flatline watchdog (WARP-1037): seconds of at/near-digital-zero input while `state=listening` before `/health` degrades to 503. The ReSpeaker XVF3800's XMOS DSP can wedge with the USB stream still open — the pipeline keeps "listening" while every frame is pure silence. The pipeline measures a rolling input RMS inside its own frame handler (never a second stream on the same hw device) and flags the wedge so the Docker healthcheck + ops-console see it. Recovery is automatic when audio returns. `0` disables. |
 | `VOICE_FLATLINE_DBFS` | `-70.0` | Level (dBFS) below which a frame counts as "no signal" for the flatline watchdog. A healthy capture chain's noise floor sits ≈ -60…-50 dBFS; a wedged DSP emits exact zeros (-120 floor) or ±1-count dither (≈ -90). |
+| `VOICE_MAX_TOKENS` | `1024` | **Voice turn shaping (WARP-1432).** Per-turn generation cap sent to the orchestrator on every reply. The box's `gpt-oss` voice model spends reasoning-channel tokens *before* visible content, so the default is deliberately generous — enough for reasoning + a short spoken sentence; too low empties the reply (WARP-854). The gateway hard-caps at 4096; a non-numeric or out-of-range value falls back to `1024`. Voice also always sends `ephemeral:true` (a constant, not an env — voice has no persisted chat session, so a per-utterance `ChatSession` would only litter the sidebar). |
+| `VOICE_ALLOWED_TOOLS` | *(curated default)* | **Voice turn shaping (WARP-1432).** Comma-separated tool names the assistant may use on tool-enabled turns. Empty (default) sends a curated scope — box health, cameras, network, files, smart devices + `control_device`, calendar, reminders — instead of the full ~43-tool set, cutting schema prefill from ~5k to ~1–1.5k tokens/turn. Whitespace and empty segments are ignored; an all-empty value falls back to the default. The greeting fast path (`tool_choice="none"`) sends zero tools regardless. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Control API
@@ -139,10 +146,11 @@ into stacked commits per `docs/voice-assistant-plan.md`:
    work without any wake/STT/TTS.
 2. **Wake word** — wake-word detection loop on a background thread;
    `/voice/status` surfaces state. The default `vosk` engine recognizes
-   the branded "hey droplet" phrase out of the box (no per-phrase
-   training, no licensing fee); `openwakeword` (`hey_jarvis` et al.) is
-   available as an alternative and the automatic fallback. Pluggable
-   `WakeWordDetector` backends live in `voice/wake.py`.
+   the branded "Droplet" and "Hey Droplet" phrases out of the box (no
+   per-phrase training, no licensing fee) — it fires on either;
+   `openwakeword` (`hey_jarvis` et al.) is available as an alternative
+   and the automatic fallback. Pluggable `WakeWordDetector` backends live
+   in `voice/wake.py`.
 3. **STT** — wyoming-faster-whisper sidecar container speaks Wyoming
    protocol over TCP. After wake, voice-io streams the next
    5 s of mic audio (fixed window — VAD-based cutoff in a follow-up),

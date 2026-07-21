@@ -814,9 +814,10 @@ describe("runAgent", () => {
     expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toEqual([]);
   });
 
-  // The undefined case stays "no restriction → every tool", so the empty
-  // array fix doesn't accidentally clamp callers that omit allowed_tools.
-  it("allowed_tools undefined forwards the full tool set", async () => {
+  // The undefined case is "no restriction → the default chat scope"
+  // (WARP-1424): everything except the chat-tool-scope.ts exclusions. The
+  // empty-array fix must not clamp callers that omit allowed_tools.
+  it("allowed_tools undefined forwards the default chat scope", async () => {
     const chat = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -839,6 +840,48 @@ describe("runAgent", () => {
       // allowed_tools intentionally omitted
     });
     expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toHaveLength(2);
+  });
+
+  // WARP-1424 — the default chat advertisement excludes the specialist/admin
+  // set (chat-tool-scope.ts): the post-WARP-1423 registry no longer fits the
+  // shipping 16K window whole. An explicit allowed_tools still reaches the
+  // excluded tools (that's how power callers and tests opt back in).
+  it("default chat scope drops excluded tools; explicit allowed_tools restores them", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "done" } }],
+      }),
+    });
+    const registry = [
+      { name: "list_cameras", description: "...", inputSchema: { type: "object", properties: {} } },
+      { name: "get_switch_ports", description: "...", inputSchema: { type: "object", properties: {} } },
+    ];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue(registry),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const defaultNames = (
+      chat.mock.calls[0][0] as { tools: { function: { name: string } }[] }
+    ).tools.map((t) => t.function.name);
+    expect(defaultNames).toEqual(["list_cameras"]);
+
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "hi" }],
+      allowed_tools: ["get_switch_ports"],
+    });
+    const explicitNames = (
+      chat.mock.calls[1][0] as { tools: { function: { name: string } }[] }
+    ).tools.map((t) => t.function.name);
+    expect(explicitNames).toEqual(["get_switch_ports"]);
   });
 
   // WARP-329 — client disconnect cancellation. The signal is forwarded to

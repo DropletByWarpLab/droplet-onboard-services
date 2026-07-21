@@ -27,7 +27,8 @@ import type {
   McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
-import type { ChatMessage, ChatResponse, ToolCall } from "../types/index.js";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
 
@@ -77,6 +78,10 @@ export interface AgentDeps {
         stream?: boolean;
         temperature?: number;
         max_tokens?: number;
+        // WARP-1442 — gpt-oss reasoning-effort, forwarded verbatim to the
+        // gateway (which only applies it for the gpt-oss family). Unset →
+        // omitted, so the outbound request is byte-for-byte unchanged.
+        reasoning_effort?: "low" | "medium" | "high";
         tools?: {
           type: "function";
           function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -88,6 +93,33 @@ export interface AgentDeps {
       // client goes away mid-turn.
       signal?: AbortSignal,
     ) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
+    /**
+     * WARP-1442 — optional SERVER-SIDE token streaming. When present AND the
+     * caller supplied `onEvent` (i.e. `/api/llm/chat` with `stream=true`), the
+     * agent loop consumes this token stream instead of the blocking `chat()`
+     * and emits `content_delta` events INCREMENTALLY as the model generates,
+     * rather than one delta after the full decode. The yielded chunks are the
+     * ai-gateway's OpenAI-compat SSE (`ChatStreamChunk`), the SAME request body
+     * `chat()` takes (with `stream:true`). Absent → the loop uses `chat()`
+     * byte-for-byte, so every existing (blocking) caller is unchanged. A THROW
+     * from this stream (transport error) is caught and the loop falls back to
+     * `chat()` — streaming is additive, never a new failure mode.
+     */
+    chatStream?: (
+      req: {
+        model: string;
+        messages: ChatMessage[];
+        temperature?: number;
+        max_tokens?: number;
+        reasoning_effort?: "low" | "medium" | "high";
+        tools?: {
+          type: "function";
+          function: { name: string; description: string; parameters: Record<string, unknown> };
+        }[];
+        tool_choice?: "auto" | "none";
+      },
+      signal?: AbortSignal,
+    ) => AsyncIterable<ChatStreamChunk>;
   };
   /**
    * WARP-437 — when present, the agent loop classifies every
@@ -186,6 +218,15 @@ export interface AgentRequest {
    * provider default applies (pre-WARP-849 behavior).
    */
   max_tokens?: number;
+  /**
+   * WARP-1442 — gpt-oss reasoning-effort, forwarded verbatim to the
+   * ai-gateway chat call (like `max_tokens`). The route resolves the
+   * effective value — applying the `_service:voice` principal's server-side
+   * "low" default — before handing it here; the loop only forwards it. Unset
+   * → nothing is sent and the outbound request is byte-for-byte unchanged, so
+   * the dashboard / every non-voice caller is unaffected.
+   */
+  reasoning_effort?: "low" | "medium" | "high";
   /** If set, restrict the registry to this subset of tool names. */
   allowed_tools?: string[];
   /**
@@ -355,6 +396,291 @@ export function parseReasoningTrace(args: {
   return { reasoningSteps: steps, cleanedContent, fullReasoning };
 }
 
+// ── WARP-1442 — SERVER-SIDE token streaming ─────────────────────────────────
+//
+// The agent loop can obtain a turn two ways:
+//   1. blocking `aiGateway.chat()` — one JSON body, one content_delta emitted
+//      after the full decode (the historical path; unchanged);
+//   2. streaming `aiGateway.chatStream()` — an OpenAI-compat token stream from
+//      which we emit content_delta INCREMENTALLY as the model generates.
+//
+// The streaming consumer synthesises the SAME `asst` ChatMessage the blocking
+// path produces (content + tool_calls + reasoning_content), so the rest of the
+// loop — tool dispatch, the hallucinated-tool guard, the terminal finalize —
+// runs UNCHANGED. The only difference is that content_delta + reasoning_step
+// were already emitted during the stream, so the terminal block skips
+// re-emitting them (guarded by `streamedTurn`).
+
+/** Thrown by the stream consumer when the client disconnected mid-generation. */
+class AgentStreamAborted extends Error {
+  constructor() {
+    super("client_aborted");
+    this.name = "AgentStreamAborted";
+  }
+}
+
+/**
+ * Thrown when the token stream errors AFTER content/reasoning was already
+ * emitted. We must NOT fall back to the blocking path in that case — replaying
+ * would double-emit the answer and corrupt the persisted content. This surfaces
+ * as an honest error turn instead (the same outcome the blocking path would
+ * reach if its connection died mid-answer).
+ */
+class AgentStreamPartialError extends Error {
+  constructor(readonly cause: unknown) {
+    super("stream_interrupted");
+    this.name = "AgentStreamPartialError";
+  }
+}
+
+/** Name-based abort check (mirrors routes/llm.ts — robust to error re-wrapping). */
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err.name === "AbortError" || err.name === "AgentStreamAborted")
+  );
+}
+
+/**
+ * WARP-1442 — longest k in [1, marker.length) such that `s` ends with the
+ * first k chars of `marker`. Used to hold back a trailing PARTIAL control
+ * marker (e.g. a `<reasoning>` opening tag split across chunks) until the rest
+ * of it arrives, so we never leak a half-tag as content.
+ */
+function trailingPrefixLen(s: string, marker: string): number {
+  const max = Math.min(s.length, marker.length - 1);
+  for (let k = max; k >= 1; k--) {
+    if (s.endsWith(marker.slice(0, k))) return k;
+  }
+  return 0;
+}
+
+/**
+ * WARP-1442 — the largest PREFIX of the raw streamed content that is SAFE to
+ * finalize NOW: appending more tokens can't retroactively change it. We hold
+ * back the volatile tail so the incremental deltas we emit always sum EXACTLY
+ * to the blocking path's single answer.
+ *
+ * Returns `null` when the WHOLE buffer must be held: a completion that starts
+ * as a bare JSON object/array is failed tool routing that `sanitizeFinalContent`
+ * demotes to "" (WARP-854) — we can't know whether it parses until it's whole,
+ * so we never stream a JSON blob we might have to retract.
+ */
+function stableStreamedContent(raw: string): string | null {
+  if (/^\s*[[{]/.test(raw)) return null;
+  let s = raw;
+  // Hold back from an UNCLOSED inline `<reasoning>` segment (qwen3/deepseek):
+  // parseReasoningTrace only strips CLOSED segments deterministically, and the
+  // reasoning text must never leak into user-visible content (WARP-495).
+  const openTag = "<reasoning>";
+  const lastOpen = s.lastIndexOf(openTag);
+  if (lastOpen !== -1 && s.indexOf("</reasoning>", lastOpen) === -1) {
+    s = s.slice(0, lastOpen);
+  }
+  // Hold back a trailing PARTIAL `<reasoning>` opening tag (e.g. "…<reas").
+  const partial = trailingPrefixLen(s, openTag);
+  if (partial) s = s.slice(0, s.length - partial);
+  // Hold back an unclosed harmony citation token `【…` until its `】` arrives
+  // (gpt-oss leaks `【3†source=…】` — WARP-1331 strips the complete token).
+  const lastTok = s.lastIndexOf("【");
+  if (lastTok !== -1 && s.indexOf("】", lastTok) === -1) s = s.slice(0, lastTok);
+  return s;
+}
+
+/**
+ * WARP-1442 — turns a growing raw-content buffer into INCREMENTAL, sanitized
+ * `content_delta` events plus `reasoning_step` events for any CLOSED inline
+ * `<reasoning>` segments (in document order, before the content that follows
+ * them). By construction the concatenation of every emitted content_delta is
+ * byte-identical to the blocking path's single delta:
+ *   `sanitizeFinalContent(parseReasoningTrace(raw).cleanedContent)`.
+ */
+class StreamingContentEmitter {
+  private raw = "";
+  private emittedContent = "";
+  private emittedSteps = 0;
+
+  constructor(
+    private readonly emit: (e: SSEEvent) => void,
+    private readonly captureReasoning: boolean,
+  ) {}
+
+  push(fragment: string): void {
+    this.raw += fragment;
+    this.flush(false);
+  }
+
+  /** Flush the final remainder; returns the raw content for message assembly. */
+  finish(): string {
+    this.flush(true);
+    return this.raw;
+  }
+
+  private flush(final: boolean): void {
+    const view = final ? this.raw : stableStreamedContent(this.raw);
+    if (view === null) return; // bare-JSON answer held until finish (WARP-854)
+    const parsed = parseReasoningTrace({ content: view });
+    // Emit newly-CLOSED inline reasoning segments before their content.
+    if (this.captureReasoning) {
+      for (let i = this.emittedSteps; i < parsed.reasoningSteps.length; i++) {
+        this.emit({ type: "reasoning_step", text: parsed.reasoningSteps[i]! });
+      }
+    }
+    this.emittedSteps = parsed.reasoningSteps.length;
+    const visible = sanitizeFinalContent(parsed.cleanedContent);
+    // The safe view is always a prefix-extension of what we've emitted; guard
+    // anyway so an unexpected non-monotonic step can never corrupt the answer.
+    if (
+      visible.length > this.emittedContent.length &&
+      visible.startsWith(this.emittedContent)
+    ) {
+      const delta = visible.slice(this.emittedContent.length);
+      this.emittedContent = visible;
+      this.emit({ type: "content_delta", text: delta });
+    }
+  }
+}
+
+/** Accumulate a streamed tool-call fragment into the by-index register. */
+function accumulateToolCall(
+  byIndex: Map<number, { id: string; name: string; args: string }>,
+  order: number[],
+  frag: {
+    index?: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  },
+): void {
+  const idx = typeof frag.index === "number" ? frag.index : 0;
+  let acc = byIndex.get(idx);
+  if (!acc) {
+    acc = { id: "", name: "", args: "" };
+    byIndex.set(idx, acc);
+    order.push(idx);
+  }
+  // The `id` + function `name` arrive on the FIRST fragment for an index; the
+  // `arguments` arrive as partial JSON strings across subsequent fragments.
+  if (frag.id) acc.id = frag.id;
+  if (frag.function?.name) acc.name = frag.function.name;
+  if (typeof frag.function?.arguments === "string") {
+    acc.args += frag.function.arguments;
+  }
+}
+
+/**
+ * WARP-1442 — drain one turn's token stream, emitting content_delta +
+ * reasoning_step incrementally, and return the synthesised assistant message
+ * (identical in shape to `chat()`'s `choice.message`) for the rest of the loop.
+ *
+ * - `delta.content` → accumulate + emit content_delta incrementally.
+ * - `delta.reasoning_content` (gpt-oss channel) → accumulate; emit as ONE
+ *   `reasoning_step` BEFORE the first content_delta (WARP-458 ordering), and
+ *   ONLY on a terminal (non-tool-call) turn — matching the blocking path, which
+ *   never parses reasoning on a tool-call turn (WARP-495).
+ * - `delta.tool_calls` → accumulate fragments BY INDEX into valid calls; never
+ *   emitted as content.
+ * - client disconnect (WARP-329) → break, which tears the upstream Ollama
+ *   stream down (the `for await` calls `.return()`), then throw so the loop
+ *   returns the aborted terminal.
+ */
+async function consumeChatStream(
+  stream: AsyncIterable<ChatStreamChunk>,
+  opts: {
+    emit: (e: SSEEvent) => void;
+    captureReasoning: boolean;
+    signal?: AbortSignal;
+  },
+): Promise<{ asst: ChatMessage }> {
+  const { emit, captureReasoning, signal } = opts;
+  // Track whether we've put ANYTHING on the wire this turn. If the stream errors
+  // AFTER we've emitted, the loop must NOT fall back to blocking chat() (that
+  // would replay + double-emit the answer) — we surface an error turn instead.
+  let emittedAny = false;
+  const trackedEmit = (e: SSEEvent) => {
+    if (e.type === "content_delta" || e.type === "reasoning_step") {
+      emittedAny = true;
+    }
+    emit(e);
+  };
+  const content = new StreamingContentEmitter(trackedEmit, captureReasoning);
+  let reasoningBuf = "";
+  let channelReasoningEmitted = false;
+  let sawContent = false;
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  const toolOrder: number[] = [];
+
+  const flushChannelReasoning = () => {
+    if (channelReasoningEmitted) return;
+    channelReasoningEmitted = true;
+    if (captureReasoning) {
+      const step = reasoningBuf.trim();
+      if (step) trackedEmit({ type: "reasoning_step", text: step });
+    }
+  };
+
+  try {
+    for await (const chunk of stream) {
+      // WARP-329 — a mid-stream disconnect stops draining; breaking the
+      // for-await calls the iterator's `.return()`, tearing down the Ollama
+      // stream.
+      if (signal?.aborted) break;
+      const choice = chunk.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        reasoningBuf += delta.reasoning_content;
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          accumulateToolCall(toolCalls, toolOrder, tc);
+        }
+      }
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        // gpt-oss streams the reasoning channel fully before content — flush it
+        // as a step so reasoning_step precedes content_delta (WARP-458 order).
+        if (!sawContent) {
+          flushChannelReasoning();
+          sawContent = true;
+        }
+        content.push(delta.content);
+      }
+    }
+  } catch (err) {
+    if (signal?.aborted || isAbortError(err)) throw new AgentStreamAborted();
+    // Nothing emitted yet → let the loop fall back to blocking chat(). Already
+    // emitted → a fallback would double the answer, so make it an error turn.
+    if (emittedAny) throw new AgentStreamPartialError(err);
+    throw err;
+  }
+
+  if (signal?.aborted) throw new AgentStreamAborted();
+
+  // Flush the channel reasoning for a terminal turn (content, empty, or
+  // reasoning-only). A tool-call turn does NOT emit reasoning_step — the
+  // blocking path parses reasoning only on the terminal non-tool-call turn
+  // (WARP-495), so streaming matches.
+  if (toolOrder.length === 0) flushChannelReasoning();
+
+  const rawContent = content.finish();
+
+  const asst: ChatMessage = { role: "assistant", content: rawContent };
+  if (toolOrder.length > 0) {
+    asst.tool_calls = toolOrder.map((idx) => {
+      const tc = toolCalls.get(idx)!;
+      return {
+        id: tc.id || `call_${idx}`,
+        type: "function" as const,
+        function: { name: tc.name, arguments: tc.args },
+      };
+    });
+  }
+  // Surface the raw reasoning channel so the terminal finalize can fold it into
+  // `message.reasoning` exactly as the blocking path does (parseReasoningTrace's
+  // `providerReasoning`).
+  if (reasoningBuf.trim()) asst.reasoning_content = reasoningBuf;
+  return { asst };
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
   const trace: AgentTraceEntry[] = [];
@@ -374,13 +700,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // it impossible by construction.
   const toolChoice: "auto" | "none" = req.tool_choice ?? "auto";
   const allTools = toolChoice === "none" ? [] : await deps.mcp.listTools();
-  // Distinguish `undefined` (no restriction → every tool) from an explicit
-  // empty array (caller asked for ZERO tools). Truthiness on `.length`
-  // would conflate the two and silently advertise the full registry for an
-  // intentional `allowed_tools: []`.
+  // Distinguish `undefined` (no restriction → the default chat scope) from
+  // an explicit empty array (caller asked for ZERO tools). Truthiness on
+  // `.length` would conflate the two and silently advertise the default
+  // scope for an intentional `allowed_tools: []`.
+  //
+  // WARP-1424: with no explicit `allowed_tools`, chat advertises the
+  // registry minus the specialist/admin exclusion set — the full ~127-tool
+  // registry no longer fits the shipping 16K window (see chat-tool-scope.ts
+  // and the WARP-1118 canary). External MCP clients are unaffected; an
+  // explicit `allowed_tools` still selects freely from the full registry.
   const filtered = req.allowed_tools
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-    : allTools;
+    : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name));
   const tools = filtered.map((t) => ({
     type: "function" as const,
     function: {
@@ -426,49 +758,108 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     error: "client_aborted",
   });
 
+  // WARP-1442 — SERVER-SIDE token streaming is used when the caller streams
+  // (`onEvent` present, i.e. /api/llm/chat stream=true) AND a streaming
+  // transport is injected. It emits content_delta INCREMENTALLY as the model
+  // generates. Absent onEvent or chatStream → the blocking path below runs
+  // byte-for-byte, so every non-streaming caller is unchanged.
+  const useStream = Boolean(deps.onEvent && deps.aiGateway.chatStream);
+
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
     if (req.signal?.aborted) return abortedResult(iter);
-    const gw = await deps.aiGateway.chat(
-      {
-        model: req.model,
-        messages,
-        stream: false,
-        temperature: req.temperature,
-        // WARP-849 — forward the caller's completion budget (previously
-        // dropped here, making the wizard probe's max_tokens a no-op).
-        max_tokens: req.max_tokens,
-        tools,
-        tool_choice: toolChoice,
-      },
-      // WARP-329 — cancel the in-flight inference fetch on disconnect.
-      req.signal,
-    );
-    if (!gw.ok) {
-      const error = `ai-gateway ${gw.status ?? "error"}`;
-      emit({ type: "done", iterations: iter, stop_reason: "error", error });
-      return {
-        message: { role: "assistant", content: "" },
-        trace,
-        iterations: iter,
-        stop_reason: "error",
-        error,
-      };
+
+    // The outbound request shared by both transports. `stream` is set per
+    // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
+    // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
+    // the same request as a blocking one.
+    const chatReq = {
+      model: req.model,
+      messages,
+      temperature: req.temperature,
+      max_tokens: req.max_tokens,
+      reasoning_effort: req.reasoning_effort,
+      tools,
+      tool_choice: toolChoice,
+    };
+
+    let asst: ChatMessage | null = null;
+    // Streamed turns already emitted content_delta + reasoning_step during the
+    // stream; the terminal finalize below must NOT re-emit them.
+    let streamedTurn = false;
+    if (useStream) {
+      try {
+        const streamed = await consumeChatStream(
+          // WARP-329 — the signal is threaded into the streaming read so a
+          // client disconnect tears down the Ollama stream mid-generation.
+          deps.aiGateway.chatStream!(chatReq, req.signal),
+          {
+            emit,
+            captureReasoning: req.captureReasoning ?? false,
+            signal: req.signal,
+          },
+        );
+        asst = streamed.asst;
+        streamedTurn = true;
+      } catch (err) {
+        if (req.signal?.aborted || isAbortError(err)) return abortedResult(iter);
+        if (err instanceof AgentStreamPartialError) {
+          // The stream died AFTER partial content was emitted — falling back to
+          // blocking would double the answer. Surface an honest error turn (the
+          // same outcome a blocking connection death would reach).
+          const error = "stream_interrupted";
+          emit({ type: "done", iterations: iter, stop_reason: "error", error });
+          return {
+            message: { role: "assistant", content: "" },
+            trace,
+            iterations: iter,
+            stop_reason: "error",
+            error,
+          };
+        }
+        // Stream failed BEFORE emitting anything (e.g. gateway non-200 at open)
+        // — fall back to the blocking path so the turn still completes.
+        // Streaming is additive, never a new failure mode.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[agent] streaming chat failed, falling back to blocking:",
+          err,
+        );
+      }
     }
-    const data = await gw.json();
-    const choice = data.choices?.[0];
-    if (!choice) {
-      emit({ type: "done", iterations: iter, stop_reason: "error", error: "no choice in response" });
-      return {
-        message: { role: "assistant", content: "" },
-        trace,
-        iterations: iter,
-        stop_reason: "error",
-        error: "no choice in response",
-      };
+
+    if (asst === null) {
+      const gw = await deps.aiGateway.chat(
+        { ...chatReq, stream: false },
+        // WARP-329 — cancel the in-flight inference fetch on disconnect.
+        req.signal,
+      );
+      if (!gw.ok) {
+        const error = `ai-gateway ${gw.status ?? "error"}`;
+        emit({ type: "done", iterations: iter, stop_reason: "error", error });
+        return {
+          message: { role: "assistant", content: "" },
+          trace,
+          iterations: iter,
+          stop_reason: "error",
+          error,
+        };
+      }
+      const data = await gw.json();
+      const choice = data.choices?.[0];
+      if (!choice) {
+        emit({ type: "done", iterations: iter, stop_reason: "error", error: "no choice in response" });
+        return {
+          message: { role: "assistant", content: "" },
+          trace,
+          iterations: iter,
+          stop_reason: "error",
+          error: "no choice in response",
+        };
+      }
+      asst = choice.message;
     }
-    const asst = choice.message;
 
     // Happy path: model produced a final answer with no more tool calls.
     if (!asst.tool_calls?.length) {
@@ -483,7 +874,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         content: typeof asst.content === "string" ? asst.content : null,
         providerReasoning: asst.reasoning_content ?? null,
       });
-      if (req.captureReasoning) {
+      // WARP-1442 — a streamed turn already emitted reasoning_step +
+      // content_delta INCREMENTALLY during the stream; only the blocking path
+      // emits them here at decode time. The parse + sanitize below still run
+      // for BOTH paths so `message.content` / `message.reasoning` persist
+      // identically (the streamed content_delta events sum to `visible`).
+      if (req.captureReasoning && !streamedTurn) {
         // Spec §AC3: reasoning_step blocks land BEFORE the content_delta.
         for (const step of reasoning.reasoningSteps) {
           emit({ type: "reasoning_step", text: step });
@@ -494,7 +890,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // content_delta — WARP-854's error path (done error frame / FAILED
       // turn) is the owner of that case.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
-      if (visible) emit({ type: "content_delta", text: visible });
+      if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
