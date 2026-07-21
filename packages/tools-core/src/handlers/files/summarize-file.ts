@@ -5,6 +5,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { sniffIsText } from "./_sniff.js";
 
 const inputSchema = {
   type: "object",
@@ -25,29 +26,6 @@ const MAX_FOCUS_CHARS = 500;
 /** Cap on the content sent to the completion endpoint — very large files
  *  are summarized from their first portion only. */
 const MAX_SUMMARY_INPUT_CHARS = 24000;
-
-// Same sniff parameters as read-file.ts (WARP-1372) — the download proxy
-// reports application/octet-stream for plainly-readable files (md/csv/txt),
-// so the header alone must never be grounds for refusal. Duplicated here
-// because read-file.ts only exports its tool, not the helper.
-const SNIFF_BYTES = 4096;
-
-function sniffIsText(bytes: Uint8Array): boolean {
-  const head = bytes.subarray(0, SNIFF_BYTES);
-  if (head.includes(0)) return false;
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  // Tolerate up to 3 trailing bytes of a char truncated by the sniff window.
-  for (let trim = 0; trim <= 3 && trim < head.length; trim++) {
-    try {
-      decoder.decode(head.subarray(0, head.length - trim));
-      return true;
-    } catch {
-      // Only a boundary truncation is forgivable — keep trimming; a decode
-      // error that survives all trims is real binary content.
-    }
-  }
-  return false;
-}
 
 function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
