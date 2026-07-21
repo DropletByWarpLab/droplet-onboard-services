@@ -84,6 +84,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "list_ap_devices",
     "approve_ap",
     "decommission_ap",
+    "get_bandwidth_usage",
+    "list_vpn_peers",
+    "list_threat_events",
+    "set_wifi_password",
+    "set_device_schedule",
   ],
   files: [
     "list_files",
@@ -221,6 +226,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_ap_devices: "See your Wi-Fi extenders that boost coverage",
   approve_ap: "Add a Wi-Fi extender to spread coverage further",
   decommission_ap: "Remove a Wi-Fi extender from your network",
+  get_bandwidth_usage: "See how much internet your home is using",
+  list_vpn_peers: "See who has remote access to your home network",
+  list_threat_events: "Review recent security alerts from your network",
+  set_wifi_password: "Change your Wi-Fi password (every device reconnects)",
+  set_device_schedule: "Set internet time limits for a device, like bedtime hours",
   // Files
   list_files: "Browse the files on your Droplet",
   read_file: "Open and read one of your files",

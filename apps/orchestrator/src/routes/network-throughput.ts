@@ -120,7 +120,11 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
 
   router.get(
     "/network/throughput",
-    requireRole("owner", "admin", "family", "guest"),
+    // WARP-1443: the MCP principal is admitted so the get_bandwidth_usage
+    // LLM tool can read the window time-series — same read-only posture
+    // as /network/summary above. Human roles unchanged (all four already
+    // pass).
+    requireRoleOrMcpService("owner", "admin", "family", "guest"),
     async (req, res, next) => {
       try {
         const q = throughputQuerySchema.safeParse(req.query);

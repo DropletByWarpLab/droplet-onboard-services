@@ -9,7 +9,7 @@ import type { Router } from "express";
 import type { createScheduleApiService } from "../services/schedule-api.service.js";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { handleRegistryError } from "./network-error-handler.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -49,7 +49,13 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
   // WARP-171: per-route guard. owner + admin — schedules are
   // parental-controls / time-of-day rules that cut household member
   // connectivity, so they're admin-tier.
-  router.post("/network/schedules", requireRole("owner", "admin"), async (req, res, next) => {
+  //
+  // WARP-1443: every schedules/overrides/manualBlock guard below is
+  // requireRoleOrMcpService — the MCP service principal (`_service:mcp`)
+  // is admitted so the set_device_schedule LLM tool reaches this surface.
+  // The tool enforces the human caller's forwarded role (owner/admin)
+  // before dispatching; human RBAC on these routes is byte-identical.
+  router.post("/network/schedules", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const schedule = await scheduleApi.createSchedule(req.body);
       res.status(201).json({ schedule });
@@ -58,7 +64,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.patch("/network/schedules/:id", requireRole("owner", "admin"), async (req, res, next) => {
+  router.patch("/network/schedules/:id", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const schedule = await scheduleApi.updateSchedule(
         req.params.id,
@@ -70,7 +76,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.delete("/network/schedules/:id", requireRole("owner", "admin"), async (req, res, next) => {
+  router.delete("/network/schedules/:id", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       await scheduleApi.deleteSchedule(req.params.id);
       res.status(204).end();
@@ -98,7 +104,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.post("/network/overrides", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/network/overrides", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const body = { ...(req.body ?? {}) };
       // Guard against `new Date("not-a-date")` silently yielding Invalid Date —
@@ -156,7 +162,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.delete("/network/overrides/:id", requireRole("owner", "admin"), async (req, res, next) => {
+  router.delete("/network/overrides/:id", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const removed = await scheduleApi.cancelOverride(req.params.id);
       // WARP-181 (AC4): mirror row for the delete path.
@@ -209,7 +215,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.post("/network/devices/:mac/manualBlock", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/network/devices/:mac/manualBlock", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       if (typeof req.body?.blocked !== "boolean") {
         return res

@@ -9,8 +9,9 @@
  *
  * Uses the REAL network-safety service so the assertions pin end-to-end
  * behavior: Tier-1 ops execute (200, tier echo), Tier-2 ops mint a 202 and
- * never execute. The password route keeps plain requireRole — no tool needs
- * it — and other service principals (voice) stay excluded.
+ * never execute. WARP-1443: the password route now admits the MCP principal
+ * too (set_wifi_password tool — Tier-2, so the AI path only ever mints a
+ * 202 here). Other service principals (voice) stay excluded everywhere.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -199,8 +200,26 @@ describe("the guard admits exactly the MCP principal", () => {
     expect(networkService.setWifiSsid).not.toHaveBeenCalled();
   });
 
-  it("the password route is NOT relaxed: _service:mcp is 403 there", async () => {
+  // WARP-1443: the password route is relaxed for the set_wifi_password
+  // tool — but it's Tier-2, so the MCP principal only ever mints a 202
+  // confirmation and never executes (confirm stays human-only below).
+  it("the password route admits _service:mcp: 202 mint, never executes", async () => {
     const res = await request(buildApp(mcpPrincipal))
+      .post("/api/network/wifi/password")
+      .send({ password: "longenoughpw" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      status: "confirmation_required",
+      operation: "set_wifi_password",
+      tier: 2,
+    });
+    expect(res.body.confirmationToken).toBeTruthy();
+    expect(networkService.setWifiPassword).not.toHaveBeenCalled();
+  });
+
+  it("other service principals (voice) are still 403 on the password route", async () => {
+    const res = await request(buildApp(voicePrincipal))
       .post("/api/network/wifi/password")
       .send({ password: "longenoughpw" });
 
