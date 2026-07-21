@@ -299,6 +299,28 @@ def prettify_ollama_name(raw: str) -> str:
     return f"{base_pretty} {tag_pretty}".strip()
 
 
+# WARP-1442: the model families that honor a `reasoning_effort` control on
+# Ollama's OpenAI-compat endpoint. Today that's OpenAI's open-weights gpt-oss
+# family (the single-box default, gpt-oss:20b) — its harmony format maps a
+# top-level `reasoning_effort` to the "Reasoning: <level>" directive. Match on
+# a substring so registry-prefixed tags (e.g. "library/gpt-oss:20b") still
+# resolve. Kept as a tuple so a future reasoning family is a one-line add.
+_REASONING_MODEL_MARKERS = ("gpt-oss",)
+
+
+def model_supports_reasoning_effort(model: str) -> bool:
+    """True when `model` belongs to a family that honors `reasoning_effort`.
+
+    The knob is deliberately scoped to this set rather than passed through
+    blindly: a non-reasoning model (llama/mistral/…) served on the same
+    OpenAI-compat endpoint would otherwise receive a field it doesn't
+    understand, risking a 400. Guarding here keeps every non-gpt-oss request
+    byte-for-byte unchanged.
+    """
+    m = model.lower()
+    return any(marker in m for marker in _REASONING_MODEL_MARKERS)
+
+
 class OllamaLocalProvider(BaseProvider):
     """Provider for the local Ollama instance.
 
@@ -450,6 +472,17 @@ class OllamaLocalProvider(BaseProvider):
         for k in ("temperature", "max_tokens"):
             if kwargs.get(k) is not None:
                 body[k] = kwargs[k]
+        # WARP-1442 — reasoning-effort control. Set as a TOP-LEVEL field on the
+        # OpenAI-compat body (same shape/rationale as temperature/max_tokens in
+        # the GW-12 note above — we always POST to /v1/chat/completions). Ollama
+        # maps `reasoning_effort` to gpt-oss's harmony "Reasoning: <level>"
+        # directive, trimming the inaudible reasoning-token overhead on short
+        # replies (the voice principal defaults this to "low" server-side in the
+        # orchestrator). Guarded to the gpt-oss family so a non-reasoning model's
+        # request stays byte-for-byte unchanged; unset → the field is never added.
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None and model_supports_reasoning_effort(model):
+            body["reasoning_effort"] = reasoning_effort
         if has_tools:
             body["tools"] = [
                 t.model_dump() if hasattr(t, "model_dump") else t

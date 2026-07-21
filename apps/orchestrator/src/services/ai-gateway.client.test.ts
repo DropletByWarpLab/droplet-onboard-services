@@ -31,7 +31,9 @@ import {
   deleteKey,
   saveKey,
   isTimeoutError,
+  chatStream,
 } from "./ai-gateway.client.js";
+import type { ChatStreamChunk } from "../types/index.js";
 
 function okResponse(body: unknown): Response {
   return {
@@ -127,6 +129,128 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     expect(isTimeoutError(new DOMException("aborted", "AbortError"))).toBe(true);
     expect(isTimeoutError(new Error("nope"))).toBe(false);
     expect(isTimeoutError(null)).toBe(false);
+  });
+});
+
+// WARP-1442 — SERVER-SIDE token streaming client. `chatStream` POSTs
+// /ai/chat with stream:true and yields the gateway's OpenAI-compat SSE
+// chunks, threading the WARP-329 disconnect signal and tearing the body
+// down on early break.
+describe("ai-gateway.client — chatStream (WARP-1442)", () => {
+  const realFetch = global.fetch;
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  function streamResponse(
+    frames: string[],
+    opts: { onCancel?: () => void } = {},
+  ): Response {
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const f of frames) controller.enqueue(enc.encode(f));
+        controller.close();
+      },
+      cancel() {
+        opts.onCancel?.();
+      },
+    });
+    return {
+      ok: true,
+      status: 200,
+      body,
+      text: vi.fn().mockResolvedValue(""),
+      json: vi.fn(),
+      headers: new Headers(),
+    } as unknown as Response;
+  }
+
+  it("yields parsed OpenAI-compat chunks in order and stops on [DONE]", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      streamResponse([
+        'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+        // reasoning_content + tool_calls fragments pass through verbatim.
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n',
+        "data: [DONE]\n\n",
+        // Anything after [DONE] must NOT be yielded.
+        'data: {"choices":[{"delta":{"content":"AFTER"}}]}\n\n',
+      ]),
+    );
+    const chunks: ChatStreamChunk[] = [];
+    for await (const c of chatStream({ model: "gpt-oss:20b", messages: [] })) {
+      chunks.push(c);
+    }
+    expect(chunks).toHaveLength(3);
+    expect(chunks[0].choices?.[0]?.delta?.content).toBe("Hel");
+    expect(chunks[1].choices?.[0]?.delta?.content).toBe("lo");
+    expect(chunks[2].choices?.[0]?.delta?.reasoning_content).toBe("thinking");
+  });
+
+  it("POSTs stream:true and threads the WARP-329 signal", async () => {
+    const controller = new AbortController();
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      streamResponse(["data: [DONE]\n\n"]),
+    );
+    // Drive the generator to the first read.
+    const gen = chatStream({ model: "m", messages: [] }, controller.signal);
+    await gen.next();
+    const call = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("http://ai-gateway.test:8000/ai/chat");
+    expect(JSON.parse(call[1].body).stream).toBe(true);
+    expect(call[1].signal).toBe(controller.signal);
+  });
+
+  it("throws on a non-OK status so the agent loop can fall back to blocking", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      body: null,
+      text: vi.fn().mockResolvedValue("upstream boom"),
+      headers: new Headers(),
+    } as unknown as Response);
+    await expect(
+      (async () => {
+        for await (const _ of chatStream({ model: "m", messages: [] })) {
+          void _;
+        }
+      })(),
+    ).rejects.toThrow(/502/);
+  });
+
+  it("cancels the response body on early break (client disconnect)", async () => {
+    let cancelled = false;
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          enc.encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n'),
+        );
+        // Deliberately leave the stream OPEN (no close) so the consumer must
+        // cancel it to tear down.
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body,
+      text: vi.fn(),
+      headers: new Headers(),
+    } as unknown as Response);
+
+    const gen = chatStream({ model: "m", messages: [] });
+    const first = await gen.next();
+    expect(first.value?.choices?.[0]?.delta?.content).toBe("a");
+    // Consumer stops early → generator .return() runs the finally → body.cancel().
+    await gen.return();
+    expect(cancelled).toBe(true);
   });
 });
 
