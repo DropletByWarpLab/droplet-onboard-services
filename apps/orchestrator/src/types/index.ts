@@ -115,6 +115,41 @@ export interface ChatResponse {
   };
 }
 
+/**
+ * WARP-1442 — one OpenAI-compatible streaming chunk from the ai-gateway's
+ * `/ai/chat` SSE (`stream:true`). The gateway passes Ollama's
+ * `/v1/chat/completions` stream through verbatim, so each chunk carries a
+ * `choices[0].delta` with an INCREMENTAL slice of the turn:
+ *
+ *   - `delta.content`          — a fragment of the user-visible answer.
+ *   - `delta.reasoning_content`— a fragment of the gpt-oss reasoning channel
+ *                                (harmony "analysis"); never user-visible.
+ *   - `delta.tool_calls[]`     — tool-call fragments keyed by `index`; the
+ *                                function `arguments` arrive as partial JSON
+ *                                strings that the CONSUMER concatenates per
+ *                                index into one valid call.
+ *   - `finish_reason`          — set on the terminal chunk of the turn
+ *                                (`stop` | `length` | `tool_calls`).
+ *
+ * This is the RESPONSE side only; the request shape stays `ChatRequest`.
+ */
+export interface ChatStreamChunk {
+  choices?: Array<{
+    delta?: {
+      role?: string;
+      content?: string | null;
+      reasoning_content?: string | null;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        type?: "function";
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+}
+
 export interface ModelCapabilities {
   vision?: boolean;
   tools?: boolean;

@@ -735,6 +735,118 @@ class TestStreamingProvider503Path:
 
 
 # ---------------------------------------------------------------------------
+# WARP-1442 — streaming chat content contract
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingProviderContent:
+    """The streaming path yields Ollama's OpenAI-compat SSE chunks in order,
+    VERBATIM: content, reasoning_content, and tool_call fragments all pass
+    through untouched.
+
+    The gateway never accumulates tool-call fragments, folds reasoning into
+    content, or dispatches tools — the orchestrator agent loop owns all of that
+    (ADR-011 / WARP-104). This test pins that the streaming transport is a
+    faithful passthrough so the loop's by-index accumulation + reasoning
+    separation have exactly the frames they expect. reasoning_effort rides the
+    streaming body for gpt-oss, identical to the non-streaming path.
+    """
+
+    # One turn's worth of Ollama OpenAI-compat streaming SSE: two content
+    # fragments, a reasoning-channel fragment, a tool-call fragment (args split
+    # so the orchestrator must concatenate by index), then the terminal [DONE].
+    SSE_BODY = (
+        'data: {"choices":[{"delta":{"role":"assistant","content":"Hel"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        'data: {"choices":[{"delta":{"reasoning_content":"analysing"}}]}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        '"type":"function","function":{"name":"get_x","arguments":"{}"}}]}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    @staticmethod
+    def _stub_limits(provider: OllamaLocalProvider) -> None:
+        provider._limits.num_parallel = 1
+        provider._limits._last_refresh = time.monotonic()
+        provider._sema = asyncio.Semaphore(1)
+        provider._sema_size = 1
+
+    @respx.mock
+    async def test_streaming_yields_chunks_in_order_verbatim(self, provider):
+        self._stub_limits(provider)
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(200, text=self.SSE_BODY)
+        )
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+        )
+        frames = [frame async for frame in gen]
+
+        # Each yielded frame is a full SSE frame: "data: {json}\n\n".
+        payloads = [f[len("data: ") :].strip() for f in frames]
+        assert payloads[-1] == "[DONE]"
+        parsed = [json.loads(p) for p in payloads[:-1]]
+
+        # Order is preserved fragment-for-fragment.
+        assert parsed[0]["choices"][0]["delta"]["content"] == "Hel"
+        assert parsed[1]["choices"][0]["delta"]["content"] == "lo"
+        # reasoning_content is a SEPARATE delta field — never folded into content.
+        assert parsed[2]["choices"][0]["delta"]["reasoning_content"] == "analysing"
+        assert "content" not in parsed[2]["choices"][0]["delta"]
+        # Tool-call fragment passes through verbatim, INDEX intact so the
+        # orchestrator can accumulate args by index.
+        tc = parsed[3]["choices"][0]["delta"]["tool_calls"][0]
+        assert tc["index"] == 0
+        assert tc["function"]["name"] == "get_x"
+
+    @respx.mock
+    async def test_streaming_body_sets_stream_true_and_reasoning_effort(self, provider):
+        self._stub_limits(provider)
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, text=self.SSE_BODY)
+
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+            reasoning_effort="low",
+        )
+        _ = [frame async for frame in gen]
+        # WARP-1442a keeps working on the streaming request too.
+        assert captured["body"]["stream"] is True
+        assert captured["body"]["reasoning_effort"] == "low"
+
+    @respx.mock
+    async def test_streaming_early_break_tears_down_cleanly(self, provider):
+        # A client disconnect mid-stream: consume one frame, then close the
+        # generator. The `async with client.stream()` + semaphore context must
+        # unwind without raising (WARP-329 teardown).
+        self._stub_limits(provider)
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(200, text=self.SSE_BODY)
+        )
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            stream=True,
+        )
+        first = None
+        async for frame in gen:
+            first = frame
+            break
+        await gen.aclose()
+        assert first is not None and first.startswith("data: ")
+        # The semaphore slot was released on teardown (not leaked).
+        assert provider._sema._value == 1
+
+
+# ---------------------------------------------------------------------------
 # WARP-1284 (F1/F2) — list_models failure seam + metadata timeout
 # ---------------------------------------------------------------------------
 
