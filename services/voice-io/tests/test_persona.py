@@ -24,6 +24,8 @@ import json
 
 import httpx
 
+import voice.llm
+import voice.persona
 from voice.llm import DEFAULT_LLM_SYSTEM_PROMPT, OrchestratorLLM
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 
@@ -34,8 +36,15 @@ PERSONA_BLOCK = (
 
 
 def _install_mock_transport(monkeypatch, handler) -> list:
-    """Route module-level httpx.get/httpx.post through a MockTransport
-    (same plumbing as test_llm.py — persona.py uses `httpx.get`)."""
+    """Route BOTH pooled clients (persona fetch + llm chat/health) through
+    one MockTransport (WARP-1433).
+
+    The greeting-path tests drive a PersonaFetcher AND an OrchestratorLLM
+    together, and each now owns a reused `httpx.Client` built via its
+    module's `_new_httpx_client()` factory. Patching both factories to the
+    same transport captures the persona GET and the chat POST in one list —
+    the mTLS material rides the pool constructor now, so there are no
+    per-request cert/verify kwargs to strip."""
     captured: list[httpx.Request] = []
 
     def _record_and_handle(request: httpx.Request) -> httpx.Response:
@@ -43,20 +52,12 @@ def _install_mock_transport(monkeypatch, handler) -> list:
         return handler(request)
 
     transport = httpx.MockTransport(_record_and_handle)
-    client = httpx.Client(transport=transport)
 
-    def _patched_get(url, **kwargs):
-        kwargs.pop("verify", None)
-        kwargs.pop("cert", None)
-        return client.get(url, **kwargs)
+    def _factory() -> httpx.Client:
+        return httpx.Client(transport=transport)
 
-    def _patched_post(url, **kwargs):
-        kwargs.pop("verify", None)
-        kwargs.pop("cert", None)
-        return client.post(url, **kwargs)
-
-    monkeypatch.setattr(httpx, "get", _patched_get)
-    monkeypatch.setattr(httpx, "post", _patched_post)
+    monkeypatch.setattr(voice.persona, "_new_httpx_client", _factory)
+    monkeypatch.setattr(voice.llm, "_new_httpx_client", _factory)
     return captured
 
 

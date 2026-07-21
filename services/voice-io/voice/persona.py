@@ -40,6 +40,19 @@ from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kw
 
 logger = logging.getLogger("voice.persona")
 
+
+def _new_httpx_client() -> httpx.Client:
+    """Build the reused httpx.Client for one PersonaFetcher (WARP-1433).
+
+    The mTLS material rides on the pool, built once, instead of the old
+    module-level ``httpx.get`` per greeting fetch (a fresh TCP + full mTLS
+    handshake + CA re-read each time). Reused across every ``get_block()``
+    for the fetcher's lifetime, closed on shutdown. Module-level so tests
+    can inject a MockTransport + count constructions.
+    """
+    return httpx.Client(**httpx_client_kwargs())
+
+
 DEFAULT_PERSONA_PROMPT_PATH = "/api/persona/prompt"
 # Short in-session TTL (§14): a greeting burst inside one interaction is
 # served from cache; the next session (anything later than this) re-fetches
@@ -82,6 +95,9 @@ class PersonaFetcher:
 
         self._cached: Optional[str] = None
         self._cached_at: Optional[float] = None  # via time_source
+        # WARP-1433 — ONE pooled httpx.Client reused across every fetch and
+        # closed on shutdown; the mTLS material is applied once, on the pool.
+        self._client = _new_httpx_client()
 
     def get_block(self) -> Optional[str]:
         """The composed persona block, or None (caller falls back to the
@@ -95,11 +111,10 @@ class PersonaFetcher:
         self.last_fetch_at = time.time()
         self._cached_at = now  # both outcomes hold for the TTL
         try:
-            resp = httpx.get(
+            resp = self._client.get(
                 f"{self._base_url}{self._path}",
                 timeout=self._timeout_s,
                 headers=self._headers(),
-                **httpx_client_kwargs(),
             )
         except (httpx.HTTPError, OSError) as exc:
             logger.warning(
@@ -136,6 +151,10 @@ class PersonaFetcher:
         if self._bearer_token:
             h["Authorization"] = f"Bearer {self._bearer_token}"
         return h
+
+    def close(self) -> None:
+        """Close the pooled httpx.Client (WARP-1433). Idempotent."""
+        self._client.close()
 
 
 def build_persona_fetcher_from_env() -> Optional[PersonaFetcher]:
