@@ -1581,7 +1581,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // its retry chip instead of nothing, and finalize as `failed`.
           if (
             e.type === "done" &&
-            e.stop_reason === "model_done" &&
+            (e.stop_reason === "model_done" ||
+              e.stop_reason === "context_budget" ||
+              e.stop_reason === "repetition") &&
             liveAssistantContent.trim().length === 0 &&
             liveToolCalls.length === 0
           ) {
@@ -1679,6 +1681,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1442 — resolved reasoning effort (voice → "low" default).
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
+            context_window: config.OLLAMA_CONTEXT_LENGTH,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
             toolCallContext,
@@ -1735,6 +1738,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — resolved reasoning effort (voice → "low" default).
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
+          context_window: config.OLLAMA_CONTEXT_LENGTH,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
           toolCallContext,
@@ -1760,7 +1764,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // prompt overflowed the context window (see the streaming-path
         // comment). Surface it as an error instead of a silent success.
         if (
-          result.stop_reason === "model_done" &&
+          (result.stop_reason === "model_done" ||
+            result.stop_reason === "context_budget" ||
+            result.stop_reason === "repetition") &&
           contentToText(result.message.content).trim().length === 0 &&
           result.trace.length === 0
         ) {

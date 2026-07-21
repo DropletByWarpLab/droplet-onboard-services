@@ -62,7 +62,12 @@ export type SSEEvent =
   | {
       type: "done";
       iterations: number;
-      stop_reason: "model_done" | "iteration_limit" | "error";
+      stop_reason:
+        | "model_done"
+        | "iteration_limit"
+        | "error"
+        | "context_budget"
+        | "repetition";
       error?: string;
     };
 

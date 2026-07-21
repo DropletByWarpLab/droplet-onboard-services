@@ -30,6 +30,14 @@ import type {
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import {
+  ITERATION_MIN_HEADROOM,
+  OUTPUT_RESERVE,
+} from "./prompt-budget.consts.js";
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  estimateTokensFromChars,
+} from "./context-budget.service.js";
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
@@ -279,6 +287,13 @@ export interface AgentRequest {
    * background.
    */
   signal?: AbortSignal;
+  /**
+   * Spec §2 — effective model context window in tokens
+   * (config.OLLAMA_CONTEXT_LENGTH in production; the route passes it
+   * explicitly). Drives the per-iteration token guard. Unset →
+   * DEFAULT_CONTEXT_WINDOW (conservative fallback for direct callers).
+   */
+  context_window?: number;
 }
 
 export interface AgentTraceEntry {
@@ -292,7 +307,12 @@ export interface AgentResult {
   message: ChatMessage;
   trace: AgentTraceEntry[];
   iterations: number;
-  stop_reason: "model_done" | "iteration_limit" | "error";
+  stop_reason:
+    | "model_done"
+    | "iteration_limit"
+    | "error"
+    | "context_budget"
+    | "repetition";
   error?: string;
 }
 
@@ -742,6 +762,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const advertisedNames = new Set(tools.map((t) => t.function.name));
   const availableToolList = tools.map((t) => t.function.name).join(", ");
 
+  // Spec §2/§4 — when set, the NEXT model call is a finalization pass: zero
+  // tools, tool_choice "none", plus a one-time system nudge. A flag rather
+  // than a break because the user still deserves an answer synthesized from
+  // the gathered results, which needs one more inference call.
+  const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+  let toolSchemasJsonLen = JSON.stringify(tools).length;
+  let finalizeReason: "context_budget" | "repetition" | null = null;
+
   // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
   // iterations, so a model that keeps naming an unknown tool every turn
   // (ignoring the UNKNOWN_TOOL recovery message) would otherwise run the
@@ -778,6 +806,32 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // already disconnected (e.g. during the previous iteration's tool work).
     if (req.signal?.aborted) return abortedResult(iter);
 
+    // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
+    // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
+    // and any inlined image payloads), which only makes the guard fire
+    // EARLIER than the true fill — conservative by construction.
+    if (
+      iter > 0 &&
+      finalizeReason === null &&
+      toolChoice !== "none" &&
+      estimateTokensFromChars(
+        JSON.stringify(messages).length + toolSchemasJsonLen,
+      ) >
+        contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM
+    ) {
+      finalizeReason = "context_budget";
+    }
+    if (finalizeReason !== null) {
+      messages.push({
+        role: "system",
+        content:
+          "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+      });
+    }
+    const iterTools = finalizeReason !== null ? [] : tools;
+    const iterToolChoice: "auto" | "none" =
+      finalizeReason !== null ? "none" : toolChoice;
+
     // The outbound request shared by both transports. `stream` is set per
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
@@ -788,8 +842,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       temperature: req.temperature,
       max_tokens: req.max_tokens,
       reasoning_effort: req.reasoning_effort,
-      tools,
-      tool_choice: toolChoice,
+      tools: iterTools,
+      tool_choice: iterToolChoice,
     };
 
     let asst: ChatMessage | null = null;
@@ -869,6 +923,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       asst = choice.message;
     }
 
+    // Spec §2 — the finalize pass advertised zero tools; a model that still
+    // emits tool_calls gets no second chance. Strip them so this turn takes
+    // the terminal path (empty content lands in WARP-854's FAILED-turn path).
+    if (finalizeReason !== null && asst.tool_calls?.length) {
+      delete asst.tool_calls;
+    }
+
     // Happy path: model produced a final answer with no more tool calls.
     if (!asst.tool_calls?.length) {
       // WARP-458 — extract `<reasoning>…</reasoning>` segments + the
@@ -899,7 +960,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // turn) is the owner of that case.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
       if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
-      emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
+      emit({
+        type: "done",
+        iterations: iter + 1,
+        stop_reason: finalizeReason ?? "model_done",
+      });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
       //
@@ -922,7 +987,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         message: finalMessage,
         trace,
         iterations: iter + 1,
-        stop_reason: "model_done",
+        stop_reason: finalizeReason ?? "model_done",
       };
     }
 
