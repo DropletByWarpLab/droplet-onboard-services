@@ -228,10 +228,21 @@ export interface LocalModelRow {
   role: string | null;
   /** Lifecycle of the model in the runtime. Drives the status chip. */
   status: "ready" | "loading" | "error";
-  /** Sustained tokens/sec from the most recent benchmark; null until wired. */
+  /** Sustained tokens/sec; null until a benchmark surface exists (no honest
+   *  at-rest source today) — renders "—", never fabricated. */
   tokensPerSec: number | null;
-  /** 0–100 fill for the on-disk usage meter; null until gbOnDisk has a value. */
+  /** 0–100 fill for the on-disk usage meter (this model's share of the store);
+   *  null until real disk sizes are known. */
   diskBarPct: number | null;
+  // WARP-836 honest metrics (additive/optional), measured from Ollama:
+  /** Parameter count, e.g. "20.9B". */
+  parameterSize?: string | null;
+  /** Quantization level, e.g. "MXFP4" / "Q4_K_M". */
+  quantization?: string | null;
+  /** True when the model is resident in memory right now. */
+  loaded?: boolean;
+  /** Graphics memory the resident model uses (GB); null when not loaded. */
+  vramGb?: number | null;
 }
 
 /** One opt-in cloud provider. Read-only on this surface — enabling a provider

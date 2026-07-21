@@ -16,6 +16,10 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import {
+  fetchLocalModelMetrics,
+  metricsFor,
+} from "./model-metrics.service.js";
 
 export interface LocalModelInfo {
   name: string;
@@ -29,12 +33,22 @@ export interface LocalModelInfo {
   /** "ready" | "loading" | "error" — defaults to "ready" if the model
    *  is in the listed set. ai-gateway exposes status via a future probe. */
   status: "ready" | "loading" | "error";
-  /** Sustained tokens/sec from the most recent benchmark — null until
-   *  the ai-gateway benchmark surface lands. */
+  /** Sustained tokens/sec. Null until a benchmark surface exists — there is
+   *  no honest source today (Ollama doesn't expose throughput at rest), so
+   *  this stays "—" rather than fabricated (WARP-836 honesty contract). */
   tokensPerSec: number | null;
-  /** 0-100 percentage for the on-disk usage bar. Null until gbOnDisk
-   *  has a value to compare against the model-store quota. */
+  /** 0-100 percentage for the on-disk usage bar — this model's share of the
+   *  model store. Null until real disk sizes are known (WARP-836). */
   diskBarPct: number | null;
+  // ── WARP-836 honest metrics, measured from Ollama (/api/tags, /api/ps) ──
+  /** Parameter count as Ollama reports it, e.g. "20.9B". Null when unknown. */
+  parameterSize?: string | null;
+  /** Quantization level, e.g. "MXFP4" / "Q4_K_M". Null when unknown. */
+  quantization?: string | null;
+  /** True when the model is currently resident in memory (Ollama /api/ps). */
+  loaded?: boolean;
+  /** Graphics memory the resident model uses (GB), or null when not loaded. */
+  vramGb?: number | null;
 }
 
 export interface CloudProviderInfo {
@@ -123,10 +137,47 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       contextLength: m.context_window,
       gbOnDisk: null,
       role: null,
-      status: "ready",
+      status: "ready" as const,
       tokensPerSec: null,
       diskBarPct: null,
+      parameterSize: null,
+      quantization: null,
+      loaded: false,
+      vramGb: null,
     }));
+
+    // WARP-836 — enrich local (ollama) rows with real Ollama metrics: disk
+    // size, parameter count, quantization, and resident/VRAM. Best-effort:
+    // if the probe fails the rows keep their honest null placeholders ("—"),
+    // never a fabricated number. A single extra call, behind the route's 30s
+    // cache. (Cloud rows have no local footprint — left untouched.)
+    try {
+      const metrics = await fetchLocalModelMetrics();
+      if (metrics.size > 0) {
+        for (const row of local) {
+          if (row.provider !== "ollama") continue;
+          const m = metricsFor(metrics, row.name);
+          if (!m) continue;
+          row.gbOnDisk = m.gbOnDisk;
+          row.parameterSize = m.parameterSize;
+          row.quantization = m.quantization;
+          row.loaded = m.loaded;
+          row.vramGb = m.vramGb;
+        }
+        // Disk bar = each model's share of the total on-disk model store.
+        const totalGb = local.reduce((s, r) => s + (r.gbOnDisk ?? 0), 0);
+        if (totalGb > 0) {
+          for (const row of local) {
+            row.diskBarPct =
+              row.gbOnDisk != null
+                ? Math.round((row.gbOnDisk / totalGb) * 100)
+                : null;
+          }
+        }
+      }
+    } catch {
+      // Metrics are a best-effort enrichment — never fail the page for them.
+    }
   } catch {
     local = [];
     degraded = true;

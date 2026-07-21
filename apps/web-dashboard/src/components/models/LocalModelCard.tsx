@@ -3,15 +3,15 @@
 /**
  * WARP-836 — one local LLM card on the Models page (rendered 2-up).
  *
- * Status-only (one-model rule, architecture-guard #13): there are NO
- * pull/swap/benchmark/delete controls — the card is purely informational.
- * Metrics the backend doesn't report yet (gbOnDisk, role, tokensPerSec,
- * diskBarPct) render as an honest "—", never a fabricated value. The status
- * chip maps the backend lifecycle enum to home-user language:
- * ready → "running", loading → "loading", error → "error".
+ * Informational card. Metrics are now measured from Ollama (disk size,
+ * parameter count, quantization, and resident/graphics-memory) — see
+ * model-metrics.service. Anything Ollama doesn't report renders an honest
+ * "—", never a fabricated value; tokens/sec has no at-rest source so it is
+ * intentionally not shown. The status chip maps the backend lifecycle enum to
+ * home-user language: ready → "running", loading → "loading", error → "error".
  */
 
-import { BookOpen, Cpu, Gauge, HardDrive, ShieldCheck } from "lucide-react";
+import { BookOpen, Cpu, Gauge, HardDrive, Layers, ShieldCheck } from "lucide-react";
 import type { LocalModelRow } from "@/lib/types";
 
 const DASH = "—";
@@ -55,9 +55,22 @@ const STATUS_META: Record<
 
 export function LocalModelCard({ model }: { model: LocalModelRow }) {
   const status = STATUS_META[model.status];
-  const gb = model.gbOnDisk != null ? `${model.gbOnDisk} GB on disk` : DASH;
-  const rate =
-    model.tokensPerSec != null ? `${model.tokensPerSec} tok/s` : DASH;
+  const gb = model.gbOnDisk != null ? `${model.gbOnDisk} GB` : DASH;
+  // Parameter count · quantization, e.g. "20.9B · MXFP4". DASH when neither
+  // is known (metrics probe missed this model).
+  const spec =
+    [model.parameterSize, model.quantization].filter(Boolean).join(" · ") ||
+    DASH;
+  // Resident state — honest three-way: in memory (real VRAM) / on disk /
+  // unknown. "on disk" is only claimed when metrics succeeded (gbOnDisk known),
+  // so we never assert "not loaded" from a failed probe.
+  const resident = model.loaded
+    ? model.vramGb != null
+      ? `${model.vramGb} GB in memory`
+      : "in memory"
+    : model.gbOnDisk != null
+      ? "on disk"
+      : DASH;
   const hasMeter = model.diskBarPct != null;
 
   return (
@@ -114,20 +127,36 @@ export function LocalModelCard({ model }: { model: LocalModelRow }) {
         </p>
       )}
 
-      {/* Foot stats — on-disk GB and a tokens/sec sample, both honest about
-          missing data, plus the always-true "local-only" reassurance. */}
-      <div className="flex items-center gap-4 type-caption-1" style={{ color: "var(--text-muted)" }}>
-        <span className="inline-flex items-center gap-1">
+      {/* Foot stats — measured from Ollama: disk size · parameters/quant ·
+          context window · resident graphics memory. Each is honest about
+          missing data ("—"); the trailing "local-only" is always true. */}
+      <div
+        className="flex flex-wrap items-center gap-x-4 gap-y-1.5 type-caption-1"
+        style={{ color: "var(--text-muted)" }}
+      >
+        <span className="inline-flex items-center gap-1" title="On disk">
           <HardDrive size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">{gb}</span>
         </span>
-        <span className="inline-flex items-center gap-1">
-          <Gauge size={12} strokeWidth={2} aria-hidden />
-          <span className="tabular-nums">{rate}</span>
+        <span className="inline-flex items-center gap-1" title="Parameters · quantization">
+          <Layers size={12} strokeWidth={2} aria-hidden />
+          <span className="tabular-nums">{spec}</span>
         </span>
-        <span className="inline-flex items-center gap-1">
+        <span className="inline-flex items-center gap-1" title="Context window">
           <BookOpen size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">ctx {formatContext(model.contextLength)}</span>
+        </span>
+        <span
+          className="inline-flex items-center gap-1"
+          title="Graphics memory in use"
+          style={{
+            color: model.loaded
+              ? "var(--system-green, #34c759)"
+              : "var(--text-muted)",
+          }}
+        >
+          <Gauge size={12} strokeWidth={2} aria-hidden />
+          <span className="tabular-nums">{resident}</span>
         </span>
         <span className="inline-flex items-center gap-1 ml-auto" style={{ color: "var(--text-muted)" }}>
           <ShieldCheck size={12} strokeWidth={2} aria-hidden />

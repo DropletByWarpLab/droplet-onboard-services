@@ -35,6 +35,20 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
+// WARP-836 — stub only the Ollama metrics *probe* (network); keep the real
+// `metricsFor` so the enrichment name-matching is exercised for real.
+const { fetchLocalModelMetricsMock } = vi.hoisted(() => ({
+  fetchLocalModelMetricsMock: vi.fn(),
+}));
+vi.mock("../services/model-metrics.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-metrics.service.js")>();
+  return {
+    ...actual,
+    fetchLocalModelMetrics: () => fetchLocalModelMetricsMock(),
+  };
+});
+
 import { createModelsRouter } from "../routes/models.js";
 import { getModelsPagePayload } from "../services/models-summary.service.js";
 
@@ -75,6 +89,8 @@ function buildApp(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: metrics probe returns nothing → rows keep honest null placeholders.
+  fetchLocalModelMetricsMock.mockResolvedValue(new Map());
 });
 
 describe("WARP-471 — models page payload", () => {
@@ -167,6 +183,48 @@ describe("WARP-471 — models page payload", () => {
     expect(payload.gpu).toBeNull();
     expect(payload.avgLatencyMs).toBe(0);
     expect(payload.cloudSpendUsd).toBe(0);
+  });
+});
+
+describe("WARP-836 — honest metrics enrichment", () => {
+  it("enriches local rows with real Ollama metrics (disk/params/quant/vram)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+        { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+      ],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(
+      new Map([
+        ["gpt-oss:20b", { gbOnDisk: 13.8, parameterSize: "20.9B", quantization: "MXFP4", loaded: true, vramGb: 12.7 }],
+        ["llama3.2:3b", { gbOnDisk: 2.0, parameterSize: "3.2B", quantization: "Q4_K_M", loaded: false, vramGb: null }],
+      ]),
+    );
+    const payload = await getModelsPagePayload();
+    const gpt = payload.local.find((m) => m.name === "gpt-oss:20b")!;
+    expect(gpt.gbOnDisk).toBe(13.8);
+    expect(gpt.parameterSize).toBe("20.9B");
+    expect(gpt.quantization).toBe("MXFP4");
+    expect(gpt.loaded).toBe(true);
+    expect(gpt.vramGb).toBe(12.7);
+    // disk bar = share of the 15.8 GB store → 13.8/15.8 ≈ 87%.
+    expect(gpt.diskBarPct).toBe(87);
+    const llama = payload.local.find((m) => m.name === "llama3.2:3b")!;
+    expect(llama.loaded).toBe(false);
+    expect(llama.vramGb).toBeNull();
+  });
+
+  it("keeps honest null metrics when the Ollama probe returns nothing", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [{ id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 }],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(new Map());
+    const payload = await getModelsPagePayload();
+    expect(payload.local[0].gbOnDisk).toBeNull();
+    expect(payload.local[0].parameterSize).toBeNull();
+    expect(payload.local[0].quantization).toBeNull();
+    expect(payload.local[0].vramGb).toBeNull();
+    expect(payload.local[0].diskBarPct).toBeNull();
   });
 });
 
