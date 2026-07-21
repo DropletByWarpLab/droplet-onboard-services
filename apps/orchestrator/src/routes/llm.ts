@@ -168,7 +168,8 @@ const chatRequestSchema = z.object({
   // (see VOICE_REASONING_EFFORT); every non-voice caller stays unchanged.
   reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
   provider: z.string().optional(),
-  max_iter: z.number().int().min(1).max(10).optional(),
+  // Spec §1 — the cap comes from config so it matches the loop's clamp.
+  max_iter: z.number().int().min(1).max(config.agentMaxIter.capIter).optional(),
   allowed_tools: z.array(z.string()).optional(),
   // Per-turn override for the agent loop's tool advertisement. "none"
   // sends ZERO tools to the model so it can't wander into a speculative

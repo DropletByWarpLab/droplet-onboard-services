@@ -16,12 +16,14 @@
  * shape this file exposed before the rewire (assistant message + trace),
  * so legacy consumers don't break.
  *
- * Iteration cap: default 5, hard max 10 — a confused or prompt-injected
+ * Iteration cap: config.agentMaxIter (env AGENT_MAX_ITER_DEFAULT / CAP,
+ * ships 5 / 10) — a confused or prompt-injected
  * model can't burn unbounded tokens.
  */
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
 
+import { config } from "../config.js";
 import type {
   McpCallContext,
   McpClientService,
@@ -293,8 +295,6 @@ export interface AgentResult {
   stop_reason: "model_done" | "iteration_limit" | "error";
   error?: string;
 }
-
-const DEFAULT_MAX_ITER = 5;
 
 /**
  * WARP-458 — parsed reasoning trace for a single assistant turn.
@@ -682,7 +682,15 @@ async function consumeChatStream(
 }
 
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
-  const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
+  // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
+  // bound) read config.agentMaxIter, so they cannot drift.
+  const maxIter = Math.max(
+    1,
+    Math.min(
+      req.max_iter ?? config.agentMaxIter.defaultIter,
+      config.agentMaxIter.capIter,
+    ),
+  );
   const trace: AgentTraceEntry[] = [];
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
