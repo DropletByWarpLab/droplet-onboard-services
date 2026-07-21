@@ -161,7 +161,24 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // is matched exactly, so a future /api/setup/<x> sibling can never be
   // silently de-authed by a stray prefix match (the latent fail-open ORCH-001
   // caught — the old startsWith() applied to EVERY entry).
-  const PUBLIC_PREFIXES = ["/api/setup/box-name", "/api/auth/invites/accept/"];
+  // WARP-1474 (ADR-030/031): the dashboard-QR overlay redeem + poll. The
+  // QR-scanning phone has NO bearer by design, so the global gate must let the
+  // by-token surface through — `app.ts` mounts authMiddleware BEFORE
+  // createVpnRouter, so without this entry a bearer-less
+  // POST /api/vpn/overlay/devices/by-token (and the …/:pending_id/status GET)
+  // 401s at the gate and the redeem→stage→approve→status flow is dead on a real
+  // box. Prefix semantics cover BOTH the POST redeem and the /status GET under
+  // one entry. Scoped to EXACTLY this prefix — the owner-gated siblings
+  // (/vpn/overlay/link-tokens, /vpn/overlay/pending-enrollments, and the
+  // WARP-1385 POST /vpn/overlay/devices) do NOT start with it, so they stay
+  // authed. The handlers re-gate themselves: one-time link-token consumption,
+  // the X-Overlay-PoP signature on /status, per-IP/per-token/global rate limits,
+  // and P256/WireGuard boundary validation before any state change.
+  const PUBLIC_PREFIXES = [
+    "/api/setup/box-name",
+    "/api/auth/invites/accept/",
+    "/api/vpn/overlay/devices/by-token",
+  ];
   const isPublic =
     publicPaths.includes(req.path) ||
     PUBLIC_PREFIXES.some((p) => req.path === p || req.path.startsWith(p));
