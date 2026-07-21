@@ -775,6 +775,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         ? m.tool_calls.map((tc) => tc.function.name)
         : [],
     );
+    // `content` is an array (multimodal — e.g. an image attachment) on some
+    // user turns; rule matching only understands plain text, so those turns
+    // yield "" here and fall back to core-only advertisement. That's an
+    // accepted gap, not a silent failure: the WARP-642 self-heal branch
+    // below re-admits any real tool the model still names, at the cost of
+    // one lost iteration.
     const sel = selectAdvertisedTools({
       mode: "domains",
       userMessage:
@@ -804,7 +810,6 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let toolSchemasJsonLen = JSON.stringify(tools).length;
   let finalizeReason: "context_budget" | "repetition" | null = null;
 
   // Spec §4 repetition early-stop. Key = tool name + DEEP-canonicalized args:
@@ -823,10 +828,21 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     }
     return JSON.stringify(v) ?? "null";
   };
+  // A pathologically nested / cyclic model-supplied `args` object can
+  // RangeError inside `canonicalJson`'s recursion — that must not kill the
+  // whole turn. Fall back to a per-call unique key (never collides, so the
+  // call is treated as never-before-seen rather than falsely deduped).
   const canonicalCallKey = (
     name: string,
     args: Record<string, unknown>,
-  ): string => `${name}:${canonicalJson(args)}`;
+    callId: string,
+  ): string => {
+    try {
+      return `${name}:${canonicalJson(args)}`;
+    } catch {
+      return `${name}:__uncanonicalizable__:${callId}`;
+    }
+  };
 
   // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
   // iterations, so a model that keeps naming an unknown tool every turn
@@ -868,13 +884,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
     // and any inlined image payloads), which only makes the guard fire
     // EARLIER than the true fill — conservative by construction.
+    //
+    // Estimates `JSON.stringify(messages).length` ONLY — the serialized tool
+    // schemas are deliberately EXCLUDED. The route-side WARP-1118 estimator
+    // (context-budget.service.ts, invoked from routes/llm.ts before this loop
+    // ever starts) already budgets the FULL initial request — system blocks +
+    // tool schemas + history — against the same window; this in-loop guard's
+    // job is only to bound mid-turn TRANSCRIPT growth (tool results, nudges)
+    // on top of that already-budgeted starting point. Measured reality: the
+    // shipping 70-tool chat scope serializes to ~12k tokens of schemas alone,
+    // so folding that back into THIS guard's threshold would leave next to no
+    // transcript headroom at the 16k default window and cap every tool turn
+    // at one iteration — the exact regression this comment exists to prevent
+    // a future edit from reintroducing.
     if (
       iter > 0 &&
       finalizeReason === null &&
       toolChoice !== "none" &&
-      estimateTokensFromChars(
-        JSON.stringify(messages).length + toolSchemasJsonLen,
-      ) >
+      estimateTokensFromChars(JSON.stringify(messages).length) >
         contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM
     ) {
       finalizeReason = "context_budget";
@@ -883,7 +910,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       messages.push({
         role: "system",
         content:
-          "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+          finalizeReason === "repetition"
+            ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
+            : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
     const iterTools = finalizeReason !== null ? [] : tools;
@@ -1093,7 +1122,6 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           tools = filtered.filter((t) => keep.has(t.name)).map(toSpec);
           advertisedNames = new Set(tools.map((t) => t.function.name));
           availableToolList = tools.map((t) => t.function.name).join(", ");
-          toolSchemasJsonLen = JSON.stringify(tools).length;
           const heal = {
             status: "error" as const,
             error: {
@@ -1165,7 +1193,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
-      const callKey = canonicalCallKey(call.function.name, args);
+      const callKey = canonicalCallKey(call.function.name, args, call.id);
       const priorCalls = executedCallCounts.get(callKey) ?? 0;
       executedCallCounts.set(callKey, priorCalls + 1);
       if (priorCalls >= 1) {
