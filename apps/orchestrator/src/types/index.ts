@@ -84,6 +84,13 @@ export interface ChatRequest {
   provider?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+  // WARP-1442 — optional gpt-oss reasoning-effort control, forwarded to the
+  // ai-gateway which sets a top-level `reasoning_effort` on the Ollama
+  // /v1/chat/completions request for the gpt-oss family (a no-op for other
+  // models). Unset → current behavior byte-for-byte. The orchestrator route
+  // defaults it to "low" for the `_service:voice` principal, server-side, so
+  // voice-io sends nothing new.
+  reasoning_effort?: "low" | "medium" | "high";
   // The ai-gateway is a pure provider router as of WARP-104 — it never
   // dispatches tools itself. The orchestrator owns the agent loop
   // end-to-end (MCP-backed); see services/ai-gateway/router.py and

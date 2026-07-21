@@ -1726,11 +1726,13 @@ services:
       # requires a real shared secret or every /api/llm/chat 401s.
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
       # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
-      # phrase out of the box — no per-phrase training, no licensing fee
-      # — so "hey droplet" works on every box. Automatically falls back
-      # to openWakeWord (hey_jarvis) if the bundled Vosk model is absent.
+      # phrases out of the box — no per-phrase training, no licensing fee
+      # — so "droplet" and "hey droplet" both work on every box.
+      # Automatically falls back to openWakeWord (hey_jarvis) if the
+      # bundled Vosk model is absent. WAKE_WORD is a comma-separated list
+      # of phrases; the box wakes on ANY of them (WARP-1431).
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
-      - WAKE_WORD=${WAKE_WORD:-hey_droplet}
+      - WAKE_WORD=${WAKE_WORD:-droplet,hey droplet}
       # Threshold semantics are engine-aware (resolve_wake_threshold in
       # voice-io main.py). Under vosk every fire carries real acoustic
       # evidence — the MINIMUM per-word confidence of the finalized

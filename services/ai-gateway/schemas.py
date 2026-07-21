@@ -100,6 +100,16 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     provider: str | None = None  # explicit provider override
     tools: list[ToolDefinition] | None = None
+    # WARP-1442 — optional gpt-oss reasoning-effort control. Additive +
+    # backward-compatible: unset (None) → the provider builds a byte-for-byte
+    # unchanged Ollama request, so every existing caller (voice + dashboard
+    # share this path) is unaffected. When set, the local provider forwards it
+    # as a top-level `reasoning_effort` on Ollama's OpenAI-compat
+    # /v1/chat/completions call for the gpt-oss family (a no-op for other
+    # models). The three values are gpt-oss's harmony reasoning levels; the
+    # Literal makes anything else a 422 at the edge rather than a malformed
+    # field silently reaching Ollama.
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
 
     @model_validator(mode="after")
     def _validate_total_content(self) -> "ChatRequest":

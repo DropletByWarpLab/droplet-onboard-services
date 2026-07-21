@@ -182,3 +182,35 @@ class TestKeyStatusResponse:
     def test_with_providers(self):
         resp = KeyStatusResponse(providers=["anthropic", "openai"])
         assert "anthropic" in resp.providers
+
+
+class TestChatRequestReasoningEffort:
+    """WARP-1442 — optional gpt-oss reasoning-effort knob on the chat request.
+
+    Additive + backward-compatible: unset defaults to None so the provider
+    layer sends a byte-for-byte-unchanged Ollama request. Only the three
+    gpt-oss harmony levels are accepted; anything else is a 422 at the edge
+    rather than a silently-ignored field that reaches Ollama malformed.
+    """
+
+    @staticmethod
+    def _msgs():
+        return [ChatMessage(role="user", content="hi")]
+
+    def test_defaults_to_none_when_unset(self):
+        req = ChatRequest(model="gpt-oss:20b", messages=self._msgs())
+        assert req.reasoning_effort is None
+
+    @pytest.mark.parametrize("level", ["low", "medium", "high"])
+    def test_accepts_valid_levels(self, level):
+        req = ChatRequest(
+            model="gpt-oss:20b", messages=self._msgs(), reasoning_effort=level
+        )
+        assert req.reasoning_effort == level
+
+    @pytest.mark.parametrize("bad", ["ultra", "LOW", "minimal", "", "none"])
+    def test_rejects_invalid_levels(self, bad):
+        with pytest.raises(ValidationError):
+            ChatRequest(
+                model="gpt-oss:20b", messages=self._msgs(), reasoning_effort=bad
+            )

@@ -799,3 +799,108 @@ class TestListModelsFailureSeam:
         await provider.list_models()
         assert captured["timeout"] == _TAGS_TIMEOUT_S
         assert _TAGS_TIMEOUT_S <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# WARP-1442 — gpt-oss reasoning-effort control on the outbound Ollama request
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningEffort:
+    """The knob is set as a TOP-LEVEL `reasoning_effort` field on the
+    OpenAI-compat /v1/chat/completions body — the same shape as temperature /
+    max_tokens (see the GW-12 note in ollama_local.chat), so it reaches Ollama
+    on the exact path this provider already uses. It is applied ONLY for the
+    gpt-oss family (the reasoning-capable model this stack serves), so every
+    other model's request is byte-for-byte unchanged and we never risk a 400
+    on a field a non-reasoning model doesn't understand. Unset → the field is
+    never added (back-compat)."""
+
+    @staticmethod
+    def _capture_post():
+        """Returns (route_handler, captured_dict). Mounted via respx side_effect."""
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "cmpl-1",
+                    "object": "chat.completion",
+                    "model": "gpt-oss:20b",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        return handler, captured
+
+    @staticmethod
+    def _stub_limits(provider: OllamaLocalProvider) -> None:
+        provider._limits.num_parallel = 1
+        provider._limits._last_refresh = time.monotonic()
+        provider._sema = asyncio.Semaphore(1)
+        provider._sema_size = 1
+
+    @respx.mock
+    async def test_low_effort_set_on_body_for_gpt_oss(self, provider):
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="low",
+        )
+        assert captured["body"]["reasoning_effort"] == "low"
+
+    @respx.mock
+    async def test_effort_passed_through_verbatim_for_gpt_oss(self, provider):
+        # A different level proves we forward the caller's value, not a constant.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="high",
+        )
+        assert captured["body"]["reasoning_effort"] == "high"
+
+    @respx.mock
+    async def test_no_reasoning_effort_key_when_unset(self, provider):
+        # Byte-for-byte back-compat: an unset knob must NOT add the field, even
+        # for a gpt-oss model. This is the dashboard/default path.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+        )
+        assert "reasoning_effort" not in captured["body"]
+
+    @respx.mock
+    async def test_effort_ignored_for_non_reasoning_model(self, provider):
+        # No-op guard: a non-gpt-oss model's request stays byte-for-byte
+        # unchanged even when an effort is passed, so a model that doesn't
+        # support the field never receives it.
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            reasoning_effort="low",
+        )
+        assert "reasoning_effort" not in captured["body"]

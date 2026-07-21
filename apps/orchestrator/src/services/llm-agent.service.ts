@@ -77,6 +77,10 @@ export interface AgentDeps {
         stream?: boolean;
         temperature?: number;
         max_tokens?: number;
+        // WARP-1442 — gpt-oss reasoning-effort, forwarded verbatim to the
+        // gateway (which only applies it for the gpt-oss family). Unset →
+        // omitted, so the outbound request is byte-for-byte unchanged.
+        reasoning_effort?: "low" | "medium" | "high";
         tools?: {
           type: "function";
           function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -186,6 +190,15 @@ export interface AgentRequest {
    * provider default applies (pre-WARP-849 behavior).
    */
   max_tokens?: number;
+  /**
+   * WARP-1442 — gpt-oss reasoning-effort, forwarded verbatim to the
+   * ai-gateway chat call (like `max_tokens`). The route resolves the
+   * effective value — applying the `_service:voice` principal's server-side
+   * "low" default — before handing it here; the loop only forwards it. Unset
+   * → nothing is sent and the outbound request is byte-for-byte unchanged, so
+   * the dashboard / every non-voice caller is unaffected.
+   */
+  reasoning_effort?: "low" | "medium" | "high";
   /** If set, restrict the registry to this subset of tool names. */
   allowed_tools?: string[];
   /**
@@ -439,6 +452,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // WARP-849 — forward the caller's completion budget (previously
         // dropped here, making the wizard probe's max_tokens a no-op).
         max_tokens: req.max_tokens,
+        // WARP-1442 — forward the resolved reasoning effort (voice default
+        // applied upstream in the route). Undefined → the gateway request
+        // carries no reasoning_effort, unchanged for non-voice callers.
+        reasoning_effort: req.reasoning_effort,
         tools,
         tool_choice: toolChoice,
       },
