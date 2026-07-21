@@ -282,36 +282,67 @@ class VoskWakeWordDetector(WakeWordDetector):
     """Vosk (Kaldi) keyword spotting — recognizes ANY in-vocabulary
     phrase with no per-phrase model training.
 
-    This is how "hey droplet" becomes a first-class wake word for every
-    customer without shipping a trained .onnx: a small general English
-    acoustic model runs grammar-constrained to just the wake phrase plus
-    "[unk]" (everything else). Each 80 ms frame is fed to a
-    KaldiRecognizer; when an utterance endpoint is reached and the
-    recognized text contains the wake phrase, we fire with the averaged
-    per-word confidence as the [0, 1] score the pipeline thresholds.
+    This is how "droplet" and "hey droplet" both become first-class wake
+    words for every customer without shipping a trained .onnx: a small
+    general English acoustic model runs grammar-constrained to just the
+    configured wake phrase(s) plus "[unk]" (everything else). Each 80 ms
+    frame is fed to a KaldiRecognizer; when an utterance endpoint is
+    reached and the recognized text contains ANY configured wake phrase,
+    we fire with that phrase window's minimum per-word confidence as the
+    [0, 1] score the pipeline thresholds — the best (highest) such score
+    across all configured phrases (WARP-1431).
 
     Apache-2.0, fully offline, no AccessKey, no licensing fee. CPU cost
     of the small model is negligible on Droplet-class hosts.
 
     Lazy-loads on first predict() (like OpenWakeWordDetector) so FastAPI
     startup isn't blocked by the model load. Unlike openWakeWord there is
-    no phrase fallback — the whole point is that the requested phrase is
-    what's actually matched — so `using_fallback` is always False and
-    `model_name` is the configured wake word.
+    no phrase fallback — the whole point is that the requested phrase(s)
+    are what's actually matched — so `using_fallback` is always False and
+    `model_name` reflects the configured wake word(s).
     """
 
     def __init__(
         self,
-        wake_word: str = "hey_droplet",
+        wake_word: str | list[str] = "hey_droplet",
         model_path: str = "/app/models/" + VOSK_DEFAULT_MODEL_DIRNAME,
         sample_rate: int = WAKE_SAMPLE_RATE,
     ):
-        self._requested_wake_word = wake_word
-        self._wake_word = wake_word
-        # Spoken form of the phrase: "hey_droplet" -> "hey droplet".
-        self._phrase = wake_word.replace("_", " ").strip().lower()
-        # Precomputed tokens for whole-word matching (review item 6).
-        self._phrase_tokens = self._phrase.split()
+        # Accept a single phrase (str — the historical shape) OR a list of
+        # phrases (WARP-1431: fire on "droplet" OR "hey droplet"). A bare
+        # str keeps its exact spelling as the canonical label so
+        # /voice/status and the fire key are byte-for-byte unchanged; a
+        # list reports the comma-joined spoken phrases.
+        if isinstance(wake_word, str):
+            specs = [wake_word]
+            label = wake_word.strip()
+        else:
+            specs = [str(w) for w in wake_word]
+            label = ""
+        # Normalize each spec to its spoken form ("hey_droplet" ->
+        # "hey droplet"); drop empties; dedupe (order-preserving) so a
+        # duplicated phrase doesn't bloat the grammar.
+        phrase_strings: list[str] = []
+        seen: set[str] = set()
+        for spec in specs:
+            phrase = spec.replace("_", " ").strip().lower()
+            if not phrase or phrase in seen:
+                continue
+            seen.add(phrase)
+            phrase_strings.append(phrase)
+        if not phrase_strings:
+            # Degenerate all-empty config: keep a single empty phrase so the
+            # detector still loads and simply never matches (mirrors the old
+            # single-empty-phrase behavior instead of crashing at load).
+            phrase_strings = [""]
+        if not label:
+            label = ",".join(phrase_strings)
+        self._requested_wake_word = label
+        self._wake_word = label
+        # Spoken phrase strings drive the grammar; the per-phrase token
+        # lists drive the whole-word matcher + confidence scorer.
+        self._phrase_strings = phrase_strings
+        self._phrases = [p.split() for p in phrase_strings]
         self._model_path = model_path
         self._sample_rate = sample_rate
         self._loaded = False
@@ -337,14 +368,14 @@ class VoskWakeWordDetector(WakeWordDetector):
             from vosk import KaldiRecognizer, Model  # type: ignore[import-not-found]
 
             logger.info(
-                "vosk: loading model %s (phrase=%r)",
-                self._model_path, self._phrase,
+                "vosk: loading model %s (phrases=%r)",
+                self._model_path, self._phrase_strings,
             )
             model = Model(self._model_path)
-            # Grammar-constrain recognition to the wake phrase + [unk].
-            # This biases the recognizer hard toward the phrase and keeps
+            # Grammar-constrain recognition to EVERY wake phrase + [unk].
+            # This biases the recognizer hard toward the phrases and keeps
             # CPU + false-accepts down vs. open-vocabulary decoding.
-            grammar = json.dumps([self._phrase, "[unk]"])
+            grammar = json.dumps([*self._phrase_strings, "[unk]"])
             self._rec = KaldiRecognizer(model, self._sample_rate, grammar)
             self._rec.SetWords(True)  # per-word confidences for scoring
             self._loaded = True
@@ -470,36 +501,39 @@ class VoskWakeWordDetector(WakeWordDetector):
         return {self._wake_word: score}
 
     def _phrase_confidence(self, res: dict) -> Optional[float]:
-        """Minimum per-word confidence over the matched phrase window.
+        """Best (max) minimum-per-word confidence across ALL wake phrases.
 
         Mirrors `_phrase_in_text`'s contiguity rule on the `result` word
-        array: find contiguous windows whose word sequence equals the
-        phrase tokens, score each as min(conf) over the window, return the
-        best window's score. Windows missing any `conf` value don't count.
-        Returns None when no fully-evidenced window exists — the caller
-        treats that as "no fire". Sets `_timing_rejected` when at least
-        one confident window was thrown out by the timing gate, so the
+        array: for EVERY configured phrase, find contiguous windows whose
+        word sequence equals that phrase's tokens, score each as min(conf)
+        over the window, and return the best window's score across all
+        phrases. This lets "hey droplet" score over its 2-word window and
+        a bare "droplet" over its 1-word window; the strongest evidence
+        wins. Windows missing any `conf` value don't count. Returns None
+        when no fully-evidenced window exists — the caller treats that as
+        "no fire". Sets `_timing_rejected` when at least one confident
+        window (for any phrase) was thrown out by the timing gate, so the
         caller can log the true rejection reason.
         """
         self._timing_rejected = False
         words = res.get("result") or []
         seq = [w for w in words if isinstance(w, dict) and "word" in w]
-        p = self._phrase_tokens
-        if not p or len(seq) < len(p):
-            return None
         best: Optional[float] = None
-        for i in range(len(seq) - len(p) + 1):
-            window = seq[i : i + len(p)]
-            if [w["word"] for w in window] != p:
+        for p in self._phrases:
+            if not p or len(seq) < len(p):
                 continue
-            if any("conf" not in w for w in window):
-                continue
-            if not self._window_timing_plausible(window):
-                self._timing_rejected = True
-                continue
-            m = min(float(w["conf"]) for w in window)
-            if best is None or m > best:
-                best = m
+            for i in range(len(seq) - len(p) + 1):
+                window = seq[i : i + len(p)]
+                if [w["word"] for w in window] != p:
+                    continue
+                if any("conf" not in w for w in window):
+                    continue
+                if not self._window_timing_plausible(window):
+                    self._timing_rejected = True
+                    continue
+                m = min(float(w["conf"]) for w in window)
+                if best is None or m > best:
+                    best = m
         return best
 
     @staticmethod
@@ -576,21 +610,26 @@ class VoskWakeWordDetector(WakeWordDetector):
             logger.warning("vosk: recognizer reset failed: %s", exc)
 
     def _phrase_in_text(self, text: str) -> bool:
-        """Whole-word match: the wake phrase must appear as a contiguous run
-        of WHOLE tokens in `text`, not merely as a substring — so a
-        recognized "hey droplets" (trailing token) or a phrase glued inside
-        another token doesn't fire. The grammar already constrains output to
-        [phrase, "[unk]"] so real-world risk is low, but exact-token matching
-        removes the surprise and is robust if the grammar ever loosens.
-        (WARP-154 review item 6.)
+        """Whole-word match against ANY configured wake phrase: some phrase's
+        tokens must appear as a contiguous run of WHOLE tokens in `text`, not
+        merely as a substring — so a recognized "hey droplets" (trailing
+        token) or a bare "droplets" doesn't fire for the "droplet" phrase,
+        and a phrase glued inside another token doesn't fire either. The
+        grammar already constrains output to [*phrases, "[unk]"] so
+        real-world risk is low, but exact-token matching removes the surprise
+        and is robust if the grammar ever loosens. (WARP-154 review item 6;
+        generalized to a phrase list in WARP-1431.)
         """
         words = text.split()
-        p = self._phrase_tokens
-        if not p or len(words) < len(p):
-            return False
-        return any(
-            words[i:i + len(p)] == p for i in range(len(words) - len(p) + 1)
-        )
+        for p in self._phrases:
+            if not p or len(words) < len(p):
+                continue
+            if any(
+                words[i:i + len(p)] == p
+                for i in range(len(words) - len(p) + 1)
+            ):
+                return True
+        return False
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -655,34 +694,64 @@ class DisabledWakeWordDetector(WakeWordDetector):
 # Factory — picks the right detector for the current env.
 # ────────────────────────────────────────────────────────────────────
 
+def _parse_wake_words(raw: str) -> list[str]:
+    """Split a comma-separated WAKE_WORD into spoken phrases for Vosk.
+
+    "droplet, Hey_Droplet" -> ["droplet", "hey droplet"]. Each segment is
+    stripped, lowercased and underscore→space mapped; empties are dropped
+    and the result is deduped order-preserving so the grammar carries no
+    dead entries. Falls back to ["hey droplet"] for an all-empty spec so
+    the detector still has a phrase to constrain on. (WARP-1431)
+    """
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for seg in raw.split(","):
+        phrase = seg.replace("_", " ").strip().lower()
+        if not phrase or phrase in seen:
+            continue
+        seen.add(phrase)
+        phrases.append(phrase)
+    return phrases or ["hey droplet"]
+
+
 def build_detector_from_env() -> WakeWordDetector:
     """Resolve env config → detector instance.
 
-    `WAKE_WORD` defaults to "hey_droplet" — the product's branded wake
-    phrase.
+    `WAKE_WORD` is a comma-separated list of wake phrases and defaults to
+    "droplet,hey droplet" — the box wakes on "Droplet" OR "Hey Droplet"
+    (WARP-1431). Underscores map to spaces ("hey_droplet" == "hey droplet").
 
     `WAKE_ENGINE` (default "vosk") selects the backend:
-      - "vosk" — recognizes the WAKE_WORD phrase out of the box via a
+      - "vosk" — recognizes the WAKE_WORD phrases out of the box via a
         grammar-constrained Vosk model, no per-phrase training. This is
-        how "hey droplet" works for every customer with no licensing
-        fee. Falls back to openWakeWord if the Vosk model dir isn't
-        present, so a stripped image still wakes (on the bundled
+        how "droplet"/"hey droplet" work for every customer with no
+        licensing fee. Falls back to openWakeWord if the Vosk model dir
+        isn't present, so a stripped image still wakes (on the bundled
         hey_jarvis model) rather than going silent.
       - "openwakeword" — the bundled-ONNX engine (hey_jarvis, alexa,
-        hey_mycroft), with its own runtime fallback to a bundled model
-        when the requested phrase has no .onnx.
+        hey_mycroft). It loads a single model, so it takes the FIRST
+        configured phrase verbatim (underscores preserved — the name maps
+        to an .onnx filename / bundled model), with its own runtime
+        fallback to a bundled model when that phrase has no .onnx.
 
     Set `WAKE_WORD=__mock__` for a dev box with no wake runtime
     available (forces the MockWakeWordDetector).
     """
-    wake_word = os.environ.get("WAKE_WORD", "hey_droplet").strip()
-    if wake_word == "__mock__":
+    raw = os.environ.get("WAKE_WORD", "droplet,hey droplet")
+    if raw.strip() == "__mock__":
         logger.info("WAKE_WORD=__mock__ → MockWakeWordDetector (dev only)")
         return MockWakeWordDetector()
 
+    # openWakeWord loads a single model and maps its wake word to an .onnx
+    # filename / bundled name, so it takes the first configured phrase
+    # VERBATIM (underscores intact); Vosk takes the full spoken-phrase list.
+    raw_segments = [s.strip() for s in raw.split(",") if s.strip()]
+    oww_wake_word = raw_segments[0] if raw_segments else "hey_droplet"
+    vosk_phrases = _parse_wake_words(raw)
+
     engine = os.environ.get("WAKE_ENGINE", "vosk").strip().lower()
     if engine in ("openwakeword", "oww"):
-        return OpenWakeWordDetector(wake_word=wake_word)
+        return OpenWakeWordDetector(wake_word=oww_wake_word)
     if engine and engine != "vosk":
         logger.warning("unknown WAKE_ENGINE=%r — using vosk", engine)
 
@@ -696,11 +765,11 @@ def build_detector_from_env() -> WakeWordDetector:
     )
     if os.path.isdir(vosk_model_path):
         logger.info(
-            "WAKE_ENGINE=vosk → VoskWakeWordDetector (phrase=%r, model=%s)",
-            wake_word, vosk_model_path,
+            "WAKE_ENGINE=vosk → VoskWakeWordDetector (phrases=%r, model=%s)",
+            vosk_phrases, vosk_model_path,
         )
         return VoskWakeWordDetector(
-            wake_word=wake_word, model_path=vosk_model_path,
+            wake_word=vosk_phrases, model_path=vosk_model_path,
         )
 
     logger.warning(
@@ -708,4 +777,4 @@ def build_detector_from_env() -> WakeWordDetector:
         "openWakeWord (wake will use its bundled fallback until the Vosk "
         "model is present)", vosk_model_path,
     )
-    return OpenWakeWordDetector(wake_word=wake_word)
+    return OpenWakeWordDetector(wake_word=oww_wake_word)
