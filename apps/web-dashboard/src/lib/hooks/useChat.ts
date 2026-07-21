@@ -212,7 +212,12 @@ interface ModelLoadingEvent extends SSEEventBase {
 interface DoneEvent extends SSEEventBase {
   type: "done";
   iterations: number;
-  stop_reason: "model_done" | "iteration_limit" | "error";
+  stop_reason:
+    | "model_done"
+    | "iteration_limit"
+    | "error"
+    | "context_budget"
+    | "repetition";
   error?: string;
 }
 
@@ -1884,7 +1889,9 @@ function applyEvent(
         // branch above.
         if (
           (evt.stop_reason === "model_done" ||
-            evt.stop_reason === "iteration_limit") &&
+            evt.stop_reason === "iteration_limit" ||
+            evt.stop_reason === "context_budget" ||
+            evt.stop_reason === "repetition") &&
           last.content.trim().length === 0 &&
           (!last.toolCalls || last.toolCalls.length === 0) &&
           (!last.reasoning || !last.reasoning.trim())
