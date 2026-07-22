@@ -284,3 +284,18 @@ per-session from Romain, so measurement runs are scheduled with him.
    tool set), but that stated justification must not be relied on or cited
    again — a future change that wants an exemption needs its own analysis of
    the args-only key, not this paragraph.
+
+## Measurement outcome (2026-07-21, §6 protocol executed)
+
+The staged protocol ran the same evening the branch merged (7 × 36-row cells,
+`staging-seed/eval/findings-2026-07-21-tuning.md`):
+
+1. **§1 step limit — shipped default flipped 5 → 10** (phase-2 winner,
+   two confirming runs at 23/36 vs 21 at 5; iteration_limit endings 4→0;
+   typical turns unaffected at ~3.6 iterations).
+2. **§6 window — 16384 kept.** 24k and 32k+q8_0 both pass the VRAM gate
+   (100% GPU on the 16 GB card) but bought no quality at any step count;
+   zero `context_budget` finalizations in 252 rows.
+3. **§3 selection — stays `off` shipped** (continuity prerequisite stands),
+   but the phase-3 cell scored 24/36 — best of the sweep — with zero
+   self-heals and zero degradation drops; re-decide after continuity lands.
