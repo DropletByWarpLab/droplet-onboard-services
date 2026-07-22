@@ -148,24 +148,24 @@ model ChatProject {
 }
 
 model ChatSession {
-  id           String        @id @default(uuid())
-  userId       String
-  title        String?
-  model        String?
-  provider     String?
+  id              String           @id @default(uuid())
+  userId          String
+  title           String?
+  model           String?
+  provider        String?
   /// WARP-845 — optional project membership. SetNull on project delete:
   /// the chats survive, falling back to the ungrouped date list.
-  projectId    String?
-  project      ChatProject?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId       String?
+  project         ChatProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
   /// the textarea when the thread is reloaded. NULL = no custom prompt.
-  systemPrompt String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @default(now()) @updatedAt
-  messages     ChatMessage[]
-  pins         ContextPin[]
+  systemPrompt    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @default(now()) @updatedAt
+  messages        ChatMessage[]
+  pins            ContextPin[]
   /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
   /// requires the opposite side of the relation to be declared; it is the
   /// onboarding-interview session a business profile was built from (at
@@ -1377,18 +1377,18 @@ model Reminder {
 // period). Re-using a recently-revoked IP is fine — the orchestrator's
 // allocator just picks the next free one in numerical order.
 model VpnPeer {
-  id          String    @id @default(uuid())
-  userId      String // Nextcloud username
-  deviceLabel String // "Alice's iPhone"
+  id            String    @id @default(uuid())
+  userId        String // Nextcloud username
+  deviceLabel   String // "Alice's iPhone"
   // Peer's WireGuard public key (X25519, base64). Unique across all
   // peers (active + revoked) — pubkey is effectively the peer identity
   // and reusing one would let a revoked device reauthenticate.
-  publicKey   String    @unique
+  publicKey     String    @unique
   // Tunnel IP assigned from the VPN subnet (e.g. "10.13.13.5"). Unique
   // across ACTIVE rows; a revoked row's IP can be reissued. Stored
   // without CIDR mask (mask is implied by the subnet).
-  assignedIp  String
-  status      String    @default("active") // "active" | "revoked"
+  assignedIp    String
+  status        String    @default("active") // "active" | "revoked"
   // How this peer reaches the box (hybrid remote-access P1). EXPLICIT enum-
   // checked value, never inferred from another field's absence (rule 10):
   //   "away" (default) — dials the box from OUTSIDE the home LAN via the public
@@ -1397,7 +1397,7 @@ model VpnPeer {
   //   "home" — dials the box DIRECTLY at its home-facing LAN IP (split-tunnel to
   //           the box, no public inbound). The .conf's Endpoint is the LAN IP.
   // A CHECK constraint pins it to exactly these two values (see the migration).
-  mode        String    @default("away")
+  mode          String    @default("away")
   // WARP-1385: how this peer was provisioned. EXPLICIT enum-checked value, never
   // inferred from absence (rule 10):
   //   "static"  (default) — a persistent peer minted by the owner via
@@ -1413,8 +1413,22 @@ model VpnPeer {
   // idle-expiry sweep filters on `kind = 'overlay' AND lastSessionAt < cutoff`,
   // so the NULL is never used to DERIVE state (rule 10).
   lastSessionAt DateTime?
-  createdAt   DateTime  @default(now())
-  revokedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  revokedAt     DateTime?
+
+  // WARP-1474: provenance for a peer enrolled via the dashboard-QR link flow
+  // (ADR-030). Nullable — a peer minted via POST /api/vpn/peers (kind='static')
+  // or an overlay peer created before this flow existed carries none of these.
+  // When an owner APPROVES a PendingOverlayEnrollment these are stamped onto the
+  // resulting overlay peer row so the audit trail shows who linked which QR:
+  //   linkTokenEnrolledBy — the approving owner's user id (createdBy).
+  //   linkTokenId         — the OverlayLinkToken this device redeemed.
+  //   linkTokenLabel      — the human label from the redeem body.
+  //   enrolledAt          — when the owner approved the enrollment.
+  linkTokenEnrolledBy String?
+  linkTokenId         String?
+  linkTokenLabel      String?
+  enrolledAt          DateTime?
 
   @@index([userId])
   @@index([status])
@@ -1426,6 +1440,85 @@ model VpnPeer {
   // 20260614000000_vpn_peer_unique_active_ip. This @@index stays for the
   // non-unique read path the allocator uses.
   @@index([assignedIp])
+}
+
+// ── WARP-1474: Dashboard-QR overlay device linking (ADR-030) ──
+//
+// The owner mints a short-lived QR on the dashboard; a phone scans it and
+// redeems the token (NO bearer) to STAGE an enrollment the owner then approves.
+// Only on approval does the box vouch the device to HQ (reusing the WARP-1385
+// enrollOverlayDevice broker) — the redeem itself performs NO HQ call and
+// installs NO wg0 peer.
+//
+// `state` on both models is an EXPLICIT enum-checked TEXT column (rule 10 — no
+// state derived from a NULL), pinned by a raw-SQL CHECK constraint in the
+// migration, mirroring the sibling VpnPeer.status / .mode / .kind idiom.
+
+// One row per minted QR link token. The plaintext token is returned to the
+// owner ONCE and NEVER persisted or logged — only its sha256 hex hash lives
+// here, so a DB read can neither replay nor reconstruct a token.
+model OverlayLinkToken {
+  id          String    @id @default(uuid())
+  // sha256(token) hex. Unique — the redeem path looks a token up by its hash.
+  tokenHash   String    @unique
+  // 'available' — freshly minted, unredeemed, unexpired.
+  // 'consumed'  — redeemed once; boundSignFp records the first redeemer's key.
+  // 'expired'   — past TTL, or superseded by a newer mint from the same owner
+  //               (single-active-per-owner). CHECK-pinned in the migration.
+  state       String    @default("available")
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  // The owner (req.user.id) who minted the token. Drives single-active-per-owner
+  // supersession + the mint audit's actor.
+  createdBy   String
+  // Optional owner-supplied label shown on the pending-enrollments list.
+  label       String?
+  // sha256(sign_public_key_pem) hex of the FIRST device to redeem this token.
+  // A later redeem with a DIFFERENT fingerprint is a token_conflict (409); the
+  // same fingerprint re-redeeming is idempotent.
+  boundSignFp String?
+  createdAt   DateTime  @default(now())
+
+  @@index([createdBy, state])
+  @@index([state, expiresAt])
+}
+
+// One row per staged (redeemed-but-not-yet-approved) device enrollment.
+// Created by the by-token redeem; transitions to approved/denied by the owner,
+// or expired by the natural token TTL. The owner approves against the short
+// fingerprint; the client polls its coarse state via a PoP-guarded endpoint.
+model PendingOverlayEnrollment {
+  id                 String    @id @default(uuid())
+  // The OverlayLinkToken.id redeemed to create this row.
+  linkTokenId        String
+  // sha256(sign_public_key_pem) hex — full fingerprint; the list surfaces its
+  // first 8 chars.
+  signKeyFingerprint String
+  // Exact validated PEM bytes, un-trimmed, so sha256(pem) stays byte-identical
+  // to the box vouch + HQ recompute. Also the key the status-PoP verifies against.
+  signPublicKeyPem   String
+  wgPublicKey        String
+  label              String
+  presentedAt        DateTime  @default(now())
+  // 'pending' | 'approving' | 'approved' | 'denied' | 'expired'. CHECK-pinned in
+  // the migration. 'approving' is the WARP-1474 SEND-BACK #2 atomic-approve
+  // claim: the approve route flips pending→approving BEFORE the box→HQ vouch so
+  // exactly one approver vouches (the losing concurrent approve matches 0 rows
+  // on the conditional flip). approving→approved on vouch success; compensated
+  // back to pending on vouch failure so the owner can retry.
+  state              String    @default("pending")
+  // True once a DIFFERENT-fingerprint device tried to redeem the same token —
+  // surfaced to the owner so a hijack attempt is visible, not silent.
+  conflict           Boolean   @default(false)
+  // Set on approval: the approving owner, the enroll timestamp, and HQ's
+  // returned device reference (the response `device_id`).
+  approvedBy         String?
+  enrolledAt         DateTime?
+  hqDeviceRef        String?
+
+  @@index([state])
+  @@index([linkTokenId])
+  @@index([wgPublicKey])
 }
 
 // Append-only log of every notification dispatched. Powers the in-app
@@ -1723,7 +1816,7 @@ model User {
   // WARP-1255: department membership (per-user rights per department).
   departmentMemberships DepartmentMembership[]
   // WARP-1255: per-user storage/usage policy (quota, upload cap, LLM cap).
-  usagePolicy UserUsagePolicy?
+  usagePolicy           UserUsagePolicy?
 
   @@index([role])
 }
@@ -1929,17 +2022,17 @@ enum Scope {
 /// right level per department, and that right determines what operations they
 /// can perform on the department's files and shared resources.
 enum DepartmentRight {
-  reader        // list/download/search/read metadata
-  contributor   // + upload/mkdir/rename/move/copy/delete/trash/versions/favorite
-  manager       // + create shares on dept content, manage dept membership (absorbs WARP-1245)
+  reader // list/download/search/read metadata
+  contributor // + upload/mkdir/rename/move/copy/delete/trash/versions/favorite
+  manager // + create shares on dept content, manage dept membership (absorbs WARP-1245)
 }
 
 /// WARP-1255: department hierarchy kind. Departments are top-level; teams nest
 /// one level deep inside them. Household is the legacy WS-5 system department.
 enum DepartmentKind {
-  HOUSEHOLD     // the seeded WS-5 system department — legacy NC group adopted verbatim (zero NC mutation)
+  HOUSEHOLD // the seeded WS-5 system department — legacy NC group adopted verbatim (zero NC mutation)
   DEPARTMENT
-  TEAM          // 2026-07-11 amendment: nested one level under a DEPARTMENT parent
+  TEAM // 2026-07-11 amendment: nested one level under a DEPARTMENT parent
 }
 
 /// WARP-1255: department provisioning lifecycle. Departments move through this
@@ -2144,16 +2237,16 @@ enum WebAuthnChallengeType {
 // this column; the scope-filter pass narrows the join result by the
 // caller's ScopeBinding set.
 model File {
-  id             String   @id @default(uuid())
-  ncFileId       Int      @unique
-  ownerUserId    String
-  departmentId   String?                                // WARP-1255: department this file belongs to (null = personal/household)
-  scope          Scope    @default(team)
+  id           String   @id @default(uuid())
+  ncFileId     Int      @unique
+  ownerUserId  String
+  departmentId String? // WARP-1255: department this file belongs to (null = personal/household)
+  scope        Scope    @default(team)
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
-  path           String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  path         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
@@ -2994,11 +3087,11 @@ enum WorkspaceType {
 model Workspace {
   // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
   // path use a fixed primary key + prisma upsert without inventing one.
-  id            Int           @id @default(1)
-  type          WorkspaceType @default(BUSINESS)
+  id                Int           @id @default(1)
+  type              WorkspaceType @default(BUSINESS)
   /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
   /// Surfaced in the chrome workspace pill + setup wizard.
-  displayName   String?
+  displayName       String?
   /// PR #380 (WARP onb org) — the onboarding ORG step fields. The org step
   /// names this single workspace (the "company brain") and reserves its
   /// `droplet.local/<slug>` host. Everyone the owner invites joins this ONE
@@ -3012,11 +3105,11 @@ model Workspace {
   /// `industry` / `size` are LOCAL smart-default hints ONLY — folder
   /// structure, example tools, camera policy. NEVER sent off the box
   /// (FEATURES.md §10). `logoPath` is the on-NVMe path of the optional logo.
-  slug          String?       @unique
-  tz            String?
-  industry      String?
-  size          String?
-  logoPath      String?
+  slug              String?       @unique
+  tz                String?
+  industry          String?
+  size              String?
+  logoPath          String?
   /// Module-toggles feature — BOUNDED module-preset selector. Distinct from the
   /// free-form `industry` hint above: module enablement keys off THIS enum so the
   /// preset a customer picks maps to a deterministic module set (CLAUDE.md
@@ -3031,13 +3124,13 @@ model Workspace {
   /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
   /// the org step is NOT skippable.
-  orgConfigured Boolean       @default(false)
+  orgConfigured     Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
-  setBy         String?
-  setAt         DateTime      @default(now())
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  setBy             String?
+  setAt             DateTime      @default(now())
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 }
 
 /// Module-toggles feature — the bounded set of vertical presets. Each maps (in
@@ -3956,46 +4049,48 @@ model ErpWriteRequest {
 /// teams are nested one level under a department parent. Household is the
 /// legacy system department adopted from WS-5.
 model Department {
-  id              String            @id @default(uuid())
-  name            String            @unique              // display + groupfolder mount_point
-  slug            String            @unique              // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
-  parentId        String?                                // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent          Department?       @relation("DeptHierarchy", fields: [parentId], references: [id])
-  teams           Department[]      @relation("DeptHierarchy")
+  id              String                 @id @default(uuid())
+  name            String                 @unique // display + groupfolder mount_point
+  slug            String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
+  parentId        String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
+  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
+  teams           Department[]           @relation("DeptHierarchy")
   description     String?
-  kind            DepartmentKind    @default(DEPARTMENT)
-  state           ProvisionState    @default(pending)
+  kind            DepartmentKind         @default(DEPARTMENT)
+  state           ProvisionState         @default(pending)
   provisionError  String?
-  ncGroupRw       String?           @unique              // "dept-<slug>"; household: legacy householdGroupName()
-  ncGroupRo       String?           @unique              // "dept-<slug>-ro"; null for kind=HOUSEHOLD
-  ncGroupfolderId Int?              @unique              // discovered via gfListFolders; NEVER a sentinel key
-  quotaBytes      BigInt?                                // null = unlimited; pushed via gfSetQuota
-  aclVersion      Int               @default(0)          // bumped in-tx on EVERY membership/state mutation
-  createdBy       String                                 // local User.id
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
+  ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
+  ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
+  quotaBytes      BigInt? // null = unlimited; pushed via gfSetQuota
+  aclVersion      Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
+  createdBy       String // local User.id
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
   archivedAt      DateTime?
   memberships     DepartmentMembership[]
   shares          DepartmentShare[]
   inviteGrants    UserInviteDepartment[]
+
   @@index([state])
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
 /// department. The sync state tracks whether NC group membership has converged.
 model DepartmentMembership {
-  id               String           @id @default(uuid())
+  id               String          @id @default(uuid())
   departmentId     String
-  userId           String                                // local User.id UUID
-  right            DepartmentRight  @default(contributor)
-  syncState        NcSyncState      @default(pending)
+  userId           String // local User.id UUID
+  right            DepartmentRight @default(contributor)
+  syncState        NcSyncState     @default(pending)
   syncError        String?
-  ncPermissionMask Int?                                  // last mask confirmed pushed (15 | 1) — drift forensics
+  ncPermissionMask Int? // last mask confirmed pushed (15 | 1) — drift forensics
   grantedBy        String
-  grantedAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
-  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
-  user       User       @relation(fields: [userId],       references: [id], onDelete: Cascade)
+  grantedAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  department       Department      @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([departmentId, userId])
   @@index([userId])
   @@index([syncState])
@@ -4005,15 +4100,16 @@ model DepartmentMembership {
 /// (members' masks withhold the share bit), so NC's uidOwner is the admin account —
 /// this table holds the TRUE creator for authz.
 model DepartmentShare {
-  id            String   @id @default(uuid())
-  departmentId  String
-  ncShareId     Int      @unique
-  createdById   String                        // local User.id of the manager who minted it
-  shareType     Int                           // 0=user, 1=group (phase 2), 3=link
-  path          String                        // dept-root-relative, display/audit only
-  createdAt     DateTime @default(now())
-  revokedAt     DateTime?
-  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  id           String     @id @default(uuid())
+  departmentId String
+  ncShareId    Int        @unique
+  createdById  String // local User.id of the manager who minted it
+  shareType    Int // 0=user, 1=group (phase 2), 3=link
+  path         String // dept-root-relative, display/audit only
+  createdAt    DateTime   @default(now())
+  revokedAt    DateTime?
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
   @@index([createdById])
 }
 
@@ -4024,22 +4120,23 @@ model UserInviteDepartment {
   inviteId     String
   departmentId String
   right        DepartmentRight @default(contributor)
-  invite     UserInvite @relation(fields: [inviteId],     references: [id], onDelete: Cascade)
-  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  invite       UserInvite      @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+  department   Department      @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
   @@unique([inviteId, departmentId])
 }
 
 /// WARP-1255: per-user storage and usage policy. Controls storage quota,
 /// upload size limit, and optional LLM daily message cap.
 model UserUsagePolicy {
-  userId              String      @id                    // FK User, onDelete Cascade
-  storageQuotaBytes   BigInt?                            // local desired state → ncUpdateUser(...,'quota',...)
-  quotaSyncState      NcSyncState @default(pending)
-  maxUploadSizeMb     Int?                               // per-user override of config.MAX_UPLOAD_SIZE_MB
-  llmDailyMessageCap  Int?                               // optional (decision D-7)
-  updatedBy           String
-  updatedAt           DateTime    @updatedAt
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId             String      @id // FK User, onDelete Cascade
+  storageQuotaBytes  BigInt? // local desired state → ncUpdateUser(...,'quota',...)
+  quotaSyncState     NcSyncState @default(pending)
+  maxUploadSizeMb    Int? // per-user override of config.MAX_UPLOAD_SIZE_MB
+  llmDailyMessageCap Int? // optional (decision D-7)
+  updatedBy          String
+  updatedAt          DateTime    @updatedAt
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 /// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of

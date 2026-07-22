@@ -34,6 +34,22 @@ export function createRequestLogger(opts: {
         "req.headers.authorization",
         "req.headers.cookie",
         'res.headers["set-cookie"]',
+        // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
+        // it's returned to the owner ONCE and only its sha256 hash is persisted.
+        // Redact it (and the client sign-key PEM) on any request/response body
+        // that a future serializer or a `req.log.info({ req/res })` call might
+        // emit, so a token can never ride out of the box in a log bundle.
+        "req.body.token",
+        // AC2 defense-in-depth: a client that passes the redeem token as a
+        // query param (?token=…) lands it under `req.query.token`, which the
+        // default pino req serializer DOES emit — redact it alongside the body
+        // copy so neither shape rides out in a log bundle. (The raw `req.url`
+        // is unaffected; the routes take the token in the JSON body, not the
+        // query string.)
+        "req.query.token",
+        "req.body.sign_public_key_pem",
+        'req.headers["x-overlay-pop"]',
+        "res.body.token",
       ],
     },
     mixin() {
