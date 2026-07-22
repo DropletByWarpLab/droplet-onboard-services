@@ -243,6 +243,35 @@
   color: var(--color-system-red-text);
 }
 
+/* Accessible inline-warning text — WARP-1475 (mirrors the WARP-633 red fix
+   above). The once-only-token warnings ("shown once", "expires in ~5 min") in
+   the Link + Add device dialogs render the vivid --color-system-orange
+   (#ff9500) as ~12px BODY TEXT on its own bg-system-orange/10 tint, which
+   computes only ~2.0:1 in light mode — well under WCAG AA's 4.5:1 floor. This
+   compound-selector override repoints ONLY the text color when both utilities
+   land on the same element, to a darkened burnt-orange that clears AA on the
+   tint (5.1:1 light) while staying unmistakably orange (not red). In dark mode
+   the vivid orange already clears AA on the dark tint (~7.5:1), so the token
+   falls back to it there — icons, borders, and badges keep the vivid orange
+   everywhere.
+
+   The token is intentionally scoped to these override selectors rather than the
+   :root/.dark contract blocks: that surface is locked byte-for-byte to the
+   DropletByWarpLab/design-and-style canon (WARP-1277 drift gate), and a new
+   global token must land in that repo first (`npm run tokens:sync`). Scoping it
+   here keeps the fix on-branch and the drift gate green; promoting
+   --color-system-orange-text to the canon is a follow-up. Declared unlayered
+   (like the red override) so it beats the Tailwind utilities cascade. */
+.text-system-orange.bg-system-orange\/10 {
+  --color-system-orange-text: #a3520a; /* burnt orange — 5.1:1 on the light tint */
+  color: var(--color-system-orange-text);
+}
+.dark .text-system-orange.bg-system-orange\/10 {
+  /* Vivid dark orange already clears AA (~7.5:1) on the dark tint — no darkening
+     needed; pin to the fill token so the two never drift apart. */
+  --color-system-orange-text: var(--color-system-orange);
+}
+
 /* ============================================================
    Typography Scale
    ============================================================ */
