@@ -1047,7 +1047,7 @@ function PendingEnrollmentRow({
 
         {/* Without this, the short code is decorative to a non-technical owner.
             It's the one signal that ties this row to the physical device. */}
-        <p className="type-caption-2 text-label-tertiary mt-1">
+        <p className="type-caption-2 text-label-secondary mt-1">
           Check this code matches the one shown in the Droplet app on that
           device.
         </p>
