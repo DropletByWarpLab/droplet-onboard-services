@@ -154,7 +154,14 @@ const envSchema = z.object({
   // enforce. Both enforcement points read the SAME resolved value
   // (config.agentMaxIter) so they can never drift. `.positive()`: zero
   // iterations is meaningless, so zod rejects it at boot.
-  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(5),
+  //
+  // DEFAULT is 10 per the 2026-07-21 staging tuning sweep (spec §6 phase 2,
+  // staging-seed/eval/findings-2026-07-21-tuning.md): 23/36 twice-confirmed
+  // vs 21 at the old default 5, iteration_limit endings 4→0, and four
+  // previously-unpassable eval rows converting at 6-10 iterations — while
+  // typical turns still finish in ~3.6 iterations, so the raised budget
+  // costs nothing on easy turns. Only hard rows use the depth.
+  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
   AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
   // Spec §3 — relevance-based tool selection kill switch. "off" (default)
   // advertises the full effective pool exactly as before; "domains" narrows

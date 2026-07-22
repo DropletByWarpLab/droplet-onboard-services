@@ -4,7 +4,15 @@
  * must clamp with a warning, never crash boot or silently break chat.
  */
 import { describe, it, expect, vi } from "vitest";
-import { resolveAgentIterLimits } from "../config.js";
+import { config, resolveAgentIterLimits } from "../config.js";
+
+describe("shipped agent iteration defaults", () => {
+  it("resolve to 10/10 — the 2026-07-21 staging step-sweep outcome (findings-2026-07-21-tuning.md)", () => {
+    // Env-unset boot (this test env) must yield the measured winner, not the
+    // pre-tuning 5. A regression to 5 silently reverts the phase-2 result.
+    expect(config.agentMaxIter).toEqual({ defaultIter: 10, capIter: 10 });
+  });
+});
 
 describe("resolveAgentIterLimits (spec §1)", () => {
   it("passes well-formed values through unchanged", () => {
