@@ -180,4 +180,42 @@ describe("overlay-link.service - fixed-window rate limiter", () => {
     t = 1001;
     expect(rl.check("k", 1, 1000)).toBe(true);
   });
+
+  // SEND-BACK #1 — the limiter is keyed by sha256(attacker-supplied token) on an
+  // always-on appliance, so without eviction the bucket Map grows unbounded.
+  it("prunes fully-elapsed buckets on a later check (Map shrinks)", () => {
+    let t = 1_000_000;
+    const rl = new FixedWindowRateLimiter(() => t);
+    // Create 200 distinct buckets inside window 1.
+    for (let i = 0; i < 200; i++) rl.check(`k${i}`, 5, 1000);
+    expect(rl.size).toBe(200);
+    // Advance PAST the window (and the sweep cadence) — the next check must
+    // lazily evict the now-stale buckets rather than let them accumulate.
+    t += 10_000;
+    rl.check("trigger", 5, 1000);
+    // Only the freshly-created "trigger" bucket should remain.
+    expect(rl.size).toBeLessThan(200);
+    expect(rl.size).toBe(1);
+  });
+
+  it("still counts a live bucket after a sweep evicts a stale sibling", () => {
+    let t = 0;
+    const rl = new FixedWindowRateLimiter(() => t);
+    rl.check("stale", 5, 1000); // window 1
+    t = 5_000; // "stale" is now fully elapsed
+    // "live" gets created fresh; the sweep drops "stale" but must not touch
+    // "live"'s brand-new count.
+    expect(rl.check("live", 1, 1000)).toBe(true);
+    expect(rl.check("live", 1, 1000)).toBe(false); // its own limit still enforced
+    expect(rl.size).toBe(1); // "stale" evicted, only "live" remains
+  });
+
+  it("enforces a hard max-bucket safety cap even within one window", () => {
+    let t = 0;
+    const rl = new FixedWindowRateLimiter(() => t, 50);
+    // Flood distinct keys inside a single window — memory must stay bounded by
+    // the cap rather than growing with the (attacker-controlled) key cardinality.
+    for (let i = 0; i < 500; i++) rl.check(`flood${i}`, 5, 60_000);
+    expect(rl.size).toBeLessThanOrEqual(50);
+  });
 });

@@ -193,29 +193,73 @@ export function verifyStatusPop(
  * per-hit history, and a burst at a window boundary is an acceptable tradeoff
  * for a DoS backstop whose real job is to cap sustained abuse, not to meter
  * perfectly.
+ *
+ * Memory (SEND-BACK #1): the by-token path keys buckets on
+ * `sha256(attacker-supplied token)`, so distinct redeem attempts mint distinct
+ * keys. On an always-on appliance an un-evicted Map would grow without bound.
+ * `check()` therefore performs LAZY, event-driven eviction — no background loop
+ * (rule: no `while(true)`): each call opportunistically sweeps fully-elapsed
+ * buckets (gated so the hot path stays O(1) in the common case), and a hard
+ * `maxBuckets` safety cap bounds worst-case memory even within a single window.
  */
 export class FixedWindowRateLimiter {
   private readonly buckets = new Map<
     string,
-    { windowStart: number; count: number }
+    { windowStart: number; windowMs: number; count: number }
   >();
   private readonly now: () => number;
+  private readonly maxBuckets: number;
+  /** Last wall-clock at which we swept expired buckets. `-Infinity` forces the
+   *  first check to sweep (over an empty/tiny Map — cheap). */
+  private lastSweep = Number.NEGATIVE_INFINITY;
 
-  constructor(now: () => number = () => Date.now()) {
+  constructor(now: () => number = () => Date.now(), maxBuckets = 10_000) {
     this.now = now;
+    this.maxBuckets = maxBuckets;
+  }
+
+  /** Number of live buckets. Exposed read-only so tests can prove eviction. */
+  get size(): number {
+    return this.buckets.size;
   }
 
   /** Returns true if the hit is ALLOWED (and records it), false if it would
    *  exceed `limit` within the current `windowMs` window. */
   check(key: string, limit: number, windowMs: number): boolean {
     const t = this.now();
+    // Lazy eviction: sweep at most once per `windowMs` (a bucket can only go
+    // stale after a full window), OR immediately when the Map hits the safety
+    // cap. Cheap-gated so the steady state stays O(1) per check.
+    if (this.buckets.size >= this.maxBuckets || t - this.lastSweep >= windowMs) {
+      this.sweep(t);
+    }
     const bucket = this.buckets.get(key);
     if (!bucket || t - bucket.windowStart >= windowMs) {
-      this.buckets.set(key, { windowStart: t, count: 1 });
+      this.buckets.set(key, { windowStart: t, windowMs, count: 1 });
       return true;
     }
     if (bucket.count >= limit) return false;
     bucket.count += 1;
     return true;
+  }
+
+  /** Drop every bucket whose window has fully elapsed; if an adversary created
+   *  more than `maxBuckets` still-live buckets inside one window, evict the
+   *  oldest until back under the cap (bounded memory beats perfect accounting
+   *  for a DoS backstop). Single pass, no loop over time (event-driven). */
+  private sweep(t: number): void {
+    for (const [k, b] of this.buckets) {
+      if (t - b.windowStart >= b.windowMs) this.buckets.delete(k);
+    }
+    this.lastSweep = t;
+    if (this.buckets.size >= this.maxBuckets) {
+      const oldestFirst = [...this.buckets.entries()].sort(
+        (a, b) => a[1].windowStart - b[1].windowStart,
+      );
+      for (const [k] of oldestFirst) {
+        if (this.buckets.size < this.maxBuckets) break;
+        this.buckets.delete(k);
+      }
+    }
   }
 }
