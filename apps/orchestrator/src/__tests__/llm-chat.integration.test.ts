@@ -294,6 +294,100 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.body.error).toContain("empty_completion");
   });
 
+  it("non-streaming rewrites a blank model_done even with prior tool activity (WARP-1479)", async () => {
+    // The live repro: the model dispatches a real tool, the tool SUCCEEDS,
+    // and the terminal turn then answers with nothing. The pre-fix gate
+    // required an EMPTY trace to rewrite `model_done`, so this persisted as
+    // a silent "completed" empty bubble — tool chips, no answer, no retry.
+    mockChat
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_blank",
+                    type: "function",
+                    function: { name: "list_network_devices", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "" } }],
+        }),
+      });
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "how much did I spend last month?" }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.stop_reason).toBe("error");
+    expect(res.body.error).toContain("empty_completion");
+  });
+
+  it("streaming rewrites a blank model_done even with prior tool activity (WARP-1479)", async () => {
+    mockChat
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_blank_stream",
+                    type: "function",
+                    function: { name: "list_network_devices", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "" } }],
+        }),
+      });
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "how much did I spend last month?" }],
+        stream: true,
+      })
+      .buffer(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .parse(sseBufferParser as any);
+
+    expect(res.status).toBe(200);
+    const frames = parseSse(sseText(res));
+    const done = frames.find((f) => f.event === "done");
+    expect(done?.data).toMatchObject({ stop_reason: "error" });
+    expect(String((done?.data as { error?: string }).error)).toContain(
+      "empty_completion",
+    );
+  });
+
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
     mockChat
       .mockResolvedValueOnce({
