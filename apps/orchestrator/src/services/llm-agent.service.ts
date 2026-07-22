@@ -16,18 +16,33 @@
  * shape this file exposed before the rewire (assistant message + trace),
  * so legacy consumers don't break.
  *
- * Iteration cap: default 5, hard max 10 — a confused or prompt-injected
+ * Iteration cap: config.agentMaxIter (env AGENT_MAX_ITER_DEFAULT / CAP,
+ * ships 5 / 10) — a confused or prompt-injected
  * model can't burn unbounded tokens.
  */
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
 
+import { config } from "../config.js";
 import type {
   McpCallContext,
   McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import {
+  selectAdvertisedTools,
+  domainOfTool,
+  toolNamesForDomain,
+} from "./tool-selection.service.js";
+import {
+  ITERATION_MIN_HEADROOM,
+  OUTPUT_RESERVE,
+} from "./prompt-budget.consts.js";
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  estimateTokensFromChars,
+} from "./context-budget.service.js";
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
@@ -277,6 +292,22 @@ export interface AgentRequest {
    * background.
    */
   signal?: AbortSignal;
+  /**
+   * Spec §2 — effective model context window in tokens
+   * (config.OLLAMA_CONTEXT_LENGTH in production; the route passes it
+   * explicitly). Drives the per-iteration token guard. Unset →
+   * DEFAULT_CONTEXT_WINDOW (conservative fallback for direct callers).
+   */
+  context_window?: number;
+  /**
+   * Spec §3 — relevance-based tool selection. "domains" narrows the
+   * advertised tools per-turn (core set + rule-matched + conversation-
+   * continuity domains); a filtered-but-allowed call self-heals via the
+   * WARP-642 guard. Unset/"off" → full-pool advertisement, byte-for-byte
+   * today's behavior. Only ever SUBSETS the pool this loop already resolved
+   * (allowed_tools / chat scope) — RBAC is decided before this field.
+   */
+  tool_selection_mode?: "off" | "domains";
 }
 
 export interface AgentTraceEntry {
@@ -290,11 +321,14 @@ export interface AgentResult {
   message: ChatMessage;
   trace: AgentTraceEntry[];
   iterations: number;
-  stop_reason: "model_done" | "iteration_limit" | "error";
+  stop_reason:
+    | "model_done"
+    | "iteration_limit"
+    | "error"
+    | "context_budget"
+    | "repetition";
   error?: string;
 }
-
-const DEFAULT_MAX_ITER = 5;
 
 /**
  * WARP-458 — parsed reasoning trace for a single assistant turn.
@@ -682,7 +716,15 @@ async function consumeChatStream(
 }
 
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
-  const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
+  // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
+  // bound) read config.agentMaxIter, so they cannot drift.
+  const maxIter = Math.max(
+    1,
+    Math.min(
+      req.max_iter ?? config.agentMaxIter.defaultIter,
+      config.agentMaxIter.capIter,
+    ),
+  );
   const trace: AgentTraceEntry[] = [];
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
@@ -713,14 +755,43 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const filtered = req.allowed_tools
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
     : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name));
-  const tools = filtered.map((t) => ({
+  const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
     function: {
       name: t.name,
       description: t.description,
       parameters: t.inputSchema as Record<string, unknown>,
     },
-  }));
+  });
+  // Spec §3 — per-turn relevance selection. `filtered` (the effective pool
+  // after RBAC/chat-scope) stays the ceiling: the self-heal branch below may
+  // re-admit pool tools that selection dropped, but NOTHING outside it.
+  const fullPoolNames = new Set(filtered.map((t) => t.name));
+  let activeTools = filtered;
+  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+    const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
+    const conversationToolNames = req.messages.flatMap((m) =>
+      m.role === "assistant" && m.tool_calls
+        ? m.tool_calls.map((tc) => tc.function.name)
+        : [],
+    );
+    // `content` is an array (multimodal — e.g. an image attachment) on some
+    // user turns; rule matching only understands plain text, so those turns
+    // yield "" here and fall back to core-only advertisement. That's an
+    // accepted gap, not a silent failure: the WARP-642 self-heal branch
+    // below re-admits any real tool the model still names, at the cost of
+    // one lost iteration.
+    const sel = selectAdvertisedTools({
+      mode: "domains",
+      userMessage:
+        typeof lastUser?.content === "string" ? lastUser.content : "",
+      pool: filtered.map((t) => t.name),
+      conversationToolNames,
+    });
+    const selected = new Set(sel.advertised);
+    activeTools = filtered.filter((t) => selected.has(t.name));
+  }
+  let tools = activeTools.map(toSpec);
   // WARP-642 — the exact set of tool names the model was advertised this
   // turn. Used to catch hallucinated tool names (e.g. gpt-oss:20b inventing
   // `knowledge_base_search` instead of the real `search_content`) BEFORE we
@@ -731,8 +802,47 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // WARP-642). We intercept here and feed back an error that LISTS the
   // available tools so the model can recover within the same loop, on the
   // remaining iterations, without a round-trip to the MCP child.
-  const advertisedNames = new Set(tools.map((t) => t.function.name));
-  const availableToolList = tools.map((t) => t.function.name).join(", ");
+  let advertisedNames = new Set(tools.map((t) => t.function.name));
+  let availableToolList = tools.map((t) => t.function.name).join(", ");
+
+  // Spec §2/§4 — when set, the NEXT model call is a finalization pass: zero
+  // tools, tool_choice "none", plus a one-time system nudge. A flag rather
+  // than a break because the user still deserves an answer synthesized from
+  // the gathered results, which needs one more inference call.
+  const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+  let finalizeReason: "context_budget" | "repetition" | null = null;
+
+  // Spec §4 repetition early-stop. Key = tool name + DEEP-canonicalized args:
+  // object keys sorted recursively so {a:1,b:2} and {b:2,a:1} collide as
+  // intended, while nested payload differences (which a flat replacer
+  // array would erase) keep genuinely different calls distinct.
+  const executedCallCounts = new Map<string, number>();
+  const canonicalJson = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+    if (v !== null && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      return `{${Object.keys(o)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(v) ?? "null";
+  };
+  // A pathologically nested / cyclic model-supplied `args` object can
+  // RangeError inside `canonicalJson`'s recursion — that must not kill the
+  // whole turn. Fall back to a per-call unique key (never collides, so the
+  // call is treated as never-before-seen rather than falsely deduped).
+  const canonicalCallKey = (
+    name: string,
+    args: Record<string, unknown>,
+    callId: string,
+  ): string => {
+    try {
+      return `${name}:${canonicalJson(args)}`;
+    } catch {
+      return `${name}:__uncanonicalizable__:${callId}`;
+    }
+  };
 
   // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
   // iterations, so a model that keeps naming an unknown tool every turn
@@ -770,6 +880,45 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // already disconnected (e.g. during the previous iteration's tool work).
     if (req.signal?.aborted) return abortedResult(iter);
 
+    // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
+    // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
+    // and any inlined image payloads), which only makes the guard fire
+    // EARLIER than the true fill — conservative by construction.
+    //
+    // Estimates `JSON.stringify(messages).length` ONLY — the serialized tool
+    // schemas are deliberately EXCLUDED. The route-side WARP-1118 estimator
+    // (context-budget.service.ts, invoked from routes/llm.ts before this loop
+    // ever starts) already budgets the FULL initial request — system blocks +
+    // tool schemas + history — against the same window; this in-loop guard's
+    // job is only to bound mid-turn TRANSCRIPT growth (tool results, nudges)
+    // on top of that already-budgeted starting point. Measured reality: the
+    // shipping 70-tool chat scope serializes to ~12k tokens of schemas alone,
+    // so folding that back into THIS guard's threshold would leave next to no
+    // transcript headroom at the 16k default window and cap every tool turn
+    // at one iteration — the exact regression this comment exists to prevent
+    // a future edit from reintroducing.
+    if (
+      iter > 0 &&
+      finalizeReason === null &&
+      toolChoice !== "none" &&
+      estimateTokensFromChars(JSON.stringify(messages).length) >
+        contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM
+    ) {
+      finalizeReason = "context_budget";
+    }
+    if (finalizeReason !== null) {
+      messages.push({
+        role: "system",
+        content:
+          finalizeReason === "repetition"
+            ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
+            : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+      });
+    }
+    const iterTools = finalizeReason !== null ? [] : tools;
+    const iterToolChoice: "auto" | "none" =
+      finalizeReason !== null ? "none" : toolChoice;
+
     // The outbound request shared by both transports. `stream` is set per
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
@@ -780,8 +929,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       temperature: req.temperature,
       max_tokens: req.max_tokens,
       reasoning_effort: req.reasoning_effort,
-      tools,
-      tool_choice: toolChoice,
+      tools: iterTools,
+      tool_choice: iterToolChoice,
     };
 
     let asst: ChatMessage | null = null;
@@ -861,6 +1010,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       asst = choice.message;
     }
 
+    // Spec §2 — the finalize pass advertised zero tools; a model that still
+    // emits tool_calls gets no second chance. Strip them so this turn takes
+    // the terminal path (empty content lands in WARP-854's FAILED-turn path).
+    if (finalizeReason !== null && asst.tool_calls?.length) {
+      delete asst.tool_calls;
+    }
+
     // Happy path: model produced a final answer with no more tool calls.
     if (!asst.tool_calls?.length) {
       // WARP-458 — extract `<reasoning>…</reasoning>` segments + the
@@ -891,7 +1047,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // turn) is the owner of that case.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
       if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
-      emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
+      emit({
+        type: "done",
+        iterations: iter + 1,
+        stop_reason: finalizeReason ?? "model_done",
+      });
       // Surface cleaned content + concatenated reasoning on the
       // returned ChatMessage so the route layer can persist.
       //
@@ -914,7 +1074,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         message: finalMessage,
         trace,
         iterations: iter + 1,
-        stop_reason: "model_done",
+        stop_reason: finalizeReason ?? "model_done",
       };
     }
 
@@ -944,6 +1104,47 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // sends zero tools, so this branch never fires on greeting-style
       // turns (the model is given nothing to mis-name).
       if (!advertisedNames.has(call.function.name)) {
+        if (fullPoolNames.has(call.function.name)) {
+          // Spec §3 self-heal — a REAL pool tool that selection filtered
+          // out. Expand its whole domain for the remaining iterations and
+          // tell the model to retry: one lost iteration, not a failed turn.
+          // Deliberately NOT counted as a guard hit (the model named a real
+          // tool) and not a real dispatch either.
+          const domain = domainOfTool(call.function.name);
+          const domainNames = new Set(
+            domain ? toolNamesForDomain(domain) : [call.function.name],
+          );
+          const keep = new Set([
+            ...advertisedNames,
+            call.function.name,
+            ...domainNames,
+          ]);
+          tools = filtered.filter((t) => keep.has(t.name)).map(toSpec);
+          advertisedNames = new Set(tools.map((t) => t.function.name));
+          availableToolList = tools.map((t) => t.function.name).join(", ");
+          const heal = {
+            status: "error" as const,
+            error: {
+              code: "TOOL_NOW_AVAILABLE",
+              message:
+                `The tool '${call.function.name}' is now available. ` +
+                `Call it again with the same arguments.`,
+            },
+          };
+          trace.push({
+            tool_call_id: call.id,
+            tool: call.function.name,
+            args,
+            result: heal,
+          });
+          emit({ type: "tool_result", id: call.id, ok: false, data: heal });
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(heal).slice(0, 8000),
+          });
+          continue;
+        }
         // FINDING 3 (security) — `call.function.name` is model-controlled
         // (steerable via prompt injection) and a degenerate huge name could
         // bloat history. Sanitize before reflecting it into the
@@ -986,6 +1187,41 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           content: guardText.slice(0, 8000),
         });
         iterGuardHits++;
+        continue;
+      }
+
+      // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
+      // call is neither a guard hit nor a real dispatch, so the WARP-642
+      // circuit breaker is unaffected.
+      const callKey = canonicalCallKey(call.function.name, args, call.id);
+      const priorCalls = executedCallCounts.get(callKey) ?? 0;
+      executedCallCounts.set(callKey, priorCalls + 1);
+      if (priorCalls >= 1) {
+        const nudge = {
+          status: "error" as const,
+          error: {
+            code: "REPEATED_CALL",
+            message:
+              `You already called '${call.function.name}' with these exact ` +
+              `arguments; its result is in the conversation above. Use that ` +
+              `result or answer the user — do not repeat the call.`,
+          },
+        };
+        trace.push({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          args,
+          result: nudge,
+        });
+        emit({ type: "tool_result", id: call.id, ok: false, data: nudge });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(nudge).slice(0, 8000),
+        });
+        if (priorCalls >= 2) {
+          finalizeReason = finalizeReason ?? "repetition";
+        }
         continue;
       }
 
@@ -1152,6 +1388,26 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             | null
             | undefined;
           if (r === null || typeof r !== "object") return false;
+          // Spec §4 — a REPEATED_CALL nudge means the call was never
+          // re-dispatched this turn (its prior result already succeeded);
+          // it must not read as "the tool kept failing".
+          if (
+            typeof r.error === "object" &&
+            r.error !== null &&
+            (r.error as { code?: unknown }).code === "REPEATED_CALL"
+          ) {
+            return false;
+          }
+          // Spec §3 — a TOOL_NOW_AVAILABLE heal means selection filtered the
+          // tool out; it was never actually dispatched, so it must not read
+          // as "the tool kept failing" either.
+          if (
+            typeof r.error === "object" &&
+            r.error !== null &&
+            (r.error as { code?: unknown }).code === "TOOL_NOW_AVAILABLE"
+          ) {
+            return false;
+          }
           // Handler envelopes report status:"error" / ok:false; the
           // dispatch-throw path (ORCH-05) reports a string `error`.
           // confirmation_required is a UX pause, not a failure.

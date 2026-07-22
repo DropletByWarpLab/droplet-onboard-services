@@ -30,7 +30,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import type { PrismaClient } from "@prisma/client";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: true },
+  config: { AUTH_ENABLED: true, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 const { recordActivityMock } = vi.hoisted(() => ({

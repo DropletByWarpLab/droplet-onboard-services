@@ -12,7 +12,7 @@ import express from "express";
 
 // The Jira check reads `config`; mock it as a mutable object the tests tweak.
 vi.mock("../config.js", () => ({
-  config: { JIRA_HOST: "", JIRA_EMAIL: "", JIRA_API_TOKEN: "" },
+  config: { JIRA_HOST: "", JIRA_EMAIL: "", JIRA_API_TOKEN: "", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { config } from "../config.js";

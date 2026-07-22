@@ -2168,6 +2168,14 @@ services:
       # fits tools + memory block + history while keeping gpt-oss:20b's
       # KV cache fully resident on a 16 GB GPU.
       OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
+      # 2026-07-21 agent-budgets spec §5 — window-experiment levers. Empty
+      # defaults = Ollama's own defaults (f16 KV cache, flash attention off),
+      # so today's behavior is byte-identical. OLLAMA_KV_CACHE_TYPE=q8_0
+      # roughly halves KV-cache VRAM (flash attention is its prerequisite);
+      # set both in .env only per the spec §6 measurement protocol — never
+      # as a silent default change.
+      OLLAMA_FLASH_ATTENTION: "${OLLAMA_FLASH_ATTENTION:-}"
+      OLLAMA_KV_CACHE_TYPE: "${OLLAMA_KV_CACHE_TYPE:-}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:

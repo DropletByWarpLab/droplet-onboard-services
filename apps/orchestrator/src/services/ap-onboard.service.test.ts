@@ -33,6 +33,7 @@ vi.mock("../config.js", () => ({
     DROPLET_AP_APPROVAL_TIMEOUT: 60,
     DROPLET_AP_DAWN_ENABLED: true,
     DROPLET_AP_DEFAULT_TXPOWER: 20,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

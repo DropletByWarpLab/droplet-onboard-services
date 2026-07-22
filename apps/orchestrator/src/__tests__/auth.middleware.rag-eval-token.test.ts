@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: true,
     NEXTCLOUD_URL: "http://nextcloud.test",
     SERVICE_TOKEN_RAG_EVAL: "test-rag-eval-token-32chars-pad-abc1",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

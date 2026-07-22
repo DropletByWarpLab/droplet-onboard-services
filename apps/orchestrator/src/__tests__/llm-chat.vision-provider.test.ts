@@ -27,6 +27,7 @@ vi.mock("../config.js", () => ({
     // model can't see. Its provider ("ollama") is what the audit row must
     // record — NOT the cloud provider the caller forwarded.
     vision: { model: "llava:7b", maxImages: 3 },
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

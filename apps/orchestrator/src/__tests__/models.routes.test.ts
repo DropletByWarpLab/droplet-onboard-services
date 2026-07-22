@@ -13,7 +13,7 @@ import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false, AI_GATEWAY_URL: "http://ai-gateway:8000" },
+  config: { AUTH_ENABLED: false, AI_GATEWAY_URL: "http://ai-gateway:8000", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 vi.mock("../services/cache.service.js", () => ({

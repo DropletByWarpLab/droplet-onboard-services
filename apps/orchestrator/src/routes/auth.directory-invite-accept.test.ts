@@ -52,6 +52,7 @@ vi.mock("../config.js", () => ({
     REDIS_URL: "redis://localhost:6379",
     SERVICE_TOKEN_VOICE: "",
     SERVICE_TOKEN_MCP: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

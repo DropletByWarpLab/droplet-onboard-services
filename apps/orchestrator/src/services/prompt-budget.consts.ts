@@ -52,3 +52,15 @@ export const BASE_PROMPT_MAX_CHARS = 10000;
  * A constant, deliberately not env-configurable.
  */
 export const OUTPUT_RESERVE = 1024;
+
+/**
+ * Agent-loop iteration guard (2026-07-21 agent-budgets spec §2): minimum
+ * estimated-token headroom under `window − OUTPUT_RESERVE` required to start
+ * another tool-calling iteration. Below it the loop stops dispatching tools
+ * and runs one finalization pass (stop_reason "context_budget") instead of
+ * pushing the request into history-trim territory. Sized so one more
+ * 8000-char tool result (~2000 tokens at 4 chars/token) can't fit anyway;
+ * 1536 keeps usable iterations while never over-filling. Revisit with the
+ * spec §6 measurement data.
+ */
+export const ITERATION_MIN_HEADROOM = 1536;

@@ -23,6 +23,7 @@ vi.mock("../config.js", () => ({
     DOCS_EDITOR_PUBLIC_PATH: "/docs/",
     DOCS_ACCESS_TOKEN_TTL_SECONDS: 600,
     ONLYOFFICE_JWT_SECRET: "test-onlyoffice-secret-32-chars-aaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

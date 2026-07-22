@@ -85,7 +85,7 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock("../config.js", () => ({
-  config: { SERVICE_SECRET: "", FRIGATE_URL: "http://frigate.test:5000" },
+  config: { SERVICE_SECRET: "", FRIGATE_URL: "http://frigate.test:5000", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 vi.mock("../middleware/auth.js", () => ({

@@ -14,7 +14,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import type { PrismaClient } from "@prisma/client";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: true, JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa", DROPLET_AP_MODE: "uci" },
+  config: { AUTH_ENABLED: true, JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa", DROPLET_AP_MODE: "uci", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 vi.mock("../services/network.service.js", () => ({

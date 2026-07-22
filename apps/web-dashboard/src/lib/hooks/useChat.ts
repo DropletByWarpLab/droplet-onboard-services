@@ -212,7 +212,12 @@ interface ModelLoadingEvent extends SSEEventBase {
 interface DoneEvent extends SSEEventBase {
   type: "done";
   iterations: number;
-  stop_reason: "model_done" | "iteration_limit" | "error";
+  stop_reason:
+    | "model_done"
+    | "iteration_limit"
+    | "error"
+    | "context_budget"
+    | "repetition";
   error?: string;
 }
 
@@ -1874,20 +1879,29 @@ function applyEvent(
           };
           return updated;
         }
-        // WARP-854 (live path) — a turn that finishes `model_done` or
-        // `iteration_limit` but produced no visible content AND no tool
-        // activity is the live-stream twin of the persisted ghost-turn the
-        // loadConversation path maps to `failureKind: "failed"`. Without
-        // this guard the bubble renders as nothing at all. Set `error`
-        // (not `failureKind` — that field is loadConversation-only) so the
-        // FailureChip + Try-again render, matching the `stop_reason: "error"`
-        // branch above.
+        // WARP-854 (live path) — a turn that finishes `model_done`,
+        // `iteration_limit`, `context_budget`, or `repetition` but produced
+        // no visible content and no reasoning is the live-stream twin of the
+        // persisted ghost-turn the loadConversation path maps to
+        // `failureKind: "failed"`. Without this guard the bubble renders as
+        // nothing at all. Set `error` (not `failureKind` — that field is
+        // loadConversation-only) so the FailureChip + Try-again render,
+        // matching the `stop_reason: "error"` branch above.
+        //
+        // `context_budget`/`repetition` are agent-budgets finalize passes:
+        // the turn may carry real tool activity from earlier in the turn
+        // (`last.toolCalls` non-empty), but a blank FINAL answer is still
+        // dishonest — so those two reasons only require blank content +
+        // reasoning, tool activity or not. `model_done`/`iteration_limit`
+        // keep their original zero-tool-activity requirement unchanged.
         if (
-          (evt.stop_reason === "model_done" ||
-            evt.stop_reason === "iteration_limit") &&
           last.content.trim().length === 0 &&
-          (!last.toolCalls || last.toolCalls.length === 0) &&
-          (!last.reasoning || !last.reasoning.trim())
+          (!last.reasoning || !last.reasoning.trim()) &&
+          (evt.stop_reason === "context_budget" ||
+            evt.stop_reason === "repetition" ||
+            ((evt.stop_reason === "model_done" ||
+              evt.stop_reason === "iteration_limit") &&
+              (!last.toolCalls || last.toolCalls.length === 0)))
         ) {
           const updated = [...base];
           updated[idx] = {

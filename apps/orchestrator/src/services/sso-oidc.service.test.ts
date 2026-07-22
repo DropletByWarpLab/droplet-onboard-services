@@ -52,6 +52,7 @@ const baseConfig = {
   DROPLET_SSO_OKTA_CLIENT_ID: "okta-client-id",
   DROPLET_SSO_OKTA_CLIENT_SECRET: "okta-secret",
   DROPLET_SSO_OKTA_REDIRECT_URI: "https://droplet.local/api/sso/oidc/callback",
+  agentMaxIter: { defaultIter: 5, capIter: 10 },
 };
 const mockConfig: Record<string, unknown> = { ...baseConfig };
 vi.mock("../config.js", () => ({

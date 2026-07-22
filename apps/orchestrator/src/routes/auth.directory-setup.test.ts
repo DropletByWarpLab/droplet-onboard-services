@@ -34,6 +34,7 @@ vi.mock("../config.js", () => ({
     // mock object. Default-off keeps every existing /auth/setup test (above)
     // on the un-gated path with no claimCode field.
     DROPLET_CLAIM_GATE_ENABLED: false,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

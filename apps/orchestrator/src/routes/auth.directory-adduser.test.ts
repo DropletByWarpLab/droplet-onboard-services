@@ -21,6 +21,7 @@ vi.mock("../config.js", () => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     DROPLET_SHARED_FOLDER_NAME: "Household",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

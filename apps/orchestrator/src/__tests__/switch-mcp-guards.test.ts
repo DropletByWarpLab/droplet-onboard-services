@@ -35,6 +35,7 @@ vi.mock("../config.js", () => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

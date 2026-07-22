@@ -21,6 +21,7 @@ vi.mock("../config.js", () => ({
     // calls. Same shape as SERVICE_TOKEN_VOICE; the principal table
     // maps each token to a different AuthUser.
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

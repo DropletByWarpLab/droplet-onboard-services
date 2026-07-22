@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     STORAGE_BACKEND: "nextcloud",
     JWT_SECRET: "test-secret-at-least-32-chars-long-aaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

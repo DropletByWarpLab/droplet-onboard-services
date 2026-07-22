@@ -32,6 +32,7 @@ vi.mock("../config.js", () => ({
     SWITCH_SERVICE_URL: "http://switch.test:8081",
     SWITCH_PROTECTED_PORT: "9",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

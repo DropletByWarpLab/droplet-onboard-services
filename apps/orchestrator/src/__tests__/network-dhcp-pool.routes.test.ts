@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: true,
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_AP_MODE: "uci",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

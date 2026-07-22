@@ -69,6 +69,7 @@ vi.mock("../config.js", () => ({
   config: {
     MAX_UPLOAD_SIZE_MB: 10,
     NODE_ENV: "test",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

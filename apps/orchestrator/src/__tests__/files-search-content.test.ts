@@ -37,6 +37,7 @@ vi.mock("../config.js", () => ({
     // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
     DROPLET_SHARED_FOLDER_NAME: "Household",
     FRIGATE_URL: "http://frigate:5000",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

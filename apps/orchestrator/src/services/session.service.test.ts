@@ -17,6 +17,7 @@ vi.mock("../config.js", () => ({
     SESSION_IDLE_TIMEOUT_USER_SECONDS: 3600,
     SESSION_ABSOLUTE_TIMEOUT_SECONDS: 28800,
     SESSION_MAX_CONCURRENT_PER_USER: 3,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

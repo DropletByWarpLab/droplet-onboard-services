@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 
 vi.mock("../config.js", () => ({
-  config: { NEXTCLOUD_URL: "http://nextcloud.test" },
+  config: { NEXTCLOUD_URL: "http://nextcloud.test", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 vi.mock("./activity.singleton.js", () => ({

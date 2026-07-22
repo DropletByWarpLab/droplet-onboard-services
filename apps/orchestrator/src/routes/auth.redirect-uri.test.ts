@@ -19,6 +19,7 @@ vi.mock("../config.js", () => ({
   config: {
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

@@ -24,7 +24,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 
 // ── Wiring for the metadata-gate integration section (createFilesRouter) ──
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false, MAX_UPLOAD_SIZE_MB: 100 },
+  config: { AUTH_ENABLED: false, MAX_UPLOAD_SIZE_MB: 100, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),

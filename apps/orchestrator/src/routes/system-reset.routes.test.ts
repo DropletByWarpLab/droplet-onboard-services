@@ -22,7 +22,7 @@ import request from "supertest";
 import express from "express";
 
 vi.mock("../config.js", () => ({
-  config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090" },
+  config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { createSystemResetRouter } from "./system-reset.routes.js";

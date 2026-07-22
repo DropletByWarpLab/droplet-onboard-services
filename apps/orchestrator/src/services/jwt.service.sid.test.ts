@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("../config.js", () => ({
   config: {
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

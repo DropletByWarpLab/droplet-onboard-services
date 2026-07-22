@@ -168,7 +168,8 @@ const chatRequestSchema = z.object({
   // (see VOICE_REASONING_EFFORT); every non-voice caller stays unchanged.
   reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
   provider: z.string().optional(),
-  max_iter: z.number().int().min(1).max(10).optional(),
+  // Spec §1 — the cap comes from config so it matches the loop's clamp.
+  max_iter: z.number().int().min(1).max(config.agentMaxIter.capIter).optional(),
   allowed_tools: z.array(z.string()).optional(),
   // Per-turn override for the agent loop's tool advertisement. "none"
   // sends ZERO tools to the model so it can't wander into a speculative
@@ -1578,11 +1579,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // persist as completed-with-empty-content — invisible in the UI.
           // Rewrite the terminal event to an error so the dashboard shows
           // its retry chip instead of nothing, and finalize as `failed`.
+          //
+          // `context_budget`/`repetition` are agent-budgets finalize passes:
+          // the turn may have real tool activity earlier (a non-empty
+          // `liveToolCalls`), but the FINAL answer synthesized from that
+          // activity is still blank — that's just as dishonest a "success"
+          // as `model_done`'s zero-tool-zero-content case, so those two
+          // reasons rewrite on blank content alone, tool activity or not.
+          // `model_done` keeps its original zero-tool-activity requirement
+          // unchanged.
           if (
             e.type === "done" &&
-            e.stop_reason === "model_done" &&
             liveAssistantContent.trim().length === 0 &&
-            liveToolCalls.length === 0
+            (e.stop_reason === "context_budget" ||
+              e.stop_reason === "repetition" ||
+              (e.stop_reason === "model_done" && liveToolCalls.length === 0))
           ) {
             emptyCompletion = true;
             e = {
@@ -1678,6 +1689,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1442 — resolved reasoning effort (voice → "low" default).
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
+            context_window: config.OLLAMA_CONTEXT_LENGTH,
+            tool_selection_mode: config.TOOL_SELECTION_MODE,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
             toolCallContext,
@@ -1734,6 +1747,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — resolved reasoning effort (voice → "low" default).
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
+          context_window: config.OLLAMA_CONTEXT_LENGTH,
+          tool_selection_mode: config.TOOL_SELECTION_MODE,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
           toolCallContext,
@@ -1758,10 +1773,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // model "finished" without saying anything, typically because the
         // prompt overflowed the context window (see the streaming-path
         // comment). Surface it as an error instead of a silent success.
+        //
+        // `context_budget`/`repetition` are agent-budgets finalize passes:
+        // the trace may be non-empty (real tool activity happened earlier
+        // in the turn), but a blank FINAL answer is still dishonest — so
+        // those two reasons rewrite on blank content alone, trace or not.
+        // `model_done` keeps its original zero-trace requirement unchanged.
         if (
-          result.stop_reason === "model_done" &&
           contentToText(result.message.content).trim().length === 0 &&
-          result.trace.length === 0
+          (result.stop_reason === "context_budget" ||
+            result.stop_reason === "repetition" ||
+            (result.stop_reason === "model_done" && result.trace.length === 0))
         ) {
           result = {
             ...result,

@@ -18,6 +18,7 @@ vi.mock("../config.js", () => ({
     // test config needs a sensible value here too. Default matches
     // config.ts's Zod default.
     FRIGATE_URL: "http://frigate:5000",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

@@ -26,7 +26,10 @@ import express from "express";
 // helper) reads config keys at module-evaluation time, which would otherwise
 // hit the TDZ on a plain `const`.
 const { mockConfig } = vi.hoisted(() => ({
-  mockConfig: { DROPLET_SCIM_BEARER_TOKEN: "scim-token" } as Record<string, unknown>,
+  mockConfig: {
+    DROPLET_SCIM_BEARER_TOKEN: "scim-token",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
+  } as Record<string, unknown>,
 }));
 vi.mock("../config.js", () => ({
   get config() {
@@ -150,6 +153,7 @@ const AUTH = ["Authorization", "Bearer scim-token"] as const;
 beforeEach(() => {
   for (const k of Object.keys(mockConfig)) delete mockConfig[k];
   mockConfig.DROPLET_SCIM_BEARER_TOKEN = "scim-token";
+  mockConfig.agentMaxIter = { defaultIter: 5, capIter: 10 };
   recordedScim.length = 0;
   _setActivityRecorderForTests(
     {

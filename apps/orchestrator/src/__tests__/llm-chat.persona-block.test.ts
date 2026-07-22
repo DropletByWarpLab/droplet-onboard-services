@@ -16,7 +16,11 @@ import express, { type Request, type Response, type NextFunction } from "express
 
 // Shipping window so nothing degrades — the persona block must survive.
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false, OLLAMA_CONTEXT_LENGTH: 16384 },
+  config: {
+    AUTH_ENABLED: false,
+    OLLAMA_CONTEXT_LENGTH: 16384,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
+  },
 }));
 
 vi.mock("@prisma/client", () => ({

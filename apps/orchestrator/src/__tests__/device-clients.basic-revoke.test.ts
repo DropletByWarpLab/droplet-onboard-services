@@ -74,6 +74,7 @@ vi.mock("../config.js", () => ({
     ROUTING_MODE: "disabled",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 
