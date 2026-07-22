@@ -264,3 +264,92 @@ describe("Remote Access — pending enrollment queue", () => {
     await waitFor(() => expect(h.deny).toHaveBeenCalledWith("pe-1"));
   });
 });
+
+// ─── UX send-back: WCAG AA text-contrast + security legibility (WARP-1475) ───
+//
+// The UX review returned CHANGES_REQUESTED on two AA 1.4.3 contrast blockers
+// plus cheap security-legibility copy/aria improvements. These guard the fixes.
+describe("Remote Access — WCAG AA contrast + security legibility (WARP-1475 UX send-back)", () => {
+  const baseRow = {
+    id: "pe-1",
+    label: "Alice's iPhone",
+    fingerprint_short: "a1b2c3d4",
+    presented_at: new Date().toISOString(),
+    state: "pending" as const,
+    conflict: false,
+  };
+
+  it("puts the conflict security note on its own red tint so the AA text override fires", async () => {
+    // The vivid `text-system-red` only clears AA when paired with
+    // `bg-system-red/10` on the SAME element — that's the compound selector in
+    // globals.css (WARP-633) that repoints to --color-system-red-text (#b91c1c).
+    h.pending.mockResolvedValue([
+      { ...baseRow, id: "c", label: "Unknown phone", conflict: true },
+    ]);
+    renderPage();
+    const note = await screen.findByText(/approve only if you recognize it/i);
+    expect(note).toHaveClass("text-system-red");
+    expect(note).toHaveClass("bg-system-red/10");
+  });
+
+  it("keeps the once-only Link warning on its orange tint (paired classes for the AA override)", async () => {
+    h.mint.mockResolvedValue({
+      token: "t",
+      server: "box.example",
+      box_name: "Droplet",
+      expires_at: "2026-07-21T18:00:00.000Z",
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /link a device/i }));
+    await screen.findByTestId("overlay-qr");
+    const warnBox = screen
+      .getByText(/expires in about 5 minutes and is shown once/i)
+      .closest("div");
+    expect(warnBox).toHaveClass("text-system-orange");
+    expect(warnBox).toHaveClass("bg-system-orange/10");
+  });
+
+  it("tells the owner to match the fingerprint against the Droplet app", async () => {
+    h.pending.mockResolvedValue([baseRow]);
+    renderPage();
+    expect(
+      await screen.findByText(/matches the one shown in the droplet app/i),
+    ).toBeInTheDocument();
+  });
+
+  it("names the remote-access grant in the queue header (ADR-002 consequence)", async () => {
+    h.pending.mockResolvedValue([baseRow]);
+    renderPage();
+    expect(
+      await screen.findByText(/remote access to your network/i),
+    ).toBeInTheDocument();
+  });
+
+  it("marks the pending queue as a polite live region for screen readers", async () => {
+    h.pending.mockResolvedValue([baseRow]);
+    renderPage();
+    const region = (await screen.findByText(/devices waiting to link/i)).closest(
+      "[aria-live]",
+    );
+    expect(region).not.toBeNull();
+    expect(region).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("escalates the live region to assertive when a conflict row is present", async () => {
+    h.pending.mockResolvedValue([
+      { ...baseRow, id: "c", label: "Unknown phone", conflict: true },
+    ]);
+    renderPage();
+    await screen.findByText(/unexpected device/i);
+    const region = screen
+      .getByText(/devices waiting to link/i)
+      .closest("[aria-live]");
+    expect(region).toHaveAttribute("aria-live", "assertive");
+  });
+
+  it("hints that Link uses the Droplet app (disambiguates from Add device)", async () => {
+    renderPage();
+    const btn = await screen.findByRole("button", { name: /link a device/i });
+    expect(btn.getAttribute("title") ?? "").toMatch(/droplet app/i);
+  });
+});

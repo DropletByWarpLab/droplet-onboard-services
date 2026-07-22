@@ -147,6 +147,9 @@ export default function RemoteAccessPage() {
           className="btn"
           onClick={() => setShowLink(true)}
           type="button"
+          // Disambiguates from "Add device" for a non-technical owner: Link is
+          // the flow for a device that already runs the Droplet app.
+          title="Link a device that has the Droplet app"
         >
           <Link2 size={15} />
           <span>Link a device</span>
@@ -918,16 +921,29 @@ function PendingEnrollments() {
   const visible = rows.filter(
     (r) => r.state === "pending" || r.state === "approving",
   );
+  // A conflict row is a security event — escalate the live-region politeness so
+  // a screen-reader owner is interrupted rather than merely queued behind other
+  // announcements. Benign additions stay polite.
+  const hasConflict = visible.some((r) => r.conflict);
 
   return (
-    <div className="card" style={{ marginBottom: 16 }}>
+    <div
+      className="card"
+      style={{ marginBottom: 16 }}
+      // The queue polls every 10s; without a live region a screen-reader owner
+      // never learns a device (or a conflict) appeared.
+      aria-live={hasConflict ? "assertive" : "polite"}
+    >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: visible.length ? 12 : 0 }}>
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
             Devices waiting to link
           </h2>
           <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-            Scanned devices appear here. Approve one only if you recognize it.
+            {/* ADR-002: name the consequence. Approving is not just an
+                acknowledgement — it grants the device access to the network. */}
+            Scanned devices appear here. Approving one gives it remote access to
+            your network, so approve only a device you recognize.
           </p>
         </div>
         <button
@@ -1029,8 +1045,21 @@ function PendingEnrollmentRow({
           <span>{formatRelativeTime(row.presented_at)}</span>
         </div>
 
+        {/* Without this, the short code is decorative to a non-technical owner.
+            It's the one signal that ties this row to the physical device. */}
+        <p className="type-caption-2 text-label-tertiary mt-1">
+          Check this code matches the one shown in the Droplet app on that
+          device.
+        </p>
+
         {row.conflict && (
-          <p className="type-caption-1 text-system-red mt-1.5">
+          // The security note is the highest-stakes copy on the row. Pairing
+          // `text-system-red` with its own `bg-system-red/10` tint fires the
+          // WARP-633 compound-selector override in globals.css, which repoints
+          // the text to --color-system-red-text (#b91c1c, ≥4.5:1 on the tint —
+          // still ≥5:1 even over the row's own red wash). Matches the sibling
+          // inline-error boxes elsewhere in this file.
+          <p className="type-footnote text-system-red bg-system-red/10 border border-system-red/20 rounded p-2 mt-2">
             A different device tried to use this code. Approve only if you
             recognize it — otherwise deny it.
           </p>
