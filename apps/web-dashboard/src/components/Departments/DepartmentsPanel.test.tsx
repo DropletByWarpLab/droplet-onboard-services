@@ -323,7 +323,10 @@ describe("DepartmentsPanel — archive / restore", () => {
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
 
     expect(screen.queryByRole("button", { name: /^archive$/i })).not.toBeInTheDocument();
-    // But member management (a manager-right unit) IS available.
-    expect(screen.getByLabelText(/rights for priya nair/i)).not.toBeDisabled();
+    // But member management (a manager-right unit) IS available. The rights
+    // control lands after the detail fetch (getDepartmentMock) resolves — a
+    // second async hop past the name — so on slow CI runners it must be
+    // awaited rather than asserted on synchronously right after the name.
+    expect(await screen.findByLabelText(/rights for priya nair/i)).not.toBeDisabled();
   });
 });
