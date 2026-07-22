@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { createLogger } from "./lib/logger.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -18,8 +17,6 @@ export function isWeakJwtSecret(s: string): boolean {
   return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
 }
 
-const configLogger = createLogger("config");
-
 /** PURE — resolve the agent iteration limits, clamping DEFAULT down to CAP
  *  when misconfigured: a bad env must not silently break chat. A
  *  misconfigured env clamps with a structured warning instead of crashing
@@ -27,7 +24,24 @@ const configLogger = createLogger("config");
 export function resolveAgentIterLimits(
   defaultIter: number,
   capIter: number,
-  warn: (msg: string) => void = (msg) => configLogger.warn(msg),
+  // Constructed lazily, via a DYNAMIC import — config.ts is on nearly every
+  // orchestrator module's import graph (including test setup's
+  // column-crypto.service.ts → config.ts chain), so even a plain top-level
+  // `import { createLogger } from "./lib/logger.js"` here would load
+  // logger.ts's own top-level `import pino from "pino"` before the actual
+  // misconfigured-env path ever runs. That eager, unconditional pino require
+  // gets cached by Node's module loader ahead of any given test file's own
+  // `vi.mock("pino", ...)`, so the mock never takes — breaking every test
+  // that mocks pino and asserts on its call history (model-readiness,
+  // auth-throttle test suites). A dynamic import defers loading logger.js
+  // until this default actually runs (the rare misconfigured-env path, which
+  // no test exercises through the default), keeping pino out of config.ts's
+  // module graph entirely.
+  warn: (msg: string) => void = (msg) => {
+    void import("./lib/logger.js").then(({ createLogger }) =>
+      createLogger("config").warn(msg),
+    );
+  },
 ): { defaultIter: number; capIter: number } {
   if (defaultIter > capIter) {
     warn(
