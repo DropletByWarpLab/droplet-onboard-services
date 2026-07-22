@@ -27,6 +27,12 @@ vi.mock("@/lib/api", () => ({
   fetchVpnPeers: (...a: unknown[]) => fetchVpnPeersMock(...a),
   createVpnPeer: (...a: unknown[]) => createVpnPeerMock(...a),
   deleteVpnPeer: (...a: unknown[]) => deleteVpnPeerMock(...a),
+  // WARP-1475: overlay QR-enroll fns the page now imports (owner view mounts
+  // the pending-approval queue). Stub them so the wholesale api mock stays complete.
+  mintOverlayLinkToken: () => Promise.resolve({ token: "t", server: "s", box_name: "b", expires_at: "2026-07-21T00:00:00.000Z" }),
+  fetchPendingOverlayEnrollments: () => Promise.resolve([]),
+  approveOverlayEnrollment: () => Promise.resolve({ state: "approved", device_id: null }),
+  denyOverlayEnrollment: () => Promise.resolve({ state: "denied" }),
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
 }));
 

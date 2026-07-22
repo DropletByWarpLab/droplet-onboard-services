@@ -14,6 +14,10 @@ import {
   AlertCircle,
   Loader2,
   ShieldOff,
+  Link2,
+  ShieldAlert,
+  Fingerprint,
+  RefreshCw,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
@@ -22,17 +26,28 @@ import {
   fetchVpnPeers,
   createVpnPeer,
   deleteVpnPeer,
+  mintOverlayLinkToken,
+  fetchPendingOverlayEnrollments,
+  approveOverlayEnrollment,
+  denyOverlayEnrollment,
 } from "@/lib/api";
 import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
+  OverlayLinkToken,
+  PendingOverlayEnrollment,
 } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
+import {
+  buildOverlayEnrollUri,
+  overlayApproveErrorCopy,
+} from "@/lib/overlay-enroll";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -53,8 +68,16 @@ export default function RemoteAccessPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [showLink, setShowLink] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<VpnPeerInfo | null>(null);
   const { toast } = useToast();
+
+  // WARP-1475: the overlay QR-enroll flow (mint + approval queue) is
+  // owner/admin-only — the orchestrator gates the mint / pending-list /
+  // approve / deny routes to those roles, so we only render the affordances
+  // for them (never a button that would 403).
+  const isOwnerOrAdmin =
+    currentUser?.role === "owner" || currentUser?.role === "admin";
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -116,16 +139,30 @@ export default function RemoteAccessPage() {
   const offLanReachable = status?.offLanReachable === true;
 
   const addAction = (
-    <button
-      className="btn primary"
-      onClick={() => setShowAdd(true)}
-      disabled={endpointMissing === true || homeMintBlocked}
-      aria-describedby={disabledReasonId}
-      type="button"
-    >
-      <Plus size={15} />
-      <span>Add device</span>
-    </button>
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {/* WARP-1475: owner/admin-only overlay QR-enroll — a device scans the
+          code with the Droplet app, then the owner approves it below. */}
+      {isOwnerOrAdmin && (
+        <button
+          className="btn"
+          onClick={() => setShowLink(true)}
+          type="button"
+        >
+          <Link2 size={15} />
+          <span>Link a device</span>
+        </button>
+      )}
+      <button
+        className="btn primary"
+        onClick={() => setShowAdd(true)}
+        disabled={endpointMissing === true || homeMintBlocked}
+        aria-describedby={disabledReasonId}
+        type="button"
+      >
+        <Plus size={15} />
+        <span>Add device</span>
+      </button>
+    </div>
   );
 
   return (
@@ -201,6 +238,11 @@ export default function RemoteAccessPage() {
         </div>
       )}
 
+      {/* WARP-1475: overlay QR-enroll approval queue (owner/admin only). Sits
+          above the peer list because approving here is the load-bearing gate
+          that turns a scan into an enrolled device. */}
+      {isOwnerOrAdmin && <PendingEnrollments />}
+
       {/* Peer list */}
       <div className="card rows" style={{ padding: "4px 18px" }}>
         {loading && peers.length === 0 ? (
@@ -234,6 +276,8 @@ export default function RemoteAccessPage() {
           offLanReachable={offLanReachable}
         />
       )}
+
+      {showLink && <LinkDeviceDialog onClose={() => setShowLink(false)} />}
 
       <ConfirmDialog
         open={revokeTarget !== null}
@@ -362,6 +406,13 @@ function PeerRow({
         <span className="sub mono">
           {peer.assignedIp} · {peer.userId}
         </span>
+        {/* TODO(WARP-1475): surface overlay provenance (enrolled-by owner +
+            link-token label + enrolled-at) so the owner can tell their device
+            from an unexpected one. The `GET /vpn/peers` DTO doesn't yet carry
+            linkTokenEnrolledBy / linkTokenLabel / enrolledAt (they're stamped
+            on the VpnPeer row by the approve path in WARP-1474 but not
+            selected into the list response) — render only once the DTO does;
+            do not fabricate the fields client-side. */}
       </span>
       {!isRevoked && isOwner && (
         <button
@@ -643,5 +694,374 @@ function AddDeviceDialog({
         )}
       </div>
     </Dialog>
+  );
+}
+
+// ─────────────────────── Link Device dialog (overlay QR-enroll) ──────────────
+//
+// WARP-1475 (ADR-030). Owner/admin-only. Mints a single-use link token on open
+// and renders it as a `droplet://overlay-enroll` QR. The token is returned by
+// the box ONCE (only its hash is persisted) — it lives only in this dialog's
+// state, is cleared when the dialog unmounts, and is NEVER logged. Minting a new
+// code supersedes (invalidates) the prior one. A scan STAGES a pending
+// enrollment that the owner approves in the queue below; the QR alone grants no
+// access.
+
+function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
+  const headingId = useId();
+  const [token, setToken] = useState<OverlayLinkToken | null>(null);
+  const [minting, setMinting] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const startedRef = useRef(false);
+
+  const mint = useCallback(async () => {
+    setMinting(true);
+    setError(null);
+    try {
+      // The plaintext token is held only here and rendered into the QR — never
+      // console-logged, never lifted into a parent store.
+      const minted = await mintOverlayLinkToken();
+      setToken(minted);
+    } catch (err) {
+      setToken(null);
+      setError(translateError(err, "vpn"));
+    } finally {
+      setMinting(false);
+    }
+  }, []);
+
+  // Mint once on open (ref-guarded against StrictMode's double-invoke so a
+  // second token can't silently supersede the first the moment the dialog
+  // appears).
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void mint();
+  }, [mint]);
+
+  const enrollUri = token
+    ? buildOverlayEnrollUri({
+        server: token.server,
+        token: token.token,
+        boxName: token.box_name,
+      })
+    : null;
+
+  return (
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md" flush>
+      <div>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+          <h3 id={headingId} className="type-headline text-label-primary">
+            Link a device
+          </h3>
+          <button
+            onClick={onClose}
+            className="p-1 text-label-tertiary hover:text-label-primary transition-colors"
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <ol className="type-footnote text-label-secondary list-decimal pl-5 space-y-1">
+            <li>
+              Open the <strong>Droplet app</strong> on the device you want to add.
+            </li>
+            <li>
+              Choose <strong>Link a device</strong> and scan the code below.
+            </li>
+            <li>
+              Come back here and <strong>approve</strong> it — it can&rsquo;t
+              connect until you do.
+            </li>
+          </ol>
+
+          {minting && (
+            <div className="flex items-center justify-center gap-2 py-8 text-label-tertiary">
+              <Loader2 size={16} className="animate-spin" />
+              <span className="type-subheadline">Generating a code&hellip;</span>
+            </div>
+          )}
+
+          {error && !minting && (
+            <div className="p-2 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {enrollUri && !minting && (
+            <>
+              <div className="flex justify-center">
+                <div className="p-4 bg-white rounded-lg">
+                  <QRCodeSVG
+                    value={enrollUri}
+                    size={224}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 bg-system-orange/10 border border-system-orange/20 rounded type-caption-1 text-system-orange flex items-start gap-2">
+                <ShieldOff size={14} className="mt-0.5 flex-shrink-0" />
+                <span>
+                  This code expires in about 5 minutes and is shown once.
+                  Minting a new code invalidates this one — re-mint if it&rsquo;s
+                  lost.
+                </span>
+              </div>
+            </>
+          )}
+
+          <div className="flex items-center justify-between pt-1">
+            <button
+              onClick={() => void mint()}
+              disabled={minting}
+              className="btn"
+              type="button"
+            >
+              <RefreshCw size={14} />
+              Generate a new code
+            </button>
+            <button onClick={onClose} className="btn primary" type="button">
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// ─────────────────────── Pending enrollment queue ───────────────────────────
+//
+// WARP-1475 (ADR-030). Owner/admin-only. Lists staged overlay enrollments and
+// is the load-bearing approval gate: a scan only becomes a network grant when
+// the owner approves here. Polls on an interval so a scan surfaces without a
+// manual refresh. The device-presented `label` is UNTRUSTED — rendered as text
+// only (React escapes it; never dangerouslySetInnerHTML). A `conflict` row (a
+// different device redeemed the same code) is flagged as a security event with
+// distinct styling, not a benign expiry.
+
+const OVERLAY_POLL_MS = 10_000;
+
+function PendingEnrollments() {
+  const [rows, setRows] = useState<PendingOverlayEnrollment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const { toast } = useToast();
+
+  const reload = useCallback(async () => {
+    try {
+      const data = await fetchPendingOverlayEnrollments();
+      setRows(data);
+    } catch {
+      // A transient poll failure is non-actionable — keep the last-known list
+      // rather than flashing an error banner every interval. Approve/deny
+      // surface their own errors inline.
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+    const id = setInterval(() => void reload(), OVERLAY_POLL_MS);
+    return () => clearInterval(id);
+  }, [reload]);
+
+  const handleApprove = useCallback(
+    async (row: PendingOverlayEnrollment) => {
+      setBusyId(row.id);
+      try {
+        await approveOverlayEnrollment(row.id);
+        toast(
+          `Approved "${row.label?.trim() || "device"}".`,
+          "success",
+        );
+        await reload();
+      } catch (err) {
+        // Honest per-case copy for the 409/503 states — never a raw code.
+        toast(
+          overlayApproveErrorCopy(
+            err as { status?: number; code?: string; message?: string },
+          ),
+          "error",
+        );
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [reload, toast],
+  );
+
+  const handleDeny = useCallback(
+    async (row: PendingOverlayEnrollment) => {
+      setBusyId(row.id);
+      try {
+        await denyOverlayEnrollment(row.id);
+        toast(`Denied "${row.label?.trim() || "device"}".`, "info");
+        await reload();
+      } catch (err) {
+        toast(translateError(err, "vpn"), "error");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [reload, toast],
+  );
+
+  // Only actionable states belong in the queue — approved/denied/expired are
+  // history, not decisions the owner still has to make.
+  const visible = rows.filter(
+    (r) => r.state === "pending" || r.state === "approving",
+  );
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: visible.length ? 12 : 0 }}>
+        <div>
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
+            Devices waiting to link
+          </h2>
+          <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
+            Scanned devices appear here. Approve one only if you recognize it.
+          </p>
+        </div>
+        <button
+          onClick={() => void reload()}
+          className="k-iconbtn"
+          title="Refresh"
+          aria-label="Refresh waiting devices"
+          type="button"
+        >
+          <RefreshCw size={14} />
+        </button>
+      </div>
+
+      {visible.length === 0 ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            paddingTop: 12,
+            fontSize: 12.5,
+            color: "var(--text-muted)",
+          }}
+        >
+          <Smartphone size={14} style={{ flexShrink: 0 }} />
+          <span>
+            {loading
+              ? "Checking for devices…"
+              : "No devices waiting. Tap “Link a device” to add one."}
+          </span>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {visible.map((row) => (
+            <PendingEnrollmentRow
+              key={row.id}
+              row={row}
+              busy={busyId === row.id}
+              onApprove={() => handleApprove(row)}
+              onDeny={() => handleDeny(row)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingEnrollmentRow({
+  row,
+  busy,
+  onApprove,
+  onDeny,
+}: {
+  row: PendingOverlayEnrollment;
+  busy: boolean;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  // Device-presented label — untrusted; interpolated as TEXT (React escapes it).
+  const displayLabel = row.label?.trim() || "Unnamed device";
+  const approving = row.state === "approving";
+  const disabled = busy || approving;
+
+  return (
+    <div
+      className={
+        "flex items-start gap-3 p-3 rounded-lg border " +
+        (row.conflict
+          ? "border-system-red/30 bg-system-red/10"
+          : "border-separator")
+      }
+      style={row.conflict ? undefined : { background: "var(--surface)" }}
+    >
+      <span
+        className={"flex-shrink-0 mt-0.5 " + (row.conflict ? "text-system-red" : "text-label-tertiary")}
+      >
+        {row.conflict ? <ShieldAlert size={18} /> : <Smartphone size={18} />}
+      </span>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="type-subheadline text-label-primary font-medium break-all">
+            {displayLabel}
+          </span>
+          {row.conflict && (
+            <span className="type-caption-2 px-1.5 py-0.5 rounded bg-system-red/10 text-system-red border border-system-red/25">
+              Unexpected device
+            </span>
+          )}
+        </div>
+
+        <div className="type-caption-1 text-label-tertiary mt-0.5 flex items-center gap-2 flex-wrap">
+          <span className="inline-flex items-center gap-1 font-mono">
+            <Fingerprint size={12} aria-hidden="true" />
+            {row.fingerprint_short}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span>{formatRelativeTime(row.presented_at)}</span>
+        </div>
+
+        {row.conflict && (
+          <p className="type-caption-1 text-system-red mt-1.5">
+            A different device tried to use this code. Approve only if you
+            recognize it — otherwise deny it.
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <button
+          onClick={onDeny}
+          disabled={disabled}
+          className="btn sm"
+          aria-label={`Deny device ${displayLabel}`}
+          type="button"
+        >
+          Deny
+        </button>
+        <button
+          onClick={onApprove}
+          disabled={disabled}
+          className="btn sm primary"
+          aria-label={`Approve device ${displayLabel}`}
+          type="button"
+        >
+          {disabled ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <Check size={13} />
+          )}
+          {approving ? "Approving…" : "Approve"}
+        </button>
+      </div>
+    </div>
   );
 }
