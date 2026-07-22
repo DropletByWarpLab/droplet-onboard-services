@@ -103,14 +103,24 @@ function createPrismaMock() {
       return { count: hits.length };
     }),
   });
-  return {
+  const client: any = {
     overlayLinkToken: table(linkTokens, "tok"),
     pendingOverlayEnrollment: table(pendings, "pend", { conflict: false }),
     vpnPeer: table(vpnPeers, "vp"),
     _linkTokens: linkTokens,
     _pendings: pendings,
     _vpnPeers: vpnPeers,
-  } as any;
+  };
+  // Mirror PrismaClient.$transaction for BOTH the array form (mint supersession,
+  // SEND-BACK #5) and the interactive callback form. The in-memory tables mutate
+  // eagerly, so array ops have already run by the time they're awaited here; the
+  // callback form receives the same client (shared table refs) as `tx`.
+  client.$transaction = vi.fn(async (arg: any) => {
+    if (Array.isArray(arg)) return Promise.all(arg);
+    if (typeof arg === "function") return arg(client);
+    return undefined;
+  });
+  return client;
 }
 
 interface AuditEntry {
@@ -210,6 +220,19 @@ describe("POST /api/vpn/overlay/link-tokens (mint)", () => {
     const { app } = buildApp({ audit });
     await mint(app);
     expect(audit.some((a) => a.event === "overlay_link_mint")).toBe(true);
+  });
+
+  // SEND-BACK #5 — supersession (available→expired) + create must be atomic, or
+  // a crash between them can leave an owner with ZERO available tokens (old one
+  // expired, new one never created) or, worse, two available tokens.
+  it("runs supersession + create inside a single $transaction", async () => {
+    const { app, prisma } = buildApp();
+    await mint(app);
+    await mint(app);
+    expect(prisma.$transaction).toHaveBeenCalled();
+    // The end-state invariant still holds: exactly one available, one expired.
+    const states = prisma._linkTokens.map((t: any) => t.state).sort();
+    expect(states).toEqual(["available", "expired"]);
   });
 });
 
@@ -436,17 +459,19 @@ describe("GET /api/vpn/overlay/pending-enrollments (owner)", () => {
 });
 
 describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
-  async function stage(app: any) {
+  async function stage(app: any, wgKey: string = VALID_WG_KEY) {
     const tokenRes = await mint(app);
     const key = p256();
     const res = await request(app).post("/api/vpn/overlay/devices/by-token").send({
       token: tokenRes.body.token,
-      wg_public_key: VALID_WG_KEY,
+      wg_public_key: wgKey,
       sign_public_key_pem: key.pem,
       label: "Phone",
     });
     return res.body.pending_id;
   }
+  const approve = (app: any, id: string) =>
+    request(app).post(`/api/vpn/overlay/pending-enrollments/${id}/approve`).send({});
 
   it("fires enrollOverlayDevice exactly once and returns 200 { state:'approved', device_id }", async () => {
     const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-42" }));
@@ -493,6 +518,124 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
     const pendingId = await stage(app);
     await request(app).post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`).send({});
     expect(audit.some((a) => a.event === "overlay_enroll_approved")).toBe(true);
+  });
+
+  // ── SEND-BACK #2/#8 — the vouch must fire AT MOST ONCE per pending id ──
+  it("idempotent re-approve returns the recorded device_id WITHOUT a second vouch", async () => {
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
+    const { app } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+    const first = await approve(app, pendingId);
+    const second = await approve(app, pendingId);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.device_id).toBe("hq-dev-9");
+    expect(overlayEnroll).toHaveBeenCalledTimes(1);
+  });
+
+  it("a claim that loses the race (count===0) gets a clean 409 and does NOT vouch", async () => {
+    // Deterministically simulate the losing concurrent approver: the row still
+    // reads 'pending' at findUnique, but the atomic pending→approving claim
+    // matches 0 rows (another approver already flipped it). Must be a clean 409,
+    // never a 500 or a second vouch.
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq" }));
+    const { app, prisma } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+    const realUpdateMany = prisma.pendingOverlayEnrollment.updateMany;
+    prisma.pendingOverlayEnrollment.updateMany = vi.fn(async (args: any) => {
+      // Force ONLY the claim (pending→approving) to lose; let every other
+      // updateMany (compensation, finalize, provenance) behave normally.
+      if (args?.data?.state === "approving" && args?.where?.state === "pending") {
+        return { count: 0 };
+      }
+      return realUpdateMany(args);
+    });
+    const res = await approve(app, pendingId);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("already_being_approved");
+    expect(overlayEnroll).not.toHaveBeenCalled();
+  });
+
+  it("a row already mid-approve ('approving') is not re-vouched (clean 409)", async () => {
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq" }));
+    const { app, prisma } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+    // Simulate another approver holding the claim: the row sits in 'approving'.
+    prisma._pendings[0].state = "approving";
+    const res = await approve(app, pendingId);
+    expect(res.status).toBe(409);
+    expect(overlayEnroll).not.toHaveBeenCalled();
+  });
+
+  it("two OVERLAPPING approves vouch exactly once; the loser gets a clean 409", async () => {
+    // Gate the vouch so approver #1 holds the 'approving' claim while approver #2
+    // runs to completion — the integration-level proof of exactly-once. (True
+    // simultaneous claim collision can't be produced by a single-threaded
+    // in-memory mock; the deterministic count===0 path is covered above.)
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const overlayEnroll = vi.fn(async () => {
+      await gate;
+      return { device_ref: "hq-dev-1" };
+    });
+    const { app } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+
+    // Dispatch #1 NOW (supertest sends on `.then`) — it claims the row and then
+    // parks in the gated vouch.
+    let r1: any;
+    const p1 = approve(app, pendingId).then((r: any) => (r1 = r));
+    await new Promise((r) => setTimeout(r, 30)); // let #1 reach the gated vouch
+    const r2 = await approve(app, pendingId); // must see the claim held → 409
+    expect(r2.status).toBe(409);
+    expect(overlayEnroll).toHaveBeenCalledTimes(1); // #2 never reached the vouch
+
+    release();
+    await p1;
+    expect(r1.status).toBe(200);
+    expect(r1.body.state).toBe("approved");
+    expect(overlayEnroll).toHaveBeenCalledTimes(1); // still exactly once
+  });
+
+  it("compensates approving→pending and returns 503 when the vouch fails", async () => {
+    const overlayEnroll = vi.fn(async () => {
+      throw new Error("HQ unreachable");
+    });
+    const { app, prisma } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+    const res = await approve(app, pendingId);
+    expect(res.status).toBe(503);
+    // The row is back in the review queue (retryable), NOT stuck in 'approving'.
+    expect(prisma._pendings[0].state).toBe("pending");
+  });
+
+  // ── SEND-BACK #7 — dedupe by wgPublicKey before vouching ──
+  it("rejects a duplicate wgPublicKey with 409 BEFORE a second vouch", async () => {
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq" }));
+    const { app } = buildApp({ overlayEnroll });
+    // Device A stages + approves with the shared wg key.
+    const pA = await stage(app, VALID_WG_KEY);
+    expect((await approve(app, pA)).status).toBe(200);
+    // Device B stages with the SAME wg key and tries to approve.
+    const pB = await stage(app, VALID_WG_KEY);
+    const res = await approve(app, pB);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("wg_key_conflict");
+    // Only device A's vouch fired — B never hit HQ (would 500 on peer-install).
+    expect(overlayEnroll).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a wgPublicKey already held by an active VpnPeer (409)", async () => {
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq" }));
+    const { app, prisma } = buildApp({ overlayEnroll });
+    // Seed an ACTIVE peer holding the wg key (e.g. a static peer or a prior
+    // overlay peer the connect agent already installed).
+    prisma._vpnPeers.push({ id: "vp-seed", publicKey: VALID_WG_KEY, status: "active" });
+    const pendingId = await stage(app, VALID_WG_KEY);
+    const res = await approve(app, pendingId);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("wg_key_conflict");
+    expect(overlayEnroll).not.toHaveBeenCalled();
   });
 });
 
@@ -552,6 +695,26 @@ describe("rate limiting + trust-proxy hardening", () => {
     let last = 0;
     for (let i = 0; i < 4; i++) last = (await mint(app)).status;
     expect(last).toBe(429);
+  });
+
+  // SEND-BACK #3 — the public status GET is unauthenticated and runs an ECDSA
+  // verify per hit, so it needs the same per-IP/global DoS backstop + 4xx audit
+  // as the redeem route.
+  it("429s a status flood from one IP and audits the 4xx", async () => {
+    const audit: AuditEntry[] = [];
+    const { app } = buildApp({ audit, rateLimits: { byTokenPerIp: 3, byTokenGlobal: 1000 } });
+    let last = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await request(app)
+        .get("/api/vpn/overlay/devices/by-token/pend-unknown/status")
+        .set("X-Forwarded-For", "203.0.113.20")
+        .set("X-Overlay-PoP", "AAAA");
+      last = r.status;
+    }
+    expect(last).toBe(429);
+    // Both the pre-cap 401s and the 429 flood are 4xx → an audit row exists.
+    expect(audit.some((a) => a.status === 429 && a.route.includes("status"))).toBe(true);
+    expect(audit.some((a) => a.status === 401 && a.route.includes("status"))).toBe(true);
   });
 });
 

@@ -65,6 +65,21 @@ describe("WARP-1474 overlay QR-enroll migration", () => {
     ).toBe(true);
   });
 
+  // SEND-BACK #2 — the atomic-approve claim flips pending→approving before the
+  // HQ vouch, so the CHECK enum MUST admit 'approving' or the UPDATE 500s on a
+  // real box.
+  it("admits the 'approving' intermediate claim state (atomic approve)", () => {
+    expect(
+      /"PendingOverlayEnrollment_state_check"[\s\S]*?CHECK[\s\S]*?'approving'/i.test(sql),
+      "state CHECK must include 'approving' for the atomic-approve claim",
+    ).toBe(true);
+    // Idempotent + re-run-safe: DROP IF EXISTS before ADD so a box that applied
+    // the pre-send-back constraint converges to the widened enum on re-run.
+    expect(
+      /DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+"PendingOverlayEnrollment_state_check"/i.test(sql),
+    ).toBe(true);
+  });
+
   it("adds the VpnPeer provenance columns", () => {
     for (const col of [
       "linkTokenEnrolledBy",

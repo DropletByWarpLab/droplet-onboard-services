@@ -7,7 +7,9 @@
 --                               sha256 hash is stored; plaintext is never
 --                               persisted). state: available | consumed | expired.
 --   PendingOverlayEnrollment  — one row per redeemed-but-unapproved enrollment.
---                               state: pending | approved | denied | expired.
+--                               state: pending | approving | approved | denied
+--                               | expired ('approving' = the atomic-approve
+--                               claim held across the HQ vouch; SEND-BACK #2).
 --   VpnPeer.linkToken* / enrolledAt — provenance stamped on approval.
 --
 -- Every `state` is an EXPLICIT enum-checked TEXT column (rule 10 — no state
@@ -75,12 +77,17 @@ CREATE TABLE IF NOT EXISTS "PendingOverlayEnrollment" (
     CONSTRAINT "PendingOverlayEnrollment_pkey" PRIMARY KEY ("id")
 );
 
-DO $$ BEGIN
-    ALTER TABLE "PendingOverlayEnrollment" ADD CONSTRAINT "PendingOverlayEnrollment_state_check"
-        CHECK ("state" IN ('pending', 'approved', 'denied', 'expired'));
-EXCEPTION
-    WHEN duplicate_object THEN null;
-END $$;
+-- state CHECK enum. 'approving' is the SEND-BACK #2 atomic-approve claim state:
+-- the approve route flips pending→approving BEFORE the box→HQ vouch so exactly
+-- one approver can vouch (the loser's conditional update matches 0 rows). On
+-- success it flips approving→approved; on vouch failure it compensates back to
+-- pending. DROP-then-ADD (not DO/EXCEPTION) so this is BOTH idempotent on re-run
+-- AND convergent — a box that already applied the pre-send-back 4-value
+-- constraint is widened to include 'approving' rather than silently keeping the
+-- narrower CHECK.
+ALTER TABLE "PendingOverlayEnrollment" DROP CONSTRAINT IF EXISTS "PendingOverlayEnrollment_state_check";
+ALTER TABLE "PendingOverlayEnrollment" ADD CONSTRAINT "PendingOverlayEnrollment_state_check"
+    CHECK ("state" IN ('pending', 'approving', 'approved', 'denied', 'expired'));
 
 CREATE INDEX IF NOT EXISTS "PendingOverlayEnrollment_state_idx"
     ON "PendingOverlayEnrollment"("state");

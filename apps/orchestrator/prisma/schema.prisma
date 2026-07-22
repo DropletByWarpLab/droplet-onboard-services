@@ -1500,7 +1500,12 @@ model PendingOverlayEnrollment {
   wgPublicKey        String
   label              String
   presentedAt        DateTime  @default(now())
-  // 'pending' | 'approved' | 'denied' | 'expired'. CHECK-pinned in the migration.
+  // 'pending' | 'approving' | 'approved' | 'denied' | 'expired'. CHECK-pinned in
+  // the migration. 'approving' is the WARP-1474 SEND-BACK #2 atomic-approve
+  // claim: the approve route flips pending→approving BEFORE the box→HQ vouch so
+  // exactly one approver vouches (the losing concurrent approve matches 0 rows
+  // on the conditional flip). approving→approved on vouch success; compensated
+  // back to pending on vouch failure so the owner can retry.
   state              String    @default("pending")
   // True once a DIFFERENT-fingerprint device tried to redeem the same token —
   // surfaced to the owner so a hijack attempt is visible, not silent.

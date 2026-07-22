@@ -401,23 +401,28 @@ export function createVpnRouter(
       try {
         const createdBy = req.user?.id ?? "unknown";
         const { token, tokenHash } = generateLinkToken();
-        // Single-active-per-owner: flip any prior AVAILABLE token for this owner
-        // to expired so exactly one QR can be redeemed at a time.
-        await prisma.overlayLinkToken.updateMany({
-          where: { createdBy, state: "available" },
-          data: { state: "expired" },
-        });
         const parsedLabel = overlayLabelSchema.safeParse(req.body?.label);
         const expiresAt = new Date(now().getTime() + OVERLAY_LINK_TOKEN_TTL_MS);
-        await prisma.overlayLinkToken.create({
-          data: {
-            tokenHash, // ONLY the hash is persisted — never the plaintext token
-            state: "available",
-            expiresAt,
-            createdBy,
-            label: parsedLabel.success ? parsedLabel.data : null,
-          },
-        });
+        // Single-active-per-owner: flip any prior AVAILABLE token for this owner
+        // to expired, then create the new one — as ONE transaction (SEND-BACK
+        // #5). Non-atomic, a crash between the two writes could leave the owner
+        // with zero available tokens (old expired, new never created) or, if the
+        // create landed but the supersession didn't, two available tokens.
+        await prisma.$transaction([
+          prisma.overlayLinkToken.updateMany({
+            where: { createdBy, state: "available" },
+            data: { state: "expired" },
+          }),
+          prisma.overlayLinkToken.create({
+            data: {
+              tokenHash, // ONLY the hash is persisted — never the plaintext token
+              state: "available",
+              expiresAt,
+              createdBy,
+              label: parsedLabel.success ? parsedLabel.data : null,
+            },
+          }),
+        ]);
         const server = await resolveEndpointHost();
         const boxName =
           config.DROPLET_BOX_NAME || config.DROPLET_PUBLIC_FQDN || "Droplet";
@@ -545,6 +550,16 @@ export function createVpnRouter(
                 .status(202)
                 .json({ state: "pending", pending_id: existing.id });
             }
+            // SEND-BACK #6 (LOW, documented not fixed): a same-fingerprint retry
+            // that races the winning redeem BETWEEN its atomic token-consume and
+            // its pending-row create sees boundSignFp===fp but no `existing` row
+            // yet, so it briefly 410s here instead of 202. This is a sub-request
+            // window that SELF-HEALS on the client's next poll/redeem (the row
+            // exists by then). Left as a documented low rather than adding a
+            // re-read/retry loop: the client already retries the redeem, a spin
+            // here would add latency to the common path, and a bounded re-read
+            // still can't close the window deterministically. The winner is
+            // unaffected; only the losing concurrent retry sees the transient.
             return res.status(410).json({ error: "gone" });
           }
           // A DIFFERENT device tried to redeem an already-bound token — flag the
@@ -585,8 +600,27 @@ export function createVpnRouter(
   // ── GET /api/vpn/overlay/devices/by-token/:pending_id/status ── (NO bearer).
   // Client proves possession of the sign key with X-Overlay-PoP; reveals only
   // the coarse state. Unknown id AND bad PoP both 401 — no existence leak.
+  const ROUTE_STATUS = "/vpn/overlay/devices/by-token/:pending_id/status";
   router.get(
-    "/vpn/overlay/devices/by-token/:pending_id/status",
+    ROUTE_STATUS,
+    // SEND-BACK #3 — this is an UNAUTHENTICATED endpoint that runs an ECDSA
+    // verify per hit, so it needs the same audit-every-4xx + DoS backstop as the
+    // redeem route. Reuse the by-token per-IP + global limiter keys so a flood
+    // of polls shares the redeem budget (bounded on an always-on box).
+    auditEvery4xx(ROUTE_STATUS),
+    (req: Request, res: Response, next: NextFunction) => {
+      if (
+        !rl.check("bytoken:global", limits.byTokenGlobal, limits.windowMs) ||
+        !rl.check(
+          `bytoken:ip:${req.ip ?? "unknown"}`,
+          limits.byTokenPerIp,
+          limits.windowMs,
+        )
+      ) {
+        return res.status(429).json({ error: "rate_limited" });
+      }
+      return next();
+    },
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const pop = req.header("X-Overlay-PoP");
@@ -636,10 +670,12 @@ export function createVpnRouter(
   );
 
   // ── POST /api/vpn/overlay/pending-enrollments/:id/approve ── (owner).
+  const ROUTE_APPROVE = "/vpn/overlay/pending-enrollments/:id/approve";
   router.post(
-    "/vpn/overlay/pending-enrollments/:id/approve",
+    ROUTE_APPROVE,
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
+      const clientId = req.user?.id ?? "unknown";
       try {
         const pending = await prisma.pendingOverlayEnrollment.findUnique({
           where: { id: req.params.id },
@@ -654,44 +690,136 @@ export function createVpnRouter(
             .json({ state: "approved", device_id: pending.hqDeviceRef ?? null });
         }
         if (pending.state !== "pending") {
+          // 'approving' (a concurrent approver already holds the claim),
+          // 'denied', or 'expired'. Never re-vouch.
           return res
             .status(409)
             .json({ error: `cannot approve a ${pending.state} enrollment` });
         }
+
+        // SEND-BACK #2 — make the vouch fire AT MOST ONCE. Atomically CLAIM the
+        // row (pending → approving) before doing anything irreversible. The
+        // conditional update is the serialization point: two overlapping
+        // approves both read 'pending' above, but only ONE flips the row here
+        // (count === 1); the loser matches 0 rows and gets a clean 409 instead
+        // of a duplicate HQ vouch. 'approving' is CHECK-enum pinned (migration).
+        const claim = await prisma.pendingOverlayEnrollment.updateMany({
+          where: { id: pending.id, state: "pending" },
+          data: { state: "approving" },
+        });
+        if (claim.count === 0) {
+          return res.status(409).json({ error: "already_being_approved" });
+        }
+
+        // We now OWN the claim. Any pre-vouch rejection (or a failed vouch) must
+        // COMPENSATE the row back to 'pending' so the owner can retry — the
+        // claim is otherwise a dead 'approving' row nobody can act on.
+        const compensate = (): Promise<unknown> =>
+          prisma.pendingOverlayEnrollment
+            .updateMany({
+              where: { id: pending.id, state: "approving" },
+              data: { state: "pending" },
+            })
+            .catch((e) =>
+              logger.warn(
+                { err: e, pendingId: pending.id },
+                "overlay approve: compensation to pending failed",
+              ),
+            );
+
         // Hard cap on concurrently-active QR-enrolled overlay devices — reject
-        // over cap BEFORE vouching anything to HQ.
+        // over cap BEFORE vouching. Our own row is 'approving', so it is NOT
+        // counted in the 'approved' tally.
         const activeCount = await prisma.pendingOverlayEnrollment.count({
           where: { state: "approved" },
         });
         if (activeCount >= limits.maxActiveQrDevices) {
+          await compensate();
           audit({
             event: "overlay_enroll_cap_reached",
             method: req.method,
-            route: "/vpn/overlay/pending-enrollments/:id/approve",
+            route: ROUTE_APPROVE,
             status: 409,
-            clientId: req.user?.id ?? "unknown",
+            clientId,
             refs: { pending_id: pending.id, cap: limits.maxActiveQrDevices },
           });
-          return res
-            .status(409)
-            .json({ error: "overlay_device_cap_reached" });
+          return res.status(409).json({ error: "overlay_device_cap_reached" });
         }
         if (!config.HQ_ISSUANCE_URL) {
+          await compensate();
           return res.status(503).json({
             error:
               "The box hasn't linked to its fleet directory yet — remote-access enrollment turns on automatically once it does.",
           });
         }
-        // The IDENTICAL box→HQ vouch the owner-JWT /devices route uses.
-        const result = await overlayEnroll({
-          wgPublicKey: pending.wgPublicKey,
-          signPublicKeyPem: pending.signPublicKeyPem,
-          label: pending.label,
-        });
+
+        // SEND-BACK #7 — dedupe by wgPublicKey BEFORE vouching. VpnPeer.publicKey
+        // is @unique, so two staged rows sharing one wg key that BOTH vouch would
+        // collide on peer-install as an unhandled 500. Reject the second with a
+        // clean 409 (an active peer already holds it, or another enrollment was
+        // already approved with it).
+        const [dupPeer, dupApproved] = await Promise.all([
+          prisma.vpnPeer.findFirst({
+            where: { publicKey: pending.wgPublicKey, status: "active" },
+          }),
+          prisma.pendingOverlayEnrollment.findFirst({
+            where: {
+              wgPublicKey: pending.wgPublicKey,
+              state: "approved",
+              id: { not: pending.id },
+            },
+          }),
+        ]);
+        if (dupPeer || dupApproved) {
+          await compensate();
+          audit({
+            event: "overlay_enroll_wg_key_conflict",
+            method: req.method,
+            route: ROUTE_APPROVE,
+            status: 409,
+            clientId,
+            refs: { pending_id: pending.id },
+          });
+          return res.status(409).json({ error: "wg_key_conflict" });
+        }
+
+        // The IDENTICAL box→HQ vouch the owner-JWT /devices route uses — fired
+        // AT MOST ONCE per pending id thanks to the claim above. On failure,
+        // compensate → pending (retryable) and surface 503 rather than leaving a
+        // stuck 'approving' row or a half-made network grant.
+        let result: unknown;
+        try {
+          result = await overlayEnroll({
+            wgPublicKey: pending.wgPublicKey,
+            signPublicKeyPem: pending.signPublicKeyPem,
+            label: pending.label,
+          });
+        } catch (vouchErr) {
+          await compensate();
+          logger.warn(
+            { err: vouchErr, pendingId: pending.id },
+            "overlay approve: HQ vouch failed — rolled back to pending for retry",
+          );
+          audit({
+            event: "overlay_enroll_vouch_failed",
+            method: req.method,
+            route: ROUTE_APPROVE,
+            status: 503,
+            clientId,
+            refs: { pending_id: pending.id },
+          });
+          return res.status(503).json({
+            error:
+              "Couldn't reach the fleet directory to finish linking this device. It's back in your review queue — try approving again in a minute.",
+          });
+        }
+
         const deviceId = extractDeviceId(result);
         const nowDate = now();
-        await prisma.pendingOverlayEnrollment.update({
-          where: { id: pending.id },
+        // Finalize approving → approved. Guarded on 'approving' so a compensating
+        // path (or a manual state change) can't be silently clobbered.
+        await prisma.pendingOverlayEnrollment.updateMany({
+          where: { id: pending.id, state: "approving" },
           data: {
             state: "approved",
             approvedBy: req.user?.id ?? null,
@@ -713,9 +841,9 @@ export function createVpnRouter(
         audit({
           event: "overlay_enroll_approved",
           method: req.method,
-          route: "/vpn/overlay/pending-enrollments/:id/approve",
+          route: ROUTE_APPROVE,
           status: 200,
-          clientId: req.user?.id ?? "unknown",
+          clientId,
           refs: { device_id: deviceId, pending_id: pending.id },
         });
         return res.status(200).json({ state: "approved", device_id: deviceId });
