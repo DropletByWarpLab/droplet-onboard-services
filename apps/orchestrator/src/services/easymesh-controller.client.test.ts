@@ -25,6 +25,7 @@ vi.mock("../config.js", () => ({
   config: {
     DROPLET_AP_EASYMESH_CONTROLLER_URL: "http://controller.test:8080",
     DROPLET_AP_EASYMESH_ENABLED: true,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

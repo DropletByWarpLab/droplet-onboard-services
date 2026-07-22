@@ -23,6 +23,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: false,
     DEVICE_BRIDGE_URL: "http://host.docker.internal:9090",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

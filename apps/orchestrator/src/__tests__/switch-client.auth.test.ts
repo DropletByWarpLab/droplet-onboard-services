@@ -16,6 +16,7 @@ const { mockConfig } = vi.hoisted(() => ({
     SWITCH_SERVICE_URL: "http://switch.test:8081",
     SERVICE_TOKEN_SWITCH: "",
     SERVICE_SECRET: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 vi.mock("../config.js", () => ({ config: mockConfig }));

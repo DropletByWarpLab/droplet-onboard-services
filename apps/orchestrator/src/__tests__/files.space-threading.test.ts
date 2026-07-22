@@ -66,6 +66,7 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NODE_ENV: "test",
     DROPLET_SHARED_FOLDER_NAME: "Household",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

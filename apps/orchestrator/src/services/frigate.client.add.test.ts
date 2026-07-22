@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // FRIGATE_URL is read from config at import; stub it deterministically.
 vi.mock("../config.js", () => ({
-  config: { FRIGATE_URL: "http://frigate:5000" },
+  config: { FRIGATE_URL: "http://frigate:5000", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { addCamera } from "./frigate.client.js";

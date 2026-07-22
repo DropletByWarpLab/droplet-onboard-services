@@ -7,6 +7,7 @@ vi.mock("../config.js", () => ({
     ROUTING_SERVICE_URL: "http://routing.test",
     ROUTING_SERVICE_TOKEN: "test-token",
     ROUTING_MODE: "real",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

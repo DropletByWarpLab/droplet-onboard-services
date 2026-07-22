@@ -19,7 +19,7 @@ import type { AuthUser } from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { createMemoryRouter } from "../routes/memory.js";

@@ -33,6 +33,7 @@ vi.mock("../config.js", () => ({
     // URL the service reports BRIDGE_UNREACHABLE → 503, so the owner "guard
     // passes" assertion (status < 500) fails. Mirror the dedicated handler test.
     DEVICE_BRIDGE_URL: "http://bridge.test:9090",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

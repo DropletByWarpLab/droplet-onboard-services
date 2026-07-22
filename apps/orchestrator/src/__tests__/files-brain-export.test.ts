@@ -47,6 +47,7 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

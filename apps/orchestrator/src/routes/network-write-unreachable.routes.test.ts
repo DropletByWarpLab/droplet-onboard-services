@@ -33,6 +33,7 @@ vi.mock("../config.js", () => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

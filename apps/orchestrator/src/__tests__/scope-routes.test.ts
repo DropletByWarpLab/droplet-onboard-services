@@ -21,7 +21,7 @@ import express, { Request, Response, NextFunction, Router } from "express";
 
 // Config mock — hoisted above route imports (same as rbac.test.ts).
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: true },
+  config: { AUTH_ENABLED: true, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { requireRole, type AuthUser } from "../middleware/auth.js";

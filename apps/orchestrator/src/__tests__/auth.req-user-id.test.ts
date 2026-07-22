@@ -33,6 +33,7 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_VOICE: "",
     SERVICE_TOKEN_MCP: "",
     JWT_SECRET: "test-secret-at-least-32-chars-long-aaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

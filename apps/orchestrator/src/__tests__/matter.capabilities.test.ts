@@ -28,6 +28,7 @@ vi.mock("../config.js", () => ({
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_MATTER_SERVICE_URL: "http://sidecar.test:8083",
     DROPLET_MATTER_SERVICE_TOKEN: "tok-warp-850",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

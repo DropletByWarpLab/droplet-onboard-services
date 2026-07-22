@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../config.js", () => ({
-  config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090" },
+  config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import {

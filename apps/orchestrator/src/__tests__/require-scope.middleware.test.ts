@@ -30,7 +30,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: true },
+  config: { AUTH_ENABLED: true, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import {

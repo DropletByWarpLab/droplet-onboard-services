@@ -12,6 +12,7 @@ import type { PrismaClient } from "@prisma/client";
 vi.mock("../config.js", () => ({
   config: {
     NEXTCLOUD_URL: "http://nextcloud.test",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

@@ -55,6 +55,7 @@ vi.mock("../config.js", () => ({
     // onto. Use a non-default value so the tests prove the route reads config
     // rather than a hard-coded "Household" string.
     DROPLET_SHARED_FOLDER_NAME: "Household",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

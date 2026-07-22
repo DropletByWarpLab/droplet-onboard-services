@@ -28,6 +28,7 @@ vi.mock("../config.js", () => ({
     // The pinned firmware image this build ships — the version-check compares
     // the running release against the version embedded in this name.
     ROUTER_FIRMWARE_IMAGE: "openwrt-24.10.0-droplet-squashfs-sysupgrade.img.gz",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

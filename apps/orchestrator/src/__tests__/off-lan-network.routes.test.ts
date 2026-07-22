@@ -8,7 +8,7 @@ import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { createOffLanNetworkRouter } from "../routes/off-lan-network.js";

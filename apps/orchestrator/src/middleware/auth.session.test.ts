@@ -18,6 +18,7 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_EMAIL: "",
     ORCHESTRATOR_SAMPLER_TOKEN: "",
     AI_GATEWAY_SAMPLER_TOKEN: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

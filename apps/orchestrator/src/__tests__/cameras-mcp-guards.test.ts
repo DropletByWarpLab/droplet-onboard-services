@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     CAMERA_DISCOVERY_URL: "http://camera-discovery.test:8085",
     ROUTING_SERVICE_URL: "http://routing.test:8080",
     SERVICE_SECRET: "svc",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

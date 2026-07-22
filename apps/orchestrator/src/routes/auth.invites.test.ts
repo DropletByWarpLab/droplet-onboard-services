@@ -28,6 +28,7 @@ vi.mock("../config.js", () => ({
     JWT_REFRESH_TTL_SECONDS: 604800,
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     REDIS_URL: "redis://localhost:6379",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

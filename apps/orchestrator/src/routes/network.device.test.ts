@@ -34,6 +34,7 @@ vi.mock("../config.js", () => ({
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

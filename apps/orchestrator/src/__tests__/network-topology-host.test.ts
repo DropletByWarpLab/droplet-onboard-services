@@ -31,6 +31,7 @@ const { configMock } = vi.hoisted(() => ({
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_AP_MODE: "uci" as "uci" | "hostapd" | "auto",
     DEVICE_BRIDGE_URL: "http://host.docker.internal:9090",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

@@ -28,7 +28,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // --- Mocks ---
 
 // config is read for DROPLET_AP_MODE on the write paths; harmless default here.
-vi.mock("../config.js", () => ({ config: { DROPLET_AP_MODE: "uci" } }));
+vi.mock("../config.js", () => ({ config: { DROPLET_AP_MODE: "uci", agentMaxIter: { defaultIter: 5, capIter: 10 } } }));
 
 // Cache must MISS so getNetworkOverview recomputes (it short-circuits on a hit).
 vi.mock("./cache.service.js", () => ({

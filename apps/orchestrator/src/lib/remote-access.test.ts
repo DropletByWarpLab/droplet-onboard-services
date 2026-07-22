@@ -8,6 +8,7 @@ vi.mock("../config.js", () => ({
     REMOTE_ACCESS_MODE: "fqdn",
     DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_ENDPOINT_HOST: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

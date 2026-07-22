@@ -23,6 +23,7 @@ vi.mock("../config.js", () => ({
     DROPLET_AP_UNIFI_CONTROLLER_URL: "https://controller.test:8443",
     DROPLET_AP_UNIFI_API_KEY: "test-api-key",
     DROPLET_AP_UNIFI_ENABLED: true,
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

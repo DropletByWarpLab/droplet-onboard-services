@@ -24,7 +24,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mutable config mock so each describe block can set DROPLET_AP_MODE. Built via
 // vi.hoisted so it's initialized before the hoisted vi.mock factories run.
 const { configMock } = vi.hoisted(() => ({
-  configMock: { DROPLET_AP_MODE: "uci" as "uci" | "hostapd" | "auto" },
+  configMock: {
+    DROPLET_AP_MODE: "uci" as "uci" | "hostapd" | "auto",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
+  },
 }));
 vi.mock("../config.js", () => ({ config: configMock }));
 

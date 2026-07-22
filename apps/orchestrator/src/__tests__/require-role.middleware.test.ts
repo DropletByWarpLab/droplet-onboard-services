@@ -25,6 +25,7 @@ vi.mock("../config.js", () => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     SERVICE_TOKEN_VOICE: "",
     SERVICE_TOKEN_MCP: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

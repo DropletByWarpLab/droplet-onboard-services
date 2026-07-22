@@ -24,6 +24,7 @@ vi.mock("../config.js", () => ({
     WIREGUARD_HOME_DNS: "192.168.20.1",
     WIREGUARD_HOME_ALLOWED_IPS: "192.168.20.0/24",
     WIREGUARD_HOME_ENDPOINT_HOST: "",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

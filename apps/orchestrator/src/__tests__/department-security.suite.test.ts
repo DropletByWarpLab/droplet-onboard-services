@@ -32,6 +32,7 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 100,
     NEXTCLOUD_URL: "http://nextcloud.test",
     DROPLET_SHARED_FOLDER_NAME: "Household",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

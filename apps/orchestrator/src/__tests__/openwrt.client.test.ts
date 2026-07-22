@@ -16,6 +16,7 @@ const { mockConfig } = vi.hoisted(() => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     PORT: 3000,
     NODE_ENV: "test",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

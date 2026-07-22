@@ -30,6 +30,7 @@ vi.mock("../config.js", () => ({
     // camera-retention-purge.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

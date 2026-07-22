@@ -44,6 +44,7 @@ vi.mock("../config.js", () => ({
     DOCS_INTERNAL_URL: "http://docserver.test",
     DOCS_ENABLED: true,
     DOCS_EDITOR_PUBLIC_PATH: "/docs/",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

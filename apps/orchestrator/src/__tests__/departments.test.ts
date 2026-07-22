@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_SHARED_FOLDER_NAME: "Household",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

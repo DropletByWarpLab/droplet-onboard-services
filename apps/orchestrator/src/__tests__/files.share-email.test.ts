@@ -53,7 +53,7 @@ vi.mock("../services/cache.service.js", () => ({
 }));
 vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
 vi.mock("../config.js", () => ({
-  config: { MAX_UPLOAD_SIZE_MB: 10, NODE_ENV: "test" },
+  config: { MAX_UPLOAD_SIZE_MB: 10, NODE_ENV: "test", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("nc-session-token"),

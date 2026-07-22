@@ -27,6 +27,7 @@ vi.mock("../config.js", () => ({
     DROPLET_OTA_APPLY_SCRIPT: "",
     DROPLET_OTA_COMPOSE_FILE: "/opt/droplet/docker/docker-compose.yml",
     DROPLET_OTA_UPDATES_DIR: "/data/updates",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

@@ -24,6 +24,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

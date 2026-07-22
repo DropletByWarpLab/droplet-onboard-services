@@ -7,7 +7,7 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncUploadFile: (...a: unknown[]) => ncUploadFile(...a),
 }));
 vi.mock("../config.js", () => ({
-  config: { FRIGATE_URL: "http://frigate.test:5000" },
+  config: { FRIGATE_URL: "http://frigate.test:5000", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { exportClip } from "../services/clips.service.js";

@@ -18,7 +18,7 @@ import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 // WARP-1062: the route's rate limiter reads/writes the Redis cache — mock it

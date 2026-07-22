@@ -48,6 +48,7 @@ vi.mock("../config.js", () => ({
     DROPLET_SHARED_FOLDER_NAME: "Household",
     FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

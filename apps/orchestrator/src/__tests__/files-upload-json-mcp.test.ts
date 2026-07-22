@@ -94,6 +94,7 @@ vi.mock("../config.js", () => ({
     NODE_ENV: "test",
     DROPLET_SHARED_FOLDER_NAME: "Household",
     NEXTCLOUD_URL: "http://nextcloud.test",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 

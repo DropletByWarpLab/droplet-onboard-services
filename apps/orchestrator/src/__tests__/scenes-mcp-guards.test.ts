@@ -17,7 +17,7 @@ import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: true },
+  config: { AUTH_ENABLED: true, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 const { recordActivityMock } = vi.hoisted(() => ({

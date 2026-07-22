@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
     FILES_ROOT: "/tmp/files",
     MAX_UPLOAD_SIZE_MB: 10,
     STORAGE_BACKEND: "nextcloud",
+    agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
 
