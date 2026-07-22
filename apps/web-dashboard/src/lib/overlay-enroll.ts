@@ -64,13 +64,22 @@ export function overlayApproveErrorCopy(err: OverlayApproveErrorLike): string {
   }
 
   // The 503 vouch-retry / not-yet-linked-to-fleet answers ship an honest,
-  // customer-safe sentence in `error` — surface it as-is.
+  // customer-safe sentence in `error`. api.ts mirrors that sentence onto BOTH
+  // `code` and `message`, so a present `code` is the signal the orchestrator
+  // actually supplied one — surface it then. On a bare 503 (no body), `message`
+  // is api.ts's technical "Failed to approve enrollment: 503" fallback, which
+  // must NOT reach the owner: use fixed copy instead.
   if (err.status === 503) {
     return (
-      err.message ||
+      (err.code && err.message) ||
       "The box is still connecting to its fleet directory. This device is back in your review queue — try approving again in a minute."
     );
   }
 
-  return err.message || "Couldn't approve this device. Try again.";
+  // Anything else — a network drop (no status/code), an unmapped code, or an
+  // unexpected 5xx — falls back to fixed copy. `err.message` on these paths is a
+  // raw code, a browser "Failed to fetch", or api.ts's technical
+  // "Failed to approve enrollment: <status>" string — never customer copy, per
+  // this function's contract and the shared translateError rule (WARP-294).
+  return "Couldn't approve this device. Try again.";
 }

@@ -99,4 +99,41 @@ describe("overlayApproveErrorCopy", () => {
     const copy = overlayApproveErrorCopy({ status: 500, code: undefined, message: undefined });
     expect(copy).toMatch(/couldn't|try again/i);
   });
+
+  it("never leaks a raw browser/network error message to the owner", () => {
+    // A network drop rejects with a TypeError carrying a technical message and
+    // no status/code — it must NOT surface verbatim (WARP-294 rule).
+    const copy = overlayApproveErrorCopy({ message: "Failed to fetch" });
+    expect(copy).toBe("Couldn't approve this device. Try again.");
+    expect(copy).not.toMatch(/failed to fetch/i);
+  });
+
+  it("never leaks an unmapped code or api.ts's technical fallback string", () => {
+    // An unmapped 4xx code (api.ts sets code+message to it) must map to fixed
+    // copy, not echo the raw snake_case code.
+    const unmapped = overlayApproveErrorCopy({
+      status: 400,
+      code: "malformed_request",
+      message: "malformed_request",
+    });
+    expect(unmapped).toBe("Couldn't approve this device. Try again.");
+    expect(unmapped).not.toMatch(/malformed_request/);
+
+    // A bare 5xx whose only message is api.ts's technical fallback.
+    const bare500 = overlayApproveErrorCopy({
+      status: 500,
+      message: "Failed to approve enrollment: 500",
+    });
+    expect(bare500).not.toMatch(/Failed to approve enrollment/);
+  });
+
+  it("uses fixed 503 copy when the orchestrator supplied no sentence (bare 503)", () => {
+    // No `code` => api.ts fell back to the technical message; don't surface it.
+    const copy = overlayApproveErrorCopy({
+      status: 503,
+      message: "Failed to approve enrollment: 503",
+    });
+    expect(copy).not.toMatch(/Failed to approve enrollment/);
+    expect(copy).toMatch(/fleet directory|review queue|try approving again/i);
+  });
 });
