@@ -154,6 +154,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     "/api/auth/refresh",
     // WARP-217: invite-accept (token-in-path) also needs prefix semantics —
     // see PUBLIC_PREFIXES below.
+    // WARP-1474 (ADR-030/031): the dashboard-QR overlay REDEEM. The QR-scanning
+    // phone has NO bearer by design, so this EXACT POST path must reach the
+    // handler. Exact-match — NOT a prefix (SEND-BACK #4): the old
+    // startsWith("…/by-token") prefix would fail OPEN for any future sibling
+    // like `…/by-token-admin`. The `/status` subpath is opened separately by a
+    // TRAILING-SLASH prefix in PUBLIC_PREFIXES below, so ONLY the exact redeem
+    // path and the `…/by-token/<id>/status` tree are public; every sibling is
+    // authed. The handler re-gates itself (one-time token consume, per-IP/
+    // per-token/global rate limits, P256/WireGuard boundary validation).
+    "/api/vpn/overlay/devices/by-token",
   ];
   // Exact-match the allowlist. Only two entries genuinely need PREFIX
   // semantics: the box-name pair (/api/setup/box-name covers /box-name/check
@@ -161,23 +171,25 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // is matched exactly, so a future /api/setup/<x> sibling can never be
   // silently de-authed by a stray prefix match (the latent fail-open ORCH-001
   // caught — the old startsWith() applied to EVERY entry).
-  // WARP-1474 (ADR-030/031): the dashboard-QR overlay redeem + poll. The
-  // QR-scanning phone has NO bearer by design, so the global gate must let the
-  // by-token surface through — `app.ts` mounts authMiddleware BEFORE
-  // createVpnRouter, so without this entry a bearer-less
-  // POST /api/vpn/overlay/devices/by-token (and the …/:pending_id/status GET)
-  // 401s at the gate and the redeem→stage→approve→status flow is dead on a real
-  // box. Prefix semantics cover BOTH the POST redeem and the /status GET under
-  // one entry. Scoped to EXACTLY this prefix — the owner-gated siblings
-  // (/vpn/overlay/link-tokens, /vpn/overlay/pending-enrollments, and the
-  // WARP-1385 POST /vpn/overlay/devices) do NOT start with it, so they stay
-  // authed. The handlers re-gate themselves: one-time link-token consumption,
-  // the X-Overlay-PoP signature on /status, per-IP/per-token/global rate limits,
-  // and P256/WireGuard boundary validation before any state change.
+  // WARP-1474 (ADR-030/031): the dashboard-QR overlay POLL. The QR-scanning
+  // phone has NO bearer by design, so the global gate must let the `/status`
+  // subpath through — `app.ts` mounts authMiddleware BEFORE createVpnRouter, so
+  // without this a bearer-less GET …/by-token/:pending_id/status would 401 at
+  // the gate and the redeem→stage→approve→status flow would be dead on a real
+  // box. TRAILING SLASH (SEND-BACK #4): `/api/vpn/overlay/devices/by-token/`
+  // matches the `…/by-token/<id>/status` tree but NOT a sibling like
+  // `…/by-token-admin` (the char after "by-token" must be "/"), mirroring the
+  // `/api/auth/invites/accept/` trailing-slash precedent. The EXACT redeem POST
+  // path (`…/by-token`, no slash) is opened in the exact-match `publicPaths`
+  // list above. The owner-gated siblings (/vpn/overlay/link-tokens,
+  // /vpn/overlay/pending-enrollments, and the WARP-1385 POST
+  // /vpn/overlay/devices) match neither, so they stay authed. The /status
+  // handler re-gates itself with the X-Overlay-PoP signature + per-IP/global
+  // rate limits before revealing even the coarse state.
   const PUBLIC_PREFIXES = [
     "/api/setup/box-name",
     "/api/auth/invites/accept/",
-    "/api/vpn/overlay/devices/by-token",
+    "/api/vpn/overlay/devices/by-token/",
   ];
   const isPublic =
     publicPaths.includes(req.path) ||

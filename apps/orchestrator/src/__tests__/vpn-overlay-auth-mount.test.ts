@@ -249,4 +249,27 @@ describe("WARP-1474 — scoping guard: the allowlist prefix opens ONLY the by-to
     expect(res.status).toBe(401);
     expect(res.body.error).toBe(MIDDLEWARE_401);
   });
+
+  // SEND-BACK #4 — the old allowlist used a NO-trailing-slash prefix
+  // (`startsWith("/api/vpn/overlay/devices/by-token")`), which would fail OPEN
+  // for any future sibling like `…/by-token-admin`. The fix pins the exact POST
+  // path in the exact-match list and uses a TRAILING-SLASH prefix for the
+  // `/status` subpath, so a hypothetical sibling is NOT public.
+  it("a sibling path (…/by-token-admin) is NOT de-authed by the prefix (401 at middleware)", async () => {
+    const app = buildApp(createPrismaMock());
+    const res = await request(app)
+      .post("/api/vpn/overlay/devices/by-token-admin")
+      .send({ token: "x", wg_public_key: VALID_WG_KEY, sign_public_key_pem: p256().pem });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe(MIDDLEWARE_401);
+  });
+
+  it("another sibling (…/by-token-x) is NOT public either (401 at middleware)", async () => {
+    const app = buildApp(createPrismaMock());
+    const res = await request(app)
+      .post("/api/vpn/overlay/devices/by-token-x")
+      .send({});
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe(MIDDLEWARE_401);
+  });
 });
