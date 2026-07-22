@@ -94,6 +94,28 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
   is cheaper than every reader remembering the derivation rule.
   WARP-218's `BrainMemoryItemStatus` enum is the pattern to copy.
 
+## CI cost budget (hard constraint)
+
+GitHub Actions has a **$100/month org spending limit** (~66k runner-min;
+practical target: the 50k included minutes). CI was redesigned to fit it
+on 2026-07-21 (PR #1204) after burning ~118k min/month — when the limit
+is hit, **all Actions runs block org-wide and nothing merges**. Full
+rationale, measured costs, and the cost-estimation formula:
+[`docs/ci-cost-budget.md`](docs/ci-cost-budget.md). Non-negotiables:
+
+- PR-time test coverage lives in **ci.yml's path-aware legs** (`detect`
+  job → dynamic matrices; `ci-summary` is the required check and fails
+  closed). Don't re-add `pull_request:` triggers to the per-service
+  `*-tests.yml` workflows — they run on push-to-main only, as the
+  post-merge canary. New service ⇒ new ci.yml leg (detect filter +
+  matrix entry) + a push-only `<name>-tests.yml`.
+- No unfiltered `pull_request:` trigger on anything heavier than ~1 min;
+  widening `paths:` on docker-build / setup-e2e / test-fips is a spend
+  decision — estimate min/month first (formula in the doc) and state it
+  in the PR. >2k min/mo needs a callout; >5k needs Romain's sign-off.
+- `publish-release.yml` stays `workflow_dispatch`-only until the cosign
+  key ceremony runs.
+
 ## LLM tool calling
 
 - All LLM-callable tools live in `@droplet/tools-core` (single canonical
