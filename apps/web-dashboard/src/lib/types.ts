@@ -586,6 +586,64 @@ export interface VpnPeerCreatedInfo {
   offLanReachable?: boolean;
 }
 
+// ── WARP-1475: overlay QR-enroll (ADR-030) ──
+
+/**
+ * One-shot response from `POST /api/vpn/overlay/link-tokens` (owner/admin).
+ * The plaintext `token` is returned exactly ONCE — the box persists only its
+ * hash. The dashboard encodes {server, token, box_name} into the
+ * `droplet://overlay-enroll` QR, shows it, and forgets it on dialog close.
+ * Minting again supersedes (expires) the prior token.
+ */
+export interface OverlayLinkToken {
+  /** Plaintext link token (base64url). Shown once; NEVER logged. */
+  token: string;
+  /** The endpoint host a scanning device redeems the token against. */
+  server: string;
+  /** Human box name to display in the app while enrolling. */
+  box_name: string;
+  /** ISO-8601 expiry (~5 min TTL). */
+  expires_at: string;
+}
+
+/** Lifecycle of a staged overlay enrollment, mirrored from the orchestrator. */
+export type OverlayEnrollmentState =
+  | "pending"
+  | "approving"
+  | "approved"
+  | "denied"
+  | "expired";
+
+/**
+ * A staged, awaiting-owner-review overlay enrollment, from
+ * `GET /api/vpn/overlay/pending-enrollments` (owner/admin).
+ *
+ * `label` is DEVICE-PRESENTED (the scanning phone self-reports it at redeem
+ * time) — it is untrusted input and MUST render as text, never as HTML.
+ * `conflict:true` marks a security event: a second, different device redeemed
+ * the same link token (the box flags it for the owner to review, not a benign
+ * expiry).
+ */
+export interface PendingOverlayEnrollment {
+  id: string;
+  /** Device-presented label — untrusted; render as text only. */
+  label: string | null;
+  /** First 8 hex of sha256(device sign-key PEM) — the owner eyeball-matches this. */
+  fingerprint_short: string;
+  /** ISO-8601 timestamp the device presented the token. */
+  presented_at: string;
+  state: OverlayEnrollmentState;
+  /** True when a different device redeemed the same token — a security event. */
+  conflict: boolean;
+}
+
+/** Response from the approve endpoint on success (200). */
+export interface OverlayApproveResult {
+  state: "approved";
+  /** HQ device ref for the newly-enrolled overlay device; null if not yet known. */
+  device_id: string | null;
+}
+
 // ── WARP-1036: Voice assistant ──
 
 /** Snapshot of the voice-io wake pipeline, relayed verbatim by the

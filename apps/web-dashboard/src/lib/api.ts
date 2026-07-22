@@ -72,6 +72,9 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
+  OverlayLinkToken,
+  PendingOverlayEnrollment,
+  OverlayApproveResult,
   VoiceStatusInfo,
   VoiceSayResult,
   VoiceCalibrationInfo,
@@ -5374,6 +5377,93 @@ export async function deleteVpnPeer(id: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
   }
+}
+
+// ── WARP-1475: overlay QR-enroll (ADR-030) ──
+//
+// Owner/admin mints a link token → the QR encodes it → a phone scans + redeems
+// it (no bearer) which STAGES a pending enrollment → the owner approves/denies
+// here. Approval is the load-bearing gate that turns a scan into an enrolled
+// overlay device (the box only vouches to HQ on approve).
+
+/**
+ * Mint a single-use overlay link token (owner/admin). The plaintext token in
+ * the response is returned ONCE — the caller renders it into a QR and forgets
+ * it on dialog close. NEVER log the returned token. Minting supersedes any
+ * prior available token for this owner.
+ */
+export async function mintOverlayLinkToken(): Promise<OverlayLinkToken> {
+  const res = await authFetch(`${BASE}/api/vpn/overlay/link-tokens`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const e = new Error(
+      body.error || `Failed to mint link token: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    e.status = res.status;
+    if (typeof body.error === "string") e.code = body.error;
+    throw e;
+  }
+  return res.json();
+}
+
+/** List staged overlay enrollments awaiting owner review (owner/admin). */
+export async function fetchPendingOverlayEnrollments(): Promise<
+  PendingOverlayEnrollment[]
+> {
+  const res = await authFetch(`${BASE}/api/vpn/overlay/pending-enrollments`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch pending enrollments: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Approve a staged enrollment (owner/admin). This is the point the box vouches
+ * the device to HQ. On failure the thrown error carries the orchestrator's
+ * typed `code` (409: `already_being_approved` / `wg_key_conflict` /
+ * `overlay_device_cap_reached` / `cannot approve a <state> enrollment`; 503:
+ * the vouch-retry sentence) plus the HTTP `status`, so the page can render
+ * honest per-case copy via `overlayApproveErrorCopy`.
+ */
+export async function approveOverlayEnrollment(
+  id: string,
+): Promise<OverlayApproveResult> {
+  const res = await authFetch(
+    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const e = new Error(
+      body.error || `Failed to approve enrollment: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    e.status = res.status;
+    if (typeof body.error === "string") e.code = body.error;
+    throw e;
+  }
+  return res.json();
+}
+
+/** Deny a staged enrollment (owner/admin). */
+export async function denyOverlayEnrollment(
+  id: string,
+): Promise<{ state: "denied" }> {
+  const res = await authFetch(
+    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/deny`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const e = new Error(
+      body.error || `Failed to deny enrollment: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    e.status = res.status;
+    if (typeof body.error === "string") e.code = body.error;
+    throw e;
+  }
+  return res.json();
 }
 
 // --- WARP-1036: voice assistant (setup-wizard step + status) ---
