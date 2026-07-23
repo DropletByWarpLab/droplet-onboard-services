@@ -1888,20 +1888,19 @@ function applyEvent(
         // loadConversation-only) so the FailureChip + Try-again render,
         // matching the `stop_reason: "error"` branch above.
         //
-        // `context_budget`/`repetition` are agent-budgets finalize passes:
-        // the turn may carry real tool activity from earlier in the turn
-        // (`last.toolCalls` non-empty), but a blank FINAL answer is still
-        // dishonest — so those two reasons only require blank content +
-        // reasoning, tool activity or not. `model_done`/`iteration_limit`
-        // keep their original zero-tool-activity requirement unchanged.
+        // WARP-1479 — tool activity does NOT make a blank answer honest, so
+        // no stop reason requires an empty `toolCalls` any more: the common
+        // live shape is tools that RUN, SUCCEED, and are followed by no
+        // answer at all (chips, then nothing). The server rewrites those
+        // turns to `stop_reason: "error"` now, so this guard is the
+        // defense-in-depth twin for any turn that reaches us un-rewritten.
         if (
           last.content.trim().length === 0 &&
           (!last.reasoning || !last.reasoning.trim()) &&
-          (evt.stop_reason === "context_budget" ||
-            evt.stop_reason === "repetition" ||
-            ((evt.stop_reason === "model_done" ||
-              evt.stop_reason === "iteration_limit") &&
-              (!last.toolCalls || last.toolCalls.length === 0)))
+          (evt.stop_reason === "model_done" ||
+            evt.stop_reason === "iteration_limit" ||
+            evt.stop_reason === "context_budget" ||
+            evt.stop_reason === "repetition")
         ) {
           const updated = [...base];
           updated[idx] = {

@@ -163,6 +163,15 @@ const envSchema = z.object({
   // costs nothing on easy turns. Only hard rows use the depth.
   AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
   AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  // WARP-1479 — include a bounded 500-char excerpt of the RAW model
+  // completion in the blank-answer diagnostics. Off by default: that raw
+  // text can quote corpus content (the model was mid-answer about the
+  // user's own files), so it is opt-in for a debugging window and the
+  // counts/labels alongside it are always safe to log.
+  AGENT_BLANK_TURN_DEBUG: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // Spec §3 — relevance-based tool selection kill switch. "off" (default)
   // advertises the full effective pool exactly as before; "domains" narrows
   // per-turn via tool-selection.service.ts. The shipped default flips only

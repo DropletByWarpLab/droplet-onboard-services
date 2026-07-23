@@ -317,6 +317,55 @@ export interface AgentTraceEntry {
   result: unknown;
 }
 
+/**
+ * WARP-1479 — why a terminal turn produced no visible answer.
+ *
+ * Present ONLY when the turn ended with empty visible content. The blank
+ * itself is surfaced to the customer by the route's empty-completion
+ * rewrite; this attributes it to a LAYER so the fix work is aimed at
+ * evidence: the model returned nothing, it spent the turn in the reasoning
+ * channel, or our own `sanitizeFinalContent` demoted what it did return.
+ *
+ * Counts and labels only — the raw completion can quote corpus text, so
+ * `rawExcerpt` is opt-in behind `AGENT_BLANK_TURN_DEBUG`.
+ */
+export interface BlankAnswerDiagnostics {
+  /** Raw `message.content` length before reasoning extraction. */
+  rawContentChars: number;
+  /** After `<reasoning>` segments are split out. */
+  cleanedChars: number;
+  /** After `sanitizeFinalContent` — always 0 (that's what makes it blank). */
+  visibleChars: number;
+  /** Provider-native reasoning channel (`reasoning_content`) length. */
+  providerReasoningChars: number;
+  /** Parsed `<reasoning>…</reasoning>` step count. */
+  parsedReasoningSteps: number;
+  /** Tool dispatches in this turn's trace — a blank AFTER real tool work is
+   *  the WARP-1479 shape; a blank with zero tools is the WARP-854 shape. */
+  toolCalls: number;
+  cause:
+    /** No content and no reasoning channel — the model emitted nothing. */
+    | "model_returned_nothing"
+    /** Content empty but the reasoning channel ran — thought, never answered. */
+    | "reasoning_only"
+    /** Content was bare tool-args JSON; the sanitizer demoted it (WARP-1331). */
+    | "sanitizer_demoted_json"
+    /** Content was citation tokens / whitespace only; the strip pass emptied it. */
+    | "sanitizer_stripped_all";
+  /** Bounded (500-char) raw excerpt. Opt-in: AGENT_BLANK_TURN_DEBUG=1. */
+  rawExcerpt?: string;
+  /**
+   * The provider's own verdict for the BLANK iteration (blocking transport
+   * only — the streaming transport doesn't surface these). `finishReason`
+   * "length" or `promptTokens` near the configured window is the mid-turn
+   * context-overflow signature (WARP-854's mechanism recurring later in the
+   * turn); `promptTokens` well under the window exonerates the window.
+   */
+  finishReason?: string | null;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
 export interface AgentResult {
   message: ChatMessage;
   trace: AgentTraceEntry[];
@@ -328,6 +377,8 @@ export interface AgentResult {
     | "context_budget"
     | "repetition";
   error?: string;
+  /** WARP-1479 — set only when the terminal turn produced no visible answer. */
+  blankDiagnostics?: BlankAnswerDiagnostics;
 }
 
 /**
@@ -811,6 +862,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
   let finalizeReason: "context_budget" | "repetition" | null = null;
+  // WARP-1479 — the provider's verdict for the most recent BLOCKING
+  // response, folded into the blank-answer diagnostics when the terminal
+  // turn produces no visible output. Set fresh on every blocking response
+  // so a blank terminal can never inherit an earlier iteration's numbers.
+  let lastFinishReason: string | null | undefined;
+  let lastUsage:
+    | { prompt_tokens?: number; completion_tokens?: number }
+    | undefined;
 
   // Spec §4 repetition early-stop. Key = tool name + DEEP-canonicalized args:
   // object keys sorted recursively so {a:1,b:2} and {b:2,a:1} collide as
@@ -997,6 +1056,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
       const data = await gw.json();
       const choice = data.choices?.[0];
+      lastFinishReason = choice?.finish_reason;
+      lastUsage = data.usage;
       if (!choice) {
         emit({ type: "done", iterations: iter, stop_reason: "error", error: "no choice in response" });
         return {
@@ -1046,6 +1107,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // content_delta — WARP-854's error path (done error frame / FAILED
       // turn) is the owner of that case.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
+      // WARP-1479 — a blank answer is a failed turn (the route rewrites it as
+      // one); attribute WHY here, while the raw completion is still in hand.
+      const blankDiagnostics = visible
+        ? undefined
+        : describeBlankAnswer({
+            rawContent: typeof asst.content === "string" ? asst.content : null,
+            cleanedContent: reasoning.cleanedContent,
+            providerReasoning: asst.reasoning_content ?? null,
+            parsedReasoningSteps: reasoning.reasoningSteps.length,
+            toolCalls: trace.length,
+            finishReason: lastFinishReason,
+            usage: lastUsage,
+          });
       if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
       emit({
         type: "done",
@@ -1075,6 +1149,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         trace,
         iterations: iter + 1,
         stop_reason: finalizeReason ?? "model_done",
+        ...(blankDiagnostics ? { blankDiagnostics } : {}),
       };
     }
 
@@ -1449,27 +1524,92 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 // invents prose: WARP-854 owns the empty-completion contract (done error
 // frame on stream, FAILED persisted turn) and an earlier fallback here
 // masked that signal — CI's WARP-854 tests are the pin.
-function sanitizeFinalContent(raw: string | null): string {
-  // gpt-oss leaks harmony-style citation tokens (`【3†source=…】`) into
-  // otherwise-correct answers — strip the tokens, keep the prose.
-  const stripped = (raw ?? "")
+/** gpt-oss leaks harmony-style citation tokens (`【3†source=…】`) into
+ *  otherwise-correct answers — strip the tokens, keep the prose. Shared with
+ *  the WARP-1479 diagnostics so both classify the same string. */
+function stripPresentationCruft(raw: string | null): string {
+  return (raw ?? "")
     .replace(/【[^】]*】/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+function sanitizeFinalContent(raw: string | null): string {
+  const stripped = stripPresentationCruft(raw);
   if (!stripped) return "";
   // A final answer that IS a bare JSON object/array is tool-call arguments
   // the loop failed to route — a failed turn, not prose. Empty routes it
   // into the WARP-854 error path. Fenced or inline JSON inside a sentence
   // doesn't parse here and passes through untouched.
-  if (/^[[{]/.test(stripped)) {
-    try {
-      JSON.parse(stripped);
-      return "";
-    } catch {
-      // Not valid JSON after all — treat as prose.
-    }
-  }
+  if (isBareJson(stripped)) return "";
   return stripped;
+}
+
+/** True when `s` is a bare JSON object/array — tool-call arguments the loop
+ *  failed to route, not prose. Shared by the sanitizer and the WARP-1479
+ *  diagnostics so the two can never disagree about what "demoted" means. */
+function isBareJson(s: string): boolean {
+  if (!/^[[{]/.test(s)) return false;
+  try {
+    JSON.parse(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * WARP-1479 — attribute a blank terminal answer to its layer. Pure; called
+ * only when the sanitized answer is empty.
+ */
+function describeBlankAnswer(args: {
+  rawContent: string | null;
+  cleanedContent: string;
+  providerReasoning: string | null;
+  parsedReasoningSteps: number;
+  toolCalls: number;
+  finishReason?: string | null;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+}): BlankAnswerDiagnostics {
+  const raw = args.rawContent ?? "";
+  // "Did the model write anything at all" is asked of the UNstripped text;
+  // "what did the sanitizer judge" is asked of the stripped text. Asking
+  // both of the same string would misfile a citation-token-only answer as
+  // an empty one.
+  const wroteSomething = args.cleanedContent.trim().length > 0;
+  const asSanitizerSawIt = stripPresentationCruft(args.cleanedContent);
+  const providerReasoning = args.providerReasoning ?? "";
+  const cause: BlankAnswerDiagnostics["cause"] = !wroteSomething
+    ? // Nothing survived reasoning extraction: either the model spent the
+      // turn in its reasoning channel, or it truly returned nothing.
+      providerReasoning.trim() || args.parsedReasoningSteps > 0
+      ? "reasoning_only"
+      : "model_returned_nothing"
+    : // Content existed and OUR sanitizer emptied it.
+      isBareJson(asSanitizerSawIt)
+      ? "sanitizer_demoted_json"
+      : "sanitizer_stripped_all";
+  return {
+    rawContentChars: raw.length,
+    cleanedChars: args.cleanedContent.length,
+    visibleChars: 0,
+    providerReasoningChars: providerReasoning.length,
+    parsedReasoningSteps: args.parsedReasoningSteps,
+    toolCalls: args.toolCalls,
+    cause,
+    ...(config.AGENT_BLANK_TURN_DEBUG && raw
+      ? { rawExcerpt: raw.slice(0, 500) }
+      : {}),
+    ...(args.finishReason !== undefined
+      ? { finishReason: args.finishReason }
+      : {}),
+    ...(args.usage?.prompt_tokens !== undefined
+      ? { promptTokens: args.usage.prompt_tokens }
+      : {}),
+    ...(args.usage?.completion_tokens !== undefined
+      ? { completionTokens: args.usage.completion_tokens }
+      : {}),
+  };
 }
 
 /**

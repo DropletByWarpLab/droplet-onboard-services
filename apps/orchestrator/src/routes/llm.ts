@@ -10,7 +10,11 @@ import {
 } from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { completeOnce } from "../services/llm-complete.service.js";
-import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import {
+  runAgent,
+  type AgentDeps,
+  type AgentResult,
+} from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -133,6 +137,36 @@ function publishTurnCompleted(
     // eslint-disable-next-line no-console
     console.warn("[llm/chat] MQTT publish failed (non-fatal):", err);
   }
+}
+
+/**
+ * WARP-1479 — record WHY a turn produced no visible answer.
+ *
+ * The customer already gets an honest failed turn (the empty-completion
+ * rewrite below); this is the operator's half. Blank turns are the eval
+ * suite's largest failure class and nothing in the logs currently says
+ * whether the model returned nothing, thought without answering, or our own
+ * sanitizer demoted the completion — so every fix attempt would be a guess.
+ * Counts and labels only; the raw excerpt rides along solely when
+ * AGENT_BLANK_TURN_DEBUG is set (it can quote the user's own documents).
+ */
+function logBlankAnswer(
+  result: AgentResult,
+  conversationId: string | null,
+  assistantMessageId: string | null,
+): void {
+  if (!result.blankDiagnostics) return;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[llm/chat] blank_final_answer",
+    JSON.stringify({
+      conversationId,
+      assistantMessageId,
+      stop_reason: result.stop_reason,
+      iterations: result.iterations,
+      ...result.blankDiagnostics,
+    }),
+  );
 }
 
 // /llm/chat accepts tool-role messages on replay so a client can resume a
@@ -1580,29 +1614,32 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // Rewrite the terminal event to an error so the dashboard shows
           // its retry chip instead of nothing, and finalize as `failed`.
           //
-          // `context_budget`/`repetition` are agent-budgets finalize passes:
-          // the turn may have real tool activity earlier (a non-empty
-          // `liveToolCalls`), but the FINAL answer synthesized from that
-          // activity is still blank — that's just as dishonest a "success"
-          // as `model_done`'s zero-tool-zero-content case, so those two
-          // reasons rewrite on blank content alone, tool activity or not.
-          // `model_done` keeps its original zero-tool-activity requirement
-          // unchanged.
+          // WARP-1479 — tool activity does NOT make a blank answer honest.
+          // The original gate only rewrote `model_done` when the turn had
+          // called no tools, so the common live shape — tools run, they
+          // SUCCEED, and the final answer is still blank — persisted as a
+          // silent "completed" empty bubble: chips, no answer, no retry.
+          // (Live repro: "how much money did I spend last month?" — 4
+          // successful tool calls, 49 s, zero visible output.) A turn with
+          // no visible answer is a failed turn whatever its trace says, so
+          // all three terminal reasons now rewrite on blank content alone.
           if (
             e.type === "done" &&
             liveAssistantContent.trim().length === 0 &&
-            (e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition" ||
-              (e.stop_reason === "model_done" && liveToolCalls.length === 0))
+            (e.stop_reason === "model_done" ||
+              e.stop_reason === "context_budget" ||
+              e.stop_reason === "repetition")
           ) {
             emptyCompletion = true;
             e = {
               ...e,
               stop_reason: "error",
               error:
-                "empty_completion: the model returned no output. This " +
-                "usually means the request (system prompt + tools + " +
-                "history) overflowed the model's context window.",
+                "empty_completion: the model produced no visible answer for " +
+                "this turn. Common causes: the request (system prompt + " +
+                "tools + history) overflowed the context window, or the " +
+                "model returned nothing after its tool calls. Server logs " +
+                "carry a `blank_final_answer` line attributing this turn.",
             };
           }
           try {
@@ -1705,6 +1742,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // persists, enabling lazy-load reasoning on rehydrate
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
+          logBlankAnswer(streamResult, conversationId, assistantMessageId);
         } catch (err) {
           // Use the name-based check rather than instanceof DOMException:
           // aligns with the codebase pattern and stays robust against
@@ -1755,6 +1793,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
+        logBlankAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
         // WARP-458 — agent loop populates message.reasoning regardless
         // of captureReasoning; persist whenever present so the
@@ -1774,16 +1813,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // prompt overflowed the context window (see the streaming-path
         // comment). Surface it as an error instead of a silent success.
         //
-        // `context_budget`/`repetition` are agent-budgets finalize passes:
-        // the trace may be non-empty (real tool activity happened earlier
-        // in the turn), but a blank FINAL answer is still dishonest — so
-        // those two reasons rewrite on blank content alone, trace or not.
-        // `model_done` keeps its original zero-trace requirement unchanged.
+        // WARP-1479 — a non-empty trace does NOT make a blank answer
+        // honest (see the streaming site above for the live repro). All
+        // three terminal reasons rewrite on blank content alone.
         if (
           contentToText(result.message.content).trim().length === 0 &&
-          (result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition" ||
-            (result.stop_reason === "model_done" && result.trace.length === 0))
+          (result.stop_reason === "model_done" ||
+            result.stop_reason === "context_budget" ||
+            result.stop_reason === "repetition")
         ) {
           result = {
             ...result,
