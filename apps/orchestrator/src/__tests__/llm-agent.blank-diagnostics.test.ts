@@ -52,8 +52,14 @@ function depsAnsweringWith(finalContent: unknown, reasoningContent?: string) {
                 ? { reasoning_content: reasoningContent }
                 : {}),
             },
+            finish_reason: "stop",
           },
         ],
+        usage: {
+          prompt_tokens: 15872,
+          completion_tokens: 0,
+          total_tokens: 15872,
+        },
       }),
     });
   const deps: AgentDeps = {
@@ -89,6 +95,13 @@ describe("runAgent — blank-answer diagnostics (WARP-1479)", () => {
       rawContentChars: 0,
       visibleChars: 0,
       toolCalls: 1,
+      // WARP-1479 window-overflow attribution: the provider's own numbers
+      // for the BLANK iteration. prompt_tokens near the configured window
+      // (or finish_reason "length") is the mid-turn overflow signature;
+      // well under it exonerates the window.
+      finishReason: "stop",
+      promptTokens: 15872,
+      completionTokens: 0,
     });
     // Opt-in only: no corpus text leaves the process by default.
     expect(result.blankDiagnostics?.rawExcerpt).toBeUndefined();

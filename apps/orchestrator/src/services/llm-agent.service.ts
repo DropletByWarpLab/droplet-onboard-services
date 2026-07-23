@@ -354,6 +354,16 @@ export interface BlankAnswerDiagnostics {
     | "sanitizer_stripped_all";
   /** Bounded (500-char) raw excerpt. Opt-in: AGENT_BLANK_TURN_DEBUG=1. */
   rawExcerpt?: string;
+  /**
+   * The provider's own verdict for the BLANK iteration (blocking transport
+   * only — the streaming transport doesn't surface these). `finishReason`
+   * "length" or `promptTokens` near the configured window is the mid-turn
+   * context-overflow signature (WARP-854's mechanism recurring later in the
+   * turn); `promptTokens` well under the window exonerates the window.
+   */
+  finishReason?: string | null;
+  promptTokens?: number;
+  completionTokens?: number;
 }
 
 export interface AgentResult {
@@ -852,6 +862,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
   let finalizeReason: "context_budget" | "repetition" | null = null;
+  // WARP-1479 — the provider's verdict for the most recent BLOCKING
+  // response, folded into the blank-answer diagnostics when the terminal
+  // turn produces no visible output. Set fresh on every blocking response
+  // so a blank terminal can never inherit an earlier iteration's numbers.
+  let lastFinishReason: string | null | undefined;
+  let lastUsage:
+    | { prompt_tokens?: number; completion_tokens?: number }
+    | undefined;
 
   // Spec §4 repetition early-stop. Key = tool name + DEEP-canonicalized args:
   // object keys sorted recursively so {a:1,b:2} and {b:2,a:1} collide as
@@ -1038,6 +1056,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
       const data = await gw.json();
       const choice = data.choices?.[0];
+      lastFinishReason = choice?.finish_reason;
+      lastUsage = data.usage;
       if (!choice) {
         emit({ type: "done", iterations: iter, stop_reason: "error", error: "no choice in response" });
         return {
@@ -1097,6 +1117,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             providerReasoning: asst.reasoning_content ?? null,
             parsedReasoningSteps: reasoning.reasoningSteps.length,
             toolCalls: trace.length,
+            finishReason: lastFinishReason,
+            usage: lastUsage,
           });
       if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
       emit({
@@ -1546,6 +1568,8 @@ function describeBlankAnswer(args: {
   providerReasoning: string | null;
   parsedReasoningSteps: number;
   toolCalls: number;
+  finishReason?: string | null;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }): BlankAnswerDiagnostics {
   const raw = args.rawContent ?? "";
   // "Did the model write anything at all" is asked of the UNstripped text;
@@ -1575,6 +1599,15 @@ function describeBlankAnswer(args: {
     cause,
     ...(config.AGENT_BLANK_TURN_DEBUG && raw
       ? { rawExcerpt: raw.slice(0, 500) }
+      : {}),
+    ...(args.finishReason !== undefined
+      ? { finishReason: args.finishReason }
+      : {}),
+    ...(args.usage?.prompt_tokens !== undefined
+      ? { promptTokens: args.usage.prompt_tokens }
+      : {}),
+    ...(args.usage?.completion_tokens !== undefined
+      ? { completionTokens: args.usage.completion_tokens }
       : {}),
   };
 }
