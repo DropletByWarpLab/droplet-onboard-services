@@ -21,6 +21,9 @@
  * environment-sensitive, so each case imports it in an isolated module
  * registry with a controlled process.env (same approach
  * apps/orchestrator/src/config.shared-folder.test.ts uses).
+ *
+ * WARP-1513 mirrors the same fix for DROPLET_MATTER_WIFI_PSK_FILE
+ * (/etc/droplet/ap-psk) — second describe below.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
@@ -61,5 +64,45 @@ describe("WARP-1509 — DROPLET_MATTER_WIFI_SSID_FILE default", () => {
     vi.resetModules();
     const { config } = await import("../src/config.js");
     expect(config.DROPLET_MATTER_WIFI_SSID_FILE).toBe("/custom/ap-ssid");
+  });
+});
+
+describe("WARP-1513 — DROPLET_MATTER_WIFI_PSK_FILE default", () => {
+  const original = process.env.DROPLET_MATTER_WIFI_PSK_FILE;
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete process.env.DROPLET_MATTER_WIFI_PSK_FILE;
+  });
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.DROPLET_MATTER_WIFI_PSK_FILE;
+    else process.env.DROPLET_MATTER_WIFI_PSK_FILE = original;
+  });
+
+  it("defaults to /etc/droplet/ap-psk when the env var is unset", async () => {
+    const { config } = await import("../src/config.js");
+    expect(config.DROPLET_MATTER_WIFI_PSK_FILE).toBe("/etc/droplet/ap-psk");
+  });
+
+  it("defaults to /etc/droplet/ap-psk when the env var is an explicit empty string (the shape docker-compose's ${VAR:-} interpolation produces when .env never set it)", async () => {
+    process.env.DROPLET_MATTER_WIFI_PSK_FILE = "";
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.DROPLET_MATTER_WIFI_PSK_FILE).toBe("/etc/droplet/ap-psk");
+  });
+
+  it("defaults to /etc/droplet/ap-psk when the env var is whitespace-only", async () => {
+    process.env.DROPLET_MATTER_WIFI_PSK_FILE = "   ";
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.DROPLET_MATTER_WIFI_PSK_FILE).toBe("/etc/droplet/ap-psk");
+  });
+
+  it("honours an explicit non-empty override", async () => {
+    process.env.DROPLET_MATTER_WIFI_PSK_FILE = "/custom/ap-psk";
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.DROPLET_MATTER_WIFI_PSK_FILE).toBe("/custom/ap-psk");
   });
 });
