@@ -151,6 +151,16 @@ Never-dropped block grows ~1.9k → ~2.9k chars (~+250 tokens) against the
 re-pinned; if a hard ceiling is crossed, the bump is deliberate and
 documented in the canary comment.
 
+**Amendment (implementation, settled with Romain 2026-07-23):** counting
+guidance as a capped block (2200 chars) pushed the worst-case window-fit
+assertion 33 tokens over `16384 − OUTPUT_RESERVE`. Fixed by scoping four
+config-heavy/power-user tools out of DEFAULT chat in `chat-tool-scope.ts`
+— `create_scene` (the largest schema in chat scope, ~1.9K chars),
+`remove_device`, `restore_file_version`, `list_file_versions` — reclaiming
+~1,000 tokens (headroom now ~975, better than pre-change). Dashboard and
+external MCP clients still see these tools; explicit `allowed_tools`
+overrides as always. `BASE_PROMPT_MAX_CHARS` 10000 → 12200.
+
 ## 5. Testing
 
 - **New** `tool-guidance.service.test.ts`: per-category gating on/off; the

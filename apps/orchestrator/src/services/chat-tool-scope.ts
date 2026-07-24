@@ -85,6 +85,18 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "discover_matter_devices",
   "get_command_history",
   "set_detection_zones",
+  // 2026-07-23 business-identity rollout — window-headroom reclaim. The
+  // category-level tool guidance grew the never-dropped fixed blocks
+  // (+2200-char cap) and pushed the worst-case canary 33 tokens over the
+  // 16384 window; these four are config-heavy/power-user fare per this
+  // list's philosophy (create_scene is the single LARGEST schema in chat
+  // scope at ~1.9K chars) and reclaim ~1000 tokens for history. Dashboard
+  // and external MCP clients still get them; explicit allowed_tools
+  // overrides as always.
+  "create_scene",
+  "remove_device",
+  "restore_file_version",
+  "list_file_versions",
   // box-admin writes + misc
   "list_storage_pools",
   "send_notification",

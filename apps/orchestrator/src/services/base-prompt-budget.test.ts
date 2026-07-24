@@ -1,11 +1,13 @@
 /**
  * WARP-1118 — worst-case fixed-system-block budget canary (§10).
  *
- * `BASE_PROMPT_MAX_CHARS = 10000` bounds the worst-case sum of EVERY fixed
+ * `BASE_PROMPT_MAX_CHARS = 12200` bounds the worst-case sum of EVERY fixed
  * system-prompt block: identity (4000) + persona (1200) + business (1500)
- * + memory facts (2000) + interview conductor (900) = 9600, leaving 400
- * chars of slack. This canary fails in CI if a future budget edit pushes
- * the sum over the ceiling.
+ * + tool guidance (2200) + memory facts (2000) + interview conductor (900)
+ * = 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * counted, capped block — previously ~600 uncounted chars riding inside
+ * the identity fold.) This canary fails in CI if a future budget edit
+ * pushes the sum over the ceiling.
  *
  * It ALSO folds in a representative serialized tools[] payload (§10): the
  * number that actually matters is the whole request, and tools[] lives in
@@ -24,6 +26,7 @@ import {
   PERSONA_PROMPT_MAX_CHARS,
   BUSINESS_CONTEXT_MAX_CHARS,
   INTERVIEW_PROMPT_MAX_CHARS,
+  TOOL_GUIDANCE_MAX_CHARS,
   BASE_PROMPT_MAX_CHARS,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
@@ -60,15 +63,18 @@ function serializeChatToolSchemas(): string {
 }
 
 describe("worst-case fixed system-block budget", () => {
-  it("keeps identity + persona + business + memory + interview under BASE_PROMPT_MAX_CHARS", () => {
+  it("keeps identity + persona + business + guidance + memory + interview under BASE_PROMPT_MAX_CHARS", () => {
     const fixedBlockChars =
       IDENTITY_MAX_CHARS +
       PERSONA_PROMPT_MAX_CHARS +
       BUSINESS_CONTEXT_MAX_CHARS +
+      TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
       INTERVIEW_PROMPT_MAX_CHARS;
-    // 4000 + 1200 + 1500 + 2000 + 900 = 9600.
-    expect(fixedBlockChars).toBe(9600);
+    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 = 11800. (2026-07-23: tool
+    // guidance became a counted, capped block — it was previously ~600
+    // uncounted chars riding inside the identity fold.)
+    expect(fixedBlockChars).toBe(11800);
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 
@@ -81,6 +87,7 @@ describe("worst-case fixed system-block budget", () => {
       IDENTITY_MAX_CHARS +
       PERSONA_PROMPT_MAX_CHARS +
       BUSINESS_CONTEXT_MAX_CHARS +
+      TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
       INTERVIEW_PROMPT_MAX_CHARS +
       toolSchemasJson.length;
