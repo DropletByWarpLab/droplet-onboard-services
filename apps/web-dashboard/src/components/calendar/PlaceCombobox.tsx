@@ -33,6 +33,29 @@ interface PlaceComboboxProps {
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_LEN = 2;
 
+/** The place's short primary label — its own `name`, else the first
+ *  display_name segment (defensive against a stale pre-WARP-1502 cache item
+ *  that carries only `displayName`), else the whole display_name. */
+function primaryName(place: PlaceSuggestion): string {
+  return (
+    place.name?.trim() ||
+    place.displayName.split(",")[0]?.trim() ||
+    place.displayName
+  );
+}
+
+/**
+ * WARP-1502 — the clean, readable value we STORE (and echo into the field) when
+ * a suggestion is picked: `name, context` (e.g. "Newport Beach, CA"), NOT the
+ * long raw Nominatim display_name Samantha saw. Falls back to the primary name
+ * alone when there's no context.
+ */
+export function placeStoredValue(place: PlaceSuggestion): string {
+  const context = place.context?.trim();
+  const name = primaryName(place);
+  return context ? `${name}, ${context}` : name;
+}
+
 export function PlaceCombobox({
   value,
   onChange,
@@ -82,8 +105,12 @@ export function PlaceCombobox({
   }, [value, open, disabled]);
 
   function pick(place: PlaceSuggestion) {
-    lastPickedRef.current = place.displayName;
-    onChange(place.displayName);
+    // WARP-1502: store the clean `name, context` value, not the raw
+    // display_name. Guard the refetch-suppression ref with the SAME value we
+    // write so a pick doesn't immediately re-open suggestions for itself.
+    const stored = placeStoredValue(place);
+    lastPickedRef.current = stored;
+    onChange(stored);
     onSelectSuggestion?.(place);
     setSuggestions([]);
     setOpen(false);
@@ -159,36 +186,56 @@ export function PlaceCombobox({
             boxShadow: "var(--lift)",
           }}
         >
-          {suggestions.map((s, idx) => (
-            <li
-              key={`${s.lat}|${s.lon}|${idx}`}
-              id={`place-suggestion-${idx}`}
-              role="option"
-              aria-selected={idx === activeIdx}
-              // mousedown (not click) so the picker fires BEFORE the
-              // input's onBlur tears the list down.
-              onMouseDown={(e) => {
-                e.preventDefault();
-                pick(s);
-              }}
-              onMouseEnter={() => setActiveIdx(idx)}
-              className={`flex items-start gap-2 px-3 py-2 cursor-pointer ${
-                idx === activeIdx
-                  ? "bg-[var(--brand-subtle)]"
-                  : "hover:bg-[var(--hover)]"
-              }`}
-            >
-              <MapPin
-                size={14}
-                className="mt-0.5 flex-shrink-0"
-                style={{ color: "var(--text-muted)" }}
-                aria-hidden
-              />
-              <span className="type-footnote" style={{ color: "var(--text)" }}>
-                {s.displayName}
-              </span>
-            </li>
-          ))}
+          {suggestions.map((s, idx) => {
+            const primary = primaryName(s);
+            const context = s.context?.trim();
+            return (
+              <li
+                key={`${s.lat}|${s.lon}|${idx}`}
+                id={`place-suggestion-${idx}`}
+                role="option"
+                aria-selected={idx === activeIdx}
+                // Announce the concise value we'll actually store, rather than
+                // reading the two visual lines separately.
+                aria-label={placeStoredValue(s)}
+                // mousedown (not click) so the picker fires BEFORE the
+                // input's onBlur tears the list down.
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(s);
+                }}
+                onMouseEnter={() => setActiveIdx(idx)}
+                className={`flex items-start gap-2 px-3 py-2 cursor-pointer ${
+                  idx === activeIdx
+                    ? "bg-[var(--brand-subtle)]"
+                    : "hover:bg-[var(--hover)]"
+                }`}
+              >
+                <MapPin
+                  size={14}
+                  className="mt-0.5 flex-shrink-0"
+                  style={{ color: "var(--text-muted)" }}
+                  aria-hidden
+                />
+                <span className="min-w-0 flex-1">
+                  <span
+                    className="type-footnote block truncate"
+                    style={{ color: "var(--text)" }}
+                  >
+                    {primary}
+                  </span>
+                  {context && (
+                    <span
+                      className="type-caption-2 block truncate"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      {context}
+                    </span>
+                  )}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
       {loading && !showList && value.trim().length >= MIN_QUERY_LEN && (
