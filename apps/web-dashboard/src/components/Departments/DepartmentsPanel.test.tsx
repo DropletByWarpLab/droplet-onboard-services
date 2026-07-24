@@ -219,14 +219,18 @@ describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
     getDepartmentMock.mockResolvedValue(detail(failed));
 
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
-    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
-
-    // The actual reason the schema stored is shown, not just "Needs attention".
-    expect(
-      screen.getByText("Groupfolder create: CSRF check failed (412)"),
-    ).toBeInTheDocument();
-    // ...and the reassurance that it self-heals once the cause is fixed.
-    expect(screen.getByText(/retries automatically/i)).toBeInTheDocument();
+    // WARP-1521: assert INSIDE waitFor so each retry re-queries the live DOM.
+    // Waiting on "Priya Nair" raced the detail fetch (the name also renders
+    // immediately from the `people`-prop picker), and holding a reference from
+    // an early commit goes stale when the detail load re-renders the panel.
+    await waitFor(() => {
+      // The actual reason the schema stored is shown, not just "Needs attention".
+      expect(
+        screen.getByText("Groupfolder create: CSRF check failed (412)"),
+      ).toBeInTheDocument();
+      // ...and the reassurance that it self-heals once the cause is fixed.
+      expect(screen.getByText(/retries automatically/i)).toBeInTheDocument();
+    });
   });
 
   it("a member stuck retrying exposes its syncError", async () => {
@@ -247,11 +251,18 @@ describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
     );
 
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
-    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
 
-    // Mouse path: the reason is on the tooltip.
-    const retrying = screen.getByText("Retrying");
-    expect(retrying).toHaveAttribute("title", "gfAddGroup: CSRF check failed (412)");
+    // WARP-1521: the chip only exists after the detail fetch commits, and
+    // waiting on the member name raced it ("Priya Nair" also renders
+    // immediately from the `people`-prop picker) — so wait on the chip itself,
+    // re-querying inside waitFor rather than holding an early reference.
+    await waitFor(() => {
+      // Mouse path: the reason is on the tooltip.
+      expect(screen.getByText("Retrying")).toHaveAttribute(
+        "title",
+        "gfAddGroup: CSRF check failed (412)",
+      );
+    });
     // Keyboard/screen-reader path (WCAG 2.1.1): the reason is ALSO in the
     // accessible DOM as visually-hidden text, not tooltip-only.
     const srError = screen.getByText("gfAddGroup: CSRF check failed (412)");
