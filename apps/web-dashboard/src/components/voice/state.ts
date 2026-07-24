@@ -31,15 +31,19 @@ export const WAKE_STALE_AFTER_S = 14 * 24 * 3600;
 /* ── WARP-1520 · busy-capture classification ── */
 
 /**
- * True when an error thrown by the lib/api voice helpers means the
- * box's ONE mic capture is already held: voice-io guards every capture
- * window with a non-blocking lock and answers 409 to any overlap, and
+ * True when an error thrown by the lib/api CAPTURE-family helpers —
+ * `measureVoiceLevel` / `runVoiceEchoCheck` / `captureVoiceEnrollmentLine`
+ * / `verifyVoiceEnrollment` — means the box's ONE mic capture is
+ * already held: voice-io guards every capture window with a
+ * non-blocking lock and answers 409 to any overlap, and
  * `throwVoiceError` (lib/api) carries that upstream status on the
- * thrown Error. Busy is "wait a beat, then retry" — never "the
- * microphone didn't respond". Lives here rather than beside
- * `isVoiceUnavailableError` in lib/api so component tests that mock
- * `@/lib/api` at the module boundary still exercise the REAL
- * classifier.
+ * thrown Error. Scoped to those helpers: `restartVoiceProcessor`'s 409
+ * means "a restart is already in progress" and keeps its own message
+ * path — it does not route through this classifier. Busy is "wait a
+ * beat, then retry" — never "the microphone didn't respond". Lives
+ * here rather than beside `isVoiceUnavailableError` in lib/api so
+ * component tests that mock `@/lib/api` at the module boundary still
+ * exercise the REAL classifier.
  */
 export function isVoiceBusyError(err: unknown): boolean {
   return (

@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 import {
   deriveVoiceSurfaceState,
   deriveHealthChecks,
+  isVoiceBusyError,
   meterFractionFromDbfs,
   nextNoiseCount,
   NOISE_SUSTAIN_POLLS,
@@ -316,5 +317,42 @@ describe("meterFractionFromDbfs", () => {
     const mid = meterFractionFromDbfs(-38);
     expect(mid).toBeGreaterThan(0.2);
     expect(mid).toBeLessThan(0.8);
+  });
+});
+
+describe("isVoiceBusyError (WARP-1520)", () => {
+  // The classifier must be EXACTLY status === 409 on an Error. voice-io's
+  // operational faults (dead mic, service down) come through
+  // `throwVoiceError` stamped `status: 503` — misreading one as "busy —
+  // try again in a few seconds" would be the exact inverse of the
+  // honest-copy promise. These pins kill the tempting mutants
+  // (`status !== undefined`, `status >= 400`, `status >= 409`, dropping
+  // the `instanceof Error` guard).
+  function statusError(status?: number): Error & { status?: number } {
+    const e = new Error("voice fault") as Error & { status?: number };
+    if (status !== undefined) e.status = status;
+    return e;
+  }
+
+  it("409 → busy", () => {
+    expect(isVoiceBusyError(statusError(409))).toBe(true);
+  });
+
+  it("503 (dead mic / service down) → NOT busy", () => {
+    expect(isVoiceBusyError(statusError(503))).toBe(false);
+  });
+
+  it("400 → NOT busy", () => {
+    expect(isVoiceBusyError(statusError(400))).toBe(false);
+  });
+
+  it("a status-less Error (plain network failure) → NOT busy", () => {
+    expect(isVoiceBusyError(statusError())).toBe(false);
+  });
+
+  it("non-Error rejection values → NOT busy, even carrying status 409", () => {
+    expect(isVoiceBusyError({ status: 409 })).toBe(false);
+    expect(isVoiceBusyError("boom")).toBe(false);
+    expect(isVoiceBusyError(undefined)).toBe(false);
   });
 });

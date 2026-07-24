@@ -254,6 +254,29 @@ describe("CalibrationWizard (WARP-1055)", () => {
     ).toBeNull();
   });
 
+  it("a 503 rejection (dead mic / service down) is never classified busy (WARP-1520)", async () => {
+    // voice-io's operational faults come through throwVoiceError stamped
+    // status: 503 — they must keep the didn't-respond copy; "busy — try
+    // again in a few seconds" on a dead mic would be the inverse lie.
+    const dead = new Error(
+      "The microphone didn't respond (device busy or disconnected). Check the mic and try again.",
+    ) as Error & { status?: number };
+    dead.status = 503;
+    measureMock.mockRejectedValueOnce(dead);
+    renderWizard();
+
+    expect(
+      await screen.findByText(
+        "Couldn't measure the room — the microphone didn't respond. Try again in a moment.",
+        undefined,
+        { timeout: 3000 },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/microphone is busy finishing another listening check/),
+    ).toBeNull();
+  });
+
   it("step 2: a 409 busy rejection on the talk test renders the busy copy (WARP-1520)", async () => {
     // Step 1 (noise floor) passes; the step-2 speech capture hits the
     // held capture lock.
