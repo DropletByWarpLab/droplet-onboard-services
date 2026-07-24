@@ -243,7 +243,7 @@ describe("WARP-1525 schema: User + UserInvite accessRoleId", () => {
     expect(block).toMatch(/@@index\(\[accessRoleId\]\)/);
   });
 
-  it("UserInvite gains nullable accessRoleId with onDelete: Restrict (pending invites must not silently degrade)", () => {
+  it("UserInvite gains nullable accessRoleId with onDelete: Restrict (any invite row referencing the role blocks its delete)", () => {
     const schema = readSchema();
     const block = modelBlock(schema, "UserInvite");
     expect(block).toMatch(/accessRoleId\s+String\?/);

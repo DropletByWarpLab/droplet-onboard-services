@@ -592,8 +592,11 @@ model UserInvite {
   // ADR-032 / WARP-1525 (RBAC v2): custom access role granted by this invite.
   // Null = plain tier invite (today's world). The accept path assigns it in
   // the same mint transaction (T9, the WARP-1051 pattern). onDelete Restrict:
-  // deleting a role a pending invite references is blocked at the DB — the
-  // invitee's intended access must never silently degrade to the bare tier.
+  // deleting a role blocks on ANY invite row that references it — pending,
+  // accepted, revoked, or expired alike (invite rows are retained state via
+  // acceptedAt/revokedAt, never deleted) — so an invitee's intended access
+  // can never silently degrade to the bare tier and role deletion stays an
+  // explicit service-layer flow ("reassign first", T3).
   accessRoleId     String?
   accessRole       AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
 

@@ -54,15 +54,28 @@ describe.skipIf(!RUN)(
       await prisma.$disconnect();
     });
 
+    // Every fixture this suite mints is namespaced `warp1525-` (usernames,
+    // invite usernames, role slugs) so cleanup and assertions can scope to it.
+    const OURS = { startsWith: "warp1525-" } as const;
+
     beforeEach(async () => {
       // FK-ordered cleanup, scoped to the tables this suite touches (other
       // pg-gated suites share the throwaway DB — never TRUNCATE ... CASCADE
-      // here, it would reach across FKs into their tables).
-      await prisma.userAccessException.deleteMany();
-      await prisma.user.updateMany({ data: { accessRoleId: null } });
-      await prisma.userInvite.deleteMany();
-      await prisma.accessRole.deleteMany(); // grant rows cascade
-      await prisma.user.deleteMany();
+      // here, it would reach across FKs into their tables) — AND scoped to
+      // THIS suite's `warp1525-`-prefixed fixtures only, because those suites
+      // run in parallel against the one DB: an unscoped deleteMany() here
+      // would eat their User/AccessRole rows mid-test. T2/T3 pg suites: copy
+      // this rule — namespace your fixtures, scope every cleanup and count.
+      await prisma.userAccessException.deleteMany({
+        where: { user: { username: OURS } },
+      });
+      await prisma.user.updateMany({
+        where: { username: OURS },
+        data: { accessRoleId: null },
+      });
+      await prisma.userInvite.deleteMany({ where: { username: OURS } });
+      await prisma.accessRole.deleteMany({ where: { slug: OURS } }); // grant rows cascade
+      await prisma.user.deleteMany({ where: { username: OURS } });
     });
 
     const mkUser = (username: string) =>
@@ -74,7 +87,7 @@ describe.skipIf(!RUN)(
       prisma.accessRole.create({
         data: {
           name: `Role ${slug}`,
-          slug,
+          slug: `warp1525-${slug}`,
           startingPoint: "family",
           createdBy: "00000000-0000-4000-8000-00000000adm1",
           ...extra,
@@ -212,7 +225,7 @@ describe.skipIf(!RUN)(
         data: { accessRoleId: role.id },
         include: { accessRole: true },
       });
-      expect(updated.accessRole?.slug).toBe("assignable");
+      expect(updated.accessRole?.slug).toBe("warp1525-assignable");
 
       const roster = await prisma.accessRole.findUniqueOrThrow({
         where: { id: role.id },
@@ -240,7 +253,7 @@ describe.skipIf(!RUN)(
       expect(still.accessRoleId).toBe(role.id);
     });
 
-    it("RESTRICT: deleting a role referenced by a pending invite fails", async () => {
+    it("RESTRICT: deleting a role referenced by an invite row fails (FK covers any invite state; fixture here is pending)", async () => {
       const role = await mkRole("invited");
       const invite = await prisma.userInvite.create({
         data: {
@@ -267,9 +280,21 @@ describe.skipIf(!RUN)(
 
       await prisma.accessRole.delete({ where: { id: role.id } });
 
-      expect(await prisma.accessRoleFeatureGrant.count()).toBe(0);
-      expect(await prisma.accessRoleToolGrant.count()).toBe(0);
-      expect(await prisma.accessRoleConnectorGrant.count()).toBe(0);
+      // Scoped to the deleted role's id — a global count() would race the
+      // other pg suites sharing this throwaway DB.
+      expect(
+        await prisma.accessRoleFeatureGrant.count({
+          where: { roleId: role.id },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.accessRoleToolGrant.count({ where: { roleId: role.id } }),
+      ).toBe(0);
+      expect(
+        await prisma.accessRoleConnectorGrant.count({
+          where: { roleId: role.id },
+        }),
+      ).toBe(0);
     });
 
     it("CASCADE: deleting a user removes their exception rows", async () => {
@@ -285,7 +310,12 @@ describe.skipIf(!RUN)(
 
       await prisma.user.delete({ where: { id: person.id } });
 
-      expect(await prisma.userAccessException.count()).toBe(0);
+      // Scoped to the deleted user's id — see the beforeEach scoping rule.
+      expect(
+        await prisma.userAccessException.count({
+          where: { userId: person.id },
+        }),
+      ).toBe(0);
     });
   },
 );

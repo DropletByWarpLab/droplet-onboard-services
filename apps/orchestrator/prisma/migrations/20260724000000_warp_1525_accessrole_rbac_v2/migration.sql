@@ -19,8 +19,11 @@
 --   - User.accessRoleId column (nullable; FK ON DELETE RESTRICT — deleting an
 --     in-use role must never silently strip a person's assignment; the
 --     service layer blocks it with "reassign first" and the DB backs that up)
---   - UserInvite.accessRoleId column (nullable; FK ON DELETE RESTRICT — a
---     pending invite's intended access must never silently degrade)
+--   - UserInvite.accessRoleId column (nullable; FK ON DELETE RESTRICT — the
+--     restrict applies to ANY invite row referencing the role, pending or
+--     accepted/revoked/expired alike, since invite rows are retained state
+--     (acceptedAt/revokedAt columns, never deleted); an invitee's intended
+--     access must never silently degrade)
 -- Grant/exception rows CASCADE with their role/user (they are composition).
 --
 -- No data backfill, nothing destructive, no seeds.
