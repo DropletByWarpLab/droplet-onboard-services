@@ -33,8 +33,7 @@ import { fetchNominatim, type PlaceSuggestion } from "../services/places.service
 
 // WARP-1502: the place-suggestion shape + Nominatim fetch/formatting moved to
 // services/places.service.ts so the structured-formatting logic is unit-tested
-// directly. Re-export the type for any legacy importer of this route module.
-export type { PlaceSuggestion };
+// directly.
 
 function getUser(req: Request): string {
   const username = req.user?.username;

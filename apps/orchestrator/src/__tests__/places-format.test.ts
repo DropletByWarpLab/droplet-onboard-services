@@ -53,6 +53,27 @@ describe("formatPlaceSuggestion (WARP-1502)", () => {
     expect(out!.lon).toBe("-117.9298");
   });
 
+  it("does not repeat a state-level result as its own abbreviated context", () => {
+    const raw: NominatimRecord = {
+      name: "California",
+      display_name: "California, United States",
+      lat: "36.7015",
+      lon: "-118.7560",
+      type: "administrative",
+      address: {
+        state: "California",
+        "ISO3166-2-lvl4": "US-CA",
+        country: "United States",
+        country_code: "us",
+      },
+    };
+    const out = formatPlaceSuggestion(raw);
+    expect(out!.name).toBe("California");
+    // "California, CA" would be redundant — the region collapses to the
+    // country instead.
+    expect(out!.context).toBe("United States");
+  });
+
   it("keeps the locality for a POI whose name differs from its city", () => {
     const raw: NominatimRecord = {
       name: "Disneyland Park",
