@@ -149,6 +149,23 @@ const updateMemberSchema = z.object({
 });
 
 /**
+ * Max length for a provision/sync error surfaced to the dashboard.
+ *
+ * WARP-1507: the failure reasons the schema stores (Department.provisionError,
+ * DepartmentMembership.syncError) are surfaced read-only in the panel so the
+ * "Needs attention"/"Retrying" states can explain themselves. Real errors (the
+ * 412 CSRF stack, provisioner exception traces) run long, so truncate them
+ * server-side to a caption-sized string before they cross the wire.
+ */
+const ERROR_MAX_LEN = 300;
+
+function truncateError(msg: string | null | undefined): string | null {
+  if (!msg) return null;
+  if (msg.length <= ERROR_MAX_LEN) return msg;
+  return `${msg.slice(0, ERROR_MAX_LEN - 1).trimEnd()}…`;
+}
+
+/**
  * Format a DepartmentMembership row for API response.
  */
 function formatMembershipResponse(m: {
@@ -195,6 +212,10 @@ function formatDepartmentResponse(
     parentId: dept.parentId ?? null,
     description: dept.description,
     state: dept.state,
+    // WARP-1507: read-only failure reason for the "Needs attention" state, so
+    // the panel can say WHAT needs attention. Truncated server-side; null when
+    // no failure is recorded.
+    provisionError: truncateError(dept.provisionError),
     quotaBytes: dept.quotaBytes?.toString() ?? null,
     aclVersion: dept.aclVersion,
     createdAt: dept.createdAt,
@@ -364,6 +385,9 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
             displayName: m.user.displayName || m.user.username,
             right: m.right,
             syncState: m.syncState,
+            // WARP-1507: read-only failure reason for a member stuck "Retrying"
+            // (syncState=failed). Truncated server-side; null when synced/clean.
+            syncError: truncateError(m.syncError),
           })),
           teams: dept.teams.map((t) => formatDepartmentResponse(t)),
         });

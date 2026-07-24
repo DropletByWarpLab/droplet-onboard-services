@@ -409,6 +409,11 @@ describe("nextcloud-groups.client", () => {
 
       const folders = await gfListFolders("adminToken");
 
+      // WARP-1507: groupfolders REST routes require the OCS-APIRequest header
+      // or Nextcloud rejects them with 412 "CSRF check failed".
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
+
       expect(folders).toHaveLength(2);
       expect(folders[0]).toEqual({
         id: 1,
@@ -486,6 +491,10 @@ describe("nextcloud-groups.client", () => {
 
       const folder = await gfGetFolder("adminToken", 42);
 
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
+
       expect(folder).toEqual({
         id: 42,
         mountPoint: "Research",
@@ -547,6 +556,8 @@ describe("nextcloud-groups.client", () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe("http://nextcloud.test/index.php/apps/groupfolders/folders");
       expect(init.method).toBe("POST");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
     });
 
     it("throws if response has no id", async () => {
@@ -597,6 +608,8 @@ describe("nextcloud-groups.client", () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe("http://nextcloud.test/index.php/apps/groupfolders/folders/42");
       expect(init.method).toBe("DELETE");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
     });
 
     it("succeeds on 404 (idempotent)", async () => {
@@ -642,6 +655,8 @@ describe("nextcloud-groups.client", () => {
       expect(url).toBe("http://nextcloud.test/index.php/apps/groupfolders/folders/5/groups");
       expect(init.method).toBe("POST");
       expect(init.headers["Authorization"]).toBe("Bearer adminToken");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
       // URLSearchParams body is verified by checking call was made
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -678,6 +693,8 @@ describe("nextcloud-groups.client", () => {
         "http://nextcloud.test/index.php/apps/groupfolders/folders/5/groups/dept-sales"
       );
       expect(init.method).toBe("DELETE");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
     });
 
     it("succeeds on 404 (idempotent)", async () => {
@@ -724,6 +741,8 @@ describe("nextcloud-groups.client", () => {
       );
       expect(init.method).toBe("POST");
       expect(init.headers["Authorization"]).toBe("Bearer adminToken");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
       // Verified that POST was called with the correct URL
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -779,6 +798,8 @@ describe("nextcloud-groups.client", () => {
       );
       expect(init.method).toBe("POST");
       expect(init.headers["Authorization"]).toBe("Bearer adminToken");
+      // WARP-1507: OCS-APIRequest header required on groupfolders routes.
+      expect(init.headers["OCS-APIRequest"]).toBe("true");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
