@@ -29,69 +29,12 @@ import {
 } from "../services/calendar.service.js";
 import { serializeIcs } from "../services/ics.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
 
-/**
- * WARP-307: minimal place suggestion shape. Includes lat/lon so a future
- * column on CalendarEvent can persist coordinates without changing the
- * route's wire shape.
- */
-export interface PlaceSuggestion {
-  displayName: string;
-  lat: string;
-  lon: string;
-  type: string | null;
-}
-
-const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
-// OSM ToS requires a real User-Agent that identifies the app. Pin a
-// stable string so OSM ops can correlate any rate-limit complaints back
-// to this project.
-const NOMINATIM_UA = "DropletByWarpLab/1.0 (https://warp-lab.com)";
-
-async function fetchNominatim(
-  q: string,
-  limit: number,
-): Promise<PlaceSuggestion[]> {
-  const url =
-    `${NOMINATIM_URL}?format=jsonv2&addressdetails=0&limit=${limit}` +
-    `&q=${encodeURIComponent(q)}`;
-  const resp = await fetch(url, {
-    headers: {
-      "User-Agent": NOMINATIM_UA,
-      Accept: "application/json",
-      // OSM asks for English-language results when there's no preference;
-      // letting it default would pick locale-of-server which is unpredictable
-      // in a container.
-      "Accept-Language": "en",
-    },
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!resp.ok) return [];
-  const raw = (await resp.json()) as Array<{
-    display_name?: unknown;
-    lat?: unknown;
-    lon?: unknown;
-    type?: unknown;
-  }>;
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((r): PlaceSuggestion | null => {
-      if (
-        typeof r.display_name !== "string" ||
-        typeof r.lat !== "string" ||
-        typeof r.lon !== "string"
-      ) {
-        return null;
-      }
-      return {
-        displayName: r.display_name,
-        lat: r.lat,
-        lon: r.lon,
-        type: typeof r.type === "string" ? r.type : null,
-      };
-    })
-    .filter((r): r is PlaceSuggestion => r !== null);
-}
+// WARP-1502: the place-suggestion shape + Nominatim fetch/formatting moved to
+// services/places.service.ts so the structured-formatting logic is unit-tested
+// directly. Re-export the type for any legacy importer of this route module.
+export type { PlaceSuggestion };
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -409,7 +352,10 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         return;
       }
       const limit = Math.max(1, Math.min(10, Number(req.query.limit) || 5));
-      const cacheKey = `places:${limit}:${q.toLowerCase()}`;
+      // WARP-1502: `v2` — the suggestion shape gained `name`/`context`. Bumping
+      // the key prefix guarantees we never serve a stale old-shape entry from
+      // the 10-minute cache after this ships.
+      const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;
       const cached = await cacheGet<PlaceSuggestion[]>(cacheKey);
       if (cached) {
         res.json({ places: cached });
