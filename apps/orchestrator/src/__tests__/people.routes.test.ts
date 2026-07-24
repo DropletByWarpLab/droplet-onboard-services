@@ -545,6 +545,90 @@ describe("PATCH /api/people/:id/role", () => {
   });
 });
 
+describe("PATCH /api/people/:id/role — WARP-1523 ROLE_RANK cap", () => {
+  // WARP-623 introduced the rank ladder for the CREATE/INVITE sites; this
+  // block locks the same cap onto the role-UPDATE path. requireRole
+  // ("owner","admin") only proves the caller may edit roles, not WHICH role
+  // they may assign — without the cap an admin (rank 2) could promote any
+  // member to owner (rank 3), a straight privilege escalation.
+  it("admin promoting another user to owner → 403 ROLE_RANK_EXCEEDED, no write, no revoke, no audit row", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-id",
+      username: "adm",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    // The refusal comes from the handler (past requireRole), so not even
+    // the "Access denied" policy row fires — same as the invite-site cap.
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("admin assigning admin (equal rank) is ALLOWED — the cap is <=, not <, so last-admin recovery keeps working", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-id",
+      username: "adm",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.role).toBe("admin");
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("owner promoting a user to owner (equal rank at the top) is ALLOWED", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "admin" }),
+    ]);
+    const app = buildApp(prisma); // default caller: owner
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.role).toBe("owner");
+  });
+
+  it("admin no-op re-submit of an existing owner row stays 200 (cap runs after the no-op short-circuit)", async () => {
+    // The dashboard re-submits the same form on focus loss (see the no-op
+    // comment in the handler). An admin with an owner's row open must not
+    // start seeing spurious 403s — the cap only bites on an actual CHANGE.
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "boss", role: "owner" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-id",
+      username: "adm",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.user.update).not.toHaveBeenCalled(); // no-op short-circuit
+  });
+});
+
 describe("PATCH /api/people/:id/role — WARP-1259 droplet-admins NC sync", () => {
   it("promote family -> admin adds to droplet-admins", async () => {
     const prisma = createPrismaMock([

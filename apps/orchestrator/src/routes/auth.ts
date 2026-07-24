@@ -41,6 +41,7 @@ import {
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   roleOutranks,
+  isRole,
   type Role,
 } from "../services/jwt.service.js";
 import {
@@ -2796,6 +2797,29 @@ export function createProtectedAuthRouter(
         res.status(401).json({ error: "Authentication required" });
         return;
       }
+
+      // WARP-1523: ROLE_RANK cap on the role-UPDATE path. updateUserSchema
+      // has no `role` field, so a `role` key in the body used to be silently
+      // STRIPPED by zod — an admin probing { role: "owner" } saw either a
+      // validation 400 or, mixed with a real field, a 200 that looked like a
+      // successful promotion. Enforce the SAME cap as the create sites
+      // (WARP-1042 / WARP-623) BEFORE validation: any recognized requested
+      // role that outranks the caller is refused outright and nothing is
+      // half-applied. Within-rank role keys keep the pre-existing semantics
+      // (stripped by the schema — PATCH /api/people/:id/role owns actual
+      // role changes). Fail closed if the actor's role claim is absent.
+      const requestedRole: unknown = req.body?.role;
+      if (isRole(requestedRole)) {
+        const actorRole = req.user?.role;
+        if (!actorRole || roleOutranks(requestedRole, actorRole)) {
+          res.status(403).json({
+            error: "You cannot assign a role higher than your own",
+            code: "ROLE_RANK_EXCEEDED",
+          });
+          return;
+        }
+      }
+
       const parsed = updateUserSchema.safeParse(req.body);
       if (!parsed.success) {
         const fieldErrors = parsed.error.flatten().fieldErrors;

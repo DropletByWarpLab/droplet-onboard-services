@@ -270,3 +270,72 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("PUT /api/auth/users/:username — WARP-1523 ROLE_RANK cap", () => {
+  // updateUserSchema deliberately has no `role` field, so before this guard a
+  // `role` key in the body was silently STRIPPED by zod — an admin probing
+  // `{ role: "owner" }` got either a validation 400 or, mixed with a real
+  // field, a 200 that looked like a successful promotion. The cap makes the
+  // refusal explicit and fail-closed, mirroring the POST /auth/users +
+  // POST /auth/invites create-site guards (WARP-1042 / WARP-623): any
+  // recognized requested role that outranks the caller is rejected before a
+  // single directory or Nextcloud write happens.
+  it("admin sending role: owner → 403 ROLE_RANK_EXCEEDED, nothing written", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("admin mixing an outranking role into an otherwise-valid edit → 403, other fields NOT half-applied", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ displayName: "Sneaky", role: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
+    const row = prisma._users.find((u: any) => u.username === "alice");
+    expect(row.displayName).toBe("Alice"); // untouched
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("a within-rank role key does not 403 — but this endpoint still does NOT apply roles (PATCH /api/people/:id/role owns that)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ displayName: "Alice B", role: "admin" });
+
+    expect(res.status).toBe(200);
+    const row = prisma._users.find((u: any) => u.username === "alice");
+    expect(row.displayName).toBe("Alice B");
+    expect(row.role).toBe("family"); // role untouched — schema strips it
+    expect(nc.ncUpdateUser).toHaveBeenCalledTimes(1); // displayname only
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "displayname", "Alice B");
+  });
+
+  it("an unrecognized role string is not rank-checked — it falls through to schema validation (400)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ role: "superuser" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_REQUEST");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+});
