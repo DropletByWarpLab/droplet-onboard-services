@@ -37,6 +37,25 @@ function ocsHeaders(token: string): Record<string, string> {
   };
 }
 
+/**
+ * Headers for the Groupfolders REST API (`/index.php/apps/groupfolders/*`).
+ *
+ * WARP-1507: Nextcloud requires the `OCS-APIRequest: true` header on the
+ * groupfolders routes too — without it every call is rejected with HTTP 412
+ * `{"message":"CSRF check failed"}`, which stalls the department reconciler
+ * (members stuck "Retrying", storage "—", card "Needs attention"). The eight
+ * gf* functions previously built inline headers WITHOUT this header, so this
+ * shared builder is the single source of truth. Callers that send a body merge
+ * `Content-Type` on top of this.
+ */
+function gfHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: resolveAuthHeader(token),
+    "OCS-APIRequest": "true",
+    Accept: "application/json",
+  };
+}
+
 function resolveAuthHeader(token: string): string {
   if (token.startsWith("basic:")) return `Basic ${token.slice(6)}`;
   return `Bearer ${token}`;
@@ -252,10 +271,7 @@ export async function gfListFolders(
 
   try {
     const resp = await fetch(url, {
-      headers: {
-        Authorization: resolveAuthHeader(adminToken),
-        Accept: "application/json",
-      },
+      headers: gfHeaders(adminToken),
     });
 
     if (!resp.ok) {
@@ -291,10 +307,7 @@ export async function gfGetFolder(
 
   try {
     const resp = await fetch(url, {
-      headers: {
-        Authorization: resolveAuthHeader(adminToken),
-        Accept: "application/json",
-      },
+      headers: gfHeaders(adminToken),
     });
 
     if (!resp.ok) {
@@ -329,9 +342,8 @@ export async function gfCreateFolder(
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: resolveAuthHeader(adminToken),
+      ...gfHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
     },
     body: new URLSearchParams({ mountpoint }),
   });
@@ -365,10 +377,7 @@ export async function gfDeleteFolder(
   try {
     const resp = await fetch(url, {
       method: "DELETE",
-      headers: {
-        Authorization: resolveAuthHeader(adminToken),
-        Accept: "application/json",
-      },
+      headers: gfHeaders(adminToken),
     });
 
     if (!resp.ok) {
@@ -408,9 +417,8 @@ export async function gfAddGroup(
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: resolveAuthHeader(adminToken),
+      ...gfHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
     },
     body: new URLSearchParams({ group: groupId }),
   });
@@ -444,10 +452,7 @@ export async function gfRemoveGroup(
 
   const resp = await fetch(url, {
     method: "DELETE",
-    headers: {
-      Authorization: resolveAuthHeader(adminToken),
-      Accept: "application/json",
-    },
+    headers: gfHeaders(adminToken),
   });
 
   if (!resp.ok) {
@@ -484,9 +489,8 @@ export async function gfSetGroupPermissions(
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: resolveAuthHeader(adminToken),
+      ...gfHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
     },
     body: new URLSearchParams({ permissions: String(permissions) }),
   });
@@ -523,9 +527,8 @@ export async function gfSetQuota(
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: resolveAuthHeader(adminToken),
+      ...gfHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
     },
     body: new URLSearchParams({ quota: String(quota) }),
   });
