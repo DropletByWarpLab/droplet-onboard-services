@@ -37,14 +37,25 @@ export const BUSINESS_CONTEXT_MAX_CHARS = 1500;
  *  never dropped there. Declared now for the same reason. */
 export const INTERVIEW_PROMPT_MAX_CHARS = 900;
 
+/** 2026-07-23 business-identity rollout — ceiling for the full-set render of
+ *  composeToolGuidance (tool-guidance.service.ts). Guidance is folded into
+ *  the NEVER-DROPPED identity part of the WARP-1118 estimate, so every char
+ *  is permanent context cost on every turn; the composer's own test asserts
+ *  the real render stays under this. */
+export const TOOL_GUIDANCE_MAX_CHARS = 2200;
+
 /**
  * CI-tested ceiling on the worst-case sum of every FIXED system-prompt
- * block (identity + persona + business + memory facts + interview). Not a
- * runtime gate — the estimator is — but a canary so a future block-copy or
- * budget edit that would blow the sum fails in CI. The nominal worst case
- * is 4000 + 1200 + 1500 + 2000 + 900 = 9600, leaving 400 chars of slack.
+ * block (identity + persona + business + tool guidance + memory facts +
+ * interview). Not a runtime gate — the estimator is — but a canary so a
+ * future block-copy or budget edit that would blow the sum fails in CI.
+ * The nominal worst case is 4000 + 1200 + 1500 + 2200 + 2000 + 900 =
+ * 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * counted, capped block; the window headroom it consumed was reclaimed by
+ * scoping four config-heavy tools out of default chat — see
+ * chat-tool-scope.ts.)
  */
-export const BASE_PROMPT_MAX_CHARS = 10000;
+export const BASE_PROMPT_MAX_CHARS = 12200;
 
 /**
  * Tokens held back from the configured context window for the model's
