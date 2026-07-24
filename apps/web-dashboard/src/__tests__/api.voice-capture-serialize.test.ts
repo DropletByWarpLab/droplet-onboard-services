@@ -31,6 +31,8 @@ vi.mock("@/lib/auth", () => ({
 
 import {
   captureVoiceEnrollmentLine,
+  enterVoiceCalibrationMode,
+  fetchVoiceStatus,
   measureVoiceLevel,
   runVoiceEchoCheck,
   verifyVoiceEnrollment,
@@ -166,5 +168,36 @@ describe("exclusive-capture gate (WARP-1520)", () => {
       "/api/voice/enroll/verify",
     );
     await p2;
+  });
+
+  it("status + calibration-mode calls are deliberately UNgated — never queued behind a capture", async () => {
+    const measure = deferred<Response>();
+    authFetchMock
+      .mockReturnValueOnce(measure.promise)
+      .mockResolvedValue(okJson({ state: "listening", active: true }));
+
+    const capture = measureVoiceLevel("noise_floor", 5);
+    await flush();
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
+
+    // The live level meter's status poll and the wizard's calibration-
+    // mode bracket must fire their requests IMMEDIATELY while the 5 s
+    // capture window is still open — gating them would freeze the meter
+    // (and starve the mode renewal) behind every measure.
+    const statusP = fetchVoiceStatus();
+    const modeP = enterVoiceCalibrationMode(90);
+    await flush();
+
+    expect(authFetchMock).toHaveBeenCalledTimes(3);
+    expect(String(authFetchMock.mock.calls[1]![0])).toContain(
+      "/api/voice/status",
+    );
+    expect(String(authFetchMock.mock.calls[2]![0])).toContain(
+      "/api/voice/calibration-mode",
+    );
+
+    // Release the held capture so the module-level chain stays clean.
+    measure.resolve(okJson(MEASURE_OK));
+    await Promise.all([capture, statusP, modeP]);
   });
 });

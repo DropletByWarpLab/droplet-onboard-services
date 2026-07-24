@@ -101,8 +101,11 @@ const WAKE_PHRASE = "“Hey Droplet”";
    dead-mic "didn't respond". */
 const BUSY_MIC_COPY =
   "Droplet's microphone is busy finishing another listening check. Give it a few seconds, then try again.";
+/* UX review — "couldn't start", never "is waiting on": the check STOPPED
+   and needs Try again (nothing auto-resumes), and the contended resource
+   is the mic, not the speaker check itself. */
 const BUSY_ECHO_COPY =
-  "Droplet's speaker check is waiting on another listening check. Give it a few seconds, then try again.";
+  "Droplet's speaker check couldn't start — the microphone is busy with another listening check. Give it a few seconds, then try again.";
 
 export function computeAutoGain(peakDbfs: number): number {
   const gain = Math.pow(10, (TARGET_PEAK_DBFS - peakDbfs) / 20);
@@ -383,7 +386,7 @@ export function CalibrationWizard({
         setPhase("fail");
         setAnnounce(
           isVoiceBusyError(err)
-            ? "The speaker check is waiting on another check."
+            ? "The speaker check couldn't start — the microphone is busy."
             : "The speaker check didn't run.",
         );
       });
