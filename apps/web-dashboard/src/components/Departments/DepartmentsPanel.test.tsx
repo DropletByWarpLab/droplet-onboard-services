@@ -49,6 +49,7 @@ function dept(overrides: Partial<Department> = {}): Department {
     parentId: null,
     description: null,
     state: "active",
+    provisionError: null,
     quotaBytes: null,
     aclVersion: 1,
     createdAt: "2026-01-01T00:00:00Z",
@@ -67,7 +68,7 @@ function detail(department: Department, overrides: Partial<DepartmentDetail> = {
     department,
     usedBytes: null,
     members: [
-      { userId: "u1", displayName: "Priya Nair", right: "contributor", syncState: "synced" },
+      { userId: "u1", displayName: "Priya Nair", right: "contributor", syncState: "synced", syncError: null },
     ],
     teams: [],
     ...overrides,
@@ -205,6 +206,62 @@ describe("DepartmentsPanel — list + detail", () => {
 
     expect(screen.getByText("Household access follows each person's role for now.")).toBeInTheDocument();
     expect(screen.getByLabelText(/rights for priya nair/i)).toBeDisabled();
+  });
+});
+
+describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
+  it("a failed department explains the provisionError and that the box auto-retries", async () => {
+    const failed = dept({
+      state: "failed",
+      provisionError: "Groupfolder create: CSRF check failed (412)",
+    });
+    listDepartmentsMock.mockResolvedValue({ departments: [failed] });
+    getDepartmentMock.mockResolvedValue(detail(failed));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    // The actual reason the schema stored is shown, not just "Needs attention".
+    expect(
+      screen.getByText("Groupfolder create: CSRF check failed (412)"),
+    ).toBeInTheDocument();
+    // ...and the reassurance that it self-heals once the cause is fixed.
+    expect(screen.getByText(/retries automatically/i)).toBeInTheDocument();
+  });
+
+  it("a member stuck retrying exposes its syncError", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(
+      detail(finance, {
+        members: [
+          {
+            userId: "u1",
+            displayName: "Priya Nair",
+            right: "contributor",
+            syncState: "failed",
+            syncError: "gfAddGroup: CSRF check failed (412)",
+          },
+        ],
+      }),
+    );
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    const retrying = screen.getByText("Retrying");
+    expect(retrying).toHaveAttribute("title", "gfAddGroup: CSRF check failed (412)");
+  });
+
+  it("does not render a failure notice for a healthy active department", async () => {
+    const finance = dept();
+    listDepartmentsMock.mockResolvedValue({ departments: [finance] });
+    getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.queryByText(/retries automatically/i)).not.toBeInTheDocument();
   });
 });
 

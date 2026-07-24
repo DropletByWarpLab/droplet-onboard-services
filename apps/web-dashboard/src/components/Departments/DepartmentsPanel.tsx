@@ -87,6 +87,12 @@ const COPY = {
   syncingShort: "Syncing…",
   retrying: "Retrying",
   noLimit: "No limit",
+  // WARP-1507: shown under a department stuck in "Needs attention" so the
+  // user knows it self-heals once the underlying cause is fixed (the
+  // orchestrator's reconciler re-attempts every ~5 min).
+  setupUnfinished: "Setup didn't finish.",
+  setupUnfinishedPrefix: "Setup didn't finish:",
+  failedRetryNote: "The box retries automatically every few minutes, so this usually clears once the cause is fixed.",
 };
 
 /** Bytes-decimal-string → a short human size ("13.2 GB"). Never fabricates
@@ -724,6 +730,52 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
               )}
             </div>
 
+            {/* WARP-1507: explain the "Needs attention" state — the failure
+                reason the schema stored, plus the reassurance that the box
+                keeps retrying on its own. Calm, muted treatment; the red
+                "Needs attention" chip already carries the signal. */}
+            {selected.state === "failed" && (
+              <div
+                role="status"
+                style={{
+                  display: "flex",
+                  gap: 9,
+                  alignItems: "flex-start",
+                  margin: "16px 0 0",
+                  padding: "11px 13px",
+                  borderRadius: "var(--radius-input)",
+                  background: "var(--inset)",
+                  border: "1px solid var(--card-bd)",
+                }}
+              >
+                <AlertTriangle
+                  size={14}
+                  aria-hidden="true"
+                  style={{ color: "var(--text-muted)", flexShrink: 0, marginTop: 2 }}
+                />
+                <div style={{ minWidth: 0 }}>
+                  <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5, color: "var(--text)" }}>
+                    {selected.provisionError ? (
+                      <>
+                        {COPY.setupUnfinishedPrefix}{" "}
+                        <span
+                          className="mono"
+                          style={{ color: "var(--text-muted)", wordBreak: "break-word" }}
+                        >
+                          {selected.provisionError}
+                        </span>
+                      </>
+                    ) : (
+                      COPY.setupUnfinished
+                    )}
+                  </p>
+                  <p style={{ margin: "5px 0 0", fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)" }}>
+                    {COPY.failedRetryNote}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Member table */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "22px 0 10px" }}>
               <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Members</h3>
@@ -751,7 +803,20 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       </span>
                     )}
                     {!saving && m.syncState === "failed" && (
-                      <span className="rmeta" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--brand)" }}>
+                      // WARP-1507: surface the member's syncError as a tooltip
+                      // so "Retrying" isn't a dead label — the box re-attempts
+                      // this sync automatically (see the department notice above).
+                      <span
+                        className="rmeta"
+                        title={m.syncError ?? undefined}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          color: "var(--brand)",
+                          cursor: m.syncError ? "help" : undefined,
+                        }}
+                      >
                         <AlertTriangle size={12} aria-hidden="true" />
                         {COPY.retrying}
                       </span>

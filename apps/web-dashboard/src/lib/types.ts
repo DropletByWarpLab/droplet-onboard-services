@@ -397,6 +397,10 @@ export interface Department {
   parentId: string | null;
   description: string | null;
   state: DepartmentState;
+  /** WARP-1507: read-only failure reason for the `failed` ("Needs attention")
+   *  state, so the panel can explain WHAT failed. Truncated server-side to
+   *  300 chars; null when no failure is recorded. */
+  provisionError: string | null;
   quotaBytes: string | null;
   aclVersion: number;
   createdAt: string;
@@ -420,6 +424,10 @@ export interface DepartmentMember {
   displayName: string;
   right: DepartmentRight;
   syncState: DepartmentSyncState;
+  /** WARP-1507: read-only failure reason for a member stuck "Retrying"
+   *  (syncState=failed). Truncated server-side to 300 chars; null when
+   *  synced/clean. */
+  syncError: string | null;
 }
 
 export interface DepartmentDetail {
