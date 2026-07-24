@@ -82,6 +82,7 @@ import re
 
 from request_context import configure_logging
 from middleware import RequestIdMiddleware
+from reconnect import ReconnectCoordinator
 
 logger = logging.getLogger("droplet.routing")
 configure_logging()
@@ -210,8 +211,50 @@ def require_bearer(request: Request) -> None:
 router_instance: Optional[DropletRouter] = None
 
 
+def _connect_to_openwrt() -> DropletRouter:
+    """Construct a fresh, authenticated DropletRouter. Raises `ConnectionLost`
+    / `UbusError` on failure — the caller (lifespan's startup attempt, or
+    `reconnect_coordinator`'s on-demand / background retry, WARP-1510)
+    decides what to do."""
+    return DropletRouter(
+        host=OPENWRT_HOST,
+        port=OPENWRT_PORT,
+        username=OPENWRT_USERNAME,
+        password=OPENWRT_PASSWORD,
+        auto_login=True,
+    )
+
+
+def _set_router_instance(router: DropletRouter) -> None:
+    global router_instance
+    router_instance = router
+
+
+def _router_is_connected() -> bool:
+    return router_instance is not None
+
+
+# WARP-1510: the startup connect above is a single attempt — if it loses
+# the boot-order race (or a live connection is lost later), nothing retried
+# it before this ticket, so `router_instance` stayed None forever. The
+# coordinator is looked up as a module global (not captured by value) so
+# tests can monkeypatch `main.reconnect_coordinator` per-test without
+# leaking cooldown/backoff state across the suite — see conftest.py's
+# autouse `_isolated_reconnect_coordinator` fixture.
+reconnect_coordinator = ReconnectCoordinator(
+    connect_fn=_connect_to_openwrt,
+    on_connected=_set_router_instance,
+    is_connected=_router_is_connected,
+)
+
+
 def get_router() -> DropletRouter:
-    """Return the router singleton, raising 503 if not connected."""
+    """Return the router singleton. If disconnected, first makes a
+    cooldown-guarded on-demand reconnect attempt (WARP-1510) instead of
+    503ing forever after a lost startup race — then 503s exactly as before
+    if still disconnected."""
+    if router_instance is None:
+        reconnect_coordinator.maybe_reconnect_on_demand()
     if router_instance is None:
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
@@ -244,13 +287,7 @@ async def lifespan(app: FastAPI):
         return
 
     try:
-        router_instance = DropletRouter(
-            host=OPENWRT_HOST,
-            port=OPENWRT_PORT,
-            username=OPENWRT_USERNAME,
-            password=OPENWRT_PASSWORD,
-            auto_login=True,
-        )
+        router_instance = _connect_to_openwrt()
         logger.info("Connected to OpenWrt router at %s", OPENWRT_HOST)
     except (ConnectionLost, UbusError) as exc:
         logger.warning("Could not connect to OpenWrt router: %s", exc)
@@ -297,6 +334,22 @@ async def lifespan(app: FastAPI):
                     exc,
                 )
 
+    # WARP-1510: the startup connect above lost the boot-order race — start
+    # a background retry with capped exponential backoff instead of staying
+    # wedged until a container restart. Non-fatal (same umbrella as the
+    # samplers below): a failure to even start the retry scheduler must not
+    # stop the service from serving the on-demand reconnect path in
+    # get_router(). Stops itself (removes its own job) once connected —
+    # see reconnect.py, rule 9 (no `while True` / `time.sleep` polling).
+    reconnect_scheduler = None
+    if router_instance is None:
+        try:
+            from reconnect import start_reconnect_scheduler
+
+            reconnect_scheduler = start_reconnect_scheduler(reconnect_coordinator)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("reconnect scheduler failed to start: %s", exc)
+
     # WARP-470: start the 60 s WAN throughput sampler once we have a
     # real router connection. Skipped in mock mode (the mock doesn't
     # carry traffic counters worth sampling). Failure to start is
@@ -335,6 +388,12 @@ async def lifespan(app: FastAPI):
             logger.warning("dns-block meter failed to start: %s", exc)
 
     yield
+
+    if reconnect_scheduler is not None:
+        try:
+            reconnect_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reconnect scheduler shutdown failed: %s", exc)
 
     if throughput_scheduler is not None:
         try:

@@ -37,6 +37,52 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+from droplet_openwrt_sdk import ConnectionLost  # noqa: E402
+from reconnect import ReconnectCoordinator  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_reconnect_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WARP-1510 safety net.
+
+    `get_router()` now makes a cooldown-guarded on-demand reconnect attempt
+    whenever `router_instance` is None. Every test written before this
+    ticket sets that up directly (`monkeypatch.setattr(main,
+    "router_instance", None)`, in this file's `disconnected_client` or
+    inline in test_aps.py / test_vpn.py / test_topology.py /
+    test_system_firmware_routes.py) and asserts a fast 503 without
+    expecting any real network I/O. Without this fixture those tests would
+    each try to dial the real `DropletRouter(host=OPENWRT_HOST, ...)` —
+    unreachable from a test box — and hang.
+
+    Runs for every test automatically:
+
+      1. Stubs `main.DropletRouter` to fail instantly (no real socket
+         calls), so any reconnect attempt a test doesn't care about stays
+         fast and disconnected — same observable 503 as before this
+         ticket.
+      2. Swaps in a brand-new `ReconnectCoordinator` so cooldown/backoff
+         state can never leak between tests (the real one is a
+         process-wide singleton on `main`).
+
+    Tests that want to exercise a *successful* reconnect (test_reconnect.py)
+    override `main.DropletRouter` and/or `main.reconnect_coordinator`
+    themselves, after this fixture has already run.
+    """
+
+    def _fails_fast(*_args, **_kwargs):
+        raise ConnectionLost("test double: no real OpenWrt router in the test suite")
+
+    monkeypatch.setattr(main, "DropletRouter", _fails_fast)
+    monkeypatch.setattr(
+        main,
+        "reconnect_coordinator",
+        ReconnectCoordinator(
+            connect_fn=main._connect_to_openwrt,
+            on_connected=main._set_router_instance,
+            is_connected=main._router_is_connected,
+        ),
+    )
 
 
 @pytest.fixture
