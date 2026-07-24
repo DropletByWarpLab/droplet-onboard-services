@@ -42,6 +42,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
+import { composeToolGuidance } from "../services/tool-guidance.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
   getInterviewOverlay,
@@ -506,7 +507,6 @@ function buildBaseSystemPrompt(
    */
   businessBlock?: string,
 ): string {
-  const can = (name: string) => !allowed || allowed.includes(name);
   // Identity leads: the full "who you are / what this box does" block
   // from data/droplet-identity.md (fail-open to the legacy one-liner),
   // shared by every surface — dashboard, voice, external MCP clients.
@@ -522,23 +522,12 @@ function buildBaseSystemPrompt(
   if (businessBlock && businessBlock.length > 0) {
     lines.push("", businessBlock);
   }
-  const guidance: string[] = [];
-  if (can("search_content")) {
-    guidance.push(
-      "- For questions about the user's files, documents, notes, emails, or photos, call the search_content tool and ground your answer in the returned passages (cite their path values). Use tool names exactly as advertised — never invent one.",
-    );
-  }
-  guidance.push(
-    "- Before answering questions about the user's preferences or how they like things done, check the durable memory below" +
-      (can("memory_recall") ? "; call memory_recall for anything not listed." : "."),
-  );
-  if (can("memory_extract_fact")) {
-    guidance.push(
-      "- When the user states a durable preference or fact worth keeping, save it with memory_extract_fact.",
-    );
-  }
-  if (guidance.length > 0) {
-    lines.push("", "Tool guidance:", ...guidance);
+  // Tool guidance is composed per-category from the caller's EFFECTIVE
+  // set (tool-guidance.service.ts) — the WARP-642 never-name-a-stripped-
+  // tool invariant lives there, with its own unit tests.
+  const guidanceBlock = composeToolGuidance(allowed);
+  if (guidanceBlock.length > 0) {
+    lines.push("", guidanceBlock);
   }
   return lines.join("\n");
 }
@@ -575,7 +564,7 @@ async function buildMemoryFactsBlock(
   }
   if (lines.length === 0) return "";
   return (
-    "\n\nDurable memory — facts previously saved for this household:\n" +
+    "\n\nDurable memory — facts previously saved for this business:\n" +
     lines.join("\n")
   );
 }

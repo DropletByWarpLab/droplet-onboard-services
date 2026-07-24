@@ -236,6 +236,70 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     expect(sys.content).not.toContain("This one was deactivated");
   });
 
+  it("steers calculate and the wider tool surface for privileged callers", async () => {
+    const app = buildApp(createPrismaMock([]));
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "what is 15% of 2400?" }],
+      });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    // The mocked auth user is privileged → allowed=undefined → full render.
+    expect(sys.content).toContain("Never do arithmetic in your head");
+    expect(sys.content).toContain("calculate");
+    expect(sys.content).toContain("email_search");
+    expect(sys.content).toContain("business_profile_get");
+  });
+
+  it("renders guidance from an explicit allowed_tools list only", async () => {
+    const app = buildApp(createPrismaMock([]));
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "hi" }],
+        allowed_tools: ["calculate"],
+      });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    expect(sys.content).toContain("Never do arithmetic in your head");
+    // WARP-642: nothing outside the explicit list may be named.
+    expect(sys.content).not.toContain("unit_convert");
+    expect(sys.content).not.toContain("search_content");
+    expect(sys.content).not.toContain("email_search");
+  });
+
+  it("frames the durable-memory block for the business, not a household", async () => {
+    const app = buildApp(
+      createPrismaMock([
+        {
+          category: "Workflow",
+          fact: "Invoices go out on the 1st",
+          active: true,
+          addedAt: new Date("2026-06-01T00:00:00Z"),
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    expect(sys.content).toContain("facts previously saved for this business");
+    expect(sys.content).not.toContain("household");
+  });
+
   it("keeps a caller-supplied system message (additive, after the base prompt)", async () => {
     const app = buildApp(createPrismaMock([]));
 
