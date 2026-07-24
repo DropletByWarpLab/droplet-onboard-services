@@ -424,14 +424,83 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
     expect(res.status).toBe(200);
     expect(res.body.activeModel).toBe("llama3.2:3b");
   });
+});
 
-  it("GET /api/models resolves activeModel to null when the stored tag isn't installed", async () => {
+describe("WARP-1511 — GET /api/models blank/stale activeModel falls back", () => {
+  const installed = {
+    models: [
+      { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+    ],
+  };
+
+  it("resolves a blank stored value to the sole installed model — the reported production bug", async () => {
+    // Live evidence: ai.model.chat is "" and gpt-oss:20b is the only
+    // installed model, yet /api/models used to report activeModel: null.
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      ],
+    });
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBe("gpt-oss:20b");
+  });
+
+  it("resolves a stale stored tag (since removed) to the first installed model, not null", async () => {
     listModelsMock.mockResolvedValue(installed);
-    // Stored model was since removed from the box.
     const prisma = createPrismaMock("gemma4:26b");
     const app = buildApp({ username: "stefan", role: "family" }, prisma);
     const res = await request(app).get("/api/models");
     expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBe("gpt-oss:20b");
+  });
+
+  it("never offers a cloud-tagged entry as the local fallback", async () => {
+    // Defensive: even if the gateway's local list is ever polluted with a
+    // non-ollama entry, the fallback must stay local-only (same invariant
+    // as localModelIdentifiers / the PATCH validation path).
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "claude-sonnet", provider: "anthropic", name: "claude-sonnet", context_window: 200000 },
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      ],
+    });
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBe("gpt-oss:20b");
+  });
+
+  it("stays honestly null when nothing is installed, blank stored value", async () => {
+    listModelsMock.mockResolvedValue({ models: [] });
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.activeModel).toBeNull();
+  });
+
+  it("passes a previously-valid stored value through unresolved when the gateway is unreachable — never nulls it out", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const prisma = createPrismaMock("gpt-oss:20b");
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(true);
+    expect(res.body.activeModel).toBe("gpt-oss:20b");
+  });
+
+  it("does not fabricate a fallback from a blank stored value while the gateway is unreachable", async () => {
+    listModelsMock.mockRejectedValue(new Error("connection refused"));
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "family" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(true);
     expect(res.body.activeModel).toBeNull();
   });
 });

@@ -71,10 +71,23 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         }
 
         // Resolve the active model against what's actually installed (for
-        // local models the row `name` IS the tag). A stale setting (model
-        // since removed) resolves to null rather than claiming a phantom
-        // active model.
-        const installed = new Set(payload.local.map((m) => m.name));
+        // local models the row `name` IS the tag). WARP-1511: a blank/stale
+        // setting now falls back to the sole/first installed local model
+        // (see resolveActiveChatModel's doc comment for the full contract)
+        // instead of claiming a permanent phantom-blank active model. When
+        // the local list itself can't be trusted (gateway/Ollama listing
+        // degraded), pass `null` so the resolver treats the installed set as
+        // unknown and returns the stored value unresolved rather than
+        // nulling it out — or fabricating a fallback — against an
+        // incomplete list. Ollama-only, same "local never points off-box"
+        // invariant as localModelIdentifiers.
+        const installed = payload.degraded
+          ? null
+          : new Set(
+              payload.local
+                .filter((m) => m.provider === "ollama")
+                .map((m) => m.name),
+            );
         const activeModel = resolveActiveChatModel(
           await readActiveChatModel(prisma),
           installed,
