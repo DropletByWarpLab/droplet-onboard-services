@@ -8,10 +8,17 @@
  * (as `defaultModel`, so the dashboard chat defaults to it).
  *
  * Appliance stays stateless about model choice (ADR-003): this is a
- * control-plane preference the orchestrator resolves, not on-box state. The
- * resolver is defensive — a stored tag that isn't installed (model since
- * removed) resolves to null so chat falls back to LLM_MODEL / the single
- * installed model instead of pointing at a model that isn't there.
+ * control-plane preference the orchestrator resolves, not on-box state.
+ *
+ * WARP-1511 — the resolver is defensive in BOTH directions now: a stored
+ * tag that isn't installed (model since removed) OR a blank/never-set value
+ * falls back to the sole/first installed local model — the fallback the
+ * seed row's own comment (WORKSPACE_SETTING_DEFAULTS, "ai.model.chat")
+ * already promised but the original WARP-1112 cut never implemented, which
+ * left a healthy single-model box reporting a permanent blank. It falls
+ * back to null only when NO local model is installed (honest — never
+ * fabricated) or when the installed set itself couldn't be confirmed this
+ * request (gateway/Ollama probe failed) — see `resolveActiveChatModel`.
  */
 import type { PrismaClient } from "@prisma/client";
 import type { ModelInfo } from "../types/index.js";
@@ -51,11 +58,31 @@ export function localModelIdentifiers(models: ModelInfo[]): Set<string> {
 
 /**
  * Resolve a stored active-model tag against the installed local set.
- * Returns the tag only when it's actually installed; otherwise null.
+ *
+ * WARP-1511 — resolution-on-read: the `ai.model.chat` row is never
+ * rewritten by this function, a blank/stale value stays exactly as stored.
+ *
+ *   - `installed === null` means this request couldn't confirm the
+ *     installed set (the ai-gateway/Ollama listing probe failed or is
+ *     known-degraded). Rather than discarding a previously-good choice
+ *     against an incomplete list, the stored value passes through
+ *     unresolved — this never throws.
+ *   - Otherwise, a `stored` tag that IS in `installed` wins unchanged.
+ *   - A blank (`null`) OR stale (no-longer-installed) `stored` tag falls
+ *     back to the sole/first installed local model, so a healthy box with
+ *     at least one model never reports a blank active model. "First"
+ *     follows the caller's Set iteration order (insertion order — the
+ *     order its installed-models source returned them in), so it's
+ *     deterministic per call.
+ *   - An empty but CONFIRMED `installed` set (genuinely zero local models)
+ *     stays honestly null — never fabricated.
  */
 export function resolveActiveChatModel(
   stored: string | null,
-  installed: Set<string>,
+  installed: Set<string> | null,
 ): string | null {
-  return stored && installed.has(stored) ? stored : null;
+  if (installed === null) return stored;
+  if (stored && installed.has(stored)) return stored;
+  const [fallback] = installed;
+  return fallback ?? null;
 }
