@@ -47,7 +47,11 @@ import {
   PlaybackArcs,
   ZoneMeter,
 } from "./VoiceBits";
-import { NOISE_FLOOR_PASS_DBFS, SPEECH_PEAK_PASS_DBFS } from "./state";
+import {
+  isVoiceBusyError,
+  NOISE_FLOOR_PASS_DBFS,
+  SPEECH_PEAK_PASS_DBFS,
+} from "./state";
 import "./voice.css";
 
 /* Capture windows. Step 1 matches the visible 5 s countdown; step 2
@@ -89,6 +93,17 @@ const FLAG_ECHO =
 const TALK_PHRASE = "“Hey Droplet, what's the weather like tomorrow?”";
 const WAKE_PHRASE = "“Hey Droplet”";
 
+/* WARP-1520 §9 busy copy — voice-io answered 409: its exclusive capture
+   lock is held by another listening window. With lib/api's capture gate
+   serializing THIS tab's captures, a 409 can only come from OUTSIDE
+   this tab (another admin session, a direct API caller) — which is
+   exactly when this copy is true. Busy is "wait a beat", never the
+   dead-mic "didn't respond". */
+const BUSY_MIC_COPY =
+  "Droplet's microphone is busy finishing another listening check. Give it a few seconds, then try again.";
+const BUSY_ECHO_COPY =
+  "Droplet's speaker check is waiting on another listening check. Give it a few seconds, then try again.";
+
 export function computeAutoGain(peakDbfs: number): number {
   const gain = Math.pow(10, (TARGET_PEAK_DBFS - peakDbfs) / 20);
   return Math.round(Math.min(GAIN_MAX, Math.max(GAIN_MIN, gain)) * 100) / 100;
@@ -96,7 +111,7 @@ export function computeAutoGain(peakDbfs: number): number {
 
 type Step = 1 | 2 | 3 | 4 | 5 | "result";
 type Phase = "measuring" | "fail" | "pass";
-type FailKind = "threshold" | "request";
+type FailKind = "threshold" | "request" | "busy";
 
 export function CalibrationWizard({
   open,
@@ -236,11 +251,17 @@ export function CalibrationWizard({
           setAnnounce("The room is too loud to calibrate over.");
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (stale) return;
-        setFailKind("request");
+        // WARP-1520 — a 409 means the capture lock is held elsewhere,
+        // not a dead mic. Classify so the fail note tells the truth.
+        setFailKind(isVoiceBusyError(err) ? "busy" : "request");
         setPhase("fail");
-        setAnnounce("Couldn't measure the room.");
+        setAnnounce(
+          isVoiceBusyError(err)
+            ? "The microphone is busy with another check."
+            : "Couldn't measure the room.",
+        );
       });
     return () => {
       stale = true;
@@ -267,11 +288,15 @@ export function CalibrationWizard({
           setAnnounce("Speech was too faint to lock a level.");
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (stale) return;
-        setFailKind("request");
+        setFailKind(isVoiceBusyError(err) ? "busy" : "request"); // WARP-1520
         setPhase("fail");
-        setAnnounce("Couldn't measure your speech level.");
+        setAnnounce(
+          isVoiceBusyError(err)
+            ? "The microphone is busy with another check."
+            : "Couldn't measure your speech level.",
+        );
       });
     return () => {
       stale = true;
@@ -351,12 +376,16 @@ export function CalibrationWizard({
           setAnnounce("Droplet couldn't hear its own speaker.");
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (stale) return;
         setEchoOk(false);
-        setFailKind("request");
+        setFailKind(isVoiceBusyError(err) ? "busy" : "request"); // WARP-1520
         setPhase("fail");
-        setAnnounce("The speaker check didn't run.");
+        setAnnounce(
+          isVoiceBusyError(err)
+            ? "The speaker check is waiting on another check."
+            : "The speaker check didn't run.",
+        );
       });
     return () => {
       stale = true;
@@ -447,7 +476,9 @@ export function CalibrationWizard({
               message={
                 failKind === "threshold"
                   ? "There's steady noise near the mic — a fan, appliance, or music. Move it or turn it down, then try again."
-                  : "Couldn't measure the room — the microphone didn't respond. Try again in a moment."
+                  : failKind === "busy"
+                    ? BUSY_MIC_COPY
+                    : "Couldn't measure the room — the microphone didn't respond. Try again in a moment."
               }
             >
               <button type="button" className="btn ghost" onClick={retry}>
@@ -508,7 +539,9 @@ export function CalibrationWizard({
               message={
                 failKind === "threshold"
                   ? "Droplet can hear you, but only faintly from there. Try moving the box, or speak from a bit closer."
-                  : "Couldn't measure your speech — the microphone didn't respond. Try again in a moment."
+                  : failKind === "busy"
+                    ? BUSY_MIC_COPY
+                    : "Couldn't measure your speech — the microphone didn't respond. Try again in a moment."
               }
             >
               <button type="button" className="btn ghost" onClick={retry}>
@@ -602,7 +635,9 @@ export function CalibrationWizard({
               message={
                 failKind === "threshold"
                   ? "Droplet couldn't hear its own speaker. Check that the speaker isn't muted or disconnected."
-                  : "Droplet couldn't run the speaker check — the audio device didn't respond. Try again in a moment."
+                  : failKind === "busy"
+                    ? BUSY_ECHO_COPY
+                    : "Droplet couldn't run the speaker check — the audio device didn't respond. Try again in a moment."
               }
             >
               <button type="button" className="btn ghost" onClick={retry}>

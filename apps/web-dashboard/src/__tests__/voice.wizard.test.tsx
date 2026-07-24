@@ -188,6 +188,94 @@ describe("CalibrationWizard (WARP-1055)", () => {
     ).toBeInTheDocument();
   });
 
+  /* WARP-1520 — voice-io's capture lock answers 409 to an overlapping
+     capture. That's "busy", never "the microphone didn't respond" —
+     the old catch-all copy read as a dead mic on a healthy one. */
+  it("a 409 busy rejection renders the honest busy copy, and Try again re-measures (WARP-1520)", async () => {
+    mockHealthyMeasurements();
+    const busy = new Error(
+      "Another microphone measurement is already running — try again in a few seconds.",
+    ) as Error & { status?: number };
+    busy.status = 409;
+    measureMock.mockRejectedValueOnce(busy);
+    renderWizard();
+
+    expect(
+      await screen.findByText(
+        "Droplet's microphone is busy finishing another listening check. Give it a few seconds, then try again.",
+        undefined,
+        { timeout: 3000 },
+      ),
+    ).toBeInTheDocument();
+    // The dead-mic lie must be gone…
+    expect(
+      screen.queryByText(
+        "Couldn't measure the room — the microphone didn't respond. Try again in a moment.",
+      ),
+    ).toBeNull();
+    // …and busy is not a threshold fail: no "Continue anyway" escape hatch.
+    expect(
+      screen.queryByRole("button", { name: "Continue anyway" }),
+    ).toBeNull();
+
+    // Try again re-invokes the measure; with the capture gate it now
+    // waits its turn and (here, mocked healthy) passes to step 2.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText(
+        "Say this from where you'd normally talk to Droplet.",
+        undefined,
+        { timeout: 3000 },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      measureMock.mock.calls.filter((c) => c[0] === "noise_floor"),
+    ).toHaveLength(2);
+  });
+
+  it("a plain network rejection still shows the didn't-respond copy (WARP-1520)", async () => {
+    measureMock.mockRejectedValueOnce(new Error("network down"));
+    renderWizard();
+
+    expect(
+      await screen.findByText(
+        "Couldn't measure the room — the microphone didn't respond. Try again in a moment.",
+        undefined,
+        { timeout: 3000 },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/microphone is busy finishing another listening check/),
+    ).toBeNull();
+  });
+
+  it("step 4: a 409 echo-check rejection renders the busy speaker copy (WARP-1520)", async () => {
+    mockHealthyMeasurements();
+    const busy = new Error(
+      "Another microphone measurement is already running — try again in a few seconds.",
+    ) as Error & { status?: number };
+    busy.status = 409;
+    echoMock.mockRejectedValueOnce(busy);
+    const { rerender, onClose } = renderWizard();
+    await driveWakeHits(rerender, onClose, 3);
+
+    expect(
+      await screen.findByText(
+        "Droplet's speaker check is waiting on another listening check. Give it a few seconds, then try again.",
+        undefined,
+        { timeout: 5000 },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Droplet couldn't run the speaker check — the audio device didn't respond. Try again in a moment.",
+      ),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
   it("full pass: one write with measured values + auto-gain, serif result", async () => {
     mockHealthyMeasurements();
     applyMock.mockResolvedValue({ calibrated: true });

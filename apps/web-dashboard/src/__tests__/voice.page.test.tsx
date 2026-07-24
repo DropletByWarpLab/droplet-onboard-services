@@ -62,7 +62,11 @@ vi.mock("next/link", () => ({
 }));
 
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
-import { applyVoiceCalibration, restartVoiceProcessor } from "@/lib/api";
+import {
+  applyVoiceCalibration,
+  measureVoiceLevel,
+  restartVoiceProcessor,
+} from "@/lib/api";
 import { ToastProvider } from "@/components/Toast";
 import type {
   VoiceActivityItem,
@@ -71,6 +75,7 @@ import type {
 } from "@/lib/types";
 
 const restartMock = vi.mocked(restartVoiceProcessor);
+const measureMock = vi.mocked(measureVoiceLevel);
 
 const NOW = 1_751_000_000;
 
@@ -454,6 +459,44 @@ describe("VoiceSurface processor restart (WARP-1057, §7.3)", () => {
         name: "Restart processor",
       }),
     ).toBeNull();
+  });
+});
+
+describe("VoiceSurface health-card captures on a busy mic (WARP-1520)", () => {
+  // voice-io's capture lock answers 409 to an overlapping capture — that's
+  // "busy, wait a beat", never the dead-mic "didn't respond" toast.
+  it('"Find the noise" on a 409 toasts the busy copy, not the dead-mic lie', async () => {
+    const busy = new Error(
+      "Another microphone measurement is already running — try again in a few seconds.",
+    ) as Error & { status?: number };
+    busy.status = 409;
+    measureMock.mockRejectedValueOnce(busy);
+    // High calibrated floor → the noise card fails → "Find the noise".
+    renderSurface({ calibration: calibration({ noise_floor_dbfs: -30 }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Find the noise" }));
+
+    expect(
+      await screen.findByText(
+        "The microphone is busy with another check — try again in a few seconds.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Couldn't measure — the microphone didn't respond."),
+    ).toBeNull();
+  });
+
+  it("a plain rejection keeps the didn't-respond toast", async () => {
+    measureMock.mockRejectedValueOnce(new Error("network down"));
+    renderSurface({ calibration: calibration({ noise_floor_dbfs: -30 }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Find the noise" }));
+
+    expect(
+      await screen.findByText(
+        "Couldn't measure — the microphone didn't respond.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 
