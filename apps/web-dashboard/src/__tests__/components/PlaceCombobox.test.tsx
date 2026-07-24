@@ -1,6 +1,12 @@
 /**
- * WARP-307 — PlaceCombobox: fuzzy location autocomplete backed by the
- * orchestrator's `/api/calendar/places` Nominatim proxy.
+ * WARP-307 / WARP-1502 — PlaceCombobox: fuzzy location autocomplete backed by
+ * the orchestrator's `/api/calendar/places` Nominatim proxy.
+ *
+ * WARP-1502 changes covered here:
+ *   - suggestions render two lines (short `name` + muted `context`),
+ *   - picking stores the CLEAN value `name, context` (e.g. "Newport Beach, CA"),
+ *     NOT the long raw display_name,
+ *   - free-text fallback + keyboard nav still work.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useState } from "react";
@@ -14,7 +20,22 @@ vi.mock("@/lib/api", () => ({
   fetchPlaces: fetchPlacesMock,
 }));
 
-import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
+import {
+  PlaceCombobox,
+  placeStoredValue,
+} from "@/components/calendar/PlaceCombobox";
+import type { PlaceSuggestion } from "@/lib/api";
+
+function place(p: Partial<PlaceSuggestion>): PlaceSuggestion {
+  return {
+    name: p.name,
+    context: p.context,
+    displayName: p.displayName ?? "",
+    lat: p.lat ?? "0",
+    lon: p.lon ?? "0",
+    type: p.type ?? null,
+  };
+}
 
 function Harness({
   initialValue = "",
@@ -45,7 +66,33 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-describe("PlaceCombobox (WARP-307)", () => {
+describe("placeStoredValue (WARP-1502)", () => {
+  it("composes `name, context` when both present", () => {
+    expect(
+      placeStoredValue(
+        place({ name: "Newport Beach", context: "CA", displayName: "long…" }),
+      ),
+    ).toBe("Newport Beach, CA");
+  });
+
+  it("uses the name alone when there is no context", () => {
+    expect(
+      placeStoredValue(place({ name: "Anywhere", context: "", displayName: "long…" })),
+    ).toBe("Anywhere");
+  });
+
+  it("falls back to the first display_name segment for a stale old-shape item", () => {
+    // No `name`/`context` (e.g. a pre-WARP-1502 cache entry): don't store the
+    // whole chain — take the first segment.
+    expect(
+      placeStoredValue(
+        place({ displayName: "Newport Beach, Orange County, California, United States" }),
+      ),
+    ).toBe("Newport Beach");
+  });
+});
+
+describe("PlaceCombobox (WARP-307 / WARP-1502)", () => {
   beforeEach(() => {
     fetchPlacesMock.mockReset();
   });
@@ -74,15 +121,18 @@ describe("PlaceCombobox (WARP-307)", () => {
     expect(fetchPlacesMock.mock.calls[0][0]).toBe("Pari");
   });
 
-  it("renders suggestions as a listbox once the proxy answers", async () => {
+  it("renders each suggestion as two lines — short name + muted context", async () => {
     fetchPlacesMock.mockResolvedValueOnce([
-      { displayName: "Paris, France", lat: "48.85", lon: "2.35", type: "city" },
-      {
-        displayName: "Paris, Texas, USA",
-        lat: "33.66",
-        lon: "-95.55",
-        type: "city",
-      },
+      place({
+        name: "Paris",
+        context: "Île-de-France",
+        displayName: "Paris, Île-de-France, France",
+      }),
+      place({
+        name: "Paris",
+        context: "TX",
+        displayName: "Paris, Lamar County, Texas, United States",
+      }),
     ]);
     render(<Harness />);
     const input = screen.getByTestId("place-input");
@@ -91,28 +141,37 @@ describe("PlaceCombobox (WARP-307)", () => {
     expect(await screen.findByRole("listbox")).toBeInTheDocument();
     const options = screen.getAllByRole("option");
     expect(options).toHaveLength(2);
-    expect(options[0]).toHaveTextContent(/Paris, France/);
+    // Primary name line.
+    expect(options[0]).toHaveTextContent("Paris");
+    // Muted context line disambiguates the two same-named cities.
+    expect(options[0]).toHaveTextContent("Île-de-France");
+    expect(options[1]).toHaveTextContent("TX");
+    // The long raw display_name is NOT rendered.
+    expect(options[0]).not.toHaveTextContent("France, France");
+    expect(options[1]).not.toHaveTextContent(/Lamar County|United States/);
   });
 
-  it("clicking a suggestion fills the input and closes the list", async () => {
+  it("stores the CLEAN `name, context` value on pick, not the raw display_name", async () => {
     fetchPlacesMock.mockResolvedValueOnce([
-      {
-        displayName: "Eiffel Tower, Paris, France",
-        lat: "48.858",
-        lon: "2.294",
-        type: "tourism",
-      },
+      place({
+        name: "Newport Beach",
+        context: "CA",
+        displayName: "Newport Beach, Orange County, California, United States",
+      }),
     ]);
     const onChangeSpy = vi.fn();
     render(<Harness onChangeSpy={onChangeSpy} />);
     const input = screen.getByTestId("place-input");
     fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: "Eiffel" } });
+    fireEvent.change(input, { target: { value: "Newport" } });
     const option = await screen.findByRole("option");
     // mousedown — the component listens on mousedown so the pick fires
     // before the input's onBlur tears the list down.
     fireEvent.mouseDown(option);
-    expect(onChangeSpy).toHaveBeenCalledWith("Eiffel Tower, Paris, France");
+    expect(onChangeSpy).toHaveBeenCalledWith("Newport Beach, CA");
+    expect(onChangeSpy).not.toHaveBeenCalledWith(
+      "Newport Beach, Orange County, California, United States",
+    );
     await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
   });
 
@@ -127,15 +186,14 @@ describe("PlaceCombobox (WARP-307)", () => {
     expect((input as HTMLInputElement).value).toBe("Somewhere obscure");
   });
 
-  it("ArrowDown / Enter picks the second suggestion", async () => {
+  it("ArrowDown / Enter picks the second suggestion's clean value", async () => {
     fetchPlacesMock.mockResolvedValueOnce([
-      { displayName: "Paris, France", lat: "48.85", lon: "2.35", type: "city" },
-      {
-        displayName: "Paris, Texas, USA",
-        lat: "33.66",
-        lon: "-95.55",
-        type: "city",
-      },
+      place({ name: "Paris", context: "Île-de-France", displayName: "Paris, France" }),
+      place({
+        name: "Paris",
+        context: "TX",
+        displayName: "Paris, Lamar County, Texas, United States",
+      }),
     ]);
     const onChangeSpy = vi.fn();
     render(<Harness onChangeSpy={onChangeSpy} />);
@@ -145,6 +203,6 @@ describe("PlaceCombobox (WARP-307)", () => {
     await screen.findByRole("listbox");
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChangeSpy).toHaveBeenLastCalledWith("Paris, Texas, USA");
+    expect(onChangeSpy).toHaveBeenLastCalledWith("Paris, TX");
   });
 });

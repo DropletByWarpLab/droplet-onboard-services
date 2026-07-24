@@ -4823,6 +4823,11 @@ export async function fetchShareRecipients(): Promise<ShareRecipient[]> {
 // --- WARP-307: Calendar place autocomplete ---
 
 export interface PlaceSuggestion {
+  /** WARP-1502 — short primary label (place's own name / first display_name
+   *  segment). Optional so a stale-cache old-shape item still parses. */
+  name?: string;
+  /** WARP-1502 — concise "City, ST" locality context. Empty/absent when none. */
+  context?: string;
   displayName: string;
   lat: string;
   lon: string;
