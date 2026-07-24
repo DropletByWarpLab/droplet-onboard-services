@@ -162,6 +162,53 @@ describe("GET /api/departments — myRight + admin-visible-archived scoping", ()
     const whereArg = prisma.department.findMany.mock.calls[0][0].where;
     expect(whereArg.id).toEqual({ in: [] });
   });
+
+  // WARP-1507: the panel's "Needs attention" badge has to be able to SAY what
+  // needs attention, so the failure reason the schema already stores
+  // (Department.provisionError) must be serialized read-only to the client.
+  it("serializes provisionError so the UI can explain a failed department", async () => {
+    const failed = {
+      ...DEPT_ROW,
+      id: "d9",
+      state: "failed",
+      provisionError: "Groupfolder create: CSRF check failed (412)",
+    };
+    const prisma = mkPrisma();
+    prisma.department.findMany.mockResolvedValue([failed]);
+    prisma.departmentMembership.findMany.mockResolvedValue([]);
+    const app = mkApp(prisma, { id: "owner-1", role: "owner" });
+
+    const res = await request(app).get("/api/departments");
+    expect(res.status).toBe(200);
+    expect(res.body.departments[0].provisionError).toBe(
+      "Groupfolder create: CSRF check failed (412)",
+    );
+  });
+
+  it("truncates a very long provisionError server-side (≤300 chars)", async () => {
+    const longMsg = "x".repeat(600);
+    const failed = { ...DEPT_ROW, id: "d9", state: "failed", provisionError: longMsg };
+    const prisma = mkPrisma();
+    prisma.department.findMany.mockResolvedValue([failed]);
+    prisma.departmentMembership.findMany.mockResolvedValue([]);
+    const app = mkApp(prisma, { id: "owner-1", role: "owner" });
+
+    const res = await request(app).get("/api/departments");
+    expect(res.status).toBe(200);
+    expect(res.body.departments[0].provisionError.length).toBeLessThanOrEqual(300);
+  });
+
+  it("provisionError is null when the department has no failure recorded", async () => {
+    const prisma = mkPrisma();
+    prisma.department.findMany.mockResolvedValue([{ ...DEPT_ROW, provisionError: null }]);
+    prisma.departmentMembership.findMany.mockResolvedValue([]);
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkApp(prisma, { id: "owner-1", role: "owner" });
+
+    const res = await request(app).get("/api/departments");
+    expect(res.status).toBe(200);
+    expect(res.body.departments[0].provisionError).toBeNull();
+  });
 });
 
 describe("GET /api/departments/:id — detail", () => {
@@ -211,12 +258,87 @@ describe("GET /api/departments/:id — detail", () => {
     expect(res.body.department).toEqual(expect.objectContaining({ id: "d1", myRight: "contributor" }));
     expect(res.body.usedBytes).toBe("14179869184");
     expect(res.body.members).toEqual([
-      { userId: "u1", displayName: "Priya Nair", right: "contributor", syncState: "synced" },
-      { userId: "u2", displayName: "dana", right: "manager", syncState: "pending" },
+      { userId: "u1", displayName: "Priya Nair", right: "contributor", syncState: "synced", syncError: null },
+      { userId: "u2", displayName: "dana", right: "manager", syncState: "pending", syncError: null },
     ]);
     // No email anywhere in the payload — the member table doesn't need it
     // and the column is encrypted-at-rest.
     expect(JSON.stringify(res.body)).not.toMatch(/email/i);
+  });
+
+  it("serializes department.provisionError + members[].syncError so the UI can explain the failure", async () => {
+    // WARP-1507: a failed department stalled by the 412 CSRF bug shows
+    // "Needs attention" (provisionError) and per-member "Retrying"
+    // (syncError). Both reasons the schema already stores must reach the panel.
+    const prisma = mkPrisma();
+    prisma.department.findUnique.mockResolvedValue({
+      ...DEPT_ROW,
+      state: "failed",
+      provisionError: "Groupfolder create: CSRF check failed (412)",
+      teams: [],
+    });
+    prisma.departmentMembership.findUnique.mockResolvedValue({ right: "manager" });
+    prisma.departmentMembership.findMany.mockResolvedValue([
+      {
+        userId: "u1",
+        right: "contributor",
+        syncState: "failed",
+        syncError: "gfAddGroup: CSRF check failed (412)",
+        user: { id: "u1", displayName: "Priya Nair", username: "priya" },
+      },
+      {
+        userId: "u2",
+        right: "manager",
+        syncState: "synced",
+        syncError: null,
+        user: { id: "u2", displayName: "Dana Lee", username: "dana" },
+      },
+    ]);
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkApp(prisma, { id: "owner-1", role: "owner" });
+
+    const res = await request(app).get("/api/departments/d1");
+    expect(res.status).toBe(200);
+    expect(res.body.department.provisionError).toBe(
+      "Groupfolder create: CSRF check failed (412)",
+    );
+    expect(res.body.members).toEqual([
+      {
+        userId: "u1",
+        displayName: "Priya Nair",
+        right: "contributor",
+        syncState: "failed",
+        syncError: "gfAddGroup: CSRF check failed (412)",
+      },
+      {
+        userId: "u2",
+        displayName: "Dana Lee",
+        right: "manager",
+        syncState: "synced",
+        syncError: null,
+      },
+    ]);
+  });
+
+  it("truncates a very long member syncError server-side (≤300 chars)", async () => {
+    const prisma = mkPrisma();
+    prisma.department.findUnique.mockResolvedValue({ ...DEPT_ROW, teams: [] });
+    prisma.departmentMembership.findUnique.mockResolvedValue({ right: "manager" });
+    prisma.departmentMembership.findMany.mockResolvedValue([
+      {
+        userId: "u1",
+        right: "contributor",
+        syncState: "failed",
+        syncError: "y".repeat(600),
+        user: { id: "u1", displayName: "Priya Nair", username: "priya" },
+      },
+    ]);
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkApp(prisma, { id: "owner-1", role: "owner" });
+
+    const res = await request(app).get("/api/departments/d1");
+    expect(res.status).toBe(200);
+    expect(res.body.members[0].syncError.length).toBeLessThanOrEqual(300);
   });
 
   it("a team member is authorized via the PARENT department's membership (inherited-manager read)", async () => {
