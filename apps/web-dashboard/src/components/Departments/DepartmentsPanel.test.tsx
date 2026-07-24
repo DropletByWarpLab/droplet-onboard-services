@@ -249,8 +249,14 @@ describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
 
+    // Mouse path: the reason is on the tooltip.
     const retrying = screen.getByText("Retrying");
     expect(retrying).toHaveAttribute("title", "gfAddGroup: CSRF check failed (412)");
+    // Keyboard/screen-reader path (WCAG 2.1.1): the reason is ALSO in the
+    // accessible DOM as visually-hidden text, not tooltip-only.
+    const srError = screen.getByText("gfAddGroup: CSRF check failed (412)");
+    expect(srError).toBeInTheDocument();
+    expect(srError).toHaveClass("sr-only");
   });
 
   it("does not render a failure notice for a healthy active department", async () => {

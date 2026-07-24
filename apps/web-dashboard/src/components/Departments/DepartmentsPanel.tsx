@@ -759,8 +759,15 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       <>
                         {COPY.setupUnfinishedPrefix}{" "}
                         <span
-                          className="mono"
-                          style={{ color: "var(--text-muted)", wordBreak: "break-word" }}
+                          style={{
+                            // `.mono` is descendant-scoped to .lrow/.dl dd in
+                            // droplet-shell.css and wouldn't apply here (see the
+                            // NM_STYLE note above / line 695) — set the mono
+                            // family inline so the error actually renders mono.
+                            fontFamily: "var(--font-mono)",
+                            color: "var(--text-muted)",
+                            wordBreak: "break-word",
+                          }}
                         >
                           {selected.provisionError}
                         </span>
@@ -803,8 +810,12 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       </span>
                     )}
                     {!saving && m.syncState === "failed" && (
-                      // WARP-1507: surface the member's syncError as a tooltip
-                      // so "Retrying" isn't a dead label — the box re-attempts
+                      // WARP-1507: surface the member's syncError. The `title`
+                      // covers mouse hover, but a title on a non-focusable span
+                      // is unreachable by keyboard/touch (WCAG 2.1.1) and, when
+                      // the department itself stays "active", this is the SOLE
+                      // disclosure path — so also render the reason as visually
+                      // -hidden text in the accessible DOM. The box re-attempts
                       // this sync automatically (see the department notice above).
                       <span
                         className="rmeta"
@@ -819,6 +830,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       >
                         <AlertTriangle size={12} aria-hidden="true" />
                         {COPY.retrying}
+                        {m.syncError && <span className="sr-only">{m.syncError}</span>}
                       </span>
                     )}
                     <select
