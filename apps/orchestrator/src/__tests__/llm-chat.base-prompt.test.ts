@@ -185,6 +185,11 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     // legacy one-liner — every surface shares this block.
     expect(sys.content).toContain("You are Droplet");
     expect(sys.content).toContain("What the box does");
+    // Business-voice rollout (2026-07-23 spec): the identity is business-
+    // framed on every box; the household voice is gone.
+    expect(sys.content).toContain("for this business");
+    expect(sys.content).not.toContain("household");
+    expect(sys.content).not.toContain("housemate");
     // Identity leads; tool guidance follows it.
     const sysText = typeof sys.content === "string" ? sys.content : "";
     expect(sysText.indexOf("You are Droplet")).toBeLessThan(

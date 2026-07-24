@@ -17,9 +17,10 @@ import { createLogger } from "../lib/logger.js";
 
 const log = createLogger("identity-prompt");
 
-/** Legacy identity line — also the fail-open fallback. */
+/** Minimal identity line — the fail-open fallback when the identity file
+ *  is missing/empty/unreadable. Business-voiced (2026-07-23 spec). */
 export const FALLBACK_IDENTITY =
-  "You are the Droplet AI assistant, running locally on the user's Droplet appliance.";
+  "You are Droplet, the AI assistant for this business, running locally on its appliance.";
 
 /**
  * Hard cap so a runaway edit can't blow the local model's context
