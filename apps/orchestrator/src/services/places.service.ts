@@ -181,9 +181,17 @@ function buildContext(
     const region = resolveRegion(addr);
     const country = strOrUndef(addr.country);
 
+    // A state-level result abbreviates to its own region ("California" →
+    // "CA"), which the plain equality check can't see — treat it as a
+    // duplicate of the name, not context.
+    const regionDuplicatesName =
+      region !== undefined &&
+      (region.toLowerCase() === name.toLowerCase() ||
+        US_STATE_ABBR[name.toLowerCase()] === region);
+
     const parts: string[] = [];
     if (locality && locality !== name) parts.push(locality);
-    if (region && region !== name && region !== locality) parts.push(region);
+    if (region && !regionDuplicatesName && region !== locality) parts.push(region);
     // Only fall back to the country when we have nothing else — keeps the
     // context human-scale ("City, State") rather than the full chain.
     if (parts.length === 0 && country && country !== name) parts.push(country);

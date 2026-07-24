@@ -85,6 +85,22 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: (...args: any[]) => mockDeleteKey(...args),
 }));
 
+// WARP-1511 — stub only the DB read (`readActiveChatModel`) so
+// GET /api/llm/models' `defaultModel` resolution is testable without a live
+// Postgres connection. `resolveActiveChatModel` / `localModelIdentifiers`
+// stay real so the actual fallback logic under test runs for real.
+const { readActiveChatModelMock } = vi.hoisted(() => ({
+  readActiveChatModelMock: vi.fn(),
+}));
+vi.mock("../services/active-model.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/active-model.service.js")>();
+  return {
+    ...actual,
+    readActiveChatModel: (...args: any[]) => readActiveChatModelMock(...args),
+  };
+});
+
 // Mock the cache so the model-list cache path is deterministic instead of
 // silently depending on REDIS_URL being unset. Keep every other cache export
 // (cacheDel, cacheSetNx, getRedis, withSwrCache, …) real — `createApp` mounts
@@ -138,6 +154,9 @@ describe("LLM routes", () => {
     // Default to a cache miss so /api/llm/models exercises the gateway path.
     mockCacheGet.mockResolvedValue(null);
     mockCacheSet.mockResolvedValue(undefined);
+    // WARP-1511 — default to "unset", matching the WORKSPACE_SETTING_DEFAULTS
+    // seed row (`ai.model.chat` = ""). Individual tests override.
+    readActiveChatModelMock.mockResolvedValue(null);
   });
 
   describe("GET /api/llm/models", () => {
@@ -270,6 +289,78 @@ describe("LLM routes", () => {
         expect.objectContaining({ models: expect.any(Array) }),
         expect.any(Number)
       );
+    });
+  });
+
+  describe("GET /api/llm/models — defaultModel resolution (WARP-1511)", () => {
+    it("resolves a blank stored value to the sole installed local model", async () => {
+      readActiveChatModelMock.mockResolvedValue(null);
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: null },
+        ],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBe("gpt-oss:20b");
+    });
+
+    it("resolves a stale stored tag (since removed) to the first installed model", async () => {
+      readActiveChatModelMock.mockResolvedValue("gemma4:26b");
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: null },
+          { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: null },
+        ],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBe("gpt-oss:20b");
+    });
+
+    it("leaves a valid stored value unchanged", async () => {
+      readActiveChatModelMock.mockResolvedValue("llama3:8b");
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "llama3:8b", provider: "ollama", name: "llama3:8b", context_window: null },
+        ],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBe("llama3:8b");
+    });
+
+    it("passes a previously-valid stored value through unresolved when the gateway is unreachable — never nulls it out", async () => {
+      readActiveChatModelMock.mockResolvedValue("gpt-oss:20b");
+      mockListModels.mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled"),
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBe(true);
+      expect(res.body.defaultModel).toBe("gpt-oss:20b");
+    });
+
+    it("passes a previously-valid stored value through unresolved when the gateway's ollama provider is degraded", async () => {
+      readActiveChatModelMock.mockResolvedValue("gpt-oss:20b");
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "gpt-4o", provider: "openai", name: "GPT-4o", context_window: 128000 },
+        ],
+        degraded_providers: ["ollama"],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.degraded).toBe(true);
+      expect(res.body.defaultModel).toBe("gpt-oss:20b");
+    });
+
+    it("stays honestly null when nothing is installed", async () => {
+      readActiveChatModelMock.mockResolvedValue(null);
+      mockListModels.mockResolvedValueOnce({ models: [] });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBeNull();
     });
   });
 

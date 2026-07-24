@@ -17,6 +17,21 @@
  * On error we go back to the scan step with the error banner above
  * the viewport, preserving any manually-entered code so the customer
  * can correct a typo without re-typing.
+ *
+ * Design-token scope (WARP-1504): this page renders `.card` / `.btn` and
+ * reads `var(--text)`, `var(--text-muted)`, `var(--brand)`, etc. throughout
+ * (itself and `MatterQrScanner`), but those are only DEFINED inside the
+ * `.droplet-shell` scope (components/shell/indigo-tokens.css +
+ * droplet-shell.css) — every sibling dashboard page gets that scope for
+ * free via `ShellPage` (see /devices). This page never did, so every one of
+ * those `var()` references resolved to nothing; for the inherited `color`
+ * property that computes to the ambient body text color, which is why the
+ * pairing-code placeholder painted at full contrast instead of the dimmed
+ * `--text-muted` tone — it looked like a real entered code. Import the
+ * token stylesheets and wrap the page in `.droplet-shell` (without pulling
+ * in `ShellPage`'s top bar, which this focused sub-page intentionally
+ * doesn't have — see WARP-1411) to restore the scope the component already
+ * assumed was active.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -29,6 +44,8 @@ import { translateError } from "@/lib/friendly-errors";
 import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
 import { commissioningPhaseCopy } from "./commissioning-copy";
 import type { MatterCapabilities } from "@/lib/types";
+import "@/components/shell/indigo-tokens.css";
+import "@/components/shell/droplet-shell.css";
 
 // WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
 // are ~200 KB minified each and not tree-shakeable (the decoder pulls a
@@ -121,7 +138,7 @@ export default function AddMatterDevicePage() {
   }, []);
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-8">
+    <div className="droplet-shell max-w-2xl mx-auto px-6 py-8">
       {/* Header w/ back link to /devices. WARP-1411: one line of lead copy,
           not three stacked paragraphs — the network detail moved under the
           card, where it's still findable but no longer costs above-the-fold

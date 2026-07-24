@@ -726,13 +726,23 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // NOT part of the cached object — so a PATCH /api/models/active takes
       // effect on the next poll without a cache-invalidation dance. A
       // settings-read hiccup degrades to `defaultModel: null`, never an error.
+      //
+      // WARP-1511: `degraded` (the models list itself is unreachable or its
+      // ollama listing is known-partial — the three call sites below pass it
+      // explicitly) means `resp.models` can't be trusted as the complete
+      // installed set, so the resolver gets `null` instead and passes the
+      // stored value through unresolved rather than nulling it out — or
+      // fabricating a fallback — against an incomplete list. `cached` is
+      // never a degraded snapshot (only a healthy response gets cached
+      // below), so its call keeps the default (not degraded).
       const stampDefault = async (
         resp: ModelsResponse,
+        degraded = false,
       ): Promise<ModelsResponse> => {
         try {
           const active = resolveActiveChatModel(
             await readActiveChatModel(prisma),
-            localModelIdentifiers(resp.models),
+            degraded ? null : localModelIdentifiers(resp.models),
           );
           return { ...resp, defaultModel: active };
         } catch {
@@ -769,7 +779,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // "can't reach the AI service", not "no model pulled yet".
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
         const empty: ModelsResponse = { models: [], degraded: true };
-        res.json(await stampDefault(empty));
+        res.json(await stampDefault(empty, true));
         return;
       }
       // WARP-1284: the gateway answered, but reported that its LOCAL Ollama
@@ -785,7 +795,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,
         );
-        res.json(await stampDefault({ ...models, degraded: true }));
+        res.json(await stampDefault({ ...models, degraded: true }, true));
         return;
       }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
