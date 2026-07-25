@@ -281,10 +281,12 @@ function buildWorld(departmentsSeed: DeptRow[], membershipsSeed: MembershipRow[]
         const row = userRows.get(id);
         return row ? { ...row } : null;
       }),
-      // WARP-1531 (RBAC v2 T7): the usage-policy sweep's stateless role
-      // pass scans users whose AccessRole carries a storage default. No
-      // fixture in this suite assigns roles — empty keeps it a no-op.
-      findMany: vi.fn().mockResolvedValue([]),
+      // One always-empty findMany serves BOTH same-tick sweeps here
+      // (rebase union): the WARP-1531 role-default pass (no fixture in
+      // this suite assigns AccessRoles) and the WARP-1526 droplet-admins
+      // membership sweep (no fixture seeds operator-tier users) — both
+      // stay no-ops for every pre-existing spec.
+      findMany: vi.fn(async () => []),
     },
     userUsagePolicy: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -444,13 +446,20 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     expect(prisma.memRows.get("mem-1")!.syncState).toBe("synced");
   });
 
-  it("never calls ncListGroupMembers for a HOUSEHOLD department (D-5 deferred)", async () => {
+  it("never calls ncListGroupMembers for a HOUSEHOLD department's groups (D-5 deferred)", async () => {
     const d = dept({ id: "hh-1", kind: "HOUSEHOLD", state: "active", ncGroupfolderId: 1 });
     const prisma = buildWorld([d]);
 
     await reconcileDepartments(prisma as any);
 
-    expect(ncListGroupMembersMock).not.toHaveBeenCalled();
+    // WARP-1526 note: the tick now ALWAYS reads the box-wide
+    // `droplet-admins` group once (the tier-vs-group drift sweep) — that
+    // call is unrelated to household rights convergence, so the D-5 pin
+    // narrows to "no HOUSEHOLD/department group is ever read": the only
+    // membership read on this tick is the admin-group one.
+    for (const call of ncListGroupMembersMock.mock.calls) {
+      expect(call[1]).toBe("droplet-admins");
+    }
   });
 });
 

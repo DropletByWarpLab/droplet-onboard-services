@@ -93,6 +93,10 @@ interface FakeMembership {
 interface FakeUser {
   id: string;
   nextcloudUsername: string | null;
+  // WARP-1526: the admin-group sweep derives its expectation from the role
+  // tier. Optional so every pre-existing fixture (which never cared) stays
+  // untouched — a missing role is simply not admin-tier.
+  role?: string;
 }
 
 function dept(overrides: Partial<FakeDepartment>): FakeDepartment {
@@ -255,11 +259,35 @@ function buildPrisma(
           return row ? { ...row } : null;
         },
       ),
-      // WARP-1531 (RBAC v2 T7): the usage-policy sweep's stateless role
-      // pass scans users whose AccessRole carries a storage default. No
-      // fixture in this suite assigns roles, so an empty list is the
-      // correct default — the pass is a no-op here.
-      findMany: vi.fn().mockResolvedValue([]),
+      // One findMany, two callers on the same tick (rebase union):
+      //  - WARP-1531 (T7): the usage-policy sweep's stateless role pass
+      //    queries `{ accessRole: { storageQuotaBytes: { not: null } } }`.
+      //    No fixture in this suite assigns AccessRoles, so an empty list
+      //    is the correct answer — that pass stays a no-op here.
+      //  - WARP-1526: the admin-group sweep lists operator-tier users with
+      //    a Nextcloud mapping ({ role: { in }, nextcloudUsername:
+      //    { not: null } }) — served by filtering the seeded rows.
+      findMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where?: {
+            role?: { in?: string[] };
+            nextcloudUsername?: { not: null };
+            accessRole?: unknown;
+          };
+        } = {}) => {
+          if (where?.role?.in === undefined) return [];
+          return [...userRows.values()].filter((u) => {
+            const roleOk =
+              u.role !== undefined && where.role!.in!.includes(u.role);
+            const ncOk =
+              where?.nextcloudUsername === undefined ||
+              u.nextcloudUsername !== null;
+            return roleOk && ncOk;
+          });
+        },
+      ),
     },
     // WARP-1271 (T19a): reconcileDepartments() also sweeps UserUsagePolicy
     // rows (usage-policy-reconciler.service.ts) on the same tick. No fixture
@@ -667,5 +695,101 @@ describe("reconcileDepartments — intent-preserving removal retry (WARP-1257 CR
     const row = prisma.memRows.get(m.id)!;
     expect(row.syncState).toBe("remove_failed");
     expect(prisma.memRows.has(m.id)).toBe(true);
+  });
+});
+
+/**
+ * WARP-1526 (rail 6) — stateless tier-vs-group drift correction for the
+ * box-wide `droplet-admins` NC group.
+ *
+ * The role-change post-effects push the group membership best-effort; a
+ * Nextcloud outage used to leave user<->group drift with NO reconciler
+ * sweep of its own (the people.ts comment said as much). This sweep closes
+ * that: the expectation is derived from `User.role` alone (owner∪admin
+ * with a Nextcloud mapping — no new columns, Prisma is truth), compared
+ * against `ncListGroupMembers(droplet-admins)`, and corrected both ways.
+ * The NC system admin account is never removed (it isn't in the local
+ * directory but owns the provisioning credential).
+ */
+describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
+  it("re-adds a missing operator (role is truth) and reports adminGroupAdded", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const fam: FakeUser = { id: "u-fam", nextcloudUsername: "fam", role: "family" };
+    const prisma = buildPrisma([], [], [sam, fam]);
+    ncListGroupMembersMock.mockResolvedValue([]); // NC lost the membership
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).toHaveBeenCalledTimes(1);
+    expect(ncAddUserToGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "sam",
+      DROPLET_ADMINS_GROUP,
+    );
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+    expect(result.adminGroupAdded).toBe(1);
+    expect(result.adminGroupRemoved).toBe(0);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        what: "Restored drifted admin-group member (role tier is truth)",
+      }),
+    );
+  });
+
+  it("removes a drifted non-operator member but never the NC system admin", async () => {
+    const owner: FakeUser = { id: "u-own", nextcloudUsername: "stefan", role: "owner" };
+    const prisma = buildPrisma([], [], [owner]);
+    ncListGroupMembersMock.mockResolvedValue([
+      { id: "stefan" }, // expected (owner)
+      { id: "eve" },    // drifted — no operator row backs her
+      { id: "admin" },  // NC system admin — excluded from removal
+    ]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledTimes(1);
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "eve",
+      DROPLET_ADMINS_GROUP,
+    );
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(result.adminGroupRemoved).toBe(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        what: "Removed drifted admin-group member (role tier is truth)",
+      }),
+    );
+  });
+
+  it("a converged group is a silent no-op", async () => {
+    const owner: FakeUser = { id: "u-own", nextcloudUsername: "stefan", role: "owner" };
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const prisma = buildPrisma([], [], [owner, sam]);
+    ncListGroupMembersMock.mockResolvedValue([
+      { id: "stefan" },
+      { id: "sam" },
+      { id: "admin" },
+    ]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupRemoved).toBe(0);
+  });
+
+  it("an NC failure inside the sweep is contained — the tick still completes with zero counts", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const prisma = buildPrisma([], [], [sam]);
+    ncListGroupMembersMock.mockRejectedValue(new Error("nc OCS 503"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupRemoved).toBe(0);
   });
 });
