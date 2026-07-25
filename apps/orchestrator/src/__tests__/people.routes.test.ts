@@ -621,6 +621,16 @@ describe("People surface never serializes secret columns — WARP-1539", () => {
       run: (app) =>
         request(app).patch("/api/people/u1/role").send({ role: "admin" }),
     },
+    {
+      // Easy one to miss: `res.json({` and `user: existing` sit on
+      // separate lines here, so a single-line grep for the leak does not
+      // find this route. Pinned so it cannot regress quietly.
+      name: "PATCH /api/people/:id/scope",
+      run: (app) =>
+        request(app)
+          .patch("/api/people/u1/scope")
+          .send({ scopes: ["team"] }),
+    },
   ];
 
   for (const c of leakCases) {

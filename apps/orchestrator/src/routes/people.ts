@@ -621,8 +621,11 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: returned to the caller at the end of this
+        // handler. Only `id` and `username` are read off it (the audit row).
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
