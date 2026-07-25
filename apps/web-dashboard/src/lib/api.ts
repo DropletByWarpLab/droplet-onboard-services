@@ -5547,6 +5547,41 @@ export async function applyVoiceCalibration(
   return res.json();
 }
 
+/*
+ * WARP-1520 — the box's mic capture is EXCLUSIVE hardware. voice-io
+ * guards every capture window (`/audio/measure`, `/audio/echo-check`,
+ * `/audio/test-record`, and the enrollment captures via
+ * `_capture_speaker_pcm`) with one non-blocking lock and answers an
+ * instant 409 to any overlap. Fired freely from here, a discarded-but-
+ * still-recording window (Back / Try again / reopening the wizard while
+ * a 5–6 s measure was mid-flight server-side) turned EVERY follow-up
+ * capture into a 409 that rendered as "the microphone didn't respond"
+ * on a healthy mic — and each retry collided again.
+ *
+ * So every api function that lands on a capture-lock endpoint queues
+ * through this module-level gate: a new capture waits for the previous
+ * one to settle instead of colliding. Worst-case queue wait is bounded
+ * (~30 s: the orchestrator proxy caps each capture at 45 s, and
+ * `authFetch` imposes no client timeout on the initial request, so a
+ * queued wait can't trip one). The chain must survive rejections — a
+ * failed capture releases the gate but still rejects to ITS caller.
+ * Status/calibration-mode calls are deliberately NOT gated: they don't
+ * touch the capture device and must never queue behind a measure.
+ */
+let captureChain: Promise<void> = Promise.resolve();
+
+async function exclusiveCapture<T>(run: () => Promise<T>): Promise<T> {
+  const prev = captureChain;
+  let release!: () => void;
+  captureChain = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    return await run();
+  } finally {
+    release();
+  }
+}
+
 /**
  * One wizard capture — the box records `seconds` of mic audio and
  * reports RMS + peak in dBFS. Blocks server-side for the capture
@@ -5556,26 +5591,30 @@ export async function measureVoiceLevel(
   kind: "noise_floor" | "speech_peak",
   seconds?: number,
 ): Promise<VoiceMeasureResult> {
-  const body: { kind: string; seconds?: number } = { kind };
-  if (seconds !== undefined) body.seconds = seconds;
-  const res = await authFetch(`${BASE}/api/voice/measure`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  return exclusiveCapture(async () => {
+    const body: { kind: string; seconds?: number } = { kind };
+    if (seconds !== undefined) body.seconds = seconds;
+    const res = await authFetch(`${BASE}/api/voice/measure`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) await throwVoiceError(res, "Measurement failed");
+    return res.json();
   });
-  if (!res.ok) await throwVoiceError(res, "Measurement failed");
-  return res.json();
 }
 
 /** Fully automatic speaker→mic loop check (wizard step 4). */
 export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
-  const res = await authFetch(`${BASE}/api/voice/echo-check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+  return exclusiveCapture(async () => {
+    const res = await authFetch(`${BASE}/api/voice/echo-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) await throwVoiceError(res, "Echo check failed");
+    return res.json();
   });
-  if (!res.ok) await throwVoiceError(res, "Echo check failed");
-  return res.json();
 }
 
 // --- WARP-1057: mic-processor (XVF3800 DSP) restart ---
@@ -5660,28 +5699,35 @@ export async function captureVoiceEnrollmentLine(
   sessionId: string,
   replaceIndex?: number,
 ): Promise<VoiceEnrollCaptureResult> {
-  const body: { sessionId: string; replaceIndex?: number } = { sessionId };
-  if (replaceIndex !== undefined) body.replaceIndex = replaceIndex;
-  const res = await authFetch(`${BASE}/api/voice/enroll/capture`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  // WARP-1520 — lands on voice-io's `_capture_speaker_pcm`, which takes
+  // the same exclusive capture lock as the wizard measures.
+  return exclusiveCapture(async () => {
+    const body: { sessionId: string; replaceIndex?: number } = { sessionId };
+    if (replaceIndex !== undefined) body.replaceIndex = replaceIndex;
+    const res = await authFetch(`${BASE}/api/voice/enroll/capture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) await throwVoiceError(res, "Voice capture failed");
+    return res.json();
   });
-  if (!res.ok) await throwVoiceError(res, "Voice capture failed");
-  return res.json();
 }
 
 /** §5 step 3 — "One more time, no script." Captures + matches on-box. */
 export async function verifyVoiceEnrollment(
   sessionId: string,
 ): Promise<VoiceEnrollVerifyResult> {
-  const res = await authFetch(`${BASE}/api/voice/enroll/verify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
+  // WARP-1520 — also a `_capture_speaker_pcm` capture; see exclusiveCapture.
+  return exclusiveCapture(async () => {
+    const res = await authFetch(`${BASE}/api/voice/enroll/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+    if (!res.ok) await throwVoiceError(res, "Voice check failed");
+    return res.json();
   });
-  if (!res.ok) await throwVoiceError(res, "Voice check failed");
-  return res.json();
 }
 
 /** The ONE write of Flow B ("Save [Name]'s voice"). */

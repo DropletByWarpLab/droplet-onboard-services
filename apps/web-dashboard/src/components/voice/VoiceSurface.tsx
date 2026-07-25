@@ -52,6 +52,7 @@ import {
   deriveHealthChecks,
   deriveVoiceSurfaceState,
   formatClock,
+  isVoiceBusyError,
   NOISE_FLOOR_PASS_DBFS,
   relTime,
   SPEECH_PEAK_PASS_DBFS,
@@ -101,6 +102,14 @@ const RESTART_FAILED_TOAST =
   "The processor didn't come back after the restart.";
 const RESTART_REQUEST_FAILED_TOAST =
   "Couldn't restart the processor — the voice service didn't respond.";
+/* WARP-1520 — voice-io's exclusive capture lock answered 409: another
+   listening window is running (with lib/api's capture gate serializing
+   this tab, that means another session or API caller). Busy is "wait a
+   beat", never the dead-mic "didn't respond" toast. */
+const BUSY_CHECK_TOAST =
+  "The microphone is busy with another check — try again in a few seconds.";
+const MEASURE_FAILED_TOAST =
+  "Couldn't measure — the microphone didn't respond.";
 
 export interface VoiceSurfaceProps {
   status: VoiceStatusInfo | null;
@@ -257,8 +266,11 @@ export function VoiceSurface({
             : `A constant noise source is nearby — about ${r.rms_dbfs} dB at the mic.`,
           "info",
         );
-      } catch {
-        toast("Couldn't measure — the microphone didn't respond.", "error");
+      } catch (err) {
+        toast(
+          isVoiceBusyError(err) ? BUSY_CHECK_TOAST : MEASURE_FAILED_TOAST,
+          "error",
+        );
       }
       return;
     }
@@ -273,8 +285,11 @@ export function VoiceSurface({
             : `Speech came through — faint at ${r.peak_dbfs} dB. Try from a bit closer.`,
           "info",
         );
-      } catch {
-        toast("Couldn't measure — the microphone didn't respond.", "error");
+      } catch (err) {
+        toast(
+          isVoiceBusyError(err) ? BUSY_CHECK_TOAST : MEASURE_FAILED_TOAST,
+          "error",
+        );
       }
       return;
     }
