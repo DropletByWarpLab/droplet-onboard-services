@@ -83,6 +83,12 @@ export interface ReconcileResult {
   usagePoliciesSwept: number;
   usagePoliciesSynced: number;
   usagePoliciesFailed: number;
+  // WARP-1531 (RBAC v2 T7): stateless AccessRole storage-default pushdown
+  // for users without a person-level quota, same tick, no sync state —
+  // see usage-policy-reconciler.service.ts pass 2.
+  roleDefaultQuotasSwept: number;
+  roleDefaultQuotasSynced: number;
+  roleDefaultQuotasFailed: number;
 }
 
 /**
@@ -529,6 +535,9 @@ export async function reconcileDepartments(
     usagePoliciesSwept: usageResult.usagePoliciesSwept,
     usagePoliciesSynced: usageResult.usagePoliciesSynced,
     usagePoliciesFailed: usageResult.usagePoliciesFailed,
+    roleDefaultQuotasSwept: usageResult.roleDefaultQuotasSwept,
+    roleDefaultQuotasSynced: usageResult.roleDefaultQuotasSynced,
+    roleDefaultQuotasFailed: usageResult.roleDefaultQuotasFailed,
   };
 
   logger.debug(result, "department-reconciler tick complete");

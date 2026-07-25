@@ -69,6 +69,7 @@ import {
 } from "../services/file-registry.service.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
+import { getEffectiveUsage } from "../services/effective-usage.service.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -78,13 +79,17 @@ const CACHE_TTL = 10;
 const MEMORY_STORAGE = multer.memoryStorage();
 
 /**
- * WARP-1271 (T19a) — per-user upload cap. `UserUsagePolicy.maxUploadSizeMb`
- * (when set) tightens `config.MAX_UPLOAD_SIZE_MB` for the authenticated
- * caller; it can only shrink the ceiling, never raise it (min(), never a
- * bypass). `Infinity` means "no policy override" — min() then resolves to
- * the config default. One indexed `findUnique` per request (no cross-
- * request cache — the brief's "cache per-request only" is naturally true
- * here since this runs once per upload call, not per file).
+ * WARP-1271 (T19a) — per-user upload cap. WARP-1531 (RBAC v2 T7): the cap
+ * is now the EFFECTIVE value — the person's `UserUsagePolicy.maxUploadSizeMb`
+ * ?? their `AccessRole` default ?? config, resolved field-by-field by
+ * effective-usage.service.ts. Whatever the source, it tightens
+ * `config.MAX_UPLOAD_SIZE_MB` for the authenticated caller and can only
+ * shrink the ceiling, never raise it (min(), never a bypass). With zero
+ * AccessRole rows (null accessRoleId — production today) this resolves
+ * exactly as pre-1531: person override or config default. Two indexed
+ * point reads per request (no cross-request cache — the brief's "cache
+ * per-request only" is naturally true here since this runs once per
+ * upload call, not per file).
  */
 async function resolveUploadLimitMb(
   prisma: PrismaClient,
@@ -92,13 +97,10 @@ async function resolveUploadLimitMb(
 ): Promise<number> {
   if (!userId) return config.MAX_UPLOAD_SIZE_MB;
   try {
-    const policy = await prisma.userUsagePolicy.findUnique({
-      where: { userId },
-      select: { maxUploadSizeMb: true },
-    });
-    const override = policy?.maxUploadSizeMb;
-    if (override != null && override > 0) {
-      return Math.min(config.MAX_UPLOAD_SIZE_MB, override);
+    const effective = await getEffectiveUsage(prisma, userId);
+    const capMb = effective.maxUploadSizeMb.value;
+    if (capMb != null && capMb > 0) {
+      return Math.min(config.MAX_UPLOAD_SIZE_MB, capMb);
     }
   } catch (err) {
     logger.warn({ err, userId }, "upload: usage-policy lookup failed; using config default");

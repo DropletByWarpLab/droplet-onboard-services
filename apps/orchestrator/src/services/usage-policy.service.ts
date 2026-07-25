@@ -23,6 +23,7 @@ import type { PrismaClient, UserUsagePolicy } from "@prisma/client";
 import { ncUpdateUser, ncGetUserQuotaAdmin } from "./nextcloud.client.js";
 import { adminBasicToken } from "./department-provisioner.service.js";
 import { recordActivity } from "./activity.singleton.js";
+import { resolveEffectiveUsage } from "./effective-usage.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("usage-policy");
@@ -35,9 +36,14 @@ export class TargetUserNotFoundError extends Error {
 }
 
 export interface UsagePolicyInput {
-  /** `undefined` = leave unchanged; `null` = clear (no limit). */
+  /**
+   * `undefined` = leave unchanged; `null` = clear the person field.
+   * WARP-1531: a cleared field falls through to the user's AccessRole
+   * storage default (effective-usage.service.ts); only with no role
+   * default does "clear" still mean "no limit" (OCS "none").
+   */
   storageQuotaBytes?: bigint | null;
-  /** `undefined` = leave unchanged; `null` = clear (use config default). */
+  /** `undefined` = leave unchanged; `null` = clear (role default ?? config default). */
   maxUploadSizeMb?: number | null;
 }
 
@@ -115,9 +121,18 @@ export async function upsertUsagePolicy(
 ): Promise<{ policy: UserUsagePolicy; pushed: boolean }> {
   const user = await prisma.user.findUnique({
     where: { id: targetUserId },
-    select: { id: true, username: true, nextcloudUsername: true },
+    // WARP-1531: the role's storage default participates in every quota
+    // push below — the pushed value is the EFFECTIVE quota, not the raw
+    // person field.
+    select: {
+      id: true,
+      username: true,
+      nextcloudUsername: true,
+      accessRole: { select: { storageQuotaBytes: true } },
+    },
   });
   if (!user) throw new TargetUserNotFoundError(targetUserId);
+  const roleDefaults = user.accessRole ?? null;
 
   const quotaChanged = input.storageQuotaBytes !== undefined;
 
@@ -130,8 +145,12 @@ export async function upsertUsagePolicy(
   // real Nextcloud account (WARP-1271 review finding). Instead we seed the
   // row with the system/global default the account already carries (its
   // current NC quota) and mark it `synced`, so the reconciler leaves NC
-  // untouched. This snapshot is a CREATE-ONLY default: the `update` branch
-  // below keeps strict "only the provided fields change" semantics, so a
+  // untouched. WARP-1531: when the user's AccessRole carries a storage
+  // default, the snapshot would PIN them to a fake person value and
+  // silently stop them following their role — so the field stays null
+  // (`synced`); the reconciler's stateless role pass owns convergence.
+  // This is a CREATE-ONLY default either way: the `update` branch below
+  // keeps strict "only the provided fields change" semantics, so a
   // partial PUT on an existing row never re-reads or overwrites the quota.
   let createStorageQuotaBytes: bigint | null = input.storageQuotaBytes ?? null;
   let createQuotaSyncState: "pending" | "synced" = "pending";
@@ -141,7 +160,10 @@ export async function upsertUsagePolicy(
       select: { userId: true },
     });
     if (!existing) {
-      createStorageQuotaBytes = await snapshotCurrentQuota(user.nextcloudUsername);
+      createStorageQuotaBytes =
+        roleDefaults?.storageQuotaBytes != null
+          ? null
+          : await snapshotCurrentQuota(user.nextcloudUsername);
       createQuotaSyncState = "synced";
     }
   }
@@ -193,7 +215,15 @@ export async function upsertUsagePolicy(
     return { policy, pushed: false };
   }
 
-  const pushed = await pushQuota(prisma, targetUserId, user.nextcloudUsername, policy.storageQuotaBytes);
+  // WARP-1531: push the EFFECTIVE quota — a cleared person field falls
+  // through to the role's storage default; only when neither is set does
+  // the legacy "none" (explicit unlimited) go out. Zero AccessRole rows
+  // keeps this byte-identical to the pre-1531 push.
+  const effectiveQuota = resolveEffectiveUsage(
+    { storageQuotaBytes: policy.storageQuotaBytes },
+    roleDefaults,
+  ).storageQuotaBytes.value;
+  const pushed = await pushQuota(prisma, targetUserId, user.nextcloudUsername, effectiveQuota);
   // pushQuota (success OR failure) always updates quotaSyncState on the row
   // — re-fetch either way so the response reflects the ACTUAL persisted
   // state, not the pre-pushdown snapshot captured by the upsert above.

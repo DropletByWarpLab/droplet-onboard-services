@@ -255,6 +255,11 @@ function buildPrisma(
           return row ? { ...row } : null;
         },
       ),
+      // WARP-1531 (RBAC v2 T7): the usage-policy sweep's stateless role
+      // pass scans users whose AccessRole carries a storage default. No
+      // fixture in this suite assigns roles, so an empty list is the
+      // correct default — the pass is a no-op here.
+      findMany: vi.fn().mockResolvedValue([]),
     },
     // WARP-1271 (T19a): reconcileDepartments() also sweeps UserUsagePolicy
     // rows (usage-policy-reconciler.service.ts) on the same tick. No fixture

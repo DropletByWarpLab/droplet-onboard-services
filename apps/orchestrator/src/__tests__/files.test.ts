@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 
@@ -452,6 +452,95 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           .post("/api/files/upload?path=/")
           .attach("files", Buffer.alloc(1024, 1), "small.bin");
         expect(res.status).toBe(200);
+      });
+
+      // WARP-1531 (RBAC v2 T7) — AccessRole usage defaults feed the cap:
+      // person field → role default → config, field-by-field. The role read
+      // rides prisma.user.findUnique (nested accessRole select); the stub is
+      // keyed on that select shape so the BUG-11 password-change gate (which
+      // also calls user.findUnique each request) keeps seeing its null.
+      describe("role-level defaults (WARP-1531)", () => {
+        const stubRole = (
+          role: {
+            storageQuotaBytes?: bigint | null;
+            maxUploadSizeMb?: number | null;
+            llmDailyMessageCap?: number | null;
+          } | null,
+        ) => {
+          (prismaMock.user.findUnique as any).mockImplementation(
+            async (args: any) =>
+              args?.select?.accessRole ? { accessRole: role } : null,
+          );
+        };
+
+        afterEach(() => {
+          // Restore the setup.ts default (no directory row → gate fails open).
+          (prismaMock.user.findUnique as any).mockReset();
+          (prismaMock.user.findUnique as any).mockResolvedValue(null);
+        });
+
+        it("a role default caps the upload when the person has no policy row", async () => {
+          stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 1, llmDailyMessageCap: null });
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
+          expect(res.status).toBe(413);
+          expect(res.body.error).toMatch(/1MB/);
+          expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+        });
+
+        it("a person row whose upload field is UNSET still inherits the role cap (field-by-field)", async () => {
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+            storageQuotaBytes: 5_000_000n, // storage set…
+            maxUploadSizeMb: null, // …upload cap unset → role's 1 MB applies
+          });
+          stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 1, llmDailyMessageCap: null });
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
+          expect(res.status).toBe(413);
+          expect(res.body.error).toMatch(/1MB/);
+        });
+
+        it("the person override beats a looser role default", async () => {
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+            maxUploadSizeMb: 1,
+          });
+          stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 500, llmDailyMessageCap: null });
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.bin");
+          expect(res.status).toBe(413);
+          expect(res.body.error).toMatch(/1MB/);
+        });
+
+        it("the person override beats a TIGHTER role default (override semantics, not min())", async () => {
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+            maxUploadSizeMb: 5,
+          });
+          stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 1, llmDailyMessageCap: null });
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "under-person-cap.bin");
+          expect(res.status).toBe(200);
+        });
+
+        it("a role default looser than config never widens the ceiling (min() wins)", async () => {
+          stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 500, llmDailyMessageCap: null });
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(11 * 1024 * 1024, 1), "over-config.bin");
+          expect(res.status).toBe(413);
+          expect(res.body.error).toMatch(/10MB/);
+        });
+
+        it("zero AccessRole rows (accessRoleId null) behaves exactly like today: config default", async () => {
+          stubRole(null); // user row exists, accessRole relation null — production today
+          const res = await request(app)
+            .post("/api/files/upload?path=/")
+            .attach("files", Buffer.alloc(1024, 1), "small.bin");
+          expect(res.status).toBe(200);
+        });
       });
     });
   });
