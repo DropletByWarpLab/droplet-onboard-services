@@ -114,7 +114,9 @@ function mkUsagePrisma(opts: {
     displayName: string;
     username: string;
     nextcloudUsername: string | null;
-    usagePolicy?: { maxUploadSizeMb: number | null } | null;
+    usagePolicy?: { storageQuotaBytes?: bigint | null; maxUploadSizeMb: number | null } | null;
+    // WARP-1531 (RBAC v2 T7): AccessRole usage defaults.
+    accessRole?: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
   }>;
   departments?: Array<{ id: string; name: string; kind: string; ncGroupfolderId: number | null; quotaBytes: bigint | null }>;
 }) {
@@ -172,9 +174,13 @@ describe("GET /api/admin/files/usage", () => {
         userId: "u1",
         displayName: "Alice",
         quota: "5000000000",
+        // WARP-1531: no person row, no role → box default; quota stays the
+        // live NC value (today's behavior) and the sources say so honestly.
+        quotaSource: "default",
         used: "4000000000",
         free: "1000000000",
         largestUploadMb: null,
+        largestUploadMbSource: "default",
         lastActive: null,
       },
     ]);
@@ -204,6 +210,7 @@ describe("GET /api/admin/files/usage", () => {
     const res = await request(app).get("/api/admin/files/usage");
     expect(res.status).toBe(200);
     expect(res.body.users[0].largestUploadMb).toBe(2048);
+    expect(res.body.users[0].largestUploadMbSource).toBe("person");
   });
 
   it("tolerates a per-user quota-read failure with an honest '—', never dropping the row or 500ing", async () => {
@@ -219,7 +226,17 @@ describe("GET /api/admin/files/usage", () => {
     const res = await request(app).get("/api/admin/files/usage");
     expect(res.status).toBe(200);
     expect(res.body.users).toEqual([
-      { userId: "u1", displayName: "Alice", quota: "—", used: "—", free: "—", largestUploadMb: null, lastActive: null },
+      {
+        userId: "u1",
+        displayName: "Alice",
+        quota: "—",
+        quotaSource: "default",
+        used: "—",
+        free: "—",
+        largestUploadMb: null,
+        largestUploadMbSource: "default",
+        lastActive: null,
+      },
     ]);
   });
 
@@ -235,9 +252,114 @@ describe("GET /api/admin/files/usage", () => {
     const res = await request(app).get("/api/admin/files/usage");
     expect(res.status).toBe(200);
     expect(res.body.users).toEqual([
-      { userId: "u2", displayName: "NoNc", quota: null, used: "—", free: null, largestUploadMb: null, lastActive: null },
+      {
+        userId: "u2",
+        displayName: "NoNc",
+        quota: null,
+        quotaSource: "default",
+        used: "—",
+        free: null,
+        largestUploadMb: null,
+        largestUploadMbSource: "default",
+        lastActive: null,
+      },
     ]);
     expect(ncGetUserQuotaAdminMock).not.toHaveBeenCalled();
+  });
+
+  // ── WARP-1531 (RBAC v2 T7): effective quota + provenance in the roster ──
+
+  it("a role-default user reports the role's quota as the EFFECTIVE value, BigInt string-encoded", async () => {
+    // NC still reports an older/different live quota — the roster's quota
+    // column is the resolved desired state once a role manages it.
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 4_000_000_000,
+      free: 1_000_000_000,
+      total: 5_000_000_000,
+      quota: 5_000_000_000,
+    });
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          {
+            id: "u1",
+            displayName: "Alice",
+            username: "alice",
+            nextcloudUsername: "alice",
+            accessRole: { storageQuotaBytes: 10_737_418_240n, maxUploadSizeMb: 100 },
+          },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users[0]).toEqual({
+      userId: "u1",
+      displayName: "Alice",
+      quota: "10737418240",
+      quotaSource: "role",
+      used: "4000000000",
+      free: "1000000000",
+      largestUploadMb: 100,
+      largestUploadMbSource: "role",
+      lastActive: null,
+    });
+  });
+
+  it("a person policy beats the role default, field-by-field", async () => {
+    ncGetUserQuotaAdminMock.mockResolvedValue({
+      used: 1_000,
+      free: 2_000,
+      total: 3_000,
+      quota: 3_000,
+    });
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          {
+            id: "u1",
+            displayName: "Alice",
+            username: "alice",
+            nextcloudUsername: "alice",
+            // Person sets ONLY storage — the upload cap still inherits the role.
+            usagePolicy: { storageQuotaBytes: 1_073_741_824n, maxUploadSizeMb: null },
+            accessRole: { storageQuotaBytes: 10_737_418_240n, maxUploadSizeMb: 100 },
+          },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users[0].quota).toBe("1073741824");
+    expect(res.body.users[0].quotaSource).toBe("person");
+    expect(res.body.users[0].largestUploadMb).toBe(100);
+    expect(res.body.users[0].largestUploadMbSource).toBe("role");
+  });
+
+  it("a role-managed quota still renders when the NC read fails (used/free stay an honest '—')", async () => {
+    ncGetUserQuotaAdminMock.mockRejectedValue(new Error("nc down"));
+    gfListFoldersMock.mockResolvedValue([]);
+    const app = mkUsageApp(
+      mkUsagePrisma({
+        users: [
+          {
+            id: "u1",
+            displayName: "Alice",
+            username: "alice",
+            nextcloudUsername: "alice",
+            accessRole: { storageQuotaBytes: 5_368_709_120n, maxUploadSizeMb: null },
+          },
+        ],
+      }),
+    );
+    const res = await request(app).get("/api/admin/files/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.users[0].quota).toBe("5368709120");
+    expect(res.body.users[0].quotaSource).toBe("role");
+    expect(res.body.users[0].used).toBe("—");
+    expect(res.body.users[0].free).toBe("—");
   });
 
   it("returns per-department rows from gfListFolders, BigInt quota string-encoded", async () => {

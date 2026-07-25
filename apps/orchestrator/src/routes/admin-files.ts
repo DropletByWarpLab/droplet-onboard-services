@@ -40,6 +40,10 @@ import {
 import { ncGetUserQuotaAdmin } from "../services/nextcloud.client.js";
 import { gfListFolders } from "../services/nextcloud-groups.client.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
+import {
+  resolveEffectiveUsage,
+  type EffectiveUsageSource,
+} from "../services/effective-usage.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("admin-files-usage-route");
@@ -117,12 +121,24 @@ const ADMIN_USAGE_CONCURRENCY = 4;
 interface AdminUsageUserRow {
   userId: string;
   displayName: string;
-  quota: string | null; // null = unlimited; "—" = read failed
+  /**
+   * WARP-1531 (RBAC v2 T7): the EFFECTIVE storage quota. When a person
+   * policy or an AccessRole default manages it (`quotaSource` ≠ "default")
+   * this is that resolved desired value, BigInt string-encoded — rendered
+   * even when the live NC read fails. Unmanaged users keep the pre-1531
+   * live-NC semantics: null = unlimited; "—" = read failed.
+   */
+  quota: string | null;
+  /** Provenance of `quota` — additive (WARP-1531). */
+  quotaSource: EffectiveUsageSource;
   used: string; // "—" on read failure
   free: string | null; // null = unlimited/unknown; "—" = read failed
-  /** WARP-1270 (T18) — the per-user upload-cap override (UserUsagePolicy.
-   *  maxUploadSizeMb); null = system default, no override set. */
+  /** WARP-1270 (T18) — the per-user upload cap; WARP-1531: now the
+   *  EFFECTIVE value (person override ?? AccessRole default); null =
+   *  system default, nothing set on either level. */
   largestUploadMb: number | null;
+  /** Provenance of `largestUploadMb` — additive (WARP-1531). */
+  largestUploadMbSource: EffectiveUsageSource;
   /**
    * WARP-1270 (T18) — always null today: Droplet has no per-user
    * last-activity timestamp (auth is stateless JWT, no login-audit table
@@ -151,25 +167,58 @@ async function fetchUserUsageRow(
     displayName: string;
     username: string;
     nextcloudUsername: string | null;
-    usagePolicy: { maxUploadSizeMb: number | null } | null;
+    usagePolicy: { storageQuotaBytes?: bigint | null; maxUploadSizeMb: number | null } | null;
+    accessRole: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
   },
 ): Promise<AdminUsageUserRow> {
   const displayName = user.displayName || user.username;
-  const largestUploadMb = user.usagePolicy?.maxUploadSizeMb ?? null;
+  // WARP-1531: person field ?? AccessRole default ?? box default, per field.
+  const effective = resolveEffectiveUsage(user.usagePolicy, user.accessRole);
+  const largestUploadMb = effective.maxUploadSizeMb.value;
+  const largestUploadMbSource = effective.maxUploadSizeMb.source;
+  const quotaSource = effective.storageQuotaBytes.source;
+  // Non-null exactly when a person policy or role default manages the quota
+  // — then it IS the roster's quota value (desired state, the same value
+  // the reconciler converges NC onto). Unmanaged (source "default") keeps
+  // the live-NC read as before.
+  const managedQuota =
+    effective.storageQuotaBytes.value !== null ? effective.storageQuotaBytes.value.toString() : null;
   if (!user.nextcloudUsername) {
-    return { userId: user.id, displayName, quota: null, used: "—", free: null, largestUploadMb, lastActive: null };
+    return {
+      userId: user.id,
+      displayName,
+      quota: managedQuota,
+      quotaSource,
+      used: "—",
+      free: null,
+      largestUploadMb,
+      largestUploadMbSource,
+      lastActive: null,
+    };
   }
   const quota = await ncGetUserQuotaAdmin(adminToken, user.nextcloudUsername).catch(() => null);
   if (!quota) {
-    return { userId: user.id, displayName, quota: "—", used: "—", free: "—", largestUploadMb, lastActive: null };
+    return {
+      userId: user.id,
+      displayName,
+      quota: managedQuota ?? "—",
+      quotaSource,
+      used: "—",
+      free: "—",
+      largestUploadMb,
+      largestUploadMbSource,
+      lastActive: null,
+    };
   }
   return {
     userId: user.id,
     displayName,
-    quota: quota.quota !== null ? String(Math.trunc(quota.quota)) : null,
+    quota: managedQuota ?? (quota.quota !== null ? String(Math.trunc(quota.quota)) : null),
+    quotaSource,
     used: String(Math.trunc(quota.used)),
     free: quota.free !== null ? String(Math.trunc(quota.free)) : null,
     largestUploadMb,
+    largestUploadMbSource,
     lastActive: null,
   };
 }
@@ -190,7 +239,9 @@ export function createAdminFilesUsageRouter(prisma: PrismaClient): Router {
             displayName: true,
             username: true,
             nextcloudUsername: true,
-            usagePolicy: { select: { maxUploadSizeMb: true } },
+            usagePolicy: { select: { storageQuotaBytes: true, maxUploadSizeMb: true } },
+            // WARP-1531: role-level usage defaults feed the effective values.
+            accessRole: { select: { storageQuotaBytes: true, maxUploadSizeMb: true } },
           },
         });
 
