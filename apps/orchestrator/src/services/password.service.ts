@@ -48,7 +48,7 @@ export const PASSWORD_HASH_PARAMS = {
   parallelism: 1,
 } as const;
 
-const ARGON2_OPTIONS: argon2.HashOptions = {
+const ARGON2_OPTIONS: argon2.Options = {
   type: argon2.argon2id,
   memoryCost: PASSWORD_HASH_PARAMS.memoryCost,
   timeCost: PASSWORD_HASH_PARAMS.timeCost,
