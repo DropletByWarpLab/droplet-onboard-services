@@ -97,6 +97,20 @@ export function roleOutranks(a: Role, b: Role): boolean {
   return ROLE_RANK[a] > ROLE_RANK[b];
 }
 
+/**
+ * Is `value` one of the canonical Role vocabulary values? Runtime guard for
+ * rank-checking role strings that arrive OUTSIDE a zod-validated body — e.g.
+ * the WARP-1523 role-UPDATE cap on PUT /auth/users/:username reads the raw
+ * body because updateUserSchema strips unknown keys. Exact lowercase match
+ * (mirrors isInviteRole's shape); never consults the prototype chain.
+ */
+export function isRole(value: unknown): value is Role {
+  return (
+    typeof value === "string" &&
+    (VALID_ROLES as readonly string[]).includes(value)
+  );
+}
+
 function getSecret(): string {
   return config.JWT_SECRET;
 }

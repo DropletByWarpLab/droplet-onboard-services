@@ -31,7 +31,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { revokeAllSessions } from "../services/session.service.js";
 import { denylistUser } from "../services/auth-denylist.service.js";
-import { ACCESS_TOKEN_TTL_SECONDS } from "../services/jwt.service.js";
+import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "../services/jwt.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -79,19 +79,12 @@ const logger = createLogger("people-route");
 // the contract.
 const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
 
-// Privilege ladder for the household roles, inlined as a TS literal — the
-// same standalone-compile discipline as ROLE_VALUES above. This branch (#381)
-// predates the shared `ROLE_RANK` / `roleOutranks` helper added to
-// jwt.service.ts by the POST /auth/invites rank-cap fix; de-duplicate against
-// jwt.service.ROLE_RANK once both land on main. Higher = more authority;
-// `service` is floored so it can never outrank a human role in a comparison.
-const ROLE_RANK: Record<(typeof ROLE_VALUES)[number], number> = {
-  service: -1,
-  guest: 0,
-  family: 1,
-  admin: 2,
-  owner: 3,
-};
+// The privilege ladder is imported from jwt.service.ts (`ROLE_RANK`) — the
+// WARP-623 single source of truth shared with the POST /auth/users and
+// POST /auth/invites rank caps. WARP-1523 removed the inline duplicate that
+// used to sit here now that both branches have landed on main (jwt.service is
+// already in this file's import graph via ACCESS_TOKEN_TTL_SECONDS, so the
+// standalone-compile discipline for ROLE_VALUES above is unaffected).
 
 // WARP-1259 (T7): the box-wide `droplet-admins` NC group (mask 31 on every
 // active groupfolder, ADR-029 §3.5 Tier 1 admin-see-all) tracks this exact
@@ -423,6 +416,27 @@ export function createPeopleRouter(
         // dashboard re-submits the same form on focus loss.
         if (existing.role === parsed.data.role) {
           return res.json({ user: existing });
+        }
+
+        // WARP-1523: ROLE_RANK cap on the role-UPDATE path — the same
+        // privilege-escalation guard the CREATE/INVITE sites enforce
+        // (POST /auth/users, POST /auth/invites, POST /people/invite).
+        // requireRole("owner","admin") proves the caller may edit roles,
+        // not WHICH role they may assign: without this cap an admin
+        // (rank 2) could set any member to owner (rank 3). The cap is
+        // <= — assigning your OWN rank is allowed (owner→owner co-owner,
+        // admin→admin last-admin recovery), only an outranking target is
+        // refused. Runs AFTER the no-op short-circuit so an unchanged
+        // re-submit of an owner row by an admin stays a quiet 200 (the
+        // dashboard re-submits the same form on focus loss), and BEFORE
+        // the write path so every actual escalating change is refused.
+        // Fail closed if the actor's role claim is somehow absent.
+        const actorRole = req.user?.role;
+        if (!actorRole || ROLE_RANK[parsed.data.role] > ROLE_RANK[actorRole]) {
+          return res.status(403).json({
+            error: "You cannot assign a role higher than your own",
+            code: "ROLE_RANK_EXCEEDED",
+          });
         }
 
         // WARP-480 last-owner invariant. At least one user with

@@ -26,6 +26,7 @@ import {
   denyRefreshToken,
   claimRefreshRotation,
   roleFromGroups,
+  isRole,
   type Role,
 } from "../services/jwt.service.js";
 
@@ -183,6 +184,26 @@ describe("JWT Service", () => {
 
     it("should not throw for an already-expired token", async () => {
       await expect(denyRefreshToken("expired.token.here")).resolves.not.toThrow();
+    });
+  });
+
+  describe("isRole (WARP-1523 — canonical Role vocabulary guard)", () => {
+    it("accepts every canonical role value", () => {
+      for (const role of ["owner", "admin", "family", "guest", "service"]) {
+        expect(isRole(role)).toBe(true);
+      }
+    });
+
+    it("rejects non-role strings, non-strings, and prototype-chain keys", () => {
+      expect(isRole("superuser")).toBe(false);
+      expect(isRole("Owner")).toBe(false); // vocabulary is lowercase-exact
+      expect(isRole("")).toBe(false);
+      expect(isRole(undefined)).toBe(false);
+      expect(isRole(null)).toBe(false);
+      expect(isRole(3)).toBe(false);
+      // Not an `in`-style check: object prototype keys must not pass.
+      expect(isRole("constructor")).toBe(false);
+      expect(isRole("toString")).toBe(false);
     });
   });
 
