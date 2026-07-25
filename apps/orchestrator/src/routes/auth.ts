@@ -1,5 +1,6 @@
 import { Router, Request } from "express";
 import { randomBytes, createHash } from "node:crypto";
+import type { AccessRole } from "@prisma/client";
 import { z } from "zod";
 import {
   generateInviteToken,
@@ -3251,7 +3252,7 @@ export function createProtectedAuthRouter(
       // startingPoint with the same 403 shape as the tier cap above, tier
       // agreement). Shared with POST /api/people/invite (the canonical
       // people surface) so the two create paths can never diverge.
-      let inviteAccessRole = null as Awaited<ReturnType<typeof validateInviteAccessRole>> | null;
+      let inviteAccessRole: AccessRole | null = null;
       if (parsed.data.accessRoleId) {
         try {
           inviteAccessRole = await validateInviteAccessRole(prisma, {
