@@ -114,7 +114,9 @@ function mkUsagePrisma(opts: {
     displayName: string;
     username: string;
     nextcloudUsername: string | null;
-    usagePolicy?: { storageQuotaBytes?: bigint | null; maxUploadSizeMb: number | null } | null;
+    // C2 (PR #1223 review): non-optional, mirroring fetchUserUsageRow's
+    // param contract — a fixture omitting it must fail compilation.
+    usagePolicy?: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
     // WARP-1531 (RBAC v2 T7): AccessRole usage defaults.
     accessRole?: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
   }>;
@@ -202,7 +204,7 @@ describe("GET /api/admin/files/usage", () => {
             displayName: "Alice",
             username: "alice",
             nextcloudUsername: "alice",
-            usagePolicy: { maxUploadSizeMb: 2048 },
+            usagePolicy: { storageQuotaBytes: null, maxUploadSizeMb: 2048 },
           },
         ],
       }),

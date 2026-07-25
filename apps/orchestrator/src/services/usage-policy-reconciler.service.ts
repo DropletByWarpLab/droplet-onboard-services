@@ -154,12 +154,49 @@ export async function sweepUsagePolicies(
     const roleQuota = user.accessRole?.storageQuotaBytes ?? null;
     if (roleQuota === null) continue; // defensive; the where-clause filters
 
-    roleSwept += 1;
     if (!user.nextcloudUsername) {
       // Same posture as pass 1: provisioning is async; retry next tick.
+      roleSwept += 1;
       roleFailed += 1;
       continue;
     }
+
+    // C1 (PR #1223 review): RE-READ the person row immediately before the
+    // push. The roster snapshot above and this iteration can be minutes
+    // apart on a slow NC; a concurrent admin PUT in that window sets a
+    // person quota (inline push lands, row commits `synced`) — pushing the
+    // snapshot's STALE role default afterwards would make NC enforce the
+    // role value while Prisma says the person value is `synced`, and
+    // nothing would ever heal it (pass 1 skips synced rows, the next pass 2
+    // skips person-set users). Also stand down on `pending`/`failed` — the
+    // row lifecycle owns the next push, same rule as the rowSweptUserIds
+    // dedupe. This shrinks the TOCTOU window to the single NC call below,
+    // matching the residual pass 1 carries.
+    let fresh: { storageQuotaBytes: bigint | null; quotaSyncState: string } | null;
+    try {
+      fresh = await prisma.userUsagePolicy.findUnique({
+        where: { userId: user.id },
+        select: { storageQuotaBytes: true, quotaSyncState: true },
+      });
+    } catch (err) {
+      logger.error(
+        { err, userId: user.id },
+        "usage-policy reconcile: pre-push person-row re-read failed; skipping role push this tick",
+      );
+      roleSwept += 1;
+      roleFailed += 1;
+      continue;
+    }
+    if (
+      fresh !== null &&
+      (fresh.storageQuotaBytes !== null ||
+        (SWEEP_STATES as readonly string[]).includes(fresh.quotaSyncState))
+    ) {
+      // No longer a role-managed candidate — claimed mid-sweep.
+      continue;
+    }
+
+    roleSwept += 1;
     try {
       await ncUpdateUser(adminToken, user.nextcloudUsername, "quota", quotaFieldValue(roleQuota));
       roleSynced += 1;

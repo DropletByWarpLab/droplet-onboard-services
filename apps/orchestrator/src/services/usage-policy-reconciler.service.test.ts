@@ -41,6 +41,13 @@ function buildPrisma(
     findMany: vi.fn(async ({ where }: any) => {
       return [...policyRows.values()].filter((p) => where.quotaSyncState.in.includes(p.quotaSyncState));
     }),
+    // C1 (PR #1223 review): pass 2's pre-push re-read of the person row.
+    findUnique: vi.fn(async ({ where }: any) => {
+      const p = policyRows.get(where.userId);
+      return p
+        ? { storageQuotaBytes: p.storageQuotaBytes, quotaSyncState: p.quotaSyncState }
+        : null;
+    }),
     update: vi.fn(async ({ where, data }: any) => {
       const row = policyRows.get(where.userId);
       if (!row) throw new Error(`no such policy ${where.userId}`);
@@ -271,6 +278,95 @@ describe("sweepUsagePolicies", () => {
     expect(result.roleDefaultQuotasFailed).toBe(1);
     expect(result.roleDefaultQuotasSynced).toBe(0);
     expect(self.userUsagePolicy.update).not.toHaveBeenCalled();
+  });
+
+  it("C1: a concurrent person PUT between the roster snapshot and the push is honored — the stale role default is NOT pushed", async () => {
+    // PR #1223 review (C1). Timeline this pins:
+    //   1. pass 2 snapshots the roster — u2 is rowless with a 10 GB role
+    //      default;
+    //   2. an admin PUTs a 25 GB person quota; the inline push lands and the
+    //      row commits `synced`;
+    //   3. the loop reaches u2. Without the pre-push re-read it would push
+    //      the STALE 10 GB role default — NC then enforces 10 GB while
+    //      Prisma says 25 GB `synced`, and NOTHING heals it (pass 1 skips
+    //      synced rows, pass 2 skips person-set users) — permanent drift
+    //      the roster masks.
+    const { self } = buildPrisma([], {
+      u2: { nextcloudUsername: "bob", accessRole: { storageQuotaBytes: 10n * 1024n ** 3n } },
+    });
+    // The re-read (step 3) sees the row the concurrent PUT (step 2) just
+    // committed: person-set, synced.
+    (self.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+      storageQuotaBytes: 25n * 1024n ** 3n,
+      quotaSyncState: "synced",
+    });
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    expect(result.roleDefaultQuotasSwept).toBe(0);
+    expect(result.roleDefaultQuotasSynced).toBe(0);
+    expect(result.roleDefaultQuotasFailed).toBe(0);
+  });
+
+  it("C1: a person row gone PENDING mid-sweep is left to its own lifecycle (no role push)", async () => {
+    // Same race, earlier phase: the PUT committed `pending` (inline push
+    // still in flight or deferred). The row lifecycle owns the next push;
+    // pass 2 must stand down exactly like the rowSweptUserIds dedupe.
+    const { self } = buildPrisma([], {
+      u2: { nextcloudUsername: "bob", accessRole: { storageQuotaBytes: 10n * 1024n ** 3n } },
+    });
+    (self.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+      storageQuotaBytes: null,
+      quotaSyncState: "pending",
+    });
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    expect(result.roleDefaultQuotasSwept).toBe(0);
+  });
+
+  it("N4 pass 1: one user's NC failure never aborts the sweep — the next row still pushes", async () => {
+    const { self, policyRows } = buildPrisma(
+      [
+        { userId: "u1", storageQuotaBytes: 1_000n, quotaSyncState: "pending" },
+        { userId: "u2", storageQuotaBytes: 2_000n, quotaSyncState: "pending" },
+      ],
+      { u1: { nextcloudUsername: "alice" }, u2: { nextcloudUsername: "bob" } },
+    );
+    ncUpdateUserMock.mockImplementation(async (_token: string, ncUser: string) => {
+      if (ncUser === "alice") throw new Error("nc choked on alice");
+    });
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "alice", "quota", "1000 B");
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "bob", "quota", "2000 B");
+    expect(result.usagePoliciesSwept).toBe(2);
+    expect(result.usagePoliciesSynced).toBe(1);
+    expect(result.usagePoliciesFailed).toBe(1);
+    expect(policyRows.get("u1")!.quotaSyncState).toBe("failed");
+    expect(policyRows.get("u2")!.quotaSyncState).toBe("synced");
+  });
+
+  it("N4 pass 2: one user's NC failure never aborts the role pass — the next user still pushes", async () => {
+    const { self } = buildPrisma([], {
+      u1: { nextcloudUsername: "alice", accessRole: { storageQuotaBytes: 3_000n } },
+      u2: { nextcloudUsername: "bob", accessRole: { storageQuotaBytes: 4_000n } },
+    });
+    ncUpdateUserMock.mockImplementation(async (_token: string, ncUser: string) => {
+      if (ncUser === "alice") throw new Error("nc choked on alice");
+    });
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "alice", "quota", "3000 B");
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "bob", "quota", "4000 B");
+    expect(result.roleDefaultQuotasSwept).toBe(2);
+    expect(result.roleDefaultQuotasSynced).toBe(1);
+    expect(result.roleDefaultQuotasFailed).toBe(1);
   });
 
   it("STATELESS convergence: a role-default change is pushed on the very next sweep", async () => {

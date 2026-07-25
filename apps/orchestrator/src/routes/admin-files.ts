@@ -167,7 +167,11 @@ async function fetchUserUsageRow(
     displayName: string;
     username: string;
     nextcloudUsername: string | null;
-    usagePolicy: { storageQuotaBytes?: bigint | null; maxUploadSizeMb: number | null } | null;
+    // C2 (PR #1223 review): storageQuotaBytes is deliberately NON-optional —
+    // if a future refactor drops it from the route's findMany select, this
+    // param stops compiling instead of silently resolving every
+    // person-managed quota to role/default provenance.
+    usagePolicy: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
     accessRole: { storageQuotaBytes: bigint | null; maxUploadSizeMb: number | null } | null;
   },
 ): Promise<AdminUsageUserRow> {
