@@ -589,6 +589,17 @@ model UserInvite {
   // rights in each listed department once the invite is accepted).
   departmentGrants UserInviteDepartment[]
 
+  // ADR-032 / WARP-1525 (RBAC v2): custom access role granted by this invite.
+  // Null = plain tier invite (today's world). The accept path assigns it in
+  // the same mint transaction (T9, the WARP-1051 pattern). onDelete Restrict:
+  // deleting a role blocks on ANY invite row that references it — pending,
+  // accepted, revoked, or expired alike (invite rows are retained state via
+  // acceptedAt/revokedAt, never deleted) — so an invitee's intended access
+  // can never silently degrade to the bare tier and role deletion stays an
+  // explicit service-layer flow ("reassign first", T3).
+  accessRoleId     String?
+  accessRole       AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+
   @@index([token])
   @@index([expiresAt])
   @@index([sendStatus])
@@ -1818,7 +1829,20 @@ model User {
   // WARP-1255: per-user storage/usage policy (quota, upload cap, LLM cap).
   usagePolicy           UserUsagePolicy?
 
+  // ADR-032 / WARP-1525 (RBAC v2): optional custom access role. Null = plain
+  // built-in tier — today's world, fully backward compatible. Assigning a
+  // role sets `role = accessRole.startingPoint` in the same transaction (T3)
+  // so the ADR-004 enum floor stays authoritative. onDelete Restrict (not
+  // SetNull/Cascade): deleting an in-use role is blocked server-side
+  // ("reassign first") and the DB backs that up — a role delete must never
+  // silently strip or downgrade a person's assignment.
+  accessRoleId          String?
+  accessRole            AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
+  accessExceptions      UserAccessException[]
+
   @@index([role])
+  @@index([accessRoleId])
 }
 
 /// ADR-013 (SSO OIDC) — maps an external IdP identity to a LOCAL User.
@@ -2066,6 +2090,48 @@ enum NcSyncState {
   failed
   removing
   remove_failed
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2): action level carried by an AccessRole
+/// feature grant (axis a+b) or an allow-exception. The catalog tiers
+/// (ADR-032 §9): view (read surfaces) → act (day-to-day operations) →
+/// manage (admin operations). The service layer (T3) clamps a grant's level
+/// to the catalog ceiling of the role's `startingPoint` — the ADR-004 floor.
+enum FeatureAccessLevel {
+  view
+  act
+  manage
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2): per-tool-domain level for an AccessRole
+/// tool grant (axis d, on-box). Absence of a grant row = domain OFF for the
+/// role — never inferred, the resolver (T5) treats no-row as no-access.
+///   - view — the domain's read-only tools.
+///   - use  — the domain's full tool set (write tools remain subject to the
+///            tier write-filter and handler-side confirmations).
+enum ToolAccessLevel {
+  view
+  use
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2): per-connector level for an AccessRole
+/// connector grant (axis d, off-box). Absence of a grant row = none.
+/// `read_write` is only selectable on Admin-based roles (decision O-2) and
+/// always sits UNDER IntegrationConnection.writeEnabled + the staged-outbox
+/// human confirm — role grants only ever narrow, never widen.
+enum ConnectorAccessLevel {
+  read
+  read_write
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2): effect of a per-person feature exception
+/// (design D-A — feature axis only in v1). `allow` grants a module on top of
+/// the person's role (with a required `level`, service-enforced); `deny`
+/// removes one the role grants. Exceptions can never escape the ADR-004
+/// floor — the T3 resolver clamps them like role grants.
+enum AccessExceptionEffect {
+  allow
+  deny
 }
 
 // User ↔ Scope many-to-many. A user can be bound to any subset of the
@@ -4137,6 +4203,105 @@ model UserUsagePolicy {
   updatedBy          String
   updatedAt          DateTime    @updatedAt
   user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2): admin-authored custom access role. A role
+/// is a ROW, not a new `Role` enum value — the pgEnum is migration-gated and
+/// triple-duplicated in TS by design (ADR-029 departments precedent: rows,
+/// not enum values). `startingPoint` IS the built-in tier its people receive:
+/// assigning the role sets `User.role = startingPoint` in the same
+/// transaction (T3), so every ADR-004 `requireRole` floor keeps working
+/// unchanged and the per-axis grant rows below can only NARROW within it.
+model AccessRole {
+  id          String  @id @default(uuid())
+  name        String
+  slug        String  @unique
+  description String?
+  // CHECK: admin|family|guest — never owner/service. Enforced in the service
+  // layer + zod (T3 role-mutation-guard), deliberately NOT a DB check
+  // constraint; the column stays the plain Role enum.
+  startingPoint Role
+  // active | archived. Stays a String default "active" (the ADR-032 §2 spec
+  // shape); the two-value lifecycle is service-managed and archived roles
+  // keep their rows (the design's archive-don't-delete affordance).
+  state         String @default("active")
+  // axis c — usage DEFAULTS for people in this role; a person's
+  // UserUsagePolicy row overrides per person. Null = box default.
+  storageQuotaBytes  BigInt?
+  maxUploadSizeMb    Int?
+  llmDailyMessageCap Int? // rendered; enforcement stays deferred (llm.ts:401)
+  // axis d — the two off-box booleans that are per-role, not per-domain.
+  cloudModelsAllowed Boolean  @default(false) // under the workspace cloud_model_escape backstop
+  mayOperateLocks    Boolean  @default(false) // Tier-2; handler-side confirm stays regardless
+  createdBy          String // local User.id
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  users           User[]
+  invites         UserInvite[]
+  featureGrants   AccessRoleFeatureGrant[]
+  toolGrants      AccessRoleToolGrant[]
+  connectorGrants AccessRoleConnectorGrant[]
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2), axis a + b: per-role feature grant. Absent
+/// row = feature OFF for the role (the chat/home/settings always-on floor is
+/// service-enforced, not a row). `moduleId` reuses the App-Modules `ModuleId`
+/// enum — ONE feature vocabulary shared between the module registry,
+/// ModuleSetting rows, and role grants; no parallel list to drift.
+model AccessRoleFeatureGrant {
+  roleId   String
+  moduleId ModuleId
+  level    FeatureAccessLevel
+  role     AccessRole         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, moduleId])
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2), axis d on-box: per-role tool-domain grant.
+/// Absent row = domain OFF for this role. `domain` is a String holding a
+/// ToolDomain value from the tools-core catalog (packages/tools-core
+/// catalog.ts) — that union is TS-only, not a pgEnum, so the DB deliberately
+/// does not re-declare it; the T5 resolver validates values against the
+/// catalog at write time.
+model AccessRoleToolGrant {
+  roleId String
+  domain String // ToolDomain value from tools-core catalog (string — the TS enum is not a pgEnum)
+  level  ToolAccessLevel
+  role   AccessRole      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, domain])
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2), axis d off-box: per-role connector grant.
+/// Absent row = none. `provider` matches IntegrationConnection.provider
+/// ("eaglesoft"). A grant sits UNDER the connection-level `writeEnabled`
+/// gate and the staged-outbox human confirm — role grants only ever narrow.
+model AccessRoleConnectorGrant {
+  roleId   String
+  provider String // IntegrationConnection.provider ("eaglesoft")
+  level    ConnectorAccessLevel
+  role     AccessRole           @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, provider])
+}
+
+/// ADR-032 / WARP-1525 (RBAC v2), design D-A: small, secondary per-person
+/// exception list — feature axis ONLY in v1 (tool/connector exceptions are a
+/// v2 candidate). `level` is required when effect=allow — service-enforced
+/// (T3), so nullable here; the resolver clamps allows to the same ADR-004
+/// catalog ceiling as role grants. Rows cascade with their user.
+model UserAccessException {
+  id        String                @id @default(uuid())
+  userId    String
+  moduleId  ModuleId
+  effect    AccessExceptionEffect
+  level     FeatureAccessLevel?
+  grantedBy String // local User.id
+  createdAt DateTime              @default(now())
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, moduleId])
 }
 
 /// Append-only PHI audit trail (brief §11, §14, invariant 11). Every read of
