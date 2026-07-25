@@ -191,12 +191,21 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         scheduler_loop["loop"] = loop
-        try:
-            import scheduler_service
-            scheduler_holder["scheduler"] = scheduler_service.build_scheduler()
-        except Exception:
-            logger.exception("scheduler_service.build_scheduler failed")
-            return
+
+        # apscheduler >= 3.11 binds AsyncIOScheduler to the *running* loop
+        # (asyncio.get_running_loop()), so build_scheduler() must be called
+        # from inside run_forever() — calling it here, before the loop runs,
+        # raises RuntimeError("no running event loop") and the daily
+        # transcription pass would never be registered.
+        def _start_scheduler():
+            try:
+                import scheduler_service
+                scheduler_holder["scheduler"] = scheduler_service.build_scheduler()
+            except Exception:
+                logger.exception("scheduler_service.build_scheduler failed")
+                loop.stop()
+
+        loop.call_soon(_start_scheduler)
         try:
             loop.run_forever()
         finally:

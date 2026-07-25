@@ -12,7 +12,8 @@ import pytest
 
 @pytest.fixture
 def event_loop():
-    """AsyncIOScheduler.start() expects a running loop. Create + tear down
+    """apscheduler >= 3.11 binds AsyncIOScheduler to the *running* loop, so
+    build_scheduler() has to be called from inside one. Create + tear down
     one per test rather than relying on pytest-asyncio."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -63,7 +64,13 @@ def test_build_scheduler_registers_run_pass(event_loop):
     one CronTrigger job pointing at transcription_worker.run_pass."""
     import scheduler_service
 
-    sched = scheduler_service.build_scheduler()
+    async def _build():
+        # Mirrors main.py, which defers build_scheduler() into the running
+        # loop via loop.call_soon() — apscheduler >= 3.11 raises
+        # RuntimeError("no running event loop") if start() happens first.
+        return scheduler_service.build_scheduler()
+
+    sched = event_loop.run_until_complete(_build())
     try:
         jobs = sched.get_jobs()
         assert len(jobs) == 1
