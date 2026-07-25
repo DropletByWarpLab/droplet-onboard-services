@@ -79,11 +79,13 @@ import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
+import { createAccessRouter } from "./routes/access.js";
 import { createDepartmentsRouter } from "./routes/departments.js";
 import {
   initScopeLoader,
   loadUserEffectiveScopes,
 } from "./services/scope-loader.service.js";
+import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
@@ -225,6 +227,14 @@ export function createApp(
   // post-boot request to a scope-guarded route must find it populated.
   // Idempotent — a second createApp() in tests is a no-op.
   initScopeLoader(prisma);
+
+  // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
+  // scope loader (same singleton discipline, same reason): layer-2
+  // per-person access resolution (features / tools / cloud / connectors /
+  // usage) is a DB-read per request with no cache in v1, and the first
+  // post-boot read must find the client bound. Availability config rides
+  // along for the workspace-module intersection (modules.service).
+  initEffectiveAccess(prisma, config);
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
@@ -387,6 +397,10 @@ export function createApp(
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
+  // WARP-1527 / ADR-032 §5 (RBAC v2 T3): custom access roles — CRUD,
+  // duplicate, archive, delete (reassign-first), and bulk assignment.
+  // owner/admin only; every mutation through the T2 role-mutation guard.
+  app.use("/api", createAccessRouter(prisma));
   // WARP-1258 (T6): departments/teams CRUD. Manages department/team lifecycle,
   // membership, and integration with Nextcloud groupfolders. Provisioning is
   // async (reconciler converges NC state).

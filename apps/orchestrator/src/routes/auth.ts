@@ -2580,24 +2580,48 @@ export function createProtectedAuthRouter(
       const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
       // WARP-947: run NC list + DB lookup in parallel; separate maps per column
       // prevent cross-column key collision (nc username ≠ local username namespace).
+      // WARP-1527 (RBAC v2 T3): each row also carries the local enforcement
+      // tier (`role`) and assigned custom-role id (`accessRoleId`, null =
+      // plain built-in tier) — the T8 RosterUser extension. The select stays
+      // EXPLICIT: never return raw User rows from this endpoint (the full
+      // passwordHash serialization sweep is WARP-1539 — don't widen it here).
+      type LocalRosterRow = {
+        id: string;
+        username: string;
+        nextcloudUsername: string | null;
+        role: string;
+        accessRoleId: string | null;
+      };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
         prisma
-          ? prisma.user.findMany({ select: { id: true, username: true, nextcloudUsername: true } })
-          : ([] as { id: string; username: string; nextcloudUsername: string | null }[]),
+          ? (prisma.user.findMany({
+              select: {
+                id: true,
+                username: true,
+                nextcloudUsername: true,
+                role: true,
+                accessRoleId: true,
+              },
+            }) as Promise<LocalRosterRow[]>)
+          : ([] as LocalRosterRow[]),
       ]);
       const ncUsers = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
-      const uuidByNcUsername = new Map<string, string>();
-      const uuidByUsername = new Map<string, string>();
+      const localByNcUsername = new Map<string, LocalRosterRow>();
+      const localByUsername = new Map<string, LocalRosterRow>();
       for (const row of localRows) {
-        if (row.nextcloudUsername) uuidByNcUsername.set(row.nextcloudUsername.toLowerCase(), row.id);
-        uuidByUsername.set(row.username.toLowerCase(), row.id);
+        if (row.nextcloudUsername) localByNcUsername.set(row.nextcloudUsername.toLowerCase(), row);
+        localByUsername.set(row.username.toLowerCase(), row);
       }
       const users = ncUsers.map((u) => {
         const key = u.id.toLowerCase();
+        const local = localByNcUsername.get(key) ?? localByUsername.get(key) ?? null;
         return {
           ...u,
-          userId: uuidByNcUsername.get(key) ?? uuidByUsername.get(key) ?? null,
+          userId: local?.id ?? null,
+          // No local row → no fabricated tier; the dashboard renders no chip.
+          role: local?.role ?? null,
+          accessRoleId: local?.accessRoleId ?? null,
         };
       });
       res.json({ users });
