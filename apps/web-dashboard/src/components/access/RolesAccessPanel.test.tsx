@@ -208,6 +208,71 @@ describe("§4.2 role detail", () => {
     expect(del).toHaveAttribute("title", ACCESS_COPY.deleteRoleInUse(1));
   });
 
+  it("delete-in-use is never a dead-end: Reassign people → focuses the holders list (QA send-back 3)", async () => {
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Role actions" }));
+    const reassign = screen.getByRole("menuitem", { name: ACCESS_COPY.reassignPeopleLink });
+    fireEvent.click(reassign);
+    // Menu closed, focus handed to the people-with-this-role block.
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByTestId("access-people-with-role"));
+  });
+
+  it("assign candidates fail closed on unknown tiers, with an honest empty caption (QA send-back 4)", async () => {
+    // Degraded roster: no role data at all (pre-T3/T7 API) — the owner row
+    // must NOT sneak into the candidate list; nothing is offered.
+    renderPanel({
+      people: PEOPLE.map(({ role: _role, ...p }) => ({ ...p, accessRoleId: null })),
+    });
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Assign people" }));
+    const dialog = await screen.findByRole("dialog", { name: /Assign people/ });
+    expect(within(dialog).queryByText("Stefan C")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "No one can be offered yet — this Droplet hasn't reported everyone's current role.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("built-in detail carries the read-only catalog summary; service keeps notes only (QA send-back 5)", async () => {
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Admin/ }));
+    const detail = screen.getByTestId("access-role-detail");
+    // Ceiling levels for the admin tier, catalog-derived.
+    expect(within(detail).getByText("Network · configure")).toBeInTheDocument();
+    expect(within(detail).getByText("Files · share & manage")).toBeInTheDocument();
+    expect(within(detail).getByText("No limit storage")).toBeInTheDocument();
+    expect(within(detail).getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
+    // Guest ceilings clamp to view.
+    fireEvent.click(screen.getByRole("button", { name: /Guest/ }));
+    expect(within(screen.getByTestId("access-role-detail")).getByText("Network · view")).toBeInTheDocument();
+    // Service is a system principal — notes only, no feature chips.
+    fireEvent.click(screen.getByRole("button", { name: /Service/ }));
+    const serviceDetail = screen.getByTestId("access-role-detail");
+    expect(within(serviceDetail).queryByText(/Network ·/)).not.toBeInTheDocument();
+    expect(within(serviceDetail).getByText(/Not assignable to a person/)).toBeInTheDocument();
+  });
+
+  it("prefers the server peopleCount and renders — (not the empty claim) when roster rows can't be linked", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ peopleCount: 2 })] });
+    renderPanel({
+      // Roster has no accessRoleId data — the join can't resolve holders.
+      people: PEOPLE.map((p) => ({ ...p, accessRoleId: null })),
+    });
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    const list = screen.getByTestId("access-people-with-role");
+    expect(within(list).getByText("2")).toBeInTheDocument();
+    expect(within(list).queryByText(ACCESS_COPY.emptyPeopleInRole)).not.toBeInTheDocument();
+    expect(within(list).getByText(ACCESS_COPY.unknownValue)).toBeInTheDocument();
+  });
+
   it("deleting an unused role runs the §8 consequence confirm then the DELETE", async () => {
     listAccessRolesMock.mockResolvedValue({ roles: [role({ peopleCount: 0 })] });
     deleteAccessRoleMock.mockResolvedValue(undefined);

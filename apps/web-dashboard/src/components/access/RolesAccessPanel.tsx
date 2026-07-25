@@ -50,6 +50,8 @@ import type {
   RosterUser,
 } from "@/lib/types";
 import {
+  ACCESS_FEATURES,
+  TIER_RANK,
   blankRoleDraft,
   featureDef,
   formatStorageBytes,
@@ -144,6 +146,10 @@ export function RolesAccessPanel({
   const [archiveTarget, setArchiveTarget] = useState<AccessRole | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // §8 delete-in-use escape hatch: "Reassign people →" moves focus to the
+  // people-with-this-role list (the cheapest honest recovery path — the
+  // Change-role affordances live right there).
+  const peopleListRef = useRef<HTMLDivElement | null>(null);
   // A refetch scheduled after a pending mutation so the sync chip converges
   // on server truth without polling forever.
   const refetchTimer = useRef<number | null>(null);
@@ -210,17 +216,24 @@ export function RolesAccessPanel({
 
   /** Assignment candidates: local rows only, never the owner or a service
    *  principal (§8 owner untouchable; service not assignable), and not the
-   *  people who already hold the role. */
+   *  people who already hold the role. FAIL CLOSED (QA send-back 4): a row
+   *  whose tier is unknown (roster extension not merged yet) is excluded —
+   *  an unknown row could be the owner, so it is never offered. */
   const assignCandidates = useMemo(
     () =>
       people.filter(
         (p) =>
           p.userId &&
-          p.role !== "owner" &&
-          p.role !== "service" &&
+          (p.role === "admin" || p.role === "family" || p.role === "guest") &&
           p.accessRoleId !== selectedRole?.id,
       ),
     [people, selectedRole],
+  );
+  /** True when the roster carries local rows without tier data — the §10
+   *  degraded (pre-T3/T7) mode the assign dialog must explain honestly. */
+  const assignDegraded = useMemo(
+    () => people.some((p) => p.userId && p.role == null),
+    [people],
   );
 
   const openCreate = () => setBuilder({ mode: "create", base: blankRoleDraft("family") });
@@ -376,6 +389,48 @@ export function RolesAccessPanel({
   }
 
   // ── Right pane ──
+
+  /** Read-only catalog summary for a built-in person tier (§4.2 parity —
+   *  QA send-back 5): every feature at the ceiling level the ADR-004 floor
+   *  allows that tier, plus the truthful usage defaults (built-in tiers set
+   *  none, so the box default applies). The off-box axis is intentionally
+   *  NOT summarised here: built-ins carry no role grant — cloud/connector
+   *  reach resolves from the workspace settings, and a static chip would
+   *  claim something this panel cannot know. */
+  function renderBuiltinAxisSummary(tier: AccessTier) {
+    const chips = ACCESS_FEATURES.map((def) => {
+      let ceiling = def.levels[0]!;
+      for (const level of def.levels) {
+        if (!level.minTier || TIER_RANK[tier] >= TIER_RANK[level.minTier]) ceiling = level;
+      }
+      const suffix = def.levels.length > 1 ? ` · ${ceiling.label.toLowerCase()}` : "";
+      return { key: def.moduleId, label: `${def.label}${suffix}` };
+    });
+    return (
+      <>
+        <div>
+          <div className="type-caption-1 mb-2" style={{ color: "var(--text-faint)", fontWeight: 600 }}>
+            Features
+          </div>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {chips.map((chip) => (
+              <AccessChip key={chip.key}>{chip.label}</AccessChip>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>
+            Usage
+          </span>
+          <AccessChip mono icon={<Gauge size={12} aria-hidden="true" />}>
+            No limit storage
+          </AccessChip>
+          <AccessChip mono>Box default upload</AccessChip>
+        </div>
+      </>
+    );
+  }
+
   function renderAxisSummary(role: AccessRole) {
     const featureChips: Array<{ key: string; label: string }> = [];
     for (const grant of role.featureGrants) {
@@ -454,7 +509,11 @@ export function RolesAccessPanel({
               <AccessChip icon={<Lock size={12} aria-hidden="true" />}>Fixed</AccessChip>
             )}
           </div>
-          <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* QA send-back 5: read-only axis summary above the notes —
+                service is a system principal, not a person tier, so it
+                keeps its note only. */}
+            {selectedBuiltin.id !== "service" && renderBuiltinAxisSummary(selectedBuiltin.id)}
             <GuardNote icon={<ShieldCheck size={15} aria-hidden="true" />}>{ACCESS_COPY.builtinFixed}</GuardNote>
             {selectedBuiltin.id === "owner" && (
               <GuardNote icon={<Lock size={15} aria-hidden="true" />}>{ACCESS_COPY.ownerDetailNote}</GuardNote>
@@ -552,6 +611,22 @@ export function RolesAccessPanel({
                 >
                   Delete…
                 </button>
+                {inUse && (
+                  // §8: the in-use block is never a dead-end — hand the
+                  // admin straight to the people who hold the role.
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="btn ghost sm"
+                    style={{ justifyContent: "flex-start", border: "none", color: "var(--brand)" }}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      peopleListRef.current?.focus();
+                    }}
+                  >
+                    {ACCESS_COPY.reassignPeopleLink}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -569,12 +644,19 @@ export function RolesAccessPanel({
             </button>
           </div>
 
-          <div>
+          <div
+            ref={peopleListRef}
+            tabIndex={-1}
+            data-testid="access-people-with-role"
+            style={{ outline: "none" }}
+          >
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
                 {ACCESS_COPY.peopleWithRole}
               </span>
-              <AccessChip mono>{peopleWithRole.length}</AccessChip>
+              {/* Server truth for the count — the roster join is best-effort
+                  until the T3/T7 roster extension merges. */}
+              <AccessChip mono>{selectedRole.peopleCount}</AccessChip>
             </div>
             {peopleWithRole.length > 0 ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -589,6 +671,13 @@ export function RolesAccessPanel({
                     </button>
                   </div>
                 ))}
+              </div>
+            ) : selectedRole.peopleCount > 0 ? (
+              // The server says the role is held but the roster rows can't
+              // be linked yet (no accessRoleId data pre-T3/T7) — render the
+              // §12 unknown mark, never a fabricated "no one" claim.
+              <div className="type-caption-1 mono" style={{ color: "var(--text-faint)", padding: "4px 2px" }}>
+                {ACCESS_COPY.unknownValue}
               </div>
             ) : (
               <GuardNote icon={<User size={15} aria-hidden="true" />}>{ACCESS_COPY.emptyPeopleInRole}</GuardNote>
@@ -678,6 +767,7 @@ export function RolesAccessPanel({
       <AssignPeopleDialog
         open={assignOpen}
         candidates={assignCandidates}
+        degraded={assignDegraded}
         checked={assignChecked}
         busy={assignBusy}
         onToggle={(userId) =>
@@ -718,6 +808,7 @@ export function RolesAccessPanel({
 function AssignPeopleDialog({
   open,
   candidates,
+  degraded,
   checked,
   busy,
   onToggle,
@@ -726,6 +817,8 @@ function AssignPeopleDialog({
 }: {
   open: boolean;
   candidates: RosterUser[];
+  /** Roster rows exist whose tier is unknown — excluded fail-closed. */
+  degraded: boolean;
   checked: Set<string>;
   busy: boolean;
   onToggle: (userId: string) => void;
@@ -745,7 +838,11 @@ function AssignPeopleDialog({
         </div>
         {candidates.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>
-            Everyone who can hold this role already has it.
+            {degraded
+              ? // Fail-closed honesty: unknown-tier rows are never offered
+                // (one could be the owner), so say why the list is empty.
+                "No one can be offered yet — this Droplet hasn't reported everyone's current role."
+              : "Everyone who can hold this role already has it."}
           </p>
         ) : (
           <div style={{ border: "1px solid var(--card-bd)", borderRadius: "var(--radius-input)", overflow: "hidden" }}>

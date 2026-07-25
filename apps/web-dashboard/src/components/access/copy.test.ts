@@ -83,6 +83,11 @@ describe("§12 Guardrails", () => {
     expect(ACCESS_COPY.rankCap).toBe("You can only assign access at or below your own level.");
   });
 
+  it("never-a-dead-end recovery links (§8)", () => {
+    expect(ACCESS_COPY.manageRolesLink).toBe("Manage roles →");
+    expect(ACCESS_COPY.reassignPeopleLink).toBe("Reassign people →");
+  });
+
   it("confirm bodies (templates)", () => {
     expect(ACCESS_COPY.cloudConfirm("Finance")).toBe(
       "Let Finance's assistant use cloud models? This is the only setting that sends a person's chat messages off this Droplet. Turn it off any time.",
