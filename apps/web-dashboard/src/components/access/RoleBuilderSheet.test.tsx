@@ -9,7 +9,7 @@
  * the dirty-gated Save that emits the ADR-032 payload.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import React from "react";
 
 vi.mock("framer-motion", async () => {
@@ -207,6 +207,41 @@ describe("AI tools & connectors (axis 4)", () => {
     const row = screen.getByTestId("access-tools-cameras");
     expect(within(row).getByText(ACCESS_COPY.toolAutoOff("Cameras"))).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Use" })).toBeDisabled();
+  });
+
+  it("Escape closes only the topmost dialog — the draft survives a nested-confirm ESC (review F1)", async () => {
+    const { onClose } = renderSheet();
+    fireEvent.change(screen.getByPlaceholderText("Name this role"), {
+      target: { value: "Front desk" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: ACCESS_COPY.cloudModelsToggle }));
+    expect(screen.getByText(ACCESS_COPY.cloudConfirm("Front desk"))).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    // The confirm (topmost) closed — AnimatePresence unmounts it a beat later.
+    await waitFor(() =>
+      expect(screen.queryByText(ACCESS_COPY.cloudConfirm("Front desk"))).not.toBeInTheDocument(),
+    );
+    // …but the sheet below it never saw the Escape: no onClose, draft intact.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue("Front desk")).toBeInTheDocument();
+    // A second Escape now reaches the sheet (it is topmost again).
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("downgrading the starting point clamps a Read & write connector and says so (review F3)", () => {
+    const base = blankRoleDraft("admin");
+    base.connectors.eaglesoft = "read_write";
+    renderSheet({ mode: "edit", base });
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    expect(select.value).toBe("read_write");
+    fireEvent.click(screen.getByRole("button", { name: "Staff" }));
+    // The select keeps a real value (never silently blank)…
+    expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
+    // …and the §5.1 notice names the downgrade.
+    expect(
+      screen.getByText(/caps Eaglesoft at Read — Read & write is available on Admin-based roles\./),
+    ).toBeInTheDocument();
   });
 
   it("cloud toggle opens the §8 confirm and only enables on explicit confirm", () => {

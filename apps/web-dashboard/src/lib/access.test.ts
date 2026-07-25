@@ -5,11 +5,13 @@
  * ADR-032 §2/§3): starting point = the enforcement tier; levels above the
  * ADR-004 floor are BLOCKED (disabled-with-reason, never hidden); re-flooring
  * a draft pulls over-floor levels back and names the first dropped grant with
- * the §12 notice pattern. Also pins the BigInt-string display formatting
- * (storageQuotaBytes travels as a decimal string — never parsed into a lossy
- * float round-trip) and the grant-payload builder (absent row = OFF; always-on
- * chat/home/settings never produce grant rows; connector write capped to
- * Admin-based roles per O-2).
+ * the §12 notice pattern. Also pins the touched-axis save model (review F2):
+ * the GB/TB usage inputs and the grouped tool selects are LOSSY views over
+ * the wire values (BigInt byte strings, per-domain rows), so any axis the
+ * admin never touched re-emits the server's raw values VERBATIM — parsing
+ * only happens for explicitly edited fields. Plus the grant-payload builder
+ * (absent row = OFF; always-on chat/home/settings never produce grant rows;
+ * connector write capped to Admin-based roles per O-2).
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -328,6 +330,59 @@ describe("tool grants — untouched groups never widen or invent (QA send-back)"
     draft.features.cameras = { on: false, level: "view" };
     const payload = draftToRolePayload(draft);
     expect(payload.toolGrants).toEqual([]);
+  });
+});
+
+describe("usage — untouched fields never drift or drop (review F2)", () => {
+  function usageRole(overrides: Partial<AccessRole>): AccessRole {
+    return {
+      id: "r1",
+      name: "Finance",
+      slug: "finance",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-07-24T00:00:00Z",
+      updatedAt: "2026-07-24T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [],
+      connectorGrants: [],
+      ...overrides,
+    };
+  }
+
+  it("a non-whole-GB quota round-trips verbatim on a name-only save (no float drift)", () => {
+    const draft = roleToDraft(
+      usageRole({ storageQuotaBytes: "1234567890123", maxUploadSizeMb: 123, llmDailyMessageCap: 7 }),
+    );
+    draft.name = "Finance renamed";
+    const payload = draftToRolePayload(draft);
+    expect(payload.storageQuotaBytes).toBe("1234567890123");
+    expect(payload.maxUploadSizeMb).toBe(123);
+    expect(payload.llmDailyMessageCap).toBe(7);
+  });
+
+  it("a sub-0.05-GB quota (20 MB) round-trips verbatim — never nulled into no-limit", () => {
+    const draft = roleToDraft(usageRole({ storageQuotaBytes: "20971520" }));
+    draft.name = "Renamed";
+    const payload = draftToRolePayload(draft);
+    expect(payload.storageQuotaBytes).toBe("20971520");
+  });
+
+  it("a TOUCHED storage field emits the newly typed value", () => {
+    const draft = roleToDraft(usageRole({ storageQuotaBytes: "1234567890123" }));
+    draft.usage.storageValue = "25";
+    draft.usage.storageUnit = "GB";
+    draft.usageTouched = true;
+    const payload = draftToRolePayload(draft);
+    expect(payload.storageQuotaBytes).toBe("26843545600");
   });
 });
 

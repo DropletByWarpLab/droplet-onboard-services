@@ -285,6 +285,52 @@ describe("person editor — role change flow", () => {
     );
   });
 
+  it("a stale effective-access resolve never seeds another person's editor (review F4)", async () => {
+    const resolvers: Array<(v: unknown) => void> = [];
+    fetchEffectiveAccessMock.mockImplementation(
+      () => new Promise((res) => resolvers.push(res as (v: unknown) => void)),
+    );
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+    // Open Priya's editor (fetch #1 held open), then close it…
+    fireEvent.click(screen.getByRole("button", { name: "Edit user Priya Nair" }));
+    await screen.findByLabelText("Assigned role");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // …and open Sam's (fetch #2 held open).
+    fireEvent.click(screen.getByRole("button", { name: "Edit user Sam Ortega" }));
+    await screen.findByLabelText("Assigned role");
+    await waitFor(() => expect(fetchEffectiveAccessMock).toHaveBeenCalledTimes(2));
+    // Priya's fetch resolves LATE, carrying her exception rows.
+    resolvers[0]!({
+      tier: "family",
+      features: [],
+      toolDomains: [],
+      locks: false,
+      cloud: false,
+      connectors: {},
+      usage: { storageQuotaBytes: null, maxUploadSizeMb: null, llmDailyMessageCap: null },
+      deptRights: [],
+      exceptions: [{ moduleId: "cameras", effect: "allow", level: "act" }],
+    });
+    // Sam's open editor must never show Priya's rows.
+    await waitFor(() =>
+      expect(screen.queryByText(/Allow: Cameras/)).not.toBeInTheDocument(),
+    );
+    // Sam's own (empty) seed still applies cleanly when his fetch lands.
+    resolvers[1]!({
+      tier: "guest",
+      features: [],
+      toolDomains: [],
+      locks: false,
+      cloud: false,
+      connectors: {},
+      usage: { storageQuotaBytes: null, maxUploadSizeMb: null, llmDailyMessageCap: null },
+      deptRights: [],
+      exceptions: [],
+    });
+    await waitFor(() => expect(screen.queryByText(/Allow: Cameras/)).not.toBeInTheDocument());
+  });
+
   it("orders the editor per §17: Usage override BEFORE Exceptions (UX-6)", async () => {
     render(<UsersPage />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());

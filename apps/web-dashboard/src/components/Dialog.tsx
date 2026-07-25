@@ -150,6 +150,15 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
+// Module-level stack of OPEN dialogs (WARP-1532 review F1). Every open
+// Dialog registers its own window keydown listener, and stopPropagation
+// cannot suppress OTHER listeners on the same target — so with nested
+// dialogs (e.g. the role-builder sheet + its cloud confirm, or the
+// smart-home nested surfaces) a single Escape used to close BOTH layers,
+// discarding the underlying draft. Each dialog pushes a token while open;
+// only the TOPMOST token's dialog may act on Escape.
+const openDialogStack: symbol[] = [];
+
 export function Dialog({
   open,
   onClose,
@@ -169,16 +178,36 @@ export function Dialog({
   // can restore it on close even if no explicit `triggerRef` was passed.
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const prefersReducedMotion = useReducedMotion();
+  // Stable identity on the open-dialog stack (F1). A ref, not state — the
+  // token never changes for this component instance.
+  const stackTokenRef = useRef<symbol>();
+  if (stackTokenRef.current === undefined) stackTokenRef.current = Symbol("dialog");
+
+  // Register on the open-dialog stack while open. Nested dialogs mount
+  // after their parents, so the innermost open dialog is always topmost;
+  // closing it pops the stack and hands Escape back to the layer below.
+  useEffect(() => {
+    if (!open) return;
+    const token = stackTokenRef.current!;
+    openDialogStack.push(token);
+    return () => {
+      const index = openDialogStack.lastIndexOf(token);
+      if (index !== -1) openDialogStack.splice(index, 1);
+    };
+  }, [open]);
 
   // Escape close — only while open, so background surfaces keep their
-  // own Escape semantics.
+  // own Escape semantics, and only for the TOPMOST open dialog:
+  // stopPropagation cannot suppress sibling window-level listeners, so
+  // without the stack check a nested confirm's Escape would also close
+  // the sheet underneath it and discard the draft (F1).
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
+      if (e.key !== "Escape") return;
+      if (openDialogStack[openDialogStack.length - 1] !== stackTokenRef.current) return;
+      e.stopPropagation();
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

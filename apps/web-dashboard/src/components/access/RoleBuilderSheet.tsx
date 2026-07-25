@@ -141,13 +141,33 @@ export function RoleBuilderSheet({
 
   const patch = (p: Partial<RoleDraft>) => setDraft((d) => ({ ...d, ...p }));
 
+  /** Usage edits mark the axis touched — untouched usage re-emits the
+   *  server's raw values verbatim on save (review F2; lossy GB/TB input). */
+  const patchUsage = (p: Partial<RoleDraft["usage"]>) =>
+    setDraft((d) => ({ ...d, usage: { ...d.usage, ...p }, usageTouched: true }));
+
   const setStartingPoint = (tier: AccessStartingPoint) => {
     if (TIER_RANK[tier] > TIER_RANK[actingTier]) return;
-    setDraft((d) => {
-      const { features, notice } = refloorFeatures(d.features, tier);
-      setRefloorNotice(notice);
-      return { ...d, startingPoint: tier, features };
-    });
+    // Review F5a: compute OUTSIDE the setState updater — updaters must stay
+    // pure (StrictMode double-invokes them) and the notice is a side effect.
+    const { features, notice } = refloorFeatures(draft.features, tier);
+    // Review F3: the O-2 cap shrinks the connector options on a downgrade —
+    // clamp the draft value too (the select would otherwise sit valueless)
+    // and say so in the same §5.1 notice; connectors are never silent.
+    const allowedLevels = new Set(connectorLevelsFor(tier));
+    const nextConnectors = { ...draft.connectors };
+    let connectorNotice: string | null = null;
+    for (const [provider, level] of Object.entries(nextConnectors)) {
+      if (level === "none" || allowedLevels.has(level)) continue;
+      nextConnectors[provider] = "read";
+      if (!connectorNotice) {
+        const label = connectors.find((c) => c.provider === provider)?.label ?? provider;
+        connectorNotice = `Switching to ${tierLabel(tier)} caps ${label} at Read — Read & write is available on Admin-based roles.`;
+      }
+    }
+    const combined = [notice, connectorNotice].filter(Boolean).join(" ");
+    setRefloorNotice(combined || null);
+    setDraft((d) => ({ ...d, startingPoint: tier, features, connectors: nextConnectors }));
   };
 
   const setFeatureOn = (moduleId: string, on: boolean) =>
@@ -420,14 +440,14 @@ export function RoleBuilderSheet({
                     inputMode="decimal"
                     placeholder="No limit"
                     value={draft.usage.storageValue}
-                    onChange={(e) => patch({ usage: { ...draft.usage, storageValue: e.target.value } })}
+                    onChange={(e) => patchUsage({ storageValue: e.target.value })}
                     className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)", minWidth: 0 }}
                   />
                   <select
                     aria-label="Storage limit unit"
                     value={draft.usage.storageUnit}
-                    onChange={(e) => patch({ usage: { ...draft.usage, storageUnit: e.target.value as "GB" | "TB" } })}
+                    onChange={(e) => patchUsage({ storageUnit: e.target.value as "GB" | "TB" })}
                     className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)" }}
                   >
@@ -448,7 +468,7 @@ export function RoleBuilderSheet({
                   inputMode="numeric"
                   placeholder="Box default"
                   value={draft.usage.uploadMb}
-                  onChange={(e) => patch({ usage: { ...draft.usage, uploadMb: e.target.value } })}
+                  onChange={(e) => patchUsage({ uploadMb: e.target.value })}
                   className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                   style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)" }}
                 />
@@ -466,7 +486,7 @@ export function RoleBuilderSheet({
                 inputMode="numeric"
                 placeholder="No limit"
                 value={draft.usage.llmDaily}
-                onChange={(e) => patch({ usage: { ...draft.usage, llmDaily: e.target.value } })}
+                onChange={(e) => patchUsage({ llmDaily: e.target.value })}
                 className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)" }}
               />

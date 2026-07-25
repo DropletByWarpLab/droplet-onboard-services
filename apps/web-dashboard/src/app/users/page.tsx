@@ -309,6 +309,11 @@ export default function UsersPage() {
   // can restore focus on close. Each user row owns its own Edit button so
   // a single ref isn't sufficient; capture document.activeElement instead.
   const editTriggerRef = useRef<HTMLElement | null>(null);
+  // WARP-1532 review F4: monotonically increasing token per openEdit. The
+  // exceptions seed resolves async — a slow response for a PREVIOUS person
+  // (or a previous open of the same person) must never seed the currently
+  // open editor, or a later Save would PUT someone else's exception rows.
+  const editSeedTokenRef = useRef(0);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -687,11 +692,16 @@ export default function UsersPage() {
     setEditExceptions([]);
     setEditExceptionsSeed("[]");
     setEditAccessSyncText(null);
+    const seedToken = ++editSeedTokenRef.current;
     if (u.userId) {
       // Existing exceptions ride the effective-access resolver (§6.5) —
       // best-effort; an absent T3 backend just leaves the block empty.
       fetchEffectiveAccess(u.userId)
         .then((eff) => {
+          // F4: bail if another editor opened (or this one closed and
+          // reopened) since this fetch started — stale data must never
+          // seed the current person's exception list.
+          if (editSeedTokenRef.current !== seedToken) return;
           const rows = (eff.exceptions ?? []).map(({ moduleId, effect, level }) => ({
             moduleId,
             effect,

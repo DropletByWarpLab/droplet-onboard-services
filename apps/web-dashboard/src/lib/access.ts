@@ -498,6 +498,20 @@ export interface RoleDraft {
   /** Keyed by connector provider; "none" = no grant row. */
   connectors: Record<string, ConnectorAccessLevel | "none">;
   usage: RoleUsageDraft;
+  /** The server's usage values VERBATIM (edit mode; nulls on create).
+   *  The GB/TB input is a lossy view over a byte string — re-parsing an
+   *  untouched display value drifted non-whole-GB quotas (~20 MB on a 1.2 TB
+   *  value) and NULLED sub-0.05-GB quotas entirely (review F2). Untouched
+   *  saves re-emit these raw values exactly. */
+  originalUsage: {
+    storageQuotaBytes: string | null;
+    maxUploadSizeMb: number | null;
+    llmDailyMessageCap: number | null;
+  };
+  /** True once the admin edits ANY usage field this session; only then do
+   *  the input values become the payload source. Create mode starts true
+   *  (the blank fields are the truth for a new role). */
+  usageTouched: boolean;
   cloud: boolean;
   locks: boolean;
 }
@@ -532,6 +546,8 @@ export function blankRoleDraft(sp: AccessStartingPoint = "family"): RoleDraft {
     touchedToolGroups: TOOL_DOMAIN_GROUPS.map((g) => g.id),
     connectors: {},
     usage: { storageValue: "", storageUnit: "GB", uploadMb: "", llmDaily: "" },
+    originalUsage: { storageQuotaBytes: null, maxUploadSizeMb: null, llmDailyMessageCap: null },
+    usageTouched: true,
     cloud: false,
     locks: false,
   };
@@ -674,19 +690,28 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
           : (level as ConnectorAccessLevel),
     }));
 
+  // Usage — same untouched-verbatim rule as the tool axis (review F2):
+  // the GB/TB input is lossy, so its parsed value only becomes the payload
+  // once the admin actually edited a usage field; otherwise the server's
+  // raw values re-emit exactly (no float drift, no silent quota removal).
   const uploadTrimmed = draft.usage.uploadMb.trim();
   const uploadN = Number(uploadTrimmed);
   const llmTrimmed = draft.usage.llmDaily.trim();
   const llmN = Number(llmTrimmed);
+  const usage = draft.usageTouched
+    ? {
+        storageQuotaBytes: storageInputToBytes(draft.usage.storageValue, draft.usage.storageUnit),
+        maxUploadSizeMb:
+          uploadTrimmed && Number.isInteger(uploadN) && uploadN > 0 ? uploadN : null,
+        llmDailyMessageCap: llmTrimmed && Number.isInteger(llmN) && llmN > 0 ? llmN : null,
+      }
+    : { ...draft.originalUsage };
 
   return {
     name: draft.name.trim(),
     description: draft.description.trim() || null,
     startingPoint: draft.startingPoint,
-    storageQuotaBytes: storageInputToBytes(draft.usage.storageValue, draft.usage.storageUnit),
-    maxUploadSizeMb:
-      uploadTrimmed && Number.isInteger(uploadN) && uploadN > 0 ? uploadN : null,
-    llmDailyMessageCap: llmTrimmed && Number.isInteger(llmN) && llmN > 0 ? llmN : null,
+    ...usage,
     cloudModelsAllowed: draft.cloud,
     mayOperateLocks: draft.locks && !!draft.features.smart_home?.on,
     featureGrants,
@@ -741,6 +766,12 @@ export function roleToDraft(role: AccessRole): RoleDraft {
       uploadMb: role.maxUploadSizeMb != null ? String(role.maxUploadSizeMb) : "",
       llmDaily: role.llmDailyMessageCap != null ? String(role.llmDailyMessageCap) : "",
     },
+    originalUsage: {
+      storageQuotaBytes: role.storageQuotaBytes,
+      maxUploadSizeMb: role.maxUploadSizeMb,
+      llmDailyMessageCap: role.llmDailyMessageCap,
+    },
+    usageTouched: false,
     cloud: role.cloudModelsAllowed,
     locks: role.mayOperateLocks,
   };
