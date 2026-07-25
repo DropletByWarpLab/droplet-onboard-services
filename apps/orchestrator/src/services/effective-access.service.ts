@@ -1,0 +1,383 @@
+/**
+ * WARP-1527 / ADR-032 §3 (RBAC v2 T3) — the effective-access resolver.
+ *
+ * The ONE layer-2 resolver every per-person authorization surface consults
+ * (module gate T4, tool-catalog builder T5, cloud router + connector routes
+ * T6, and the People UI's read-only drawer via GET
+ * /api/people/:id/effective-access). §3 verbatim:
+ *
+ *   tier          = User.role                       (the ADR-004 floor)
+ *   features      = tier==owner ? ALL
+ *                   : clamp(roleFeatureGrants ⊕ exceptions,
+ *                           catalogFloor(tier)) ∩ workspaceModules
+ *   toolDomains   = writeFilter(tier) ∩ moduleToolDomains(features)
+ *                   ∩ roleToolGrants
+ *   locks         = role.mayOperateLocks && smart_home ∈ features
+ *   cloud         = workspace.cloud_model_escape && role.cloudModelsAllowed
+ *   connectors[p] = min(roleConnectorGrant(p),
+ *                       connection.writeEnabled ? read_write : read)
+ *   usage         = UserUsagePolicy ?? roleDefaults ?? box default   (T7)
+ *   deptRights    = read-only reference (ADR-029 owns them)
+ *
+ * ONLY `owner` bypasses this layer — admins can be narrowed (that is the
+ * point of Admin-based custom roles). Do NOT copy requireScope's
+ * owner/admin short-circuit here. `service` principals keep their dedicated
+ * requireRoleOrService paths and never resolve through this module. A null
+ * `accessRoleId` (every user today) resolves to the tier's FULL catalog —
+ * today's behavior bit-for-bit; the coarse requireRole floors stay
+ * enforcing unchanged at layer 1.
+ *
+ * Shape: scope-loader-shaped singleton (module-bound Prisma + availability
+ * config, idempotent boot init beside initScopeLoader, fail-closed throw
+ * when unwired, `_setForTests` hook). DB-read per request; box scale is
+ * tens of users — deliberately NO cache in v1.
+ *
+ * The pure composition (computeEffectiveAccess) is exported separately so
+ * the resolver matrix tests need no DB, and so T4/T5/T6 callers that
+ * already hold the rows can compose without a second read.
+ */
+import type { ModuleId, PrismaClient } from "@prisma/client";
+import { TOOL_DOMAINS } from "@droplet/tools-core";
+import type { Role } from "./jwt.service.js";
+import {
+  resolveEffectiveUsage,
+  type EffectiveUsageSource,
+} from "./effective-usage.service.js";
+import {
+  ALWAYS_ON_FEATURES,
+  GATEABLE_MODULE_IDS,
+  clampLevel,
+  domainsForFeatures,
+  fullCatalogFeatures,
+  isGateableModuleId,
+  tierReachableDomains,
+  type ConnectorLevel,
+  type FeatureLevel,
+} from "./access-catalog.js";
+import type { AvailabilityConfig } from "../modules/module-registry.js";
+import { getEffectiveModuleIds } from "./modules.service.js";
+
+// ── shapes ─────────────────────────────────────────────────────────
+
+export interface AccessRoleGrantRows {
+  mayOperateLocks: boolean;
+  cloudModelsAllowed: boolean;
+  storageQuotaBytes: bigint | null;
+  maxUploadSizeMb: number | null;
+  llmDailyMessageCap: number | null;
+  featureGrants: Array<{ moduleId: ModuleId; level: FeatureLevel }>;
+  toolGrants: Array<{ domain: string; level: "view" | "use" }>;
+  connectorGrants: Array<{ provider: string; level: ConnectorLevel }>;
+}
+
+export interface AccessExceptionRow {
+  id: string;
+  moduleId: ModuleId;
+  effect: "allow" | "deny";
+  level: FeatureLevel | null;
+}
+
+export interface EffectiveAccessInputs {
+  user: { id: string; role: Role; accessRole: AccessRoleGrantRows | null };
+  exceptions: AccessExceptionRow[];
+  /** Workspace-EFFECTIVE module ids (available ∧ enabled — modules.service). */
+  workspaceModuleIds: ReadonlySet<ModuleId>;
+  /** OffLanAllowlistChannel `cloud_model_escape` enabled (absent row = false). */
+  cloudEscapeEnabled: boolean;
+  connections: Array<{ provider: string; writeEnabled: boolean }>;
+  usagePolicy: {
+    storageQuotaBytes: bigint | null;
+    maxUploadSizeMb: number | null;
+    llmDailyMessageCap: number | null;
+  } | null;
+  deptRights: Array<{ id: string; name: string; right: string }>;
+}
+
+/** The §5 wire shape (matches the dashboard's EffectiveAccess type —
+ *  WARP-1532 api contract; unknown extras there are ignored by design). */
+export interface EffectiveAccessResult {
+  tier: Role;
+  features: Array<{ moduleId: ModuleId; level: FeatureLevel }>;
+  toolDomains: string[];
+  locks: boolean;
+  cloud: boolean;
+  connectors: Record<string, ConnectorLevel>;
+  usage: {
+    storageQuotaBytes: string | null;
+    maxUploadSizeMb: number | null;
+    llmDailyMessageCap: number | null;
+    /** Headline provenance = the storage field's source (the NC-managed,
+     *  roster-rendered field — T7 "roster shows source"). */
+    source: EffectiveUsageSource;
+    /** Per-field provenance — the honest per-field view (additive extra). */
+    sources: {
+      storageQuotaBytes: EffectiveUsageSource;
+      maxUploadSizeMb: EffectiveUsageSource;
+      llmDailyMessageCap: EffectiveUsageSource;
+    };
+  };
+  deptRights: Array<{ id: string; name: string; right: string }>;
+  exceptions: AccessExceptionRow[];
+}
+
+// ── pure §3 composition ────────────────────────────────────────────
+
+/** Tiers whose write filter (routes/llm.ts) leaves smart-home control tools
+ *  reachable — today's lock-operation reality for role-less users. */
+const LOCK_CAPABLE_TIERS: ReadonlySet<Role> = new Set(["owner", "admin", "family"]);
+
+function minConnectorLevel(a: ConnectorLevel, b: ConnectorLevel): ConnectorLevel {
+  return a === "read_write" && b === "read_write" ? "read_write" : "read";
+}
+
+function connectionLevels(
+  connections: Array<{ provider: string; writeEnabled: boolean }>,
+): Map<string, ConnectorLevel> {
+  const out = new Map<string, ConnectorLevel>();
+  for (const conn of connections) {
+    // One connection per provider by design (ADR-032 §1.13); if rows ever
+    // drift to multiples, any write-enabled row makes the provider
+    // read_write-capable — the role grant and the staged-outbox confirm
+    // remain the narrowing layers above.
+    const prev = out.get(conn.provider);
+    const level: ConnectorLevel = conn.writeEnabled ? "read_write" : "read";
+    out.set(conn.provider, prev === "read_write" ? prev : level);
+  }
+  return out;
+}
+
+export function computeEffectiveAccess(inputs: EffectiveAccessInputs): EffectiveAccessResult {
+  const { user } = inputs;
+  const tier = user.role;
+  const connLevels = connectionLevels(inputs.connections);
+
+  // T7 usage line — import, never duplicate. Owner included: rail 1 keeps
+  // admins from WRITING an owner policy row, but an owner's own row (self
+  // edits are allowed on the usage surface) still resolves honestly.
+  const usage = resolveEffectiveUsage(inputs.usagePolicy, user.accessRole);
+  const usageWire: EffectiveAccessResult["usage"] = {
+    storageQuotaBytes: usage.storageQuotaBytes.value?.toString() ?? null,
+    maxUploadSizeMb: usage.maxUploadSizeMb.value,
+    llmDailyMessageCap: usage.llmDailyMessageCap.value,
+    source: usage.storageQuotaBytes.source,
+    sources: {
+      storageQuotaBytes: usage.storageQuotaBytes.source,
+      maxUploadSizeMb: usage.maxUploadSizeMb.source,
+      llmDailyMessageCap: usage.llmDailyMessageCap.source,
+    },
+  };
+
+  // ── owner bypass — full control, outside every intersection (§3) ──
+  if (tier === "owner") {
+    return {
+      tier,
+      features: [
+        ...ALWAYS_ON_FEATURES.map((f) => ({ ...f })),
+        ...GATEABLE_MODULE_IDS.map((moduleId) => ({
+          moduleId: moduleId as ModuleId,
+          level: "manage" as FeatureLevel,
+        })),
+      ],
+      toolDomains: [...TOOL_DOMAINS],
+      locks: true,
+      // The workspace escape channel is not a role narrowing — ai-gateway's
+      // fail-closed 451 applies to owners too, so the resolver stays honest.
+      cloud: inputs.cloudEscapeEnabled,
+      connectors: Object.fromEntries(connLevels),
+      usage: usageWire,
+      deptRights: inputs.deptRights,
+      exceptions: inputs.exceptions,
+    };
+  }
+
+  // ── features = clamp(roleGrants ⊕ exceptions, floor) ∩ workspace ──
+  const levelByModule = new Map<ModuleId, FeatureLevel>();
+  if (user.accessRole === null) {
+    // Legacy / role-less: the tier's full catalog (today's world).
+    for (const f of fullCatalogFeatures(tier)) levelByModule.set(f.moduleId, f.level);
+  } else {
+    for (const f of ALWAYS_ON_FEATURES) levelByModule.set(f.moduleId, f.level);
+    for (const grant of user.accessRole.featureGrants) {
+      if (!isGateableModuleId(grant.moduleId)) continue; // chat rows never exist; defensive
+      levelByModule.set(grant.moduleId, clampLevel(tier, grant.moduleId, grant.level));
+    }
+  }
+  for (const exception of inputs.exceptions) {
+    if (!isGateableModuleId(exception.moduleId)) continue; // always-on floor is exception-immune
+    if (exception.effect === "deny") {
+      levelByModule.delete(exception.moduleId);
+    } else {
+      levelByModule.set(
+        exception.moduleId,
+        clampLevel(tier, exception.moduleId, exception.level ?? "view"),
+      );
+    }
+  }
+  for (const moduleId of [...levelByModule.keys()]) {
+    if (!inputs.workspaceModuleIds.has(moduleId)) levelByModule.delete(moduleId);
+  }
+  const features = [...levelByModule.entries()].map(([moduleId, level]) => ({
+    moduleId,
+    level,
+  }));
+  const featureIds = new Set(levelByModule.keys());
+
+  // ── toolDomains = writeFilter ∩ moduleToolDomains ∩ roleToolGrants ──
+  const reachable = tierReachableDomains(tier);
+  const featureDomains = domainsForFeatures(featureIds);
+  const granted =
+    user.accessRole === null
+      ? new Set<string>(TOOL_DOMAINS)
+      : new Set(user.accessRole.toolGrants.map((g) => g.domain));
+  const toolDomains = [...TOOL_DOMAINS].filter(
+    (d) => reachable.has(d) && featureDomains.has(d) && granted.has(d),
+  );
+
+  // ── locks ──
+  const smartHomeOn = featureIds.has("smart_home");
+  const locks =
+    user.accessRole === null
+      ? smartHomeOn && LOCK_CAPABLE_TIERS.has(tier)
+      : user.accessRole.mayOperateLocks && smartHomeOn;
+
+  // ── cloud AND-gate ──
+  const cloud =
+    user.accessRole === null
+      ? inputs.cloudEscapeEnabled // today's workspace-only gate
+      : inputs.cloudEscapeEnabled && user.accessRole.cloudModelsAllowed;
+
+  // ── connectors[p] = min(grant, connection) ──
+  const connectors: Record<string, ConnectorLevel> = {};
+  if (user.accessRole === null) {
+    // Today's floor: the connector routes gate owner/admin (O-2 widens
+    // family reads only THROUGH a role grant, which a role-less user
+    // cannot hold).
+    if (tier === "admin") {
+      for (const [provider, level] of connLevels) connectors[provider] = level;
+    }
+  } else {
+    for (const grant of user.accessRole.connectorGrants) {
+      const connLevel = connLevels.get(grant.provider);
+      if (!connLevel) continue; // no connection = no reach
+      connectors[grant.provider] = minConnectorLevel(grant.level, connLevel);
+    }
+  }
+
+  return {
+    tier,
+    features,
+    toolDomains,
+    locks,
+    cloud,
+    connectors,
+    usage: usageWire,
+    deptRights: inputs.deptRights,
+    exceptions: inputs.exceptions,
+  };
+}
+
+// ── bound fetch wrapper (scope-loader shape) ───────────────────────
+
+let boundPrisma: PrismaClient | null = null;
+let boundConfig: AvailabilityConfig | null = null;
+
+/**
+ * Bind the orchestrator's PrismaClient + availability config at boot,
+ * beside initScopeLoader (app.ts). Idempotent — same contract as
+ * initScopeLoader / initActivityRecorder.
+ */
+export function initEffectiveAccess(prisma: PrismaClient, cfg: AvailabilityConfig): void {
+  if (boundPrisma) return;
+  boundPrisma = prisma;
+  boundConfig = cfg;
+}
+
+/** Exposed only for tests — inject fakes or reset to null. */
+export function _setEffectiveAccessForTests(
+  prisma: PrismaClient | null,
+  cfg: AvailabilityConfig | null,
+): void {
+  boundPrisma = prisma;
+  boundConfig = cfg;
+}
+
+/**
+ * Fetch-and-compose for a userId. Returns `null` when no such user (the
+ * route maps it to 404). Throws when unwired — fail closed (a silent empty
+ * result would 404/deny a legitimate person), the scope-loader posture.
+ */
+export async function resolveEffectiveAccess(
+  userId: string,
+): Promise<EffectiveAccessResult | null> {
+  const prisma = boundPrisma;
+  const cfg = boundConfig;
+  if (!prisma || !cfg) {
+    throw new Error("effective-access resolver not initialised");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      role: true,
+      accessRole: {
+        select: {
+          mayOperateLocks: true,
+          cloudModelsAllowed: true,
+          storageQuotaBytes: true,
+          maxUploadSizeMb: true,
+          llmDailyMessageCap: true,
+          featureGrants: { select: { moduleId: true, level: true } },
+          toolGrants: { select: { domain: true, level: true } },
+          connectorGrants: { select: { provider: true, level: true } },
+        },
+      },
+    },
+  });
+  if (!user) return null;
+
+  const [exceptions, workspaceModuleIds, cloudRow, connections, usagePolicy, memberships] =
+    await Promise.all([
+      prisma.userAccessException.findMany({
+        where: { userId },
+        select: { id: true, moduleId: true, effect: true, level: true },
+        orderBy: { createdAt: "asc" },
+      }),
+      getEffectiveModuleIds(prisma, cfg),
+      prisma.offLanAllowlistChannel.findUnique({
+        where: { key: "cloud_model_escape" },
+        select: { enabled: true },
+      }),
+      prisma.integrationConnection.findMany({
+        select: { provider: true, writeEnabled: true },
+      }),
+      prisma.userUsagePolicy.findUnique({
+        where: { userId },
+        select: {
+          storageQuotaBytes: true,
+          maxUploadSizeMb: true,
+          llmDailyMessageCap: true,
+        },
+      }),
+      prisma.departmentMembership.findMany({
+        where: { userId },
+        select: { right: true, department: { select: { id: true, name: true } } },
+      }),
+    ]);
+
+  return computeEffectiveAccess({
+    user: user as EffectiveAccessInputs["user"],
+    exceptions: exceptions as AccessExceptionRow[],
+    workspaceModuleIds,
+    // Sovereignty read fails toward CLOSED: absent row = disabled (the
+    // off-lan-gate.service posture).
+    cloudEscapeEnabled: cloudRow?.enabled === true,
+    connections,
+    usagePolicy,
+    deptRights: memberships.map((m) => ({
+      id: m.department.id,
+      name: m.department.name,
+      right: m.right,
+    })),
+  });
+}
