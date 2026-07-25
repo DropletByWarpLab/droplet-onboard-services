@@ -132,7 +132,11 @@ describe("Users page — invite UX", () => {
     });
     const callArg = createInviteMock.mock.calls[0][0];
     expect(callArg.email).toBe("bob@example.com");
-    expect(callArg.role).toBe("user");
+    // WARP-1533: the picker defaults to the most-restrictive sensible role
+    // (built-in Guest) and sends the CANONICAL enum value — the legacy
+    // "user" alias is no longer emitted by the dashboard.
+    expect(callArg.role).toBe("guest");
+    expect(callArg.accessRoleId).toBeUndefined();
   });
 
   it("flips to share-this-link view with URL + QR after invite is created", async () => {

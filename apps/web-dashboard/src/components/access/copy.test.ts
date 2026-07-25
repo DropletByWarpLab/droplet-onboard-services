@@ -121,6 +121,12 @@ describe("§12 Sync + §10 system states", () => {
     expect(ACCESS_COPY.retry).toBe("Retry");
   });
 
+  it("invite modal degraded picker (§7 / WARP-1533 — T9-authored, pending packet ratification)", () => {
+    expect(ACCESS_COPY.inviteRolesDegraded).toBe(
+      "Couldn't load your custom roles — you can invite with the built-in roles for now.",
+    );
+  });
+
   it("built-in detail + off-box block copy (§4.2 / §5.4 quoted strings)", () => {
     expect(ACCESS_COPY.builtinFixed).toBe(
       "Built-in roles are fixed. Create a custom role to change what a group can do.",
