@@ -143,7 +143,11 @@ describe("guardrails (§8 — disabled with honest copy)", () => {
     renderSection({ person: OWNER, value: "tier:owner" });
     expect(screen.getByText(ACCESS_COPY.ownerTooltip)).toBeInTheDocument();
     expect(screen.getByLabelText("Assigned role")).toBeDisabled();
-    expect(screen.queryByText(ACCESS_COPY.addException)).not.toBeInTheDocument();
+    // §8: the exceptions affordance renders DISABLED with the honest
+    // reason — never hidden (QA send-back 2).
+    const addException = screen.getByRole("button", { name: ACCESS_COPY.addException });
+    expect(addException).toBeDisabled();
+    expect(addException).toHaveAttribute("title", ACCESS_COPY.ownerTooltip);
   });
 
   it("self-lockout: acting on yourself disables the select with the verbatim reason", () => {

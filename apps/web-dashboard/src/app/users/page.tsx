@@ -759,8 +759,11 @@ export default function UsersPage() {
     // "No limit" → storageQuotaBytes: null (explicit clear, not "unchanged"
     // — the field is always sent when a userId exists, since the dialog
     // always shows the current desired state, not a sparse diff).
+    // WARP-1532 QA send-back 2 — §8 owner rail: the owner's usage is never
+    // written (the fields render disabled with the honest reason, and the
+    // save path skips the live usage endpoint entirely).
     let usagePatch: { storageQuotaBytes?: string | null; maxUploadSizeMb?: number | null } | null = null;
-    if (editing.userId) {
+    if (editing.userId && editing.role !== "owner") {
       const trimmedStorage = editStorageValue.trim();
       let storageQuotaBytes: string | null = null;
       if (trimmedStorage) {
@@ -906,6 +909,10 @@ export default function UsersPage() {
       : "No limit",
     upload: editingRole ? "Role default" : "Device default",
   };
+  // WARP-1532 QA send-back 2 — §8 owner rail: usage controls render
+  // disabled-with-reason for the owner (the endpoint is live today).
+  const editingIsOwner = editing?.role === "owner";
+  const editUsageDisabledTitle = editingIsOwner ? ACCESS_COPY.ownerTooltip : undefined;
 
   /** One roster row. WARP-1532 extends the WARP-1271 row with the assigned-
    *  role chip (text-first, never a --role-* color) and the §8 owner rail:
@@ -1982,7 +1989,9 @@ export default function UsersPage() {
                           onChange={(e) => setEditStorageValue(e.target.value)}
                           placeholder={editUsagePlaceholders.storage}
                           aria-label="Storage limit"
-                          className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                          disabled={editingIsOwner}
+                          title={editUsageDisabledTitle}
+                          className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -1994,7 +2003,9 @@ export default function UsersPage() {
                           value={editStorageUnit}
                           onChange={(e) => setEditStorageUnit(e.target.value as StorageUnit)}
                           aria-label="Storage limit unit"
-                          className="px-2.5 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                          disabled={editingIsOwner}
+                          title={editUsageDisabledTitle}
+                          className="px-2.5 py-2.5 outline-none focus:border-[var(--brand)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2023,7 +2034,9 @@ export default function UsersPage() {
                         onChange={(e) => setEditUploadCapMb(e.target.value)}
                         placeholder={editUsagePlaceholders.upload}
                         aria-label="Upload cap in megabytes"
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        disabled={editingIsOwner}
+                        title={editUsageDisabledTitle}
+                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",

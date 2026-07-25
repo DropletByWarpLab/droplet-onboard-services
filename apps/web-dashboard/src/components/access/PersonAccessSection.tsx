@@ -309,8 +309,11 @@ export function PersonAccessSection({
         </div>
       </div>
 
-      {/* ── Exceptions (§6.5 — small, secondary, collapsed) ── */}
-      {!isOwner && (
+      {/* ── Exceptions (§6.5 — small, secondary, collapsed). §8: rails are
+          rendered DISABLED with the honest reason, never hidden — an
+          owner/self/last-admin target keeps the block visible with the add
+          affordance inert and titled. ── */}
+      {
         <div>
           <div className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
             Exceptions
@@ -345,8 +348,22 @@ export function PersonAccessSection({
               })}
             </div>
           )}
-          {!locked && !addingException && (
-            <button type="button" className="btn ghost sm" onClick={() => setAddingException(true)}>
+          {!addingException && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={locked}
+              title={
+                isOwner
+                  ? ACCESS_COPY.ownerTooltip
+                  : isSelf
+                    ? ACCESS_COPY.selfLockout
+                    : lastAdminBlocked
+                      ? ACCESS_COPY.lastAdmin
+                      : undefined
+              }
+              onClick={() => setAddingException(true)}
+            >
               {ACCESS_COPY.addException}
             </button>
           )}
@@ -404,7 +421,7 @@ export function PersonAccessSection({
             {ACCESS_COPY.exceptionsHint}
           </p>
         </div>
-      )}
+      }
     </div>
   );
 }

@@ -26,6 +26,7 @@ const setPersonAccessMock = vi.fn();
 const putAccessExceptionsMock = vi.fn();
 const fetchEffectiveAccessMock = vi.fn();
 const fetchUserUsageMock = vi.fn();
+const updateUserUsageMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
@@ -37,7 +38,7 @@ vi.mock("@/lib/api", () => ({
   listInvites: (...a: any[]) => listInvitesMock(...a),
   revokeInvite: vi.fn(),
   fetchUserUsage: (...a: any[]) => fetchUserUsageMock(...a),
-  updateUserUsage: vi.fn(),
+  updateUserUsage: (...a: any[]) => updateUserUsageMock(...a),
   fetchAdminFilesUsage: vi.fn().mockResolvedValue({ users: [], departments: [] }),
   listDepartments: vi.fn().mockResolvedValue({ departments: [] }),
   getDepartment: vi.fn(),
@@ -244,6 +245,32 @@ describe("person editor — role change flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /Save/ }));
     await waitFor(() => expect(fetchUsersMock.mock.calls.length).toBeGreaterThan(1));
     expect(setPersonAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("owner target: usage fields disabled with the §12 tooltip and the live usage PATCH is skipped", async () => {
+    // A second owner (not self) so the editor opens on an owner target.
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        ...ROSTER,
+        { id: "co", username: "co", displayName: "Co Owner", userId: "u-co", role: "owner", accessRoleId: null },
+      ],
+    });
+    updateUserUsageMock.mockResolvedValue({ policy: null });
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Co Owner")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Edit user Co Owner" }));
+    const storage = await screen.findByLabelText("Storage limit");
+    expect(storage).toBeDisabled();
+    expect(storage).toHaveAttribute("title", ACCESS_COPY.ownerTooltip);
+    expect(screen.getByLabelText("Storage limit unit")).toBeDisabled();
+    const upload = screen.getByLabelText("Upload cap in megabytes");
+    expect(upload).toBeDisabled();
+    expect(upload).toHaveAttribute("title", ACCESS_COPY.ownerTooltip);
+    // Saving (display-name change) never touches the live usage endpoint.
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Co O" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(fetchUsersMock.mock.calls.length).toBeGreaterThan(1));
+    expect(updateUserUsageMock).not.toHaveBeenCalled();
   });
 
   it("usage placeholders show the role default when the person has a custom role", async () => {
