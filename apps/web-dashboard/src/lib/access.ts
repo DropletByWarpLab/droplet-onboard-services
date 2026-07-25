@@ -21,6 +21,7 @@ import type {
   AccessModuleId,
   AccessRole,
   AccessRolePayload,
+  AccessRoleToolGrant,
   AccessStartingPoint,
   AccessTier,
   ConnectorAccessLevel,
@@ -482,8 +483,18 @@ export interface RoleDraft {
   description: string;
   startingPoint: AccessStartingPoint;
   features: FeatureDraft;
-  /** Keyed by TOOL_DOMAIN_GROUPS id. */
+  /** Keyed by TOOL_DOMAIN_GROUPS id — the group select's DISPLAY value.
+   *  Only groups listed in `touchedToolGroups` write from this map. */
   tools: Record<string, ToolAccessLevel>;
+  /** The server's tool-grant rows VERBATIM (edit mode; empty on create).
+   *  Untouched groups re-emit these rows exactly — a group select is a
+   *  lossy view over per-domain rows, so an untouched save must never
+   *  widen mixed levels or invent rows where the schema says absent=OFF. */
+  originalToolGrants: AccessRoleToolGrant[];
+  /** Group ids the admin explicitly set THIS session; only these fan out.
+   *  Create mode marks every group touched (the blank builder's selects
+   *  are the source of truth for a brand-new role). */
+  touchedToolGroups: string[];
   /** Keyed by connector provider; "none" = no grant row. */
   connectors: Record<string, ConnectorAccessLevel | "none">;
   usage: RoleUsageDraft;
@@ -515,6 +526,10 @@ export function blankRoleDraft(sp: AccessStartingPoint = "family"): RoleDraft {
     startingPoint: sp,
     features: defaultFeatureDraft(sp),
     tools,
+    originalToolGrants: [],
+    // Create mode: no server rows exist, so the builder's selects ARE the
+    // truth — every group is explicit and fans out on save.
+    touchedToolGroups: TOOL_DOMAIN_GROUPS.map((g) => g.id),
     connectors: {},
     usage: { storageValue: "", storageUnit: "GB", uploadMb: "", llmDaily: "" },
     cloud: false,
@@ -625,11 +640,29 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
     },
   );
 
-  const toolGrants = TOOL_DOMAIN_GROUPS.flatMap((g) => {
-    if (g.feature && !draft.features[g.feature]?.on) return [];
+  // Tool grants — QA send-back: the group select is a LOSSY view over the
+  // per-domain rows, so only groups the admin explicitly touched fan out;
+  // every other original row passes through verbatim. Never widen a mixed
+  // group, never invent rows for a zero-row group (absent row = OFF), and
+  // never drop rows for domains outside the grouped list (e.g. erp).
+  const touched = new Set(draft.touchedToolGroups);
+  const groupByDomain = new Map<string, ToolDomainGroup>();
+  for (const g of TOOL_DOMAIN_GROUPS) {
+    for (const domain of g.domains) groupByDomain.set(domain, g);
+  }
+  const toolGrants: AccessRoleToolGrant[] = [];
+  for (const g of TOOL_DOMAIN_GROUPS) {
+    if (!touched.has(g.id)) continue;
+    if (g.feature && !draft.features[g.feature]?.on) continue;
     const level = draft.tools[g.id] ?? "view";
-    return g.domains.map((domain) => ({ domain, level }));
-  });
+    for (const domain of g.domains) toolGrants.push({ domain, level });
+  }
+  for (const row of draft.originalToolGrants) {
+    const group = groupByDomain.get(row.domain);
+    if (group && touched.has(group.id)) continue; // superseded by the fan-out
+    if (group?.feature && !draft.features[group.feature]?.on) continue; // auto-off
+    toolGrants.push({ domain: row.domain, level: row.level });
+  }
 
   const connectorGrants = Object.entries(draft.connectors)
     .filter(([, level]) => level !== "none")
@@ -679,8 +712,10 @@ export function roleToDraft(role: AccessRole): RoleDraft {
   const tools: Record<string, ToolAccessLevel> = {};
   for (const g of TOOL_DOMAIN_GROUPS) {
     const grants = role.toolGrants.filter((t) => g.domains.includes(t.domain));
-    // A group renders one select; mixed per-domain levels resolve to the
-    // widest so an edit never silently narrows what the server holds.
+    // DISPLAY value only: a group select shows the widest of its domains'
+    // levels. The save path ignores this map for untouched groups — the
+    // original rows pass through verbatim (see draftToRolePayload), so the
+    // lossy display can never widen or invent grants.
     tools[g.id] = grants.some((t) => t.level === "use") ? "use" : "view";
   }
 
@@ -697,6 +732,8 @@ export function roleToDraft(role: AccessRole): RoleDraft {
     startingPoint: role.startingPoint,
     features,
     tools,
+    originalToolGrants: role.toolGrants.map((t) => ({ domain: t.domain, level: t.level })),
+    touchedToolGroups: [],
     connectors,
     usage: {
       storageValue,

@@ -197,7 +197,10 @@ describe("draft → API payload (absent row = OFF; always-on rows never sent)", 
     expect(payload.featureGrants.find((g) => g.moduleId === "cameras")!.level).toBe("view");
   });
 
-  it("expands tool groups into per-domain grant rows and drops feature-off domains", () => {
+  it("create mode: every group is explicit (touched), fans out, and drops feature-off domains", () => {
+    // A blank draft marks all groups touched — the builder's selects ARE the
+    // source of truth for a brand-new role, so what the UI shows is what
+    // saves. (Edit mode is the opposite: see the untouched-groups suite.)
     const draft = blankRoleDraft("family");
     draft.features.cameras = { on: false, level: "view" };
     draft.tools.calendar = "use";
@@ -226,6 +229,105 @@ describe("draft → API payload (absent row = OFF; always-on rows never sent)", 
     expect(payload.storageQuotaBytes).toBe("26843545600");
     expect(payload.maxUploadSizeMb).toBeNull();
     expect(payload.llmDailyMessageCap).toBeNull();
+  });
+});
+
+describe("tool grants — untouched groups never widen or invent (QA send-back)", () => {
+  function grantRole(
+    toolGrants: AccessRole["toolGrants"],
+    featureGrants: AccessRole["featureGrants"],
+  ): AccessRole {
+    return {
+      id: "r1",
+      name: "Finance",
+      slug: "finance",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-07-24T00:00:00Z",
+      updatedAt: "2026-07-24T00:00:00Z",
+      peopleCount: 0,
+      featureGrants,
+      toolGrants,
+      connectorGrants: [],
+    };
+  }
+  const sortRows = (rows: Array<{ domain: string; level: string }>) =>
+    [...rows].sort((a, b) => a.domain.localeCompare(b.domain));
+
+  it("an untouched save round-trips MIXED per-domain grants verbatim (no widening)", () => {
+    const original = [
+      { domain: "calendar", level: "use" as const },
+      { domain: "reminders", level: "view" as const },
+      { domain: "notifications", level: "view" as const },
+    ];
+    const draft = roleToDraft(
+      grantRole(original, [{ moduleId: "calendar", level: "view" }]),
+    );
+    // Name-only edit — the tool axis was never touched.
+    draft.name = "Finance renamed";
+    const payload = draftToRolePayload(draft);
+    expect(sortRows(payload.toolGrants)).toEqual(sortRows(original));
+  });
+
+  it("a feature-on group with ZERO grant rows stays zero on an untouched save (absent row = OFF)", () => {
+    const draft = roleToDraft(grantRole([], [{ moduleId: "cameras", level: "view" }]));
+    draft.name = "Renamed";
+    const payload = draftToRolePayload(draft);
+    expect(payload.toolGrants).toEqual([]);
+  });
+
+  it("touching a group fans out THAT group only and supersedes its original rows", () => {
+    const draft = roleToDraft(
+      grantRole(
+        [
+          { domain: "calendar", level: "use" },
+          { domain: "reminders", level: "view" },
+          { domain: "files", level: "use" },
+        ],
+        [
+          { moduleId: "calendar", level: "view" },
+          { moduleId: "files", level: "act" },
+        ],
+      ),
+    );
+    draft.tools.calendar = "view";
+    draft.touchedToolGroups = ["calendar"];
+    const payload = draftToRolePayload(draft);
+    expect(sortRows(payload.toolGrants)).toEqual(
+      sortRows([
+        { domain: "calendar", level: "view" },
+        { domain: "reminders", level: "view" },
+        { domain: "notifications", level: "view" },
+        { domain: "files", level: "use" }, // untouched original, verbatim
+      ]),
+    );
+  });
+
+  it("rows for domains outside the grouped list (erp) pass through untouched", () => {
+    const draft = roleToDraft(
+      grantRole([{ domain: "erp", level: "use" }], [{ moduleId: "files", level: "view" }]),
+    );
+    const payload = draftToRolePayload(draft);
+    expect(payload.toolGrants).toEqual([{ domain: "erp", level: "use" }]);
+  });
+
+  it("toggling a feature OFF drops its group's original rows (auto-off still real)", () => {
+    const draft = roleToDraft(
+      grantRole(
+        [{ domain: "cameras", level: "use" }],
+        [{ moduleId: "cameras", level: "view" }],
+      ),
+    );
+    draft.features.cameras = { on: false, level: "view" };
+    const payload = draftToRolePayload(draft);
+    expect(payload.toolGrants).toEqual([]);
   });
 });
 
@@ -267,5 +369,8 @@ describe("role wire shape → editable draft", () => {
     expect(payload.featureGrants).toEqual(
       expect.arrayContaining([{ moduleId: "files", level: "act" }]),
     );
+    // QA send-back: an untouched tool axis round-trips the server rows
+    // EXACTLY — one files:use row, nothing fanned out, nothing invented.
+    expect(payload.toolGrants).toEqual([{ domain: "files", level: "use" }]);
   });
 });

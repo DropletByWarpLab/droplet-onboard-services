@@ -163,7 +163,16 @@ export function RoleBuilderSheet({
     }));
 
   const setToolLevel = (groupId: string, level: ToolAccessLevel) =>
-    setDraft((d) => ({ ...d, tools: { ...d.tools, [groupId]: level } }));
+    setDraft((d) => ({
+      ...d,
+      tools: { ...d.tools, [groupId]: level },
+      // Explicit intent is what authorizes a fan-out on save — untouched
+      // groups re-emit the server's per-domain rows verbatim (QA send-back:
+      // a name-only edit must never widen or invent tool grants).
+      touchedToolGroups: d.touchedToolGroups.includes(groupId)
+        ? d.touchedToolGroups
+        : [...d.touchedToolGroups, groupId],
+    }));
 
   const setConnector = (provider: string, level: ConnectorAccessLevel | "none") =>
     setDraft((d) => ({ ...d, connectors: { ...d.connectors, [provider]: level } }));

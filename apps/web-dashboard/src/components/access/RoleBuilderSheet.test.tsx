@@ -249,6 +249,47 @@ describe("AI tools & connectors (axis 4)", () => {
   });
 });
 
+describe("tool grants — untouched groups round-trip verbatim (QA send-back)", () => {
+  it("a name-only edit preserves mixed per-domain rows; touching a group fans out only that group", () => {
+    const role = makeRole({
+      startingPoint: "family",
+      featureGrants: [
+        { moduleId: "calendar", level: "view" },
+        { moduleId: "files", level: "act" },
+      ],
+      toolGrants: [
+        { domain: "calendar", level: "use" },
+        { domain: "reminders", level: "view" },
+        { domain: "files", level: "use" },
+      ],
+    });
+    const { onSave } = renderSheet({ mode: "edit", base: roleToDraft(role) });
+
+    // Name-only edit → Save: the tool axis was never touched.
+    fireEvent.change(screen.getByLabelText("Role name"), { target: { value: "Finance 2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    const untouched = onSave.mock.calls[0][0].toolGrants;
+    expect([...untouched].sort((a: any, b: any) => a.domain.localeCompare(b.domain))).toEqual([
+      { domain: "calendar", level: "use" },
+      { domain: "files", level: "use" },
+      { domain: "reminders", level: "view" },
+    ]);
+
+    // Now explicitly set the calendar group to View → only that group fans
+    // out; the files row still passes through verbatim.
+    const calendarRow = screen.getByTestId("access-tools-calendar");
+    fireEvent.click(within(calendarRow).getByRole("button", { name: "View" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    const touched = onSave.mock.calls[1][0].toolGrants;
+    expect([...touched].sort((a: any, b: any) => a.domain.localeCompare(b.domain))).toEqual([
+      { domain: "calendar", level: "view" },
+      { domain: "files", level: "use" },
+      { domain: "notifications", level: "view" },
+      { domain: "reminders", level: "view" },
+    ]);
+  });
+});
+
 describe("save (footer)", () => {
   it("shows the Write safety chip and emits the contract payload on save", () => {
     const { onSave } = renderSheet();
