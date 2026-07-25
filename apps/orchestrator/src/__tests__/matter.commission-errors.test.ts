@@ -20,23 +20,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
-
-/**
- * Build the discovery-failure error exactly the way the orchestrator sees it.
- *
- * @matter 0.17 dropped the exported `CommissionableDeviceDiscoveryFailedError`
- * class, but nothing in production imported it: commissioning runs in the
- * matter-controller sidecar, which sends the constructor name over HTTP as a
- * plain string (`SidecarErrorBody.errorClass`), and the orchestrator's client
- * rethrows `new Error(errorMessage)` with `name = errorClass`. That rethrown
- * shape — not the matter.js class — is what `translateCommissionError()` has
- * always received, so constructing it here is the faithful fixture.
- */
-function discoveryFailedError(message: string): Error {
-  const err = new Error(message);
-  err.name = "CommissionableDeviceDiscoveryFailedError";
-  return err;
-}
+import { CommissionableDeviceDiscoveryFailedError } from "@matter/main/protocol";
 
 // ── Config mock — hoisted above route imports (same pattern as rbac.test). ──
 vi.mock("../config.js", () => ({
@@ -98,7 +82,7 @@ const NETWORK_DISCOVERY_COPY =
 
 describe("translateCommissionError — discovery-timeout mapping (WARP-851)", () => {
   it("maps the real 'No device discovered' message to 502 with the network-discovery copy", () => {
-    const err = discoveryFailedError(
+    const err = new CommissionableDeviceDiscoveryFailedError(
       DISCOVERY_TIMEOUT_MESSAGE,
     );
     const friendly = translateCommissionError(err);
@@ -177,7 +161,7 @@ describe("POST /api/matter/commission — discovery-timeout response (WARP-851)"
 
   it("returns 502 + network-discovery copy when matter.js throws the discovery failure", async () => {
     commissionDeviceMock.mockRejectedValue(
-      discoveryFailedError(DISCOVERY_TIMEOUT_MESSAGE),
+      new CommissionableDeviceDiscoveryFailedError(DISCOVERY_TIMEOUT_MESSAGE),
     );
 
     const res = await request(buildApp())
