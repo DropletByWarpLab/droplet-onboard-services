@@ -127,6 +127,11 @@ describe("§12 Sync + §10 system states", () => {
     );
   });
 
+  it("role-picker optgroup label (WARP-1533 N3 — distinct from Surface A's 'Built-in roles')", () => {
+    expect(ACCESS_COPY.builtIn).toBe("Built-in");
+    expect(ACCESS_COPY.builtinRoles).toBe("Built-in roles");
+  });
+
   it("built-in detail + off-box block copy (§4.2 / §5.4 quoted strings)", () => {
     expect(ACCESS_COPY.builtinFixed).toBe(
       "Built-in roles are fixed. Create a custom role to change what a group can do.",

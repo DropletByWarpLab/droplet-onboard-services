@@ -94,7 +94,7 @@ export function RoleSelectOptions({
           ))}
         </optgroup>
       )}
-      <optgroup label="Built-in">
+      <optgroup label={ACCESS_COPY.builtIn}>
         {ASSIGNABLE_TIERS.map((tier) => (
           <option
             key={tier}

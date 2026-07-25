@@ -36,6 +36,11 @@ vi.mock("@/lib/api", () => ({
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
   fetchHealth: vi.fn().mockResolvedValue({}),
+  // The UX-note N1 guard test drives the edit-dialog save path (the page's
+  // one in-session roles-refetch trigger), which touches the usage surface.
+  fetchAdminFilesUsage: vi.fn().mockResolvedValue({ users: [], departments: [] }),
+  fetchUserUsage: vi.fn().mockResolvedValue({ policy: null, usedBytes: null }),
+  updateUserUsage: vi.fn().mockResolvedValue({}),
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
   createAccessRole: vi.fn(),
   updateAccessRole: vi.fn(),
@@ -232,4 +237,69 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
       expect(screen.queryByText(/couldn't load your custom roles/i)).toBeNull();
     });
   });
+
+  it("resets a stale custom-role selection to Guest when the roles refetch fails (UX note N1)", async () => {
+    // First read succeeds (the admin can pick a custom role); the refetch
+    // after an access-changing save fails. Without the guard, the picker
+    // would keep a role:<id> value whose option no longer exists — a blank
+    // select under the degraded caption, and a submit that walks into the
+    // server's ROLE_TIER_MISMATCH 400.
+    listAccessRolesMock.mockReset();
+    listAccessRolesMock
+      .mockResolvedValueOnce({ roles: [FINANCE] })
+      .mockRejectedValueOnce(new Error("orchestrator restarting"));
+    // The refetch trigger is the person editor's access-changing save
+    // (page.tsx: `if (accessChanged) reloadAccessRoles()`), so Alice needs
+    // the local-row fields the access section keys on.
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { id: "alice", username: "alice", displayName: "Alice", userId: "u-alice", role: "family" },
+      ],
+    });
+    createInviteMock.mockResolvedValueOnce({
+      token: "x".repeat(43),
+      url: "http://droplet.local/invite/" + "x".repeat(43),
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+    });
+
+    const select = await openInviteModal();
+    await waitFor(() => {
+      expect(within(select).queryByRole("option", { name: "Finance" })).toBeInTheDocument();
+    });
+    fireEvent.change(select, { target: { value: `role:${FINANCE.id}` } });
+    expect(select.value).toBe(`role:${FINANCE.id}`);
+
+    // Drive the real refetch path: open the person editor (jsdom has no
+    // hit-testing, so the overlay doesn't block the row button), change the
+    // assigned role, save. The save path awaits two 700ms sync beats.
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    const editDialog = await screen.findByRole("dialog", { name: /edit alice/i });
+    fireEvent.change(within(editDialog).getByLabelText("Assigned role"), {
+      target: { value: "tier:guest" },
+    });
+    fireEvent.click(within(editDialog).getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(listAccessRolesMock).toHaveBeenCalledTimes(2), {
+      timeout: 5000,
+    });
+
+    // The guard: selection falls back to the default (Guest), the degraded
+    // caption renders, and the picker shows built-ins only.
+    await waitFor(() => {
+      expect(select.value).toBe("tier:guest");
+    });
+    expect(screen.getByText(/couldn't load your custom roles/i)).toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Finance" })).toBeNull();
+
+    // A submit now sends the plain tier — never the vanished role id.
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "reception@acme.co" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /generate (invite )?link|generate$/i }),
+    );
+    await waitFor(() => expect(createInviteMock).toHaveBeenCalledTimes(1));
+    expect(createInviteMock.mock.calls[0][0].role).toBe("guest");
+    expect(createInviteMock.mock.calls[0][0].accessRoleId).toBeUndefined();
+  }, 15000);
 });
