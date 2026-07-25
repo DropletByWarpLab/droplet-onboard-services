@@ -107,7 +107,14 @@ describe("POST /api/people/invite — inviter rank cap (privilege escalation)", 
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
-  it("allows owner → owner with 200 and persists role=owner", async () => {
+  it("owner → owner invite → 403 ROLE_NOT_ASSIGNABLE (WARP-1526 supersession — invites never assign owner)", async () => {
+    // SUPERSEDED (WARP-1526, conscious): this pin used to allow owner→owner
+    // to document the rank cap's equal-rank semantics. The assignable-enum
+    // narrowing (rail 7, after the rank cap) now refuses `owner` for EVERY
+    // actor: people are only {admin, family, guest} — design brief §6.2
+    // "never Owner or Service"; exactly one owner by design, and ownership
+    // transfer is a future dedicated flow. Equal-rank cap semantics stay
+    // pinned by the admin→admin case below.
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "owner");
 
@@ -115,11 +122,10 @@ describe("POST /api/people/invite — inviter rank cap (privilege escalation)", 
       .post("/api/people/invite")
       .send({ email: "trinity@example.com", role: "owner" });
 
-    expect(res.status).toBe(200);
-    expect(res.body.role).toBe("owner");
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(create.mock.calls[0][0].data.role).toBe("owner");
-    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(create).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
   it("allows admin → admin (equal rank) with 200", async () => {
