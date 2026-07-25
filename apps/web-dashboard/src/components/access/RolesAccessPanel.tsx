@@ -1,0 +1,786 @@
+"use client";
+
+/**
+ * WARP-1532 (RBAC v2 T8) — Surface A: the "Roles & access" tab on /users.
+ *
+ * Two panes (§4): a left column of custom-role cards above the read-mostly
+ * built-in five, and a right detail pane summarising the selected role's
+ * four axes, its people, and the create / duplicate / archive / delete
+ * affordances. Every list names its own §10 state trio — loading skeletons,
+ * the §4.1 empty card, and the error card with Retry — so a down
+ * orchestrator never looks like a brand-new box. Contract-driven: against a
+ * live box this panel renders its error state until the T3 routes merge;
+ * that is expected and correct.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ChevronRight,
+  Cloud,
+  Cpu,
+  Gauge,
+  KeyRound,
+  Lock,
+  MoreHorizontal,
+  Plug,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  User,
+  UserPlus,
+  X,
+} from "lucide-react";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
+import {
+  assignAccessRole,
+  createAccessRole,
+  updateAccessRole,
+  archiveAccessRole,
+  deleteAccessRole,
+  duplicateAccessRole,
+  listAccessRoles,
+} from "@/lib/api";
+import type {
+  AccessRole,
+  AccessRolePayload,
+  AccessTier,
+  RosterUser,
+} from "@/lib/types";
+import {
+  blankRoleDraft,
+  featureDef,
+  formatStorageBytes,
+  roleToDraft,
+  tierLabel,
+  type RoleDraft,
+} from "@/lib/access";
+import { ACCESS_COPY } from "./copy";
+import { AccessChip, GuardNote, SyncChip } from "./bits";
+import { RoleBuilderSheet, type ConnectorOption } from "./RoleBuilderSheet";
+import "./access.css";
+
+type ListState = "loading" | "ready" | "error";
+
+interface BuiltinDef {
+  id: AccessTier;
+  icon: typeof KeyRound;
+  meta: string;
+  lock?: boolean;
+}
+
+const BUILTINS: BuiltinDef[] = [
+  { id: "owner", icon: KeyRound, meta: ACCESS_COPY.ownerRowMeta, lock: true },
+  { id: "admin", icon: ShieldCheck, meta: ACCESS_COPY.adminMeta },
+  { id: "family", icon: User, meta: ACCESS_COPY.staffMeta },
+  { id: "guest", icon: User, meta: ACCESS_COPY.guestMeta },
+  { id: "service", icon: Cpu, meta: ACCESS_COPY.serviceMeta },
+];
+
+function initials(name: string): string {
+  return (
+    name
+      .split(" ")
+      .map((p) => p[0])
+      .filter(Boolean)
+      .slice(0, 2)
+      .join("")
+      .toUpperCase() || "?"
+  );
+}
+
+/** Track the browser's own connectivity signal for the §10 offline banner —
+ *  access data is local, so the panel keeps reading; only the apply waits. */
+function useOffline(): boolean {
+  const [offline, setOffline] = useState(false);
+  useEffect(() => {
+    setOffline(typeof navigator !== "undefined" && !navigator.onLine);
+    const on = () => setOffline(false);
+    const off = () => setOffline(true);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+  return offline;
+}
+
+export interface RolesAccessPanelProps {
+  /** Roster from the page — powers people-with-this-role + assignment. */
+  people: RosterUser[];
+  /** Acting admin's tier (owner|admin) — rank caps in the builder. */
+  actingTier: AccessTier;
+  /** Configured connectors for the builder's off-box axis. */
+  connectors: ConnectorOption[];
+  /** "Change role →" hands the person to the page-level person editor. */
+  onOpenPerson: (person: RosterUser) => void;
+  /** Files deep-link inside the builder → the Departments & teams tab. */
+  onOpenDepartments: () => void;
+}
+
+export function RolesAccessPanel({
+  people,
+  actingTier,
+  connectors,
+  onOpenPerson,
+  onOpenDepartments,
+}: RolesAccessPanelProps) {
+  const { toast } = useToast();
+  const offline = useOffline();
+  const [roles, setRoles] = useState<AccessRole[]>([]);
+  const [listState, setListState] = useState<ListState>("loading");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const [builder, setBuilder] = useState<{ mode: "create" | "edit"; base: RoleDraft } | null>(null);
+  const [builderBusy, setBuilderBusy] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [assignChecked, setAssignChecked] = useState<Set<string>>(new Set());
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<AccessRole | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // A refetch scheduled after a pending mutation so the sync chip converges
+  // on server truth without polling forever.
+  const refetchTimer = useRef<number | null>(null);
+
+  const reload = useCallback(async (background = false) => {
+    if (!background) setListState((s) => (s === "ready" ? s : "loading"));
+    try {
+      const { roles: rows } = await listAccessRoles();
+      setRoles(rows.filter((r) => r.state !== "archived"));
+      setListState("ready");
+    } catch {
+      if (!background) setListState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+    return () => {
+      if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
+    };
+  }, [reload]);
+
+  /** One delayed background refetch — lets a "pending" syncState converge
+   *  to synced/failed without a poll loop. */
+  const scheduleSyncRefetch = useCallback(() => {
+    if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
+    refetchTimer.current = window.setTimeout(() => {
+      void reload(true);
+    }, 1500);
+  }, [reload]);
+
+  // Auto-select the first custom role once loaded so the detail pane isn't
+  // a dead placeholder (Departments precedent).
+  useEffect(() => {
+    if (listState === "ready" && !selectedId && roles.length > 0) {
+      setSelectedId(roles[0]!.id);
+    }
+  }, [listState, roles, selectedId]);
+
+  // Close the overflow menu on outside click / Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  const selectedRole = roles.find((r) => r.id === selectedId) ?? null;
+  const selectedBuiltin = BUILTINS.find((b) => b.id === selectedId) ?? null;
+
+  const peopleWithRole = useMemo(
+    () => (selectedRole ? people.filter((p) => p.accessRoleId === selectedRole.id) : []),
+    [people, selectedRole],
+  );
+
+  /** Assignment candidates: local rows only, never the owner or a service
+   *  principal (§8 owner untouchable; service not assignable), and not the
+   *  people who already hold the role. */
+  const assignCandidates = useMemo(
+    () =>
+      people.filter(
+        (p) =>
+          p.userId &&
+          p.role !== "owner" &&
+          p.role !== "service" &&
+          p.accessRoleId !== selectedRole?.id,
+      ),
+    [people, selectedRole],
+  );
+
+  const openCreate = () => setBuilder({ mode: "create", base: blankRoleDraft("family") });
+  const openEdit = (role: AccessRole) => setBuilder({ mode: "edit", base: roleToDraft(role) });
+
+  async function handleBuilderSave(payload: AccessRolePayload) {
+    if (!builder) return;
+    setBuilderBusy(true);
+    try {
+      if (builder.mode === "create") {
+        const { role } = await createAccessRole(payload);
+        setBuilder(null);
+        await reload();
+        setSelectedId(role.id);
+      } else if (builder.base.id) {
+        await updateAccessRole(builder.base.id, payload);
+        setBuilder(null);
+        await reload();
+      }
+      toast(`'${payload.name}' saved — applying now.`, "success");
+      scheduleSyncRefetch();
+    } catch (err: any) {
+      toast(err?.message || "Failed to save the role", "error");
+    } finally {
+      setBuilderBusy(false);
+    }
+  }
+
+  async function handleDuplicate(role: AccessRole) {
+    try {
+      const { role: copy } = await duplicateAccessRole(role.id);
+      await reload();
+      setSelectedId(copy.id);
+      toast(`'${role.name}' duplicated — edit the copy.`, "success");
+    } catch (err: any) {
+      toast(err?.message || "Failed to duplicate the role", "error");
+    }
+  }
+
+  async function performArchive() {
+    if (!archiveTarget) return;
+    await archiveAccessRole(archiveTarget.id);
+    if (selectedId === archiveTarget.id) setSelectedId(null);
+    await reload();
+    toast(`'${archiveTarget.name}' archived.`, "success");
+  }
+
+  async function performDelete() {
+    if (!deleteTarget) return;
+    await deleteAccessRole(deleteTarget.id);
+    if (selectedId === deleteTarget.id) setSelectedId(null);
+    await reload();
+    toast(`'${deleteTarget.name}' deleted.`, "success");
+  }
+
+  async function performAssign() {
+    if (!selectedRole || assignChecked.size === 0) return;
+    setAssignBusy(true);
+    try {
+      await assignAccessRole(selectedRole.id, Array.from(assignChecked));
+      setAssignOpen(false);
+      setAssignChecked(new Set());
+      const first = people.find((p) => p.userId && assignChecked.has(p.userId));
+      const firstName = (first?.displayName || first?.id || "").split(" ")[0] ?? "";
+      toast(
+        assignChecked.size === 1 && firstName
+          ? ACCESS_COPY.sessionRevoke(firstName)
+          : "Assignment applies immediately — people are signed out to re-authenticate.",
+        "success",
+      );
+      await reload(true);
+      scheduleSyncRefetch();
+    } catch (err: any) {
+      toast(err?.message || "Failed to assign the role", "error");
+    } finally {
+      setAssignBusy(false);
+    }
+  }
+
+  // ── Left pane ──
+  function renderRolesList() {
+    if (listState === "loading") {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="acc-skel" data-testid="access-roles-skeleton" />
+          ))}
+        </div>
+      );
+    }
+    if (listState === "error") {
+      return (
+        <div className="card">
+          <div className="empty">
+            <span className="ei">
+              <AlertTriangle size={24} />
+            </span>
+            <span className="eh">{ACCESS_COPY.rolesErrorTitle}</span>
+            <span style={{ maxWidth: "36ch" }}>
+              Access data is local — this is a connection issue, not lost access.
+            </span>
+            <button type="button" className="btn ghost sm" onClick={() => void reload()} style={{ marginTop: 8 }}>
+              <RefreshCw size={13} /> {ACCESS_COPY.retry}
+            </button>
+          </div>
+        </div>
+      );
+    }
+    if (roles.length === 0) {
+      return (
+        <div className="card">
+          <div className="empty">
+            <span className="ei">
+              <KeyRound size={24} />
+            </span>
+            <span style={{ maxWidth: "42ch" }}>{ACCESS_COPY.emptyRoles}</span>
+            <button type="button" className="btn primary" onClick={openCreate} style={{ marginTop: 8 }}>
+              <Plus size={14} /> New role
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {roles.map((role) => (
+          <button
+            key={role.id}
+            type="button"
+            className={`acc-rolecard${selectedId === role.id ? " on" : ""}`}
+            aria-pressed={selectedId === role.id}
+            onClick={() => setSelectedId(role.id)}
+          >
+            <span className="acc-glyph">
+              <KeyRound size={17} aria-hidden="true" />
+            </span>
+            <span className="body">
+              <span className="nm">{role.name}</span>
+              <span className="meta">
+                <span className="mono">{role.slug}</span>·
+                <span>
+                  {role.peopleCount === 1 ? "1 person" : `${role.peopleCount} people`} · based on{" "}
+                  {tierLabel(role.startingPoint)}
+                </span>
+                <SyncChip state={role.syncState === "synced" ? null : role.syncState} />
+              </span>
+            </span>
+            <ChevronRight size={15} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // ── Right pane ──
+  function renderAxisSummary(role: AccessRole) {
+    const featureChips = role.featureGrants
+      .map((grant) => {
+        const def = featureDef(grant.moduleId);
+        if (!def) return null;
+        const level = def.levels.find((l) => l.value === grant.level);
+        const suffix = def.levels.length > 1 && level ? ` · ${level.label.toLowerCase()}` : "";
+        return { key: grant.moduleId, label: `${def.label}${suffix}` };
+      })
+      .filter((c): c is { key: string; label: string } => c !== null);
+    return (
+      <>
+        <div>
+          <div className="type-caption-1 mb-2" style={{ color: "var(--text-faint)", fontWeight: 600 }}>
+            Features
+          </div>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {featureChips.map((chip) => (
+              <AccessChip key={chip.key}>{chip.label}</AccessChip>
+            ))}
+            {featureChips.length === 0 && <AccessChip tone="muted">No features on</AccessChip>}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>
+            Usage
+          </span>
+          <AccessChip mono icon={<Gauge size={12} aria-hidden="true" />}>
+            {role.storageQuotaBytes ? formatStorageBytes(role.storageQuotaBytes) : "No limit"} storage
+          </AccessChip>
+          <AccessChip mono>
+            {role.maxUploadSizeMb != null ? `${role.maxUploadSizeMb} MB` : "Box default"} upload
+          </AccessChip>
+        </div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>
+            Off the box
+          </span>
+          {role.cloudModelsAllowed ? (
+            <AccessChip tone="orange" icon={<Cloud size={12} aria-hidden="true" />}>
+              Cloud models on
+            </AccessChip>
+          ) : (
+            <AccessChip icon={<Cloud size={12} aria-hidden="true" />}>Cloud models off</AccessChip>
+          )}
+          {role.connectorGrants.length > 0 ? (
+            role.connectorGrants.map((grant) => (
+              <AccessChip key={grant.provider} icon={<Plug size={12} aria-hidden="true" />}>
+                {grant.provider} · {grant.level === "read_write" ? "read & write" : "read"}
+              </AccessChip>
+            ))
+          ) : (
+            <AccessChip tone="muted">No connectors</AccessChip>
+          )}
+          {role.mayOperateLocks && (
+            <AccessChip icon={<Lock size={12} aria-hidden="true" />}>May operate locks</AccessChip>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  function renderDetail() {
+    if (selectedBuiltin) {
+      const Icon = selectedBuiltin.icon;
+      return (
+        <div className="card" data-testid="access-role-detail" style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 18px", borderBottom: "1px solid var(--card-bd)" }}>
+            <span className="acc-glyph" style={{ width: 34, height: 34, borderRadius: 9, background: "var(--inset)", color: "var(--text-muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon size={17} aria-hidden="true" />
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>{tierLabel(selectedBuiltin.id)}</div>
+              <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 1 }}>Built-in role</div>
+            </div>
+            {selectedBuiltin.lock && (
+              <AccessChip icon={<Lock size={12} aria-hidden="true" />}>Fixed</AccessChip>
+            )}
+          </div>
+          <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <GuardNote icon={<ShieldCheck size={15} aria-hidden="true" />}>{ACCESS_COPY.builtinFixed}</GuardNote>
+            {selectedBuiltin.id === "owner" && (
+              <GuardNote icon={<Lock size={15} aria-hidden="true" />}>{ACCESS_COPY.ownerDetailNote}</GuardNote>
+            )}
+            {selectedBuiltin.id === "service" && (
+              <GuardNote icon={<Cpu size={15} aria-hidden="true" />}>
+                System identities — the box&apos;s own voice and MCP principals. Not assignable to a person.
+              </GuardNote>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (!selectedRole) {
+      return (
+        <div className="card" data-testid="access-role-detail">
+          <div className="empty" style={{ padding: "32px 20px" }}>
+            <span className="ei">
+              <KeyRound size={24} />
+            </span>
+            <span className="eh">Create a role to see its details here.</span>
+          </div>
+        </div>
+      );
+    }
+
+    const inUse = selectedRole.peopleCount > 0;
+    return (
+      <div className="card" data-testid="access-role-detail" style={{ padding: 0, overflow: "visible" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 18px", borderBottom: "1px solid var(--card-bd)" }}>
+          <span className="acc-glyph" style={{ width: 34, height: 34, borderRadius: 9, background: "var(--brand-subtle)", color: "var(--brand)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <KeyRound size={17} aria-hidden="true" />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>{selectedRole.name}</div>
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 1, fontFamily: "var(--font-mono)" }}>
+              {selectedRole.slug}
+            </div>
+          </div>
+          <AccessChip>Based on {tierLabel(selectedRole.startingPoint)}</AccessChip>
+          <SyncChip state={selectedRole.syncState === "synced" ? null : selectedRole.syncState} />
+          <div ref={menuRef} style={{ position: "relative" }}>
+            <button
+              type="button"
+              className="p-2 rounded-sm"
+              aria-label="Role actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              style={{ color: "var(--text-muted)", border: "1px solid var(--card-bd)", borderRadius: 8 }}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen && (
+              <div
+                role="menu"
+                style={{ position: "absolute", right: 0, top: 40, zIndex: 20, minWidth: 176, background: "var(--card-bg)", border: "1px solid var(--card-bd)", borderRadius: 12, boxShadow: "var(--lift)", padding: 6, display: "flex", flexDirection: "column", gap: 1 }}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="btn ghost sm"
+                  style={{ justifyContent: "flex-start", border: "none" }}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void handleDuplicate(selectedRole);
+                  }}
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="btn ghost sm"
+                  style={{ justifyContent: "flex-start", border: "none" }}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setArchiveTarget(selectedRole);
+                  }}
+                >
+                  Archive…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="btn ghost sm"
+                  disabled={inUse}
+                  title={inUse ? ACCESS_COPY.deleteRoleInUse(selectedRole.peopleCount) : undefined}
+                  style={{ justifyContent: "flex-start", border: "none", color: inUse ? undefined : "var(--danger)" }}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setDeleteTarget(selectedRole);
+                  }}
+                >
+                  Delete…
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
+          {renderAxisSummary(selectedRole)}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn primary sm" onClick={() => openEdit(selectedRole)}>
+              Edit role
+            </button>
+            <button type="button" className="btn ghost sm" onClick={() => { setAssignChecked(new Set()); setAssignOpen(true); }}>
+              <UserPlus size={13} /> Assign people
+            </button>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                {ACCESS_COPY.peopleWithRole}
+              </span>
+              <AccessChip mono>{peopleWithRole.length}</AccessChip>
+            </div>
+            {peopleWithRole.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {peopleWithRole.map((p) => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px" }}>
+                    <span className="ava">{initials(p.displayName || p.id)}</span>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.displayName || p.id}
+                    </span>
+                    <button type="button" className="btn ghost sm" onClick={() => onOpenPerson(p)}>
+                      Change role <ChevronRight size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <GuardNote icon={<User size={15} aria-hidden="true" />}>{ACCESS_COPY.emptyPeopleInRole}</GuardNote>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {offline && (
+        <div className="acc-banner" role="status">
+          <AlertTriangle size={16} aria-hidden="true" />
+          {ACCESS_COPY.offlineBanner}
+        </div>
+      )}
+
+      <div className="acc-twopane">
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div>
+            <div className="sect" style={{ marginTop: 0, justifyContent: "space-between" }}>
+              <h2>{ACCESS_COPY.yourRoles}</h2>
+              {listState === "ready" && roles.length > 0 && (
+                <button type="button" className="btn ghost sm" onClick={openCreate}>
+                  <Plus size={13} /> New role
+                </button>
+              )}
+            </div>
+            {renderRolesList()}
+          </div>
+          <div>
+            <div className="sect" style={{ justifyContent: "space-between" }}>
+              <h2>{ACCESS_COPY.builtinRoles}</h2>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {BUILTINS.map((builtin) => {
+                const Icon = builtin.icon;
+                return (
+                  <button
+                    key={builtin.id}
+                    type="button"
+                    className={`acc-rolecard builtin${selectedId === builtin.id ? " on" : ""}`}
+                    aria-pressed={selectedId === builtin.id}
+                    onClick={() => setSelectedId(builtin.id)}
+                  >
+                    <span className="acc-glyph">
+                      <Icon size={14} aria-hidden="true" />
+                    </span>
+                    <span className="body">
+                      <span className="nm">{tierLabel(builtin.id)}</span>
+                      <span className="meta">{builtin.meta}</span>
+                    </span>
+                    {builtin.lock ? (
+                      <Lock size={13} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
+                    ) : (
+                      <ChevronRight size={14} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div>{renderDetail()}</div>
+      </div>
+
+      {/* Role builder sheet — keyed so a fresh open resets the draft. */}
+      {builder && (
+        <RoleBuilderSheet
+          key={`${builder.mode}-${builder.base.id ?? "new"}`}
+          open
+          mode={builder.mode}
+          base={builder.base}
+          actingTier={actingTier}
+          connectors={connectors}
+          busy={builderBusy}
+          onSave={handleBuilderSave}
+          onClose={() => setBuilder(null)}
+          onOpenDepartments={onOpenDepartments}
+        />
+      )}
+
+      {/* Assign-people multi-select (§4.2). */}
+      <AssignPeopleDialog
+        open={assignOpen}
+        candidates={assignCandidates}
+        checked={assignChecked}
+        busy={assignBusy}
+        onToggle={(userId) =>
+          setAssignChecked((prev) => {
+            const next = new Set(prev);
+            if (next.has(userId)) next.delete(userId);
+            else next.add(userId);
+            return next;
+          })
+        }
+        onAssign={() => void performAssign()}
+        onClose={() => setAssignOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onConfirm={performDelete}
+        onCancel={() => setDeleteTarget(null)}
+        title={deleteTarget ? `Delete '${deleteTarget.name}'?` : "Delete role?"}
+        description={deleteTarget ? ACCESS_COPY.deleteRoleUnused(deleteTarget.name) : ""}
+        confirmLabel="Delete role"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={archiveTarget !== null}
+        onConfirm={performArchive}
+        onCancel={() => setArchiveTarget(null)}
+        title={archiveTarget ? `Archive '${archiveTarget.name}'?` : "Archive role?"}
+        description="Archived roles can't be assigned but keep their settings. You can restore them any time."
+        confirmLabel="Archive"
+        variant="neutral"
+      />
+    </div>
+  );
+}
+
+function AssignPeopleDialog({
+  open,
+  candidates,
+  checked,
+  busy,
+  onToggle,
+  onAssign,
+  onClose,
+}: {
+  open: boolean;
+  candidates: RosterUser[];
+  checked: Set<string>;
+  busy: boolean;
+  onToggle: (userId: string) => void;
+  onAssign: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={open} onClose={onClose} labelledBy="access-assign-heading" maxWidth="sm">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 id="access-assign-heading" style={{ margin: 0, fontSize: 17, fontWeight: 600, color: "var(--text)" }}>
+            Assign people
+          </h2>
+          <button type="button" onClick={onClose} aria-label="Close" className="p-1" style={{ color: "var(--text-muted)" }}>
+            <X size={16} />
+          </button>
+        </div>
+        {candidates.length === 0 ? (
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>
+            Everyone who can hold this role already has it.
+          </p>
+        ) : (
+          <div style={{ border: "1px solid var(--card-bd)", borderRadius: "var(--radius-input)", overflow: "hidden" }}>
+            {candidates.map((p, i) => (
+              <label
+                key={p.id}
+                style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderTop: i === 0 ? "none" : "1px solid var(--card-bd)", cursor: "pointer" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!p.userId && checked.has(p.userId)}
+                  onChange={() => p.userId && onToggle(p.userId)}
+                />
+                <span className="ava">{initials(p.displayName || p.id)}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: "var(--text)" }}>
+                  {p.displayName || p.id}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
+          Assigning applies immediately — people are signed out and the role&apos;s access takes
+          effect when they sign back in.
+        </p>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="button" className="btn primary" onClick={onAssign} disabled={busy || checked.size === 0}>
+            {busy ? "Assigning…" : "Assign"}
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
