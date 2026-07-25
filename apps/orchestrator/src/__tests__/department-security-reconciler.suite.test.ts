@@ -281,6 +281,10 @@ function buildWorld(departmentsSeed: DeptRow[], membershipsSeed: MembershipRow[]
         const row = userRows.get(id);
         return row ? { ...row } : null;
       }),
+      // WARP-1531 (RBAC v2 T7): the usage-policy sweep's stateless role
+      // pass scans users whose AccessRole carries a storage default. No
+      // fixture in this suite assigns roles — empty keeps it a no-op.
+      findMany: vi.fn().mockResolvedValue([]),
     },
     userUsagePolicy: {
       findMany: vi.fn().mockResolvedValue([]),
