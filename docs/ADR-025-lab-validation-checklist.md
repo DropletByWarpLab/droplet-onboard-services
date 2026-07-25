@@ -1,4 +1,6 @@
-# ADR-024 — Lab validation checklist
+# ADR-025 — Lab validation checklist (multi-backend AP onboarding)
+
+> Renumbered from a duplicate "ADR-024" filename on 2026-07-25 (WARP-1563). The decision record for multi-backend coverage-AP onboarding is [ADR-024](ADR-024-multibackend-ap-onboarding.md); this checklist is its lab-validation companion and now owns the previously unassigned ADR-025 slot.
 
 The orchestrator backends (UniFi + EasyMesh) are built and unit-tested against mocks. The wire/RF details below could **not** be exercised on this laptop — they need real hardware on the lab LAN + the `feat/adr-024-multibackend-ap-onboarding` branch deployed to the box. This is the punch-list to turn "code-complete" into "validated".
 

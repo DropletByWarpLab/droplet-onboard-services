@@ -5,6 +5,7 @@
 - **Ticket:** TBD (epic; one WARP-NNN per workstream)
 - **Deciders:** Stefan, Romain (WS-4 engine/license sign-off required before code)
 - **Supersedes / relates:** ADR-002 (home/small-team persona), ADR-004 (RBAC per-route guards), ADR-007 (dual-workspace personal/household), ADR-011 (hardware-agnostic), ADR-013 (built-in directory is identity source of truth; Nextcloud demoted to downstream WebDAV), ADR-021 (container resource limits), ADR-023 (per-device FQDN/TLS)
+- **Companion:** [ADR-027b — implementation blueprint](ADR-027b-implementation-blueprint.md) (renamed from a duplicate "ADR-027" filename, WARP-1563)
 
 ## Amendment — 2026-06-22 (Stefan: 32 GB box + private/shared spaces + co-working for all)
 
