@@ -433,7 +433,16 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       expect(nc.ncCreateUser).not.toHaveBeenCalled();
     });
 
-    it("allows an owner to mint another owner (equal rank is not an escalation)", async () => {
+    it("owner minting another owner → 403 ROLE_NOT_ASSIGNABLE (WARP-1526 supersession — accounts are never created as owner)", async () => {
+      // SUPERSEDED (WARP-1526, conscious): this pin used to allow
+      // owner→owner to document the rank cap's equal-rank semantics. The
+      // assignable-enum narrowing (rail 7, running after the rank cap in
+      // the shared guard service) now refuses `owner` for EVERY actor:
+      // accounts are only ever created as {admin, family, guest} — design
+      // brief §6.2 "never Owner or Service"; there is exactly one owner by
+      // design (minted by /auth/setup), and ownership transfer is a future
+      // dedicated flow. Equal-rank cap semantics stay pinned by the
+      // admin→admin invite case and the people-surface admin→admin pin.
       const prisma = createPrismaMock();
       const app = buildApp(prisma, "owner");
 
@@ -441,16 +450,10 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         .post("/api/auth/users")
         .send({ email: "co@warp.test", password: "Co-secret12345", role: "owner" });
 
-      expect(res.status).toBe(201);
-      const row = prisma._users.find((u: any) => readUserEmail(u.email) === "co@warp.test");
-      expect(row.role).toBe("owner");
-      expect(nc.ncCreateUser).toHaveBeenCalledWith(
-        expect.anything(),
-        "co",
-        "Co-secret12345",
-        undefined,
-        ["admin", "household"],
-      );
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+      expect(prisma.user.upsert).not.toHaveBeenCalled();
+      expect(nc.ncCreateUser).not.toHaveBeenCalled();
     });
   });
 

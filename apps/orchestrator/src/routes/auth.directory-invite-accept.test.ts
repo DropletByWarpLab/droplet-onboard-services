@@ -523,12 +523,26 @@ describe("WARP-1051 — invite-accept session role matches the canonical invite 
     expect(sessionJwt(login).role).toBe("admin");
   });
 
-  it("an owner invite still mints an 'owner' session (passthrough unchanged)", async () => {
+  it("a PRE-EXISTING owner invite row still mints an 'owner' session (accept passthrough unchanged)", async () => {
+    // WARP-1526 fixture note: POST /auth/invites can no longer MINT an
+    // owner invite (403 ROLE_NOT_ASSIGNABLE — invites only assign
+    // {admin, family, guest}), so this spec seeds the invite row directly:
+    // rows created before the narrowing landed can still be pending in the
+    // DB, and the WARP-1051 contract — accept grants the invite's CANONICAL
+    // role as the session role, no silent remapping — must keep holding
+    // for them. The accept path itself is untouched by WARP-1526.
     const prisma = createPrismaMock();
-    const token = await issueInvite(buildApp(prisma), {
-      displayName: "Trinity",
-      email: "trinity@warp.test",
-      role: "owner",
+    const token = "legacy-owner-invite-token";
+    await prisma.userInvite.create({
+      data: {
+        token,
+        displayName: "Trinity",
+        email: "trinity@warp.test",
+        username: "trinity",
+        role: "owner",
+        expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000),
+        createdBy: "admin-issuer",
+      },
     });
 
     const accept = await request(buildApp(prisma, null))

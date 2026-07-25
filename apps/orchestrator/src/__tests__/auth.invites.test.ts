@@ -98,7 +98,15 @@ describe("POST /api/auth/invites — inviter rank cap (privilege escalation)", (
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("allows owner → owner with 200, derives username from email, and persists role=owner", async () => {
+  it("owner → owner invite → 403 ROLE_NOT_ASSIGNABLE (WARP-1526 supersession — invites never assign owner)", async () => {
+    // SUPERSEDED (WARP-1526, conscious): owner→owner was pinned as allowed
+    // purely to document the rank cap's equal-rank (<=) semantics. The
+    // assignable-enum narrowing (rail 7, after the rank cap in the shared
+    // guard service) now refuses `owner` for EVERY actor — invites only
+    // ever assign {admin, family, guest} (design brief §6.2 "never Owner
+    // or Service"; exactly one owner by design; ownership transfer is a
+    // future dedicated flow). Equal-rank semantics stay pinned by the
+    // admin→admin case below.
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "owner");
 
@@ -106,12 +114,9 @@ describe("POST /api/auth/invites — inviter rank cap (privilege escalation)", (
       .post("/api/auth/invites")
       .send({ email: "trinity@warp.test", role: "owner" });
 
-    expect(res.status).toBe(200);
-    expect(res.body.token).toBeDefined();
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(create.mock.calls[0][0].data.role).toBe("owner");
-    // Username is derived server-side from the email local-part.
-    expect(create.mock.calls[0][0].data.username).toBe("trinity");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("allows admin → admin (equal rank) with 200 and derives username from email", async () => {
