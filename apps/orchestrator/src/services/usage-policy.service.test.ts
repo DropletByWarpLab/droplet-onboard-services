@@ -212,6 +212,82 @@ describe("upsertUsagePolicy", () => {
     expect(pushed).toBe(true);
   });
 
+  // ── WARP-1531 (RBAC v2 T7): the inline push is the EFFECTIVE quota ──
+
+  it("clearing the quota under a role storage default pushes the ROLE default, not 'none'", async () => {
+    users.set("u1", {
+      id: "u1",
+      username: "alice",
+      nextcloudUsername: "alice",
+      accessRole: { storageQuotaBytes: 7_000n },
+    });
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    const { policy } = await upsertUsagePolicy(prisma as PrismaClient, "u1", "owner-1", {
+      storageQuotaBytes: null,
+    });
+
+    // The person FIELD stays null (unset — "follow the role"), but the
+    // pushed desired state is the effective value.
+    expect(policy.storageQuotaBytes).toBeNull();
+    expect(ncUpdateUserMock).toHaveBeenCalledWith(
+      "basic:dGVzdDp0ZXN0",
+      "alice",
+      "quota",
+      "7000 B",
+    );
+  });
+
+  it("a person quota beats the role default on the inline push", async () => {
+    users.set("u1", {
+      id: "u1",
+      username: "alice",
+      nextcloudUsername: "alice",
+      accessRole: { storageQuotaBytes: 7_000n },
+    });
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    await upsertUsagePolicy(prisma as PrismaClient, "u1", "owner-1", {
+      storageQuotaBytes: 1_000n,
+    });
+
+    expect(ncUpdateUserMock).toHaveBeenCalledWith(
+      "basic:dGVzdDp0ZXN0",
+      "alice",
+      "quota",
+      "1000 B",
+    );
+  });
+
+  it("a first-ever maxUploadSizeMb-only PUT under a role storage default leaves storage UNSET (role-managed) — no snapshot, no push", async () => {
+    // Pre-1531, the create path snapshotted the user's current NC quota into
+    // storageQuotaBytes so the reconciler wouldn't push "none". Under a role
+    // storage default that snapshot would PIN the user to a fake person
+    // value and silently stop them following their role — instead the field
+    // stays null (synced) and the reconciler's stateless role pass owns
+    // convergence.
+    users.set("u1", {
+      id: "u1",
+      username: "alice",
+      nextcloudUsername: "alice",
+      accessRole: { storageQuotaBytes: 7_000n },
+    });
+
+    const { policy, pushed } = await upsertUsagePolicy(
+      prisma as PrismaClient,
+      "u1",
+      "owner-1",
+      { maxUploadSizeMb: 250 },
+    );
+
+    expect(policy.storageQuotaBytes).toBeNull();
+    expect(policy.quotaSyncState).toBe("synced");
+    expect(policy.maxUploadSizeMb).toBe(250);
+    expect(pushed).toBe(true);
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    expect(ncGetUserQuotaAdminMock).not.toHaveBeenCalled();
+  });
+
   it("a partial update (maxUploadSizeMb only) on an EXISTING row leaves storageQuotaBytes unchanged and never snapshots or pushes to NC", async () => {
     users.set("u1", { id: "u1", username: "alice", nextcloudUsername: "alice" });
     policies.set("u1", {
