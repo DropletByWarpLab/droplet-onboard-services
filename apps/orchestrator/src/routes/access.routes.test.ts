@@ -270,6 +270,15 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
         let count = 0;
         for (const i of invites.values()) {
           if (where?.accessRoleId !== undefined && i.accessRoleId !== where.accessRoleId) continue;
+          if (where?.OR !== undefined) {
+            const matches = where.OR.some((cond: any) => {
+              if (cond.acceptedAt?.not === null) return i.acceptedAt !== null;
+              if (cond.revokedAt?.not === null) return i.revokedAt !== null;
+              if (cond.expiresAt?.lte !== undefined) return i.expiresAt <= cond.expiresAt.lte;
+              return false;
+            });
+            if (!matches) continue;
+          }
           Object.assign(i, data);
           count += 1;
         }
@@ -688,6 +697,25 @@ describe("DELETE /api/access/roles/:id", () => {
 
   it("404s an unknown role id", async () => {
     expect((await request(buildApp(createPrismaMock())).delete("/api/access/roles/nope")).status).toBe(404);
+  });
+
+  it("a pending invite racing in after the pre-check keeps its pointer — the Restrict FK rolls the delete back", async () => {
+    const prisma = createPrismaMock({
+      roles: [roleSeed],
+      invites: [
+        { id: "inv-raced", username: "raced", accessRoleId: "r1", expiresAt: FUTURE },
+      ],
+    });
+    // Simulate the check→delete window: the pre-check misses the invite
+    // that was written concurrently…
+    prisma.userInvite.findMany.mockResolvedValueOnce([]);
+    const res = await request(buildApp(prisma)).delete("/api/access/roles/r1");
+    // …the release filter skips PENDING rows, the FK refuses, and the
+    // caller gets the same reassign-first 409 the pre-check would give.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("ACCESS_ROLE_IN_USE");
+    expect(prisma._roles().has("r1")).toBe(true);
+    expect(prisma._invites().get("inv-raced").accessRoleId).toBe("r1");
   });
 });
 

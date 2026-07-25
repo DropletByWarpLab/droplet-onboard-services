@@ -752,10 +752,21 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         await prisma.$transaction(async (tx) => {
           // Non-pending invite rows are RETAINED state (accepted/revoked/
           // expired — never deleted) and reference the role via an
-          // onDelete: Restrict FK. Release them here so the delete can
-          // clear; historic rows simply lose the pointer.
+          // onDelete: Restrict FK. Release exactly those so the delete can
+          // clear; historic rows simply lose the pointer. The filter is
+          // deliberately the COMPLEMENT of the pending pre-check above: a
+          // pending invite that raced in after the pre-check keeps its
+          // pointer, the Restrict FK refuses the delete, and the whole
+          // transaction (release included) rolls back → the same 409.
           await tx.userInvite.updateMany({
-            where: { accessRoleId: existing.id },
+            where: {
+              accessRoleId: existing.id,
+              OR: [
+                { acceptedAt: { not: null } },
+                { revokedAt: { not: null } },
+                { expiresAt: { lte: new Date() } },
+              ],
+            },
             data: { accessRoleId: null },
           });
           await tx.accessRole.delete({ where: { id: existing.id } });
