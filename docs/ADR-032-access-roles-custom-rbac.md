@@ -184,9 +184,9 @@ Per-axis wiring:
 
 ### 6. ADR-004 catalog amendment (O-2 — the ERP read floor)
 
-Resolution O-2 amends the ADR-004 per-route guard catalog for the ERP connector surface: **reads become family-and-up *with* a per-role connector grant** — what makes a "Reception" role useful — where the catalog (and `erp.ts:62-63` at `dc625ca0`) has owner/admin today; the file's header comment always intended family reads, and the header's intent wins, gated through the grant. **Writes stay admin-tier**, under connection-level `writeEnabled` and the staged-outbox human confirm, and **Read & write grants are only selectable on Admin-based roles** (floor honesty: a Family-based role caps at Read). T10 (WARP-1534) operationalizes this note in `ADR-004-rbac-per-route-guards.md` itself, alongside the E2E pass; T6 (WARP-1530) is the code change.
+Resolution O-2 amends the ADR-004 per-route guard catalog for the ERP connector surface: **reads become family-and-up *with* a per-role connector grant** — what makes a "Reception" role useful — where `erp.ts:62-63` at `dc625ca0` has owner/admin today (the ADR-004 catalog predates the ERP surface and is silent; T10 adds its first ERP rows); the file's header comment always intended family reads, and the header's intent wins, gated through the grant. **Writes stay admin-tier**, under connection-level `writeEnabled` and the staged-outbox human confirm, and **Read & write grants are only selectable on Admin-based roles** (floor honesty: a Family-based role caps at Read). T10 (WARP-1534) operationalizes this note in `ADR-004-rbac-per-route-guards.md` itself, alongside the E2E pass; T6 (WARP-1530) is the code change.
 
-## Rejected alternatives
+## Alternatives considered
 
 - **Extending the `Role` or `Scope` pgEnums** — both migration-gated and TS-duplicated; rows are the ADR-029 precedent. The Scope axis keeps its own WARP-481 journey; this feature reuses its middleware seam, not its enum.
 - **Reviving `Group`/`GroupMembership`** — `@deprecated` dead code (WARP-1273). `AccessRole` is one-role-per-person ("the role is the headline"), not a group system.
