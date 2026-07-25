@@ -28,7 +28,7 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import pino from "pino";
-import { Environment, type Duration } from "@matter/main";
+import { Environment, ServerAddress, type Duration } from "@matter/main";
 import { NodeId } from "@matter/main/types";
 import {
   CommissioningController,
@@ -895,7 +895,11 @@ function commissionableToDiscovered(
     addresses: device.addresses.map((a) => ({
       ip: "ip" in a ? a.ip : "",
       port: "port" in a ? a.port : 0,
-      type: a.type,
+      // @matter 0.17 split ServerAddress: the plain IP variant no longer
+      // carries `type` (only the explicit udp/tcp/ble ones do). protocolOf()
+      // is matter.js's own accessor for the display label and yields "ip"
+      // when the transport is unspecified.
+      type: ServerAddress.protocolOf(a),
     })),
   };
 }
