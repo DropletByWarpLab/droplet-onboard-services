@@ -135,6 +135,13 @@ const PUBLIC_USER_SELECT = {
   isLocal: true,
   nextcloudUsername: true,
   accessRoleId: true,
+  // WARP-1526 (pr-reviewer #1229 N2): the guard's in-transaction invariants
+  // need the target's CURRENT enable state — a DEACTIVATED sole operator
+  // must stay demotable/removable (they hold no live access, so removing
+  // them cannot strand the box). Deliberate allow-list addition: the
+  // enable/disable state is the same fact the roster already renders, it
+  // carries no credential material, and every route here is owner/admin.
+  directoryStatus: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -353,7 +360,7 @@ export function createPeopleRouter(
         const inviterRole = req.user?.role;
         if (isInviteRole(parsed.data.role)) {
           assertAssignableForCreate({
-            actorRole: req.user?.role,
+            actorRole: inviterRole,
             requestedRole: parsed.data.role,
             rankMessage:
               "You cannot invite someone to a role higher than your own",
