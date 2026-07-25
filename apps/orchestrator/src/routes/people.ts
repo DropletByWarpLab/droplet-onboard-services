@@ -86,6 +86,43 @@ const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
 // already in this file's import graph via ACCESS_TOKEN_TTL_SECONDS, so the
 // standalone-compile discipline for ROLE_VALUES above is unaffected).
 
+/**
+ * WARP-1539 — the ONLY columns the People surface may serialize.
+ *
+ * These routes used to hand back whole `prisma.user` rows, which carry
+ * three things no client may ever receive:
+ *
+ *   • `passwordHash`    — the argon2id PHC hash. schema.prisma states it is
+ *                         "NEVER logged"; shipping it in a JSON body is
+ *                         strictly worse than a log line.
+ *   • `emailLookupHash` — the WARP-233 HMAC-SHA256 blind index over the
+ *                         normalized email. It carries the plaintext-
+ *                         uniqueness guarantee that `email @unique` used to
+ *                         hold; handing it out lets a holder confirm-by-guess
+ *                         which address a row belongs to, defeating the
+ *                         property the blind index exists to provide.
+ *   • `email`           — an encrypted dcv1: blob at rest (WARP-233). These
+ *                         routes never call `decryptColumn`, so it was only
+ *                         ever emitted as ciphertext: useless to the client
+ *                         and needless exposure. No consumer reads it.
+ *
+ * owner/admin-only is not a mitigation — it just narrows *whose* session
+ * has to leak. This is an allow-list on purpose: a column added to the
+ * schema later is excluded by default and must be opted in deliberately,
+ * which is the failure direction we want.
+ */
+const PUBLIC_USER_SELECT = {
+  id: true,
+  username: true,
+  displayName: true,
+  role: true,
+  isLocal: true,
+  nextcloudUsername: true,
+  accessRoleId: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 // WARP-1259 (T7): the box-wide `droplet-admins` NC group (mask 31 on every
 // active groupfolder, ADR-029 §3.5 Tier 1 admin-see-all) tracks this exact
 // role tier — owner and admin, nothing else.
@@ -231,7 +268,12 @@ export function createPeopleRouter(
     requireRole("owner", "admin"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const people = await prisma.user.findMany();
+        // WARP-1539 — project at the query, not after: the hash never
+        // enters this process's memory, so it cannot reach a heap dump,
+        // an error serializer, or a future `res.json(row)` added here.
+        const people = await prisma.user.findMany({
+          select: PUBLIC_USER_SELECT,
+        });
         res.json({ people });
       } catch (err) {
         next(err);
@@ -404,8 +446,14 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: this row is both read for the guards
+        // below AND returned verbatim by the no-op short-circuit, so it
+        // must never carry the secret columns. Every field the handler
+        // reads (id, username, role, nextcloudUsername) is in the
+        // allow-list.
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
@@ -461,9 +509,12 @@ export function createPeopleRouter(
               return { kind: "last-owner" as const };
             }
           }
+          // WARP-1539 — the updated row is returned to the caller, so it
+          // gets the same projection as every other read here.
           const updated = await tx.user.update({
             where: { id: req.params.id },
             data: { role: parsed.data.role },
+            select: PUBLIC_USER_SELECT,
           });
           return { kind: "ok" as const, updated };
         });
