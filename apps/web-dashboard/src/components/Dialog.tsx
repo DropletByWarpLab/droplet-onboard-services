@@ -100,6 +100,20 @@ export interface DialogProps {
    * render edge-to-edge against the right border.
    */
   placement?: "center" | "right";
+  /**
+   * Width of a `placement="right"` side panel. Every existing side panel
+   * keeps the legacy `max-w-md` default — this is an EXPLICIT opt-in
+   * (honoring `maxWidth` for side panels instead would silently widen
+   * callers that already pass it, e.g. the projects detail panel).
+   *
+   *   - `default`: `max-w-md` (448px) — the shipped side-panel width.
+   *   - `sheet`:   `max-w-[520px]` — the Access & Roles builder sheet
+   *     (WARP-1532; the design packet locks `min(520px, 100vw)`, so the
+   *     panel still goes full-width under small viewports via `w-full`).
+   *
+   * Ignored for centered dialogs.
+   */
+  sideWidth?: "default" | "sheet";
   /** Close on backdrop click. Default `true`. */
   closeOnBackdrop?: boolean;
   /**
@@ -136,6 +150,15 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
+// Module-level stack of OPEN dialogs (WARP-1532 review F1). Every open
+// Dialog registers its own window keydown listener, and stopPropagation
+// cannot suppress OTHER listeners on the same target — so with nested
+// dialogs (e.g. the role-builder sheet + its cloud confirm, or the
+// smart-home nested surfaces) a single Escape used to close BOTH layers,
+// discarding the underlying draft. Each dialog pushes a token while open;
+// only the TOPMOST token's dialog may act on Escape.
+const openDialogStack: symbol[] = [];
+
 export function Dialog({
   open,
   onClose,
@@ -144,6 +167,7 @@ export function Dialog({
   describedBy,
   maxWidth = "md",
   placement = "center",
+  sideWidth = "default",
   closeOnBackdrop = true,
   initialFocusRef,
   flush = false,
@@ -154,16 +178,36 @@ export function Dialog({
   // can restore it on close even if no explicit `triggerRef` was passed.
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const prefersReducedMotion = useReducedMotion();
+  // Stable identity on the open-dialog stack (F1). A ref, not state — the
+  // token never changes for this component instance.
+  const stackTokenRef = useRef<symbol>();
+  if (stackTokenRef.current === undefined) stackTokenRef.current = Symbol("dialog");
+
+  // Register on the open-dialog stack while open. Nested dialogs mount
+  // after their parents, so the innermost open dialog is always topmost;
+  // closing it pops the stack and hands Escape back to the layer below.
+  useEffect(() => {
+    if (!open) return;
+    const token = stackTokenRef.current!;
+    openDialogStack.push(token);
+    return () => {
+      const index = openDialogStack.lastIndexOf(token);
+      if (index !== -1) openDialogStack.splice(index, 1);
+    };
+  }, [open]);
 
   // Escape close — only while open, so background surfaces keep their
-  // own Escape semantics.
+  // own Escape semantics, and only for the TOPMOST open dialog:
+  // stopPropagation cannot suppress sibling window-level listeners, so
+  // without the stack check a nested confirm's Escape would also close
+  // the sheet underneath it and discard the draft (F1).
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
+      if (e.key !== "Escape") return;
+      if (openDialogStack[openDialogStack.length - 1] !== stackTokenRef.current) return;
+      e.stopPropagation();
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -305,8 +349,9 @@ export function Dialog({
     background: "var(--scrim)",
   };
 
+  const sideWidthClass = sideWidth === "sheet" ? "max-w-[520px]" : "max-w-md";
   const containerClass = isSide
-    ? "relative w-full max-w-md h-full overflow-y-auto overflow-x-hidden"
+    ? `relative w-full ${sideWidthClass} h-full overflow-y-auto overflow-x-hidden`
     : `${widthClass} w-full overflow-hidden`;
 
   // Body region (padding + overflow contract, see the component doc):

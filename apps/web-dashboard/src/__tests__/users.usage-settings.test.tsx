@@ -35,6 +35,23 @@ vi.mock("@/lib/api", () => ({
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
   fetchHealth: vi.fn().mockResolvedValue({}),
+  // WARP-1532 (T8): the page now pulls the access-roles surface — resolve
+  // benign empties so this file keeps exercising its own concern only.
+  listAccessRoles: vi.fn().mockResolvedValue({ roles: [] }),
+  createAccessRole: vi.fn(),
+  updateAccessRole: vi.fn(),
+  deleteAccessRole: vi.fn(),
+  duplicateAccessRole: vi.fn(),
+  archiveAccessRole: vi.fn(),
+  assignAccessRole: vi.fn(),
+  setPersonAccess: vi.fn().mockResolvedValue({ syncState: "pending" }),
+  putAccessExceptions: vi.fn().mockResolvedValue({ exceptions: [] }),
+  fetchEffectiveAccess: vi.fn().mockRejectedValue(new Error("not merged yet")),
+}));
+
+// WARP-1532 (T8): the page loads configured connectors for the role builder.
+vi.mock("@/lib/api.erp", () => ({
+  fetchIntegrations: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/lib/auth", () => ({

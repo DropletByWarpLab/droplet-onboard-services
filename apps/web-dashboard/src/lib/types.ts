@@ -969,6 +969,13 @@ export interface AuthUser {
  *  `id` against a local username. */
 export interface RosterUser extends AuthUser {
   userId: string | null;
+  /** WARP-1532 (RBAC v2 T8) — the person's enforcement tier. OPTIONAL until
+   *  the T3/T7 roster extension lands server-side: absent means "not sent
+   *  yet", and the UI renders no chip rather than fabricating one. */
+  role?: AccessTier | null;
+  /** WARP-1532 — assigned custom role id (null = plain built-in tier).
+   *  Optional for the same parallel-build reason as `role`. */
+  accessRoleId?: string | null;
 }
 
 // ── WARP-217 invite types ──
@@ -1046,6 +1053,138 @@ export interface InviteCreateResponse {
   token: string;
   url: string;
   expiresAt: string;
+}
+
+// ── WARP-1532 (RBAC v2 T8): Access & Roles wire types ──
+// Contract-driven off ADR-032 (ACCESS-AND-ROLES-ARCHITECTURE-BRIEF §2/§5)
+// and the MERGED T1 schema (WARP-1525). BigInt fields are STRING-encoded on
+// the wire (ADR-029 §8 convention); absence of a grant row = OFF, never
+// inferred. The backend routes (T3+) build in parallel — these shapes are
+// the fixed contract both sides code against.
+
+/** The full Role pgEnum (display label for `family` is "Staff", §0.1). */
+export type AccessTier = "owner" | "admin" | "family" | "guest" | "service";
+
+/** Custom-role starting point — never owner/service (ADR-032 §2 CHECK). */
+export type AccessStartingPoint = "admin" | "family" | "guest";
+
+/** §9 catalog action levels (FeatureAccessLevel pgEnum). */
+export type FeatureAccessLevel = "view" | "act" | "manage";
+
+/** Per-tool-domain level (ToolAccessLevel pgEnum). */
+export type ToolAccessLevel = "view" | "use";
+
+/** Per-connector level (ConnectorAccessLevel pgEnum). Absence = none. */
+export type ConnectorAccessLevel = "read" | "read_write";
+
+/** Sync state carried by NC-affecting responses → the "Saved. Applying…"
+ *  pattern. Mirrors the shipped NcSyncState vocabulary. */
+export type AccessSyncState = "pending" | "synced" | "failed";
+
+export type AccessRoleState = "active" | "archived";
+
+/** The gateable App-Modules vocabulary (ModuleId pgEnum) — ONE feature
+ *  vocabulary shared with the module registry; no parallel list to drift. */
+export type AccessModuleId =
+  | "chat"
+  | "knowledge"
+  | "files"
+  | "docs"
+  | "email"
+  | "calendar"
+  | "projects"
+  | "voice"
+  | "cameras"
+  | "smart_home"
+  | "network"
+  | "managed_switch";
+
+export interface AccessRoleFeatureGrant {
+  moduleId: AccessModuleId;
+  level: FeatureAccessLevel;
+}
+
+export interface AccessRoleToolGrant {
+  /** ToolDomain value from the tools-core catalog (TS union, not a pgEnum). */
+  domain: string;
+  level: ToolAccessLevel;
+}
+
+export interface AccessRoleConnectorGrant {
+  /** IntegrationConnection.provider ("eaglesoft"). */
+  provider: string;
+  level: ConnectorAccessLevel;
+}
+
+/** A custom role as it travels on the wire (GET /api/access/roles[/:id]). */
+export interface AccessRole {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  startingPoint: AccessStartingPoint;
+  state: AccessRoleState;
+  /** BigInt → decimal string; null = no limit (box default). */
+  storageQuotaBytes: string | null;
+  maxUploadSizeMb: number | null;
+  llmDailyMessageCap: number | null;
+  cloudModelsAllowed: boolean;
+  mayOperateLocks: boolean;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  /** How many people currently hold this role (list + detail responses). */
+  peopleCount: number;
+  /** Present where the mutation cascades to NC / session revocation. */
+  syncState?: AccessSyncState;
+  featureGrants: AccessRoleFeatureGrant[];
+  toolGrants: AccessRoleToolGrant[];
+  connectorGrants: AccessRoleConnectorGrant[];
+}
+
+/** POST/PATCH body for /api/access/roles — §2 shape flattened. */
+export interface AccessRolePayload {
+  name: string;
+  description: string | null;
+  startingPoint: AccessStartingPoint;
+  storageQuotaBytes: string | null;
+  maxUploadSizeMb: number | null;
+  llmDailyMessageCap: number | null;
+  cloudModelsAllowed: boolean;
+  mayOperateLocks: boolean;
+  featureGrants: AccessRoleFeatureGrant[];
+  toolGrants: AccessRoleToolGrant[];
+  connectorGrants: AccessRoleConnectorGrant[];
+}
+
+/** One per-person exception row (feature axis only in v1 — O-3). */
+export interface AccessExceptionInput {
+  moduleId: AccessModuleId;
+  effect: "allow" | "deny";
+  /** Required when effect = allow (service-enforced). */
+  level?: FeatureAccessLevel | null;
+}
+
+/** GET /api/people/:id/effective-access — the ADR-032 §3 resolver output.
+ *  Field names follow the resolver pseudo-code; unknown extras are ignored
+ *  by the renderer so a T3 refinement stays non-breaking. */
+export interface EffectiveAccess {
+  tier: AccessTier;
+  features: Array<{ moduleId: AccessModuleId; level: FeatureAccessLevel }>;
+  toolDomains: string[];
+  locks: boolean;
+  cloud: boolean;
+  connectors: Record<string, ConnectorAccessLevel>;
+  usage: {
+    storageQuotaBytes: string | null;
+    maxUploadSizeMb: number | null;
+    llmDailyMessageCap: number | null;
+    /** Where the effective value came from (T7 "roster shows source"). */
+    source?: "person" | "role" | "default";
+  };
+  /** Read-only reference — ADR-029 owns these; never merged into grants. */
+  deptRights: Array<{ id: string; name: string; right: DepartmentRight }>;
+  exceptions?: Array<AccessExceptionInput & { id?: string }>;
 }
 
 /** Mirror of `findInviteByToken` projection used by the public lookup endpoint. */
