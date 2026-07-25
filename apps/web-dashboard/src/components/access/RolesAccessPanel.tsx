@@ -275,7 +275,14 @@ export function RolesAccessPanel({
 
   async function performArchive() {
     if (!archiveTarget) return;
-    await archiveAccessRole(archiveTarget.id);
+    try {
+      await archiveAccessRole(archiveTarget.id);
+    } catch (err: any) {
+      // §10: never a silent failure — surface it and keep the confirm open
+      // (ConfirmDialog leaves the dialog up on a rejected onConfirm).
+      toast(err?.message || "Failed to archive the role", "error");
+      throw err;
+    }
     if (selectedId === archiveTarget.id) setSelectedId(null);
     await reload();
     toast(`'${archiveTarget.name}' archived.`, "success");
@@ -283,7 +290,12 @@ export function RolesAccessPanel({
 
   async function performDelete() {
     if (!deleteTarget) return;
-    await deleteAccessRole(deleteTarget.id);
+    try {
+      await deleteAccessRole(deleteTarget.id);
+    } catch (err: any) {
+      toast(err?.message || "Failed to delete the role", "error");
+      throw err;
+    }
     if (selectedId === deleteTarget.id) setSelectedId(null);
     await reload();
     toast(`'${deleteTarget.name}' deleted.`, "success");
@@ -703,7 +715,9 @@ export function RolesAccessPanel({
             <div className="sect" style={{ marginTop: 0, justifyContent: "space-between" }}>
               <h2>{ACCESS_COPY.yourRoles}</h2>
               {listState === "ready" && roles.length > 0 && (
-                <button type="button" className="btn ghost sm" onClick={openCreate}>
+                // §4.1: the primary action of the pane is filled accent —
+                // the Departments ghost sibling is a recorded divergence.
+                <button type="button" className="btn primary sm" onClick={openCreate}>
                   <Plus size={13} /> New role
                 </button>
               )}
@@ -797,7 +811,10 @@ export function RolesAccessPanel({
         onConfirm={performArchive}
         onCancel={() => setArchiveTarget(null)}
         title={archiveTarget ? `Archive '${archiveTarget.name}'?` : "Archive role?"}
-        description="Archived roles can't be assigned but keep their settings. You can restore them any time."
+        // Honesty: no restore affordance ships yet (archived roles are
+        // filtered from the list), so the copy promises none — the restore
+        // surface is a filed follow-up.
+        description="Archived roles can't be assigned but keep their settings."
         confirmLabel="Archive"
         variant="neutral"
       />
@@ -865,8 +882,10 @@ function AssignPeopleDialog({
           </div>
         )}
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
-          Assigning applies immediately — people are signed out and the role&apos;s access takes
-          effect when they sign back in.
+          {/* Mirrors §12 sessionRevoke semantics: the new access takes
+              effect immediately, not at next sign-in. */}
+          Assigning applies immediately — people are signed out and their new access takes effect
+          immediately.
         </p>
         <div className="flex items-center justify-end gap-2 pt-1">
           <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>

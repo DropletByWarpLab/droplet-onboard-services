@@ -45,6 +45,33 @@ import "./access.css";
 
 export type PersonAccessValue = `role:${string}` | `tier:${string}`;
 
+/** The §8 rail state for a target person — shared by the Role section and
+ *  the (separately mounted, §17-ordered) Exceptions section. */
+export function personGuardState(
+  person: RosterUser,
+  people: RosterUser[],
+  actingUserId: string | null,
+): { isOwner: boolean; isSelf: boolean; lastAdminBlocked: boolean; locked: boolean } {
+  const isOwner = person.role === "owner";
+  const isSelf = person.userId != null && actingUserId != null && person.userId === actingUserId;
+  // Last-operator rail: this person is an operator and the roster shows no
+  // OTHER owner/admin. Only computable once the roster carries roles — when
+  // role data is absent we stay silent and let the backend enforce (never
+  // fabricate a guard from missing data).
+  const isOperator = person.role === "admin" || person.role === "owner";
+  const operators = people.filter((p) => p.role === "owner" || p.role === "admin");
+  const lastAdminBlocked = !isOwner && isOperator && operators.length <= 1;
+  return { isOwner, isSelf, lastAdminBlocked, locked: isOwner || isSelf || lastAdminBlocked };
+}
+
+/** The honest disabled reason for a locked target, in §8 priority order. */
+function guardReason(g: ReturnType<typeof personGuardState>): string | undefined {
+  if (g.isOwner) return ACCESS_COPY.ownerTooltip;
+  if (g.isSelf) return ACCESS_COPY.selfLockout;
+  if (g.lastAdminBlocked) return ACCESS_COPY.lastAdmin;
+  return undefined;
+}
+
 export interface PersonAccessSectionProps {
   person: RosterUser;
   /** Full roster — powers the last-operator computation (§8). */
@@ -57,9 +84,6 @@ export interface PersonAccessSectionProps {
   /** Controlled select value ("role:<id>" or "tier:<tier>"). */
   value: string;
   onChange: (value: string) => void;
-  /** Controlled exception list (PUT by the parent on Save). */
-  exceptions: AccessExceptionInput[];
-  onExceptionsChange: (next: AccessExceptionInput[]) => void;
   /** Page-owned sync line (§12 sessionRevoke → Applied). */
   syncText: string | null;
   /** "Manage roles →" recovery path for the last-admin rail. */
@@ -80,33 +104,17 @@ export function PersonAccessSection({
   actingUserId,
   value,
   onChange,
-  exceptions,
-  onExceptionsChange,
   syncText,
   onManageRoles,
 }: PersonAccessSectionProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawer, setDrawer] = useState<DrawerState>({ phase: "idle" });
-  const [addingException, setAddingException] = useState(false);
-  const [exceptionModule, setExceptionModule] = useState("");
-  const [exceptionEffect, setExceptionEffect] = useState<"allow" | "deny">("allow");
-  const [exceptionLevel, setExceptionLevel] = useState<FeatureAccessLevel>("view");
 
-  const isOwner = person.role === "owner";
-  const isSelf = person.userId != null && actingUserId != null && person.userId === actingUserId;
-
-  /** Last-operator rail: this person is an operator and the roster shows no
-   *  OTHER owner/admin. Only computable once the roster carries roles —
-   *  when role data is absent we stay silent and let the backend enforce
-   *  (never fabricate a guard from missing data). */
-  const lastOperator = useMemo(() => {
-    if (person.role !== "admin" && person.role !== "owner") return false;
-    const operators = people.filter((p) => p.role === "owner" || p.role === "admin");
-    return operators.length <= 1;
-  }, [people, person.role]);
-
-  const lastAdminBlocked = !isOwner && lastOperator;
-  const locked = isOwner || isSelf || lastAdminBlocked;
+  const guards = useMemo(
+    () => personGuardState(person, people, actingUserId),
+    [person, people, actingUserId],
+  );
+  const { isOwner, isSelf, lastAdminBlocked, locked } = guards;
 
   const tierOf = (option: string): AccessTier => {
     if (option.startsWith("tier:")) return option.slice(5) as AccessTier;
@@ -147,25 +155,6 @@ export function PersonAccessSection({
     }
   }
 
-  function addException() {
-    if (!exceptionModule) return;
-    const row: AccessExceptionInput = {
-      moduleId: exceptionModule as AccessExceptionInput["moduleId"],
-      effect: exceptionEffect,
-      ...(exceptionEffect === "allow" ? { level: exceptionLevel } : {}),
-    };
-    onExceptionsChange([...exceptions, row]);
-    setAddingException(false);
-    setExceptionModule("");
-    setExceptionEffect("allow");
-    setExceptionLevel("view");
-  }
-
-  const exceptionCandidates = GATEABLE_FEATURES.filter(
-    (f) => !exceptions.some((ex) => ex.moduleId === f.moduleId),
-  );
-  const selectedExceptionFeature = featureDef(exceptionModule);
-
   const fieldStyle: React.CSSProperties = {
     background: "var(--surface)",
     border: "1px solid var(--border)",
@@ -197,7 +186,7 @@ export function PersonAccessSection({
           disabled={locked}
           title={isOwner ? ACCESS_COPY.ownerTooltip : undefined}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full px-3 py-2.5 outline-none transition-colors"
+          className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
           style={{ ...fieldStyle, opacity: locked ? 0.55 : 1 }}
         >
           {roles.length > 0 && (
@@ -290,6 +279,17 @@ export function PersonAccessSection({
                       const suffix = def.levels.length > 1 && level ? ` · ${level.label.toLowerCase()}` : "";
                       return <AccessChip key={f.moduleId}>{`${def.label}${suffix}`}</AccessChip>;
                     })}
+                    {/* §6.3 — absence is part of the honest answer ("No
+                        network"): a muted chip per gateable feature the
+                        resolver did NOT grant. The always-on trio is not
+                        gateable and never renders as absent. */}
+                    {GATEABLE_FEATURES.filter(
+                      (def) => !drawer.data.features.some((f) => f.moduleId === def.moduleId),
+                    ).map((def) => (
+                      <AccessChip key={`no-${def.moduleId}`} tone="muted">
+                        {`No ${def.label.toLowerCase()}`}
+                      </AccessChip>
+                    ))}
                     {drawer.data.deptRights.map((d) => (
                       <AccessChip key={d.id}>{`${d.name}: ${d.right}`}</AccessChip>
                     ))}
@@ -309,119 +309,168 @@ export function PersonAccessSection({
         </div>
       </div>
 
-      {/* ── Exceptions (§6.5 — small, secondary, collapsed). §8: rails are
-          rendered DISABLED with the honest reason, never hidden — an
-          owner/self/last-admin target keeps the block visible with the add
-          affordance inert and titled. ── */}
-      {
-        <div>
-          <div className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
-            Exceptions
-          </div>
-          {exceptions.length > 0 && (
-            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
-              {exceptions.map((ex) => {
-                const def = featureDef(ex.moduleId);
-                const level = def?.levels.find((l) => l.value === ex.level);
-                const label = `${ex.effect === "allow" ? "Allow" : "Deny"}: ${def?.label ?? ex.moduleId}${
-                  ex.effect === "allow" && level ? ` · ${level.label}` : ""
-                }`;
-                return (
-                  <AccessChip
-                    key={ex.moduleId}
-                    tone={ex.effect === "allow" ? "green" : "red"}
-                    icon={ex.effect === "allow" ? <Check size={12} aria-hidden="true" /> : <X size={12} aria-hidden="true" />}
+    </div>
+  );
+}
+
+/**
+ * §6.5 Exceptions — the D-A escape hatch, mounted by the page AFTER the
+ * Usage section (§17 order: Identity → Role → effective access → Usage →
+ * Exceptions; exceptions are the fine print, last). §8: for a locked
+ * target (owner / self / last admin) the block stays visible with the add
+ * affordance disabled and titled by the honest reason — never hidden.
+ * Chips are neutral text-first (§1/§15): the Check/X icon + the Allow/Deny
+ * word disambiguate; no status color for a non-status fact.
+ */
+export function PersonExceptionsSection({
+  person,
+  people,
+  actingUserId,
+  exceptions,
+  onExceptionsChange,
+}: {
+  person: RosterUser;
+  people: RosterUser[];
+  actingUserId: string | null;
+  /** Controlled exception list (PUT by the parent on Save). */
+  exceptions: AccessExceptionInput[];
+  onExceptionsChange: (next: AccessExceptionInput[]) => void;
+}) {
+  const [addingException, setAddingException] = useState(false);
+  const [exceptionModule, setExceptionModule] = useState("");
+  const [exceptionEffect, setExceptionEffect] = useState<"allow" | "deny">("allow");
+  const [exceptionLevel, setExceptionLevel] = useState<FeatureAccessLevel>("view");
+
+  const guards = useMemo(
+    () => personGuardState(person, people, actingUserId),
+    [person, people, actingUserId],
+  );
+  const { locked } = guards;
+
+  const fieldStyle: React.CSSProperties = {
+    background: "var(--surface)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-input)",
+    color: "var(--text)",
+  };
+
+  function addException() {
+    if (!exceptionModule) return;
+    const row: AccessExceptionInput = {
+      moduleId: exceptionModule as AccessExceptionInput["moduleId"],
+      effect: exceptionEffect,
+      ...(exceptionEffect === "allow" ? { level: exceptionLevel } : {}),
+    };
+    onExceptionsChange([...exceptions, row]);
+    setAddingException(false);
+    setExceptionModule("");
+    setExceptionEffect("allow");
+    setExceptionLevel("view");
+  }
+
+  const exceptionCandidates = GATEABLE_FEATURES.filter(
+    (f) => !exceptions.some((ex) => ex.moduleId === f.moduleId),
+  );
+  const selectedExceptionFeature = featureDef(exceptionModule);
+
+  return (
+    <div className="pt-2" style={{ borderTop: "1px solid var(--card-bd)", marginTop: 10 }}>
+      <div className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
+        Exceptions
+      </div>
+      {exceptions.length > 0 && (
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
+          {exceptions.map((ex) => {
+            const def = featureDef(ex.moduleId);
+            const level = def?.levels.find((l) => l.value === ex.level);
+            const label = `${ex.effect === "allow" ? "Allow" : "Deny"}: ${def?.label ?? ex.moduleId}${
+              ex.effect === "allow" && level ? ` · ${level.label}` : ""
+            }`;
+            return (
+              <AccessChip
+                key={ex.moduleId}
+                icon={ex.effect === "allow" ? <Check size={12} aria-hidden="true" /> : <X size={12} aria-hidden="true" />}
+              >
+                {label}
+                {!locked && (
+                  <button
+                    type="button"
+                    aria-label={`Remove exception for ${def?.label ?? ex.moduleId}`}
+                    onClick={() => onExceptionsChange(exceptions.filter((e) => e.moduleId !== ex.moduleId))}
+                    style={{ display: "inline-flex", background: "none", border: "none", padding: 0, marginLeft: 2, cursor: "pointer", color: "inherit" }}
                   >
-                    {label}
-                    {!locked && (
-                      <button
-                        type="button"
-                        aria-label={`Remove exception for ${def?.label ?? ex.moduleId}`}
-                        onClick={() => onExceptionsChange(exceptions.filter((e) => e.moduleId !== ex.moduleId))}
-                        style={{ display: "inline-flex", background: "none", border: "none", padding: 0, marginLeft: 2, cursor: "pointer", color: "inherit" }}
-                      >
-                        <X size={11} aria-hidden="true" />
-                      </button>
-                    )}
-                  </AccessChip>
-                );
-              })}
-            </div>
-          )}
-          {!addingException && (
-            <button
-              type="button"
-              className="btn ghost sm"
-              disabled={locked}
-              title={
-                isOwner
-                  ? ACCESS_COPY.ownerTooltip
-                  : isSelf
-                    ? ACCESS_COPY.selfLockout
-                    : lastAdminBlocked
-                      ? ACCESS_COPY.lastAdmin
-                      : undefined
-              }
-              onClick={() => setAddingException(true)}
-            >
-              {ACCESS_COPY.addException}
-            </button>
-          )}
-          {!locked && addingException && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-              <select
-                aria-label="Exception feature"
-                value={exceptionModule}
-                onChange={(e) => setExceptionModule(e.target.value)}
-                className="px-2.5 py-2 outline-none"
-                style={fieldStyle}
-              >
-                <option value="">Feature…</option>
-                {exceptionCandidates.map((f) => (
-                  <option key={f.moduleId} value={f.moduleId}>
-                    {f.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="Exception effect"
-                value={exceptionEffect}
-                onChange={(e) => setExceptionEffect(e.target.value as "allow" | "deny")}
-                className="px-2.5 py-2 outline-none"
-                style={fieldStyle}
-              >
-                <option value="allow">Allow</option>
-                <option value="deny">Deny</option>
-              </select>
-              {exceptionEffect === "allow" && (
-                <select
-                  aria-label="Exception level"
-                  value={exceptionLevel}
-                  onChange={(e) => setExceptionLevel(e.target.value as FeatureAccessLevel)}
-                  className="px-2.5 py-2 outline-none"
-                  style={fieldStyle}
-                >
-                  {(selectedExceptionFeature?.levels ?? []).map((l) => (
-                    <option key={l.value} value={l.value}>
-                      {l.label}
-                    </option>
-                  ))}
-                  {!selectedExceptionFeature && <option value="view">View</option>}
-                </select>
-              )}
-              <button type="button" className="btn primary sm" onClick={addException} disabled={!exceptionModule}>
-                Add exception
-              </button>
-              <button type="button" className="btn ghost sm" onClick={() => setAddingException(false)}>
-                Cancel
-              </button>
-            </div>
-          )}
-          <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
-            {ACCESS_COPY.exceptionsHint}
-          </p>
+                    <X size={11} aria-hidden="true" />
+                  </button>
+                )}
+              </AccessChip>
+            );
+          })}
         </div>
-      }
+      )}
+      {!addingException && (
+        <button
+          type="button"
+          className="btn ghost sm"
+          disabled={locked}
+          title={guardReason(guards)}
+          onClick={() => setAddingException(true)}
+        >
+          {ACCESS_COPY.addException}
+        </button>
+      )}
+      {!locked && addingException && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <select
+            aria-label="Exception feature"
+            value={exceptionModule}
+            onChange={(e) => setExceptionModule(e.target.value)}
+            className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+            style={fieldStyle}
+          >
+            <option value="">Feature…</option>
+            {exceptionCandidates.map((f) => (
+              <option key={f.moduleId} value={f.moduleId}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Exception effect"
+            value={exceptionEffect}
+            onChange={(e) => setExceptionEffect(e.target.value as "allow" | "deny")}
+            className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+            style={fieldStyle}
+          >
+            <option value="allow">Allow</option>
+            <option value="deny">Deny</option>
+          </select>
+          {exceptionEffect === "allow" && (
+            <select
+              aria-label="Exception level"
+              value={exceptionLevel}
+              onChange={(e) => setExceptionLevel(e.target.value as FeatureAccessLevel)}
+              className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+              style={fieldStyle}
+            >
+              {(selectedExceptionFeature?.levels ?? []).map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
+              {!selectedExceptionFeature && <option value="view">View</option>}
+            </select>
+          )}
+          <button type="button" className="btn primary sm" onClick={addException} disabled={!exceptionModule}>
+            Add exception
+          </button>
+          <button type="button" className="btn ghost sm" onClick={() => setAddingException(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+      <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)" }}>
+        {ACCESS_COPY.exceptionsHint}
+      </p>
     </div>
   );
 }

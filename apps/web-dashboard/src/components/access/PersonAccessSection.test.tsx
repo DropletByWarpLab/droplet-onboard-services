@@ -17,7 +17,7 @@ vi.mock("@/lib/api", () => ({
   fetchEffectiveAccess: (...a: any[]) => fetchEffectiveAccessMock(...a),
 }));
 
-import { PersonAccessSection } from "./PersonAccessSection";
+import { PersonAccessSection, PersonExceptionsSection } from "./PersonAccessSection";
 import { ACCESS_COPY } from "./copy";
 import type { AccessRole, EffectiveAccess, RosterUser } from "@/lib/types";
 
@@ -69,7 +69,6 @@ function effective(overrides: Partial<EffectiveAccess> = {}): EffectiveAccess {
 
 function renderSection(props: Partial<React.ComponentProps<typeof PersonAccessSection>> = {}) {
   const onChange = vi.fn();
-  const onExceptionsChange = vi.fn();
   const onManageRoles = vi.fn();
   const utils = render(
     <PersonAccessSection
@@ -80,14 +79,29 @@ function renderSection(props: Partial<React.ComponentProps<typeof PersonAccessSe
       actingUserId="u-owner"
       value="role:r-finance"
       onChange={onChange}
-      exceptions={[]}
-      onExceptionsChange={onExceptionsChange}
       syncText={null}
       onManageRoles={onManageRoles}
       {...props}
     />,
   );
-  return { onChange, onExceptionsChange, onManageRoles, ...utils };
+  return { onChange, onManageRoles, ...utils };
+}
+
+function renderExceptions(
+  props: Partial<React.ComponentProps<typeof PersonExceptionsSection>> = {},
+) {
+  const onExceptionsChange = vi.fn();
+  const utils = render(
+    <PersonExceptionsSection
+      person={PRIYA}
+      people={EVERYONE}
+      actingUserId="u-owner"
+      exceptions={[]}
+      onExceptionsChange={onExceptionsChange}
+      {...props}
+    />,
+  );
+  return { onExceptionsChange, ...utils };
 }
 
 beforeEach(() => {
@@ -143,8 +157,10 @@ describe("guardrails (§8 — disabled with honest copy)", () => {
     renderSection({ person: OWNER, value: "tier:owner" });
     expect(screen.getByText(ACCESS_COPY.ownerTooltip)).toBeInTheDocument();
     expect(screen.getByLabelText("Assigned role")).toBeDisabled();
-    // §8: the exceptions affordance renders DISABLED with the honest
-    // reason — never hidden (QA send-back 2).
+  });
+
+  it("owner exceptions: the add affordance renders DISABLED with the honest reason (QA send-back 2)", () => {
+    renderExceptions({ person: OWNER });
     const addException = screen.getByRole("button", { name: ACCESS_COPY.addException });
     expect(addException).toBeDisabled();
     expect(addException).toHaveAttribute("title", ACCESS_COPY.ownerTooltip);
@@ -181,6 +197,15 @@ describe("effective-access drawer (§6.3 — read-only, honest)", () => {
     expect(within(drawer).getByText(/Storage 25 GB/)).toBeInTheDocument();
     expect(within(drawer).getByText(/Finance: contributor/)).toBeInTheDocument();
     expect(within(drawer).getByText(ACCESS_COPY.effectiveHint)).toBeInTheDocument();
+    // §6.3 (UX-11): absence is part of the honest answer — muted "No {…}"
+    // chips for every gateable feature the resolver did not grant; the
+    // always-on trio never renders as absent.
+    const noNetwork = within(drawer).getByText("No network");
+    expect(noNetwork.closest(".acc-chip")!.className).toContain("muted");
+    expect(within(drawer).getByText("No email")).toBeInTheDocument();
+    expect(within(drawer).queryByText("No chat")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("No home")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("No settings")).not.toBeInTheDocument();
   });
 
   it("renders — for unknown usage and an error line when the resolver is unreachable", async () => {
@@ -195,9 +220,9 @@ describe("effective-access drawer (§6.3 — read-only, honest)", () => {
   });
 });
 
-describe("exceptions (§6.5 — collapsed, secondary)", () => {
+describe("exceptions (§6.5 — collapsed, secondary; its own §17-ordered section)", () => {
   it("stays collapsed behind + Add an exception and reports an added row", () => {
-    const { onExceptionsChange } = renderSection();
+    const { onExceptionsChange } = renderExceptions();
     expect(screen.getByText(ACCESS_COPY.exceptionsHint)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: ACCESS_COPY.addException }));
     fireEvent.change(screen.getByLabelText("Exception feature"), { target: { value: "cameras" } });
@@ -209,15 +234,19 @@ describe("exceptions (§6.5 — collapsed, secondary)", () => {
     ]);
   });
 
-  it("renders existing exception chips (allow green / deny red, icon + word)", () => {
-    renderSection({
+  it("renders existing exception chips NEUTRAL text-first (icon + word, no status color — §1/§15)", () => {
+    renderExceptions({
       exceptions: [
         { moduleId: "cameras", effect: "allow", level: "act" },
         { moduleId: "email", effect: "deny" },
       ],
     });
-    expect(screen.getByText(/Allow: Cameras · Export clips/)).toBeInTheDocument();
-    expect(screen.getByText(/Deny: Email/)).toBeInTheDocument();
+    const allow = screen.getByText(/Allow: Cameras · Export clips/).closest(".acc-chip");
+    const deny = screen.getByText(/Deny: Email/).closest(".acc-chip");
+    expect(allow).not.toBeNull();
+    expect(deny).not.toBeNull();
+    expect(allow!.className).not.toMatch(/green|red/);
+    expect(deny!.className).not.toMatch(/green|red/);
   });
 });
 

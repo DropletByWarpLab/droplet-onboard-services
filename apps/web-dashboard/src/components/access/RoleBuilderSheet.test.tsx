@@ -81,6 +81,9 @@ describe("identity & starting point (axis 1)", () => {
   it("create mode: subline verbatim, Save disabled until named (dirty gate)", () => {
     renderSheet();
     expect(screen.getByText(ACCESS_COPY.builderSubline)).toBeInTheDocument();
+    // UX-9 / QA-2: the sheet opts into the packet's ~520px width without
+    // shifting other right panels (Dialog sideWidth="sheet").
+    expect(screen.getByRole("dialog", { name: "New role" }).className).toContain("max-w-[520px]");
     const save = screen.getByRole("button", { name: "Save role" });
     expect(save).toBeDisabled();
     fireEvent.change(screen.getByPlaceholderText("Name this role"), {
@@ -99,19 +102,22 @@ describe("identity & starting point (axis 1)", () => {
   });
 
   it("rank-caps starting points above the actor (WARP-623) with the §12 reason", () => {
+    // Plain aria-pressed buttons (UX-4): the segment is a button group, not
+    // a fake radio contract.
     renderSheet({ actingTier: "family" });
-    const admin = screen.getByRole("radio", { name: "Admin" });
+    const admin = screen.getByRole("button", { name: "Admin" });
     expect(admin).toBeDisabled();
     expect(admin).toHaveAttribute("title", ACCESS_COPY.rankCap);
+    expect(admin).toHaveAttribute("aria-pressed", "false");
     // An admin actor may pick Admin — at-level is allowed (last-admin recovery).
     renderSheet({ actingTier: "admin" });
-    expect(screen.getAllByRole("radio", { name: "Admin" })[1]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Admin" })[1]).toBeEnabled();
   });
 
   it("re-floors on a starting-point drop and names the dropped grant (never silent)", () => {
     const base = roleToDraft(makeRole()); // admin SP with network=manage
     renderSheet({ mode: "edit", base });
-    fireEvent.click(screen.getByRole("radio", { name: "Guest" }));
+    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
     expect(
       screen.getByText(
         "Switching to Guest turns off Configure network — guests can't change the network.",

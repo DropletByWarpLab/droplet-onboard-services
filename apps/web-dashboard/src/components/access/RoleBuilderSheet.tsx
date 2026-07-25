@@ -188,7 +188,17 @@ export function RoleBuilderSheet({
   const connectorLevels = connectorLevelsFor(draft.startingPoint);
 
   return (
-    <Dialog open={open} onClose={onClose} labelledBy={headingId} placement="right" flush>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      labelledBy={headingId}
+      placement="right"
+      // Packet §17 locks the builder at min(520px, 100vw) — 448 squeezes
+      // the feature rows (QA-2/UX-9). Explicit opt-in; other side panels
+      // keep the legacy width.
+      sideWidth="sheet"
+      flush
+    >
       <div className="flex h-full flex-col">
         {/* ── Sheet head ── */}
         <div
@@ -209,6 +219,7 @@ export function RoleBuilderSheet({
                 value={draft.name}
                 autoFocus
                 onChange={(e) => patch({ name: e.target.value })}
+                className="outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow rounded-sm"
                 style={{
                   font: "inherit",
                   fontSize: 16,
@@ -219,7 +230,6 @@ export function RoleBuilderSheet({
                   borderBottom: "1.5px dashed var(--card-bd)",
                   padding: "2px 0",
                   width: "100%",
-                  outline: "none",
                 }}
               />
             ) : (
@@ -256,7 +266,7 @@ export function RoleBuilderSheet({
                   aria-label="Role name"
                   value={draft.name}
                   onChange={(e) => patch({ name: e.target.value })}
-                  className="w-full px-3 py-2.5 outline-none transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                   style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)" }}
                 />
               </div>
@@ -269,7 +279,7 @@ export function RoleBuilderSheet({
                 aria-label="Slug"
                 value={slugPreview}
                 disabled
-                className="w-full px-3 py-2.5 outline-none"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={{ background: "var(--inset)", border: "1px solid var(--card-bd)", borderRadius: "var(--radius-input)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 13 }}
               />
             </div>
@@ -282,7 +292,7 @@ export function RoleBuilderSheet({
                 placeholder="Optional — what this role is for"
                 value={draft.description}
                 onChange={(e) => patch({ description: e.target.value })}
-                className="w-full px-3 py-2.5 outline-none transition-colors"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)" }}
               />
             </div>
@@ -290,15 +300,17 @@ export function RoleBuilderSheet({
               <label className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                 Starting point
               </label>
-              <div className="acc-seg grow" role="radiogroup" aria-label="Starting point">
+              {/* Plain aria-pressed buttons (the tools-segment idiom) — an
+                  honest contract for a button group; the ARIA radio pattern
+                  demands roving tabindex + arrow keys we don't implement. */}
+              <div className="acc-seg grow" role="group" aria-label="Starting point">
                 {STARTING_POINTS.map(({ tier }) => {
                   const blocked = TIER_RANK[tier] > TIER_RANK[actingTier];
                   return (
                     <button
                       key={tier}
                       type="button"
-                      role="radio"
-                      aria-checked={draft.startingPoint === tier}
+                      aria-pressed={draft.startingPoint === tier}
                       className={draft.startingPoint === tier ? "on" : ""}
                       disabled={blocked}
                       title={blocked ? ACCESS_COPY.rankCap : undefined}
@@ -409,14 +421,14 @@ export function RoleBuilderSheet({
                     placeholder="No limit"
                     value={draft.usage.storageValue}
                     onChange={(e) => patch({ usage: { ...draft.usage, storageValue: e.target.value } })}
-                    className="flex-1 px-3 py-2.5 outline-none transition-colors"
+                    className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)", minWidth: 0 }}
                   />
                   <select
                     aria-label="Storage limit unit"
                     value={draft.usage.storageUnit}
                     onChange={(e) => patch({ usage: { ...draft.usage, storageUnit: e.target.value as "GB" | "TB" } })}
-                    className="px-2.5 py-2.5 outline-none transition-colors"
+                    className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)" }}
                   >
                     <option value="GB">GB</option>
@@ -437,7 +449,7 @@ export function RoleBuilderSheet({
                   placeholder="Box default"
                   value={draft.usage.uploadMb}
                   onChange={(e) => patch({ usage: { ...draft.usage, uploadMb: e.target.value } })}
-                  className="w-full px-3 py-2.5 outline-none transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                   style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)" }}
                 />
               </div>
@@ -455,7 +467,7 @@ export function RoleBuilderSheet({
                 placeholder="No limit"
                 value={draft.usage.llmDaily}
                 onChange={(e) => patch({ usage: { ...draft.usage, llmDaily: e.target.value } })}
-                className="w-full px-3 py-2.5 outline-none transition-colors"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)" }}
               />
             </div>
@@ -555,7 +567,7 @@ export function RoleBuilderSheet({
                           onChange={(e) =>
                             setConnector(connector.provider, e.target.value as ConnectorAccessLevel | "none")
                           }
-                          className="px-2.5 py-2 outline-none transition-colors"
+                          className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                           style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontSize: 13 }}
                         >
                           {connectorLevels.map((lvl) => (

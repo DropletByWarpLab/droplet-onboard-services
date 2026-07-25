@@ -65,7 +65,10 @@ import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, type BadgeKind } from "@/components/shell/primitives";
 import { DepartmentsPanel } from "@/components/Departments/DepartmentsPanel";
 import { RolesAccessPanel } from "@/components/access/RolesAccessPanel";
-import { PersonAccessSection } from "@/components/access/PersonAccessSection";
+import {
+  PersonAccessSection,
+  PersonExceptionsSection,
+} from "@/components/access/PersonAccessSection";
 import type { ConnectorOption } from "@/components/access/RoleBuilderSheet";
 import { ACCESS_COPY } from "@/components/access/copy";
 import { formatStorageBytes, tierLabel } from "@/lib/access";
@@ -1937,9 +1940,10 @@ export default function UsersPage() {
                 )}
               </div>
 
-              {/* WARP-1532 (T8) — Role, effective access + exceptions
-                  (design brief §6.1–§6.3/§6.5). Local rows only: role
-                  assignment keys on the local User UUID (WARP-881). */}
+              {/* WARP-1532 (T8) — Role + effective access (design brief
+                  §6.1–§6.3). Local rows only: role assignment keys on the
+                  local User UUID (WARP-881). Exceptions render LAST, after
+                  Usage — §17 order; see PersonExceptionsSection below. */}
               {editing.userId && (
                 <PersonAccessSection
                   person={editing}
@@ -1949,8 +1953,6 @@ export default function UsersPage() {
                   actingUserId={currentUser?.id ?? null}
                   value={editAccessValue}
                   onChange={setEditAccessValue}
-                  exceptions={editExceptions}
-                  onExceptionsChange={setEditExceptions}
                   syncText={editAccessSyncText}
                   onManageRoles={() => {
                     closeEdit();
@@ -2062,6 +2064,19 @@ export default function UsersPage() {
                     )}
                   </div>
                 </div>
+              )}
+
+              {/* WARP-1532 — §6.5 Exceptions, LAST per the §17 order
+                  (Identity → Role → effective access → Usage → Exceptions:
+                  the fine print sits under the usage override). */}
+              {editing.userId && (
+                <PersonExceptionsSection
+                  person={editing}
+                  people={users}
+                  actingUserId={currentUser?.id ?? null}
+                  exceptions={editExceptions}
+                  onExceptionsChange={setEditExceptions}
+                />
               )}
             </div>
             <div

@@ -100,6 +100,20 @@ export interface DialogProps {
    * render edge-to-edge against the right border.
    */
   placement?: "center" | "right";
+  /**
+   * Width of a `placement="right"` side panel. Every existing side panel
+   * keeps the legacy `max-w-md` default — this is an EXPLICIT opt-in
+   * (honoring `maxWidth` for side panels instead would silently widen
+   * callers that already pass it, e.g. the projects detail panel).
+   *
+   *   - `default`: `max-w-md` (448px) — the shipped side-panel width.
+   *   - `sheet`:   `max-w-[520px]` — the Access & Roles builder sheet
+   *     (WARP-1532; the design packet locks `min(520px, 100vw)`, so the
+   *     panel still goes full-width under small viewports via `w-full`).
+   *
+   * Ignored for centered dialogs.
+   */
+  sideWidth?: "default" | "sheet";
   /** Close on backdrop click. Default `true`. */
   closeOnBackdrop?: boolean;
   /**
@@ -144,6 +158,7 @@ export function Dialog({
   describedBy,
   maxWidth = "md",
   placement = "center",
+  sideWidth = "default",
   closeOnBackdrop = true,
   initialFocusRef,
   flush = false,
@@ -305,8 +320,9 @@ export function Dialog({
     background: "var(--scrim)",
   };
 
+  const sideWidthClass = sideWidth === "sheet" ? "max-w-[520px]" : "max-w-md";
   const containerClass = isSide
-    ? "relative w-full max-w-md h-full overflow-y-auto overflow-x-hidden"
+    ? `relative w-full ${sideWidthClass} h-full overflow-y-auto overflow-x-hidden`
     : `${widthClass} w-full overflow-hidden`;
 
   // Body region (padding + overflow contract, see the component doc):

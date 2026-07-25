@@ -37,6 +37,7 @@ vi.mock("framer-motion", async () => {
 });
 
 import { RolesAccessPanel } from "./RolesAccessPanel";
+import { ToastProvider } from "@/components/Toast";
 import { ACCESS_COPY } from "./copy";
 import type { AccessRole, RosterUser } from "@/lib/types";
 
@@ -143,6 +144,8 @@ describe("§4.1 roles list", () => {
     expect(screen.getByText(/1 person · based on Staff/)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.yourRoles)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.builtinRoles)).toBeInTheDocument();
+    // §4.1 (UX-10): the pane's primary action is filled accent.
+    expect(screen.getByRole("button", { name: /New role/ }).className).toContain("primary");
   });
 
   it("shows the Applying… chip on a pending role and Needs attention on a failed one", async () => {
@@ -286,6 +289,45 @@ describe("§4.2 role detail", () => {
     await waitFor(() => expect(deleteAccessRoleMock).toHaveBeenCalledWith("r-finance"));
   });
 
+  it("a failed delete surfaces an error toast — never a silent failure (§10 / UX-3)", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ peopleCount: 0 })] });
+    deleteAccessRoleMock.mockRejectedValue(new Error("Role delete blocked by the box"));
+    render(
+      <ToastProvider>
+        <RolesAccessPanel
+          people={PEOPLE.map((p) => ({ ...p, accessRoleId: null }))}
+          actingTier="owner"
+          connectors={[]}
+          onOpenPerson={vi.fn()}
+          onOpenDepartments={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Role actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Delete/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete role" }));
+    await waitFor(() =>
+      expect(screen.getByText("Role delete blocked by the box")).toBeInTheDocument(),
+    );
+  });
+
+  it("archive runs a consequence confirm with honest copy (no restore promise — UX-7)", async () => {
+    archiveAccessRoleMock.mockResolvedValue({ role: role({ state: "archived" }) });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Role actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Archive/ }));
+    expect(
+      screen.getByText("Archived roles can't be assigned but keep their settings."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/restore them any time/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(archiveAccessRoleMock).toHaveBeenCalledWith("r-finance"));
+  });
+
   it("duplicate POSTs sourceRoleId and refreshes the list", async () => {
     duplicateAccessRoleMock.mockResolvedValue({ role: role({ id: "r2", name: "Finance copy", slug: "finance-copy" }) });
     renderPanel();
@@ -308,6 +350,13 @@ describe("§4.2 role detail", () => {
     expect(within(dialog).queryByText("Stefan C")).not.toBeInTheDocument();
     // Priya already holds the role — only Sam is offered.
     expect(within(dialog).queryByText("Priya Nair")).not.toBeInTheDocument();
+    // UX-8: the helper mirrors §12 sessionRevoke semantics — immediately,
+    // not "when they sign back in".
+    expect(
+      within(dialog).getByText(
+        "Assigning applies immediately — people are signed out and their new access takes effect immediately.",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("checkbox", { name: /Sam Ortega/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
     await waitFor(() =>

@@ -284,4 +284,15 @@ describe("person editor — role change flow", () => {
       "Role default",
     );
   });
+
+  it("orders the editor per §17: Usage override BEFORE Exceptions (UX-6)", async () => {
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Edit user Priya Nair" }));
+    await screen.findByLabelText("Assigned role");
+    const usage = screen.getByText("Usage");
+    const exceptions = screen.getByText("Exceptions");
+    // eslint-disable-next-line no-bitwise
+    expect(usage.compareDocumentPosition(exceptions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });
