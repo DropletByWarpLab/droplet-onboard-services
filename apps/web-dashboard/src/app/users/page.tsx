@@ -8,8 +8,9 @@ import {
   X,
   Users as UsersIcon,
   UserPlus,
-  ShieldOff,
+  KeyRound,
   Shield,
+  ShieldCheck,
   Check,
   Copy,
   RefreshCw,
@@ -35,7 +36,12 @@ import {
   updateUserUsage,
   fetchAdminFilesUsage,
   listDepartments,
+  listAccessRoles,
+  setPersonAccess,
+  putAccessExceptions,
+  fetchEffectiveAccess,
 } from "@/lib/api";
+import { fetchIntegrations } from "@/lib/api.erp";
 import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import type {
@@ -48,6 +54,9 @@ import type {
   AdminUsageUserRow,
   Department,
   DepartmentRight,
+  AccessRole,
+  AccessExceptionInput,
+  AccessStartingPoint,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
@@ -55,6 +64,11 @@ import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, type BadgeKind } from "@/components/shell/primitives";
 import { DepartmentsPanel } from "@/components/Departments/DepartmentsPanel";
+import { RolesAccessPanel } from "@/components/access/RolesAccessPanel";
+import { PersonAccessSection } from "@/components/access/PersonAccessSection";
+import type { ConnectorOption } from "@/components/access/RoleBuilderSheet";
+import { ACCESS_COPY } from "@/components/access/copy";
+import { formatStorageBytes, tierLabel } from "@/lib/access";
 
 const DEPT_RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
 const DEPT_RIGHT_LABEL: Record<DepartmentRight, string> = {
@@ -152,8 +166,9 @@ export default function UsersPage() {
   const { user: currentUser } = useAuth();
   const isAdminTier = currentUser?.role === "owner" || currentUser?.role === "admin";
   // WARP-1270 (T18): "People" / "Departments & teams" tab row (design
-  // brief §3). Business-only build — always rendered.
-  const [tab, setTab] = useState<"people" | "departments">("people");
+  // brief §3). Business-only build — always rendered. WARP-1532 (T8) adds
+  // the third "Roles & access" tab, visible to owner/admin only.
+  const [tab, setTab] = useState<"people" | "departments" | "roles">("people");
   const [users, setUsers] = useState<RosterUser[]>([]);
   // DASH-001: self-identity compares the LOCAL user UUID (u.userId ↔
   // currentUser.id), never the Nextcloud username (u.id) against the local
@@ -253,6 +268,25 @@ export default function UsersPage() {
   // vs. N per-user calls) — best-effort, never blocks the roster itself.
   const [usageRoster, setUsageRoster] = useState<Record<string, AdminUsageUserRow>>({});
 
+  // ── WARP-1532 (T8): Roles & access page state ──
+  // Custom roles for the roster chip + the person editor's role select.
+  // Best-effort: until the T3 routes merge this endpoint is absent and the
+  // People extensions degrade gracefully (no chip, built-in group only).
+  const [accessRoles, setAccessRoles] = useState<AccessRole[]>([]);
+  // Configured connectors for the role builder's off-box axis (§5.4) —
+  // best-effort for the same parallel-build reason.
+  const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
+  // Roster "All · by role" filter (design brief §6).
+  const [rosterFilter, setRosterFilter] = useState<"all" | "byrole">("all");
+  // Person-editor access state: the controlled role-select value, its seed
+  // (no PATCH when unchanged), the exceptions list + seed, and the §12
+  // session-revocation sync line shown while a role change applies.
+  const [editAccessValue, setEditAccessValue] = useState("");
+  const [editAccessSeed, setEditAccessSeed] = useState("");
+  const [editExceptions, setEditExceptions] = useState<AccessExceptionInput[]>([]);
+  const [editExceptionsSeed, setEditExceptionsSeed] = useState("[]");
+  const [editAccessSyncText, setEditAccessSyncText] = useState<string | null>(null);
+
   // WARP-291: ConfirmDialog targets for the three destructive flows that
   // used to hit `window.confirm()`. Storing the target object (not just a
   // boolean) lets the dialog body render the username/displayName.
@@ -323,6 +357,45 @@ export default function UsersPage() {
       .then((data) => setDepartments(data.departments || []))
       .catch(() => setDepartments([]));
   }, [isAdmin]);
+
+  // WARP-1532 (T8) — custom roles for the roster chip / person editor and
+  // configured connectors for the role builder. Both best-effort: a missing
+  // backend (T3 building in parallel) or a failed read leaves the People
+  // surface fully functional, minus the role affordances.
+  const reloadAccessRoles = useCallback(() => {
+    listAccessRoles()
+      .then((data) => setAccessRoles((data.roles || []).filter((r) => r.state !== "archived")))
+      .catch(() => setAccessRoles([]));
+  }, []);
+
+  useEffect(() => {
+    if (isAdmin !== true) return;
+    reloadAccessRoles();
+    fetchIntegrations()
+      .then((connections) =>
+        setConnectors(
+          (connections || []).map((c) => ({
+            provider: c.provider,
+            label: c.provider.charAt(0).toUpperCase() + c.provider.slice(1),
+          })),
+        ),
+      )
+      .catch(() => setConnectors([]));
+  }, [isAdmin, reloadAccessRoles]);
+
+  /** Roster row → its display role label: the custom role's name when
+   *  assigned, else the built-in tier label (family displays as Staff —
+   *  §0.1). Null when the roster doesn't carry role data yet. */
+  const roleLabelFor = useCallback(
+    (u: RosterUser): string | null => {
+      if (u.accessRoleId) {
+        const role = accessRoles.find((r) => r.id === u.accessRoleId);
+        if (role) return role.name;
+      }
+      return u.role ? tierLabel(u.role) : null;
+    },
+    [accessRoles],
+  );
 
   const resetInviteForm = () => {
     setInviteEmail("");
@@ -597,6 +670,38 @@ export default function UsersPage() {
     setEditUsedBytes(null);
     setEditUsageSyncText(null);
 
+    // WARP-1532 (T8): seed the person editor's access sections. The select
+    // value mirrors the roster row; when the roster doesn't carry role data
+    // yet (backend building in parallel) the seed stays empty and no PATCH
+    // fires unless the admin explicitly picks a role.
+    const accessSeed = u.accessRoleId
+      ? `role:${u.accessRoleId}`
+      : u.role && u.role !== "service"
+        ? `tier:${u.role}`
+        : "";
+    setEditAccessValue(accessSeed);
+    setEditAccessSeed(accessSeed);
+    setEditExceptions([]);
+    setEditExceptionsSeed("[]");
+    setEditAccessSyncText(null);
+    if (u.userId) {
+      // Existing exceptions ride the effective-access resolver (§6.5) —
+      // best-effort; an absent T3 backend just leaves the block empty.
+      fetchEffectiveAccess(u.userId)
+        .then((eff) => {
+          const rows = (eff.exceptions ?? []).map(({ moduleId, effect, level }) => ({
+            moduleId,
+            effect,
+            ...(level != null ? { level } : {}),
+          }));
+          setEditExceptions(rows);
+          setEditExceptionsSeed(JSON.stringify(rows));
+        })
+        .catch(() => {
+          // Keep the empty seed — never fabricate exception rows.
+        });
+    }
+
     // WARP-1271 (T19a): usage settings key on the LOCAL User UUID
     // (RosterUser.userId), not the Nextcloud username — rows without a
     // matching local row (userId: null) have no usage policy surface yet.
@@ -679,7 +784,14 @@ export default function UsersPage() {
       usagePatch = { storageQuotaBytes, maxUploadSizeMb };
     }
 
-    if (!patch.displayName && !patch.password && !usagePatch) {
+    // WARP-1532 (T8): pending access changes — a role re-assignment and/or
+    // an edited exception list. Both are no-ops when untouched.
+    const accessChanged =
+      editing.userId != null && editAccessValue !== "" && editAccessValue !== editAccessSeed;
+    const exceptionsChanged =
+      editing.userId != null && JSON.stringify(editExceptions) !== editExceptionsSeed;
+
+    if (!patch.displayName && !patch.password && !usagePatch && !accessChanged && !exceptionsChanged) {
       closeEdit();
       return;
     }
@@ -697,27 +809,47 @@ export default function UsersPage() {
         // Let "Applied" stay visible for a beat before the dialog closes.
         await new Promise((resolve) => setTimeout(resolve, 700));
       }
+      if (accessChanged && editing.userId) {
+        // §8/§12 — the change revokes the target's sessions (WARP-116), so
+        // the sync line states the consequence while the box applies it.
+        const firstName = (editing.displayName || editing.id).split(" ")[0] ?? editing.id;
+        setEditAccessSyncText(ACCESS_COPY.sessionRevoke(firstName));
+        const body = editAccessValue.startsWith("role:")
+          ? { accessRoleId: editAccessValue.slice(5) }
+          : {
+              accessRoleId: null,
+              tier: editAccessValue.slice(5) as AccessStartingPoint,
+            };
+        await setPersonAccess(editing.userId, body);
+        setEditAccessSyncText(ACCESS_COPY.applied);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      if (exceptionsChanged && editing.userId) {
+        await putAccessExceptions(editing.userId, editExceptions);
+      }
       closeEdit();
       await reload();
+      if (accessChanged) reloadAccessRoles();
     } catch (err: any) {
       setEditUsageSyncText(null);
+      setEditAccessSyncText(null);
       setError(err?.message || "Failed to update user");
     }
   };
 
   if (isAdmin === false) {
+    // WARP-1532 (T8) — member view (design brief §2): People read-only with
+    // the §12 caption; the Roles tab and every mutating control are HIDDEN,
+    // not disabled. The roster endpoint itself is owner/admin-gated, so a
+    // member sees the caption card rather than a fabricated list.
     return (
       <ShellPage icon={<UsersIcon size={15} />} label="Users" title="Users">
         <div className="card">
           <div className="empty">
             <span className="ei">
-              <ShieldOff size={24} />
+              <UsersIcon size={24} />
             </span>
-            <span className="eh">Admin access required</span>
-            <span style={{ maxWidth: "32ch" }}>
-              Only administrators can manage users on this Droplet. Ask an admin
-              to give you the <code>admin</code> group membership.
-            </span>
+            <span style={{ maxWidth: "36ch" }}>{ACCESS_COPY.memberCaption}</span>
           </div>
         </div>
       </ShellPage>
@@ -731,6 +863,155 @@ export default function UsersPage() {
     if (new Date(i.expiresAt).getTime() < Date.now())
       return { label: "Expired", kind: "warn" };
     return { label: "Pending", kind: "info" };
+  }
+
+  // WARP-1532 (T8): the roster grouped for the "By role" filter. Rows
+  // without role data (roster extension not merged yet) bucket under "—".
+  function rosterGroups(): Array<{ label: string; rows: RosterUser[] }> {
+    const byLabel = new Map<string, RosterUser[]>();
+    for (const u of users) {
+      const label = roleLabelFor(u) ?? "—";
+      if (!byLabel.has(label)) byLabel.set(label, []);
+      byLabel.get(label)!.push(u);
+    }
+    // Custom roles first (list order), then built-ins, then the unknown bucket.
+    const order = [
+      ...accessRoles.map((r) => r.name),
+      tierLabel("owner"),
+      tierLabel("admin"),
+      tierLabel("family"),
+      tierLabel("guest"),
+      tierLabel("service"),
+      "—",
+    ];
+    return order
+      .filter((label, i) => order.indexOf(label) === i && byLabel.has(label))
+      .map((label) => ({ label, rows: byLabel.get(label)! }));
+  }
+
+  // WARP-1532 (T8) — §6.4: an empty per-person usage field means the ROLE
+  // default applies, and the placeholder says so honestly. People without a
+  // custom role keep the pre-existing box-default placeholders.
+  const editingRole =
+    editing?.accessRoleId != null
+      ? accessRoles.find((r) => r.id === editing.accessRoleId) ?? null
+      : null;
+  const editUsagePlaceholders = {
+    storage: editingRole
+      ? `Role default (${
+          editingRole.storageQuotaBytes
+            ? formatStorageBytes(editingRole.storageQuotaBytes)
+            : "No limit"
+        })`
+      : "No limit",
+    upload: editingRole ? "Role default" : "Device default",
+  };
+
+  /** One roster row. WARP-1532 extends the WARP-1271 row with the assigned-
+   *  role chip (text-first, never a --role-* color) and the §8 owner rail:
+   *  an owner's disable/delete render disabled with the honest reason —
+   *  the member view never reaches this branch (controls hidden there). */
+  function rosterRow(u: RosterUser) {
+    // aria-label uses the row's primary visible identifier so
+    // screen-reader announcements match what sighted users see.
+    const label = u.displayName || u.id;
+    const roleLabel = roleLabelFor(u);
+    const isOwnerRow = u.role === "owner";
+    return (
+    <div key={u.id} className="lrow">
+      <span className="ri brand">
+        <UsersIcon size={15} />
+      </span>
+      <span className="rt">
+        <span className="nm">{u.displayName || u.id}</span>
+        <span className="sub mono">
+          {u.id}
+          {isSelf(u) && (
+            <span style={{ color: "var(--brand)" }}> · you</span>
+          )}
+        </span>
+      </span>
+      {/* WARP-1532 (T8): assigned-role chip — custom role name or built-in
+          tier label (family displays as Staff). Absent role data renders
+          no chip rather than a fabricated one. */}
+      {roleLabel && (
+        <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
+          <KeyRound size={11} aria-hidden="true" />
+          {roleLabel}
+        </span>
+      )}
+      {/* WARP-1271 (T19a): "used / limit" — mono, matches the
+          identity sub-line's treatment. Blank (not "—") when the
+          row has no local userId yet or the roster fetch failed;
+          a bare em dash on every row would read as "everyone has
+          no data", which is worse than showing nothing. */}
+      {u.userId && usageRoster[u.userId] && (
+        <span className="sub mono" style={{ color: "var(--text-faint)" }}>
+          {formatBytes(usageRoster[u.userId]!.used)} /{" "}
+          {usageRoster[u.userId]!.quota != null
+            ? formatBytes(usageRoster[u.userId]!.quota)
+            : "No limit"}
+        </span>
+      )}
+      {/*
+        Row actions are always rendered (not opacity-gated on hover) so
+        they're discoverable on touch and reachable for keyboard-only
+        users. Each button carries an aria-label naming the action +
+        target user; the visual icons stay restrained via the muted
+        text-label-tertiary token. Padding token p-2.5 yields a
+        34 px × 34 px hit-target around the 14 px Lucide glyph,
+        clearing the ≥ 32 px floor in the ui-ux brief.
+      */}
+      <div className="flex items-center gap-0.5">
+        {/* WARP-1056 — §5 Flow B entry point: deep-links to the
+            Voice page with this person preselected (the wizard
+            itself lives on /voice; enrollment attaches a
+            voiceprint to this EXISTING person). Local-directory
+            rows only — a voiceprint is keyed by the local user
+            id. */}
+        {u.userId && (
+          <Link
+            href={`/voice?enroll=${encodeURIComponent(u.userId)}`}
+            aria-label={`Add voice for ${label}`}
+            className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            title="Add voice"
+          >
+            <Mic size={14} />
+          </Link>
+        )}
+        <button
+          onClick={() => openEdit(u)}
+          aria-label={`Edit user ${label}`}
+          className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+          title="Edit"
+        >
+          <Edit3 size={14} />
+        </button>
+        {!isSelf(u) && (
+          <>
+            <button
+              onClick={() => handleSetEnabled(u, false)}
+              aria-label={`Disable user ${label}`}
+              disabled={isOwnerRow}
+              title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Disable"}
+              className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <Shield size={14} />
+            </button>
+            <button
+              onClick={() => handleDelete(u)}
+              aria-label={`Delete user ${label}`}
+              disabled={isOwnerRow}
+              title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Delete"}
+              className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <Trash2 size={14} />
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+    );
   }
 
   return (
@@ -820,6 +1101,23 @@ export default function UsersPage() {
           <Building2 size={14} aria-hidden="true" />
           Departments &amp; teams
         </button>
+        {/* WARP-1532 (T8) — the third tab (design brief §2): owner/admin
+            only; members never see it (hidden, not disabled). */}
+        {isAdminTier && (
+          <button
+            type="button"
+            role="tab"
+            id="users-tab-roles"
+            aria-selected={tab === "roles"}
+            aria-controls="users-panel-roles"
+            tabIndex={tab === "roles" ? 0 : -1}
+            onClick={() => setTab("roles")}
+            className={"tab" + (tab === "roles" ? " active" : "")}
+          >
+            <ShieldCheck size={14} aria-hidden="true" />
+            {ACCESS_COPY.tab}
+          </button>
+        )}
       </div>
 
       <div
@@ -828,7 +1126,44 @@ export default function UsersPage() {
         aria-labelledby="users-tab-people"
         hidden={tab !== "people"}
       >
+      {/* WARP-1532 (T8) — "All · by role" roster filter (design brief §6). */}
+      {users.length > 0 && (
+        <div className="acc-seg" role="group" aria-label="Filter roster" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            className={rosterFilter === "all" ? "on" : ""}
+            aria-pressed={rosterFilter === "all"}
+            onClick={() => setRosterFilter("all")}
+          >
+            All
+          </button>
+          <button
+            type="button"
+            className={rosterFilter === "byrole" ? "on" : ""}
+            aria-pressed={rosterFilter === "byrole"}
+            onClick={() => setRosterFilter("byrole")}
+          >
+            By role
+          </button>
+        </div>
+      )}
+
       {/* User list */}
+      {rosterFilter === "byrole" && users.length > 0 ? (
+        <div>
+          {rosterGroups().map(({ label, rows }) => (
+            <div key={label} data-testid={`roster-group-${label}`}>
+              <div className="sect" style={{ margin: "14px 0 8px" }}>
+                <h2>{label}</h2>
+                <span className="sx mono">{rows.length}</span>
+              </div>
+              <div className="card">
+                <div className="rows">{rows.map((u) => rosterRow(u))}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
       <div className="card">
         {loading && users.length === 0 ? (
           <div className="empty" style={{ padding: "32px 20px" }}>
@@ -845,97 +1180,12 @@ export default function UsersPage() {
         ) : (
           <div className="rows">
           {users.map((u) => {
-            // aria-label uses the row's primary visible identifier so
-            // screen-reader announcements match what sighted users see.
-            const label = u.displayName || u.id;
-            return (
-            <div key={u.id} className="lrow">
-              <span className="ri brand">
-                <UsersIcon size={15} />
-              </span>
-              <span className="rt">
-                <span className="nm">{u.displayName || u.id}</span>
-                <span className="sub mono">
-                  {u.id}
-                  {isSelf(u) && (
-                    <span style={{ color: "var(--brand)" }}> · you</span>
-                  )}
-                </span>
-              </span>
-              {/* WARP-1271 (T19a): "used / limit" — mono, matches the
-                  identity sub-line's treatment. Blank (not "—") when the
-                  row has no local userId yet or the roster fetch failed;
-                  a bare em dash on every row would read as "everyone has
-                  no data", which is worse than showing nothing. */}
-              {u.userId && usageRoster[u.userId] && (
-                <span className="sub mono" style={{ color: "var(--text-faint)" }}>
-                  {formatBytes(usageRoster[u.userId]!.used)} /{" "}
-                  {usageRoster[u.userId]!.quota != null
-                    ? formatBytes(usageRoster[u.userId]!.quota)
-                    : "No limit"}
-                </span>
-              )}
-              {/*
-                Row actions are always rendered (not opacity-gated on hover) so
-                they're discoverable on touch and reachable for keyboard-only
-                users. Each button carries an aria-label naming the action +
-                target user; the visual icons stay restrained via the muted
-                text-label-tertiary token. Padding token p-2.5 yields a
-                34 px × 34 px hit-target around the 14 px Lucide glyph,
-                clearing the ≥ 32 px floor in the ui-ux brief.
-              */}
-              <div className="flex items-center gap-0.5">
-                {/* WARP-1056 — §5 Flow B entry point: deep-links to the
-                    Voice page with this person preselected (the wizard
-                    itself lives on /voice; enrollment attaches a
-                    voiceprint to this EXISTING person). Local-directory
-                    rows only — a voiceprint is keyed by the local user
-                    id. */}
-                {u.userId && (
-                  <Link
-                    href={`/voice?enroll=${encodeURIComponent(u.userId)}`}
-                    aria-label={`Add voice for ${label}`}
-                    className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                    title="Add voice"
-                  >
-                    <Mic size={14} />
-                  </Link>
-                )}
-                <button
-                  onClick={() => openEdit(u)}
-                  aria-label={`Edit user ${label}`}
-                  className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                  title="Edit"
-                >
-                  <Edit3 size={14} />
-                </button>
-                {!isSelf(u) && (
-                  <>
-                    <button
-                      onClick={() => handleSetEnabled(u, false)}
-                      aria-label={`Disable user ${label}`}
-                      className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                      title="Disable"
-                    >
-                      <Shield size={14} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(u)}
-                      aria-label={`Delete user ${label}`}
-                      className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                      title="Delete"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-            );
+            return rosterRow(u);
           })}
           </div>
         )}
       </div>
+      )}
 
       {/* Pending invites */}
       {invites.length > 0 && (
@@ -995,6 +1245,29 @@ export default function UsersPage() {
           <DepartmentsPanel people={users} isAdminTier={isAdminTier} />
         )}
       </div>
+
+      {/* WARP-1532 (T8) — Roles & access tabpanel (owner/admin only). */}
+      {isAdminTier && (
+        <div
+          role="tabpanel"
+          id="users-panel-roles"
+          aria-labelledby="users-tab-roles"
+          hidden={tab !== "roles"}
+        >
+          {tab === "roles" && (
+            <RolesAccessPanel
+              people={users}
+              actingTier={currentUser?.role ?? "admin"}
+              connectors={connectors}
+              onOpenPerson={(p) => {
+                setTab("people");
+                openEdit(p);
+              }}
+              onOpenDepartments={() => setTab("departments")}
+            />
+          )}
+        </div>
+      )}
 
       {/* Invite modal */}
       {showInvite && (
@@ -1657,6 +1930,28 @@ export default function UsersPage() {
                 )}
               </div>
 
+              {/* WARP-1532 (T8) — Role, effective access + exceptions
+                  (design brief §6.1–§6.3/§6.5). Local rows only: role
+                  assignment keys on the local User UUID (WARP-881). */}
+              {editing.userId && (
+                <PersonAccessSection
+                  person={editing}
+                  people={users}
+                  roles={accessRoles}
+                  actingTier={currentUser?.role ?? "admin"}
+                  actingUserId={currentUser?.id ?? null}
+                  value={editAccessValue}
+                  onChange={setEditAccessValue}
+                  exceptions={editExceptions}
+                  onExceptionsChange={setEditExceptions}
+                  syncText={editAccessSyncText}
+                  onManageRoles={() => {
+                    closeEdit();
+                    setTab("roles");
+                  }}
+                />
+              )}
+
               {/* WARP-1271 (T19a) — Usage section. Only meaningful for rows
                   with a local User row (userId); the roster otherwise still
                   lists Nextcloud-only accounts, but they have no local
@@ -1685,7 +1980,7 @@ export default function UsersPage() {
                           inputMode="decimal"
                           value={editStorageValue}
                           onChange={(e) => setEditStorageValue(e.target.value)}
-                          placeholder="No limit"
+                          placeholder={editUsagePlaceholders.storage}
                           aria-label="Storage limit"
                           className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                           style={{
@@ -1726,7 +2021,7 @@ export default function UsersPage() {
                         inputMode="numeric"
                         value={editUploadCapMb}
                         onChange={(e) => setEditUploadCapMb(e.target.value)}
-                        placeholder="Device default"
+                        placeholder={editUsagePlaceholders.upload}
                         aria-label="Upload cap in megabytes"
                         className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                         style={{
