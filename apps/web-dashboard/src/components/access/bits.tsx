@@ -52,35 +52,34 @@ export function AccessChip({
   );
 }
 
-/** Sync-state chip — §12 vocabulary; color + icon + word, never color alone. */
+/** Sync-state chip — §12 vocabulary; color + icon + word, never color alone.
+ *  Wrapped in a polite live region so state changes announce (§11/§13). */
 export function SyncChip({ state }: { state: AccessSyncState | "applied" | null | undefined }) {
-  if (state === "pending") {
-    return (
-      <AccessChip
-        tone="orange"
-        icon={
-          <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-        }
-      >
-        {ACCESS_COPY.applying}
-      </AccessChip>
-    );
-  }
-  if (state === "applied") {
-    return (
-      <AccessChip tone="green" icon={<Check size={12} aria-hidden="true" />}>
-        {ACCESS_COPY.applied}
-      </AccessChip>
-    );
-  }
-  if (state === "failed") {
-    return (
-      <AccessChip tone="red" icon={<AlertTriangle size={12} aria-hidden="true" />}>
-        {ACCESS_COPY.needsAttention}
-      </AccessChip>
-    );
-  }
-  return null;
+  if (state !== "pending" && state !== "applied" && state !== "failed") return null;
+  return (
+    <span role="status" aria-live="polite" style={{ display: "inline-flex" }}>
+      {state === "pending" && (
+        <AccessChip
+          tone="orange"
+          icon={
+            <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          }
+        >
+          {ACCESS_COPY.applying}
+        </AccessChip>
+      )}
+      {state === "applied" && (
+        <AccessChip tone="green" icon={<Check size={12} aria-hidden="true" />}>
+          {ACCESS_COPY.applied}
+        </AccessChip>
+      )}
+      {state === "failed" && (
+        <AccessChip tone="red" icon={<AlertTriangle size={12} aria-hidden="true" />}>
+          {ACCESS_COPY.needsAttention}
+        </AccessChip>
+      )}
+    </span>
+  );
 }
 
 /** Quiet guard/info note — the honest-reason surface for §8 rails. */

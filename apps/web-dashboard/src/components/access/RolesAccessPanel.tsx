@@ -377,15 +377,14 @@ export function RolesAccessPanel({
 
   // ── Right pane ──
   function renderAxisSummary(role: AccessRole) {
-    const featureChips = role.featureGrants
-      .map((grant) => {
-        const def = featureDef(grant.moduleId);
-        if (!def) return null;
-        const level = def.levels.find((l) => l.value === grant.level);
-        const suffix = def.levels.length > 1 && level ? ` · ${level.label.toLowerCase()}` : "";
-        return { key: grant.moduleId, label: `${def.label}${suffix}` };
-      })
-      .filter((c): c is { key: string; label: string } => c !== null);
+    const featureChips: Array<{ key: string; label: string }> = [];
+    for (const grant of role.featureGrants) {
+      const def = featureDef(grant.moduleId);
+      if (!def) continue;
+      const level = def.levels.find((l) => l.value === grant.level);
+      const suffix = def.levels.length > 1 && level ? ` · ${level.label.toLowerCase()}` : "";
+      featureChips.push({ key: grant.moduleId, label: `${def.label}${suffix}` });
+    }
     return (
       <>
         <div>

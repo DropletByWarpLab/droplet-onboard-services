@@ -244,7 +244,7 @@ export function PersonAccessSection({
             style={{ color: "var(--text-muted)", display: "flex", alignItems: "flex-start", gap: 5 }}
           >
             {syncText === ACCESS_COPY.applied ? (
-              <Check size={12} aria-hidden="true" style={{ color: "var(--ok, #16a34a)", flexShrink: 0, marginTop: 2 }} />
+              <Check size={12} aria-hidden="true" style={{ color: "var(--success)", flexShrink: 0, marginTop: 2 }} />
             ) : (
               <Loader2
                 size={12}
