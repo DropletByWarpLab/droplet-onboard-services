@@ -104,6 +104,12 @@ import type {
   DepartmentRight,
   CreateDepartmentPayload,
   DepartmentMembership,
+  AccessRole,
+  AccessRolePayload,
+  AccessSyncState,
+  AccessStartingPoint,
+  AccessExceptionInput,
+  EffectiveAccess,
 } from "./types";
 import type {
   EmailAccount,
@@ -6570,6 +6576,171 @@ export async function saveUpdateSettings(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to save update settings: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── WARP-1532 (RBAC v2 T8): Access & Roles ──
+// Contract-driven off ADR-032 §5 (ACCESS-AND-ROLES-ARCHITECTURE-BRIEF) while
+// the backend routes (T3+) build in parallel. Conventions: local User.id
+// UUIDs everywhere (never the Nextcloud username — WARP-881), BigInt fields
+// string-encoded, mutation responses carry `syncState` where the change
+// cascades (→ the "Saved. Applying…" pattern). Owner/admin only + the
+// role-mutation-guard rails server-side; the UI renders the same rails as
+// honest disabled states but is never trusted.
+
+export async function listAccessRoles(): Promise<{ roles: AccessRole[] }> {
+  const res = await authFetch(`${BASE}/api/access/roles`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to list roles: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getAccessRole(id: string): Promise<{ role: AccessRole }> {
+  const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load role: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createAccessRole(
+  payload: AccessRolePayload,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/access/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create role: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Duplicate = POST with `sourceRoleId` (§5). The server copies the grant
+ *  set and derives a fresh name/slug; the UI then opens the copy to edit. */
+export async function duplicateAccessRole(
+  sourceRoleId: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/access/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceRoleId }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to duplicate role: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateAccessRole(
+  id: string,
+  patch: Partial<AccessRolePayload> & { state?: "active" | "archived" },
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update role: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Archive keeps the row (assignable no more); the design's non-destructive
+ *  sibling of delete. */
+export async function archiveAccessRole(
+  id: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  return updateAccessRole(id, { state: "archived" });
+}
+
+export async function deleteAccessRole(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete role: ${res.status}`);
+  }
+}
+
+/** Bind people (local User.id UUIDs) to a role. Server-side this sets each
+ *  person's Role enum from the role's startingPoint, fires WARP-116 session
+ *  revocation, and writes Activity — hence the pending syncState. */
+export async function assignAccessRole(
+  id: string,
+  userIds: string[],
+): Promise<{ syncState: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}/assign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userIds }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to assign role: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Per-person role change. A custom role sends `{ accessRoleId }`; assigning
+ *  a built-in tier sends `{ accessRoleId: null, tier }` (User.accessRoleId
+ *  null = plain built-in tier — the §2 backward-compatible shape). */
+export async function setPersonAccess(
+  userId: string,
+  body: { accessRoleId: string | null; tier?: AccessStartingPoint },
+): Promise<{ syncState: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/people/${encodeURIComponent(userId)}/access`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const resBody = await res.json().catch(() => ({}));
+    throw new Error(resBody.error || `Failed to change role: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** The §3 resolver output — powers the read-only effective-access drawer
+ *  and every honest disabled state. */
+export async function fetchEffectiveAccess(userId: string): Promise<EffectiveAccess> {
+  const res = await authFetch(
+    `${BASE}/api/people/${encodeURIComponent(userId)}/effective-access`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load effective access: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Replace the (small, feature-axis-only) exception list — PUT semantics
+ *  per §5 so the editor never diffs rows client-side. */
+export async function putAccessExceptions(
+  userId: string,
+  exceptions: AccessExceptionInput[],
+): Promise<{ exceptions: AccessExceptionInput[] }> {
+  const res = await authFetch(
+    `${BASE}/api/people/${encodeURIComponent(userId)}/access-exceptions`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ exceptions }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save exceptions: ${res.status}`);
   }
   return res.json();
 }
