@@ -520,10 +520,7 @@ const envSchema = z.object({
   OVERLAY_CONNECT_ENABLED: z
     .string()
     .transform((v) => v === "true" || v === "1")
-    // `prefault`, not `default`: zod 4's `.default()` supplies the *output*
-    // type (boolean here) and skips the transform, while `.prefault()` keeps
-    // zod 3's behaviour of feeding the fallback through the transform.
-    .prefault("false"),
+    .default("false"),
   // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
   // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
   OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),

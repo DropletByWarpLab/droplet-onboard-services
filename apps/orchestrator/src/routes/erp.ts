@@ -53,7 +53,7 @@ function todayIso(): string {
 
 const writeRequestSchema = z.object({
   command: z.string().min(1),
-  params: z.record(z.string(), z.unknown()).default({}),
+  params: z.record(z.unknown()).default({}),
 });
 
 export function createErpRouter(prisma: PrismaClient): Router {

@@ -710,12 +710,7 @@ describe("departments CRUD routes (WARP-1258)", () => {
       const res = await request(app)
         .post(`/api/departments/${householdDept.id}/members`)
         .send({
-          // Must be a v4-shaped UUID (version nibble 4, variant nibble 8):
-          // zod 4's `.uuid()` enforces the RFC 4122 version/variant bits, so
-          // an all-1s string now fails schema validation and never reaches
-          // the HOUSEHOLD guard this test is pinning. Prisma's
-          // `@default(uuid())` emits v4, so real ids satisfy this.
-          userId: "11111111-1111-4111-8111-111111111111",
+          userId: "11111111-1111-1111-1111-111111111111",
           right: "contributor",
         });
 

@@ -2323,7 +2323,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   const pinCreateSchema = z.object({
     kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
     ref: z.string().min(1).max(512),
-    meta: z.record(z.string(), z.unknown()).optional(),
+    meta: z.record(z.unknown()).optional(),
   });
 
   async function loadOwnedSession(
