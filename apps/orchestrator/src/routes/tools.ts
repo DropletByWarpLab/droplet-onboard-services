@@ -41,7 +41,7 @@ const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const stepSchema = z.object({
   kind: z.literal("call").default("call"),
   tool: z.string().min(1).max(64),
-  args: z.record(z.unknown()).optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
 });
 
 const createSpecSchema = z.object({

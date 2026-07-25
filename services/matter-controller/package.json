@@ -18,7 +18,7 @@
     "@project-chip/matter.js": "0.17.6",
     "express": "^4.19.2",
     "pino": "^9.1.0",
-    "zod": "^3.23.8"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

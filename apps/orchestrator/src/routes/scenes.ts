@@ -37,7 +37,7 @@ import { randomBytes } from "node:crypto";
 const sceneActionInputSchema = z.object({
   deviceNodeId: z.string().min(1),
   command: z.string().min(1),
-  args: z.record(z.unknown()).optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
 });
 
 const createSceneSchema = z.object({
