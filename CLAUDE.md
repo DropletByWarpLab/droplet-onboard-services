@@ -180,7 +180,7 @@ npm run test:ai-gateway     # ai-gateway only
 
 ## Docker stack
 
-34 compose services (12 default-on, the rest profile-gated) behind
+29 compose services (13 default-on, the rest profile-gated) behind
 nginx (dashboard at `/`, orchestrator at `/api/`, ai-gateway at `/ai/`,
 Nextcloud at `/nextcloud/`). Full service/port/profile table +
 .env-update procedure: the **`docker-stack`** skill. Two
@@ -243,5 +243,9 @@ skill, plus `docs/ROADMAP.md` / `docs/STATUS.md`.
 
 When starting new work, read `docs/ROADMAP.md` first — it says whether
 the task is already scoped to a milestone and whether cross-repo
-dependencies (inference-engine: streaming + tool sandboxing;
-shared-api: OpenAPI specs; mobile-app: native pairing) block it.
+dependencies block it. Response streaming landed in-repo (WARP-1442) —
+it is NOT a cross-repo dependency. The real siblings are
+`droplet-local-LLM` (inference + tool sandboxing) and the native
+`droplet-ios` / `droplet-android` clients; the API contract they consume
+lives in `packages/shared-types` + `docs/mobile-api-contract.md` (there
+is no `shared-api` or `mobile-app` repo).

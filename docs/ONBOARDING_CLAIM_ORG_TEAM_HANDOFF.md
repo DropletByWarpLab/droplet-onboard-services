@@ -156,7 +156,7 @@ should produce the updated visuals so engineering can extend them:
   (`onb-totp-recovery` PR). Recovery codes shown once.
 - **Internet step → add Wi-Fi + advanced reveal.** Today it's a bare placeholder
   (remote access is handled automatically by the box's named address over the
-  ADR-025 relay, not configured here). The
+  ADR-025A relay (`droplet-fleet-hq`), not configured here). The
   handoff's `WizNetwork` adds SSID + Wi-Fi password + guest toggle, plus an
   "Advanced network setup (OpenWrt)" reveal (camera VLAN, static IP, WireGuard,
   full OpenWrt). Backend already exists in `services/routing` (ubus); this is

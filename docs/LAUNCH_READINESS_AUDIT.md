@@ -1,4 +1,4 @@
-# Launch-readiness audit — edge-platform
+# Launch-readiness audit — droplet-onboard-services
 
 **Date:** 2026-05-30
 **Scope:** Full-repo audit against the bar of *"a clean, trustworthy commercial business application."*

@@ -88,7 +88,7 @@ the two points that drove it:
   secrets-only-via-`.env` rule (no DB/Settings model for secrets); the WireGuard
   endpoint host is non-secret.
 - **No runtime-derivable source.** The WireGuard endpoint comes from the box's
-  provisioned named address (`<name>.droplet-us.com`, ADR-025) with zero writes;
+  provisioned named address (`<name>.droplet-us.com`, ADR-025A in `droplet-fleet-hq`) with zero writes;
   a customer-pasted issuer / client-id / secret has no equivalent source — it
   must be persisted from operator input.
 - **One-time provisioning, not a recurring toggle.** This is a single setup-time

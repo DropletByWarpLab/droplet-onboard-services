@@ -184,4 +184,4 @@ The framework is built and buildable **without** any live external system. What'
 | Assistant tools | `packages/tools-core/src/handlers/erp/` |
 | Prisma models | `apps/orchestrator/prisma/schema.prisma` (`IntegrationConnection`, `Erp*`) |
 
-**Design + specs:** `shared_brain/content/brand/handoffs/erp-integrations/` (design brief + clickable prototype) · `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` (build spec) · `EAGLESOFT-INTEGRATION-PLAN-AND-PRS-2026-07-07.md` (PR plan) · `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` (deep research). **Epic:** WARP-1093.
+**Design + specs:** `shared_brain/content/brand/handoffs/erp-integrations/` (design brief + clickable prototype). The `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` (build spec), `EAGLESOFT-INTEGRATION-PLAN-AND-PRS-2026-07-07.md` (PR plan), and `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` (deep research) are unpublished working docs — not in-repo; the in-repo authority is this README + [`eaglesoft.md`](eaglesoft.md). **Epic:** WARP-1093.
