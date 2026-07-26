@@ -509,6 +509,18 @@ export function assertUsageWriteAllowed(args: { target: GuardTarget }): void {
  *     remembering to extend a list somewhere else. Rail-the-route-unless-self
  *     is fail-closed by construction — a new field inherits the rail.
  *
+ * SCOPE, stated precisely: the rail decides from the target ROW, so it covers
+ * every request that resolves one. A username with no local row cannot BE the
+ * owner (role lives only on that row), so there is nothing to protect there —
+ * but see the call site for the one residual it leaves (a displayName/quota-
+ * only body against a rowless username still reaches Nextcloud).
+ *
+ * The caller must ALSO pin `role` in the write's `where` — this rail decides
+ * on a non-transactional read, and pinning is what makes a promotion that
+ * lands in that window a 0-row no-op rather than a credential write on a
+ * stale decision. See the header's in-transaction contract; the call site
+ * documents the concrete concurrent writer (SCIM group→role mapping).
+ *
  * Rail 2 (self-action) is deliberately NOT applied, matching the shipped
  * reasoning in `assertUsageWriteAllowed`: changing your own display name or
  * your own password grants you nothing you did not already have, so the

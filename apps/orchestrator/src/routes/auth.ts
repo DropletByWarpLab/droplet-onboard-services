@@ -2977,10 +2977,20 @@ export function createProtectedAuthRouter(
         // local row or Nextcloud — can be half-applied.
         //
         // `target === null` (legacy createAuthRouter() shim, or an NC-only
-        // account with no local row) has no owner row to protect: role lives
-        // on the local row, and a credential edit against a rowless username
-        // already fails closed below (500 USERS_NO_PRISMA without the
-        // directory, 404 USER_NOT_FOUND with it) rather than reaching login.
+        // account with no local row) has no owner row to protect: `role` lives
+        // ONLY on the local row, so nothing can be identified as the owner
+        // without one, and /auth/login needs that row's hash anyway. A
+        // credential edit there already fails closed below — 500
+        // USERS_NO_PRISMA without the directory, 404 USER_NOT_FOUND with it.
+        // Precisely (review note): a displayName- or quota-ONLY body against a
+        // rowless username skips this rail AND the 404 (which is gated on
+        // touchesDirectory) and still reaches ncUpdateUser. That is not a
+        // takeover — there is no owner to take over — but it does mean the
+        // rail covers every request WITH a local row, not literally every
+        // request. Tightening it changes documented NC-only-account semantics
+        // (displayName/quota are NC-side attributes that deliberately do not
+        // require the directory), so it is left to WARP-1614 rather than
+        // widened into this fix.
         if (target) {
           assertDirectoryEditAllowed({
             actor: { id: req.user?.id, role: req.user?.role },
@@ -3078,15 +3088,56 @@ export function createProtectedAuthRouter(
         if (password !== undefined) data.passwordHash = await hashPassword(password);
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
-            where: { nextcloudUsername: username },
+            // WARP-1564 (review L2): PIN `role` to the value rail 1b decided
+            // against. The guard service's header states the contract every
+            // guarded mutation owes — re-read the target and pin `role` in the
+            // write's `where`, "so neither the decision nor the write can be
+            // made against stale state" — and this route owed it too: rail 1b
+            // necessarily decides on a non-transactional `findUnique`, so
+            // without the pin a promotion landing in that window would let an
+            // owner credential write through on a decision made when the row
+            // was still a `family`.
+            //
+            // That window has a REAL concurrent writer, not a theoretical one:
+            // scim-role-mapping.service.ts maps any SCIM group whose
+            // normalized name CONTAINS "owner" to role "owner", and
+            // effectiveRoleForGroupNames raises a member to their highest
+            // match — so an Okta push of a customer group called e.g.
+            // "Business Owners" mints owners asynchronously, with no
+            // coordination with this route.
+            //
+            // Pinning makes a raced promotion a 0-row no-op instead of a
+            // credential rotation. `target` is null only where there is no
+            // local row to pin against (legacy shim / NC-only account), and
+            // that case already fails closed below.
+            where: target
+              ? { nextcloudUsername: username, role: target.role }
+              : { nextcloudUsername: username },
             data,
           });
-          // A credential change against a username with no directory row is
-          // meaningless for login — surface it instead of half-applying it to
-          // Nextcloud only.
-          if (updated.count === 0 && touchesDirectory) {
-            res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
-            return;
+          if (updated.count === 0) {
+            if (target) {
+              // The row EXISTED when rail 1b decided, so a 0-row write can
+              // only mean the pin missed: the role changed (or the row went
+              // away) underneath us. That is not "user not found" — reporting
+              // it as a 404 would tell the operator the account is gone when
+              // it is very much there, and would bury the one signal that a
+              // concurrent promotion was in flight. Same answer the disable /
+              // remove routes already give for the same class (409), from the
+              // same guard vocabulary. Nothing was applied locally, and we
+              // return BEFORE the Nextcloud mirror so nothing is applied
+              // there either.
+              const conflict = RoleMutationRefusedError.concurrentMutation();
+              res.status(conflict.status).json(conflict.toJSON());
+              return;
+            }
+            // A credential change against a username with no directory row is
+            // meaningless for login — surface it instead of half-applying it to
+            // Nextcloud only.
+            if (touchesDirectory) {
+              res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+              return;
+            }
           }
         }
       }
