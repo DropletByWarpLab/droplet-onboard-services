@@ -1274,11 +1274,27 @@ export default function UsersPage() {
                   <span className="rt">
                     <span className="nm">{i.displayName || i.username}</span>
                     <span className="sub mono">
-                      {i.username}
-                      {inviteRoleLabel ? ` · ${inviteRoleLabel}` : ""} · invited by{" "}
-                      {i.createdBy}
+                      {i.username} · invited by {i.createdBy}
                     </span>
                   </span>
+                  {/* WARP-1566 — assigned-role chip, byte-identical in
+                      treatment to the roster's (same class, same icon,
+                      same metrics). One semantic, one visual vocabulary:
+                      "the role this person holds/will hold" must not read
+                      as a chip in the roster and as mono identifier text
+                      two sections below. Sits before the status badge so
+                      the row reads identity → what they get → where the
+                      invite stands. Absent role data renders NO chip
+                      rather than a fabricated one. */}
+                  {inviteRoleLabel && (
+                    <span
+                      className="chip"
+                      style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}
+                    >
+                      <KeyRound size={11} aria-hidden="true" />
+                      {inviteRoleLabel}
+                    </span>
+                  )}
                   <Badge kind={status.kind}>{status.label}</Badge>
                   {canRevoke && (
                     <div className="flex items-center gap-0.5">

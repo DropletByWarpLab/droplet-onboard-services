@@ -434,13 +434,24 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
     };
   }
 
-  /** The pending-invite row's secondary line ("<username> · <role> · invited by …"). */
-  async function inviteSubline(): Promise<string> {
+  /** The whole pending-invite row, so assertions can cover the chip too. */
+  async function inviteRow(): Promise<HTMLElement> {
     render(<UsersPage />);
     const name = await screen.findByText("Diana");
-    const sub = name.parentElement?.querySelector(".sub");
-    expect(sub).not.toBeNull();
-    return sub!.textContent ?? "";
+    const row = name.closest(".lrow") as HTMLElement | null;
+    expect(row).not.toBeNull();
+    return row!;
+  }
+
+  /** The row's assigned-role chip text, or null when no chip rendered.
+   *  A CHIP, not inline sub-line text: the roster renders this exact
+   *  semantic as a `.chip` with a KeyRound icon, and the same thing on
+   *  the same page should look the same. The mono sub-line is for
+   *  identifiers (username, used/limit) — a role name is not one. */
+  async function inviteRoleChip(): Promise<string | null> {
+    const row = await inviteRow();
+    const chip = row.querySelector(".chip");
+    return chip ? (chip.textContent ?? "") : null;
   }
 
   it("names the custom role when the invite carries one", async () => {
@@ -448,9 +459,8 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "family", accessRoleId: FINANCE.id })],
     });
 
-    const text = await inviteSubline();
-    expect(text).toContain("Finance");
-    expect(text).not.toMatch(/\buser\b/);
+    expect(await inviteRoleChip()).toBe("Finance");
+    expect((await inviteRow()).textContent).not.toMatch(/\buser\b/);
   });
 
   it("shows the built-in tier label for a plain-tier invite — never the legacy 'user'", async () => {
@@ -458,10 +468,9 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "family", accessRoleId: null })],
     });
 
-    const text = await inviteSubline();
     // `family` displays as "Staff" (§0.1) — the same relabel the roster uses.
-    expect(text).toContain("Staff");
-    expect(text).not.toMatch(/\buser\b/);
+    expect(await inviteRoleChip()).toBe("Staff");
+    expect((await inviteRow()).textContent).not.toMatch(/\buser\b/);
   });
 
   it("distinguishes guest from staff — the legacy ternary collapsed both to 'user'", async () => {
@@ -469,9 +478,7 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "guest", accessRoleId: null })],
     });
 
-    const text = await inviteSubline();
-    expect(text).toContain("Guest");
-    expect(text).not.toContain("Staff");
+    expect(await inviteRoleChip()).toBe("Guest");
   });
 
   it("falls back to the tier label when the role catalog does not have the id", async () => {
@@ -482,8 +489,7 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "admin", accessRoleId: "ar-vanished" })],
     });
 
-    const text = await inviteSubline();
-    expect(text).toContain("Admin");
-    expect(text).not.toContain("ar-vanished");
+    expect(await inviteRoleChip()).toBe("Admin");
+    expect((await inviteRow()).textContent).not.toContain("ar-vanished");
   });
 });
