@@ -297,6 +297,20 @@ export function createToolsRouter(
           return;
         }
 
+        // WARP-1580 — attribution at promotion. The WARP-464 pattern miner
+        // writes `suggested` specs with NO ownerId (no human authored them),
+        // so a promoted suggestion would carry no principal for a scheduled
+        // fire to run as, and the ticker's fail-closed gate would refuse it
+        // forever. The operator who publishes it is taking ownership, so
+        // stamp them — but ONLY when the field is still empty; a promotion
+        // must never re-attribute someone else's spec.
+        const adoptOwnerId =
+          parsed.data.status === "live" &&
+          existing.ownerId === null &&
+          typeof req.user?.id === "string"
+            ? req.user.id
+            : undefined;
+
         // Bump version on every PATCH that actually mutates the spec —
         // simple, conservative: even a description-only edit bumps. The
         // dashboard's run-detail drawer pins runs to the spec version
@@ -314,20 +328,6 @@ export function createToolsRouter(
         // `null` when the operator explicitly clears it (Prisma sets
         // column to NULL). The previous `?? undefined` collapse mapped
         // both cases to skip and made clears impossible.
-        // WARP-1580 — attribution at promotion. The WARP-464 pattern miner
-        // writes `suggested` specs with NO ownerId (no human authored them),
-        // so a promoted suggestion would carry no principal for a scheduled
-        // fire to run as, and the ticker's fail-closed gate would refuse it
-        // forever. The operator who publishes it is taking ownership, so
-        // stamp them — but ONLY when the field is still empty; a promotion
-        // must never re-attribute someone else's spec.
-        const adoptOwnerId =
-          parsed.data.status === "live" &&
-          existing.ownerId === null &&
-          typeof req.user?.id === "string"
-            ? req.user.id
-            : undefined;
-
         const updated = (await prisma.$transaction(async (tx) => {
           if (parsed.data.steps) {
             await tx.toolStep.deleteMany({ where: { specId: existing.id } });
