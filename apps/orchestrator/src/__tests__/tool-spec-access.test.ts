@@ -27,6 +27,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
@@ -57,6 +58,15 @@ import type { AuthUser } from "../middleware/auth.js";
 // `files` read tool the narrowed role DOES hold.
 const FORBIDDEN_TOOL = "control_device";
 const ALLOWED_TOOL = "list_files";
+/**
+ * WARP-1621 — a tool the §3 axis refuses but the ADR-004 TIER axis allows.
+ *
+ * `control_device` above is `requiresWrite`, so after WARP-1621 every refusal
+ * in this file that uses it is decided by the tier axis, which is checked
+ * FIRST. A read tool outside the granted domains is the only fixture that
+ * isolates §3 — see the `role_grant` test below for why that matters.
+ */
+const ROLE_ONLY_FORBIDDEN_TOOL = "list_cameras";
 
 interface StepRow {
   id: string;
@@ -233,6 +243,44 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(res.body.error).toBe("forbidden_tool_for_role");
     expect(res.body.tool).toBe(FORBIDDEN_TOOL);
     // Refused before any run exists — no half-executed ToolRun row.
+    expect(prisma.runs).toEqual([]);
+  });
+
+  /**
+   * WARP-1621 put the ADR-004 write-tier axis UNDERNEATH the §3 axis, and the
+   * shared pre-flight checks the tier FIRST. `control_device` is
+   * `requiresWrite`, so every OTHER refusal in this block is now decided by
+   * the tier — meaning that with only those tests, deleting the §3 branch from
+   * `firstToolDeniedForPrincipal` leaves this whole suite green while the
+   * narrowing it is named for is gone. Verified by mutation.
+   *
+   * This case is the one that still discriminates: a READ tool outside the
+   * granted domains. The tier axis ALLOWS it, so a 403 can only have come from
+   * §3 — and `axis` proves which gate answered.
+   */
+  it("refuses a READ tool outside the granted domains — §3, not the tier", async () => {
+    // Self-verifying: were this ever to become a write tool, the test would
+    // silently revert to pinning the tier axis — the exact failure mode above.
+    expect(
+      TOOL_CATALOG.find((t) => t.name === ROLE_ONLY_FORBIDDEN_TOOL)?.requiresWrite,
+      `${ROLE_ONLY_FORBIDDEN_TOOL} must be a READ tool for this test to isolate §3`,
+    ).toBe(false);
+
+    filesOnlyAccess();
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
+    const prisma = createPrismaMock({
+      specs: [spec({ steps: [step(0, ROLE_ONLY_FORBIDDEN_TOOL, {})] })],
+      users: [FILES_ONLY_USER],
+    });
+    const app = buildApp(prisma, dispatcher, mkUser("family", "user-narrowed"));
+
+    const res = await request(app).post("/api/tools/nightly-recap/runs");
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("forbidden_tool_for_role");
+    expect(res.body.tool).toBe(ROLE_ONLY_FORBIDDEN_TOOL);
+    expect(res.body.axis).toBe("role_grant");
+    expect(dispatcher.call).not.toHaveBeenCalled();
     expect(prisma.runs).toEqual([]);
   });
 
