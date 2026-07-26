@@ -63,8 +63,8 @@ import {
 import {
   validateInviteAccessRole,
   InviteAccessRoleError,
+  type ValidatedInviteAccessRole,
 } from "../services/invite-access-role.service.js";
-import type { AccessRole } from "@prisma/client";
 import {
   sendInviteEmail,
   type SendOptions,
@@ -377,7 +377,12 @@ export function createPeopleRouter(
         // Both are fail-closed and nothing is written by either. With no
         // accessRoleId (every pre-T9 caller) this block is skipped entirely
         // and the tier rails below are still the first thing that runs.
-        let accessRole: AccessRole | null = null;
+        //
+        // WARP-1572 (F4): the declared type is the validator's BRANDED
+        // output — createTeamInvite's seam only accepts a role that went
+        // through validateInviteAccessRole, so the reorder above cannot
+        // become a path that hands the seam an unvalidated row.
+        let accessRole: ValidatedInviteAccessRole | null = null;
         if (parsed.data.accessRoleId) {
           try {
             accessRole = await validateInviteAccessRole(prisma, {
@@ -408,7 +413,9 @@ export function createPeopleRouter(
             email: parsed.data.email,
             role: parsed.data.role,
             createdBy: req.user?.username ?? "unknown",
-            accessRoleId: accessRole?.id ?? null,
+            // Branded object, not a bare id — the seam only accepts a role
+            // that went through validateInviteAccessRole (review F4).
+            accessRole,
           });
         } catch (err) {
           // Typed validation errors → 400 with the service's `code` so the

@@ -14,11 +14,20 @@
  *     routes map to `{ error, code }` JSON (the invite-service convention,
  *     mirroring InvalidInviteEmailError / InvalidInviteRoleError).
  *
- *   - {@link resolveInviteAccessRoleForAccept} — ACCEPT time, fail-OPEN
- *     toward least privilege. A role that vanished or was archived between
- *     invite and accept must NEVER fail the accept (the invitee holds a
- *     valid credential); it resolves to "no role + reason" so the route can
- *     fall back to the invite's plain tier and log/Activity-note why.
+ *   - {@link resolveInviteAccessRoleForAccept} — ACCEPT time, tolerant of
+ *     role STATE ONLY. A role that vanished, was archived, or carries a
+ *     corrupt startingPoint between invite and accept must NEVER fail the
+ *     accept (the invitee holds a valid credential): those three resolve to
+ *     "no role + reason" so the route falls back to the invite's plain tier
+ *     and log/Activity-notes why. This tolerance is scoped to role STATE and
+ *     NOTHING else — an INFRASTRUCTURE failure (DB down, query error) must
+ *     PROPAGATE, never be swallowed into a `fallback` verdict. A swallowed
+ *     infra error would silently convert "we couldn't read the role" into
+ *     the authorization decision "this person gets the plain tier", and the
+ *     two are indistinguishable in the audit trail. The call site sits
+ *     BEFORE the WARP-490 CAS claim and BEFORE ncCreateUser, so a throw
+ *     aborts the accept with ZERO mutation and the invitee can retry the
+ *     still-valid link. Pinned by test — do not add a defensive catch here.
  *
  * The `startingPoint ∈ {admin, family, guest}` CHECK lives here (schema
  * comment on AccessRole.startingPoint: service-enforced, deliberately not a
@@ -51,6 +60,31 @@ export function isAssignableStartingPoint(value: unknown): value is AssignableSt
     (ASSIGNABLE_STARTING_POINTS as readonly string[]).includes(value)
   );
 }
+
+declare const validatedInviteAccessRole: unique symbol;
+
+/**
+ * An `AccessRole` that has PASSED {@link validateInviteAccessRole} — the
+ * privilege-escalation coupling made unforgeable at the type level (review
+ * F4).
+ *
+ * Why a brand and not a bare `AccessRole`: the accept path re-checks role
+ * STATE but deliberately does NOT re-run the rank cap or the tier-agreement
+ * check (the invite row is the operator's recorded decision), and it then
+ * sets `User.role = accessRole.startingPoint`. So an invite carrying an
+ * unvalidated Admin-based role grants ADMIN on accept even if the request
+ * asked for `guest`. A plain `AccessRole` parameter would not stop that: a
+ * seed script or a future second invite surface could hand over a row read
+ * straight from `prisma.accessRole.findUnique()` and it would type-check.
+ *
+ * The brand closes that door — `unique symbol`, never exported, so the ONLY
+ * expression in the codebase that produces this type is the successful
+ * return of {@link validateInviteAccessRole}. Compile-time only: it is
+ * erased at runtime and costs nothing.
+ */
+export type ValidatedInviteAccessRole = AccessRole & {
+  readonly [validatedInviteAccessRole]: true;
+};
 
 /** Create-time validation failures, mapped by the routes to `{ error, code }`. */
 export type InviteAccessRoleErrorCode =
@@ -89,14 +123,16 @@ export interface ValidateInviteAccessRoleInput {
 }
 
 /**
- * Fail-closed create-time validation. Returns the AccessRole row on success;
- * throws {@link InviteAccessRoleError} otherwise. Check order: existence →
- * active → assignable startingPoint → WARP-623 rank cap → tier agreement.
+ * Fail-closed create-time validation. Returns the AccessRole row — branded
+ * {@link ValidatedInviteAccessRole}, the only mint site in the codebase — on
+ * success; throws {@link InviteAccessRoleError} otherwise. Check order:
+ * existence → active → assignable startingPoint → WARP-623 rank cap → tier
+ * agreement.
  */
 export async function validateInviteAccessRole(
   prisma: PrismaClient,
   input: ValidateInviteAccessRoleInput,
-): Promise<AccessRole> {
+): Promise<ValidatedInviteAccessRole> {
   const role = await prisma.accessRole.findUnique({ where: { id: input.accessRoleId } });
   if (!role) {
     throw new InviteAccessRoleError(
@@ -144,7 +180,9 @@ export async function validateInviteAccessRole(
       `The "${role.name}" role is based on the ${role.startingPoint} tier — the invite's role must match.`,
     );
   }
-  return role;
+  // The ONE brand mint. Every check above has passed, so this row is safe to
+  // hand to the persistence seam; the cast is confined to this line.
+  return role as ValidatedInviteAccessRole;
 }
 
 /** Why an invite's access role could not be applied at accept time. */

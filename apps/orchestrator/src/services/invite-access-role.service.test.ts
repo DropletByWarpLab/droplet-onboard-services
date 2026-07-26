@@ -28,7 +28,10 @@ import {
   isAssignableStartingPoint,
   resolveInviteAccessRoleForAccept,
   validateInviteAccessRole,
+  type ValidatedInviteAccessRole,
 } from "./invite-access-role.service.js";
+import type { TeamInviteInput } from "./onboarding-team-invite.service.js";
+import type { AccessRole } from "@prisma/client";
 
 function roleRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -186,6 +189,45 @@ describe("validateInviteAccessRole (create time, fail-closed)", () => {
   });
 });
 
+describe("the validated-role handoff is enforced by the TYPE (review F4)", () => {
+  // These assertions are checked by `tsc --noEmit`, not at runtime: if the
+  // brand ever weakens, the @ts-expect-error lines stop erroring and the
+  // TYPECHECK fails (vitest would still report this file green).
+  it("rejects a bare prisma AccessRole row at the createTeamInvite seam", () => {
+    // The privesc path this closes: an unvalidated Admin-based role riding a
+    // `role: "guest"` invite grants ADMIN on accept, because the accept path
+    // re-checks role STATE but not the rank cap, then sets
+    // `User.role = accessRole.startingPoint`.
+    const fromPrisma = roleRow({ startingPoint: "admin" }) as unknown as AccessRole;
+    const build = (): TeamInviteInput => ({
+      email: "sneaky@acme.co",
+      role: "guest",
+      createdBy: "admin1",
+      // @ts-expect-error — an unvalidated AccessRole (e.g. straight from
+      // prisma.accessRole.findUnique) is NOT a ValidatedInviteAccessRole:
+      // only validateInviteAccessRole mints the brand.
+      accessRole: fromPrisma,
+    });
+    expect(build().email).toBe("sneaky@acme.co");
+  });
+
+  it("accepts the validator's own output", async () => {
+    const role = roleRow();
+    const validated: ValidatedInviteAccessRole = await validateInviteAccessRole(
+      prismaWith(role),
+      { accessRoleId: "ar-1", inviteTier: "family", inviterRole: "owner" },
+    );
+    // Type-level: assignable with no cast — the seam's whole contract.
+    const input: TeamInviteInput = {
+      email: "reception@acme.co",
+      role: "family",
+      createdBy: "owner1",
+      accessRole: validated,
+    };
+    expect(input.accessRole?.id).toBe("ar-1");
+  });
+});
+
 describe("resolveInviteAccessRoleForAccept (accept time, fail-open)", () => {
   it("resolves an active assignable role", async () => {
     const role = roleRow();
@@ -212,5 +254,23 @@ describe("resolveInviteAccessRoleForAccept (accept time, fail-open)", () => {
       "ar-1",
     );
     expect(resolution).toEqual({ role: null, fallback: "not_assignable" });
+  });
+
+  it("PROPAGATES an infra error instead of failing open to a fallback (review F1)", async () => {
+    // The tolerance above is scoped to role STATE. A DB/query failure is NOT
+    // a state verdict: swallowing it would silently turn "we couldn't read
+    // the role" into the authorization decision "plain tier", and the audit
+    // trail could not tell the two apart. The throw is the contract — a
+    // future defensive catch here must fail this test.
+    const prisma = {
+      accessRole: {
+        findUnique: vi.fn(async () => {
+          throw new Error("connection terminated unexpectedly");
+        }),
+      },
+    } as never;
+    await expect(resolveInviteAccessRoleForAccept(prisma, "ar-1")).rejects.toThrow(
+      "connection terminated unexpectedly",
+    );
   });
 });

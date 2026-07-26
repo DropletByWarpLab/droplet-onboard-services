@@ -1,6 +1,5 @@
 import { Router, Request } from "express";
 import { randomBytes, createHash } from "node:crypto";
-import type { AccessRole } from "@prisma/client";
 import { z } from "zod";
 import {
   generateInviteToken,
@@ -15,6 +14,7 @@ import {
   resolveInviteAccessRoleForAccept,
   InviteAccessRoleError,
   type AcceptAccessRoleResolution,
+  type ValidatedInviteAccessRole,
 } from "../services/invite-access-role.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
@@ -3487,7 +3487,12 @@ export function createProtectedAuthRouter(
       // diverge — including this ordering: with a custom role picked, its
       // specific refusal wins over the coarser tier rail below (see the
       // matching ORDER note in routes/people.ts). Both are fail-closed.
-      let inviteAccessRole: AccessRole | null = null;
+      //
+      // WARP-1572 (F4): the declared type is the validator's BRANDED output,
+      // so the only expression that can land here is a successful
+      // validateInviteAccessRole — a bare prisma.accessRole row no longer
+      // type-checks.
+      let inviteAccessRole: ValidatedInviteAccessRole | null = null;
       if (parsed.data.accessRoleId) {
         try {
           inviteAccessRole = await validateInviteAccessRole(prisma, {
