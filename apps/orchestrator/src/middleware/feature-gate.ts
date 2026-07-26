@@ -76,6 +76,27 @@ function resolveOnce(
 }
 
 /**
+ * Resolve the caller's effective access ONCE per request, sharing the memo
+ * with every `requireFeatureAccess` gate on the same request.
+ *
+ * The T3 resolver is ~7 DB round-trips with no cache in v1, so any surface
+ * that wants the caller's §9 set inside a request must come through here
+ * rather than calling `resolveEffectiveAccess` again. Returns `null` when
+ * there is no principal, no local user id, or a `service` principal — the same
+ * "nothing to narrow" set the gate passes through.
+ */
+export function resolveEffectiveAccessForRequest(
+  req: Request,
+  resolve: EffectiveAccessResolver = resolveEffectiveAccess,
+): Promise<EffectiveAccessResult | null> {
+  const user = req.user;
+  if (!user || user.role === "service") return Promise.resolve(null);
+  const userId = user.id;
+  if (typeof userId !== "string" || userId.length === 0) return Promise.resolve(null);
+  return resolveOnce(req, userId, resolve);
+}
+
+/**
  * Gate a route (or a whole module route group) on the caller holding at least
  * `minLevel` on `moduleId` in their resolved §9 catalog.
  *

@@ -28,7 +28,7 @@ import {
 } from "../modules/module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
 import { recordAccessDenied } from "../middleware/auth.js";
-import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import { resolveEffectiveAccessForRequest } from "../middleware/feature-gate.js";
 
 const logger = createLogger("modules-route");
 
@@ -69,7 +69,11 @@ async function resolveEffectiveForUser(req: Request) {
   const id = localUserId(req);
   if (!id) return null;
   try {
-    const access = await resolveEffectiveAccess(id);
+    // Goes through the feature gate's PER-REQUEST memo, never straight at the
+    // resolver: it is ~7 DB round-trips with no cache in v1 (T3's deliberate
+    // decision), so a request that hits both a gated prefix and this route
+    // must pay for it once, not twice.
+    const access = await resolveEffectiveAccessForRequest(req);
     return access?.features ?? null;
   } catch (e) {
     logger.warn({ err: e, user: id }, "effective_for_user_unresolved");

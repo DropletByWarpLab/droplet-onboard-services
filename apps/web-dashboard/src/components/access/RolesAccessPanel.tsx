@@ -46,6 +46,7 @@ import {
 import type {
   AccessRole,
   AccessRolePayload,
+  AccessSyncState,
   AccessTier,
   RosterUser,
 } from "@/lib/types";
@@ -80,6 +81,12 @@ const BUILTINS: BuiltinDef[] = [
   { id: "guest", icon: User, meta: ACCESS_COPY.guestMeta },
   { id: "service", icon: Cpu, meta: ACCESS_COPY.serviceMeta },
 ];
+
+/** `synced` is the quiet state — it renders no chip at all (§12: the chip is
+ *  for work in flight or work that needs a human, never for "fine"). */
+function chipState(state: AccessSyncState | undefined): AccessSyncState | null {
+  return state === undefined || state === "synced" ? null : state;
+}
 
 function initials(name: string): string {
   return (
@@ -153,6 +160,19 @@ export function RolesAccessPanel({
   // A refetch scheduled after a pending mutation so the sync chip converges
   // on server truth without polling forever.
   const refetchTimer = useRef<number | null>(null);
+  // WARP-1528 — the sync states we learned from MUTATION responses, keyed by
+  // role id. The API returns `syncState` as a SIBLING of `role`
+  // (`{ role, syncState }` — which is exactly what lib/api.ts types), and the
+  // server's role serializer never puts it inside the row. Reading
+  // `role.syncState` therefore always saw `undefined` and the §10 "Applying…"
+  // chip could never appear on a real box. The sibling is captured here; the
+  // row's own field stays the fallback so a future orchestrator that does
+  // emit it on reads works without another change.
+  const [syncStates, setSyncStates] = useState<Record<string, AccessSyncState>>({});
+  const noteSyncState = useCallback((roleId: string, state: AccessSyncState | undefined) => {
+    if (!state) return;
+    setSyncStates((prev) => ({ ...prev, [roleId]: state }));
+  }, []);
 
   const reload = useCallback(async (background = false) => {
     if (!background) setListState((s) => (s === "ready" ? s : "loading"));
@@ -173,13 +193,35 @@ export function RolesAccessPanel({
   }, [reload]);
 
   /** One delayed background refetch — lets a "pending" syncState converge
-   *  to synced/failed without a poll loop. */
-  const scheduleSyncRefetch = useCallback(() => {
-    if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
-    refetchTimer.current = window.setTimeout(() => {
-      void reload(true);
-    }, 1500);
-  }, [reload]);
+   *  without a poll loop. The re-read succeeding IS the convergence signal we
+   *  have: the cascade (session revocation + NC group sync) is server-side and
+   *  fire-and-forget, and the read path reports no per-role state, so holding
+   *  "Applying…" on screen forever would be the dishonest option. A `failed`
+   *  marker is kept — that one needs a human. */
+  const scheduleSyncRefetch = useCallback(
+    (roleId: string | null) => {
+      if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
+      refetchTimer.current = window.setTimeout(() => {
+        void reload(true).then(() => {
+          if (!roleId) return;
+          setSyncStates((prev) => {
+            if (prev[roleId] !== "pending") return prev;
+            const next = { ...prev };
+            delete next[roleId];
+            return next;
+          });
+        });
+      }, 1500);
+    },
+    [reload],
+  );
+
+  /** The sync state to render for a role: what the mutation told us, else
+   *  whatever the row itself carries. `synced` renders nothing. */
+  const syncStateFor = useCallback(
+    (r: AccessRole): AccessSyncState | undefined => syncStates[r.id] ?? r.syncState,
+    [syncStates],
+  );
 
   // Auto-select the first custom role once loaded so the detail pane isn't
   // a dead placeholder (Departments precedent).
@@ -243,18 +285,23 @@ export function RolesAccessPanel({
     if (!builder) return;
     setBuilderBusy(true);
     try {
+      let touchedId: string | null = null;
       if (builder.mode === "create") {
-        const { role } = await createAccessRole(payload);
+        const { role, syncState } = await createAccessRole(payload);
         setBuilder(null);
         await reload();
         setSelectedId(role.id);
+        touchedId = role.id;
+        noteSyncState(role.id, syncState);
       } else if (builder.base.id) {
-        await updateAccessRole(builder.base.id, payload);
+        const { syncState } = await updateAccessRole(builder.base.id, payload);
         setBuilder(null);
         await reload();
+        touchedId = builder.base.id;
+        noteSyncState(builder.base.id, syncState);
       }
       toast(`'${payload.name}' saved — applying now.`, "success");
-      scheduleSyncRefetch();
+      scheduleSyncRefetch(touchedId);
     } catch (err: any) {
       toast(err?.message || "Failed to save the role", "error");
     } finally {
@@ -304,8 +351,10 @@ export function RolesAccessPanel({
   async function performAssign() {
     if (!selectedRole || assignChecked.size === 0) return;
     setAssignBusy(true);
+    const assignedRoleId = selectedRole.id;
     try {
-      await assignAccessRole(selectedRole.id, Array.from(assignChecked));
+      const { syncState } = await assignAccessRole(assignedRoleId, Array.from(assignChecked));
+      noteSyncState(assignedRoleId, syncState);
       setAssignOpen(false);
       setAssignChecked(new Set());
       const first = people.find((p) => p.userId && assignChecked.has(p.userId));
@@ -317,7 +366,7 @@ export function RolesAccessPanel({
         "success",
       );
       await reload(true);
-      scheduleSyncRefetch();
+      scheduleSyncRefetch(assignedRoleId);
     } catch (err: any) {
       toast(err?.message || "Failed to assign the role", "error");
     } finally {
@@ -390,7 +439,7 @@ export function RolesAccessPanel({
                   {role.peopleCount === 1 ? "1 person" : `${role.peopleCount} people`} · based on{" "}
                   {tierLabel(role.startingPoint)}
                 </span>
-                <SyncChip state={role.syncState === "synced" ? null : role.syncState} />
+                <SyncChip state={chipState(syncStateFor(role))} />
               </span>
             </span>
             <ChevronRight size={15} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
@@ -567,7 +616,7 @@ export function RolesAccessPanel({
             </div>
           </div>
           <AccessChip>Based on {tierLabel(selectedRole.startingPoint)}</AccessChip>
-          <SyncChip state={selectedRole.syncState === "synced" ? null : selectedRole.syncState} />
+          <SyncChip state={chipState(syncStateFor(selectedRole))} />
           <div ref={menuRef} style={{ position: "relative" }}>
             <button
               type="button"

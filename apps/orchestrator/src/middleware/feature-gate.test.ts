@@ -25,7 +25,7 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-import { requireFeatureAccess } from "./feature-gate.js";
+import { requireFeatureAccess, resolveEffectiveAccessForRequest } from "./feature-gate.js";
 import type { AuthUser } from "./auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 
@@ -194,5 +194,34 @@ describe("requireFeatureAccess — failure posture + cost", () => {
     ]);
     expect((await request(app).get("/api/cameras")).status).toBe(200);
     expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("a ROUTE handler shares the gates' memo — the whole request costs one resolve", async () => {
+    // The resolver is ~7 DB round-trips with no cache in v1, so any in-request
+    // consumer (the /api/modules effectiveForUser view is the first) must come
+    // through resolveEffectiveAccessForRequest, not call the resolver again.
+    const resolve = vi.fn(async () => result([{ moduleId: "cameras", level: "manage" }]));
+    const app = express();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      req.user = STAFF;
+      next();
+    });
+    app.use("/api/cameras", requireFeatureAccess("cameras", "view", resolve));
+    app.get("/api/cameras", async (req, res) => {
+      const access = await resolveEffectiveAccessForRequest(req, resolve);
+      res.json({ features: access?.features ?? [] });
+    });
+    const res = await request(app).get("/api/cameras");
+    expect(res.status).toBe(200);
+    expect(res.body.features).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolveEffectiveAccessForRequest short-circuits the no-narrowing principals", async () => {
+    const resolve = vi.fn(async () => result([]));
+    const req = { user: principal("_service:mcp", "mcp", "service") } as unknown as Request;
+    expect(await resolveEffectiveAccessForRequest(req, resolve)).toBeNull();
+    expect(await resolveEffectiveAccessForRequest({} as Request, resolve)).toBeNull();
+    expect(resolve).not.toHaveBeenCalled();
   });
 });

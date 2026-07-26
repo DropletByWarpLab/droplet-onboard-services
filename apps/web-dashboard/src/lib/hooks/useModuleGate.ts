@@ -23,6 +23,13 @@ import { authFetch } from "../auth";
  * the nav on the next focus / navigation revalidation, or the poll interval at
  * worst — never a reload. (The Features panel does not mutate this key today; a
  * `mutate('/api/modules')` there would make the nav update immediate.)
+ *
+ * WARP-1528: the same endpoint now also carries `effectiveForUser` (workspace ∩
+ * the caller's role grants, ADR-032 §3). When present it supersedes the
+ * workspace flags here, so every consumer — all three nav surfaces and the
+ * route guard — narrows per person off ONE fetch. The fail-open posture is
+ * unchanged and deliberate: this hook is a convenience layer, and
+ * `requireFeatureAccess` on the orchestrator is the actual boundary.
  */
 
 const MODULES_KEY = "/api/modules";
@@ -31,8 +38,19 @@ interface ModuleState {
   id: string;
   effective: boolean;
 }
+interface EffectiveFeature {
+  moduleId: string;
+  level: "view" | "act" | "manage";
+}
 interface ModulesView {
   modules: ModuleState[];
+  /**
+   * WARP-1528 / ADR-032 §3(a) — the PER-USER view: workspace-effective ∩ this
+   * person's §9 feature grants, resolved server-side. Absent when the
+   * orchestrator predates T4 or couldn't resolve the caller (it omits rather
+   * than sends an empty set), in which case the workspace view stands.
+   */
+  effectiveForUser?: EffectiveFeature[];
 }
 
 async function fetchModules(): Promise<ModulesView> {
@@ -44,14 +62,26 @@ async function fetchModules(): Promise<ModulesView> {
 /**
  * The fail-open decision, extracted pure for testing:
  *  - probe not resolved (`data` undefined) → shown (never hide on a blip)
- *  - module known → its `effective` flag
+ *  - the server sent a PER-USER set → membership in that set is the answer
+ *    (it already contains the workspace intersection — ADR-032 §3 — so
+ *    re-checking `effective` on top would be redundant and could only
+ *    disagree with the server, which is the authority)
+ *  - otherwise: module known → its `effective` flag
  *  - module unknown to the registry → shown (never hide what we can't classify)
+ *
+ * An EMPTY `effectiveForUser` is treated as unresolved, not as "nothing": the
+ * always-on chat floor makes a genuinely empty set impossible, so an empty
+ * array is a malformed/partial payload and must not blank the whole nav.
  */
 export function isModuleEffective(
   data: ModulesView | undefined,
   moduleId: string,
 ): boolean {
   if (!data) return true;
+  const perUser = data.effectiveForUser;
+  if (perUser && perUser.length > 0) {
+    return perUser.some((f) => f.moduleId === moduleId);
+  }
   const m = data.modules.find((x) => x.id === moduleId);
   return m ? m.effective : true;
 }
