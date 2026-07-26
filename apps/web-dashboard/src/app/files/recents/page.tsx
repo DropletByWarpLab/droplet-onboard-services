@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Clock } from "lucide-react";
 import { FileListSimple } from "@/components/FileManager/FileListSimple";
 import { useRecents } from "@/lib/hooks/useRecents";
+import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
 import { getDownloadUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
@@ -32,6 +33,9 @@ const BUCKET_ORDER = ["Today", "Yesterday", "This week", "Earlier"] as const;
 export default function RecentsPage() {
   const router = useRouter();
   const { items, isLoading, error, refresh } = useRecents(50);
+  // WARP-1549 — recents span every library the user can reach; without this
+  // the whole list reads as though it were all personal.
+  const attribution = useSpaceAttribution();
   const { toast } = useToast();
 
   const grouped = useMemo(() => {
@@ -49,13 +53,10 @@ export default function RecentsPage() {
     }));
   }, [items]);
 
+  // WARP-1549: routes with the row's resolved space, so a recently-edited
+  // library file opens in its library instead of the personal space.
   const handleOpen = (file: FileEntryInfo) => {
-    if (file.isDirectory) {
-      router.push(`/files?path=${encodeURIComponent(file.path)}`);
-    } else {
-      const parent = file.path.replace(/\/[^/]*$/, "") || "/";
-      router.push(`/files?path=${encodeURIComponent(parent)}`);
-    }
+    router.push(attribution.href(file));
   };
 
   const handleDownload = (file: FileEntryInfo) => {
@@ -114,6 +115,8 @@ export default function RecentsPage() {
                 files={group.files}
                 isLoading={false}
                 showLocation
+                spaceLabel={(file) => attribution.label(file.path)}
+                locationLabel={(file) => attribution.location(file.path)}
                 onOpen={handleOpen}
                 onDownload={handleDownload}
               />

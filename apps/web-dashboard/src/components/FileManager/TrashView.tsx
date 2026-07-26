@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { TrashItemInfo } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { LibraryChip } from "./FileListSimple";
 import { isTrashUnsupportedError } from "@/lib/api";
 
 interface TrashViewProps {
@@ -29,6 +30,22 @@ interface TrashViewProps {
   error?: unknown;
   /** Re-runs the trash fetch. Pass `useTrash().refresh`. */
   onRetry?: () => void;
+  /**
+   * WARP-1549 — the same library slot `FileListSimple` has, feeding Trash's
+   * existing "Original location" column. Return the library a deleted item
+   * came out of, or null/undefined to say nothing.
+   *
+   * Saying nothing matters here more than anywhere else: a deleted item whose
+   * library the caller can no longer see must not be relabelled "My Files",
+   * because the next thing the user does with that row is decide whether to
+   * restore it.
+   */
+  spaceLabel?: (item: TrashItemInfo) => string | null | undefined;
+  /**
+   * WARP-1549 — overrides `item.originalLocation` with its in-library form,
+   * so the mount name isn't repeated next to the chip.
+   */
+  locationLabel?: (item: TrashItemInfo) => string;
   onRestore: (name: string) => void | Promise<void>;
   onDeleteForever: (name: string) => void | Promise<void>;
   onEmpty: () => void | Promise<void>;
@@ -76,6 +93,8 @@ export function TrashView({
   isLoading,
   error,
   onRetry,
+  spaceLabel,
+  locationLabel,
   onRestore,
   onDeleteForever,
   onEmpty,
@@ -214,7 +233,10 @@ export function TrashView({
           style={{ color: "var(--text-faint)", fontSize: "11px", borderBottom: "1px solid var(--card-bd)" }}
         >
           <span className="flex-1">Name</span>
-          <span className="w-32 hidden md:block">Original location</span>
+          {/* WARP-1549: widened from w-32 — the column now carries the owning
+              library alongside the folder, so a restore decision doesn't
+              depend on guessing which library the item came out of. */}
+          <span className="w-44 hidden md:block">Original location</span>
           <span className="w-20 text-right hidden sm:block">Size</span>
           <span className="w-28 text-right hidden lg:block">Deleted</span>
           <span className="w-20" />
@@ -232,6 +254,8 @@ export function TrashView({
         <div className="rows">
           {items.map((item) => {
             const Icon = getIconForName(item.originalName, item.isDirectory);
+            const library = spaceLabel?.(item);
+            const location = locationLabel?.(item) ?? item.originalLocation;
             return (
               <div
                 key={item.name}
@@ -250,11 +274,14 @@ export function TrashView({
                   </span>
                 </div>
 
-                <span
-                  className="w-32 truncate hidden md:block"
-                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
-                >
-                  {item.originalLocation}
+                <span className="w-44 hidden md:flex items-center gap-1.5 min-w-0">
+                  {library && <LibraryChip label={library} />}
+                  <span
+                    className="truncate"
+                    style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+                  >
+                    {location}
+                  </span>
                 </span>
 
                 <span
