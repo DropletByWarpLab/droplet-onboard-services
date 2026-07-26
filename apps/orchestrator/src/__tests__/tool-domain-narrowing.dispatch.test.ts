@@ -146,6 +146,21 @@ describe("runAgent — fail-closed dispatch re-check (the stale-shelf case)", ()
     expect(callTool.mock.calls[0]![0]).toBe("write_file");
   });
 
+  it("trips the consecutive-guard circuit breaker with an honest reason", async () => {
+    // A model that keeps re-issuing a refused tool must stop the turn rather
+    // than burn every iteration — and the breaker's error must say WHY.
+    const { deps, callTool } = makeDeps([callOf("list_cameras")]);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "cameras?" }],
+      allowed_tools: ["list_cameras"],
+      toolAccessScope: scope(["files"]),
+    });
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("model repeatedly called forbidden tool: list_cameras");
+  });
+
   it("feeds the refusal back to the model so the turn still answers", async () => {
     const { deps } = makeDeps([callOf("list_cameras"), { role: "assistant", content: "ok" }]);
     const result = await runAgent(deps, {

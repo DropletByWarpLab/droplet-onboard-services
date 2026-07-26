@@ -946,6 +946,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const MAX_CONSECUTIVE_GUARD_HITS = 3;
   let consecutiveGuardHits = 0;
   let lastBadToolName = "";
+  // WARP-1529 — the breaker now has two feeders (a hallucinated name and a
+  // §3-refused one). Carry WHY so the terminal error names the real problem;
+  // an operator reading "unknown tool" for a tool that exists and is simply
+  // not granted would chase the wrong bug.
+  let lastBadToolReason: "unknown tool" | "forbidden tool" = "unknown tool";
 
   // WARP-329 — the result returned when the client disconnects mid-turn.
   // We don't emit a `done` event (the SSE consumer is gone) and the route
@@ -1210,6 +1215,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // self-correct.
       const denial = toolDispatchDenial(call.function.name, args, scoped);
       if (denial) {
+        // No sanitising pass here (unlike FINDING 3 below): a denial only
+        // fires for a name that IS in the tools-core catalog, so the string
+        // reflected back to the model is one of the registry's own fixed
+        // names, never model-authored text.
+        lastBadToolName = call.function.name;
+        lastBadToolReason = "forbidden tool";
         const denialError = { status: "error" as const, error: denial };
         trace.push({
           tool_call_id: call.id,
@@ -1290,6 +1301,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // emit / trace below (not model-facing).
         const safeName = call.function.name.slice(0, 64).replace(/[^\w:.\-]/g, "_");
         lastBadToolName = safeName;
+        lastBadToolReason = "unknown tool";
         const guardError = {
           status: "error" as const,
           error: {
@@ -1495,7 +1507,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       consecutiveGuardHits = 0;
     }
     if (consecutiveGuardHits >= MAX_CONSECUTIVE_GUARD_HITS) {
-      const error = `model repeatedly called unknown tool: ${lastBadToolName}`;
+      const error = `model repeatedly called ${lastBadToolReason}: ${lastBadToolName}`;
       emit({ type: "done", iterations: iter + 1, stop_reason: "error", error });
       return {
         message: { role: "assistant", content: "" },
