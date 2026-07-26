@@ -182,34 +182,21 @@ def main():
     # uses apscheduler — never while-True loops. The scheduler runs on its
     # own asyncio loop in a daemon thread because main()'s primary
     # blocking surface is still the watchdog Observer (started below).
-    import asyncio
     import threading
     scheduler_holder: dict = {}
     scheduler_loop: dict = {}
 
     def _scheduler_thread():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        scheduler_loop["loop"] = loop
-
-        # apscheduler >= 3.11 binds AsyncIOScheduler to the *running* loop
-        # (asyncio.get_running_loop()), so build_scheduler() must be called
-        # from inside run_forever() — calling it here, before the loop runs,
-        # raises RuntimeError("no running event loop") and the daily
-        # transcription pass would never be registered.
-        def _start_scheduler():
-            try:
-                import scheduler_service
-                scheduler_holder["scheduler"] = scheduler_service.build_scheduler()
-            except Exception:
-                logger.exception("scheduler_service.build_scheduler failed")
-                loop.stop()
-
-        loop.call_soon(_start_scheduler)
+        # The loop/ordering logic lives in scheduler_service.run_scheduler_loop
+        # so it is reachable from a test — apscheduler >= 3.11 requires the
+        # scheduler to be built from inside the running loop, and that ordering
+        # is exactly what regressed. See its docstring.
         try:
-            loop.run_forever()
-        finally:
-            loop.close()
+            import scheduler_service
+        except Exception:
+            logger.exception("scheduler_service import failed")
+            return
+        scheduler_service.run_scheduler_loop(scheduler_holder, scheduler_loop)
 
     sched_thread = threading.Thread(
         target=_scheduler_thread, name="warp218-scheduler", daemon=True
