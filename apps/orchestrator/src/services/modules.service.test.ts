@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ModuleId } from "@prisma/client";
-import { computeModuleStates, computeEffectiveIds } from "./modules.service.js";
+import { computeModuleStates, computeEffectiveIds, setModuleEnabled } from "./modules.service.js";
 import type { AvailabilityConfig } from "../modules/module-registry.js";
 
 /** Config where every availability signal is satisfied. */
@@ -130,5 +130,69 @@ describe("declared module dependencies (WARP-1585)", () => {
     const eff = computeEffectiveIds(overrides, { ...ALL_AVAILABLE, NEXTCLOUD_URL: "" });
     expect(eff.has("files")).toBe(false);
     expect(eff.has("docs")).toBe(false);
+  });
+});
+
+// ── WARP-1585 review — the toggle's answer and GET /api/modules' answer ──
+describe("setModuleEnabled re-derives instead of answering locally", () => {
+  /** A prisma stub over an in-memory ModuleSetting table. */
+  function prismaWith(rows: Array<[ModuleId, boolean]>) {
+    const table = new Map<ModuleId, boolean>(rows);
+    return {
+      moduleSetting: {
+        findMany: async () =>
+          [...table].map(([moduleId, enabled]) => ({ moduleId, enabled })),
+        upsert: async ({ where, update }: { where: { moduleId: ModuleId }; update: { enabled: boolean } }) => {
+          table.set(where.moduleId, update.enabled);
+          return { moduleId: where.moduleId, enabled: update.enabled };
+        },
+      },
+    } as never;
+  }
+
+  it("switching Documents on with Files off returns effective:false, not a lie", () => {
+    // `available && enabled` was a correct local answer while a module's
+    // effectiveness depended only on itself. With a declared dependency it
+    // reports a module the box will not serve as ON, so the row the panel
+    // renders after a toggle disagrees with the row GET /api/modules returns
+    // one refresh later.
+    return setModuleEnabled(
+      prismaWith([["files", false]]),
+      ALL_AVAILABLE,
+      "docs",
+      true,
+      "owner",
+    ).then((row) => {
+      expect(row).toMatchObject({
+        id: "docs",
+        available: true,
+        enabled: true,       // the operator's stored intent is kept
+        effective: false,    // …and the box still won't serve it
+        requires: "files",
+        requiresUnmet: true,
+      });
+    });
+  });
+
+  it("the same toggle with Files on is effective", async () => {
+    const row = await setModuleEnabled(
+      prismaWith([["files", true]]),
+      ALL_AVAILABLE,
+      "docs",
+      true,
+      "owner",
+    );
+    expect(row).toMatchObject({ id: "docs", effective: true, requiresUnmet: false });
+  });
+
+  it("switching the PARENT off is reflected in the parent's own row", async () => {
+    const row = await setModuleEnabled(
+      prismaWith([["files", true], ["docs", true]]),
+      ALL_AVAILABLE,
+      "files",
+      false,
+      "owner",
+    );
+    expect(row).toMatchObject({ id: "files", enabled: false, effective: false });
   });
 });

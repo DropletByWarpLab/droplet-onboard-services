@@ -15,7 +15,7 @@
  * list — and both deny with the identical 404, so a narrowed person sees a
  * smaller Droplet rather than a wall of locked doors.
  *
- * What changed: each gate is now SCOPED TO ITS OWN NAMESPACE. Express
+ * What changed: each gate is now SCOPED TO THE PATHS ITS MODULE OWNS. Express
  * `app.use(prefix, handler)` is a prefix mount, and three of this catalog's
  * prefixes nest:
  *
@@ -37,14 +37,23 @@
  *     DECLARED (`requires: "files"`) and enforced by the effective-set
  *     computation, so the dashboard can render Documents as blocked with the
  *     reason rather than presenting a toggle that quietly does nothing.
+ *
+ * The split is by PATH, not by prefix, and that distinction is load-bearing.
+ * `/api/files` serves wildcard routes whose middle is user data —
+ * `/api/files/:filePath(*)/editor-session` and its comments/citations/tags
+ * siblings — so a Nextcloud file stored under a folder called `docs` or
+ * `knowledge` produces a FILES request that lands inside a SIBLING's
+ * namespace. Handing the whole sub-tree to the sibling would move real file
+ * operations onto the wrong toggle in both directions at once: a person
+ * holding Knowledge but no Files could mint an editor session for anything
+ * under `knowledge/`, and it would keep serving after Files was switched off
+ * box-wide — while a Files holder without Knowledge would 404 on their own
+ * file. So the nested modules declare the paths they own (registry
+ * `ownedPaths`) and the enclosing module keeps everything else.
  */
 import type { RequestHandler } from "express";
 import type { ModuleId } from "@prisma/client";
-import {
-  MODULES,
-  foreignSubPrefixes,
-  pathIsUnder,
-} from "./module-registry.js";
+import { MODULES, gateScopeFor } from "./module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
 import {
   requireFeatureAccess,
@@ -87,27 +96,31 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
 ]);
 
 /**
- * Wrap `handler` so it is a NO-OP on requests that belong to a nested sibling
- * module's namespace — that sibling's own gate is mounted separately and is
- * the authority for those paths.
+ * Wrap `handler` so it only runs on the paths this module OWNS — every other
+ * request under the mount falls straight through, because a different
+ * module's gate is the authority for it.
+ *
+ * The ownership rule itself is the registry's (`gateScopeFor`); this is only
+ * the Express plumbing for it. Note it is asymmetric, deliberately: a nested
+ * module owns its declared routes and nothing else, and the enclosing module
+ * keeps the rest of its sub-tree — including the wildcard Nextcloud paths
+ * (`/api/files/:filePath(*)/editor-session`) that a file stored under a folder
+ * named `docs` or `knowledge` pushes into a sibling's namespace.
  *
  * `req.baseUrl + req.path` reconstructs the full pathname from inside a
  * prefix mount (Express rewrites `req.url` to the remainder and puts the
  * matched prefix in `baseUrl`), which keeps this correct if the gates are ever
  * mounted under a Router rather than directly on the app.
  */
-function scopeToOwnNamespace(
+function scopeToOwnedPaths(
   handler: RequestHandler,
-  foreign: readonly string[],
+  applies: ((fullPath: string) => boolean) | null,
 ): RequestHandler {
-  if (foreign.length === 0) return handler;
-  return function namespaceScopedGate(req, res, next) {
-    const full = `${req.baseUrl}${req.path}`;
-    for (const p of foreign) {
-      if (pathIsUnder(full, p)) {
-        next();
-        return;
-      }
+  if (applies === null) return handler;
+  return function pathScopedGate(req, res, next) {
+    if (!applies(`${req.baseUrl}${req.path}`)) {
+      next();
+      return;
     }
     handler(req, res, next);
   };
@@ -136,12 +149,12 @@ export function mountModuleGates(
     if (def.core) continue;
     const featureGated = FEATURE_GATED_MODULES.has(def.id);
     for (const prefix of def.routePrefixes) {
-      const foreign = foreignSubPrefixes(def.id, prefix);
-      app.use(prefix, scopeToOwnNamespace(moduleGate.requireModuleEnabled(def.id), foreign));
+      const applies = gateScopeFor(def, prefix);
+      app.use(prefix, scopeToOwnedPaths(moduleGate.requireModuleEnabled(def.id), applies));
       if (featureGated) {
         app.use(
           prefix,
-          scopeToOwnNamespace(requireFeatureAccess(def.id, "view", resolve), foreign),
+          scopeToOwnedPaths(requireFeatureAccess(def.id, "view", resolve), applies),
         );
       }
     }

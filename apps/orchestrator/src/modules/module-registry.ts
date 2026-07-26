@@ -62,6 +62,32 @@ export interface ModuleDef {
    * without the parent. It is not for "these feel related".
    */
   requires?: ModuleId;
+  /**
+   * WARP-1585 review — for a module whose prefix NESTS inside another
+   * module's prefix, the EXACT request paths it owns.
+   *
+   * A prefix is not a safe ownership boundary for a nested module, because
+   * the ENCLOSING module serves wildcard paths built from USER DATA:
+   * `/api/files/:filePath(*)/{editor-session,comments,citations,tags}`. A
+   * Nextcloud file at `knowledge/q3.docx` spells
+   * `/api/files/knowledge/q3.docx/editor-session` — a FILES route sitting
+   * inside the KNOWLEDGE namespace. Releasing the whole sub-tree to the
+   * sibling would hand a Nextcloud file operation to the Knowledge toggle
+   * (reachable by someone holding Knowledge but no Files, and still serving
+   * after Files is switched off box-wide), and would 404 the same operation
+   * for a Files holder who lacks Knowledge.
+   *
+   * So a nested module's authority is its listed paths and NOTHING else;
+   * every other path under its prefix stays with the enclosing module. The
+   * list is short by construction — a nested module that needs a wildcard of
+   * its own has outgrown the namespace and should be re-mounted.
+   *
+   * Drift is fail-CLOSED and loud: a nested module that forgets to declare
+   * this fails the registry's `nested prefixes` invariant test, and a new
+   * route added under a declared namespace without listing it here keeps the
+   * enclosing module's gate (narrower), it never opens one.
+   */
+  ownedPaths?: string[];
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
@@ -85,6 +111,11 @@ export const MODULES: readonly ModuleDef[] = [
     id: "knowledge", label: "Knowledge",
     description: "Retrieval over your indexed files and notes (RAG).",
     category: "workspace", routePrefixes: ["/api/files/knowledge"], navHrefs: ["/knowledge"],
+    // The two routes files-knowledge.ts serves — its header says "nothing
+    // else should" target this namespace. Anything ELSE under
+    // /api/files/knowledge/* is a Nextcloud path that happens to start with a
+    // folder called `knowledge`, and stays with `files`.
+    ownedPaths: ["/api/files/knowledge/recent", "/api/files/knowledge/search"],
     // WARP-1527: "knowledge" is not a tools-core ToolDomain — the module's
     // agent surface is the memory suite (memory_recall & co.).
     toolDomains: ["memory"], core: false, defaultEnabled: true,
@@ -108,6 +139,11 @@ export const MODULES: readonly ModuleDef[] = [
     id: "docs", label: "Documents",
     description: "In-browser document editing / co-authoring (OnlyOffice).",
     category: "workspace", routePrefixes: ["/api/files/docs"], navHrefs: [],
+    // The doc-engine health probe is the module's ONLY route (it is declared
+    // in files.ts, registered before the `:filePath(*)` wildcard). Everything
+    // else under /api/files/docs/* is a Nextcloud path under a folder called
+    // `docs`, and stays with `files`.
+    ownedPaths: ["/api/files/docs/status"],
     toolDomains: [], core: false, defaultEnabled: false,
     // WARP-1585: Documents genuinely depends on Files, and now says so.
     // Note `navHrefs: []` — Documents has no surface of its own. Its one
@@ -217,8 +253,18 @@ export function isModuleId(v: string): v is ModuleId {
 //
 // The fix is not to rename the prefixes (they are a published API surface and
 // files-knowledge.ts records why the namespace is what it is). It is to SCOPE
-// each module's gate to its own namespace, deriving the exclusions from this
+// each module's gate to the paths it OWNS, deriving the boundary from this
 // registry so there is no parallel list to drift.
+//
+// The boundary is asymmetric, and it has to be. `/api/files` serves wildcard
+// routes built from user data (`/api/files/:filePath(*)/editor-session` and
+// its comments/citations/tags siblings), so a Nextcloud file under a folder
+// named `knowledge` or `docs` produces a FILES request that lands inside a
+// SIBLING's namespace. Splitting on the prefix alone would therefore move real
+// Nextcloud file operations onto the wrong toggle in BOTH directions. So:
+//
+//   nested module   → owns its declared `ownedPaths`, exactly, nothing else
+//   enclosing module → owns its whole sub-tree MINUS those paths
 
 /**
  * Does `path` fall under `prefix` by Express's `app.use` rules? Matches on a
@@ -236,12 +282,14 @@ export function pathIsUnder(path: string, prefix: string): boolean {
 }
 
 /**
- * Prefixes owned by OTHER modules that sit strictly inside `prefix` — the set
- * a gate mounted at `prefix` for `moduleId` must NOT fire on. Sorted for a
- * stable, assertable order.
+ * Prefixes owned by OTHER modules that sit strictly inside `prefix`. Sorted
+ * for a stable, assertable order.
  *
  * Only FOREIGN nesting counts. A module nesting its own prefixes inside each
  * other is harmless: the same gate would run either way.
+ *
+ * This is the NESTING query (which namespaces collide), not the ownership
+ * answer — see `foreignOwnedPaths` for the set a gate must skip.
  */
 export function foreignSubPrefixes(moduleId: ModuleId, prefix: string): string[] {
   const out: string[] = [];
@@ -252,6 +300,73 @@ export function foreignSubPrefixes(moduleId: ModuleId, prefix: string): string[]
     }
   }
   return out.sort();
+}
+
+/**
+ * Canonical form for comparing a request path against a declared path.
+ *
+ * Express's default routing is case-INSENSITIVE and non-strict about a
+ * trailing slash, so `/API/Files/Knowledge/Recent/` reaches the same handler
+ * as `/api/files/knowledge/recent`. The gate scoping has to agree with the
+ * router it guards, or the two disagree on who owns a URL.
+ *
+ * Lower-casing opens nothing: the enclosing module's wildcard routes all carry
+ * a trailing ACTION segment (`…/editor-session`), so no real files request can
+ * fold onto a nested module's declared path.
+ */
+export function normalizeGatePath(path: string): string {
+  const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  return (trimmed.length === 0 ? "/" : trimmed).toLowerCase();
+}
+
+/**
+ * The EXACT paths inside `prefix` that belong to a different module — the set
+ * a gate mounted at `prefix` for `moduleId` must NOT fire on. Normalized and
+ * sorted.
+ *
+ * Deliberately NOT "every path under a sibling's prefix". A sibling nested
+ * inside a wildcard-serving module owns its declared routes and nothing more;
+ * everything else under its prefix is the enclosing module's data. A nested
+ * module with no `ownedPaths` yields nothing here — the enclosing gate keeps
+ * the whole sub-tree, which is the fail-closed direction (the registry's
+ * invariant test is what makes that loud rather than silent).
+ */
+export function foreignOwnedPaths(moduleId: ModuleId, prefix: string): string[] {
+  const out = new Set<string>();
+  for (const def of MODULES) {
+    if (def.id === moduleId) continue;
+    if (!def.routePrefixes.some((p) => p.startsWith(`${prefix}/`))) continue;
+    for (const owned of def.ownedPaths ?? []) {
+      if (pathIsUnder(owned, prefix)) out.add(normalizeGatePath(owned));
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * Which paths under `prefix` does `def`'s gate apply to? `null` = all of them
+ * (the common case: no nesting either way, so no scoping wrapper is needed).
+ *
+ * The one place the asymmetry above is expressed, so both gate layers and both
+ * axes cannot drift apart.
+ */
+export function gateScopeFor(
+  def: ModuleDef,
+  prefix: string,
+): ((fullPath: string) => boolean) | null {
+  if (def.ownedPaths !== undefined) {
+    const owned = new Set(
+      def.ownedPaths.filter((p) => pathIsUnder(p, prefix)).map(normalizeGatePath),
+    );
+    // A prefix with no declared paths under it is a registry mistake, not a
+    // licence to un-gate the prefix: fall back to gating all of it. The
+    // registry's invariant test is what turns this into a red build.
+    if (owned.size > 0) return (fullPath) => owned.has(normalizeGatePath(fullPath));
+  }
+  const foreign = foreignOwnedPaths(def.id, prefix);
+  if (foreign.length === 0) return null;
+  const excluded = new Set(foreign);
+  return (fullPath) => !excluded.has(normalizeGatePath(fullPath));
 }
 
 // ── WARP-1585: declared module dependencies ──────────────────────────────────

@@ -121,15 +121,18 @@ function appWith(opts: {
     createModuleGate(prismaWith(opts.disabledModules ?? []), CFG, 0),
     async () => grants(opts.features),
   );
-  // `/api/files/spaces`   — files.ts
-  // `/api/files/knowledge/recent` — files-knowledge.ts
-  // `/api/files/docs/status`      — files.ts (the docs module's only prefix)
-  // `/api/files/a/b/editor-session` — files.ts; nested but NOT a foreign
-  //   prefix, so it must keep the FILES gate.
+  // The REAL route shapes, in the REAL registration order (files.ts registers
+  // `/files/docs/status` before the `:filePath(*)` wildcard):
+  //   `/api/files/spaces`             — files.ts
+  //   `/api/files/knowledge/recent`   — files-knowledge.ts (its only 2 routes)
+  //   `/api/files/docs/status`        — files.ts (the docs module's only route)
+  //   `/api/files/:filePath(*)/…`     — files.ts; the wildcard's middle is a
+  //     USER-CHOSEN Nextcloud path, so it can spell a sibling's namespace.
   app.get("/api/files/knowledge/recent", (_q, res) => { res.json({ hit: "knowledge" }); });
   app.get("/api/files/docs/status", (_q, res) => { res.json({ hit: "docs" }); });
   app.get("/api/files/spaces", (_q, res) => { res.json({ hit: "files" }); });
-  app.get("/api/files/:p(*)/editor-session", (_q, res) => { res.json({ hit: "editor" }); });
+  app.get("/api/files/:filePath(*)/editor-session", (_q, res) => { res.json({ hit: "editor" }); });
+  app.get("/api/files/:filePath(*)/comments", (_q, res) => { res.json({ hit: "comments" }); });
   app.get("/api/cameras/list", (_q, res) => { res.json({ hit: "cameras" }); });
   return app;
 }
@@ -138,6 +141,12 @@ const KNOWLEDGE = "/api/files/knowledge/recent";
 const DOCS = "/api/files/docs/status";
 const FILES = "/api/files/spaces";
 const EDITOR = "/api/files/a/b/editor-session";
+// The same files.ts route, for a file the operator happened to store under a
+// folder called `knowledge` / `docs`. Same handler, same module — the URL just
+// lands inside a sibling's namespace, because its middle is user data.
+const EDITOR_IN_KNOWLEDGE = "/api/files/knowledge/q3-plan.docx/editor-session";
+const EDITOR_IN_DOCS = "/api/files/docs/q3-plan.docx/editor-session";
+const COMMENTS_IN_KNOWLEDGE = "/api/files/knowledge/q3-plan.docx/comments";
 
 beforeEach(() => {
   recordActivityMock.mockClear();
@@ -234,6 +243,73 @@ describe("layer 1 (workspace) — a box-wide Files toggle stops at Files", () =>
       features: [["files", "view"], ["docs", "view"]],
     });
     expect((await request(app).get(DOCS)).status).toBe(404);
+  });
+});
+
+describe("a nested namespace does not annex the enclosing module's data paths", () => {
+  // Review finding on the first cut of this fix. Scoping the files gate by
+  // PREFIX released everything under `/api/files/knowledge/*` and
+  // `/api/files/docs/*` to the siblings — but `/api/files` serves wildcard
+  // routes whose middle is a user-chosen Nextcloud path
+  // (`/api/files/:filePath(*)/editor-session`, `…/comments`, `…/citations`,
+  // `…/tags`). A file stored under a folder called `knowledge` therefore
+  // produces a FILES request inside the KNOWLEDGE namespace, and the release
+  // moved it onto the wrong toggle in both directions.
+  //
+  // The boundary is by PATH: a nested module owns its declared routes
+  // (registry `ownedPaths`), the enclosing module keeps the rest.
+
+  it("KNOWLEDGE alone cannot mint an editor session for a file under knowledge/", async () => {
+    // The privilege-escalation direction: this is a Nextcloud file operation,
+    // and `files` is the module that gates Nextcloud file operations.
+    const app = appWith({ features: [["knowledge", "view"]] });
+    expect((await request(app).get(EDITOR)).status).toBe(404); // control
+    const res = await request(app).get(EDITOR_IN_KNOWLEDGE);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "files" });
+    expect((await request(app).get(COMMENTS_IN_KNOWLEDGE)).status).toBe(404);
+  });
+
+  it("DOCS alone cannot mint an editor session for a file under docs/", async () => {
+    const app = appWith({ features: [["docs", "view"]] });
+    expect((await request(app).get(EDITOR_IN_DOCS)).status).toBe(404);
+  });
+
+  it("a box with Files OFF stops serving file operations under BOTH sibling namespaces", async () => {
+    // The workspace half. "Turn Files off" has to mean the Nextcloud surface
+    // is gone — not "gone unless the path starts with knowledge/".
+    const app = appWith({
+      disabledModules: ["files"],
+      features: [["files", "view"], ["knowledge", "view"], ["docs", "view"]],
+    });
+    expect((await request(app).get(EDITOR)).status).toBe(404);
+    expect((await request(app).get(EDITOR_IN_KNOWLEDGE)).status).toBe(404);
+    expect((await request(app).get(EDITOR_IN_DOCS)).status).toBe(404);
+    // …and Knowledge's OWN routes keep serving, which is the ticket.
+    expect((await request(app).get(KNOWLEDGE)).status).toBe(200);
+  });
+
+  it("a FILES holder keeps their own files even when stored under docs/ or knowledge/", async () => {
+    // The under-grant direction, which is just as dishonest: someone with a
+    // Files grant must not lose a file because of what they named its folder.
+    const app = appWith({ features: [["files", "view"]] });
+    expect((await request(app).get(EDITOR_IN_KNOWLEDGE)).status).toBe(200);
+    expect((await request(app).get(EDITOR_IN_DOCS)).status).toBe(200);
+    expect((await request(app).get(COMMENTS_IN_KNOWLEDGE)).status).toBe(200);
+    // …while the siblings' OWN routes stay narrowed to their own toggles.
+    expect((await request(app).get(KNOWLEDGE)).status).toBe(404);
+    expect((await request(app).get(DOCS)).status).toBe(404);
+  });
+
+  it("the boundary follows Express's own case/trailing-slash routing", async () => {
+    // `app.use` and the router both match case-insensitively and ignore a
+    // trailing slash, so the gate has to agree with the router it guards or
+    // the two disagree about who owns a URL.
+    const knowledgeOnly = appWith({ features: [["knowledge", "view"]] });
+    expect((await request(knowledgeOnly).get("/api/files/knowledge/recent/")).status).toBe(200);
+    expect((await request(knowledgeOnly).get("/api/files/KNOWLEDGE/Recent")).status).toBe(200);
+    const filesOnly = appWith({ features: [["files", "view"]] });
+    expect((await request(filesOnly).get("/api/files/knowledge/recent/")).status).toBe(404);
   });
 });
 
