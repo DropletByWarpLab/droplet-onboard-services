@@ -4516,10 +4516,42 @@ export async function bulkCopyFiles(
   return data.results;
 }
 
+/** Discriminator carried by `TrashUnsupportedError`. */
+export const TRASH_UNSUPPORTED = "TRASH_UNSUPPORTED";
+
+/**
+ * WARP-1555 — thrown by `fetchTrash` when the box's storage backend has no
+ * trashbin and the orchestrator answers 501.
+ *
+ * This used to resolve to `[]`, which rendered as "Trash is empty" — the one
+ * message you must never show a user whose deleted files are in fact gone
+ * for good. "Unsupported" is a distinct state and gets distinct copy.
+ */
+export class TrashUnsupportedError extends Error {
+  readonly code = TRASH_UNSUPPORTED;
+
+  constructor() {
+    super("This storage backend has no trash bin");
+    this.name = "TrashUnsupportedError";
+  }
+}
+
+/**
+ * Structural check rather than `instanceof`, so the guard still holds across
+ * module boundaries (mocked api modules, bundler duplicates).
+ */
+export function isTrashUnsupportedError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === TRASH_UNSUPPORTED
+  );
+}
+
 export async function fetchTrash(): Promise<TrashItemInfo[]> {
   const res = await authFetch(`${BASE}/api/files/trash`);
   if (!res.ok) {
-    if (res.status === 501) return [];
+    if (res.status === 501) throw new TrashUnsupportedError();
     throw new Error(`Failed to fetch trash: ${res.status}`);
   }
   const data = await res.json();

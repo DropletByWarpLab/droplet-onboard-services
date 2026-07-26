@@ -2,12 +2,23 @@
 
 import { Thumbnail } from "./Thumbnail";
 import { StarButton } from "./StarButton";
-import { Download, X, type LucideIcon } from "lucide-react";
+import { Download, X, AlertTriangle, type LucideIcon } from "lucide-react";
 import type { FileEntryInfo } from "@/lib/types";
 
 interface FileListSimpleProps {
   files: FileEntryInfo[];
   isLoading: boolean;
+  /**
+   * WARP-1555 — the fetch error from the owning hook (`useFavorites`,
+   * `useRecents`, …). When set, the list renders a first-class error
+   * state instead of the empty state: "we failed to load your data" and
+   * "you have nothing here" are different facts and must look different.
+   */
+  error?: unknown;
+  errorTitle?: string;
+  errorDescription?: string;
+  /** Re-runs the fetch. Pass the hook's `refresh` to get a retry button. */
+  onRetry?: () => void;
   emptyIcon?: LucideIcon;
   emptyTitle?: string;
   emptyDescription?: string;
@@ -49,6 +60,10 @@ function formatDate(iso: string): string {
 export function FileListSimple({
   files,
   isLoading,
+  error,
+  errorTitle = "We couldn't load this list",
+  errorDescription = "The box didn't answer when we asked for these files. Nothing has been changed — try again in a moment.",
+  onRetry,
   emptyIcon: EmptyIcon,
   emptyTitle = "Nothing here yet",
   emptyDescription,
@@ -60,6 +75,39 @@ export function FileListSimple({
   removeTooltip,
   onStarChanged,
 }: FileListSimpleProps) {
+  /*
+    WARP-1555: the error branch is checked BEFORE `isLoading` on purpose.
+    SWR flips `isLoading` back on for every backoff retry while `data` is
+    still undefined, so a loading-first order would flap the user between
+    "Loading…" and the failure. It is gated on an empty list so a failed
+    background poll never wipes rows we already have on screen.
+    role="alert" because the failure lands asynchronously, after the page
+    has already rendered (same reasoning as the main Files page).
+  */
+  if (error && files.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <AlertTriangle size={24} />
+          </span>
+          <p className="eh">{errorTitle}</p>
+          <p style={{ maxWidth: "22rem", fontSize: "13px" }}>{errorDescription}</p>
+          {onRetry && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={onRetry}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading && files.length === 0) {
     return (
       <div
