@@ -398,6 +398,46 @@ export function createVoiceRouter(): Router {
     });
   });
 
+  // ── WARP-1599: the voice kill switch ──
+
+  router.post("/voice/enabled", guard, async (req: Request, res) => {
+    // Strict boolean, no coercion. voice-io's own model is StrictBool
+    // precisely so a string "false" can never silence the box by
+    // accident; the proxy has to agree with it, or the same request
+    // would mean two different things depending on which layer read it.
+    // Rejecting here also means a malformed body never reaches the box.
+    const enabled: unknown = req.body?.enabled;
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: "invalid_enabled" });
+      return;
+    }
+    // Default read timeout: the toggle persists a small file and then
+    // starts or drops the pipeline — no capture window to wait on. A
+    // concurrent toggle's 409 (voice-io's non-blocking lock) relays
+    // verbatim like any other upstream status.
+    const status = await proxy(res, "POST", "/voice/enabled", { enabled });
+    // Silencing the household assistant is the single most consequential
+    // thing an admin can do to this surface — it leaves a row so nobody
+    // is left wondering why Droplet stopped answering. Only on success:
+    // a 409/422/503 changed nothing on the box, so a row would be a lie.
+    // Fire-and-forget AFTER the response is committed — an audit hiccup
+    // must never turn a committed toggle into an error (recordActivity
+    // swallows recorder failures).
+    if (status >= 200 && status < 300) {
+      void recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "mic",
+        what: enabled ? "Voice turned on" : "Voice turned off",
+        sub: enabled
+          ? "Droplet is listening for the wake word again"
+          : "Droplet stopped listening — the wake word is off until voice is turned back on",
+        refs: { surface: "voice" },
+        actor: actorFromRequest(req),
+      });
+    }
+  });
+
   // ── WARP-1058: voice-io → activity-chain event bridge ──
 
   router.post(
