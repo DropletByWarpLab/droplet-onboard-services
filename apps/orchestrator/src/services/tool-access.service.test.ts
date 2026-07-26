@@ -365,13 +365,21 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     // Here it means "we do not know who is asking", which must never widen.
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(null), null),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "no_principal" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "no_principal",
+    });
   });
 
   it("DENIES a principal whose row no longer exists", async () => {
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(null), "ghost"),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_missing" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "user_missing",
+    });
   });
 
   it("DENIES a deactivated principal even at owner tier", async () => {
@@ -385,13 +393,21 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_deactivated" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "user_deactivated",
+    });
   });
 
   it("DENIES when the row read throws", async () => {
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(new Error("db down")), "u1"),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "read_failed" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "read_failed",
+    });
   });
 
   it("bypasses for an ACTIVE owner — row-derived, no §3 resolve", async () => {
@@ -405,11 +421,17 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
-  it("does not narrow a role-less person — today's world, bit-for-bit", async () => {
+  it("applies NO §3 narrowing to a role-less person, but still reports the tier", async () => {
+    // `scope: null` means "axis B does not narrow this person" — NOT "this
+    // person may run anything". WARP-1621: the ADR-004 write tier is a
+    // separate axis the caller applies on top, so the ROW's role travels with
+    // the scope. Without `tier` here a family-owned schedule fired write tools
+    // unattended, because a null scope reads as "unrestricted" to a caller
+    // that has nothing else to go on.
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
@@ -420,7 +442,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 

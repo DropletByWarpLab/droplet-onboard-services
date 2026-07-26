@@ -1,5 +1,27 @@
 /**
- * WARP-1529 / ADR-032 §3 axis d (RBAC v2 T5) — per-role tool-domain narrowing.
+ * The one place that answers "may this principal invoke this tool".
+ *
+ * TWO independent narrowing axes live here, and a tool must clear BOTH:
+ *
+ *   A. ADR-004 — the coarse WRITE-TIER gate. Non-privileged tiers
+ *      (family/guest/service) lose every `requiresWrite` tool outright,
+ *      regardless of any AccessRole. Shipped long before RBAC v2; it is what
+ *      chat has always enforced via `narrowAllowedToolsForRole`.
+ *   B. WARP-1529 / ADR-032 §3 axis d (RBAC v2 T5) — per-role tool-domain
+ *      narrowing, for the people who actually hold an AccessRole.
+ *
+ * Neither is a superset of the other. (A) catches the role-less user (B)
+ * deliberately skips — which is every user on every box in the field today.
+ * (B) catches a privileged tier whose role was never granted the domain.
+ * WARP-1621 moved (A) here, out of routes/llm.ts, because the ToolSpec run
+ * path could not reach it there and so enforced only (B): a `family` user
+ * pressed Run on a spec calling `control_device` and it fired, while the same
+ * tool was stripped from their chat turn before the model saw it. A second
+ * copy of a tool filter is exactly how two surfaces come to disagree, so
+ * `narrowAllowedToolsForRole` now DELEGATES to this file rather than owning
+ * its own predicate.
+ *
+ * ── axis B (§3) in detail ──────────────────────────────────────────
  *
  * ONE predicate, TWO enforcement points:
  *
@@ -80,7 +102,7 @@
  * axis runs off the row, and a tool needs to clear both.
  */
 import type { PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOLS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -120,6 +142,80 @@ export const DENY_ALL_TOOL_SCOPE: ToolAccessScope = Object.freeze({
 /** Tiers that keep write tools at all (the shipped ADR-004 write filter). */
 function tierKeepsWriteTools(tier: Role | string | undefined): boolean {
   return tier === "owner" || tier === "admin";
+}
+
+// ── axis A: the ADR-004 coarse write-tier gate ─────────────────────
+
+/**
+ * Which tool names require the caller to be owner/admin. Read-only tools
+ * (list_*, get_*, search_*) are fine for any authenticated user; write tools
+ * (block/unblock/accept/scan, file mutations, device control) must be gated
+ * because the LLM is driven by user-controlled prompt text and will happily
+ * call them on request — and, since WARP-462, because a ToolSpec is a stored
+ * program a non-privileged user can fire with one button.
+ *
+ * Derived directly from each tool's `requiresWrite` boolean in
+ * `@droplet/tools-core` (WARP-104) so gate behaviour can never drift from
+ * per-tool intent: adding a write tool to the registry automatically includes
+ * it here. Legacy aliases `block_device` / `unblock_device` are not registered
+ * in tools-core — callers must use the canonical
+ * `block_network_device` / `unblock_network_device` names.
+ *
+ * Moved here from routes/llm.ts by WARP-1621: it was unreachable from the
+ * ToolSpec surfaces while it lived inside a route module.
+ */
+export const WRITE_TOOLS: ReadonlySet<string> = new Set(
+  Array.from(TOOLS.values())
+    .filter((t) => t.requiresWrite)
+    .map((t) => t.name),
+);
+
+/**
+ * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
+ * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
+ * the one documented, scoped exception (ADR-004 amendment, approved
+ * 2026-07-18): voice may drive the smart-home CONTROL tools so "hey Droplet,
+ * turn off the kitchen lights" works. Every OTHER service principal
+ * (email-indexer, etc.) stays read-only — callers gate on the exact principal
+ * id via `isVoicePrincipal`, not the coarse `service` role. Locks are NOT in
+ * this set at the tool level, but a `control_device` lock command is Tier-2
+ * (confirmation_required) and the voice flow can't complete a confirmation, so
+ * locks stay refused via voice until per-speaker enrollment (WARP-1056)
+ * provides an identity to gate on.
+ *
+ * Deliberately just `control_device` — NOT `run_scene`: a routine can contain
+ * a lock command, which would bypass the per-command Tier-2 lock refusal, so
+ * voice-run scenes wait on scene-level lock analysis (follow-up).
+ *
+ * Never true on a ToolSpec surface: the runs route's `requireRole` excludes
+ * `service`, and a scheduled fire's attributed principal must own a User row,
+ * which no `_service:*` id does.
+ */
+export const VOICE_WRITE_TOOLS: ReadonlySet<string> = new Set(["control_device"]);
+
+/**
+ * The ADR-004 privileged tiers. Threat model: the LLM is steered by
+ * user-controlled prompt text, and a ToolSpec is a stored program with a Run
+ * button; only owner/admin may touch write tools.
+ */
+export function isPrivilegedRole(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+/**
+ * Axis A alone: may this TIER invoke `name` at all, ignoring AccessRoles?
+ *
+ * Deliberately name-only and args-free — which is what makes a whole-list
+ * PRE-FLIGHT complete for this axis (unlike the §3 lock rule, which needs
+ * resolved args and can only be decided at dispatch).
+ */
+export function toolAllowedForTier(
+  name: string,
+  tier: string | undefined,
+  isVoice = false,
+): boolean {
+  if (isPrivilegedRole(tier)) return true;
+  return !WRITE_TOOLS.has(name) || (isVoice && VOICE_WRITE_TOOLS.has(name));
 }
 
 // ── the shared predicate ───────────────────────────────────────────
@@ -167,6 +263,85 @@ export function firstForbiddenToolName(
   if (!scope) return null;
   for (const name of names) {
     if (!toolAllowedInScope(name, scope)) return name;
+  }
+  return null;
+}
+
+// ── A ∧ B: the composed answer every surface asks ──────────────────
+
+/** Which axis refused. Operator-facing: "your tier has no write tools at all"
+ *  and "your access role was never granted this domain" have different fixes,
+ *  and an operator chasing a stopped automation needs to know which. */
+export type ToolDenialAxis = "write_tier" | "role_grant";
+
+/**
+ * WARP-1621 — the whole question, in one call: may `tier` (axis A), holding
+ * `scope` (axis B), invoke `name`?
+ *
+ * `scope === null` means axis B does not apply — the §3 owner bypass, service
+ * principals, and everyone with no AccessRole. It does NOT mean "no
+ * narrowing": axis A still runs, which is precisely the layer the ToolSpec
+ * surfaces were missing.
+ */
+export function toolAllowedForPrincipal(
+  name: string,
+  tier: string | undefined,
+  scope: ToolAccessScope | null | undefined,
+  isVoice = false,
+): boolean {
+  if (!toolAllowedForTier(name, tier, isVoice)) return false;
+  return !scope || toolAllowedInScope(name, scope);
+}
+
+/**
+ * Filter a candidate tool-name list to what this principal may invoke (order
+ * kept). The catalog-build half of enforcement; `routes/llm.ts`'s
+ * `narrowAllowedToolsForRole` is a thin wrapper over exactly this.
+ */
+export function narrowToolNamesForPrincipal(
+  names: readonly string[],
+  tier: string | undefined,
+  scope: ToolAccessScope | null | undefined,
+  isVoice = false,
+): string[] {
+  return names.filter((n) => toolAllowedForPrincipal(n, tier, scope, isVoice));
+}
+
+/**
+ * The whole-list PRE-FLIGHT across BOTH axes: the first name this principal
+ * may not invoke, with the axis that refused it — or `null` when every name is
+ * in reach.
+ *
+ * Used by the ToolSpec surfaces, which (unlike a chat turn) know the entire
+ * call sequence before the first dispatch. Checking up front is what lets a
+ * forbidden spec be refused WHOLE instead of half-executing up to the
+ * offending step — a half-applied automation is worse than a refused one, and
+ * the caller cannot undo it.
+ *
+ * Axis A is checked first per name, so a role-less caller (no scope at all)
+ * still gets a precise reason rather than a bare "forbidden".
+ *
+ * NAME-ONLY by construction, as both axes' name rules are. The args-dependent
+ * rule (§3 `locks`) cannot be decided here because a step's args may carry a
+ * `${prev}` reference that only resolves once the previous step has returned —
+ * so `lockOperationDenied` stays where it can see resolved args, at dispatch.
+ * A spec's tool NAMES are static (`parseCallStep` requires a literal string
+ * and `${prev}` substitution never touches them), so for the name axes this
+ * pre-flight is complete, not merely a courtesy.
+ */
+export function firstToolDeniedForPrincipal(
+  names: readonly string[],
+  tier: string | undefined,
+  scope: ToolAccessScope | null | undefined,
+  isVoice = false,
+): { tool: string; axis: ToolDenialAxis } | null {
+  for (const name of names) {
+    if (!toolAllowedForTier(name, tier, isVoice)) {
+      return { tool: name, axis: "write_tier" };
+    }
+    if (scope && !toolAllowedInScope(name, scope)) {
+      return { tool: name, axis: "role_grant" };
+    }
   }
   return null;
 }
@@ -370,6 +545,15 @@ export interface AttributedToolAccess {
    * principal yields {@link DENY_ALL_TOOL_SCOPE} with `unresolved` set.
    */
   scope: ToolAccessScope | null;
+  /**
+   * WARP-1621 — the ADR-004 tier this identity acts at, read off the User ROW
+   * (there is no token to trust on this path). `null` when `unresolved` is
+   * set: an identity we could not establish has no tier, and the caller must
+   * refuse on `unresolved` rather than infer one. Needed because `scope`
+   * alone cannot express axis A — a role-less family creator resolves to
+   * `scope: null`, which means "no §3 narrowing", NOT "no narrowing".
+   */
+  tier: string | null;
   /** Non-null ⇔ `scope` is DENY_ALL because the identity could not be trusted. */
   unresolved: AttributionFailure | null;
 }
@@ -407,6 +591,7 @@ export async function resolveAttributedToolAccess(
 ): Promise<AttributedToolAccess> {
   const deny = (unresolved: AttributionFailure): AttributedToolAccess => ({
     scope: DENY_ALL_TOOL_SCOPE,
+    tier: null,
     unresolved,
   });
 
@@ -438,7 +623,11 @@ export async function resolveAttributedToolAccess(
     return deny("user_deactivated");
   }
   // §3 owner bypass, read off the row. Service rows never reach here.
-  if (row.role === "owner") return { scope: null, unresolved: null };
+  if (row.role === "owner") return { scope: null, tier: "owner", unresolved: null };
 
-  return { scope: await composeScopeForRow(userId, row), unresolved: null };
+  return {
+    scope: await composeScopeForRow(userId, row),
+    tier: row.role,
+    unresolved: null,
+  };
 }

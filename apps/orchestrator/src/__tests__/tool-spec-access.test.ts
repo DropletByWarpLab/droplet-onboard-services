@@ -285,10 +285,20 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
-  it("leaves a role-less caller's reach untouched — every box today, bit-for-bit", async () => {
+  it("applies NO §3 narrowing to a role-less caller — every box today", async () => {
+    // The non-regression THIS ticket owns: a person nobody assigned an
+    // AccessRole to must not be narrowed by the §3 axis, and must not even
+    // reach the §3 resolver. T5 silently dropping tools from every user on
+    // every deployed box would have been a capability regression.
+    //
+    // The tool here is a READ tool on purpose. WARP-1621 later found that the
+    // separate ADR-004 WRITE-tier axis was missing from this route entirely,
+    // so a role-less `family` caller could fire `control_device` — that gap,
+    // and its fix, are pinned in tool-spec-write-tier.test.ts. The claim this
+    // test makes is about the §3 axis only, which is all WARP-1580 changed.
     const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
     const prisma = createPrismaMock({
-      specs: [spec()],
+      specs: [spec({ steps: [step(0, ALLOWED_TOOL, { path: "/" })] })],
       users: [
         {
           id: "user-family",
@@ -304,10 +314,7 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     const res = await request(app).post("/api/tools/nightly-recap/runs");
 
     expect(res.status).toBe(200);
-    expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
-      node_id: "n1",
-      command: "turn_on",
-    });
+    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
     // The §3 resolver is not even consulted on the role-less path.
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });

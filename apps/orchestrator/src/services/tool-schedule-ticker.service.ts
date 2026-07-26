@@ -11,9 +11,10 @@
  *      them. Per the §7 contract: "write-tier specs that aren't
  *      `reversible:true && !writes` emit a confirm_action card and
  *      pause until accept" — v1 pause = skip + audit + advance.
- *   3. ACCESS gate (WARP-1580) — resolves the spec's ATTRIBUTED principal
- *      and skips the fire when that identity may not invoke the spec's
- *      tools. See "WHOSE ACCESS" below.
+ *   3. ACCESS gate (WARP-1580, WARP-1621) — resolves the spec's ATTRIBUTED
+ *      principal and skips the fire when that identity may not invoke the
+ *      spec's tools, on EITHER axis: the ADR-004 write tier or its §3
+ *      per-role tool domains. See "WHOSE ACCESS" below.
  *   4. Otherwise dispatches via the imperative walker (WARP-462's
  *      `runToolSpec`) with `triggeredBy="scheduler"`.
  *   5. Advances `nextFireAt` via the RRULE parser. Malformed or
@@ -63,6 +64,17 @@
  * a failed read. The fire is then skipped, audited with the reason, and
  * `nextFireAt` still advances so a re-grant resumes the cadence cleanly
  * (the same skip-and-advance posture as the writes/!reversible gate).
+ *
+ * ── WHICH GATE (WARP-1621) ─────────────────────────────────────────
+ *
+ * A resolved creator still has TWO independent gates to clear, and a scope
+ * alone cannot express the first: a creator with no AccessRole resolves to
+ * `scope: null`, which means "axis B does not narrow this person", NOT "this
+ * person may run anything". So the attributed TIER is carried alongside the
+ * scope and the coarse ADR-004 write filter is applied to it — otherwise a
+ * `family`-owned spec calling `control_device` fires unattended every morning
+ * at reach the same person's chat turn never had. Since custom roles are new,
+ * a role-less creator is the normal case on a deployed box, not an edge one.
  */
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -71,7 +83,7 @@ import {
   type StepDispatcher,
 } from "./tool-spec-runner.service.js";
 import {
-  firstForbiddenToolName,
+  firstToolDeniedForPrincipal,
   resolveAttributedToolAccess,
 } from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
@@ -178,13 +190,23 @@ export async function tickToolSchedules(
       continue;
     }
 
-    // WARP-1580 access gate — see "WHOSE ACCESS" in the file header.
+    // Access gate — see "WHOSE ACCESS" in the file header. Both axes, in one
+    // pre-flight, against the SAME predicate chat and run-now use:
+    //   A. ADR-004 write tier (WARP-1621), read off the creator's User row.
+    //   B. WARP-1580 / §3 per-role tool domains.
+    // Axis A matters most here precisely because axis B skips role-less
+    // creators: without it a family-owned spec calling `control_device` fired
+    // every morning at reach the same person's chat turn never had.
     const attributed = await resolveAttributedToolAccess(prisma, spec.ownerId);
-    const forbiddenTool = firstForbiddenToolName(
-      plannedToolNames(spec.steps),
-      attributed.scope,
-    );
-    if (attributed.unresolved !== null || forbiddenTool !== null) {
+    const denied =
+      attributed.unresolved !== null
+        ? null
+        : firstToolDeniedForPrincipal(
+            plannedToolNames(spec.steps),
+            attributed.tier ?? undefined,
+            attributed.scope,
+          );
+    if (attributed.unresolved !== null || denied !== null) {
       const reason = attributed.unresolved ?? "forbidden_tool_for_role";
       await recordActivity({
         kind: "tool_run",
@@ -193,19 +215,27 @@ export async function tickToolSchedules(
         what: "Scheduled run skipped (access)",
         actor: { type: "system" },
         sub:
-          attributed.unresolved !== null
+          denied === null
             ? `${spec.name} (no resolvable owner)`
-            : `${spec.name} (${forbiddenTool} not permitted for its owner)`,
+            : `${spec.name} (${denied.tool} not permitted for its owner)`,
         refs: {
           specId: spec.id,
           scheduleId: schedule.id,
           reason,
           ownerId: spec.ownerId,
-          ...(forbiddenTool !== null ? { tool: forbiddenTool } : {}),
+          // `axis` says WHICH gate refused — the coarse tier floor or a
+          // missing per-role grant. Same fix, very different remediation.
+          ...(denied !== null ? { tool: denied.tool, axis: denied.axis } : {}),
         },
       });
       logger.warn(
-        { specId: spec.id, scheduleId: schedule.id, reason, ownerId: spec.ownerId },
+        {
+          specId: spec.id,
+          scheduleId: schedule.id,
+          reason,
+          ...(denied !== null ? { axis: denied.axis } : {}),
+          ownerId: spec.ownerId,
+        },
         "scheduled run skipped on access",
       );
       await advanceOrDisable(prisma, schedule, now);
