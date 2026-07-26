@@ -64,6 +64,10 @@ import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
+  AccessPreconditionError,
+  isAccessPreconditionError,
+} from "../lib/access-precondition.js";
+import {
   RoleMutationRefusedError,
   SERIALIZABLE_TX,
   ASSIGNABLE_ROLES,
@@ -322,23 +326,6 @@ async function createRoleTx(
 
 function isForeignKeyError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2003";
-}
-
-/**
- * Route-level precondition failure raised from INSIDE a transaction (404 /
- * 409 outcomes that must be decided against transactionally-consistent
- * reads — review B2). Throwing rolls the transaction back; the route catch
- * maps `status`/`body` exactly like RoleMutationRefusedError. Kept local:
- * these are HTTP shapes, not guard rails.
- */
-class AccessPreconditionError extends Error {
-  constructor(
-    readonly status: number,
-    readonly body: Record<string, unknown>,
-  ) {
-    super(typeof body.error === "string" ? body.error : "Precondition failed");
-    this.name = "AccessPreconditionError";
-  }
 }
 
 const ROLE_IN_USE = {
@@ -945,15 +932,8 @@ export function createAccessRouter(prisma: PrismaClient): Router {
 
         await prisma.$transaction(async (tx) => {
           const role = await tx.accessRole.findUnique({ where: { id: req.params.id } });
-          if (!role) {
-            throw new AccessPreconditionError(404, { error: "Role not found" });
-          }
-          if (role.state === "archived") {
-            throw new AccessPreconditionError(409, {
-              error: "This role is archived — restore it before assigning people.",
-              code: "ACCESS_ROLE_ARCHIVED",
-            });
-          }
+          if (!role) throw AccessPreconditionError.roleNotFound();
+          if (role.state === "archived") throw AccessPreconditionError.roleArchived();
           startingPoint = role.startingPoint as AssignableRole;
           roleName = role.name;
 
@@ -971,7 +951,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           const foundIds = new Set(targets.map((t) => t.id));
           const missing = parsed.data.userIds.filter((id) => !foundIds.has(id));
           if (missing.length > 0) {
-            throw new AccessPreconditionError(404, { error: "User not found", missing });
+            throw AccessPreconditionError.userNotFound(missing);
           }
 
           changed = targets.filter(
@@ -1053,10 +1033,10 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // follows) — the UI's "Saved. Applying…" line keys off pending.
         res.json({ syncState: "pending" });
       } catch (err) {
-        if (err instanceof AccessPreconditionError) {
-          return res.status(err.status).json(err.body);
-        }
-        if (err instanceof RoleMutationRefusedError) {
+        // One shape for both: a precondition and a rail refusal are the same
+        // story to the caller — the transaction unwound, nothing was applied
+        // (WARP-1583).
+        if (isAccessPreconditionError(err) || err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
         next(err);

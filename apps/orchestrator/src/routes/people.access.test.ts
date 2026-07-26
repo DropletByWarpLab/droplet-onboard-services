@@ -55,6 +55,7 @@ vi.mock("../services/effective-access.service.js", () => ({
 
 import { createPeopleRouter } from "./people.js";
 import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
+import { AccessPreconditionError } from "../lib/access-precondition.js";
 import {
   createTransactionSeam,
   expectAllTransactionsAt,
@@ -327,6 +328,28 @@ describe("PATCH /api/people/:id/access", () => {
     const archived = await request(app).patch("/api/people/u1/access").send({ accessRoleId: "r-arch" });
     expect(archived.status).toBe(409);
     expect(archived.body.code).toBe("ACCESS_ROLE_ARCHIVED");
+  });
+
+  // WARP-1583: BYTE-identical to the bodies routes/access.ts answers on the
+  // sibling assign path, because both now come from the one definition. Two
+  // surfaces can reach the same row here, and hand-copied refusal copy
+  // drifting apart is exactly what WARP-1523 cost.
+  it("sources its precondition bodies from the shared definition", async () => {
+    const app = buildApp(createPrismaMock(seed));
+    const unknownRole = await request(app)
+      .patch("/api/people/u1/access")
+      .send({ accessRoleId: "nope" });
+    expect(unknownRole.body).toEqual(AccessPreconditionError.roleNotFound().toJSON());
+
+    const unknownUser = await request(app)
+      .patch("/api/people/ghost/access")
+      .send({ accessRoleId: "r1" });
+    expect(unknownUser.body).toEqual(AccessPreconditionError.userNotFound().toJSON());
+
+    const archived = await request(app)
+      .patch("/api/people/u1/access")
+      .send({ accessRoleId: "r-arch" });
+    expect(archived.body).toEqual(AccessPreconditionError.roleArchived().toJSON());
   });
 
   it("runs the T2 rails: self-action 409, owner target 403", async () => {

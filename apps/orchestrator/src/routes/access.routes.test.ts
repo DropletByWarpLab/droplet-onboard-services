@@ -54,6 +54,7 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 
 import { createAccessRouter } from "./access.js";
 import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
+import { AccessPreconditionError } from "../lib/access-precondition.js";
 import {
   createTransactionSeam,
   expectAllTransactionsAt,
@@ -1216,6 +1217,9 @@ describe("POST /api/access/roles/:id/assign", () => {
     const archived = await request(app).post("/api/access/roles/r2/assign").send({ userIds: ["u1"] });
     expect(archived.status).toBe(409);
     expect(archived.body.code).toBe("ACCESS_ROLE_ARCHIVED");
+    // WARP-1583 — byte-identical to what PATCH /api/people/:id/access
+    // answers; both surfaces read the one definition.
+    expect(archived.body).toEqual(AccessPreconditionError.roleArchived().toJSON());
     const self = await request(app).post("/api/access/roles/r1/assign").send({ userIds: ["actor-1"] });
     expect(self.status).toBe(409);
     expect(self.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
