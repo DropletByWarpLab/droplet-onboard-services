@@ -362,6 +362,105 @@ describe("effective-access — workspace-module intersection", () => {
   });
 });
 
+// ── WARP-1585 — declared module dependencies (`ModuleDef.requires`) ──
+//
+// `docs` has no surface of its own (registry `navHrefs: []`): the substantive
+// act is minting an editor session for a Nextcloud path, which lives on
+// `/api/files/:filePath(*)/editor-session` and is gated by `files`. So a
+// Documents grant with no Files grant grants nothing reachable — which is
+// exactly the dishonest direction this ticket exists to close. The resolver
+// applies the registry's dependency closure right after the workspace
+// intersection, so the RESOLVED set never claims a capability the person
+// can't actually use, and `effectiveForUser` stays truthful for the dashboard.
+//
+// `knowledge` deliberately has NO such edge: it reads FileContentChunk rows
+// out of the orchestrator's own Postgres (sources `nextcloud` AND `brain`)
+// behind FILE_INDEXER_URL, so it stands on its own and must survive a
+// files-less grant untouched.
+describe("effective-access — declared module dependencies (WARP-1585)", () => {
+  it("drops docs when the person holds no files grant", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-2",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "docs", level: "manage" },
+              { moduleId: "knowledge", level: "view" },
+            ],
+          }),
+        },
+      }),
+    );
+    expect(featureLevel(res, "docs")).toBeUndefined();
+    // …and knowledge, which declares no parent, is untouched.
+    expect(featureLevel(res, "knowledge")).toBe("view");
+  });
+
+  it("keeps docs when files is held alongside it", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-3",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "view" },
+              { moduleId: "docs", level: "act" },
+            ],
+          }),
+        },
+      }),
+    );
+    expect(featureLevel(res, "files")).toBe("view");
+    expect(featureLevel(res, "docs")).toBe("act");
+  });
+
+  it("an ALLOW exception cannot resurrect docs without files", () => {
+    // Same rule as the workspace intersection: exceptions widen within the
+    // model, they don't suspend it.
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-4",
+          role: "family",
+          accessRole: role({ featureGrants: [{ moduleId: "knowledge", level: "view" }] }),
+        },
+        exceptions: [{ id: "x", moduleId: "docs", effect: "allow", level: "manage" }],
+      }),
+    );
+    expect(featureLevel(res, "docs")).toBeUndefined();
+  });
+
+  it("a DENY exception on files also drops docs", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-5",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "manage" },
+              { moduleId: "docs", level: "manage" },
+            ],
+          }),
+        },
+        exceptions: [{ id: "x", moduleId: "files", effect: "deny", level: null }],
+      }),
+    );
+    expect(featureLevel(res, "files")).toBeUndefined();
+    expect(featureLevel(res, "docs")).toBeUndefined();
+  });
+
+  it("the owner bypass is outside the dependency closure, like every other intersection", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "o", role: "owner", accessRole: null } }),
+    );
+    expect(featureLevel(res, "docs")).toBe("manage");
+  });
+});
+
 describe("effective-access — locks gate", () => {
   it("role.mayOperateLocks AND smart_home effective", () => {
     const withLocks = (grants: Array<{ moduleId: ModuleId; level: "view" | "act" | "manage" }>, may = true) =>

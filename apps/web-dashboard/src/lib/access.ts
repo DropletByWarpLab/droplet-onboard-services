@@ -107,6 +107,21 @@ export interface AccessFeatureDef {
   locks?: boolean;
   /** Verbatim floor reason for admin-floored features (§12 pattern). */
   floorReason?: string;
+  /**
+   * WARP-1585 — the module this feature cannot function without. Mirrors the
+   * orchestrator registry's `ModuleDef.requires`, which is the authority: the
+   * §3 resolver drops a feature whose parent the person does not hold, and
+   * this copy exists only so the panel can say so BEFORE they save.
+   *
+   * A dependency is not a grouping. The bar is that the child has no reachable
+   * surface without the parent — `docs` clears it (its editor sessions are
+   * minted on Nextcloud paths, and its only entry point is the Files preview
+   * pane); `knowledge` deliberately does NOT (it reads the box's own chunk
+   * store behind the file indexer, and has its own page).
+   */
+  requires?: AccessModuleId;
+  /** The honest reason shown on the blocked row — never a bare "unavailable". */
+  requiresReason?: string;
   levels: AccessLevelDef[];
 }
 
@@ -281,6 +296,8 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     moduleId: "docs",
     label: "Documents",
     description: "Shared documents and editing",
+    requires: "files",
+    requiresReason: ACCESS_COPY.docsNeedsFiles,
     levels: [
       { value: "view", label: "View", grants: "Open and read documents" },
       {
@@ -468,6 +485,28 @@ export interface FeatureDraftEntry {
 }
 
 export type FeatureDraft = Record<string, FeatureDraftEntry>;
+
+/**
+ * WARP-1585 — is `feature` blocked because its declared parent is off in this
+ * draft? Returns the honest reason, or null when nothing blocks it.
+ *
+ * READ-ONLY on the draft, and that is the point. Blocking is a rendering
+ * decision, never an edit: the T8 convention is that a draft never re-emits a
+ * DERIVED value for an axis the operator did not touch, and silently clearing
+ * the Documents grant when Files goes off would revoke a second thing on their
+ * behalf — which is the exact failure this ticket exists to remove. The
+ * operator's Documents intent survives the round-trip, the row explains why it
+ * isn't in effect, and the §3 resolver is the authority that enforces it.
+ */
+export function dependencyBlockedReason(
+  features: FeatureDraft,
+  feature: AccessFeatureDef,
+): string | null {
+  const parent = feature.requires;
+  if (!parent) return null;
+  if (features[parent]?.on) return null;
+  return feature.requiresReason ?? null;
+}
 
 export interface RoleUsageDraft {
   storageValue: string;

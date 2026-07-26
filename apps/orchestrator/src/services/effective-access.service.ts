@@ -93,7 +93,10 @@ import {
   type ConnectorLevel,
   type FeatureLevel,
 } from "./access-catalog.js";
-import type { AvailabilityConfig } from "../modules/module-registry.js";
+import {
+  satisfiedModuleIds,
+  type AvailabilityConfig,
+} from "../modules/module-registry.js";
 import { getEffectiveModuleIds } from "./modules.service.js";
 
 // ── shapes ─────────────────────────────────────────────────────────
@@ -278,6 +281,28 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
   for (const moduleId of [...levelByModule.keys()]) {
     if (!isGateableModuleId(moduleId)) continue;
     if (!inputs.workspaceModuleIds.has(moduleId)) levelByModule.delete(moduleId);
+  }
+  // WARP-1585 — the PER-PERSON half of the registry's declared dependencies.
+  //
+  // A genuinely separate narrowing from the workspace intersection above, and
+  // that is why it needs its own application rather than riding along: the box
+  // can have Files on while THIS PERSON holds no Files grant, and `docs`
+  // resolving in that state would claim a capability they cannot use. Docs has
+  // no surface of its own — its editor sessions are minted on
+  // `/api/files/:filePath(*)/editor-session`, which `files` gates — so a
+  // Documents grant without a Files grant reaches nothing.
+  //
+  // It runs AFTER exceptions for the same reason the workspace intersection
+  // does: an exception widens within the model, it does not suspend it. An
+  // `allow` on docs cannot resurrect it without files, and a `deny` on files
+  // takes docs with it.
+  //
+  // The rule itself lives once, in the registry (`satisfiedModuleIds`); this
+  // is one of its two call sites, not a second derivation. `knowledge`
+  // declares no parent and is deliberately untouched here.
+  const satisfied = satisfiedModuleIds(new Set(levelByModule.keys()));
+  for (const moduleId of [...levelByModule.keys()]) {
+    if (!satisfied.has(moduleId)) levelByModule.delete(moduleId);
   }
   const features = [...levelByModule.entries()].map(([moduleId, level]) => ({
     moduleId,

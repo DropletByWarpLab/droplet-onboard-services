@@ -53,6 +53,7 @@ import {
   TIER_RANK,
   TOOL_DOMAIN_GROUPS,
   connectorLevelsFor,
+  dependencyBlockedReason,
   draftToRolePayload,
   refloorFeatures,
   slugifyRoleName,
@@ -368,7 +369,13 @@ export function RoleBuilderSheet({
             </div>
             {ACCESS_FEATURES.map((feature) => {
               const entry = draft.features[feature.moduleId] ?? { on: false, level: "view" as const };
-              const on = feature.alwaysOn ? true : entry.on;
+              // WARP-1585 — a feature whose declared parent is off reads as OFF
+              // and says why, because that is what the box will enforce: the §3
+              // resolver drops it from the person's effective set. The DRAFT is
+              // untouched (see `dependencyBlockedReason`), so the operator's
+              // intent survives and restoring the parent restores the row.
+              const blockedReason = dependencyBlockedReason(draft.features, feature);
+              const on = feature.alwaysOn ? true : entry.on && !blockedReason;
               const Icon = FEATURE_ICON[feature.moduleId] ?? Home;
               return (
                 <div key={feature.moduleId} className="acc-feat" data-testid={`access-feature-${feature.moduleId}`}>
@@ -382,12 +389,29 @@ export function RoleBuilderSheet({
                     </span>
                     <AccessToggle
                       on={on}
-                      disabled={!!feature.alwaysOn}
-                      title={feature.alwaysOn ? feature.alwaysOnReason : undefined}
+                      disabled={!!feature.alwaysOn || !!blockedReason}
+                      title={feature.alwaysOn ? feature.alwaysOnReason : blockedReason ?? undefined}
                       ariaLabel={`Turn ${feature.label} ${on ? "off" : "on"}`}
                       onChange={() => setFeatureOn(feature.moduleId, !entry.on)}
                     />
                   </div>
+                  {/* Shown, never hidden — the packet's rule for every ceiling
+                      (§5.2: "the level is visible so the admin understands the
+                      ceiling, never hidden").
+                      Deliberately WITHOUT a padlock: the packet's icon
+                      vocabulary (§1) assigns `Lock` to "a floor-blocked
+                      control", and §13 asks for an icon + reason on exactly
+                      the floor-blocked and off-box cases. A dependency is
+                      neither — it is not a tier ceiling and the operator can
+                      clear it themselves by turning Files on. The matching
+                      precedent is §5.4's tool auto-off ("Turned off with
+                      {feature}."), which is text-only for the same reason, so
+                      this takes that treatment one level up.
+                      Source: shared_brain content/brand/handoffs/access/
+                      DESIGN-BRIEF.md §1 / §5.2 / §5.4 / §13. */}
+                  {blockedReason && (
+                    <p className="acc-feat-reason">{blockedReason}</p>
+                  )}
                   {on && !feature.alwaysOn && (
                     feature.filesReference ? (
                       <button type="button" className="acc-files-ref" onClick={onOpenDepartments}>

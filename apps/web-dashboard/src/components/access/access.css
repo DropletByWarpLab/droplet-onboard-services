@@ -260,6 +260,20 @@
   color: var(--text-muted);
   margin-top: 1px;
 }
+/* WARP-1585 — a feature blocked by its declared parent. Same 12px muted
+   register as `.acc-lvl-reason` and `.acc-tooldomain .tx small`, so a
+   dependency block reads as the same KIND of thing as the floor reason and
+   the tool auto-off note rather than announcing itself as a new state.
+   The row is NOT dimmed: the reason is the payload here, and `.acc-tooldomain
+   .off`'s 0.55 opacity would push it under the contrast floor just as the
+   ModuleRouteGuard's `label-tertiary` glyph did. Sits inside `.acc-feat`'s
+   10px column gap; `margin: 0` because the sheet has no `p` reset. */
+.acc-feat-reason {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
 
 /* level pills */
 .acc-levels {
