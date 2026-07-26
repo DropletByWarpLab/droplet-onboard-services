@@ -40,8 +40,8 @@ vi.mock("@/lib/friendly-errors", () => ({
     err instanceof Error ? err.message : "Something went wrong",
 }));
 
-import { createShare, fetchShareRecipients } from "@/lib/api";
-import { ShareDialog } from "./ShareDialog";
+import { createShare, updateShare, fetchShareRecipients } from "@/lib/api";
+import { ShareDialog, sendablePermissions } from "./ShareDialog";
 
 const RECIPIENTS: ShareRecipient[] = [
   { shareWith: "romain", displayName: "Romain", email: "romain@example.com" },
@@ -111,11 +111,13 @@ function share(overrides: Partial<ShareDetail> = {}): ShareDetail {
 
 const fetchRecipientsMock = fetchShareRecipients as unknown as ReturnType<typeof vi.fn>;
 const createShareMock = createShare as unknown as ReturnType<typeof vi.fn>;
+const updateShareMock = updateShare as unknown as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   fetchRecipientsMock.mockResolvedValue(RECIPIENTS);
   createShareMock.mockResolvedValue(makePersonShare());
+  updateShareMock.mockResolvedValue(undefined);
 });
 
 function renderDialog(props: Partial<React.ComponentProps<typeof ShareDialog>> = {}) {
@@ -146,7 +148,7 @@ describe("WARP-879 — ShareDialog internal sharing", () => {
     const romain = await screen.findByText("Romain");
     fireEvent.click(romain);
 
-    const createBtn = screen.getByRole("button", { name: /share|create/i });
+    const createBtn = screen.getByRole("button", { name: "Share" });
     fireEvent.click(createBtn);
 
     await waitFor(() => expect(createShareMock).toHaveBeenCalled());
@@ -197,7 +199,7 @@ describe("WARP-879 — ShareDialog internal sharing", () => {
   it("disables Create in Person mode until a recipient is chosen", async () => {
     renderDialog();
     await screen.findByText("Romain");
-    const createBtn = screen.getByRole("button", { name: /share|create/i });
+    const createBtn = screen.getByRole("button", { name: "Share" });
     expect(createBtn).toBeDisabled();
 
     fireEvent.click(screen.getByText("Romain"));
@@ -245,11 +247,22 @@ describe("ShareDialog — existing shares (WS-1 fast-follow)", () => {
  * target is a file (isDirectory falsy), and keeps the full mask for folders.
  */
 describe("WARP-1148/1149 — file shares never send CREATE/DELETE permission bits", () => {
-  it("Link mode + 'Full access' on a FILE sends permissions without CREATE|DELETE (19)", async () => {
+  // WARP-1601 renamed the file-side top level ("Full access" → "Can edit +
+  // reshare") because 31 is unrepresentable on a file. The masking contract is
+  // unchanged and still pinned below — it is now the last line of defence
+  // rather than the everyday path, so it is also unit-tested directly.
+  it("sendablePermissions strips CREATE|DELETE for a FILE and passes a FOLDER through", () => {
+    expect(sendablePermissions(31, false)).toBe(19);
+    expect(sendablePermissions(15, false)).toBe(3);
+    expect(sendablePermissions(31, true)).toBe(31);
+    expect(sendablePermissions(19, false)).toBe(19);
+  });
+
+  it("Link mode + top level on a FILE sends permissions without CREATE|DELETE (19)", async () => {
     createShareMock.mockResolvedValue(makeLinkShare());
     renderDialog(); // isDirectory defaults to false (a file)
     fireEvent.click(await screen.findByRole("button", { name: "Link" }));
-    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Can edit + reshare" }));
     fireEvent.click(screen.getByRole("button", { name: "Create link" }));
 
     await waitFor(() => expect(createShareMock).toHaveBeenCalled());
@@ -270,11 +283,11 @@ describe("WARP-1148/1149 — file shares never send CREATE/DELETE permission bit
     expect(opts.permissions).toBe(31);
   });
 
-  it("Person mode + 'Full access' on a FILE also masks CREATE|DELETE", async () => {
+  it("Person mode + top level on a FILE also sends 19, never CREATE|DELETE", async () => {
     renderDialog();
     fireEvent.click(await screen.findByText("Romain"));
-    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
-    fireEvent.click(screen.getByRole("button", { name: /share|create/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Can edit + reshare" }));
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
 
     await waitFor(() => expect(createShareMock).toHaveBeenCalled());
     const [, opts] = createShareMock.mock.calls[0];
@@ -307,11 +320,15 @@ describe("WARP-939 — existing-share access-level dropdown reflects real masks"
     return select;
   }
 
-  it("shows 'Can edit' for a person share whose raw mask is 19 (READ|UPDATE|SHARE)", () => {
+  // WARP-1601: on a FOLDER the SHARE bit is still ignored when snapping, so a
+  // raw 19 is "Can edit" exactly as WARP-939 pinned. (On a FILE, 19 now has an
+  // option of its own — see the WARP-1601 block below.)
+  it("shows 'Can edit' for a FOLDER share whose raw mask is 19 (READ|UPDATE|SHARE)", () => {
     render(
       <ShareDialog
-        filePath="/report.pdf"
-        fileName="report.pdf"
+        filePath="/Trips"
+        fileName="Trips"
+        isDirectory
         existingShares={[makePersonShare({ permissions: 19 })]}
         onClose={() => {}}
       />,
@@ -340,6 +357,7 @@ describe("WARP-939 — existing-share access-level dropdown reflects real masks"
       <ShareDialog
         filePath="/Trips"
         fileName="Trips"
+        isDirectory
         existingShares={[makePersonShare({ permissions: 31 })]}
         onClose={() => {}}
       />,
@@ -363,5 +381,208 @@ describe("WARP-939 — existing-share access-level dropdown reflects real masks"
     // selectedIndex 0 but value "" in jsdom; pin a real selection instead.
     expect(select.selectedIndex).toBeGreaterThanOrEqual(0);
     expect(select.value).not.toBe("");
+  });
+});
+
+/**
+ * WARP-1601 — the access dropdown must be file-aware.
+ *
+ * "Full access" (31) carries CREATE|DELETE, which Nextcloud rejects on a single
+ * FILE. The dialog masked those bits on the way out (→ 19) while snapping 19
+ * back to "Can edit" on the way in, so on a file "Can edit" and "Full access"
+ * rendered identically — yet switching between them silently granted or revoked
+ * the recipient's re-share bit. Files now offer the level that actually exists
+ * in storage ("Can edit + reshare" = 19) and never offer "Full access"; folders
+ * keep their three. Every visible option is assignable and round-trips.
+ */
+describe("WARP-1601 — file-aware access levels", () => {
+  const FILE_LABELS = ["View only", "Can edit", "Can edit + reshare"];
+  const FOLDER_LABELS = ["View only", "Can edit", "Full access"];
+
+  function accessSelects(): HTMLSelectElement[] {
+    return screen.getAllByRole("combobox", {
+      name: /access level/i,
+    }) as HTMLSelectElement[];
+  }
+
+  const optionLabels = (s: HTMLSelectElement) =>
+    Array.from(s.options).map((o) => o.textContent);
+
+  const selectedLabel = (s: HTMLSelectElement) =>
+    s.options[s.selectedIndex]?.textContent;
+
+  function renderFor(
+    isDirectory: boolean,
+    existingShares: ShareDetail[] = [],
+  ) {
+    return render(
+      <ShareDialog
+        filePath={isDirectory ? "/Trips" : "/report.pdf"}
+        fileName={isDirectory ? "Trips" : "report.pdf"}
+        isDirectory={isDirectory}
+        existingShares={existingShares}
+        onClose={() => {}}
+      />,
+    );
+  }
+
+  describe("option set", () => {
+    it("a FILE offers View only / Can edit / Can edit + reshare in BOTH selects", () => {
+      renderFor(false, [makePersonShare(), makeLinkShare()]);
+      const selects = accessSelects();
+      // one for the person row, one for the link row — treated identically
+      expect(selects).toHaveLength(2);
+      for (const select of selects) {
+        expect(optionLabels(select)).toEqual(FILE_LABELS);
+      }
+    });
+
+    it("a FILE never offers 'Full access' — in the selects or the create form", () => {
+      renderFor(false, [makePersonShare(), makeLinkShare()]);
+      // Absent rather than greyed: a file has no contents to create or delete,
+      // so the level could never become available.
+      expect(
+        screen.queryByRole("button", { name: "Full access" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Can edit + reshare" }),
+      ).toBeInTheDocument();
+      for (const select of accessSelects()) {
+        expect(optionLabels(select)).not.toContain("Full access");
+      }
+    });
+
+    it("a FOLDER keeps View only / Can edit / Full access in BOTH selects", () => {
+      renderFor(true, [makePersonShare(), makeLinkShare()]);
+      const selects = accessSelects();
+      expect(selects).toHaveLength(2);
+      for (const select of selects) {
+        expect(optionLabels(select)).toEqual(FOLDER_LABELS);
+      }
+      expect(
+        screen.queryByRole("button", { name: "Can edit + reshare" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Full access" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe("round-trip — pick X, see X after save and after reopening", () => {
+    async function pickAndAssertRoundTrip(
+      isDirectory: boolean,
+      from: number,
+      to: number,
+      label: string,
+      makeShare: (o: Partial<ShareDetail>) => ShareDetail,
+      shareId: number,
+    ) {
+      const { unmount } = renderFor(isDirectory, [makeShare({ permissions: from })]);
+      const select = accessSelects()[0];
+      fireEvent.change(select, { target: { value: String(to) } });
+
+      // saved exactly as chosen …
+      await waitFor(() =>
+        expect(updateShareMock).toHaveBeenCalledWith(shareId, {
+          permissions: to,
+        }),
+      );
+      // … and the control shows the chosen label, not a snapped-down one
+      await waitFor(() => expect(selectedLabel(select)).toBe(label));
+
+      // reopening the dialog against the freshly stored mask shows the same
+      unmount();
+      renderFor(isDirectory, [makeShare({ permissions: to })]);
+      expect(selectedLabel(accessSelects()[0])).toBe(label);
+    }
+
+    it.each([
+      ["View only", 19, 1],
+      ["Can edit", 1, 3],
+      ["Can edit + reshare", 1, 19],
+    ])("FILE person share → %s", async (label, from, to) => {
+      await pickAndAssertRoundTrip(
+        false,
+        from as number,
+        to as number,
+        label as string,
+        makePersonShare,
+        21,
+      );
+    });
+
+    it.each([
+      ["View only", 19, 1],
+      ["Can edit", 1, 3],
+      ["Can edit + reshare", 1, 19],
+    ])("FILE link share → %s", async (label, from, to) => {
+      await pickAndAssertRoundTrip(
+        false,
+        from as number,
+        to as number,
+        label as string,
+        makeLinkShare,
+        30,
+      );
+    });
+
+    it.each([
+      ["View only", 31, 1],
+      ["Can edit", 1, 3],
+      ["Full access", 1, 31],
+    ])("FOLDER person share → %s", async (label, from, to) => {
+      await pickAndAssertRoundTrip(
+        true,
+        from as number,
+        to as number,
+        label as string,
+        makePersonShare,
+        21,
+      );
+    });
+
+    it.each([
+      ["View only", 31, 1],
+      ["Can edit", 1, 3],
+      ["Full access", 1, 31],
+    ])("FOLDER link share → %s", async (label, from, to) => {
+      await pickAndAssertRoundTrip(
+        true,
+        from as number,
+        to as number,
+        label as string,
+        makeLinkShare,
+        30,
+      );
+    });
+  });
+
+  describe("WARP-939 snapping survives for non-preset OCS masks", () => {
+    it.each([
+      [17, "View only"], // READ|SHARE — view-level editing, no update bit
+      [19, "Can edit + reshare"], // READ|UPDATE|SHARE — now has its own level
+      [31, "Can edit + reshare"], // shouldn't exist on a file; degrade sanely
+      [3, "Can edit"],
+      [1, "View only"],
+      [0, "View only"], // never leave the control unselected
+    ])("FILE mask %i snaps to %s", (mask, label) => {
+      renderFor(false, [makePersonShare({ permissions: mask as number })]);
+      const select = accessSelects()[0];
+      expect(select.value).not.toBe("");
+      expect(selectedLabel(select)).toBe(label);
+    });
+
+    it.each([
+      [17, "View only"],
+      [19, "Can edit"], // SHARE stays ignored on folders (WARP-939)
+      [29, "View only"], // READ|CREATE|DELETE|SHARE — no UPDATE, so not "Can edit"
+      [31, "Full access"],
+      [0, "View only"],
+    ])("FOLDER mask %i snaps to %s", (mask, label) => {
+      renderFor(true, [makePersonShare({ permissions: mask as number })]);
+      const select = accessSelects()[0];
+      expect(select.value).not.toBe("");
+      expect(selectedLabel(select)).toBe(label);
+    });
   });
 });
