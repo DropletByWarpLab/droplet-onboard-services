@@ -662,6 +662,13 @@ export interface OverlayApproveResult {
  *  as STT and the reply complete. `state === "no_mic"` drives the
  *  plug-in-a-mic panel (hot-plug recovery needs no restart). */
 export interface VoiceStatusInfo {
+  /** WARP-1599 — the admin kill switch, relayed verbatim. `false` means
+   *  the wake pipeline is not running at all: no detector, no capture
+   *  stream, nothing listening. This is the AUTHORITATIVE field for
+   *  "is voice on?" — `state` only reports "off" when the pipeline is
+   *  absent, so an out-of-band edit of the on-box flag file can leave
+   *  `state: "listening"` on a switched-off box. Key the UI on this. */
+  enabled: boolean;
   state: string;
   listening: boolean;
   wake_loaded: boolean;

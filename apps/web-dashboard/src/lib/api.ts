@@ -5623,6 +5623,31 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
   });
 }
 
+// --- WARP-1599: the voice kill switch ---
+
+/**
+ * Switch the whole wake pipeline on or off, box-wide and persisted.
+ * Owner/admin only — the orchestrator route enforces that; the
+ * dashboard never gates a write it doesn't own.
+ *
+ * Deliberately NOT queued behind `exclusiveCapture`: the toggle holds
+ * no capture window, and an off must never wait on a measurement that
+ * is holding the mic. voice-io serializes concurrent toggles itself and
+ * answers 409, which `throwVoiceError` carries up as `status: 409` for
+ * callers to surface as "already switching" rather than a dead box.
+ */
+export async function setVoiceEnabled(
+  enabled: boolean,
+): Promise<{ enabled: boolean }> {
+  const res = await authFetch(`${BASE}/api/voice/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to switch voice");
+  return res.json();
+}
+
 // --- WARP-1057: mic-processor (XVF3800 DSP) restart ---
 
 /**
