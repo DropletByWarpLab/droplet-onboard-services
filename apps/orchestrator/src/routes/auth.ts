@@ -57,6 +57,7 @@ import {
 // per-route inline rank checks this file used to carry live there now.
 import {
   RoleMutationRefusedError,
+  SERIALIZABLE_TX,
   assertRankCap,
   assertRoleAssignable,
   assertRoleChangeAllowed,
@@ -3074,9 +3075,13 @@ export function createProtectedAuthRouter(
 
         if (row && prisma) {
           // Rails 2 + 1 pre-tx (self-disable and disabling the owner are
-          // refused), then rail 5 + the LOCAL write inside one serializable
-          // $transaction: disabling the final non-disabled owner-or-admin
-          // is refused, and a permitted disable parks the row on
+          // refused), then rail 5 + the LOCAL write inside one SERIALIZABLE
+          // $transaction (SERIALIZABLE_TX — passed explicitly, because
+          // Postgres/Prisma default to READ COMMITTED, under which two
+          // concurrent disables of the last two operators both count "one
+          // other operator remains" and both commit): disabling the final
+          // non-disabled owner-or-admin is refused, and a permitted
+          // disable parks the row on
           // directoryStatus=DEACTIVATED. That local write is load-bearing —
           // /auth/login, SSO, WebAuthn and the auth middleware all fail
           // closed on DEACTIVATED, whereas the NC flag alone never gated
@@ -3093,7 +3098,7 @@ export function createProtectedAuthRouter(
               where: { id: row.id },
               data: { directoryStatus: "DEACTIVATED" },
             });
-          });
+          }, SERIALIZABLE_TX);
 
           // The Nextcloud flag is the downstream mirror — best-effort and
           // non-blocking (same posture as the droplet-admins cascade): an
@@ -3258,12 +3263,18 @@ export function createProtectedAuthRouter(
       // WARP-1526 rails. This surface predated every people-surface
       // invariant — an admin could delete the owner's account here. Resolve
       // the local row and run rails 2 + 1 pre-tx (self-delete, owner
-      // untouchable), then rails 4 + 5 inside a transaction for a
-      // consistent count snapshot (the actual NC delete runs after commit —
-      // the same post-commit-mirror posture as every other NC effect).
+      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
+      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
+      // COMMITTED) for a consistent count snapshot (the actual NC delete
+      // runs after commit — the same post-commit-mirror posture as every
+      // other NC effect).
       // NOTE (out of WARP-1526 scope, pre-existing): this route still does
       // NOT delete the local User row — it removes the Nextcloud account +
-      // brain data only.
+      // brain data only. That also bounds what the isolation level can buy
+      // here: with no write in the transaction, two concurrent removals do
+      // not conflict under SSI either. The level is passed for consistency
+      // with every other guarded site; fully closing this race needs the
+      // missing local write, which is that pre-existing gap.
       const row = prisma
         ? await prisma.user.findUnique({
             where: { nextcloudUsername: req.params.username },
@@ -3277,7 +3288,7 @@ export function createProtectedAuthRouter(
         });
         await prisma.$transaction(async (tx) => {
           await assertRemovalInvariantsTx(tx, { target: row });
-        });
+        }, SERIALIZABLE_TX);
       }
 
       await ncDeleteUser(token, req.params.username);

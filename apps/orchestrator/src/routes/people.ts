@@ -40,6 +40,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 // WARP-247 / WARP-1259 inline blocks this file used to carry live there now.
 import {
   RoleMutationRefusedError,
+  SERIALIZABLE_TX,
   assertNotSelf,
   assertRoleChangeAllowed,
   assertScopeChangeAllowed,
@@ -539,10 +540,12 @@ export function createPeopleRouter(
 
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
         // WARP-1526 last-operator), then the write — count + update inside
-        // a single interactive $transaction so a concurrent demotion can't
-        // slip past the check window (serializable is Prisma's default on
-        // Postgres). Refusals throw out of the transaction and roll it
-        // back; the catch below maps them to their 4xx.
+        // a single interactive $transaction at SERIALIZABLE
+        // (SERIALIZABLE_TX; explicitly passed, because Postgres/Prisma
+        // default to READ COMMITTED, under which two concurrent demotions
+        // both pass the count and both commit) so a concurrent demotion
+        // can't slip past the check window. Refusals throw out of the
+        // transaction and roll it back; the catch below maps them to 4xx.
         const updated = await prisma.$transaction(async (tx) => {
           await assertRoleChangeInvariantsTx(tx, {
             target: { id: existing.id, role: existing.role },
@@ -555,7 +558,7 @@ export function createPeopleRouter(
             data: { role: parsed.data.role },
             select: PUBLIC_USER_SELECT,
           });
-        });
+        }, SERIALIZABLE_TX);
 
         // Rail 6 (consolidated post-commit effects): WARP-247 session
         // revocation so the new role propagates at the next request, the
@@ -634,8 +637,10 @@ export function createPeopleRouter(
         // transient DB error or process crash between the delete commit and
         // the last create can't leave the user with zero bindings — which
         // would silently lock them out of every scope-guarded route. Same
-        // shape as the PATCH /role last-owner invariant transaction above;
-        // serializable isolation is Prisma's $transaction default on Postgres.
+        // shape — and the same explicit SERIALIZABLE_TX — as the PATCH /role
+        // invariant transaction above, so two concurrent rewrites of the
+        // same user's bindings can't interleave into a merged set. Prisma's
+        // default is READ COMMITTED, never serializable.
         const targetUserId = req.params.id;
         const actor = req.user?.username ?? null;
 
@@ -651,7 +656,7 @@ export function createPeopleRouter(
             })),
             skipDuplicates: true,
           });
-        });
+        }, SERIALIZABLE_TX);
 
         await recordActivity({
           kind: "system",
@@ -731,14 +736,15 @@ export function createPeopleRouter(
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
         // WARP-1526 last-operator: removing the final non-disabled
         // owner-or-admin is refused), then the delete — checks + write in
-        // one interactive $transaction so a concurrent demotion can't slip
-        // past the check window.
+        // one interactive $transaction at SERIALIZABLE (SERIALIZABLE_TX,
+        // explicit: Prisma/Postgres default to READ COMMITTED) so a
+        // concurrent demotion or removal can't slip past the check window.
         await prisma.$transaction(async (tx) => {
           await assertRemovalInvariantsTx(tx, {
             target: { id: existing.id, role: existing.role },
           });
           await tx.user.delete({ where: { id: req.params.id } });
-        });
+        }, SERIALIZABLE_TX);
 
         // Rail 6 (consolidated post-commit effects) — WARP-490 hard
         // revocation: session RECORDS swept + the sid-less access-token

@@ -1665,3 +1665,75 @@ describe("WARP-1526 rail 5 — last-operator invariant on /api/people", () => {
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * pr-reviewer (#1229) — EVERY rail-4/5 transaction on this surface must run
+ * at SERIALIZABLE.
+ *
+ * The rails count operators and then write inside one interactive
+ * `$transaction`, and the code used to assert (falsely) that "serializable
+ * isolation is the default for Prisma $transaction on Postgres". It is not:
+ * Postgres — and therefore Prisma — defaults to READ COMMITTED, under which
+ * two concurrent demotions of the last two admins BOTH read "one other
+ * operator remains", BOTH pass rail 5, and BOTH commit — leaving zero
+ * non-disabled owner∪admin, which is precisely what LAST_OPERATOR_INVARIANT
+ * (and the older LAST_OWNER_INVARIANT) exist to prevent.
+ *
+ * The regression is silent — every functional test still passes at READ
+ * COMMITTED because the mock runs the callback serially — so these
+ * assertions pin the OPTION at each call site. Precedent: reset.service.ts
+ * (#549 finding 1) and setup.service.ts.
+ */
+describe("WARP-1526 — serializable isolation on every guarded $transaction", () => {
+  it("PATCH /role runs its rail-4/5 count + update at SERIALIZABLE", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("DELETE /people/:id runs its rail-4/5 count + delete at SERIALIZABLE", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).delete("/api/people/adm-1");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("PATCH /scope runs its delete+recreate rewrite at SERIALIZABLE", async () => {
+    // Not a rail-4/5 count, but the same false "serializable is the default"
+    // comment sat on it: the deleteMany + createMany pair must not interleave
+    // with a concurrent rewrite of the same user's bindings.
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/scope")
+      .send({ scopes: ["team", "finance"] });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+});

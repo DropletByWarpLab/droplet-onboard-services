@@ -24,9 +24,11 @@
  * owner-actor cases the ticket consciously supersedes.
  *
  * The rails are pure (no prisma import); tx invariants take a tx handle so
- * they run inside the caller's serializable $transaction (the people.ts
- * LAST_OWNER_INVARIANT pattern). Post-effect runners are tested with the
- * same module mocks the route suites use.
+ * they run inside the caller's $transaction — which every call site opens
+ * with SERIALIZABLE_TX, since the check-then-write counts are unsound at
+ * Postgres's/Prisma's actual READ COMMITTED default (pr-reviewer #1229).
+ * Post-effect runners are tested with the same module mocks the route
+ * suites use.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -65,6 +67,7 @@ import {
   RoleMutationRefusedError,
   ASSIGNABLE_ROLES,
   ADMIN_TIER_ROLES,
+  SERIALIZABLE_TX,
   assertNotSelf,
   assertTargetNotOwner,
   assertRankCap,
@@ -147,6 +150,20 @@ describe("vocabulary constants", () => {
 
   it("ADMIN_TIER_ROLES (the operator set / NC droplet-admins tier) is exactly {owner, admin}", () => {
     expect([...ADMIN_TIER_ROLES].sort()).toEqual(["admin", "owner"]);
+  });
+
+  /**
+   * pr-reviewer (#1229) — the rails 4/5 counts are only sound under
+   * SERIALIZABLE. Postgres (and therefore Prisma) defaults to READ
+   * COMMITTED, under which two concurrent demote/disable/remove
+   * transactions both read "one other operator remains", both pass, and
+   * both commit — landing zero non-disabled owner∪admin, exactly what
+   * LAST_OPERATOR_INVARIANT exists to prevent. This constant is the one
+   * place that level is spelled out; the route suites assert every
+   * $transaction call site passes it.
+   */
+  it("SERIALIZABLE_TX pins the isolation level the rail-4/5 counts require", () => {
+    expect(SERIALIZABLE_TX).toEqual({ isolationLevel: "Serializable" });
   });
 });
 

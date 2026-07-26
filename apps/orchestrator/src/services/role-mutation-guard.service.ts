@@ -29,8 +29,8 @@
  *        assignment. This consciously supersedes the #1221-era owner→owner-
  *        allowed pins, which existed purely to document the rank-cap rail.
  *
- *   in-transaction (serializable — the people.ts LAST_OWNER_INVARIANT
- *   pattern; Prisma's $transaction default on Postgres):
+ *   in-transaction (SERIALIZABLE — see SERIALIZABLE_TX below; the isolation
+ *   level is passed EXPLICITLY at every call site, it is not a default):
  *     4. Last-owner      — 409 LAST_OWNER_INVARIANT (WARP-480). At least one
  *        role="owner" row must remain. With rail 1 in place this is
  *        unreachable from the routes (every owner-targeting mutation is
@@ -195,6 +195,41 @@ export interface GuardTarget {
  * Drift would be caught by the route suites (they pass real row values).
  */
 export type GuardDirectoryStatus = "ACTIVE" | "DEACTIVATED";
+
+/**
+ * The `$transaction` options EVERY guarded mutation must be opened with —
+ * one constant so no call site can drift back to the default.
+ *
+ * SERIALIZABLE, not the READ COMMITTED default (pr-reviewer #1229; same
+ * finding class as reset.service.ts / setup.service.ts, pr-reviewer #549
+ * finding 1). Rails 4 and 5 are check-then-write: they COUNT the surviving
+ * owner∪admin rows and then demote / disable / delete inside the same
+ * transaction. Under READ COMMITTED — which is what Postgres, and therefore
+ * Prisma's `$transaction`, actually default to — two concurrent requests
+ * each removing one of the last two operators BOTH read "one other operator
+ * remains", BOTH pass the check, and BOTH commit, landing zero non-disabled
+ * owner∪admin. That is exactly the state LAST_OPERATOR_INVARIANT (and the
+ * older WARP-480 LAST_OWNER_INVARIANT this branch carries forward) exists to
+ * prevent, and it is unrecoverable from the dashboard. Under SERIALIZABLE
+ * the losing side aborts with a serialization failure instead.
+ *
+ * The string literal (rather than `Prisma.TransactionIsolationLevel
+ * .Serializable`) keeps this module free of a RUNTIME `@prisma/client`
+ * import — the standalone-compile discipline the Role / DirectoryUserStatus
+ * mirrors above exist for, and the same choice setup.service.ts documents.
+ * The `$transaction` options type still checks it against the generated
+ * isolation-level union, so a typo is a compile error, not a silent
+ * downgrade.
+ *
+ * NOT handled here (conscious, matches the shipped precedent): the loser of
+ * a serialization conflict surfaces as Prisma P2034 and falls through the
+ * routes' `next(err)` to a 500. reset.service.ts maps it to a domain error
+ * and setup.service.ts retries a bounded number of times because its
+ * operation is idempotent; neither pattern is introduced on these routes in
+ * this change. Failing closed on a rare concurrent mutation is the correct
+ * direction — the alternative that shipped was failing OPEN.
+ */
+export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
 
 /**
  * Minimal structural tx handle — the invariants only ever COUNT users, so

@@ -472,3 +472,28 @@ describe("POST /api/auth/users/:username/enable — WARP-1526 local re-activate"
     expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "legacy", true);
   });
 });
+
+/**
+ * pr-reviewer (#1229) — the disable path's rail-5 count + local
+ * directoryStatus write must run at SERIALIZABLE, not the READ COMMITTED
+ * default Postgres/Prisma actually give you. Under READ COMMITTED two
+ * concurrent disables of the last two operators both count "one other
+ * operator remains", both pass, and both commit — zero non-disabled
+ * owner∪admin, the exact state LAST_OPERATOR_INVARIANT exists to prevent.
+ * The mock runs the callback serially, so only the OPTION can be asserted;
+ * that is what stops the silent regression coming back.
+ */
+describe("POST /api/auth/users/:username/disable — serializable isolation", () => {
+  it("passes { isolationLevel: 'Serializable' } to the guard $transaction", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+});

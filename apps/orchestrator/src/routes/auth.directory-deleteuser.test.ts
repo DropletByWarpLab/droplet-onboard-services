@@ -350,3 +350,35 @@ describe("DELETE /api/auth/users/:username — WARP-1526 rails", () => {
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-sam");
   });
 });
+
+/**
+ * pr-reviewer (#1229) — the removal rails' operator count must run at
+ * SERIALIZABLE, not the READ COMMITTED default Postgres/Prisma actually
+ * give you (the code used to claim serializable WAS the default; it is
+ * not). Two concurrent deletions of the last two operators would otherwise
+ * both read "one other operator remains" and both proceed.
+ *
+ * Honest scope note, asserted here so it is not mistaken for closed: this
+ * route does NOT delete the local User row (pre-existing, called out in the
+ * handler), so the transaction is count-only. A read-only SERIALIZABLE
+ * transaction cannot conflict with another read-only one, so the isolation
+ * level alone does not fully close this particular race — the residual gap
+ * is the missing local write, tracked separately.
+ */
+describe("DELETE /api/auth/users/:username — serializable isolation", () => {
+  it("passes { isolationLevel: 'Serializable' } to the removal-rails $transaction", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+});
