@@ -52,6 +52,12 @@ PROJECT="droplet-resticdrill-$$"
 DISPOSABLE_COMPOSE=""
 WORK_ROOT=""
 
+# WARP-1571 / WARP-1575 — readiness probe for THIS suite's disposable drill
+# Postgres. The WARP-254 section below asserts the drill SCRIPT is TCP-gated;
+# this suite's own throwaway stack had the same socket probe it lectures the
+# drill about. Must stay TCP-gated for the same reason.
+PG_HEALTHCHECK_CMD='pg_isready -h 127.0.0.1 -U droplet'
+
 echo ""
 echo "  ================================================"
 echo "  Restic backup + restore drill (WARP-254)"
@@ -329,6 +335,21 @@ else
   skip "drill script missing — readiness-race checks"
 fi
 
+# This suite's OWN disposable stack had the exact socket probe the asserts
+# above forbid in the drill — same initdb temp-server false-positive, same
+# cold-volume flake, just one layer out (WARP-1571 / WARP-1575, found while
+# fixing the identical bug in tests/device-backup.test.sh).
+printf '%s\n' "$PG_HEALTHCHECK_CMD" | grep -qE 'pg_isready[[:space:]]+.*-h[[:space:]]+127\.0\.0\.1' \
+  && pass "suite's disposable Postgres healthcheck is TCP-gated (pg_isready -h 127.0.0.1)" \
+  || fail "suite's disposable Postgres healthcheck is not TCP-gated (socket pg_isready reports healthy during the initdb temp server)"
+
+suite_probe_lines="$(sed -n '/^make_disposable_compose()/,/^}/p' "${BASH_SOURCE[0]}" | grep -c 'pg_isready' || true)"
+if [ "$suite_probe_lines" -eq 0 ]; then
+  pass "suite's disposable compose has no inline pg_isready (uses \$PG_HEALTHCHECK_CMD)"
+else
+  fail "suite's disposable compose inlines pg_isready ($suite_probe_lines occurrence(s)) instead of using \$PG_HEALTHCHECK_CMD"
+fi
+
 # =============================================================================
 # Derivation known-answer test — no Docker needed, only bash + openssl.
 # =============================================================================
@@ -428,7 +449,9 @@ services:
       - nextcloud-data:/var/www/html
       - nvrdata:/data/nvr
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      # WARP-1571: TCP-gated on purpose — a socket probe reports healthy
+      # during the initdb temp server. Never inline a socket probe here.
+      test: ["CMD-SHELL", "$PG_HEALTHCHECK_CMD"]
       interval: 2s
       timeout: 3s
       retries: 40
