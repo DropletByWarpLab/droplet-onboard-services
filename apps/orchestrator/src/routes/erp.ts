@@ -17,9 +17,12 @@
  *
  *   reads  = family-and-up WITH an `AccessRoleConnectorGrant` for the
  *            provider. That is what makes a "Reception" role useful.
- *   writes = admin-tier only — UNCHANGED. `IntegrationConnection.writeEnabled`,
- *            the staged `ErpWriteRequest` outbox and the human confirm all
- *            still apply above it, untouched by any role grant.
+ *   writes = admin-tier, AND — WARP-1579 — not narrowed to `read` by the
+ *            role's own connector grant, which is what makes a "read-only
+ *            Admin" role a real thing instead of a label the enforcement
+ *            ignores. `IntegrationConnection.writeEnabled`, the staged
+ *            `ErpWriteRequest` outbox and the human confirm all still apply
+ *            ABOVE that; no role grant has ever widened them.
  *
  * In this DB-independent slice the connector is stubbed, so reads return honest
  * not-connected/empty and a confirmed write records FAILED (never fake APPLIED).
@@ -43,6 +46,8 @@ type AuthedRequest = {
   user?: { id?: string; role?: string };
   /** Resolved by `erpConnectorReadGate` and threaded to the service. */
   erpConnectorLevel?: ConnectorLevel | null;
+  /** The RAW role grant, resolved by `erpConnectorWriteGate` (WARP-1579). */
+  erpConnectorGrantLevel?: ConnectorLevel | null;
 };
 
 function erpUser(req: Request): ErpUser {
@@ -51,6 +56,7 @@ function erpUser(req: Request): ErpUser {
     id: u?.id ?? "unknown",
     role: u?.role ?? "guest",
     connectorLevel: (req as AuthedRequest).erpConnectorLevel ?? null,
+    connectorGrantLevel: (req as AuthedRequest).erpConnectorGrantLevel ?? null,
   };
 }
 
@@ -213,14 +219,153 @@ function erpConnectorReadGate(prisma: PrismaClient) {
   }
 }
 
+/**
+ * WARP-1579 — the O-2 WRITE gate.
+ *
+ * T6 shipped O-2's read half and left writes authorising off the TIER alone,
+ * so an Admin-based role holding a deliberately read-only ERP connector grant
+ * could still stage and confirm writes. ADR-032 §3 always said otherwise
+ * ("`erp.ts`'s canRead/canWrite become resolver checks per O-2"), and a grant
+ * level the enforcement ignores is a false statement in the admin UI.
+ *
+ * Layer 1 is UNCHANGED: `requireRole("owner","admin")`, the admin-tier floor.
+ * Everything above the gate is unchanged too — `IntegrationConnection.
+ * writeEnabled`, the staged `ErpWriteRequest` outbox and the human confirm all
+ * still apply, and no grant has ever widened them.
+ *
+ * IT READS THE RAW GRANT, NEVER `connectors[p]`. That field is
+ * `min(grant, writeEnabled ? read_write : read)`, so a `read` there is
+ * ambiguous between two states with two different remedies:
+ *   • the ROLE is read-only        → 403, "ask for a read & write grant";
+ *   • the CONNECTION has writes off → today's 409 `WRITE_NOT_ENABLED`,
+ *                                     "turn writes on in Integrations".
+ * Gating on the effective level would mask the second with the first — trading
+ * this bug for a different wrong answer. `connectorGrants[p]` (WARP-1579,
+ * effective-access.service) reports the role's own level, unclamped.
+ *
+ * The decision, case by case:
+ *
+ *   owner                  → through. §3's one bypass; never resolved.
+ *   below admin tier       → already refused by layer 1, byte-for-byte as
+ *                            today (family with a read grant included).
+ *   connectorGrants null   → through. No custom role narrows this person —
+ *                            every admin before RBAC v2. Today's world.
+ *   grant read_write       → through, and the raw level rides down to the
+ *                            service as `ErpUser.connectorGrantLevel`.
+ *   grant read             → 403. THE FIX.
+ *   grant absent, a
+ *     connection exists    → 403. An Admin-based role with no ERP grant
+ *                            cannot read either (§3) — writing would be a
+ *                            strictly larger reach than reading.
+ *   grant absent, NOTHING
+ *     connected            → through, mirroring the read gate exactly:
+ *                            "there is nothing to write to" is not an
+ *                            authorization answer, and the service's honest
+ *                            `NOT_CONFIGURED` must win.
+ *
+ * A resolver failure (throw, or a session that outlived its User row) falls
+ * back to today's floor. That is T6's stated posture for this axis, not an
+ * oversight: the widening is hard-closed, the NARROWING is deliberately soft,
+ * so it is not an availability-independent control and must not be relied on
+ * as one for compliance. Locking the box out of its own ERP because a DB read
+ * blipped would be the worse failure.
+ */
+function erpConnectorWriteGate(prisma: PrismaClient) {
+  // Layer 1, verbatim — the pre-1579 gate this route registered. Writes stay
+  // admin-tier; the widening half of O-2 never reached this path.
+  const adminFloor = requireRole("owner", "admin");
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    adminFloor(req, res, () => {
+      // Same rule as the read gate: `next` on a rejection, never a bare
+      // floating promise — a hung ERP write is the worst failure mode.
+      layerTwo(req, res, next).catch(next);
+    });
+  };
+
+  async function layerTwo(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const user = (req as AuthedRequest).user;
+    // `adminFloor` admitted only owner|admin, so this is the §3 bypass plus
+    // the id-less-session fall-through (nothing to resolve against).
+    if (user?.role === "owner" || !user?.id) {
+      next();
+      return;
+    }
+
+    let grants: Record<string, ConnectorLevel> | null | undefined;
+    let level: ConnectorLevel | undefined;
+    try {
+      const access = await resolveEffectiveAccess(user.id);
+      if (!access) throw new Error("no such user");
+      grants = access.connectorGrants as Record<string, ConnectorLevel> | null;
+      level = access.connectors[EAGLESOFT_PROVIDER] as ConnectorLevel | undefined;
+    } catch (err) {
+      logger.warn(
+        { err, userId: user.id },
+        "erp write gate: effective-access read failed; falling back to the layer-1 floor",
+      );
+      next();
+      return;
+    }
+
+    // No custom role ⇒ nothing narrows this admin ⇒ today's behaviour exactly.
+    if (!grants) {
+      next();
+      return;
+    }
+
+    const grant = grants[EAGLESOFT_PROVIDER];
+    if (grant === "read_write") {
+      (req as AuthedRequest).erpConnectorLevel = level ?? null;
+      (req as AuthedRequest).erpConnectorGrantLevel = grant;
+      next();
+      return;
+    }
+
+    if (!grant) {
+      // Grant absent. Before refusing, the same probe the read gate runs:
+      // with no `IntegrationConnection` row there is nothing to write to, and
+      // that is the service's honest answer to give, not a 403.
+      const configured = await prisma.integrationConnection
+        .findFirst({ where: { provider: EAGLESOFT_PROVIDER }, select: { id: true } })
+        .catch(() => null);
+      if (!configured) {
+        next();
+        return;
+      }
+      recordAccessDenied(req, "erp-connector-grant-missing");
+      res.status(403).json(
+        ErpError.forbidden(
+          "forbidden: this role has no connector grant for the ERP integration",
+        ).toJSON(),
+      );
+      return;
+    }
+
+    // grant === "read" — the operator said read-only and meant it.
+    recordAccessDenied(req, "erp-connector-grant-read-only");
+    res.status(403).json(
+      ErpError.forbidden(
+        "forbidden: this role's connector grant for the ERP integration is read-only",
+      ).toJSON(),
+    );
+  }
+}
+
 export function createErpRouter(prisma: PrismaClient): Router {
   const router = Router();
   const svc = createErpService(prisma);
   // Reads carry the O-2 gate (tier floor + the resolver's connector reach).
   const canRead = erpConnectorReadGate(prisma);
-  // Writes are UNCHANGED: admin-tier only, with `writeEnabled` + the staged
-  // outbox + the human confirm still enforced by the service above it.
-  const canWrite = requireRole("owner", "admin");
+  // Writes stay admin-tier — the O-2 widening never touched this path — with
+  // `writeEnabled` + the staged outbox + the human confirm unchanged above.
+  // WARP-1579 adds the missing half: the grant's LEVEL is now consulted, so a
+  // read-only Admin-based role is a real, enforceable thing.
+  const canWrite = erpConnectorWriteGate(prisma);
 
   router.get("/erp/schedule", canRead, async (req, res, next) => {
     try {

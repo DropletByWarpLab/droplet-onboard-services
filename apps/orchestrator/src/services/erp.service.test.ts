@@ -415,4 +415,69 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       ).resolves.toMatchObject({ connected: false });
     });
   });
+
+  // ── WARP-1579 ───────────────────────────────────────────────────
+  //
+  // The route's write gate reads the RAW role grant and threads it down as
+  // `ErpUser.connectorGrantLevel`. The service keeps its own assertion for
+  // the same reason the read side does: a future route registered without
+  // the gate must not silently regain write reach the operator revoked.
+  //
+  // ABSENT is deliberately not a denial here. Every caller that predates
+  // RBAC v2 — and every role-less admin today — arrives with no grant at
+  // all, and turning that into a 403 would take ERP writes away from the
+  // people who have them. Only an EXPLICIT read-only grant refuses.
+  describe("RBAC — the connector grant level gates writes (WARP-1579)", () => {
+    const READONLY_ADMIN = {
+      id: "u-readonly-admin",
+      role: "admin",
+      connectorLevel: "read" as const,
+      connectorGrantLevel: "read" as const,
+    };
+
+    it("refuses an admin carrying an explicit READ-ONLY connector grant", async () => {
+      build({ writeEnabled: true });
+      await expect(
+        svc.createWriteRequest({ command: "reschedule_appointment", params: {} }, READONLY_ADMIN),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(svc.confirmWriteRequest("wr-x", READONLY_ADMIN)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    });
+
+    it("…while that same admin keeps every PHI read (read-only is a level, not a lockout)", async () => {
+      await expect(
+        svc.getSchedule({ date: "2026-07-08" }, READONLY_ADMIN),
+      ).resolves.toMatchObject({ connected: false });
+    });
+
+    it("admits a read_write grant, and an ABSENT grant (today's world) unchanged", async () => {
+      build({ writeEnabled: true });
+      for (const user of [
+        { ...READONLY_ADMIN, connectorLevel: "read_write" as const, connectorGrantLevel: "read_write" as const },
+        { id: "u-admin", role: "admin" },
+        { id: "u-admin", role: "admin", connectorGrantLevel: null },
+        OWNER,
+      ]) {
+        await expect(
+          svc.createWriteRequest({ command: "reschedule_appointment", params: {} }, user),
+        ).resolves.toMatchObject({ status: "PENDING_CONFIRMATION" });
+      }
+    });
+
+    it("never narrows an OWNER — §3's one bypass holds at this layer too", async () => {
+      // The route lets owners bypass layer 2 and so never threads them a
+      // grant; this shape should not occur. Pinned in the ADR's direction
+      // rather than the strict one: `assertCanReadPhi` already admits owner
+      // unconditionally, and an owner locked out of their own ERP by a stray
+      // grant row would be a worse failure than the one being fixed.
+      build({ writeEnabled: true });
+      await expect(
+        svc.createWriteRequest(
+          { command: "reschedule_appointment", params: {} },
+          { ...OWNER, connectorGrantLevel: "read" as const },
+        ),
+      ).resolves.toMatchObject({ status: "PENDING_CONFIRMATION" });
+    });
+  });
 });
