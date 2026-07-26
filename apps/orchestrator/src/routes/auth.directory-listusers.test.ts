@@ -91,6 +91,10 @@ interface SeedUser {
   username: string;
   displayName: string;
   nextcloudUsername: string | null;
+  /** WARP-1527 (RBAC v2 T3): the roster now carries the enforcement tier +
+   *  assigned custom-role id per row (T8's RosterUser extension). */
+  role?: string;
+  accessRoleId?: string | null;
 }
 
 /** Prisma stub exposing only `user.findMany` keyed for the directory join. */
@@ -102,6 +106,8 @@ function createPrismaMock(seed: SeedUser[]) {
         id: u.id,
         username: u.username,
         nextcloudUsername: u.nextcloudUsername,
+        role: u.role ?? "family",
+        accessRoleId: u.accessRoleId ?? null,
       })),
     ),
   };
@@ -184,5 +190,47 @@ describe("GET /api/auth/users — directory carries the local userId UUID (WARP-
     expect(res.status).toBe(200);
     expect(res.body.users[0].id).toBe("ghost");
     expect(res.body.users[0].userId).toBeNull();
+    // WARP-1527: no local row → no fabricated tier/role chip (T8 renders
+    // nothing rather than guessing).
+    expect(res.body.users[0].role).toBeNull();
+    expect(res.body.users[0].accessRoleId).toBeNull();
+  });
+
+  // WARP-1527 (RBAC v2 T3) — the roster extension the Roles & access tab
+  // consumes: each row with a local User carries `role` (enforcement tier)
+  // and `accessRoleId` (null = plain built-in tier), via an EXPLICIT prisma
+  // select — never raw rows (the passwordHash sweep is WARP-1539; this
+  // endpoint must not widen what it serializes).
+  it("carries role + accessRoleId from the local row (WARP-1527 roster extension)", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([
+      { id: "ana", displayName: "Ana", email: null },
+    ]);
+    const prisma = createPrismaMock([
+      {
+        id: "uuid-ana",
+        username: "ana",
+        displayName: "Ana",
+        nextcloudUsername: "ana",
+        role: "family",
+        accessRoleId: "role-reception",
+      },
+    ]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    expect(res.status).toBe(200);
+    const [u] = res.body.users;
+    expect(u.userId).toBe("uuid-ana");
+    expect(u.role).toBe("family");
+    expect(u.accessRoleId).toBe("role-reception");
+    // the select stays explicit — nothing secret rides along
+    const selectArg = prisma.user.findMany.mock.calls[0]?.[0]?.select;
+    expect(selectArg).toEqual({
+      id: true,
+      username: true,
+      nextcloudUsername: true,
+      role: true,
+      accessRoleId: true,
+    });
   });
 });

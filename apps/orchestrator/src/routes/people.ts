@@ -7,6 +7,9 @@
  *   PATCH  /api/people/:id/role       — owner+admin, emits ActivityRow
  *   PATCH  /api/people/:id/scope      — owner+admin, emits ActivityRow
  *   DELETE /api/people/:id            — owner+admin, emits ActivityRow
+ *   PATCH  /api/people/:id/access            — WARP-1527: custom role / built-in tier
+ *   GET    /api/people/:id/effective-access  — WARP-1527: the ADR-032 §3 resolver output
+ *   PUT    /api/people/:id/access-exceptions — WARP-1527: replace the exception set
  *
  * Dependencies (do NOT re-implement):
  *   - `requireRole(...roles)`           — WARP-171, src/middleware/auth.ts
@@ -41,6 +44,8 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   RoleMutationRefusedError,
   SERIALIZABLE_TX,
+  ASSIGNABLE_ROLES,
+  type AssignableRole,
   assertNotSelf,
   assertRoleChangeAllowed,
   assertScopeChangeAllowed,
@@ -52,6 +57,12 @@ import {
   runRoleChangePostEffects,
   runRemovalPostEffects,
 } from "../services/role-mutation-guard.service.js";
+// WARP-1527 (RBAC v2 T3): the per-person access surface — custom-role /
+// built-in-tier assignment, the §3 resolver read, and the feature-axis
+// exception editor.
+import { revokeAllSessions } from "../services/session.service.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import { GATEABLE_MODULE_IDS, type GateableModuleId } from "../services/access-catalog.js";
 import {
   createTeamInvite,
   isInviteRole,
@@ -189,6 +200,42 @@ const inviteSchema = z.object({
 const usageSchema = z.object({
   storageQuotaBytes: z.string().regex(/^\d+$/).nullable().optional(),
   maxUploadSizeMb: z.number().int().positive().max(1_000_000).nullable().optional(),
+});
+
+// WARP-1527 (RBAC v2 T3): PATCH /people/:id/access — the T8 contract's two
+// shapes: `{ accessRoleId }` assigns a custom role; `{ accessRoleId: null,
+// tier }` assigns a BUILT-IN tier (clears the role pointer, sets User.role).
+// `tier` reuses the T2 assignable vocabulary — never owner/service; sending
+// both a role id AND a tier is ambiguous and refused.
+const personAccessSchema = z
+  .object({
+    accessRoleId: z.string().min(1).max(128).nullable(),
+    tier: z.enum(ASSIGNABLE_ROLES).optional(),
+  })
+  .refine((body) => (body.accessRoleId === null ? body.tier !== undefined : body.tier === undefined), {
+    message: "Send { accessRoleId } for a custom role, or { accessRoleId: null, tier } for a built-in tier",
+  });
+
+// WARP-1527: PUT /people/:id/access-exceptions — the small, feature-axis-only
+// v1 exception list (O-3). `level` is REQUIRED when effect=allow (the carried
+// zod obligation); the always-on chat module is exception-immune, so its id
+// is simply not in the vocabulary; duplicates are a client bug → 400.
+const accessExceptionSchema = z.object({
+  moduleId: z.enum(GATEABLE_MODULE_IDS as unknown as [GateableModuleId, ...GateableModuleId[]]),
+  effect: z.enum(["allow", "deny"]),
+  level: z.enum(["view", "act", "manage"]).nullable().optional(),
+});
+
+const accessExceptionsSchema = z.object({
+  exceptions: z
+    .array(accessExceptionSchema)
+    .max(GATEABLE_MODULE_IDS.length)
+    .refine((arr) => new Set(arr.map((x) => x.moduleId)).size === arr.length, {
+      message: "Duplicate exception modules not allowed",
+    })
+    .refine((arr) => arr.every((x) => x.effect !== "allow" || (x.level !== null && x.level !== undefined)), {
+      message: "`level` is required when effect is `allow`",
+    }),
 });
 
 /** BigInt fields string-encoded per the ADR-029 §8 wire contract. */
@@ -870,6 +917,301 @@ export function createPeopleRouter(
           return res.status(404).json({ error: "User not found" });
         }
         logger.warn({ err, id: req.params.id }, "GET /people/:id/usage failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── PATCH /api/people/:id/access ────────────────────────────
+  // WARP-1527 (RBAC v2 T3). The per-person assignment path of ADR-032 §5:
+  // a custom role sets `accessRoleId` AND `User.role = startingPoint` in
+  // the same transaction (the §2 rule that keeps the ADR-004 enum floor
+  // authoritative); `{ accessRoleId: null, tier }` returns the person to a
+  // plain built-in tier. Both shapes run the full T2 rails + post-effect
+  // runners; the response's pending syncState drives the UI's
+  // "Saved. Applying…" line.
+  router.patch(
+    "/people/:id/access",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        // Rail 2 first — the shipped placement (see PATCH /people/:id/role).
+        assertNotSelf(req.user?.id, req.params.id);
+
+        const parsed = personAccessSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        // Everything that DECIDES the write — the role row (state +
+        // startingPoint), the target row, the rails — is read INSIDE the
+        // serializable transaction (review B2). Read outside, a concurrent
+        // archive or re-base of the role would let this write a tier the
+        // role no longer carries, and layer-1 requireRole would honour that
+        // stale tier indefinitely. SERIALIZABLE_TX is passed EXPLICITLY,
+        // exactly like the sibling role/scope/delete paths (WARP-1526):
+        // Prisma/Postgres default to READ COMMITTED. Precondition failures
+        // return a discriminated outcome rather than throwing — nothing has
+        // been written on those paths, so the empty transaction commits.
+        const outcome = await prisma.$transaction(async (tx) => {
+          let requestedRole: AssignableRole;
+          let accessRoleId: string | null;
+          let roleName: string | null = null;
+          if (parsed.data.accessRoleId !== null) {
+            const role = await tx.accessRole.findUnique({
+              where: { id: parsed.data.accessRoleId },
+            });
+            if (!role) return { kind: "role_not_found" } as const;
+            if (role.state === "archived") return { kind: "role_archived" } as const;
+            requestedRole = role.startingPoint as AssignableRole;
+            accessRoleId = role.id;
+            roleName = role.name;
+          } else {
+            // zod's refine guarantees tier is present on this branch.
+            requestedRole = parsed.data.tier as AssignableRole;
+            accessRoleId = null;
+          }
+
+          // WARP-1539 — projected at the query: this row feeds the guards
+          // and the post-effect runners, so the hash/blind-index must never
+          // materialize here even though the response body is only
+          // `{ syncState }`.
+          const existing = await tx.user.findUnique({
+            where: { id: req.params.id },
+            select: PUBLIC_USER_SELECT,
+          });
+          if (!existing) return { kind: "user_not_found" } as const;
+
+          // Rails 1 → 3 → 7 — identical to a direct role change: the
+          // assigned tier is the role's startingPoint (or the tier itself).
+          // A refusal throws out of the transaction and rolls it back; the
+          // route catch maps it (the DELETE /people/:id precedent).
+          assertRoleChangeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: { id: existing.id, role: existing.role },
+            requestedRole,
+          });
+
+          // Rails 4 + 5, then the paired write — accessRoleId and the enum
+          // tier move together or not at all.
+          await assertRoleChangeInvariantsTx(tx, {
+            target: { id: existing.id, role: existing.role },
+            requestedRole,
+          });
+          await tx.user.update({
+            where: { id: existing.id },
+            data: { accessRoleId, role: requestedRole },
+          });
+
+          return { kind: "ok", existing, requestedRole, accessRoleId, roleName } as const;
+        }, SERIALIZABLE_TX);
+
+        if (outcome.kind === "role_not_found") {
+          return res.status(404).json({ error: "Role not found" });
+        }
+        if (outcome.kind === "role_archived") {
+          return res.status(409).json({
+            error: "This role is archived — restore it before assigning people.",
+            code: "ACCESS_ROLE_ARCHIVED",
+          });
+        }
+        if (outcome.kind === "user_not_found") {
+          return res.status(404).json({ error: "User not found" });
+        }
+        const { existing, requestedRole, accessRoleId, roleName } = outcome;
+
+        // Rail 6. A tier crossing runs the consolidated runner (revoke →
+        // NC droplet-admins cascade → "Role changed" audit); a same-tier
+        // change (role swap / role clear) still revokes — the person's
+        // effective access changed even though the enum floor didn't.
+        if (existing.role !== requestedRole) {
+          await runRoleChangePostEffects({
+            target: {
+              id: existing.id,
+              username: existing.username,
+              nextcloudUsername: existing.nextcloudUsername,
+            },
+            previousRole: existing.role,
+            nextRole: requestedRole,
+            actorUsername: req.user?.username ?? null,
+            actor: actorFromRequest(req),
+          });
+        } else {
+          await revokeAllSessions(existing.id);
+        }
+
+        if (accessRoleId !== null) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access role assigned",
+            sub: `${roleName} → ${existing.username}`,
+            refs: {
+              actor: req.user?.username ?? null,
+              roleId: accessRoleId,
+              roleName,
+              targetUserId: existing.id,
+              targetUsername: existing.username,
+            },
+            actor: actorFromRequest(req),
+          });
+        }
+
+        res.json({ syncState: "pending" });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/people/:id/effective-access ────────────────────
+  // WARP-1527 (RBAC v2 T3). The ADR-032 §3 resolver output verbatim —
+  // powers the person editor's read-only drawer and every honest
+  // disabled-state in the dashboard (T8 seeds its exception editor from
+  // the `exceptions` array).
+  router.get(
+    "/people/:id/effective-access",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const access = await resolveEffectiveAccess(req.params.id);
+        if (!access) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        res.json(access);
+      } catch (err) {
+        logger.warn(
+          { err, id: req.params.id },
+          "GET /people/:id/effective-access failed",
+        );
+        next(err);
+      }
+    },
+  );
+
+  // ── PUT /api/people/:id/access-exceptions ───────────────────
+  // WARP-1527 (RBAC v2 T3). Replace-wholesale semantics (the scope-PATCH
+  // precedent — the editor never diffs rows client-side); rails 2 + 1
+  // apply (§4: self-action extends to exceptions; the owner's row is
+  // untouchable). No session revocation: exceptions resolve live per
+  // request through the layer-2 resolver, nothing role-shaped is cached
+  // in the JWT.
+  router.put(
+    "/people/:id/access-exceptions",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        assertNotSelf(req.user?.id, req.params.id);
+
+        const parsed = accessExceptionsSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        // WARP-1539 — projected at the query (see PATCH /:id/access above).
+        const existing = await prisma.user.findUnique({
+          where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
+        });
+        if (!existing) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        // Rails 2 + 1 (same composite the scope rewrite uses).
+        assertScopeChangeAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: { id: existing.id, role: existing.role },
+        });
+
+        const previous = await prisma.userAccessException.findMany({
+          where: { userId: existing.id },
+          select: { moduleId: true, effect: true, level: true },
+        });
+
+        const grantedBy = req.user?.id ?? "unknown";
+        // Same replace-wholesale shape — and the same explicit
+        // SERIALIZABLE_TX — as the scope-binding rewrite above (WARP-1526):
+        // two concurrent PUTs of the same person's exceptions must not
+        // interleave into a merged set, and a crash between the delete and
+        // the recreate must not leave the person with zero rows.
+        await prisma.$transaction(async (tx) => {
+          await tx.userAccessException.deleteMany({
+            where: { userId: existing.id },
+          });
+          if (parsed.data.exceptions.length > 0) {
+            await tx.userAccessException.createMany({
+              data: parsed.data.exceptions.map((x) => ({
+                userId: existing.id,
+                moduleId: x.moduleId,
+                effect: x.effect,
+                level: x.effect === "allow" ? (x.level as "view" | "act" | "manage") : null,
+                grantedBy,
+              })),
+            });
+          }
+        }, SERIALIZABLE_TX);
+
+        // Audit the delta with the house vocabulary: rows added/changed →
+        // "set"; rows dropped → "removed". One row per verb, refs carry
+        // the module lists + target UUID.
+        const prevByModule = new Map(previous.map((x) => [x.moduleId as string, x]));
+        const nextByModule = new Map(parsed.data.exceptions.map((x) => [x.moduleId as string, x]));
+        const setModules = parsed.data.exceptions
+          .filter((x) => {
+            const prev = prevByModule.get(x.moduleId);
+            return !prev || prev.effect !== x.effect || (prev.level ?? null) !== (x.level ?? null);
+          })
+          .map((x) => x.moduleId);
+        const removedModules = previous
+          .filter((x) => !nextByModule.has(x.moduleId as string))
+          .map((x) => x.moduleId);
+        const baseRefs = {
+          actor: req.user?.username ?? null,
+          targetUserId: existing.id,
+          targetUsername: existing.username,
+        };
+        if (setModules.length > 0) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access exception set",
+            sub: `${existing.username}: ${setModules.join(", ")}`,
+            refs: { ...baseRefs, modules: setModules },
+            actor: actorFromRequest(req),
+          });
+        }
+        if (removedModules.length > 0) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access exception removed",
+            sub: `${existing.username}: ${removedModules.join(", ")}`,
+            refs: { ...baseRefs, modules: removedModules },
+            actor: actorFromRequest(req),
+          });
+        }
+
+        const rows = await prisma.userAccessException.findMany({
+          where: { userId: existing.id },
+          select: { id: true, moduleId: true, effect: true, level: true },
+          orderBy: { createdAt: "asc" },
+        });
+        res.json({ exceptions: rows });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
         next(err);
       }
     },
