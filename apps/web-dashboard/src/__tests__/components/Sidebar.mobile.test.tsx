@@ -9,6 +9,10 @@
  * Events / Remote Access / Knowledge / Context / Calendar are all
  * reachable through a single tap target.
  *
+ * WARP-1554 folded in the Files sub-views: a bottom-tab primary's children
+ * must survive into the drawer even though the primary's own row does not,
+ * under a non-navigating caption so nothing reads as orphaned.
+ *
  * The desktop branch (`lg:`) renders the same component in JSDOM but
  * remains unchanged; the tests here scope every query to the mobile
  * `<nav aria-label="Bottom navigation">` landmark so they never accidentally
@@ -195,6 +199,103 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(within(dialog).getByRole("link", { name: /remote access/i })).toHaveAttribute("href", "/remote-access");
     expect(within(dialog).getByRole("link", { name: /users/i })).toHaveAttribute("href", "/users");
     expect(within(dialog).getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+  });
+
+  // ── WARP-1554 ────────────────────────────────────────────────────────
+  // /files owns a bottom tab, and the drawer used to drop a primary's
+  // children along with the primary's own row. That left Drives, Recents,
+  // Favorites, Shared, Trash and Sync Devices with NO mobile navigation path
+  // whatsoever — the desktop sub-nav lives in a `hidden lg:flex` <aside>, so
+  // it is no fallback. These cases pin mobile reachability so the regression
+  // cannot happen silently again.
+  const FILES_SUBVIEWS: Array<[string, RegExp, string]> = [
+    ["Drives", /^drives$/i, "/files/drives"],
+    ["Recents", /^recents$/i, "/files/recents"],
+    ["Favorites", /^favorites$/i, "/files/favorites"],
+    ["Shared", /^shared$/i, "/files/shared"],
+    ["Trash", /^trash$/i, "/files/trash"],
+    ["Sync Devices", /^sync devices$/i, "/files/devices"],
+  ];
+
+  it.each(FILES_SUBVIEWS)(
+    "the More drawer makes the Files sub-view %s reachable on mobile (WARP-1554)",
+    (_label, name, href) => {
+      render(<Sidebar />);
+      const bottomNav = screen.getByRole("navigation", {
+        name: /bottom navigation/i,
+      });
+      fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+      const dialog = screen.getByRole("dialog");
+      expect(within(dialog).getByRole("link", { name })).toHaveAttribute(
+        "href",
+        href,
+      );
+    },
+  );
+
+  it("does not orphan the Files sub-views — they sit under a labelled, non-navigating 'Files' caption (WARP-1554)", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    // The sub-views live inside a group labelled "Files"…
+    const group = within(dialog).getByRole("group", { name: /^files$/i });
+    for (const [, name, href] of FILES_SUBVIEWS) {
+      expect(within(group).getByRole("link", { name })).toHaveAttribute(
+        "href",
+        href,
+      );
+    }
+
+    // …and the caption is NOT a link: /files is a bottom tab, so the drawer
+    // must not offer a second, competing route to the same destination.
+    expect(
+      within(dialog).queryByRole("link", { name: /^files$/i }),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByRole("link", { name: /^all files$/i }),
+    ).toBeNull();
+    expect(dialog.querySelector("a[href='/files']")).toBeNull();
+  });
+
+  it("marks the active Files sub-view with aria-current in the drawer (WARP-1554)", () => {
+    pathnameRef.current = "/files/trash";
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    expect(
+      within(dialog).getByRole("link", { name: /^trash$/i }),
+    ).toHaveAttribute("aria-current", "page");
+    expect(
+      within(dialog).getByRole("link", { name: /^favorites$/i }),
+    ).not.toHaveAttribute("aria-current");
+  });
+
+  it("keeps the non-primary Cameras parent as a real link with its child flattened after it (WARP-1554 regression guard)", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    // Cameras is NOT a bottom-tab primary, so it keeps its own tappable row
+    // and Events still follows it — the caption treatment applies only to
+    // parents displaced into the tab bar.
+    const cameras = within(dialog).getByRole("link", { name: /^cameras$/i });
+    const events = within(dialog).getByRole("link", { name: /^events$/i });
+    expect(cameras).toHaveAttribute("href", "/cameras");
+    expect(
+      cameras.compareDocumentPosition(events) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("the More drawer includes the theme toggle and a sign-out control", () => {
