@@ -1241,6 +1241,11 @@ export function createPublicAuthRouter(
         role,
         lastMfaAt: mfaStampIso,
         sid,
+        // WARP-1582 — snapshot the assigned custom role from the row we
+        // just authenticated against. `?? null` is the MEANINGFUL value
+        // ("no custom role"), not a defensive default: it is what lets the
+        // chat path skip a per-turn read for the role-less majority.
+        accessRoleId: localUser.accessRoleId ?? null,
       });
       const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
       // WARP-116: index this refresh token so an admin "revoke now" (role
@@ -1556,6 +1561,14 @@ export function createPublicAuthRouter(
         // (defensive — `localUser` is non-null and gated past the !localUser /
         // DEACTIVATED check above, so this fallback is belt-and-suspenders).
         const effectiveRole: Role = (localUser.role as Role) ?? role;
+        // WARP-1582 — the SAME "DB wins" rule, applied to the access-role
+        // claim. This is what makes the claim self-healing: even if a
+        // revoke was missed (the Redis-outage cases the paragraph above
+        // describes), the next rotation re-reads the authoritative row, so
+        // a stale claim cannot outlive one refresh cycle. Refresh tokens
+        // deliberately do NOT carry the claim — they mint access tokens
+        // from this row, never from their own payload.
+        const effectiveAccessRoleId: string | null = localUser.accessRoleId ?? null;
 
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
@@ -1568,7 +1581,14 @@ export function createPublicAuthRouter(
         // a session lineage, it never starts a new one (createdAt — and thus
         // the absolute clock — is pinned to the original login).
         const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
-        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
+        const newAccessToken = signAccessToken({
+          id: sub,
+          username,
+          displayName,
+          role: effectiveRole,
+          sid: refreshResult.sid,
+          accessRoleId: effectiveAccessRoleId,
+        });
         await registerRefreshSession(sub, newRefreshToken);
 
         // Extend the NC session token's TTL so it doesn't expire mid-session
@@ -2052,6 +2072,12 @@ export function createPublicAuthRouter(
         displayName: invite.displayName || invite.username,
         role,
         sid: inviteSid,
+        // WARP-1582 — read back off the row the upsert just wrote, not off
+        // `accessRoleAssignment`: on the FALLBACK path (role vanished or
+        // archived between invite and accept) no assignment happened, and a
+        // re-acceptance may be landing on a pre-existing row. The row is
+        // the only thing that knows what is actually true now.
+        accessRoleId: userRow.accessRoleId ?? null,
       });
       const refreshToken = signRefreshToken({
         id: userId,

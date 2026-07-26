@@ -464,3 +464,125 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     expect(attributed.scope).toEqual(DENY_ALL_TOOL_SCOPE);
   });
 });
+
+/**
+ * WARP-1582 — the session-claim read elision, and the four properties that
+ * make it safe. Every one of these is load-bearing; see the trust argument
+ * in tool-access.service.ts.
+ */
+describe("WARP-1582 — resolveToolAccessScope trust modes", () => {
+  beforeEach(() => {
+    resolveEffectiveAccessMock.mockReset();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("DEFAULTS to the database — a call site that says nothing gets the read", async () => {
+    // The fail-safe default is the whole reason the parameter is opt-IN.
+    // A new consumer that never thought about staleness must not silently
+    // inherit the elision.
+    const prisma = fakePrisma({ accessRoleId: null, accessRole: null });
+    await expect(
+      resolveToolAccessScope(prisma, { id: "u1", role: "family", accessRoleId: null }),
+    ).resolves.toBeNull();
+    expect((prisma as any).user.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it("elides the read when the claim is PRESENT and says `null`", async () => {
+    const prisma = fakePrisma({ accessRoleId: null, accessRole: null });
+    await expect(
+      resolveToolAccessScope(
+        prisma,
+        { id: "u1", role: "family", accessRoleId: null },
+        "session-claim",
+      ),
+    ).resolves.toBeNull();
+    expect((prisma as any).user.findUnique).not.toHaveBeenCalled();
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("READS when the claim is ABSENT — undefined is 'unknown', never 'no role'", async () => {
+    // THE fail-open bug this design exists to prevent. Every token minted
+    // before this shipped has no claim; reading `undefined` as "no custom
+    // role" would drop the T5 narrowing for every one of them.
+    const prisma = fakePrisma({
+      accessRoleId: "r1",
+      accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+    });
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["files"],
+      locks: false,
+    });
+    const scope = await resolveToolAccessScope(
+      prisma,
+      { id: "u1", role: "family" },
+      "session-claim",
+    );
+    expect((prisma as any).user.findUnique).toHaveBeenCalledTimes(1);
+    expect(scope?.domains.has("files")).toBe(true);
+  });
+
+  it("READS when the claim NAMES a role — the claim is never the grant source", async () => {
+    // A claim can only ever say "no narrowing applies". The grants and the
+    // §3 resolve always come from the database.
+    const prisma = fakePrisma({
+      accessRoleId: "r1",
+      accessRole: { toolGrants: [{ domain: "files", level: "view" }] },
+    });
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["files"],
+      locks: false,
+    });
+    const scope = await resolveToolAccessScope(
+      prisma,
+      { id: "u1", role: "family", accessRoleId: "r1" },
+      "session-claim",
+    );
+    expect((prisma as any).user.findUnique).toHaveBeenCalledTimes(1);
+    expect(scope?.writeDomains.has("files")).toBe(false);
+  });
+
+  it("a claim of `null` that DISAGREES with the row loses under the default mode", async () => {
+    // The staleness case made explicit: admin narrowed this person after
+    // the token was minted. Session revocation is what normally closes
+    // this (see the trust argument); the database mode closes it
+    // unconditionally, which is why write-capable surfaces stay on it.
+    const prisma = fakePrisma({
+      accessRoleId: "r1",
+      accessRole: { toolGrants: [] },
+    });
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "family",
+      toolDomains: ["files"],
+      locks: false,
+    });
+    const scope = await resolveToolAccessScope(prisma, {
+      id: "u1",
+      role: "family",
+      accessRoleId: null,
+    });
+    expect(scope).not.toBeNull();
+    expect(scope?.domains.has("files")).toBe(true);
+  });
+
+  it("the claim never rescues a principal with no id — still fails CLOSED", async () => {
+    const prisma = fakePrisma(null);
+    await expect(
+      resolveToolAccessScope(prisma, { role: "family", accessRoleId: null }, "session-claim"),
+    ).resolves.toBe(DENY_ALL_TOOL_SCOPE);
+  });
+
+  it("owner/service short-circuits are unchanged under either mode", async () => {
+    const prisma = fakePrisma({ accessRoleId: "r1", accessRole: { toolGrants: [] } });
+    await expect(
+      resolveToolAccessScope(prisma, { id: "u1", role: "owner" }, "session-claim"),
+    ).resolves.toBeNull();
+    await expect(
+      resolveToolAccessScope(prisma, { id: "_service:voice", role: "service" }, "session-claim"),
+    ).resolves.toBeNull();
+    expect((prisma as any).user.findUnique).not.toHaveBeenCalled();
+  });
+});

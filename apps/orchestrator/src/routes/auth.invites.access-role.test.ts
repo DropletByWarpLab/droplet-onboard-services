@@ -689,3 +689,72 @@ describe("WARP-1566 — accessRoleId on the invite READ surfaces", () => {
     });
   });
 });
+
+/**
+ * WARP-1582 — the invite-accept mint site must stamp the access-role claim.
+ *
+ * The claim is only worth anything if every mint site actually populates
+ * it; a site that forgets produces a claim-less token, and the consumer
+ * falls back to the per-request database read it was meant to avoid
+ * (safe, but silently unoptimised — the failure mode nothing would catch).
+ *
+ * The accept path is the interesting one because the row it writes and
+ * the role the invite ASKED for can differ: on the T9 fallback (role
+ * deleted or archived between invite and accept) no assignment happens.
+ * The claim must follow the ROW, never the invite's intent.
+ */
+describe("WARP-1582 — accessRoleId claim on the invite-accept session", () => {
+  it("stamps the applied role id into the minted access token", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      email: "reception@warp.test",
+      role: "family",
+      accessRoleId: FAMILY_ROLE.id,
+    });
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(res.status).toBe(200);
+    expect(sessionJwt(res).accessRoleId).toBe(FAMILY_ROLE.id);
+  });
+
+  it("stamps an EXPLICIT null for a plain-tier invite — present, not absent", async () => {
+    // `null` is what lets the chat path skip its read. An absent claim
+    // would be safe but pointless; the assertion distinguishes them.
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      email: "plain@warp.test",
+      role: "family",
+    });
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(res.status).toBe(200);
+    const decoded = sessionJwt(res);
+    expect(decoded).toHaveProperty("accessRoleId");
+    expect(decoded.accessRoleId).toBeNull();
+  });
+
+  it("follows the ROW, not the invite, when the role vanished before accept", async () => {
+    // T9 fallback: the accept lands on the plain tier with no assignment.
+    // A claim stamped from `invite.accessRoleId` would name a role this
+    // person does NOT hold — and would then make the chat path read the
+    // database for a role that isn't there, inverting the optimisation
+    // into a pessimisation on top of being wrong.
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      email: "reception@warp.test",
+      role: "family",
+      accessRoleId: FAMILY_ROLE.id,
+    });
+    prisma._roles.length = 0; // role deleted between invite and accept
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(res.status).toBe(200);
+    expect(sessionJwt(res).accessRoleId).toBeNull();
+  });
+});
