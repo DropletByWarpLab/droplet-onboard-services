@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Folder,
@@ -10,6 +10,9 @@ import {
   Eye,
   Star,
   ShieldCheck,
+  Check,
+  Copy as CopyIcon,
+  AlertTriangle,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
@@ -57,9 +60,11 @@ import {
   bulkMoveFiles,
   bulkCopyFiles,
   fetchShares,
+  createShare,
 } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
+import { Dialog } from "@/components/Dialog";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
 
 // WARP-1267 — verbatim copy (design brief §2).
@@ -67,6 +72,42 @@ const READER_TOOLBAR_TOOLTIP =
   "You can view and download here. Ask a manager for edit access.";
 const ADMIN_FOREIGN_LIBRARY_COPY =
   "You're viewing this library as an administrator. This visit is logged.";
+
+// ── WARP-1540: sharing a multi-file selection ────────────────────────────────
+//
+// The decision (Romain, 2026-07-24) is the LOOP: one `createShare` per selected
+// path, no bulk endpoint, no zip bundle. Everything below exists to make that
+// loop honest rather than merely short.
+
+/**
+ * Most files one Share click may fan out into. The loop is N sequential POSTs
+ * against Nextcloud's OCS share API; firing it unbounded off a Ctrl-A is how a
+ * selection of 900 turns into 900 requests and a rate-limited box. Over the
+ * cap the button is DISABLED and says so — the honest message the decision
+ * comment asked for, rather than a silent truncation to the first 20.
+ */
+const BULK_SHARE_LIMIT = 20;
+
+/**
+ * Why Share is unavailable to a non-reader who still may not share: in a
+ * department/team library the share bit is a `manager` right (ADR-029), and
+ * the member NC group masks physically withhold it — a contributor looping
+ * createShare would collect N identical 403s. Distinct from the reader copy
+ * because the remedy is different: a contributor CAN write here, just not share.
+ */
+const LIBRARY_SHARE_MANAGER_ONLY =
+  "Only a manager can share from this library. Ask one to create the link.";
+
+/** One row of a multi-file share run — the per-target outcome, kept whether it
+ *  succeeded or failed. Successes are never rolled back or hidden by a later
+ *  failure (decision comment, note 1). */
+type BulkShareRow = {
+  path: string;
+  name: string;
+  status: "pending" | "ok" | "failed";
+  url?: string | null;
+  error?: string;
+};
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -487,6 +528,168 @@ export default function FilesPage() {
     setShareFile(file);
   }, []);
 
+  // ── Share a selection (WARP-1540) ──
+  //
+  // ONE selected item is unchanged behavior: open the existing ShareDialog, so
+  // the toolbar's Share and the detail panel's "Share…" land on exactly the
+  // same surface (folders included — a single folder share is legal today and
+  // the dialog already handles the permission-bit difference).
+  //
+  // SEVERAL selected items run the loop. Folders are excluded from it: the
+  // dialog's per-target choices (permission preset, expiry, password) don't
+  // exist in a fan-out, and a folder link grants far more than a file link —
+  // so a folder still has to be shared deliberately, on its own.
+  const [bulkShare, setBulkShare] = useState<{
+    rows: BulkShareRow[];
+    /** Folder names dropped from the run — reported, never silently skipped. */
+    skipped: string[];
+    done: boolean;
+  } | null>(null);
+  // Generation token: closing the results panel abandons the in-flight run
+  // instead of letting it keep POSTing into a surface nobody is watching.
+  const bulkShareRunRef = useRef(0);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const bulkShareHeadingId = useId();
+  const bulkShareSummaryId = useId();
+
+  const closeBulkShare = useCallback(() => {
+    bulkShareRunRef.current += 1;
+    setBulkShare(null);
+    setCopiedKey(null);
+  }, []);
+
+  const runBulkShare = useCallback(
+    async (targets: FileEntryInfo[], run: number) => {
+      for (const target of targets) {
+        if (bulkShareRunRef.current !== run) return; // panel closed — stop.
+        try {
+          // NOTE: the raw, HOME-relative entry path — NOT
+          // `toActiveSpaceRelative`. POST /api/files/share takes no `space`
+          // (unlike rename/move/delete), so this is the identical argument the
+          // single-file ShareDialog sends for the same row.
+          const share = await createShare(target.path);
+          setBulkShare((prev) =>
+            prev && bulkShareRunRef.current === run
+              ? {
+                  ...prev,
+                  rows: prev.rows.map((r) =>
+                    r.path === target.path
+                      ? { ...r, status: "ok", url: share.url }
+                      : r
+                  ),
+                }
+              : prev
+          );
+        } catch (err) {
+          // Item 3 of 5 failing does not end the run and does not undo items
+          // 1–2 — it is reported on its own row and the loop continues.
+          setBulkShare((prev) =>
+            prev && bulkShareRunRef.current === run
+              ? {
+                  ...prev,
+                  rows: prev.rows.map((r) =>
+                    r.path === target.path
+                      ? { ...r, status: "failed", error: translateError(err, "files") }
+                      : r
+                  ),
+                }
+              : prev
+          );
+        }
+      }
+      setBulkShare((prev) =>
+        prev && bulkShareRunRef.current === run ? { ...prev, done: true } : prev
+      );
+    },
+    []
+  );
+
+  const startShare = useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return;
+      const entries = paths
+        .map((p) => files.find((f) => f.path === p))
+        .filter((f): f is FileEntryInfo => !!f);
+      if (entries.length === 0) {
+        toast("Couldn't find those items to share — refresh and try again.");
+        return;
+      }
+      if (entries.length === 1) {
+        handleShare(entries[0]);
+        return;
+      }
+      // Defense in depth: the toolbar already disables Share over the cap, but
+      // the context menu and any future caller route through here too.
+      if (entries.length > BULK_SHARE_LIMIT) {
+        toast(
+          `You can share up to ${BULK_SHARE_LIMIT} files at once — ${entries.length} are selected.`
+        );
+        return;
+      }
+      const shareable = entries.filter((f) => !f.isDirectory);
+      const skipped = entries.filter((f) => f.isDirectory).map((f) => f.name);
+      if (shareable.length === 0) {
+        toast("Folders are shared one at a time — select a folder on its own.");
+        return;
+      }
+      const run = ++bulkShareRunRef.current;
+      setCopiedKey(null);
+      setBulkShare({
+        rows: shareable.map((f) => ({
+          path: f.path,
+          name: f.name,
+          status: "pending" as const,
+        })),
+        skipped,
+        done: false,
+      });
+      void runBulkShare(shareable, run);
+    },
+    [files, handleShare, runBulkShare, toast]
+  );
+
+  // Copy helper for the results panel. `navigator.clipboard` is absent in
+  // non-secure contexts (and in jsdom) — fail with a toast, never throw into
+  // the render tree.
+  const copyText = useCallback(
+    (text: string, key: string) => {
+      const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+      if (!clip?.writeText) {
+        toast("Copying isn't available in this browser — select the link to copy it.");
+        return;
+      }
+      clip.writeText(text).then(
+        () => {
+          setCopiedKey(key);
+          window.setTimeout(() => setCopiedKey(null), 1600);
+        },
+        () => toast("Couldn't copy to the clipboard.")
+      );
+    },
+    [toast]
+  );
+
+  // WARP-1540 — may this viewer share, here, with this selection?
+  //
+  // Reader posture is the floor, not the whole rule. In a department/team
+  // library the share bit is a `manager` right (ADR-029) and the member group
+  // masks withhold it, so a contributor's loop would fail N times just as a
+  // reader's would. Personal / Household carry no `right` at all and are
+  // unrestricted. Whatever the cause, the button stays VISIBLE and disabled
+  // with the reason — never silently absent.
+  const shareBlockedReason = useMemo(() => {
+    const isLibrary =
+      activeSpace?.kind === "department" || activeSpace?.kind === "team";
+    if (isLibrary && activeSpace?.right !== "manager") {
+      return isReaderSpace ? READER_TOOLBAR_TOOLTIP : LIBRARY_SHARE_MANAGER_ONLY;
+    }
+    if (isReaderSpace) return READER_TOOLBAR_TOOLTIP;
+    if (fm.selectedCount > BULK_SHARE_LIMIT) {
+      return `You can share up to ${BULK_SHARE_LIMIT} files at once — ${fm.selectedCount} are selected.`;
+    }
+    return undefined;
+  }, [activeSpace, isReaderSpace, fm.selectedCount]);
+
   // ── Preview (opens rich preview modal) ──
   const handlePreview = useCallback((file: FileEntryInfo) => {
     if (file.isDirectory) return;
@@ -702,10 +905,16 @@ export default function FilesPage() {
       },
       { separator: true },
       {
-        label: "Share link",
+        // WARP-1540 — no longer single-only: the loop landed, so a multi
+        // selection shares N links from here too (ticket step 4). Still
+        // disabled when the space withholds the share right, or when the
+        // selection exceeds the bulk cap — `shareBlockedReason` is the same
+        // gate the toolbar button uses.
+        label: `Share link${isSingle ? "" : ` (${selectedCount})`}`,
         icon: contextMenuIcons.Share,
-        disabled: !isSingle,
-        onClick: () => handleShare(file),
+        disabled: !!shareBlockedReason,
+        onClick: () =>
+          startShare(fm.selectedCount > 0 ? fm.selectedPaths : [file.path]),
       },
       {
         label: "Delete",
@@ -728,7 +937,8 @@ export default function FilesPage() {
     handleRowOpen,
     handlePreview,
     handleDownload,
-    handleShare,
+    startShare,
+    shareBlockedReason,
     handleDelete,
     handleBulkDelete,
   ]);
@@ -936,6 +1146,12 @@ export default function FilesPage() {
         onCopyTo={() => setMoveDialog({ mode: "copy", paths: fm.selectedPaths })}
         onDelete={handleBulkDelete}
         onDownload={handleBulkDownload}
+        // WARP-1540 — one selected item opens the ShareDialog; several run the
+        // per-path loop. `canShare` carries the space's share right AND the
+        // bulk cap, so the disabled tooltip always names the actual reason.
+        onShare={() => startShare(fm.selectedPaths)}
+        canShare={!shareBlockedReason}
+        shareDisabledReason={shareBlockedReason}
         readOnly={isReaderSpace}
       />
 
@@ -1197,6 +1413,149 @@ export default function FilesPage() {
             setExistingShares([]);
           }}
         />
+      )}
+
+      {/* WARP-1540 — results of a multi-file share loop.
+          Per-target rows, not a raw dump of URLs: each link is labeled with
+          its filename and copyable on its own, failures sit beside the
+          successes they did not undo, and skipped folders are named. */}
+      {bulkShare && (
+        <Dialog
+          open
+          onClose={closeBulkShare}
+          labelledBy={bulkShareHeadingId}
+          describedBy={bulkShareSummaryId}
+          maxWidth="lg"
+        >
+          <h2
+            id={bulkShareHeadingId}
+            className="type-headline"
+            style={{ color: "var(--text)" }}
+          >
+            Share links
+          </h2>
+          {/* role="status" so the running count and the final tally are
+              announced — the loop settles asynchronously. */}
+          <p
+            id={bulkShareSummaryId}
+            role="status"
+            className="type-caption-1 mt-1"
+            style={{ color: "var(--text-muted)" }}
+          >
+            {(() => {
+              const total = bulkShare.rows.length;
+              const ok = bulkShare.rows.filter((r) => r.status === "ok").length;
+              const failed = bulkShare.rows.filter(
+                (r) => r.status === "failed"
+              ).length;
+              if (!bulkShare.done) {
+                return `Creating links… ${ok + failed} of ${total} done.`;
+              }
+              if (failed === 0) {
+                return `Shared ${total} file${total > 1 ? "s" : ""} — one link each.`;
+              }
+              return `Shared ${ok} of ${total}. ${failed} couldn't be shared — the links above still work.`;
+            })()}
+          </p>
+
+          <ul className="mt-4 space-y-2 max-h-[46vh] overflow-y-auto">
+            {bulkShare.rows.map((row) => (
+              <li
+                key={row.path}
+                className="flex items-center gap-3 p-2.5"
+                style={{
+                  background: "var(--inset)",
+                  border: "1px solid var(--card-bd)",
+                  borderRadius: "var(--radius-input)",
+                }}
+              >
+                <div className="flex-1 min-w-0">
+                  <div
+                    className="type-footnote font-medium truncate"
+                    style={{ color: "var(--text)" }}
+                  >
+                    {row.name}
+                  </div>
+                  {row.status === "pending" && (
+                    <div
+                      className="type-caption-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Creating link…
+                    </div>
+                  )}
+                  {row.status === "ok" && (
+                    <div
+                      className="type-caption-1 truncate"
+                      style={{ color: "var(--text-muted)" }}
+                      title={row.url ?? undefined}
+                    >
+                      {row.url ?? "Link created (no URL returned)"}
+                    </div>
+                  )}
+                  {row.status === "failed" && (
+                    <div
+                      className="type-caption-1 flex items-center gap-1"
+                      style={{ color: "var(--danger)" }}
+                    >
+                      <AlertTriangle size={12} />
+                      {row.error}
+                    </div>
+                  )}
+                </div>
+                {row.status === "ok" && row.url && (
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => copyText(row.url as string, row.path)}
+                    aria-label={`Copy link for ${row.name}`}
+                  >
+                    {copiedKey === row.path ? (
+                      <Check size={14} />
+                    ) : (
+                      <CopyIcon size={14} />
+                    )}
+                    {copiedKey === row.path ? "Copied" : "Copy"}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          {bulkShare.skipped.length > 0 && (
+            <p
+              className="type-caption-1 mt-3"
+              style={{ color: "var(--text-muted)" }}
+            >
+              Skipped {bulkShare.skipped.length} folder
+              {bulkShare.skipped.length > 1 ? "s" : ""} (
+              {bulkShare.skipped.join(", ")}) — folders are shared one at a time.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 mt-5">
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={!bulkShare.rows.some((r) => r.status === "ok" && r.url)}
+              onClick={() =>
+                copyText(
+                  bulkShare.rows
+                    .filter((r) => r.status === "ok" && r.url)
+                    .map((r) => `${r.name} — ${r.url}`)
+                    .join("\n"),
+                  "__all__"
+                )
+              }
+            >
+              {copiedKey === "__all__" ? <Check size={14} /> : <CopyIcon size={14} />}
+              {copiedKey === "__all__" ? "Copied" : "Copy all links"}
+            </button>
+            <button type="button" className="btn primary" onClick={closeBulkShare}>
+              Done
+            </button>
+          </div>
+        </Dialog>
       )}
 
       {/* Context menu */}

@@ -23,6 +23,7 @@ function renderToolbar(overrides: Partial<React.ComponentProps<typeof SelectionT
     onCopyTo: vi.fn(),
     onDelete: vi.fn(),
     onDownload: vi.fn(),
+    onShare: vi.fn(),
   };
   render(
     <SelectionToolbar
@@ -65,5 +66,55 @@ describe("SelectionToolbar — reader posture (WARP-1267)", () => {
     expect(downloadBtn).not.toBeDisabled();
     fireEvent.click(downloadBtn);
     expect(h.onDownload).toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-1540 — Share is a first-class selection action. It was reachable only
+ * from the single-file detail panel and a `disabled: !isSingle` context item,
+ * so a selection of several files had no way to share at all.
+ */
+describe("SelectionToolbar — Share (WARP-1540)", () => {
+  it("shows Share alongside Download whenever at least one item is selected", () => {
+    const h = renderToolbar({ count: 1, hasClipboard: false });
+    const shareBtn = screen.getByRole("button", { name: /^share$/i });
+    expect(shareBtn).toBeInTheDocument();
+    expect(shareBtn).not.toBeDisabled();
+    fireEvent.click(shareBtn);
+    expect(h.onShare).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides Share when nothing is selected (clipboard-only toolbar)", () => {
+    renderToolbar({ count: 0, hasClipboard: true });
+    expect(screen.queryByRole("button", { name: /^share$/i })).toBeNull();
+  });
+
+  it("says one link per file in the tooltip for a multi-selection", () => {
+    renderToolbar({ count: 3 });
+    expect(screen.getByRole("button", { name: /^share$/i })).toHaveAttribute(
+      "title",
+      "Share 3 files — one link each"
+    );
+  });
+
+  it("disables Share with the caller's reason and does not fire the handler", () => {
+    const reason = "Only a manager can share from this library.";
+    const h = renderToolbar({ canShare: false, shareDisabledReason: reason });
+    const shareBtn = screen.getByRole("button", { name: /^share$/i });
+    // Visible-but-disabled — never silently absent.
+    expect(shareBtn).toBeInTheDocument();
+    expect(shareBtn).toBeDisabled();
+    expect(shareBtn).toHaveAttribute("title", reason);
+    fireEvent.click(shareBtn);
+    expect(h.onShare).not.toHaveBeenCalled();
+  });
+
+  it("disables Share for a reader even when the caller forgot canShare", () => {
+    const h = renderToolbar({ readOnly: true });
+    const shareBtn = screen.getByRole("button", { name: /^share$/i });
+    expect(shareBtn).toBeDisabled();
+    expect(shareBtn).toHaveAttribute("title", READER_TOOLTIP);
+    fireEvent.click(shareBtn);
+    expect(h.onShare).not.toHaveBeenCalled();
   });
 });
