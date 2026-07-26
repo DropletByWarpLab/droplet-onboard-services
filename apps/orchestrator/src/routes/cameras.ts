@@ -13,6 +13,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
   getCameras,
@@ -1498,7 +1499,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   // WARP-171: per-route guard. owner + admin — Frigate driver install
   // is a system-config mutation, not a household-tier operation.
-  router.post("/cameras/drivers/fix", requireRole("owner", "admin"), async (_req, res, next) => {
+  // WARP-1528 / ADR-032 §3(b): this trio (drivers + subnet setup/teardown) IS
+  // the §9 Cameras `manage` level ("configure cameras — scan, accept,
+  // subnets"). The enum floor above is unchanged and still authoritative; the
+  // feature gate beside it narrows an Admin-BASED custom role that was granted
+  // Cameras at `view`/`act` only. Registered per-route (not at the group) for
+  // exactly the §3(b) reason: one floor route group serves two §9 levels.
+  router.post("/cameras/drivers/fix", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (_req, res, next) => {
     try {
       // Forward DEVICE_SECRET for authentication (the discovery service
       // requires it for kernel module operations like modprobe)
@@ -1541,7 +1548,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   // WARP-171: per-route guard. owner + admin — subnet provisioning
   // is a network-layer write (carves out 192.168.100.0/24 isolation).
-  router.post("/cameras/subnet/setup", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/cameras/subnet/setup", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -1585,7 +1592,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // WARP-171: per-route guard. owner + admin — same as subnet/setup.
-  router.delete("/cameras/subnet", requireRole("owner", "admin"), async (req, res, next) => {
+  router.delete("/cameras/subnet", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(

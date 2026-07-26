@@ -7,6 +7,9 @@
  *   PATCH  /api/people/:id/role       — owner+admin, emits ActivityRow
  *   PATCH  /api/people/:id/scope      — owner+admin, emits ActivityRow
  *   DELETE /api/people/:id            — owner+admin, emits ActivityRow
+ *   PATCH  /api/people/:id/access            — WARP-1527: custom role / built-in tier
+ *   GET    /api/people/:id/effective-access  — WARP-1527: the ADR-032 §3 resolver output
+ *   PUT    /api/people/:id/access-exceptions — WARP-1527: replace the exception set
  *
  * Dependencies (do NOT re-implement):
  *   - `requireRole(...roles)`           — WARP-171, src/middleware/auth.ts
@@ -29,12 +32,39 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
-import { revokeAllSessions } from "../services/session.service.js";
-import { denylistUser } from "../services/auth-denylist.service.js";
-import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "../services/jwt.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+// WARP-1526 (RBAC v2 T2): every person-mutation on this surface runs the
+// consolidated rails — owner-untouchable, self-action, rank cap, assignable
+// narrowing pre-tx; last-owner + last-operator in-tx; revoke/denylist/
+// Activity/NC-cascade post-commit — through ONE service shared with the
+// /api/auth/users* surface (ADR-032 draft §4). The WARP-480 / WARP-1523 /
+// WARP-247 / WARP-1259 inline blocks this file used to carry live there now.
+import {
+  RoleMutationRefusedError,
+  SERIALIZABLE_TX,
+  isConcurrencyConflict,
+  readGuardTargetTx,
+  ASSIGNABLE_ROLES,
+  type AssignableRole,
+  assertNotSelf,
+  assertRoleChangeAllowed,
+  assertScopeChangeAllowed,
+  assertRemovalAllowed,
+  assertUsageWriteAllowed,
+  assertAssignableForCreate,
+  assertRoleChangeInvariantsTx,
+  assertRemovalInvariantsTx,
+  runRoleChangePostEffects,
+  runRemovalPostEffects,
+} from "../services/role-mutation-guard.service.js";
+// WARP-1527 (RBAC v2 T3): the per-person access surface — custom-role /
+// built-in-tier assignment, the §3 resolver read, and the feature-axis
+// exception editor.
+import { revokeAllSessions } from "../services/session.service.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import { GATEABLE_MODULE_IDS, type GateableModuleId } from "../services/access-catalog.js";
 import {
   createTeamInvite,
   isInviteRole,
@@ -42,19 +72,16 @@ import {
   InvalidInviteRoleError,
 } from "../services/onboarding-team-invite.service.js";
 import {
+  validateInviteAccessRole,
+  InviteAccessRoleError,
+  type ValidatedInviteAccessRole,
+} from "../services/invite-access-role.service.js";
+import {
   sendInviteEmail,
   type SendOptions,
 } from "../services/email-channel.service.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
 import { createLogger } from "../lib/logger.js";
-import {
-  adminBasicToken,
-  DROPLET_ADMINS_GROUP,
-} from "../services/department-provisioner.service.js";
-import {
-  ncAddUserToGroup,
-  ncRemoveUserFromGroup,
-} from "../services/nextcloud-groups.client.js";
 import {
   upsertUsagePolicy,
   getUsagePolicyWithUsage,
@@ -79,17 +106,58 @@ const logger = createLogger("people-route");
 // the contract.
 const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
 
-// The privilege ladder is imported from jwt.service.ts (`ROLE_RANK`) — the
-// WARP-623 single source of truth shared with the POST /auth/users and
-// POST /auth/invites rank caps. WARP-1523 removed the inline duplicate that
-// used to sit here now that both branches have landed on main (jwt.service is
-// already in this file's import graph via ACCESS_TOKEN_TTL_SECONDS, so the
-// standalone-compile discipline for ROLE_VALUES above is unaffected).
+// The rank ladder, the assignable-role narrowing, the admin-tier set, and
+// every other mutation rail live in role-mutation-guard.service.ts
+// (WARP-1526) — the WARP-623 / WARP-1523 single-source-of-truth discipline,
+// now one step further: this file registers routes and maps refusals; the
+// rails themselves are shared with routes/auth.ts. `service` and `owner`
+// stay in ROLE_VALUES so zod keeps 400-ing unknown STRINGS while the guard
+// 403s known-but-unassignable ROLES (ROLE_NOT_ASSIGNABLE) — two different
+// failure classes on purpose.
 
-// WARP-1259 (T7): the box-wide `droplet-admins` NC group (mask 31 on every
-// active groupfolder, ADR-029 §3.5 Tier 1 admin-see-all) tracks this exact
-// role tier — owner and admin, nothing else.
-const ADMIN_TIER_ROLES = new Set<(typeof ROLE_VALUES)[number]>(["owner", "admin"]);
+/**
+ * WARP-1539 — the ONLY columns the People surface may serialize.
+ *
+ * These routes used to hand back whole `prisma.user` rows, which carry
+ * three things no client may ever receive:
+ *
+ *   • `passwordHash`    — the argon2id PHC hash. schema.prisma states it is
+ *                         "NEVER logged"; shipping it in a JSON body is
+ *                         strictly worse than a log line.
+ *   • `emailLookupHash` — the WARP-233 HMAC-SHA256 blind index over the
+ *                         normalized email. It carries the plaintext-
+ *                         uniqueness guarantee that `email @unique` used to
+ *                         hold; handing it out lets a holder confirm-by-guess
+ *                         which address a row belongs to, defeating the
+ *                         property the blind index exists to provide.
+ *   • `email`           — an encrypted dcv1: blob at rest (WARP-233). These
+ *                         routes never call `decryptColumn`, so it was only
+ *                         ever emitted as ciphertext: useless to the client
+ *                         and needless exposure. No consumer reads it.
+ *
+ * owner/admin-only is not a mitigation — it just narrows *whose* session
+ * has to leak. This is an allow-list on purpose: a column added to the
+ * schema later is excluded by default and must be opted in deliberately,
+ * which is the failure direction we want.
+ */
+const PUBLIC_USER_SELECT = {
+  id: true,
+  username: true,
+  displayName: true,
+  role: true,
+  isLocal: true,
+  nextcloudUsername: true,
+  accessRoleId: true,
+  // WARP-1526 (pr-reviewer #1229 N2): the guard's in-transaction invariants
+  // need the target's CURRENT enable state — a DEACTIVATED sole operator
+  // must stay demotable/removable (they hold no live access, so removing
+  // them cannot strand the box). Deliberate allow-list addition: the
+  // enable/disable state is the same fact the roster already renders, it
+  // carries no credential material, and every route here is owner/admin.
+  directoryStatus: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 const SCOPE_VALUES = [
   "team",
@@ -127,6 +195,11 @@ const scopeSchema = z.object({
 const inviteSchema = z.object({
   email: z.string().min(1).max(200),
   role: z.string().min(1).max(32),
+  // WARP-1533 (RBAC v2 T9): optional custom access role granted by this
+  // invite. Shape-checked here; existence/state/rank/tier-agreement are
+  // validated by invite-access-role.service in the handler (shared with the
+  // legacy POST /auth/invites surface so the two can never diverge).
+  accessRoleId: z.string().uuid().optional(),
 });
 
 // WARP-1271 (T19a): per-user usage settings. `null` explicitly clears the
@@ -136,6 +209,42 @@ const inviteSchema = z.object({
 const usageSchema = z.object({
   storageQuotaBytes: z.string().regex(/^\d+$/).nullable().optional(),
   maxUploadSizeMb: z.number().int().positive().max(1_000_000).nullable().optional(),
+});
+
+// WARP-1527 (RBAC v2 T3): PATCH /people/:id/access — the T8 contract's two
+// shapes: `{ accessRoleId }` assigns a custom role; `{ accessRoleId: null,
+// tier }` assigns a BUILT-IN tier (clears the role pointer, sets User.role).
+// `tier` reuses the T2 assignable vocabulary — never owner/service; sending
+// both a role id AND a tier is ambiguous and refused.
+const personAccessSchema = z
+  .object({
+    accessRoleId: z.string().min(1).max(128).nullable(),
+    tier: z.enum(ASSIGNABLE_ROLES).optional(),
+  })
+  .refine((body) => (body.accessRoleId === null ? body.tier !== undefined : body.tier === undefined), {
+    message: "Send { accessRoleId } for a custom role, or { accessRoleId: null, tier } for a built-in tier",
+  });
+
+// WARP-1527: PUT /people/:id/access-exceptions — the small, feature-axis-only
+// v1 exception list (O-3). `level` is REQUIRED when effect=allow (the carried
+// zod obligation); the always-on chat module is exception-immune, so its id
+// is simply not in the vocabulary; duplicates are a client bug → 400.
+const accessExceptionSchema = z.object({
+  moduleId: z.enum(GATEABLE_MODULE_IDS as unknown as [GateableModuleId, ...GateableModuleId[]]),
+  effect: z.enum(["allow", "deny"]),
+  level: z.enum(["view", "act", "manage"]).nullable().optional(),
+});
+
+const accessExceptionsSchema = z.object({
+  exceptions: z
+    .array(accessExceptionSchema)
+    .max(GATEABLE_MODULE_IDS.length)
+    .refine((arr) => new Set(arr.map((x) => x.moduleId)).size === arr.length, {
+      message: "Duplicate exception modules not allowed",
+    })
+    .refine((arr) => arr.every((x) => x.effect !== "allow" || (x.level !== null && x.level !== undefined)), {
+      message: "`level` is required when effect is `allow`",
+    }),
 });
 
 /** BigInt fields string-encoded per the ADR-029 §8 wire contract. */
@@ -231,7 +340,12 @@ export function createPeopleRouter(
     requireRole("owner", "admin"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const people = await prisma.user.findMany();
+        // WARP-1539 — project at the query, not after: the hash never
+        // enters this process's memory, so it cannot reach a heap dump,
+        // an error serializer, or a future `res.json(row)` added here.
+        const people = await prisma.user.findMany({
+          select: PUBLIC_USER_SELECT,
+        });
         res.json({ people });
       } catch (err) {
         next(err);
@@ -277,24 +391,66 @@ export function createPeopleRouter(
           });
         }
 
-        // Privilege-escalation guard (mirror of the POST /auth/invites fix).
-        // requireRole("owner","admin") proves the caller MAY invite, not WHICH
-        // role they may assign. Without this an admin could mint an owner
-        // invite, and the accept path grants an owner/admin invite an owner
-        // session role + Nextcloud admin group — a straight escalation. Reject
-        // (403) any assigned role that outranks the inviter's own. Only
-        // recognized invite roles are rank-checked here; an unknown role string
-        // falls through to createTeamInvite's typed 400. owner→owner is
-        // allowed, admin→owner is not. Fail closed if the role claim is absent.
+        // Rails 3 + 7 (WARP-1526, guard service): the rank cap that mirrors
+        // the POST /auth/invites fix — requireRole proves the caller MAY
+        // invite, not WHICH role they may assign — plus the assignable-enum
+        // narrowing: invites only ever assign {admin, family, guest}
+        // (design brief §6.2 "never Owner or Service"; exactly one owner by
+        // design, so even an owner cannot mint a second owner invite —
+        // this consciously supersedes the earlier owner→owner-allowed pin).
+        // Only recognized invite roles reach the rails; an unknown role
+        // string falls through to createTeamInvite's typed 400. Fail closed
+        // if the actor's role claim is absent (inside the guard).
+        //
+        // `inviterRole` is read out here because BOTH the tier rails (moved
+        // below the access-role validation, see the ORDER note there) and
+        // the WARP-1533 access-role validation apply a rank cap — the guard
+        // rails cover the tier, the shared invite-access-role service
+        // covers the custom role's startingPoint.
         const inviterRole = req.user?.role;
-        if (
-          isInviteRole(parsed.data.role) &&
-          (!inviterRole ||
-            ROLE_RANK[parsed.data.role] > ROLE_RANK[inviterRole])
-        ) {
-          return res.status(403).json({
-            error: "You cannot invite someone to a role higher than your own",
-            code: "ROLE_RANK_EXCEEDED",
+
+        // WARP-1533 (RBAC v2 T9): validate the optional custom access role
+        // BEFORE any write — fail-closed via the shared service (exists,
+        // active, assignable startingPoint, WARP-623 rank cap on the role's
+        // startingPoint, and tier agreement so the accept path's fallback
+        // tier can never drift from the operator's pick).
+        //
+        // ORDER (WARP-1526 × WARP-1533, decided at rebase): when the
+        // operator picked a custom role, its validation runs FIRST so the
+        // specific diagnosis wins — an owner-startingPoint row answers
+        // ACCESS_ROLE_NOT_ASSIGNABLE (400) rather than being masked by the
+        // coarser tier refusal, which would otherwise always fire first
+        // because T9's own tier-agreement check forces tier == startingPoint.
+        // Both are fail-closed and nothing is written by either. With no
+        // accessRoleId (every pre-T9 caller) this block is skipped entirely
+        // and the tier rails below are still the first thing that runs.
+        //
+        // WARP-1572 (F4): the declared type is the validator's BRANDED
+        // output — createTeamInvite's seam only accepts a role that went
+        // through validateInviteAccessRole, so the reorder above cannot
+        // become a path that hands the seam an unvalidated row.
+        let accessRole: ValidatedInviteAccessRole | null = null;
+        if (parsed.data.accessRoleId) {
+          try {
+            accessRole = await validateInviteAccessRole(prisma, {
+              accessRoleId: parsed.data.accessRoleId,
+              inviteTier: parsed.data.role,
+              inviterRole,
+            });
+          } catch (err) {
+            if (err instanceof InviteAccessRoleError) {
+              return res.status(err.status).json({ error: err.message, code: err.code });
+            }
+            throw err;
+          }
+        }
+
+        if (isInviteRole(parsed.data.role)) {
+          assertAssignableForCreate({
+            actorRole: inviterRole,
+            requestedRole: parsed.data.role,
+            rankMessage:
+              "You cannot invite someone to a role higher than your own",
           });
         }
 
@@ -304,6 +460,9 @@ export function createPeopleRouter(
             email: parsed.data.email,
             role: parsed.data.role,
             createdBy: req.user?.username ?? "unknown",
+            // Branded object, not a bare id — the seam only accepts a role
+            // that went through validateInviteAccessRole (review F4).
+            accessRole,
           });
         } catch (err) {
           // Typed validation errors → 400 with the service's `code` so the
@@ -338,17 +497,30 @@ export function createPeopleRouter(
         // delivery outcome — but NEVER the token (it's a bearer credential; an
         // audit row is not the place for it). Lifecycle events go on the `auth`
         // kind (matches the DELETE /people/:id "User removed" convention above).
+        // WARP-1533: an access-role invite gets the ADR-032 §5 wording
+        // ("Invite created with access role" — the free-text house style,
+        // same kind/refs shape as the shipped "Teammate invited"); plain
+        // tier invites keep the existing entry byte-for-byte.
         await recordActivity({
           kind: "auth",
           severity: send.status === "sent" ? "ok" : "warn",
           sourceIcon: "user-plus",
-          what: "Teammate invited",
-          sub: `${invite.email} · ${invite.role}`,
+          what: accessRole ? "Invite created with access role" : "Teammate invited",
+          sub: accessRole
+            ? `${invite.email} · ${accessRole.name}`
+            : `${invite.email} · ${invite.role}`,
           refs: {
             actor: req.user?.username ?? null,
             email: invite.email,
             role: invite.role,
             sendStatus: send.status,
+            ...(accessRole
+              ? {
+                  accessRoleId: accessRole.id,
+                  accessRoleName: accessRole.name,
+                  accessRoleStartingPoint: accessRole.startingPoint,
+                }
+              : {}),
           },
           actor: actorFromRequest(req),
         });
@@ -358,10 +530,21 @@ export function createPeopleRouter(
           token: invite.token,
           email: invite.email,
           role: invite.role,
+          access_role_id: invite.accessRoleId,
           expires_at: invite.expiresAt,
           send_status: send.status,
         });
       } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -381,20 +564,15 @@ export function createPeopleRouter(
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        // WARP-480 self-action guard. Runs FIRST so the refusal path
-        // skips the body parse + DB read entirely. Operators must use
-        // the appropriate workflow (re-invite, ownership-transfer) to
-        // change their own role — the people surface is for editing
-        // OTHER members, and a self-edit here is almost always a
-        // misclick that ends in lockout. Refusals do NOT emit an
-        // ActivityRow: the audit log is reserved for actual state
-        // changes; refused calls are noise that crowd out signal.
-        if (req.params.id === req.user?.id) {
-          return res.status(409).json({
-            error: "Cannot modify your own role, scope, or account",
-            code: "SELF_ACTION_NOT_ALLOWED",
-          });
-        }
+        // Rail 2 (WARP-480 self-action). Runs FIRST so the refusal path
+        // skips the body parse + DB read entirely — the shipped placement,
+        // now routed through the guard service so /api/auth/users* shares
+        // the identical rail. Operators must use the appropriate workflow
+        // (re-invite, ownership-transfer) to change their own role; a
+        // self-edit here is almost always a misclick that ends in lockout.
+        // Refusals do NOT emit an ActivityRow: the audit log is reserved
+        // for actual state changes; refused calls are noise.
+        assertNotSelf(req.user?.id, req.params.id);
 
         const parsed = roleSchema.safeParse(req.body);
         if (!parsed.success) {
@@ -404,8 +582,14 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: this row is both read for the guards
+        // below AND returned verbatim by the no-op short-circuit, so it
+        // must never carry the secret columns. Every field the handler
+        // reads (id, username, role, nextcloudUsername) is in the
+        // allow-list.
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
@@ -413,126 +597,89 @@ export function createPeopleRouter(
         // No-op short-circuit: skip the update AND the audit row when
         // the role is already what the caller asked for. Avoids
         // polluting the activity feed with no-change touches when the
-        // dashboard re-submits the same form on focus loss.
+        // dashboard re-submits the same form on focus loss. Pinned to run
+        // BEFORE the rails (WARP-1523 tests): an admin re-submitting an
+        // owner row unchanged stays a quiet 200 — a no-op is not a
+        // mutation, so the owner-untouchable rail has nothing to refuse.
         if (existing.role === parsed.data.role) {
           return res.json({ user: existing });
         }
 
-        // WARP-1523: ROLE_RANK cap on the role-UPDATE path — the same
-        // privilege-escalation guard the CREATE/INVITE sites enforce
-        // (POST /auth/users, POST /auth/invites, POST /people/invite).
-        // requireRole("owner","admin") proves the caller may edit roles,
-        // not WHICH role they may assign: without this cap an admin
-        // (rank 2) could set any member to owner (rank 3). The cap is
-        // <= — assigning your OWN rank is allowed (owner→owner co-owner,
-        // admin→admin last-admin recovery), only an outranking target is
-        // refused. Runs AFTER the no-op short-circuit so an unchanged
-        // re-submit of an owner row by an admin stays a quiet 200 (the
-        // dashboard re-submits the same form on focus loss), and BEFORE
-        // the write path so every actual escalating change is refused.
-        // Fail closed if the actor's role claim is somehow absent.
-        const actorRole = req.user?.role;
-        if (!actorRole || ROLE_RANK[parsed.data.role] > ROLE_RANK[actorRole]) {
-          return res.status(403).json({
-            error: "You cannot assign a role higher than your own",
-            code: "ROLE_RANK_EXCEEDED",
-          });
-        }
-
-        // WARP-480 last-owner invariant. At least one user with
-        // role="owner" must remain at all times so owner-only routes
-        // (POST /api/network/system/reboot, the device-identity reseal,
-        // etc.) stay reachable without DB hand-edits. The count + the
-        // update run inside a single interactive $transaction so a
-        // concurrent demotion can't slip past the check window —
-        // serializable isolation is the default for Prisma $transaction
-        // on Postgres, which is what we need here.
-        //
-        // Only fires on owner→non-owner. Owner→owner is filtered out
-        // above by the no-op short-circuit, and non-owner→anything
-        // never touches the invariant.
-        const demotingOnlyOwner =
-          existing.role === "owner" && parsed.data.role !== "owner";
-
-        const result = await prisma.$transaction(async (tx) => {
-          if (demotingOnlyOwner) {
-            const owners = await tx.user.count({ where: { role: "owner" } });
-            if (owners <= 1) {
-              return { kind: "last-owner" as const };
-            }
-          }
-          const updated = await tx.user.update({
-            where: { id: req.params.id },
-            data: { role: parsed.data.role },
-          });
-          return { kind: "ok" as const, updated };
+        // Rails 1 → 3 → 7 (WARP-1526, guard service): owner-untouchable
+        // (any actual change targeting an owner row is refused with the
+        // design copy — closes "another admin can edit the owner"), the
+        // WARP-1523 rank cap (<= — equal rank allowed, fail closed on a
+        // missing actor claim), then the assignable-enum narrowing
+        // ({admin, family, guest} only; never owner or service, design
+        // brief §6.2). Rank runs before the narrowing so admin→owner
+        // keeps its exact ROLE_RANK_EXCEEDED refusal.
+        assertRoleChangeAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: { id: existing.id, role: existing.role },
+          requestedRole: parsed.data.role,
         });
 
-        if (result.kind === "last-owner") {
-          return res.status(409).json({
-            error:
-              "Cannot remove the only owner. Promote another user to owner first.",
-            code: "LAST_OWNER_INVARIANT",
+        // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
+        // WARP-1526 last-operator), then the write — all inside ONE
+        // SERIALIZABLE transaction (pr-reviewer #1229 B1: Prisma inherits
+        // the Postgres default, READ COMMITTED, under which two concurrent
+        // demotions of the last two operators both pass the count and both
+        // commit). Refusals throw out of the transaction and roll it back;
+        // the catch below maps them to their 4xx, and a serialization
+        // loser to CONCURRENT_MUTATION rather than a 500.
+        const updated = await prisma.$transaction(async (tx) => {
+          // B2 — re-read INSIDE the transaction. `existing` is a pre-tx
+          // snapshot, and whether rail 5 runs at all is derived from the
+          // target's tier: a stale `family` would skip the operator check
+          // entirely while a concurrent promotion made this row the only
+          // admin. The rails decide on THIS row, never the snapshot.
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRoleChangeInvariantsTx(tx, {
+            target: fresh,
+            requestedRole: parsed.data.role,
           });
-        }
+          // WARP-1539 — the updated row is returned to the caller, so it
+          // gets the same projection as every other read here.
+          // B2 — optimistic concurrency: pinning `role` closes the window
+          // between the re-read above and this write. A miss is P2025,
+          // mapped to CONCURRENT_MUTATION below.
+          return tx.user.update({
+            where: { id: req.params.id, role: fresh.role },
+            data: { role: parsed.data.role },
+            select: PUBLIC_USER_SELECT,
+          });
+        }, SERIALIZABLE_TX);
 
-        // WARP-247: a role change must propagate at the next REQUEST, not
-        // wait out the ≤15-min access-token TTL or the next refresh.
-        // revokeAllSessions deletes this user's session RECORDS (so their
-        // access tokens 401 at the next middleware check and re-auth under
-        // the new role) AND sweeps the WARP-116 refresh denylist internally
-        // as defense-in-depth. Best-effort (the service swallows Redis
-        // errors).
-        await revokeAllSessions(req.params.id);
-
-        // WARP-1259 (T7): the box-wide `droplet-admins` invariant (ADR-029
-        // §3.5 Tier 1 admin-see-all — mask 31 on every active groupfolder)
-        // must track owner/admin promotion and demotion through the SAME
-        // code path that already revokes sessions on a role change. Wired
-        // right beside revokeAllSessions per the ticket. Best-effort and
-        // non-blocking: an NC outage must not fail the role change itself
-        // (the reconciler's droplet-admins-everywhere convergence pass
-        // eventually re-attaches the group to every folder regardless, but
-        // the direct user<->group membership here has no reconciler sweep
-        // of its own yet — a persistent NC outage needs operator follow-up,
-        // logged at error).
-        const wasAdminTier = ADMIN_TIER_ROLES.has(existing.role);
-        const isAdminTierNow = ADMIN_TIER_ROLES.has(parsed.data.role);
-        if (wasAdminTier !== isAdminTierNow && existing.nextcloudUsername) {
-          const ncUsername = existing.nextcloudUsername;
-          try {
-            const adminToken = adminBasicToken();
-            if (isAdminTierNow) {
-              await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
-            } else {
-              await ncRemoveUserFromGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
-            }
-          } catch (err) {
-            logger.error(
-              { err, userId: existing.id, ncUsername, isAdminTierNow },
-              "role change: droplet-admins NC group sync failed (non-blocking)",
-            );
-          }
-        }
-
-        await recordActivity({
-          kind: "system",
-          severity: "ok",
-          sourceIcon: "shield",
-          what: "Role changed",
-          sub: `${existing.username}: ${existing.role} → ${parsed.data.role}`,
-          refs: {
-            actor: req.user?.username ?? null,
-            targetUserId: existing.id,
-            targetUsername: existing.username,
-            previousRole: existing.role,
-            nextRole: parsed.data.role,
+        // Rail 6 (consolidated post-commit effects): WARP-247 session
+        // revocation so the new role propagates at the next request, the
+        // WARP-1259 droplet-admins NC cascade on tier crossings (best-
+        // effort + logged; the department-reconciler's admin-group sweep
+        // now converges residual drift from User.role), and the audit row.
+        await runRoleChangePostEffects({
+          target: {
+            id: existing.id,
+            username: existing.username,
+            nextcloudUsername: existing.nextcloudUsername,
           },
+          previousRole: existing.role,
+          nextRole: parsed.data.role,
+          actorUsername: req.user?.username ?? null,
           actor: actorFromRequest(req),
         });
 
-        res.json({ user: result.updated });
+        res.json({ user: updated });
       } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -551,16 +698,10 @@ export function createPeopleRouter(
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        // WARP-480 self-action guard. See the matching block on
-        // PATCH /people/:id/role for the full rationale; same shape
-        // here so the dashboard can render one error path. Runs
-        // BEFORE the body parse to save a roundtrip on the refusal.
-        if (req.params.id === req.user?.id) {
-          return res.status(409).json({
-            error: "Cannot modify your own role, scope, or account",
-            code: "SELF_ACTION_NOT_ALLOWED",
-          });
-        }
+        // Rail 2 (WARP-480 self-action) — see PATCH /people/:id/role for
+        // the rationale; routed through the guard service, still BEFORE
+        // the body parse to save a roundtrip on the refusal.
+        assertNotSelf(req.user?.id, req.params.id);
 
         const parsed = scopeSchema.safeParse(req.body);
         if (!parsed.success) {
@@ -570,20 +711,34 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: returned to the caller at the end of this
+        // handler. Only `id` and `username` are read off it (the audit row).
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
         }
+
+        // Rail 1 (WARP-1526 owner untouchable): an owner's scope bindings
+        // are inert today (requireScope short-circuits owners) but they
+        // are still a mutation of the owner's row — "can't be changed
+        // here" covers them too.
+        assertScopeChangeAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: { id: existing.id, role: existing.role },
+        });
 
         // Drop the old bindings, write the new ones. The deleteMany +
         // recreate pair runs inside a single interactive $transaction so a
         // transient DB error or process crash between the delete commit and
         // the last create can't leave the user with zero bindings — which
         // would silently lock them out of every scope-guarded route. Same
-        // shape as the PATCH /role last-owner invariant transaction above;
-        // serializable isolation is Prisma's $transaction default on Postgres.
+        // shape — and the same explicit SERIALIZABLE_TX — as the PATCH /role
+        // invariant transaction above, so two concurrent rewrites of the
+        // same user's bindings can't interleave into a merged set. Prisma's
+        // default is READ COMMITTED, never serializable.
         const targetUserId = req.params.id;
         const actor = req.user?.username ?? null;
 
@@ -599,7 +754,7 @@ export function createPeopleRouter(
             })),
             skipDuplicates: true,
           });
-        });
+        }, SERIALIZABLE_TX);
 
         await recordActivity({
           kind: "system",
@@ -621,6 +776,16 @@ export function createPeopleRouter(
           scopes: parsed.data.scopes,
         });
       } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -639,17 +804,12 @@ export function createPeopleRouter(
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        // WARP-480 self-action guard. An owner could otherwise DELETE
+        // Rail 2 (WARP-480 self-action). An owner could otherwise DELETE
         // their own row and lock the household out of every owner-only
         // route. Account removal goes through a separate workflow (not
         // in this surface) so an operator can never accidentally delete
         // themselves with one wrong click.
-        if (req.params.id === req.user?.id) {
-          return res.status(409).json({
-            error: "Cannot modify your own role, scope, or account",
-            code: "SELF_ACTION_NOT_ALLOWED",
-          });
-        }
+        assertNotSelf(req.user?.id, req.params.id);
 
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
@@ -657,6 +817,18 @@ export function createPeopleRouter(
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
         }
+
+        // Rail 1 (WARP-1526 owner untouchable): owner rows cannot be
+        // removed by ANY actor — regardless of how many owner rows exist.
+        // Off-boarding an owner belongs to the future ownership-transfer
+        // flow. This supersedes the earlier two-owner off-boarding path
+        // and shadows the last-owner invariant below (kept as the in-tx
+        // backstop).
+        assertRemovalAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: { id: existing.id, role: existing.role },
+        });
+
         if (!existing.isLocal) {
           // 409 Conflict — \"the resource state forbids this\". 403 would
           // imply auth/permission; the caller IS allowed, the resource
@@ -666,62 +838,47 @@ export function createPeopleRouter(
           });
         }
 
-        // WARP-480 last-owner invariant. Deleting an owner is only
-        // allowed when at least one other owner remains. count + delete
-        // run inside one interactive $transaction so a concurrent
-        // demotion of the other owner can't slip past the check window.
-        const result = await prisma.$transaction(async (tx) => {
-          if (existing.role === "owner") {
-            const owners = await tx.user.count({ where: { role: "owner" } });
-            if (owners <= 1) {
-              return { kind: "last-owner" as const };
-            }
-          }
-          await tx.user.delete({ where: { id: req.params.id } });
-          return { kind: "ok" as const };
-        });
-
-        if (result.kind === "last-owner") {
-          return res.status(409).json({
-            error:
-              "Cannot remove the only owner. Promote another user to owner first.",
-            code: "LAST_OWNER_INVARIANT",
+        // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
+        // WARP-1526 last-operator: removing the final non-disabled
+        // owner-or-admin is refused), then the delete — checks + write in
+        // one interactive $transaction so a concurrent demotion can't slip
+        // past the check window.
+        // SERIALIZABLE + in-tx re-read + optimistic delete (pr-reviewer
+        // #1229 B1/B2), same shape as PATCH /role above.
+        await prisma.$transaction(async (tx) => {
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.delete({
+            where: { id: req.params.id, role: fresh.role },
           });
-        }
+        }, SERIALIZABLE_TX);
 
-        // WARP-490 — a deletion is a hard revocation, so kill the removed
-        // user's live credentials immediately rather than letting an
-        // already-issued access token ride out its ≤15-min TTL:
-        //   • revokeAllSessions deletes their session RECORDS (sid-carrying
-        //     access tokens 401 at the next request) and sweeps the WARP-116
-        //     refresh denylist — the same call the role/scope handlers make;
-        //     DELETE was the one mutation that had been missing it.
-        //   • denylistUser writes auth:denylist:user:<id> for the access-
-        //     token max-age so the middleware also rejects sid-LESS grace-
-        //     path tokens (which skip the session check) within that window;
-        //     the entry self-expires once no such token can still be valid.
-        // Both are best-effort (Redis errors are swallowed) — the row is
-        // already gone, so /auth/refresh fails closed regardless.
-        await revokeAllSessions(existing.id);
-        await denylistUser(existing.id, ACCESS_TOKEN_TTL_SECONDS);
-
-        await recordActivity({
-          kind: "auth",
-          severity: "warn",
-          sourceIcon: "user-x",
-          what: "User removed",
-          sub: existing.username,
-          refs: {
-            actor: req.user?.username ?? null,
-            targetUserId: existing.id,
-            targetUsername: existing.username,
-            role: existing.role,
-          },
+        // Rail 6 (consolidated post-commit effects) — WARP-490 hard
+        // revocation: session RECORDS swept + the sid-less access-token
+        // denylist written (both best-effort; the row is already gone, so
+        // /auth/refresh fails closed regardless), then the mandatory-emit
+        // audit row.
+        await runRemovalPostEffects({
+          targetUserId: existing.id,
+          targetUsername: existing.username,
+          targetRole: existing.role,
+          actorUsername: req.user?.username ?? null,
           actor: actorFromRequest(req),
         });
 
         res.json({ ok: true, removed: existing.username });
       } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         // Prisma's P2025 (record not found) shouldn't reach here
         // because of the findUnique above, but stay defensive.
         logger.warn({ err, id: req.params.id }, "DELETE /people failed");
@@ -758,6 +915,22 @@ export function createPeopleRouter(
           });
         }
 
+        // Rail 1 (WARP-1526 owner untouchable): a usage-policy write IS a
+        // mutation targeting the person, so the owner's row is off-limits
+        // here too — an admin must not be able to cap the owner's storage
+        // (and the owner's own usage stays "full control", not a policy
+        // row). Rail 2 intentionally does NOT apply: a non-owner operator
+        // editing THEIR OWN quota/upload cap is normal (WARP-1271) — it
+        // can't lock anyone out of the box.
+        const target = await prisma.user.findUnique({
+          where: { id: req.params.id },
+          select: { id: true, role: true },
+        });
+        if (!target) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        assertUsageWriteAllowed({ target });
+
         const input: UsagePolicyInput = {
           storageQuotaBytes:
             parsed.data.storageQuotaBytes === undefined
@@ -776,6 +949,16 @@ export function createPeopleRouter(
         );
         res.json({ policy: formatUsagePolicy(policy) });
       } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         if (err instanceof TargetUserNotFoundError) {
           return res.status(404).json({ error: "User not found" });
         }
@@ -807,6 +990,311 @@ export function createPeopleRouter(
           return res.status(404).json({ error: "User not found" });
         }
         logger.warn({ err, id: req.params.id }, "GET /people/:id/usage failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── PATCH /api/people/:id/access ────────────────────────────
+  // WARP-1527 (RBAC v2 T3). The per-person assignment path of ADR-032 §5:
+  // a custom role sets `accessRoleId` AND `User.role = startingPoint` in
+  // the same transaction (the §2 rule that keeps the ADR-004 enum floor
+  // authoritative); `{ accessRoleId: null, tier }` returns the person to a
+  // plain built-in tier. Both shapes run the full T2 rails + post-effect
+  // runners; the response's pending syncState drives the UI's
+  // "Saved. Applying…" line.
+  router.patch(
+    "/people/:id/access",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        // Rail 2 first — the shipped placement (see PATCH /people/:id/role).
+        assertNotSelf(req.user?.id, req.params.id);
+
+        const parsed = personAccessSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        // Everything that DECIDES the write — the role row (state +
+        // startingPoint), the target row, the rails — is read INSIDE the
+        // serializable transaction (review B2). Read outside, a concurrent
+        // archive or re-base of the role would let this write a tier the
+        // role no longer carries, and layer-1 requireRole would honour that
+        // stale tier indefinitely. SERIALIZABLE_TX is passed EXPLICITLY,
+        // exactly like the sibling role/scope/delete paths (WARP-1526):
+        // Prisma/Postgres default to READ COMMITTED. Precondition failures
+        // return a discriminated outcome rather than throwing — nothing has
+        // been written on those paths, so the empty transaction commits.
+        const outcome = await prisma.$transaction(async (tx) => {
+          let requestedRole: AssignableRole;
+          let accessRoleId: string | null;
+          let roleName: string | null = null;
+          if (parsed.data.accessRoleId !== null) {
+            const role = await tx.accessRole.findUnique({
+              where: { id: parsed.data.accessRoleId },
+            });
+            if (!role) return { kind: "role_not_found" } as const;
+            if (role.state === "archived") return { kind: "role_archived" } as const;
+            requestedRole = role.startingPoint as AssignableRole;
+            accessRoleId = role.id;
+            roleName = role.name;
+          } else {
+            // zod's refine guarantees tier is present on this branch.
+            requestedRole = parsed.data.tier as AssignableRole;
+            accessRoleId = null;
+          }
+
+          // WARP-1539 — projected at the query: this row feeds the guards
+          // and the post-effect runners, so the hash/blind-index must never
+          // materialize here even though the response body is only
+          // `{ syncState }`.
+          const existing = await tx.user.findUnique({
+            where: { id: req.params.id },
+            select: PUBLIC_USER_SELECT,
+          });
+          if (!existing) return { kind: "user_not_found" } as const;
+
+          // Rails 1 → 3 → 7 — identical to a direct role change: the
+          // assigned tier is the role's startingPoint (or the tier itself).
+          // A refusal throws out of the transaction and rolls it back; the
+          // route catch maps it (the DELETE /people/:id precedent).
+          assertRoleChangeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: { id: existing.id, role: existing.role },
+            requestedRole,
+          });
+
+          // Rails 4 + 5, then the paired write — accessRoleId and the enum
+          // tier move together or not at all.
+          //
+          // WARP-1526 (pr-reviewer #1229 N2): the in-tx rails also take the
+          // target's enable state — rail 5 counts NON-disabled operators, so
+          // a DEACTIVATED sole admin must stay demotable. `existing` is read
+          // inside this transaction through PUBLIC_USER_SELECT, which
+          // carries directoryStatus, so no extra round-trip is needed.
+          await assertRoleChangeInvariantsTx(tx, {
+            target: {
+              id: existing.id,
+              role: existing.role,
+              directoryStatus: existing.directoryStatus,
+            },
+            requestedRole,
+          });
+          await tx.user.update({
+            where: { id: existing.id },
+            data: { accessRoleId, role: requestedRole },
+          });
+
+          return { kind: "ok", existing, requestedRole, accessRoleId, roleName } as const;
+        }, SERIALIZABLE_TX);
+
+        if (outcome.kind === "role_not_found") {
+          return res.status(404).json({ error: "Role not found" });
+        }
+        if (outcome.kind === "role_archived") {
+          return res.status(409).json({
+            error: "This role is archived — restore it before assigning people.",
+            code: "ACCESS_ROLE_ARCHIVED",
+          });
+        }
+        if (outcome.kind === "user_not_found") {
+          return res.status(404).json({ error: "User not found" });
+        }
+        const { existing, requestedRole, accessRoleId, roleName } = outcome;
+
+        // Rail 6. A tier crossing runs the consolidated runner (revoke →
+        // NC droplet-admins cascade → "Role changed" audit); a same-tier
+        // change (role swap / role clear) still revokes — the person's
+        // effective access changed even though the enum floor didn't.
+        if (existing.role !== requestedRole) {
+          await runRoleChangePostEffects({
+            target: {
+              id: existing.id,
+              username: existing.username,
+              nextcloudUsername: existing.nextcloudUsername,
+            },
+            previousRole: existing.role,
+            nextRole: requestedRole,
+            actorUsername: req.user?.username ?? null,
+            actor: actorFromRequest(req),
+          });
+        } else {
+          await revokeAllSessions(existing.id);
+        }
+
+        if (accessRoleId !== null) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access role assigned",
+            sub: `${roleName} → ${existing.username}`,
+            refs: {
+              actor: req.user?.username ?? null,
+              roleId: accessRoleId,
+              roleName,
+              targetUserId: existing.id,
+              targetUsername: existing.username,
+            },
+            actor: actorFromRequest(req),
+          });
+        }
+
+        res.json({ syncState: "pending" });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/people/:id/effective-access ────────────────────
+  // WARP-1527 (RBAC v2 T3). The ADR-032 §3 resolver output verbatim —
+  // powers the person editor's read-only drawer and every honest
+  // disabled-state in the dashboard (T8 seeds its exception editor from
+  // the `exceptions` array).
+  router.get(
+    "/people/:id/effective-access",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const access = await resolveEffectiveAccess(req.params.id);
+        if (!access) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        res.json(access);
+      } catch (err) {
+        logger.warn(
+          { err, id: req.params.id },
+          "GET /people/:id/effective-access failed",
+        );
+        next(err);
+      }
+    },
+  );
+
+  // ── PUT /api/people/:id/access-exceptions ───────────────────
+  // WARP-1527 (RBAC v2 T3). Replace-wholesale semantics (the scope-PATCH
+  // precedent — the editor never diffs rows client-side); rails 2 + 1
+  // apply (§4: self-action extends to exceptions; the owner's row is
+  // untouchable). No session revocation: exceptions resolve live per
+  // request through the layer-2 resolver, nothing role-shaped is cached
+  // in the JWT.
+  router.put(
+    "/people/:id/access-exceptions",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        assertNotSelf(req.user?.id, req.params.id);
+
+        const parsed = accessExceptionsSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        // WARP-1539 — projected at the query (see PATCH /:id/access above).
+        const existing = await prisma.user.findUnique({
+          where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
+        });
+        if (!existing) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        // Rails 2 + 1 (same composite the scope rewrite uses).
+        assertScopeChangeAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: { id: existing.id, role: existing.role },
+        });
+
+        const previous = await prisma.userAccessException.findMany({
+          where: { userId: existing.id },
+          select: { moduleId: true, effect: true, level: true },
+        });
+
+        const grantedBy = req.user?.id ?? "unknown";
+        // Same replace-wholesale shape — and the same explicit
+        // SERIALIZABLE_TX — as the scope-binding rewrite above (WARP-1526):
+        // two concurrent PUTs of the same person's exceptions must not
+        // interleave into a merged set, and a crash between the delete and
+        // the recreate must not leave the person with zero rows.
+        await prisma.$transaction(async (tx) => {
+          await tx.userAccessException.deleteMany({
+            where: { userId: existing.id },
+          });
+          if (parsed.data.exceptions.length > 0) {
+            await tx.userAccessException.createMany({
+              data: parsed.data.exceptions.map((x) => ({
+                userId: existing.id,
+                moduleId: x.moduleId,
+                effect: x.effect,
+                level: x.effect === "allow" ? (x.level as "view" | "act" | "manage") : null,
+                grantedBy,
+              })),
+            });
+          }
+        }, SERIALIZABLE_TX);
+
+        // Audit the delta with the house vocabulary: rows added/changed →
+        // "set"; rows dropped → "removed". One row per verb, refs carry
+        // the module lists + target UUID.
+        const prevByModule = new Map(previous.map((x) => [x.moduleId as string, x]));
+        const nextByModule = new Map(parsed.data.exceptions.map((x) => [x.moduleId as string, x]));
+        const setModules = parsed.data.exceptions
+          .filter((x) => {
+            const prev = prevByModule.get(x.moduleId);
+            return !prev || prev.effect !== x.effect || (prev.level ?? null) !== (x.level ?? null);
+          })
+          .map((x) => x.moduleId);
+        const removedModules = previous
+          .filter((x) => !nextByModule.has(x.moduleId as string))
+          .map((x) => x.moduleId);
+        const baseRefs = {
+          actor: req.user?.username ?? null,
+          targetUserId: existing.id,
+          targetUsername: existing.username,
+        };
+        if (setModules.length > 0) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access exception set",
+            sub: `${existing.username}: ${setModules.join(", ")}`,
+            refs: { ...baseRefs, modules: setModules },
+            actor: actorFromRequest(req),
+          });
+        }
+        if (removedModules.length > 0) {
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "shield",
+            what: "Access exception removed",
+            sub: `${existing.username}: ${removedModules.join(", ")}`,
+            refs: { ...baseRefs, modules: removedModules },
+            actor: actorFromRequest(req),
+          });
+        }
+
+        const rows = await prisma.userAccessException.findMany({
+          where: { userId: existing.id },
+          select: { id: true, moduleId: true, effect: true, level: true },
+          orderBy: { createdAt: "asc" },
+        });
+        res.json({ exceptions: rows });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          return res.status(err.status).json(err.toJSON());
+        }
         next(err);
       }
     },

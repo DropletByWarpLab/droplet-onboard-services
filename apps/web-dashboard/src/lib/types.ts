@@ -992,11 +992,19 @@ export type CreateUserRole = "owner" | "admin" | "family" | "guest";
 export interface InviteCreateRequest {
   email: string;
   displayName?: string;
-  role?: InviteRole;
+  /** WARP-1533: the invite modal now sends CANONICAL enum values (the
+   *  role picker's tier, or a custom role's startingPoint). The legacy
+   *  `InviteRole` "user" alias remains server-accepted for older builds
+   *  but is no longer sent. */
+  role?: CreateUserRole | InviteRole;
   ttlHours?: number;
   /** WARP-1270 (T18) — optional department/team grants, converted to
    *  DepartmentMembership rows at accept time (orchestrator WARP-1265). */
   departments?: Array<{ departmentId: string; right?: DepartmentRight }>;
+  /** WARP-1533 (RBAC v2 T9) — optional custom access role granted by this
+   *  invite. Rank-capped server-side via the role's startingPoint; must
+   *  agree with `role` (the picker guarantees it by construction). */
+  accessRoleId?: string;
 }
 
 // ── WARP-1271 (T19a): per-user usage settings ──

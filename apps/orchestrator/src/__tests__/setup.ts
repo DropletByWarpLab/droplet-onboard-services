@@ -177,6 +177,37 @@ vi.mock("@prisma/client", () => {
       upsert: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
     },
+    // WARP-1528 (T4): app.ts mounts requireFeatureAccess on the files /
+    // cameras / network / matter prefixes, and it consults the T3
+    // effective-access resolver. That resolver reads these four models
+    // whenever `user.findUnique` DOES return a row (a suite that stubs a
+    // directory user) — a mock without them throws, the gate fails closed to
+    // 404, and every gated route in that suite disappears. The defaults are a
+    // fresh box: no exceptions, no cloud escape, no connectors. Suites needing
+    // narrowing stub them per-test.
+    //
+    // NOTE the common path costs nothing: `user.findUnique` defaults to null
+    // above, the resolver returns null ("no local row"), and the gate passes
+    // through untouched — today's world, bit-for-bit.
+    userAccessException: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn().mockResolvedValue({}),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    offLanAllowlistChannel: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    integrationConnection: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    accessRole: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),

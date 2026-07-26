@@ -120,6 +120,16 @@ vi.mock("../services/llm-agent.service.js", () => ({
   runAgent: (...args: unknown[]) => mockRunAgent(...args),
 }));
 
+// WARP-1530: these turns are deliberately CLOUD turns (gpt-4o / provider
+// "openai"), so /api/llm/chat's per-person cloud gate now resolves the
+// caller's effective access before dispatching. Stubbed to "cloud allowed"
+// — the subject here is the per-turn provider audit, not the gate, and the
+// gate has its own suite (llm-chat.cloud-access.test.ts). Without this the
+// unwired resolver fails closed with a 503, which is the correct posture.
+vi.mock("../services/effective-access.service.js", () => ({
+  resolveEffectiveAccess: vi.fn().mockResolvedValue({ cloud: true, connectors: {} }),
+}));
+
 import { createLlmRouter } from "../routes/llm.js";
 import { buildImageBlocks } from "../services/vision-attachments.service.js";
 

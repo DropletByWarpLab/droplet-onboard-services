@@ -4,6 +4,7 @@
 **Date:** 2026-06-19
 **Deciders:** Stefan + Romain (Romain sign-off pending)
 **Source:** Extends ADR-005 (AP auto-onboarding). Product requirement: a household can buy a *third-party* coverage AP, plug it in, have it auto-discovered, and add it through the LLM — without it being a Droplet-flashed unit. Threads through ADR-002 (network supervision), ADR-004 (RBAC), ADR-011 (hardware-agnostic), ADR-014 (LLM client-dispatched actions), ADR-018 (single-box network unification), ADR-022 (host-sidecar container pattern).
+**Validation:** [ADR-025 — Lab validation checklist](ADR-025-lab-validation-checklist.md) — the hardware punch-list for this ADR's exit gates (renumbered from a duplicate "ADR-024" filename, WARP-1563).
 
 ## Context
 

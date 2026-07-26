@@ -782,7 +782,21 @@ async function main() {
         result.membershipsFailed > 0 ||
         result.membershipsRemoved > 0 ||
         result.usagePoliciesSynced > 0 ||
-        result.usagePoliciesFailed > 0
+        result.usagePoliciesFailed > 0 ||
+        // pr-reviewer #1229 N3: WARP-1531's role-default quota pushdown was
+        // missing here, so a tick that ONLY did role-default work logged
+        // nothing at all.
+        result.roleDefaultQuotasSynced > 0 ||
+        result.roleDefaultQuotasFailed > 0 ||
+        // WARP-1526: droplet-admins tier-vs-group drift corrections are
+        // rare and always worth a line in the log — including the failures
+        // (B4), which is how a permanently-stuck sweep becomes visible.
+        result.adminGroupAdded > 0 ||
+        result.adminGroupRemoved > 0 ||
+        result.adminGroupFailed > 0 ||
+        // pr-reviewer #1229 N1: the directoryStatus → NC disable mirror.
+        result.ncDisableMirrored > 0 ||
+        result.ncDisableMirrorFailed > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }

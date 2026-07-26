@@ -9,6 +9,13 @@ import {
   isRevoked,
 } from "../services/invite.service.js";
 import { convertInviteDepartmentGrants } from "../services/provisioning-invite.service.js";
+import {
+  validateInviteAccessRole,
+  resolveInviteAccessRoleForAccept,
+  InviteAccessRoleError,
+  type AcceptAccessRoleResolution,
+  type ValidatedInviteAccessRole,
+} from "../services/invite-access-role.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
@@ -40,10 +47,31 @@ import {
   unregisterRefreshSession,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
-  roleOutranks,
   isRole,
   type Role,
 } from "../services/jwt.service.js";
+// WARP-1526 (RBAC v2 T2): the person-mutation rails — owner-untouchable,
+// self-action, rank cap, assignable narrowing, last-owner/last-operator
+// invariants, and the consolidated post-commit effects — are shared with
+// routes/people.ts through ONE guard service (ADR-032 draft §4). The
+// per-route inline rank checks this file used to carry live there now.
+import {
+  RoleMutationRefusedError,
+  assertRankCap,
+  assertRoleAssignable,
+  assertRoleChangeAllowed,
+  assertDirectoryEditAllowed,
+  assertRemovalAllowed,
+  assertDisableAllowed,
+  assertAssignableForCreate,
+  assertRemovalInvariantsTx,
+  assertDisableInvariantsTx,
+  readGuardTargetTx,
+  isConcurrencyConflict,
+  SERIALIZABLE_TX,
+  runRemovalPostEffects,
+  runDisablePostEffects,
+} from "../services/role-mutation-guard.service.js";
 import {
   SESSION_COOKIE_NAME,
   REFRESH_COOKIE_NAME,
@@ -257,6 +285,12 @@ const createInviteSchema = z.object({
       right: z.enum(["reader", "contributor", "manager"]).optional(),
     })
   ).optional(),
+  // WARP-1533 (RBAC v2 T9): optional custom access role granted by this
+  // invite. Shape-checked here; existence/state/rank/tier-agreement run in
+  // the handler via invite-access-role.service — the SAME validation the
+  // canonical POST /api/people/invite applies, so the two create surfaces
+  // never diverge (the WARP-1523 lesson). Assigned at accept in the mint.
+  accessRoleId: z.string().uuid().optional(),
 });
 
 const acceptInviteSchema = z.object({
@@ -1706,7 +1740,34 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Build the Nextcloud groups list from the invite's role.
+      // WARP-1533 (RBAC v2 T9): resolve the invite's custom access role
+      // ONCE, before any provisioning, so every downstream consumer — the
+      // Nextcloud groups, the User row, the session role — sees ONE resolved
+      // tier. Fail-OPEN toward least privilege: a role that vanished or was
+      // archived between invite and accept must never fail the accept (the
+      // invitee holds a valid credential); we fall back to the invite's
+      // plain tier and Activity-note the fallback once the account exists.
+      const accessRoleResolution: AcceptAccessRoleResolution | null = invite.accessRoleId
+        ? await resolveInviteAccessRoleForAccept(prisma, invite.accessRoleId)
+        : null;
+      const acceptedAccessRole = accessRoleResolution?.role ?? null;
+      if (invite.accessRoleId && !acceptedAccessRole) {
+        logger.warn(
+          {
+            inviteId: invite.id,
+            accessRoleId: invite.accessRoleId,
+            reason: accessRoleResolution?.fallback,
+            fallbackRole: invite.role,
+          },
+          "invite-accept: access role could not be applied; falling back to the invite's tier",
+        );
+      }
+
+      // Build the Nextcloud groups list from the RESOLVED tier (the access
+      // role's startingPoint when applied, else the invite's role — the two
+      // agree for every invite minted after WARP-1533's tier-agreement
+      // check; the resolved tier wins for drifted/legacy rows so NC groups
+      // can never disagree with the User.role written below).
       // WARP-171: the invite role is now the canonical Role enum (was
       // a free-form String). The mapping below preserves the
       // pre-WARP-171 wire contract — "admin" invitee still lands in
@@ -1722,7 +1783,7 @@ export function createPublicAuthRouter(
       // home. buildNcGroups preserves the pre-WARP-883 role→group mapping and
       // appends the household group without duplication.
       const groups: string[] = buildNcGroups(
-        invite.role as Role,
+        acceptedAccessRole ? acceptedAccessRole.startingPoint : (invite.role as Role),
         householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
 
@@ -1798,10 +1859,16 @@ export function createPublicAuthRouter(
       // yielded an owner session, defeating the ROLE_RANK_EXCEEDED cap on
       // the create endpoint. Unknown/legacy values still collapse to
       // "family" (fail-toward-least-privilege).
-      const role: Role =
+      //
+      // WARP-1533: with an applied access role, the RESOLVED tier is the
+      // role's startingPoint — the same value the upsert below writes to
+      // User.role, so the first session matches every subsequent login and
+      // refresh (the canonical-role rule stays intact).
+      const fallbackTier: Role =
         invite.role === "owner" || invite.role === "admin" || invite.role === "guest"
           ? (invite.role as Role)
           : "family";
+      const role: Role = acceptedAccessRole ? acceptedAccessRole.startingPoint : fallbackTier;
 
       // WARP-485 round 2 — provision the local User row mapping this
       // Nextcloud identity to a local UUID BEFORE signing the JWT, so
@@ -1839,6 +1906,18 @@ export function createPublicAuthRouter(
       // login fails closed — an accepted invite that can never sign in.
       // The plaintext is hashed before it touches the row and never logged.
       const passwordHash = await hashPassword(password);
+      // WARP-1533: when the invite carries an APPLIED access role, BOTH
+      // User.accessRoleId AND User.role = startingPoint land in this ONE
+      // atomic upsert — the "same transaction" contract (a two-step write
+      // could crash between the tier and the role reference and leave them
+      // out of lockstep). The re-acceptance (update) branch refreshes the
+      // pair too — the invite states the operator's intended access. On
+      // fallback the pair is NOT written: the accept lands on the plain
+      // tier exactly as a pre-T9 invite would (least privilege, and an
+      // existing row's access is never silently stripped by a retry).
+      const accessRoleAssignment = acceptedAccessRole
+        ? { role: acceptedAccessRole.startingPoint, accessRoleId: acceptedAccessRole.id }
+        : null;
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -1852,6 +1931,7 @@ export function createPublicAuthRouter(
           displayName: invite.displayName || invite.username,
           ...emailWriteDataOrNull(inviteEmail),
           passwordHash,
+          ...(accessRoleAssignment ?? {}),
         },
         create: {
           username: invite.username,
@@ -1859,12 +1939,45 @@ export function createPublicAuthRouter(
           ...emailWriteDataOrNull(inviteEmail),
           nextcloudUsername: invite.username,
           passwordHash,
-          role: invite.role as any, // canonical Role enum from the invite
+          // Canonical Role enum: the applied role's startingPoint, else the
+          // invite's tier (pre-T9 behavior, bit-for-bit).
+          role: invite.role,
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
+          ...(accessRoleAssignment ?? {}),
         },
       });
       const userId = userRow.id; // local UUID — fed into JWT.sub
+
+      // WARP-1533: the fallback is now FACT (the account exists on the plain
+      // tier) — Activity-note it so an operator can see the invite's
+      // intended role was not applied. Best-effort: an audit-write failure
+      // must never fail the accept (same posture as the department and NC
+      // provisioning below).
+      if (invite.accessRoleId && !acceptedAccessRole) {
+        try {
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "user-plus",
+            what: "Invite accepted without access role",
+            sub: `${invite.email ?? invite.username} · fell back to ${role}`,
+            refs: {
+              userId,
+              inviteId: invite.id,
+              accessRoleId: invite.accessRoleId,
+              fallbackReason: accessRoleResolution?.fallback ?? null,
+              role,
+            },
+            actor: actorFromRequest(req),
+          });
+        } catch (activityErr) {
+          logger.warn(
+            { err: activityErr, userId },
+            "invite-accept: failed to record the access-role fallback activity",
+          );
+        }
+      }
 
       // WARP-1265: convert pending UserInviteDepartment rows to active
       // DepartmentMembership rows. Must run AFTER the User + Nextcloud account
@@ -2563,24 +2676,48 @@ export function createProtectedAuthRouter(
       const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
       // WARP-947: run NC list + DB lookup in parallel; separate maps per column
       // prevent cross-column key collision (nc username ≠ local username namespace).
+      // WARP-1527 (RBAC v2 T3): each row also carries the local enforcement
+      // tier (`role`) and assigned custom-role id (`accessRoleId`, null =
+      // plain built-in tier) — the T8 RosterUser extension. The select stays
+      // EXPLICIT: never return raw User rows from this endpoint (the full
+      // passwordHash serialization sweep is WARP-1539 — don't widen it here).
+      type LocalRosterRow = {
+        id: string;
+        username: string;
+        nextcloudUsername: string | null;
+        role: string;
+        accessRoleId: string | null;
+      };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
         prisma
-          ? prisma.user.findMany({ select: { id: true, username: true, nextcloudUsername: true } })
-          : ([] as { id: string; username: string; nextcloudUsername: string | null }[]),
+          ? (prisma.user.findMany({
+              select: {
+                id: true,
+                username: true,
+                nextcloudUsername: true,
+                role: true,
+                accessRoleId: true,
+              },
+            }) as Promise<LocalRosterRow[]>)
+          : ([] as LocalRosterRow[]),
       ]);
       const ncUsers = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
-      const uuidByNcUsername = new Map<string, string>();
-      const uuidByUsername = new Map<string, string>();
+      const localByNcUsername = new Map<string, LocalRosterRow>();
+      const localByUsername = new Map<string, LocalRosterRow>();
       for (const row of localRows) {
-        if (row.nextcloudUsername) uuidByNcUsername.set(row.nextcloudUsername.toLowerCase(), row.id);
-        uuidByUsername.set(row.username.toLowerCase(), row.id);
+        if (row.nextcloudUsername) localByNcUsername.set(row.nextcloudUsername.toLowerCase(), row);
+        localByUsername.set(row.username.toLowerCase(), row);
       }
       const users = ncUsers.map((u) => {
         const key = u.id.toLowerCase();
+        const local = localByNcUsername.get(key) ?? localByUsername.get(key) ?? null;
         return {
           ...u,
-          userId: uuidByNcUsername.get(key) ?? uuidByUsername.get(key) ?? null,
+          userId: local?.id ?? null,
+          // No local row → no fabricated tier; the dashboard renders no chip.
+          role: local?.role ?? null,
+          accessRoleId: local?.accessRoleId ?? null,
         };
       });
       res.json({ users });
@@ -2614,20 +2751,28 @@ export function createProtectedAuthRouter(
 
       const { email, password, displayName, mustChangePassword, role } = parsed.data;
 
-      // WARP-1042: privilege-escalation guard — SAME cap as POST /auth/invites.
-      // `requireRole("owner","admin")` proved the caller may create users, but
-      // NOT which role they may assign. Without this an `admin` could mint an
-      // `owner` account (local row role + NC `admin` group) — a straight
-      // privilege escalation. Reject any assigned role that outranks the
-      // caller's own; owner→owner is allowed, admin→owner is not. Fail closed
-      // if the role claim is somehow absent.
-      const creatorRole = req.user?.role;
-      if (!creatorRole || roleOutranks(role, creatorRole)) {
-        res.status(403).json({
-          error: "You cannot create an account with a role higher than your own",
-          code: "ROLE_RANK_EXCEEDED",
+      // Rails 3 + 7 (WARP-1526, guard service): the WARP-1042 rank cap —
+      // requireRole proved the caller may create users, not WHICH role they
+      // may assign; fail closed on a missing claim — plus the assignable
+      // narrowing: accounts are only ever created as {admin, family, guest}
+      // (design brief §6.2 "never Owner or Service"; exactly one owner by
+      // design, so even an owner cannot mint a second owner account — this
+      // consciously supersedes the earlier owner→owner-allowed pin).
+      // `service` was already schema-impossible (createUserSchema excludes
+      // it); the guard makes the policy explicit for every recognized role.
+      try {
+        assertAssignableForCreate({
+          actorRole: req.user?.role,
+          requestedRole: role,
+          rankMessage:
+            "You cannot create an account with a role higher than your own",
         });
-        return;
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       const token = await resolveNcToken(req);
@@ -2798,26 +2943,100 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      // WARP-1523: ROLE_RANK cap on the role-UPDATE path. updateUserSchema
-      // has no `role` field, so a `role` key in the body used to be silently
-      // STRIPPED by zod — an admin probing { role: "owner" } saw either a
-      // validation 400 or, mixed with a real field, a 200 that looked like a
-      // successful promotion. Enforce the SAME cap as the create sites
-      // (WARP-1042 / WARP-623) BEFORE validation: any recognized requested
-      // role that outranks the caller is refused outright and nothing is
-      // half-applied. Within-rank role keys keep the pre-existing semantics
-      // (stripped by the schema — PATCH /api/people/:id/role owns actual
-      // role changes). Fail closed if the actor's role claim is absent.
-      const requestedRole: unknown = req.body?.role;
-      if (isRole(requestedRole)) {
-        const actorRole = req.user?.role;
-        if (!actorRole || roleOutranks(requestedRole, actorRole)) {
-          res.status(403).json({
-            error: "You cannot assign a role higher than your own",
-            code: "ROLE_RANK_EXCEEDED",
+      // The target row, read ONCE and shared by both guarded branches below.
+      // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
+      // on every request, because the credential branch is guarded too.
+      const target = prisma
+        ? await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true, role: true },
+          })
+        : null;
+
+      try {
+        // ── WARP-1564: rail 1b, the owner-credential carve-out. ──
+        // THIS is the residual takeover vector the RBAC v2 epic left open.
+        // The role branch below was railed by WARP-1526, but this route's
+        // OTHER job — rewriting a person's password (local argon2id hash +
+        // the Nextcloud mirror), email, display name and quota — was not.
+        // With every other owner-targeting door shut, an admin could simply
+        // PUT the owner's username a new password and then sign in as the
+        // owner, defeating the whole owner-untouchable doctrine.
+        //
+        // Rail 1 proper can't be used here: it is actor-blind, so it would
+        // also refuse the OWNER's own account maintenance (this route is how
+        // the owner changes their own display name / email / password). Rail
+        // 1b is rail 1 with a self carve-out — refuse when the target is an
+        // owner and the actor is not that same owner. See the guard service
+        // for why this rails the whole route rather than an allowlist of
+        // "credential" fields, and why it fails closed on a missing actor id.
+        //
+        // Runs BEFORE schema validation, like the role branch and for the
+        // same reason: an admin probing the owner's row gets a uniform 403
+        // whatever the body's shape (no validation oracle), and nothing —
+        // local row or Nextcloud — can be half-applied.
+        //
+        // `target === null` (legacy createAuthRouter() shim, or an NC-only
+        // account with no local row) has no owner row to protect: `role` lives
+        // ONLY on the local row, so nothing can be identified as the owner
+        // without one, and /auth/login needs that row's hash anyway. A
+        // credential edit there already fails closed below — 500
+        // USERS_NO_PRISMA without the directory, 404 USER_NOT_FOUND with it.
+        // Precisely (review note): a displayName- or quota-ONLY body against a
+        // rowless username skips this rail AND the 404 (which is gated on
+        // touchesDirectory) and still reaches ncUpdateUser. That is not a
+        // takeover — there is no owner to take over — but it does mean the
+        // rail covers every request WITH a local row, not literally every
+        // request. Tightening it changes documented NC-only-account semantics
+        // (displayName/quota are NC-side attributes that deliberately do not
+        // require the directory), so it is left to WARP-1614 rather than
+        // widened into this fix.
+        if (target) {
+          assertDirectoryEditAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target,
           });
+        }
+
+        // WARP-1523 → WARP-1526: the role-relevant branch. updateUserSchema
+        // has no `role` field, so a `role` key in the body used to be silently
+        // STRIPPED by zod — an admin probing { role: "owner" } saw either a
+        // validation 400 or, mixed with a real field, a 200 that looked like a
+        // successful promotion. Any RECOGNIZED role key now runs the full
+        // pre-tx rails through the guard service BEFORE validation, so nothing
+        // is half-applied: self-action (409), owner-untouchable (403 — an
+        // admin can no longer even probe the owner's row with a role key),
+        // the WARP-1523 rank cap (403, fail closed on a missing claim), and
+        // the assignable narrowing (never owner or service, §6.2). A
+        // within-rank ASSIGNABLE role key keeps the pre-existing semantics
+        // (stripped by the schema — PATCH /api/people/:id/role owns actual
+        // role changes). Unrecognized strings still fall through to schema
+        // validation (400 INVALID_REQUEST).
+        const requestedRole: unknown = req.body?.role;
+        if (isRole(requestedRole)) {
+          if (target) {
+            assertRoleChangeAllowed({
+              actor: { id: req.user?.id, role: req.user?.role },
+              target,
+              requestedRole,
+            });
+          } else {
+            // No local row (legacy shim / NC-only account): the row-
+            // dependent rails can't run, but rank + narrowing still hold.
+            assertRankCap(
+              req.user?.role,
+              requestedRole,
+              "You cannot assign a role higher than your own",
+            );
+            assertRoleAssignable(requestedRole);
+          }
+        }
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
           return;
         }
+        throw err;
       }
 
       const parsed = updateUserSchema.safeParse(req.body);
@@ -2869,15 +3088,56 @@ export function createProtectedAuthRouter(
         if (password !== undefined) data.passwordHash = await hashPassword(password);
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
-            where: { nextcloudUsername: username },
+            // WARP-1564 (review L2): PIN `role` to the value rail 1b decided
+            // against. The guard service's header states the contract every
+            // guarded mutation owes — re-read the target and pin `role` in the
+            // write's `where`, "so neither the decision nor the write can be
+            // made against stale state" — and this route owed it too: rail 1b
+            // necessarily decides on a non-transactional `findUnique`, so
+            // without the pin a promotion landing in that window would let an
+            // owner credential write through on a decision made when the row
+            // was still a `family`.
+            //
+            // That window has a REAL concurrent writer, not a theoretical one:
+            // scim-role-mapping.service.ts maps any SCIM group whose
+            // normalized name CONTAINS "owner" to role "owner", and
+            // effectiveRoleForGroupNames raises a member to their highest
+            // match — so an Okta push of a customer group called e.g.
+            // "Business Owners" mints owners asynchronously, with no
+            // coordination with this route.
+            //
+            // Pinning makes a raced promotion a 0-row no-op instead of a
+            // credential rotation. `target` is null only where there is no
+            // local row to pin against (legacy shim / NC-only account), and
+            // that case already fails closed below.
+            where: target
+              ? { nextcloudUsername: username, role: target.role }
+              : { nextcloudUsername: username },
             data,
           });
-          // A credential change against a username with no directory row is
-          // meaningless for login — surface it instead of half-applying it to
-          // Nextcloud only.
-          if (updated.count === 0 && touchesDirectory) {
-            res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
-            return;
+          if (updated.count === 0) {
+            if (target) {
+              // The row EXISTED when rail 1b decided, so a 0-row write can
+              // only mean the pin missed: the role changed (or the row went
+              // away) underneath us. That is not "user not found" — reporting
+              // it as a 404 would tell the operator the account is gone when
+              // it is very much there, and would bury the one signal that a
+              // concurrent promotion was in flight. Same answer the disable /
+              // remove routes already give for the same class (409), from the
+              // same guard vocabulary. Nothing was applied locally, and we
+              // return BEFORE the Nextcloud mirror so nothing is applied
+              // there either.
+              const conflict = RoleMutationRefusedError.concurrentMutation();
+              res.status(conflict.status).json(conflict.toJSON());
+              return;
+            }
+            // A credential change against a username with no directory row is
+            // meaningless for login — surface it instead of half-applying it to
+            // Nextcloud only.
+            if (touchesDirectory) {
+              res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+              return;
+            }
           }
         }
       }
@@ -2919,47 +3179,125 @@ export function createProtectedAuthRouter(
           res.status(401).json({ error: "Authentication required" });
           return;
         }
-        await ncSetUserEnabled(token, req.params.username, false);
-        // WARP-116: a disabled user must lose access effectively immediately,
-        // not at their next ≤15-min access-token expiry. Resolve the local
-        // row (the session index is keyed by User.id == JWT.sub) and denylist
-        // every live refresh token so the next /auth/refresh fails. Best-effort
-        // — a missing local row (legacy NC-only account) just means there were
-        // no JWT sessions to revoke.
-        let targetUserId: string | null = null;
-        let revoked = 0;
-        if (prisma) {
-          const row = await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
+
+        // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
+        // the auth source of truth and the guard rails key off it.
+        const row = prisma
+          ? await prisma.user.findUnique({
+              where: { nextcloudUsername: req.params.username },
+              select: { id: true, role: true, directoryStatus: true },
+            })
+          : null;
+
+        if (row && prisma) {
+          // Rails 2 + 1 pre-tx (self-disable and disabling the owner are
+          // refused), then rail 5 + the LOCAL write inside one SERIALIZABLE
+          // $transaction (SERIALIZABLE_TX — passed explicitly, because
+          // Postgres/Prisma default to READ COMMITTED, under which two
+          // concurrent disables of the last two operators both count "one
+          // other operator remains" and both commit): disabling the final
+          // non-disabled owner-or-admin is refused, and a permitted
+          // disable parks the row on
+          // directoryStatus=DEACTIVATED. That local write is load-bearing —
+          // /auth/login, SSO, WebAuthn and the auth middleware all fail
+          // closed on DEACTIVATED, whereas the NC flag alone never gated
+          // directory logins (the pre-WARP-1526 gap: a "disabled" member
+          // could still sign in). It is also what makes the rail-5 operator
+          // count honest.
+          assertDisableAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: row,
           });
-          // WARP-247 — kill session RECORDS (access tokens die at the next
-          // middleware check) as well as the refresh denylist (swept
-          // internally by revokeAllSessions).
-          if (row) {
-            targetUserId = row.id;
-            revoked = await revokeAllSessions(row.id);
+          // pr-reviewer #1229 B1/B2: SERIALIZABLE (Prisma inherits READ
+          // COMMITTED otherwise, under which two concurrent disables of the
+          // last two operators both pass rail 5 and both commit), and the
+          // rails decide on a row re-read INSIDE the transaction — the
+          // snapshot above is only good enough for the pre-tx rails.
+          await prisma.$transaction(async (tx) => {
+            const fresh = await readGuardTargetTx(tx, row.id);
+            if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+            await assertDisableInvariantsTx(tx, { target: fresh });
+            await tx.user.update({
+              where: { id: fresh.id, role: fresh.role },
+              data: { directoryStatus: "DEACTIVATED" },
+            });
+          }, SERIALIZABLE_TX);
+
+          // The Nextcloud flag is the downstream mirror — best-effort and
+          // non-blocking (same posture as the droplet-admins cascade): an
+          // NC outage must not fail a disable whose authoritative local
+          // write already committed. Logged at error for operator
+          // follow-up; re-running disable is idempotent.
+          let ncMirror: "synced" | "failed" = "synced";
+          try {
+            await ncSetUserEnabled(token, req.params.username, false);
+          } catch (err) {
+            ncMirror = "failed";
+            logger.error(
+              { err, username: req.params.username },
+              "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
+            );
           }
-        }
-        // WARP-1062 (audit item B): account disablement is a mandatory-emit
-        // privileged action — it revokes sessions too, yet was the one
-        // unaudited sibling of enable/revoke-sessions. Same row shape as the
-        // revoke-sessions emit below (WARP-237).
-        await recordActivity({
-          kind: "auth",
-          severity: "warn",
-          sourceIcon: "shield-off",
-          what: "User disabled",
-          sub: req.params.username,
-          refs: {
+
+          // Rail 6 (consolidated): WARP-116/247 session-record revocation +
+          // the WARP-1062 mandatory-emit audit row.
+          //
+          // pr-reviewer #1229 N1: a failed mirror is REPORTED, not hidden.
+          // Nextcloud is proxied at /nextcloud/ with no orchestrator auth in
+          // front, so while every orchestrator login gate now refuses this
+          // person, their NC web/WebDAV/desktop-sync session keeps working
+          // until the reconciler's directoryStatus mirror pass converges it.
+          // A bare 200 + an unqualified audit row would tell the operator
+          // the opposite.
+          await runDisablePostEffects({
+            targetUserId: row.id,
             username: req.params.username,
-            targetUserId,
-            sessionsRevoked: revoked,
-          },
+            actor: actorFromRequest(req),
+            ncMirror,
+          });
+          res.json({
+            status: "disabled",
+            username: req.params.username,
+            ncMirror,
+            ...(ncMirror === "failed"
+              ? {
+                  warning:
+                    "Access to this Droplet is revoked, but Nextcloud could not be reached — their file access will be cut off automatically when it is back.",
+                }
+              : {}),
+          });
+          return;
+        }
+
+        // Legacy NC-only account (no local row): pre-WARP-1526 semantics —
+        // the NC call IS the disable (fatal on failure), nothing to revoke,
+        // audit row keeps the null targetUserId shape.
+        await ncSetUserEnabled(token, req.params.username, false);
+        await runDisablePostEffects({
+          targetUserId: null,
+          username: req.params.username,
           actor: actorFromRequest(req),
+          // No local row: the NC call IS the disable, and it succeeded (a
+          // failure would have thrown), so the mirror is synced by
+          // construction.
+          ncMirror: "synced",
         });
-        res.json({ status: "disabled", username: req.params.username });
+        res.json({
+          status: "disabled",
+          username: req.params.username,
+          ncMirror: "synced",
+        });
       } catch (err: any) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        // pr-reviewer #1229 B1 — see the DELETE sibling.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          res.status(conflict.status).json(conflict.toJSON());
+          return;
+        }
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
           return;
@@ -2979,6 +3317,24 @@ export function createProtectedAuthRouter(
         if (!token) {
           res.status(401).json({ error: "Authentication required" });
           return;
+        }
+        // WARP-1526: dashboard-disable parks the LOCAL row on
+        // directoryStatus=DEACTIVATED (see the disable handler) — re-enable
+        // must flip it back or the account stays locally locked out
+        // forever. Local truth first, then the NC mirror (fatal on failure,
+        // as before — a retry converges both sides). No guard rails here:
+        // enabling restores access, it can never strand the box.
+        if (prisma) {
+          const row = await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          });
+          if (row) {
+            await prisma.user.update({
+              where: { id: row.id },
+              data: { directoryStatus: "ACTIVE" },
+            });
+          }
         }
         await ncSetUserEnabled(token, req.params.username, true);
         res.json({ status: "enabled", username: req.params.username });
@@ -3062,6 +3418,59 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-1526 rails. This surface predated every people-surface
+      // invariant — an admin could delete the owner's account here. Resolve
+      // the local row and run rails 2 + 1 pre-tx (self-delete, owner
+      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
+      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
+      // COMMITTED) for a consistent count snapshot (the actual NC delete
+      // runs after commit — the same post-commit-mirror posture as every
+      // other NC effect).
+      // NOTE (out of WARP-1526 scope, pre-existing): this route still does
+      // NOT delete the local User row — it removes the Nextcloud account +
+      // brain data only. That also bounds what the isolation level can buy
+      // here: with no write in the transaction, two concurrent removals do
+      // not conflict under SSI either. The level is passed for consistency
+      // with every other guarded site; fully closing this race needs the
+      // missing local write, which is that pre-existing gap.
+      const row = prisma
+        ? await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true, username: true, role: true },
+          })
+        : null;
+      if (row && prisma) {
+        assertRemovalAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: row,
+        });
+        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
+        // no write — a read-only transaction pins nothing, so it read as
+        // protection without being any, and because the route never touched
+        // the local row the "removed" admin stayed role=admin/ACTIVE:
+        //   • it kept counting as a live operator for the NEXT removal's
+        //     rail 5, so admins could be emptied one DELETE at a time; and
+        //   • /auth/login verifies the LOCAL passwordHash, so once the
+        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
+        //     simply sign back in with full admin.
+        // Deleting the local row outright is WARP-1565's scope. What this
+        // route CAN do — atomically, inside the guarded transaction — is
+        // revoke local access via the same directoryStatus lever the
+        // disable path uses, which /auth/login, SSO, WebAuthn and the auth
+        // middleware all already fail closed on. Check and change now
+        // commit together, at SERIALIZABLE, with the write optimistically
+        // pinned to the role the rails were evaluated against.
+        await prisma.$transaction(async (tx) => {
+          const fresh = await readGuardTargetTx(tx, row.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.update({
+            where: { id: fresh.id, role: fresh.role },
+            data: { directoryStatus: "DEACTIVATED" },
+          });
+        }, SERIALIZABLE_TX);
+      }
+
       await ncDeleteUser(token, req.params.username);
 
       if (prisma) {
@@ -3093,8 +3502,38 @@ export function createProtectedAuthRouter(
         );
       }
 
+      // Rail 6 (consolidated, WARP-490 parity): this surface previously
+      // revoked NOTHING and audited NOTHING on delete — the removed user's
+      // sessions rode out their TTL. Hard-revoke + denylist + the
+      // mandatory-emit "User removed" row now land here exactly as on
+      // DELETE /api/people/:id (legacy NC-only rows keep a null
+      // targetUserId and skip the revocation they never had).
+      await runRemovalPostEffects({
+        targetUserId: row?.id ?? null,
+        targetUsername: row?.username ?? req.params.username,
+        targetRole: row?.role ?? null,
+        actorUsername: req.user?.username ?? null,
+        actor: actorFromRequest(req),
+        // pr-reviewer #1229 B3: name what actually happened. The Nextcloud
+        // account is gone and local access is revoked, but the local row
+        // survives (WARP-1565) — "User removed" would be a false statement
+        // in an append-only, signature-chained audit log.
+        what: "User removed from Nextcloud; local access revoked",
+      });
+
       res.json({ status: "deleted", username: req.params.username });
     } catch (err) {
+      if (err instanceof RoleMutationRefusedError) {
+        res.status(err.status).json(err.toJSON());
+        return;
+      }
+      // pr-reviewer #1229 B1: SERIALIZABLE's loser (P2034) and the
+      // optimistic-write miss (P2025) are 409s, not 500s.
+      if (isConcurrencyConflict(err)) {
+        const conflict = RoleMutationRefusedError.concurrentMutation();
+        res.status(conflict.status).json(conflict.toJSON());
+        return;
+      }
       next(err);
     }
   });
@@ -3136,22 +3575,67 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      // Privilege-escalation guard. `requireRole("owner","admin")` proved the
-      // caller may issue invites, but NOT which role they may assign. Without
-      // this cap an `admin` could mint an `owner` invite — the accept path
-      // grants the invite's canonical role as the session role (WARP-1051)
-      // and an owner/admin invite still lands the Nextcloud `admin` group
-      // (see POST /auth/invites/accept/:token above) — a straight privilege
-      // escalation. Reject any assigned role that outranks the inviter's
-      // own; owner→owner is allowed, admin→owner is not. Fail closed if the
-      // role claim is somehow absent.
+      // Rails 3 + 7 (WARP-1526, guard service). The rank cap: requireRole
+      // proved the caller may issue invites, but NOT which role they may
+      // assign — without it an admin could mint an owner invite (the accept
+      // path grants the invite's canonical role as the session role,
+      // WARP-1051, plus the Nextcloud admin group); fail closed on a
+      // missing claim. Then the assignable narrowing: invites only ever
+      // assign {admin, family, guest} (design brief §6.2 "never Owner or
+      // Service"; exactly one owner by design — even the owner cannot mint
+      // a second owner invite, which consciously supersedes the earlier
+      // owner→owner-allowed pin).
+      //
+      // `inviterRole` is read out here because BOTH the tier rails (moved
+      // below the access-role validation, see the ORDER note there) and the
+      // WARP-1533 access-role validation apply a rank cap: the guard rails
+      // cover the tier, the shared invite-access-role service covers the
+      // custom role's startingPoint.
       const inviterRole = req.user?.role;
-      if (!inviterRole || roleOutranks(parsed.data.role, inviterRole)) {
-        res.status(403).json({
-          error: "You cannot invite someone to a role higher than your own",
-          code: "ROLE_RANK_EXCEEDED",
+
+      // WARP-1533 (RBAC v2 T9): validate the optional custom access role
+      // BEFORE any write — the shared fail-closed service (exists, active,
+      // assignable startingPoint, WARP-623 rank cap on the role's
+      // startingPoint, tier agreement). Shared with POST /api/people/invite
+      // (the canonical people surface) so the two create paths can never
+      // diverge — including this ordering: with a custom role picked, its
+      // specific refusal wins over the coarser tier rail below (see the
+      // matching ORDER note in routes/people.ts). Both are fail-closed.
+      //
+      // WARP-1572 (F4): the declared type is the validator's BRANDED output,
+      // so the only expression that can land here is a successful
+      // validateInviteAccessRole — a bare prisma.accessRole row no longer
+      // type-checks.
+      let inviteAccessRole: ValidatedInviteAccessRole | null = null;
+      if (parsed.data.accessRoleId) {
+        try {
+          inviteAccessRole = await validateInviteAccessRole(prisma, {
+            accessRoleId: parsed.data.accessRoleId,
+            inviteTier: parsed.data.role,
+            inviterRole,
+          });
+        } catch (err) {
+          if (err instanceof InviteAccessRoleError) {
+            res.status(err.status).json({ error: err.message, code: err.code });
+            return;
+          }
+          throw err;
+        }
+      }
+
+      try {
+        assertAssignableForCreate({
+          actorRole: inviterRole,
+          requestedRole: parsed.data.role,
+          rankMessage:
+            "You cannot invite someone to a role higher than your own",
         });
-        return;
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       // Derive the unique userid from the email local-part. The derived
@@ -3213,6 +3697,8 @@ export function createProtectedAuthRouter(
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
           expiresAt,
+          // WARP-1533: validated custom access role (null = plain tier).
+          accessRoleId: inviteAccessRole?.id ?? null,
           // WARP-1265: write UserInviteDepartment rows in the same tx as the invite.
           departmentGrants: {
             createMany: {
@@ -3229,11 +3715,35 @@ export function createProtectedAuthRouter(
         {
           username,
           role: parsed.data.role,
+          accessRoleId: inviteAccessRole?.id ?? null,
           createdBy: req.user?.username,
           expiresAt,
         },
         "User invite created",
       );
+
+      // WARP-1533: an access-role invite lands in Activity with the ADR-032
+      // §5 wording (kind `auth`, free-text `what`, refs carry the role UUID).
+      // Plain tier invites keep this surface's shipped behavior (log-only) —
+      // the people surface owns the "Teammate invited" entry.
+      if (inviteAccessRole) {
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-plus",
+          what: "Invite created with access role",
+          sub: `${parsed.data.email} · ${inviteAccessRole.name}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            email: parsed.data.email,
+            role: parsed.data.role,
+            accessRoleId: inviteAccessRole.id,
+            accessRoleName: inviteAccessRole.name,
+            accessRoleStartingPoint: inviteAccessRole.startingPoint,
+          },
+          actor: actorFromRequest(req),
+        });
+      }
 
       // BUG-11 — deliver the invite email. The row is created above; the email
       // is a separate, fallible step over the operator's SMTP relay.

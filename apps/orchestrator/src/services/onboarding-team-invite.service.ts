@@ -39,6 +39,7 @@
  */
 import { type PrismaClient, type Role } from "@prisma/client";
 import { generateInviteToken } from "./invite.service.js";
+import type { ValidatedInviteAccessRole } from "./invite-access-role.service.js";
 
 /**
  * The roles an onboarding invite may assign — the SHIPPED HOUSEHOLD model.
@@ -147,6 +148,18 @@ export interface TeamInviteInput {
   createdBy: string;
   /** Acceptance window in hours (defaults to 72). */
   ttlHours?: number;
+  /** WARP-1533 (RBAC v2 T9): optional custom access role this invite grants.
+   *
+   *  The type IS the guarantee (review F4): `ValidatedInviteAccessRole` is a
+   *  branded type whose only mint site is a successful
+   *  `validateInviteAccessRole` — existence, active state, assignable
+   *  startingPoint, WARP-623 rank cap, and tier agreement all already
+   *  checked. A row read straight from `prisma.accessRole.findUnique()` is
+   *  NOT assignable here, so no caller can persist an unvalidated role by
+   *  omission — which matters because the accept path re-checks role STATE
+   *  but not the rank cap, then sets `User.role = startingPoint`. This
+   *  service only persists the reference; it does not re-validate. */
+  accessRole?: ValidatedInviteAccessRole | null;
 }
 
 /** What {@link createTeamInvite} returns to the route. */
@@ -156,6 +169,8 @@ export interface TeamInviteResult {
   token: string;
   email: string;
   role: InviteRole;
+  /** WARP-1533: the persisted custom access role, null for plain tier invites. */
+  accessRoleId: string | null;
   expiresAt: Date;
 }
 
@@ -199,6 +214,8 @@ export async function createTeamInvite(
       role: input.role,
       createdBy: input.createdBy,
       expiresAt,
+      // WARP-1533: type-validated custom access role (null = plain tier).
+      accessRoleId: input.accessRole?.id ?? null,
     },
   });
 
@@ -207,6 +224,7 @@ export async function createTeamInvite(
     token: created.token,
     email,
     role: input.role,
+    accessRoleId: created.accessRoleId ?? null,
     expiresAt: created.expiresAt,
   };
 }

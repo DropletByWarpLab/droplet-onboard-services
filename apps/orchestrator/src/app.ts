@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type ModuleId } from "@prisma/client";
 import { config } from "./config.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { requestIdMiddleware } from "./middleware/request-id.js";
@@ -73,17 +73,20 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
+import { requireFeatureAccess } from "./middleware/feature-gate.js";
 import { MODULES } from "./modules/module-registry.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
+import { createAccessRouter } from "./routes/access.js";
 import { createDepartmentsRouter } from "./routes/departments.js";
 import {
   initScopeLoader,
   loadUserEffectiveScopes,
 } from "./services/scope-loader.service.js";
+import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
@@ -226,6 +229,14 @@ export function createApp(
   // Idempotent — a second createApp() in tests is a no-op.
   initScopeLoader(prisma);
 
+  // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
+  // scope loader (same singleton discipline, same reason): layer-2
+  // per-person access resolution (features / tools / cloud / connectors /
+  // usage) is a DB-read per request with no cache in v1, and the first
+  // post-boot read must find the client bound. Availability config rides
+  // along for the workspace-module intersection (modules.service).
+  initEffectiveAccess(prisma, config);
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -254,6 +265,35 @@ export function createApp(
       app.use(prefix, moduleGate.requireModuleEnabled(def.id));
     }
   }
+
+  // WARP-1528 / ADR-032 §3(a) — layer 2, mounted immediately behind the
+  // WORKSPACE gate above and off the SAME registry `routePrefixes` (one
+  // vocabulary, no parallel list): the workspace says whether the box serves
+  // the module, this says whether THIS PERSON may open it. Denials are the
+  // identical 404, so a narrowed person sees a smaller Droplet rather than a
+  // wall of locked doors.
+  //
+  // The first set is deliberate, not app-wide: the four surfaces the design
+  // brief's §9 catalog treats as the load-bearing ones (Files, Cameras,
+  // Network, Devices/smart-home). `view` is the reachability floor — the
+  // ADR-004 enum floors stay authoritative above it and are untouched; this
+  // only ever narrows. Note smart_home's prefix is `/api/matter`, NOT
+  // `/api/devices` (the registry comment: /api/devices hosts appliance
+  // pairing + push, which must never 404 behind a smart-home grant).
+  // The remaining modules follow once the roster has roles in the wild.
+  const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
+    "files",
+    "cameras",
+    "network",
+    "smart_home",
+  ]);
+  for (const def of MODULES) {
+    if (!FEATURE_GATED_MODULES.has(def.id)) continue;
+    for (const prefix of def.routePrefixes) {
+      app.use(prefix, requireFeatureAccess(def.id, "view"));
+    }
+  }
+
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 
   // PR #377 — passkey REGISTRATION. You enrol a passkey for the signed-in
@@ -387,6 +427,10 @@ export function createApp(
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
+  // WARP-1527 / ADR-032 §5 (RBAC v2 T3): custom access roles — CRUD,
+  // duplicate, archive, delete (reassign-first), and bulk assignment.
+  // owner/admin only; every mutation through the T2 role-mutation guard.
+  app.use("/api", createAccessRouter(prisma));
   // WARP-1258 (T6): departments/teams CRUD. Manages department/team lifecycle,
   // membership, and integration with Nextcloud groupfolders. Provisioning is
   // async (reconciler converges NC state).

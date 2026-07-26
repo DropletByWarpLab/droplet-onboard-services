@@ -1,4 +1,6 @@
-# ADR-027 implementation blueprint
+# ADR-027b — Files SharePoint-parity implementation blueprint
+
+> Renamed from a duplicate "ADR-027" filename on 2026-07-25 (WARP-1563): this is the developer-ready companion to [ADR-027](ADR-027-files-sharepoint-parity.md), not a separate decision, so it carries the companion suffix "b" rather than consuming a number.
 
 Developer-ready companion to ADR-027. Per workstream: backend files+signatures, Prisma + migration, frontend, infra, failing-tests-first, effort. All paths absolute under `C:/Users/stefa/OneDrive/Documents/GitHub/droplet-wt-files-sharepoint/`. Worktree note: this is branch `docs/adr-027-files-sharepoint-parity` @ `fcd706e6`, **not** a clean `origin/main` checkout — rebase before opening PRs.
 
