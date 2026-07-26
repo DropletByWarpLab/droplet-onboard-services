@@ -31,6 +31,11 @@ import type {
 } from "./mcp-client.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
+  toolAllowedInScope,
+  toolDispatchDenial,
+  type ToolAccessScope,
+} from "./tool-access.service.js";
+import {
   selectAdvertisedTools,
   domainOfTool,
   toolNamesForDomain,
@@ -308,6 +313,21 @@ export interface AgentRequest {
    * (allowed_tools / chat scope) — RBAC is decided before this field.
    */
   tool_selection_mode?: "off" | "domains";
+  /**
+   * WARP-1529 / ADR-032 §3 (RBAC v2 T5) — the caller's resolved per-role tool
+   * reach. Applied TWICE, on purpose:
+   *
+   *   - to the advertised pool below (the model is never shown a tool the
+   *     role lost), and
+   *   - as a fail-closed re-check immediately before every `mcp.callTool`,
+   *     so a stale client tool shelf or a replayed tool_call can't invoke a
+   *     dropped tool even if it somehow reached the pool.
+   *
+   * Unset / null → no narrowing: the §3 owner bypass, service principals,
+   * and every person with no AccessRole (today's whole world). Direct
+   * service callers (email-analysis) also pass nothing and are unaffected.
+   */
+  toolAccessScope?: ToolAccessScope | null;
 }
 
 export interface AgentTraceEntry {
@@ -803,9 +823,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // registry no longer fits the shipping 16K window (see chat-tool-scope.ts
   // and the WARP-1118 canary). External MCP clients are unaffected; an
   // explicit `allowed_tools` still selects freely from the full registry.
-  const filtered = req.allowed_tools
-    ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-    : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name));
+  //
+  // WARP-1529 (RBAC v2 T5): the §3 tool-domain axis narrows BOTH branches —
+  // an explicit `allowed_tools` is client-supplied and a role holder's shelf
+  // can be stale, so it is a request, never a grant. `undefined` scope (the
+  // owner bypass / service principals / everyone with no AccessRole) leaves
+  // the pool byte-for-byte as it was.
+  const scoped = req.toolAccessScope;
+  const inScope = (name: string): boolean =>
+    !scoped || toolAllowedInScope(name, scoped);
+  const filtered = (
+    req.allowed_tools
+      ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
+      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
+  ).filter((t) => inScope(t.name));
   const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
     function: {
@@ -1167,6 +1198,37 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // tool call against a caller who is already gone.
       if (req.signal?.aborted) return abortedResult(iter + 1);
       const args = safeParseArgs(call);
+
+      // WARP-1529 (RBAC v2 T5) — enforcement point 2 of 2, and the one that
+      // is actually a security boundary. Runs BEFORE the hallucinated-tool
+      // guard so the refusal is decided on authorization, not on whether the
+      // pool computation happened to advertise the tool: a stale client
+      // shelf, a replayed tool_call, or any future caller that forgets to
+      // narrow `allowed_tools` all stop here without reaching the MCP child.
+      // Unregistered names deliberately fall THROUGH to the WARP-642 guard,
+      // which answers them with the valid-tool list so the model can
+      // self-correct.
+      const denial = toolDispatchDenial(call.function.name, args, scoped);
+      if (denial) {
+        const denialError = { status: "error" as const, error: denial };
+        trace.push({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          args,
+          result: denialError,
+        });
+        emit({ type: "tool_result", id: call.id, ok: false, data: denialError });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(denialError).slice(0, 8000),
+        });
+        // Counted as a guard hit: a model that keeps re-issuing a refused
+        // tool must still trip the FINDING 1 circuit breaker rather than
+        // burning every iteration on the same denial.
+        iterGuardHits++;
+        continue;
+      }
 
       // WARP-642 — hallucinated-tool guard. If the model named a tool that
       // was NOT advertised this turn, don't round-trip it to the MCP child

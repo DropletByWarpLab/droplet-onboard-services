@@ -161,6 +161,52 @@ export function lockOperationDenied(
   return isLockLikeInvocation(args);
 }
 
+// ── the dispatch gate ──────────────────────────────────────────────
+
+/** Why a dispatch was refused. `code` is model-facing (fed back as the tool
+ *  reply) and operator-facing (SSE tool_result + turn trace). */
+export interface ToolDispatchDenial {
+  code: "FORBIDDEN_TOOL_FOR_ROLE" | "LOCK_OPERATION_NOT_PERMITTED";
+  message: string;
+}
+
+/**
+ * Enforcement point 2: the fail-closed re-check the agent loop runs
+ * immediately before `mcp.callTool`. Returns `null` when the call may
+ * proceed.
+ *
+ * A name with no catalog entry returns `null` on purpose — an unregistered /
+ * hallucinated name is not an authorization question, and the loop's
+ * WARP-642 guard answers it with the list of valid tools so the model can
+ * self-correct. Swallowing that here would turn a recoverable typo into an
+ * opaque refusal.
+ */
+export function toolDispatchDenial(
+  name: string,
+  args: unknown,
+  scope: ToolAccessScope | null | undefined,
+): ToolDispatchDenial | null {
+  if (!scope) return null;
+  if (!CATALOG_BY_NAME.has(name)) return null;
+  if (!toolAllowedInScope(name, scope)) {
+    return {
+      code: "FORBIDDEN_TOOL_FOR_ROLE",
+      message:
+        `The tool '${name}' is not part of this person's access role. ` +
+        `Answer without it, or tell them to ask their administrator.`,
+    };
+  }
+  if (lockOperationDenied(name, args, scope)) {
+    return {
+      code: "LOCK_OPERATION_NOT_PERMITTED",
+      message:
+        "This person's access role does not permit operating locks. " +
+        "Do not retry; tell them to ask their administrator.",
+    };
+  }
+  return null;
+}
+
 // ── resolution ─────────────────────────────────────────────────────
 
 /**
