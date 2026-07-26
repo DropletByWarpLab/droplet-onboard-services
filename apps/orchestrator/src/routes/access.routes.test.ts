@@ -767,6 +767,34 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
   });
 
+  // WARP-1530 (T6) verification pin: O-2's "Read & write grants are only
+  // selectable on Admin-based roles" must hold on the DIRECT patch path too,
+  // not just at create and on a startingPoint drop. A Family-based role can
+  // never end up holding read_write, so T6's connector wiring has nothing to
+  // re-check at request time.
+  it("caps a read_write connector grant to read when patched onto a Family-based role (O-2)", async () => {
+    const prisma = createPrismaMock({ roles: [baseRole] });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.role.startingPoint).toBe("family");
+    expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  it("keeps read_write on an Admin-based role (the cap is a floor, not a ban)", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "admin" }],
+    });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.role.connectorGrants).toEqual([
+      { provider: "eaglesoft", level: "read_write" },
+    ]);
+  });
+
   it("refuses a startingPoint change when the actor holds the role (self-action rail)", async () => {
     const prisma = createPrismaMock({
       roles: [baseRole],

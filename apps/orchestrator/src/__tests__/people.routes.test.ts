@@ -201,12 +201,15 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           data,
           select,
         }: {
-          where: { id: string };
+          where: { id: string; role?: string };
           data: Partial<MockUser>;
           select?: any;
         }) => {
           const existing = rows.get(where.id);
-          if (!existing) {
+          // WARP-1526 (pr-reviewer #1229 B2): honour the optimistic-
+          // concurrency guard — a `where` that pins `role` must MISS (real
+          // Prisma throws P2025) when the stored row no longer carries it.
+          if (!existing || (where.role !== undefined && existing.role !== where.role)) {
             const err: any = new Error("not found");
             err.code = "P2025";
             throw err;
@@ -216,9 +219,9 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           return project(merged, select);
         },
       ),
-      delete: vi.fn(async ({ where }: { where: { id: string } }) => {
+      delete: vi.fn(async ({ where }: { where: { id: string; role?: string } }) => {
         const existing = rows.get(where.id);
-        if (!existing) {
+        if (!existing || (where.role !== undefined && existing.role !== where.role)) {
           const err: any = new Error("not found");
           err.code = "P2025";
           throw err;
@@ -528,7 +531,10 @@ describe("PATCH /api/people/:id/role", () => {
     expect(res.body.user.role).toBe("admin");
     expect(prisma.user.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "u1" },
+        // WARP-1526 (pr-reviewer #1229 B2): the write pins the role read
+        // inside the transaction — optimistic concurrency, so a row that
+        // moved under us misses (P2025) instead of clobbering.
+        where: { id: "u1", role: "family" },
         data: expect.objectContaining({ role: "admin" }),
       }),
     );
@@ -1022,7 +1028,10 @@ describe("DELETE /api/people/:id", () => {
     const res = await request(app).delete("/api/people/u1");
 
     expect(res.status).toBe(200);
-    expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: "u1" } });
+    // WARP-1526 B2 — optimistic delete: the pinned role is the in-tx re-read.
+    expect(prisma.user.delete).toHaveBeenCalledWith({
+      where: { id: "u1", role: "family" },
+    });
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const recorded = recordActivityMock.mock.calls[0][0];
     // Lifecycle events use the \"auth\" kind per the controller brief.
@@ -1735,5 +1744,179 @@ describe("WARP-1526 — serializable isolation on every guarded $transaction", (
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });
+  });
+});
+
+/**
+ * WARP-1526 — pr-reviewer #1229 B1 + B2 on the people surface.
+ *
+ * B1: the guarded transactions must be opened at SERIALIZABLE (Prisma
+ *     inherits the Postgres default, READ COMMITTED, which admits the
+ *     write skew rails 4/5 exist to stop), and the loser of that conflict
+ *     must surface as a 409, never a 500.
+ * B2: the decision to RUN rails 4/5 must come from state read INSIDE the
+ *     transaction, and the write itself must be optimistically guarded, so
+ *     a concurrent promotion can't slip a demotion past a rail that was
+ *     never evaluated.
+ */
+describe("WARP-1526 B1/B2 — isolation, conflict mapping, and in-tx target re-read", () => {
+  it("PATCH role opens the transaction at SERIALIZABLE isolation", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("DELETE opens the transaction at SERIALIZABLE isolation", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).delete("/api/people/u1");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("PATCH role guards the write with optimistic concurrency (where pins the re-read role)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    await request(app).patch("/api/people/u1/role").send({ role: "admin" });
+
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "u1", role: "family" },
+        data: expect.objectContaining({ role: "admin" }),
+      }),
+    );
+  });
+
+  it("a serialization loser (P2034) is a 409 CONCURRENT_MUTATION, not a 500", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+    const conflict: any = new Error("could not serialize access");
+    conflict.code = "P2034";
+    prisma.user.update.mockRejectedValueOnce(conflict);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CONCURRENT_MUTATION");
+    // Nothing was applied, so no post-commit effect may fire.
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("an optimistic-write miss (P2025 — the row changed under us) is a 409 CONCURRENT_MUTATION", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+    // The pre-tx read sees `family`; by the time the write lands the row is
+    // already `guest`, so the pinned `where` matches nothing.
+    // Both the pre-tx snapshot AND the in-tx re-read still say `family`;
+    // storage has already moved to `guest`, so it is the pinned WRITE that
+    // misses — exactly the window optimistic concurrency exists to close.
+    const stale = {
+      id: "u1",
+      username: "alice",
+      role: "family",
+      isLocal: true,
+      nextcloudUsername: null,
+      directoryStatus: "ACTIVE",
+    };
+    prisma.user.findUnique
+      .mockImplementationOnce(async () => stale)
+      .mockImplementationOnce(async () => stale);
+    prisma.rows.set("u1", { ...prisma.rows.get("u1"), role: "guest" });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CONCURRENT_MUTATION");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("B2 — rail 5 is decided from the IN-TRANSACTION role, not the pre-tx snapshot", async () => {
+    // TOCTOU: the pre-tx read sees `family` (rail 5 would be skipped — a
+    // family demotion removes no operator), but by transaction time the
+    // target has been promoted to `admin` and is the ONLY active operator.
+    // Deciding from the stale snapshot would demote the last admin with the
+    // rail never evaluated; the in-tx re-read catches it.
+    const prisma = createPrismaMock([
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+    prisma.user.findUnique.mockImplementationOnce(async () => ({
+      id: "adm-1",
+      username: "sam",
+      role: "family", // stale
+      isLocal: true,
+      nextcloudUsername: null,
+      directoryStatus: "ACTIVE",
+    }));
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "guest" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("N2 — a DEACTIVATED sole admin stays demotable and removable (no stuck row)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({
+        id: "adm-1",
+        username: "sam",
+        role: "admin",
+        directoryStatus: "DEACTIVATED",
+      }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+
+    const demote = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+    expect(demote.status).toBe(200);
+
+    const remove = await request(app).delete("/api/people/adm-1");
+    expect(remove.status).toBe(200);
   });
 });

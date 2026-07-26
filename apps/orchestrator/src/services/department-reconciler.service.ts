@@ -10,7 +10,7 @@
  * gets reassigned on NC reinstall; UUID-keyed Department rows survive
  * that, the cached `ncGroupfolderId` doesn't).
  *
- * Three independent sweeps per tick:
+ * Four independent sweeps per tick:
  *   1. Department state machine — pending/provisioning/failed rows are
  *      (re)provisioned; archiving rows are (re)archived; every ACTIVE
  *      DEPARTMENT/TEAM row is re-converged (drift overwrite + the
@@ -22,9 +22,15 @@
  *   3. WARP-1526 (rail 6): droplet-admins USER membership — stateless
  *      tier-vs-group drift correction. Expectation derived from
  *      `User.role` alone (owner∪admin with an NC mapping — no sync
- *      columns); ncListGroupMembers is compared and corrected both ways.
- *      Converges the best-effort cascade the role-change post-effects
- *      push (role-mutation-guard.service.ts) after an NC outage.
+ *      columns); ncListGroupMembers is compared and corrected both ways,
+ *      revocations first, each member contained on its own. Converges the
+ *      best-effort cascade the role-change post-effects push
+ *      (role-mutation-guard.service.ts) after an NC outage.
+ *   4. WARP-1526 (pr-reviewer #1229 N1): directoryStatus → NC enable
+ *      mirror — re-asserts `enabled=false` for locally DEACTIVATED rows,
+ *      so a failed disable-mirror cannot leave a revoked person with live
+ *      Nextcloud web/WebDAV access (that surface is proxied without
+ *      orchestrator auth in front of it).
  *
  * `gfDeleteFolder` is called from exactly one place in this whole
  * service: the `archiving` branch of `reconcileDepartmentRow`. No other
@@ -42,6 +48,7 @@ import {
   MASK_RO,
   MASK_ADMIN,
 } from "./department-provisioner.service.js";
+import { ncSetUserEnabled } from "./nextcloud.client.js";
 import {
   gfListFolders,
   gfAddGroup,
@@ -101,6 +108,12 @@ export interface ReconcileResult {
   // WARP-1526 (rail 6): droplet-admins tier-vs-group drift corrections.
   adminGroupAdded: number;
   adminGroupRemoved: number;
+  // pr-reviewer #1229 B4: per-member NC failures are counted, not swallowed
+  // — a sweep that silently fails every tick must be visible in the log.
+  adminGroupFailed: number;
+  // pr-reviewer #1229 N1: DEACTIVATED rows re-asserted against Nextcloud.
+  ncDisableMirrored: number;
+  ncDisableMirrorFailed: number;
 }
 
 /**
@@ -540,9 +553,11 @@ async function sweepMemberships(
 async function sweepAdminGroupMembership(
   prisma: PrismaClient,
   adminToken: string,
-): Promise<{ added: number; removed: number }> {
+): Promise<{ added: number; removed: number; failed: number }> {
   let added = 0;
   let removed = 0;
+  let failed = 0;
+
   // The Prisma read sits OUTSIDE the containment — a DB-connectivity
   // failure propagates, matching the tick's documented posture (nothing
   // useful to converge without a DB). Only the NC half is contained.
@@ -553,34 +568,48 @@ async function sweepAdminGroupMembership(
     },
     select: { nextcloudUsername: true },
   })) as { nextcloudUsername: string | null }[];
-  const expected = new Set<string>();
+
+  // ONE casing convention for the whole comparison (pr-reviewer #1229 N6).
+  // Prisma's `nextcloudUsername` and the OCS member ids can differ in case
+  // for the same account; exact-match set math would then see the member as
+  // BOTH missing (add) and unexpected (remove) on every tick — an infinite
+  // add/remove flap against a live account. Keys are lowercased on both
+  // sides; the original spelling is kept as the value for the NC calls.
+  const expectedByKey = new Map<string, string>();
   for (const row of operators) {
-    if (row.nextcloudUsername) expected.add(row.nextcloudUsername);
+    if (row.nextcloudUsername) {
+      expectedByKey.set(row.nextcloudUsername.toLowerCase(), row.nextcloudUsername);
+    }
   }
 
+  // Only the LISTING is wrapped here: without the actual membership there
+  // is nothing to compare against, so the whole sweep is skipped this tick
+  // and retried on the next one. Per-member failures are contained inside
+  // their own loops below, never at this level (pr-reviewer #1229 B4).
+  let actual: { id: string }[];
   try {
-    const actual = await ncListGroupMembers(adminToken, DROPLET_ADMINS_GROUP);
-    const actualIds = new Set(actual.map((m) => m.id));
-    const systemAdmin = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+    actual = await ncListGroupMembers(adminToken, DROPLET_ADMINS_GROUP);
+  } catch (err) {
+    logger.error(
+      { err },
+      "admin-group sweep: listing droplet-admins failed (non-fatal; next tick retries)",
+    );
+    return { added, removed, failed };
+  }
 
-    for (const ncUsername of expected) {
-      if (actualIds.has(ncUsername)) continue;
-      await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
-      added += 1;
-      await recordActivity({
-        kind: "system",
-        severity: "warn",
-        sourceIcon: "shield-alert",
-        what: "Restored drifted admin-group member (role tier is truth)",
-        sub: `${ncUsername} · ${DROPLET_ADMINS_GROUP}`,
-        refs: { ncUsername, group: DROPLET_ADMINS_GROUP },
-        actor: { type: "system" },
-      });
-    }
+  const actualKeys = new Set(actual.map((m) => m.id.toLowerCase()));
+  const systemAdmin = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
 
-    for (const member of actual) {
-      if (expected.has(member.id)) continue;
-      if (member.id.toLowerCase() === systemAdmin) continue;
+  // REMOVALS FIRST (pr-reviewer #1229 B4). This is the security-relevant
+  // direction — pulling a demoted ex-admin out of the box-wide admin group
+  // — so it must never sit behind the add loop, where one un-addable
+  // expected member (an operator whose NC account was deleted, say) would
+  // otherwise starve revocation on every tick, forever.
+  for (const member of actual) {
+    const key = member.id.toLowerCase();
+    if (expectedByKey.has(key)) continue;
+    if (key === systemAdmin) continue; // owns the provisioning credential
+    try {
       await ncRemoveUserFromGroup(adminToken, member.id, DROPLET_ADMINS_GROUP);
       removed += 1;
       await recordActivity({
@@ -592,14 +621,94 @@ async function sweepAdminGroupMembership(
         refs: { ncUsername: member.id, group: DROPLET_ADMINS_GROUP },
         actor: { type: "system" },
       });
+    } catch (err) {
+      failed += 1;
+      logger.error(
+        { err, ncUsername: member.id },
+        "admin-group sweep: revoking a drifted member failed (next tick retries)",
+      );
     }
-  } catch (err) {
-    logger.error(
-      { err },
-      "admin-group membership sweep failed (non-fatal; next tick retries)",
-    );
   }
-  return { added, removed };
+
+  // Then the restorations: an operator NC lost (or never received) is
+  // re-added. Per-item containment mirrors sweepMemberships' per-row
+  // try/catch — one bad member must not abort the rest of the loop.
+  for (const [key, ncUsername] of expectedByKey) {
+    if (actualKeys.has(key)) continue;
+    try {
+      await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
+      added += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Restored drifted admin-group member (role tier is truth)",
+        sub: `${ncUsername} · ${DROPLET_ADMINS_GROUP}`,
+        refs: { ncUsername, group: DROPLET_ADMINS_GROUP },
+        actor: { type: "system" },
+      });
+    } catch (err) {
+      failed += 1;
+      logger.error(
+        { err, ncUsername },
+        "admin-group sweep: restoring an operator failed (next tick retries)",
+      );
+    }
+  }
+
+  return { added, removed, failed };
+}
+
+/**
+ * WARP-1526 (pr-reviewer #1229 N1) — directoryStatus → Nextcloud enable
+ * mirror.
+ *
+ * The disable path writes `directoryStatus=DEACTIVATED` locally (the
+ * ADR-013 truth every login gate honours) and then mirrors to Nextcloud
+ * best-effort. When that mirror fails the local side is safe but the NC
+ * account stays ENABLED — and Nextcloud is proxied directly at
+ * `/nextcloud/` with no orchestrator auth in front, so the "disabled"
+ * person keeps web, WebDAV and desktop-sync access indefinitely. Nothing
+ * healed that until this pass.
+ *
+ * Stateless, same shape as the admin-group sweep: the expectation comes
+ * from `User.directoryStatus` alone, no sync columns. Only the DEACTIVATED
+ * direction is pushed — it is the security-relevant one, and re-asserting
+ * `enabled=false` is idempotent. The ACTIVE direction is deliberately NOT
+ * force-pushed every tick: it would mean an OCS write per active user per
+ * five minutes to correct a state no security property depends on (the
+ * enable route already writes both sides).
+ */
+async function sweepDirectoryStatusMirror(
+  prisma: PrismaClient,
+  adminToken: string,
+): Promise<{ disabledMirrored: number; failed: number }> {
+  let disabledMirrored = 0;
+  let failed = 0;
+
+  const deactivated = (await prisma.user.findMany({
+    where: {
+      directoryStatus: "DEACTIVATED",
+      nextcloudUsername: { not: null },
+    },
+    select: { nextcloudUsername: true },
+  })) as { nextcloudUsername: string | null }[];
+
+  for (const row of deactivated) {
+    if (!row.nextcloudUsername) continue;
+    try {
+      await ncSetUserEnabled(adminToken, row.nextcloudUsername, false);
+      disabledMirrored += 1;
+    } catch (err) {
+      failed += 1;
+      logger.error(
+        { err, ncUsername: row.nextcloudUsername },
+        "directoryStatus mirror: re-asserting NC disable failed (next tick retries)",
+      );
+    }
+  }
+
+  return { disabledMirrored, failed };
 }
 
 /**
@@ -620,6 +729,7 @@ export async function reconcileDepartments(
   const memberResult = await sweepMemberships(prisma, adminToken);
   const usageResult = await sweepUsagePolicies(prisma, adminToken);
   const adminGroupResult = await sweepAdminGroupMembership(prisma, adminToken);
+  const statusMirrorResult = await sweepDirectoryStatusMirror(prisma, adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -637,6 +747,9 @@ export async function reconcileDepartments(
     roleDefaultQuotasFailed: usageResult.roleDefaultQuotasFailed,
     adminGroupAdded: adminGroupResult.added,
     adminGroupRemoved: adminGroupResult.removed,
+    adminGroupFailed: adminGroupResult.failed,
+    ncDisableMirrored: statusMirrorResult.disabledMirrored,
+    ncDisableMirrorFailed: statusMirrorResult.failed,
   };
 
   logger.debug(result, "department-reconciler tick complete");

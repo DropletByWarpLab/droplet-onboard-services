@@ -267,6 +267,10 @@ function buildPrisma(
       //  - WARP-1526: the admin-group sweep lists operator-tier users with
       //    a Nextcloud mapping ({ role: { in }, nextcloudUsername:
       //    { not: null } }) — served by filtering the seeded rows.
+      // pr-reviewer #1229 N4: discriminate POSITIVELY on each caller's
+      // where-shape and throw on anything unrecognized. Falling back to []
+      // for "no role filter" silently answered any future query with an
+      // empty list, which is how a sweep gets tested into a no-op.
       findMany: vi.fn(
         async ({
           where,
@@ -275,17 +279,30 @@ function buildPrisma(
             role?: { in?: string[] };
             nextcloudUsername?: { not: null };
             accessRole?: unknown;
+            directoryStatus?: string;
           };
         } = {}) => {
-          if (where?.role?.in === undefined) return [];
-          return [...userRows.values()].filter((u) => {
-            const roleOk =
-              u.role !== undefined && where.role!.in!.includes(u.role);
-            const ncOk =
-              where?.nextcloudUsername === undefined ||
-              u.nextcloudUsername !== null;
-            return roleOk && ncOk;
-          });
+          // WARP-1531 (T7) role-default pass: users whose AccessRole sets a
+          // storage default. No fixture here assigns AccessRoles.
+          if (where?.accessRole) return [];
+          // WARP-1526 N1 mirror pass: locally DEACTIVATED rows with an NC
+          // mapping. No fixture here seeds deactivated users.
+          if (where?.directoryStatus === "DEACTIVATED") return [];
+          // WARP-1526 rail 6: operator-tier users with an NC mapping.
+          if (where?.role?.in) {
+            return [...userRows.values()].filter((u) => {
+              const roleOk =
+                u.role !== undefined && where.role!.in!.includes(u.role);
+              const ncOk =
+                where?.nextcloudUsername === undefined ||
+                u.nextcloudUsername !== null;
+              return roleOk && ncOk;
+            });
+          }
+          throw new Error(
+            `user.findMany: unrecognized where-shape ${JSON.stringify(where)} — ` +
+              "teach the stub about the new caller instead of returning [].",
+          );
         },
       ),
     },
@@ -789,6 +806,104 @@ describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
 
     const result = await reconcileDepartments(prisma as any);
 
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupRemoved).toBe(0);
+  });
+});
+
+/**
+ * WARP-1526 — pr-reviewer #1229 B4: sweep containment.
+ *
+ * The first cut wrapped BOTH loops in ONE try/catch. `ncAddUserToGroup`
+ * throws on any non-2xx, so a single un-addable expected member (e.g. an
+ * operator whose NC account was deleted by DELETE /auth/users, leaving the
+ * local row with its nextcloudUsername intact) threw on every tick and the
+ * REMOVE loop — the security-relevant direction, pulling a demoted
+ * ex-admin OUT of droplet-admins — never ran again. Containment is now
+ * per-item, removals run FIRST, and failures are counted rather than
+ * silently swallowed.
+ */
+describe("WARP-1526 B4 — admin-group sweep containment", () => {
+  it("a failing ADD cannot starve the REMOVE loop (head-of-line block)", async () => {
+    const ghost: FakeUser = { id: "u-ghost", nextcloudUsername: "ghost", role: "admin" };
+    const owner: FakeUser = { id: "u-own", nextcloudUsername: "stefan", role: "owner" };
+    const prisma = buildPrisma([], [], [ghost, owner]);
+    // NC lost `ghost` entirely (account deleted) but still carries a
+    // drifted ex-admin `eve` who must be revoked.
+    ncListGroupMembersMock.mockResolvedValue([{ id: "stefan" }, { id: "eve" }]);
+    ncAddUserToGroupMock.mockRejectedValue(new Error("OCS 404 no such user"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    // The revocation still happened despite the add blowing up.
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "eve",
+      DROPLET_ADMINS_GROUP,
+    );
+    expect(result.adminGroupRemoved).toBe(1);
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupFailed).toBe(1);
+  });
+
+  it("one failing member does not abort the rest of its own loop", async () => {
+    const a: FakeUser = { id: "u-a", nextcloudUsername: "aaa", role: "admin" };
+    const b: FakeUser = { id: "u-b", nextcloudUsername: "bbb", role: "admin" };
+    const prisma = buildPrisma([], [], [a, b]);
+    ncListGroupMembersMock.mockResolvedValue([]);
+    ncAddUserToGroupMock
+      .mockRejectedValueOnce(new Error("OCS 404"))
+      .mockResolvedValueOnce(undefined);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).toHaveBeenCalledTimes(2);
+    expect(result.adminGroupAdded).toBe(1);
+    expect(result.adminGroupFailed).toBe(1);
+  });
+
+  it("removals run BEFORE adds so revocation is never behind a broken add", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const prisma = buildPrisma([], [], [sam]);
+    ncListGroupMembersMock.mockResolvedValue([{ id: "eve" }]);
+    const order: string[] = [];
+    ncRemoveUserFromGroupMock.mockImplementation(async () => {
+      order.push("remove");
+    });
+    ncAddUserToGroupMock.mockImplementation(async () => {
+      order.push("add");
+    });
+
+    await reconcileDepartments(prisma as any);
+
+    expect(order).toEqual(["remove", "add"]);
+  });
+
+  it("a listing failure still contains to zero counts (nothing to compare against)", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const prisma = buildPrisma([], [], [sam]);
+    ncListGroupMembersMock.mockRejectedValue(new Error("nc OCS 503"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupRemoved).toBe(0);
+    expect(result.adminGroupFailed).toBe(0);
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("N6 — casing is normalized on BOTH sides, so a case-differing uid is not added and removed forever", async () => {
+    // Prisma says `Sam`; NC reports `sam`. Exact-match set math would
+    // consider Sam missing (add) AND sam unexpected (remove) on every
+    // single tick — an infinite flap. One convention, applied throughout.
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "Sam", role: "admin" };
+    const prisma = buildPrisma([], [], [sam]);
+    ncListGroupMembersMock.mockResolvedValue([{ id: "sam" }]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
     expect(result.adminGroupAdded).toBe(0);
     expect(result.adminGroupRemoved).toBe(0);
   });

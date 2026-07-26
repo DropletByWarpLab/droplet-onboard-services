@@ -44,6 +44,8 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   RoleMutationRefusedError,
   SERIALIZABLE_TX,
+  isConcurrencyConflict,
+  readGuardTargetTx,
   ASSIGNABLE_ROLES,
   type AssignableRole,
   assertNotSelf,
@@ -146,6 +148,13 @@ const PUBLIC_USER_SELECT = {
   isLocal: true,
   nextcloudUsername: true,
   accessRoleId: true,
+  // WARP-1526 (pr-reviewer #1229 N2): the guard's in-transaction invariants
+  // need the target's CURRENT enable state — a DEACTIVATED sole operator
+  // must stay demotable/removable (they hold no live access, so removing
+  // them cannot strand the box). Deliberate allow-list addition: the
+  // enable/disable state is the same fact the roster already renders, it
+  // carries no credential material, and every route here is owner/admin.
+  directoryStatus: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -393,26 +402,33 @@ export function createPeopleRouter(
         // string falls through to createTeamInvite's typed 400. Fail closed
         // if the actor's role claim is absent (inside the guard).
         //
-        // `inviterRole` is still read out here because the WARP-1533
-        // access-role validation below applies the SAME rank cap to the
-        // custom role's startingPoint — the guard rails cover the tier, the
-        // shared invite-access-role service covers the custom role.
+        // `inviterRole` is read out here because BOTH the tier rails (moved
+        // below the access-role validation, see the ORDER note there) and
+        // the WARP-1533 access-role validation apply a rank cap — the guard
+        // rails cover the tier, the shared invite-access-role service
+        // covers the custom role's startingPoint.
         const inviterRole = req.user?.role;
-        if (isInviteRole(parsed.data.role)) {
-          assertAssignableForCreate({
-            actorRole: req.user?.role,
-            requestedRole: parsed.data.role,
-            rankMessage:
-              "You cannot invite someone to a role higher than your own",
-          });
-        }
 
         // WARP-1533 (RBAC v2 T9): validate the optional custom access role
         // BEFORE any write — fail-closed via the shared service (exists,
         // active, assignable startingPoint, WARP-623 rank cap on the role's
-        // startingPoint with the same 403 shape as the tier cap above, and
-        // tier agreement so the accept path's fallback tier can never drift
-        // from the operator's pick).
+        // startingPoint, and tier agreement so the accept path's fallback
+        // tier can never drift from the operator's pick).
+        //
+        // ORDER (WARP-1526 × WARP-1533, decided at rebase): when the
+        // operator picked a custom role, its validation runs FIRST so the
+        // specific diagnosis wins — an owner-startingPoint row answers
+        // ACCESS_ROLE_NOT_ASSIGNABLE (400) rather than being masked by the
+        // coarser tier refusal, which would otherwise always fire first
+        // because T9's own tier-agreement check forces tier == startingPoint.
+        // Both are fail-closed and nothing is written by either. With no
+        // accessRoleId (every pre-T9 caller) this block is skipped entirely
+        // and the tier rails below are still the first thing that runs.
+        //
+        // WARP-1572 (F4): the declared type is the validator's BRANDED
+        // output — createTeamInvite's seam only accepts a role that went
+        // through validateInviteAccessRole, so the reorder above cannot
+        // become a path that hands the seam an unvalidated row.
         let accessRole: ValidatedInviteAccessRole | null = null;
         if (parsed.data.accessRoleId) {
           try {
@@ -427,6 +443,15 @@ export function createPeopleRouter(
             }
             throw err;
           }
+        }
+
+        if (isInviteRole(parsed.data.role)) {
+          assertAssignableForCreate({
+            actorRole: inviterRole,
+            requestedRole: parsed.data.role,
+            rankMessage:
+              "You cannot invite someone to a role higher than your own",
+          });
         }
 
         let invite;
@@ -513,6 +538,13 @@ export function createPeopleRouter(
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -588,22 +620,32 @@ export function createPeopleRouter(
         });
 
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
-        // WARP-1526 last-operator), then the write — count + update inside
-        // a single interactive $transaction at SERIALIZABLE
-        // (SERIALIZABLE_TX; explicitly passed, because Postgres/Prisma
-        // default to READ COMMITTED, under which two concurrent demotions
-        // both pass the count and both commit) so a concurrent demotion
-        // can't slip past the check window. Refusals throw out of the
-        // transaction and roll it back; the catch below maps them to 4xx.
+        // WARP-1526 last-operator), then the write — all inside ONE
+        // SERIALIZABLE transaction (pr-reviewer #1229 B1: Prisma inherits
+        // the Postgres default, READ COMMITTED, under which two concurrent
+        // demotions of the last two operators both pass the count and both
+        // commit). Refusals throw out of the transaction and roll it back;
+        // the catch below maps them to their 4xx, and a serialization
+        // loser to CONCURRENT_MUTATION rather than a 500.
         const updated = await prisma.$transaction(async (tx) => {
+          // B2 — re-read INSIDE the transaction. `existing` is a pre-tx
+          // snapshot, and whether rail 5 runs at all is derived from the
+          // target's tier: a stale `family` would skip the operator check
+          // entirely while a concurrent promotion made this row the only
+          // admin. The rails decide on THIS row, never the snapshot.
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
           await assertRoleChangeInvariantsTx(tx, {
-            target: { id: existing.id, role: existing.role },
+            target: fresh,
             requestedRole: parsed.data.role,
           });
           // WARP-1539 — the updated row is returned to the caller, so it
           // gets the same projection as every other read here.
+          // B2 — optimistic concurrency: pinning `role` closes the window
+          // between the re-read above and this write. A miss is P2025,
+          // mapped to CONCURRENT_MUTATION below.
           return tx.user.update({
-            where: { id: req.params.id },
+            where: { id: req.params.id, role: fresh.role },
             data: { role: parsed.data.role },
             select: PUBLIC_USER_SELECT,
           });
@@ -630,6 +672,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         next(err);
       }
@@ -730,6 +779,13 @@ export function createPeopleRouter(
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -785,14 +841,17 @@ export function createPeopleRouter(
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
         // WARP-1526 last-operator: removing the final non-disabled
         // owner-or-admin is refused), then the delete — checks + write in
-        // one interactive $transaction at SERIALIZABLE (SERIALIZABLE_TX,
-        // explicit: Prisma/Postgres default to READ COMMITTED) so a
-        // concurrent demotion or removal can't slip past the check window.
+        // one interactive $transaction so a concurrent demotion can't slip
+        // past the check window.
+        // SERIALIZABLE + in-tx re-read + optimistic delete (pr-reviewer
+        // #1229 B1/B2), same shape as PATCH /role above.
         await prisma.$transaction(async (tx) => {
-          await assertRemovalInvariantsTx(tx, {
-            target: { id: existing.id, role: existing.role },
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.delete({
+            where: { id: req.params.id, role: fresh.role },
           });
-          await tx.user.delete({ where: { id: req.params.id } });
         }, SERIALIZABLE_TX);
 
         // Rail 6 (consolidated post-commit effects) — WARP-490 hard
@@ -812,6 +871,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         // Prisma's P2025 (record not found) shouldn't reach here
         // because of the findUnique above, but stay defensive.
@@ -885,6 +951,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         if (err instanceof TargetUserNotFoundError) {
           return res.status(404).json({ error: "User not found" });
@@ -997,8 +1070,18 @@ export function createPeopleRouter(
 
           // Rails 4 + 5, then the paired write — accessRoleId and the enum
           // tier move together or not at all.
+          //
+          // WARP-1526 (pr-reviewer #1229 N2): the in-tx rails also take the
+          // target's enable state — rail 5 counts NON-disabled operators, so
+          // a DEACTIVATED sole admin must stay demotable. `existing` is read
+          // inside this transaction through PUBLIC_USER_SELECT, which
+          // carries directoryStatus, so no extra round-trip is needed.
           await assertRoleChangeInvariantsTx(tx, {
-            target: { id: existing.id, role: existing.role },
+            target: {
+              id: existing.id,
+              role: existing.role,
+              directoryStatus: existing.directoryStatus,
+            },
             requestedRole,
           });
           await tx.user.update({
