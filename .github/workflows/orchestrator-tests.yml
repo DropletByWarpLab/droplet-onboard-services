@@ -80,6 +80,14 @@ jobs:
       - name: Generate Prisma client
         run: npm run -w @droplet/orchestrator db:generate
 
+      # ci.yml builds this before the orchestrator suite; this lane never did,
+      # so any pg test importing a module that reaches @droplet/tools-core died
+      # at "Failed to resolve entry for package" rather than on an assertion.
+      # Latent since the lane was added — WARP-1534's suite is the first pg test
+      # to import it.
+      - name: Build workspace packages the orchestrator imports
+        run: npm run -w @droplet/tools-core build
+
       - name: Apply migrations
         run: npx prisma migrate deploy
         working-directory: apps/orchestrator
