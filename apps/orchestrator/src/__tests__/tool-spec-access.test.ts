@@ -46,7 +46,7 @@ vi.mock("../services/effective-access.service.js", () => ({
 
 import { createToolsRouter } from "../routes/tools.js";
 import { tickToolSchedules } from "../services/tool-schedule-ticker.service.js";
-import type { StepDispatcher } from "../services/tool-spec-runner.service.js";
+import { runToolSpec, type StepDispatcher } from "../services/tool-spec-runner.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 // ── fixtures ───────────────────────────────────────────────────────
@@ -386,6 +386,16 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     enabled: true,
   });
 
+  /** The `refs.reason` of the ticker's skip audit, so each fail-closed path
+   *  is pinned to ITS OWN reason. Every unresolvable principal also yields a
+   *  DENY_ALL scope, so without this the forbidden-tool branch alone would
+   *  satisfy a bare `skipped === 1` and the `unresolved` branch could be
+   *  deleted with every test still green. */
+  const auditedReason = (): unknown =>
+    recordActivityMock.mock.calls
+      .map(([a]) => a)
+      .find((a) => a.what === "Scheduled run skipped (access)")?.refs?.reason;
+
   it("refuses a fire whose attributed creator's role no longer grants the tool", async () => {
     filesOnlyAccess();
     const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
@@ -435,6 +445,10 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     expect(dispatcher.call).not.toHaveBeenCalled();
     expect(result.fired).toBe(0);
     expect(result.skipped).toBe(1);
+    // The `unresolved` branch must be what refuses, and the audit must say
+    // WHY. Without this the DENY_ALL scope alone would trip the forbidden-tool
+    // branch and mis-report an unattributable fire as a permissions problem.
+    expect(auditedReason()).toBe("no_principal");
   });
 
   it("refuses a fire when the attributed creator has been deactivated", async () => {
@@ -459,6 +473,7 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     // to act at all, so nothing may act AS it.
     expect(dispatcher.call).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
+    expect(auditedReason()).toBe("user_deactivated");
   });
 
   it("refuses a fire when the creator's row cannot be read (fail-closed)", async () => {
@@ -474,6 +489,9 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
 
     expect(dispatcher.call).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
+    // An infra failure must NOT be audited as a permissions refusal — an
+    // operator chasing "why did my automation stop" needs the real reason.
+    expect(auditedReason()).toBe("read_failed");
   });
 
   it("fires normally when the attributed creator still holds the domain", async () => {
@@ -489,6 +507,65 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
 
     expect(result.fired).toBe(1);
     expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
+  });
+
+  it("denies a scheduled lock operation at dispatch, after `${prev}` resolves", async () => {
+    // The pre-flight is NAME-only, so on the scheduled path too the §3 lock
+    // rule can ONLY be decided at dispatch: step 1's `command` does not exist
+    // until step 0 has returned. Without the runner re-checking under the
+    // ATTRIBUTED scope, a schedule stays a laundering path for exactly the
+    // hole the interactive test above closes — the ticker's own pre-flight
+    // cannot see this, and `scope: null` here would pass every other test.
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["files", "smart-home"],
+      locks: false,
+    });
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue("unlock") };
+    const prisma = createPrismaMock({
+      specs: [
+        spec({
+          ownerId: "user-narrowed",
+          steps: [
+            step(0, ALLOWED_TOOL, { path: "/" }),
+            step(1, FORBIDDEN_TOOL, { node_id: "n1", command: "${prev}" }),
+          ],
+        }),
+      ],
+      schedules: [dueSchedule()],
+      users: [
+        {
+          id: "user-narrowed",
+          role: "admin",
+          directoryStatus: "ACTIVE",
+          accessRoleId: "role-1",
+          accessRole: {
+            toolGrants: [
+              { domain: "files", level: "use" },
+              { domain: "smart-home", level: "use" },
+            ],
+          },
+        },
+      ],
+    });
+
+    await tickToolSchedules(prisma as never, dispatcher, now);
+
+    const calls = (dispatcher.call as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toEqual([[ALLOWED_TOOL, { path: "/" }]]);
+    expect(
+      calls.some(([name]) => name === FORBIDDEN_TOOL),
+      "an unlock must not reach the dispatcher on a scheduled fire either",
+    ).toBe(false);
+    const audited = recordActivityMock.mock.calls.map(([a]) => a);
+    expect(
+      audited.some(
+        (a) =>
+          a.severity === "warn" &&
+          a.sourceIcon === "shield" &&
+          a.refs?.reason === "LOCK_OPERATION_NOT_PERMITTED",
+      ),
+    ).toBe(true);
   });
 
   it("fires an owner-authored spec at full reach — today's behaviour, unchanged", async () => {
@@ -513,6 +590,84 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
       node_id: "n1",
       command: "turn_on",
+    });
+  });
+});
+
+// ── 3. the runner itself: the layer both callers sit on ────────────
+
+describe("WARP-1580 — runToolSpec refuses a forbidden spec under its own scope", () => {
+  // Both production callers pre-flight with the SAME
+  // firstForbiddenToolName(plannedToolNames(...)) before they get here, so
+  // this block never fires for them — it is the fail-closed floor for the
+  // NEXT caller. Untested, that floor is indistinguishable from dead code and
+  // can be deleted or broken without a single test going red; pinned here so
+  // it stays a real layer.
+
+  /** files granted, smart-home never granted — deliberately NOT DENY_ALL, so
+   *  step 0 is genuinely in reach and only the WHOLE-spec pre-flight can stop
+   *  it. Under DENY_ALL the per-step gate produces an indistinguishable
+   *  outcome and this test would pass with the pre-flight deleted. */
+  const filesOnlyScope = {
+    domains: new Set(["files"]),
+    writeDomains: new Set(["files"]),
+    locks: false,
+  };
+
+  it("refuses the spec WHOLE — an in-reach step 0 must not run either", async () => {
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
+    const prisma = createPrismaMock();
+
+    const { outcome } = await runToolSpec(prisma as never, dispatcher, {
+      specId: "spec-1",
+      specName: "Nightly recap",
+      steps: [
+        step(0, ALLOWED_TOOL, { path: "/" }),
+        step(1, FORBIDDEN_TOOL, { node_id: "n1" }),
+      ],
+      triggeredBy: "scheduler",
+      scope: filesOnlyScope,
+    });
+
+    // THE discriminator. The per-step gate alone would let step 0 dispatch and
+    // only refuse at step 1 — a half-applied automation the caller cannot
+    // undo. Only the pre-flight makes this zero.
+    expect(dispatcher.call).not.toHaveBeenCalled();
+    expect(outcome.status).toBe("failed");
+    expect(outcome.denialCode).toBe("FORBIDDEN_TOOL_FOR_ROLE");
+    // The trace names the OFFENDING step, not the innocent one it stopped at.
+    expect(outcome.trace).toHaveLength(1);
+    expect(outcome.trace[0].tool).toBe(FORBIDDEN_TOOL);
+    expect(outcome.trace[0].idx).toBe(1);
+    // The refusal is persisted and audited as a refusal, not a breakage.
+    expect(prisma.runs).toHaveLength(1);
+    expect(prisma.runs[0].status).toBe("failed");
+    const audited = recordActivityMock.mock.calls.map(([a]) => a);
+    expect(
+      audited.some(
+        (a) =>
+          a.severity === "warn" &&
+          a.sourceIcon === "shield" &&
+          a.refs?.reason === "FORBIDDEN_TOOL_FOR_ROLE",
+      ),
+    ).toBe(true);
+  });
+
+  it("runs untouched when no scope narrows it — omitted scope is not DENY", async () => {
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
+    const prisma = createPrismaMock();
+
+    const { outcome } = await runToolSpec(prisma as never, dispatcher, {
+      specId: "spec-1",
+      specName: "Nightly recap",
+      steps: [step(0, FORBIDDEN_TOOL, { node_id: "n1", command: "unlock" })],
+      triggeredBy: "scheduler",
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
+      node_id: "n1",
+      command: "unlock",
     });
   });
 });
