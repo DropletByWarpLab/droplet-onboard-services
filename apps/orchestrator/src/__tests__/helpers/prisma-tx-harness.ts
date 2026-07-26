@@ -51,13 +51,19 @@
  *   - predicate locks, phantom rows, or index-range granularity. Read and
  *     write keys are `model:id` for a keyed `where`, `model:*` otherwise.
  *   - lock waits / deadlock detection. Conflicts are decided at commit.
- *   - `create` with a stub-generated id replays with a NEW id if its
- *     transaction has to be rolled back around a concurrent commit. Suites
- *     that need stable ids across a rollback should seed explicit ids.
+ *   - more than two overlapping transactions. Rollback replays the writes of
+ *     transactions that COMMITTED in the interim; a third transaction still
+ *     open with uncommitted writes would lose them. Two-way races (the shape
+ *     every RBAC v2 defect took) are exact; three-way is not.
+ *   - `createMany` ids across a rollback. Single-row `create`/`upsert` pin
+ *     the generated id into the replay, so the winner's row survives a
+ *     concurrent rollback intact; `createMany` returns only a count, so a
+ *     suite that needs stable ids there should seed them explicitly.
  *
  * A real Postgres remains the only proof for the above: that is what the
  * `*.pg.test.ts` lane (RUN_PG_INTEGRATION=1) is for.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { vi } from "vitest";
 
 /** Prisma's write-conflict / deadlock code, thrown by SSI aborts. */
@@ -156,6 +162,26 @@ function restoreStore(store: Store, snap: unknown): void {
   store.set(snap);
 }
 
+/**
+ * For INSERTing methods only, fold the id the stub generated back into the
+ * call's `data` so a replay reproduces the same row rather than a new one.
+ * Never applied to `update`/`delete` — their result carries an id too, but
+ * writing it into `data` would be an id rewrite.
+ */
+function pinGeneratedId(
+  method: string,
+  args: unknown,
+  result: unknown,
+): unknown {
+  if (method !== "create" && method !== "upsert") return args;
+  const call = args as { data?: Record<string, unknown> } | undefined;
+  const data = call?.data;
+  if (!data || Array.isArray(data) || data.id !== undefined) return args;
+  const id = (result as { id?: unknown } | null | undefined)?.id;
+  if (id === undefined || id === null) return args;
+  return { ...call, data: { ...data, id } };
+}
+
 interface TxRecord {
   openedAt: number;
   committedAt: number | null;
@@ -184,11 +210,16 @@ export function createTransactionSeam(
   let conflictCount = 0;
   let clock = 0;
   let live: TxRecord[] = [];
-  /** Depth per async chain is impossible to track without ALS; a simple
-   *  counter is enough because a nested call always happens inside the
-   *  synchronous reach of its parent's callback. */
-  let depth = 0;
-  let current: TxRecord | null = null;
+  /**
+   * "Am I already inside a transaction?" is a PER-ASYNC-CONTEXT question,
+   * never a global one. A shared depth counter conflates overlap with
+   * nesting: the moment two requests are in flight, the second
+   * `$transaction` sees depth > 0, joins the first as a nested call, and
+   * silently loses its own snapshot, conflict check, and rollback — so
+   * every concurrency test passes vacuously. AsyncLocalStorage is the only
+   * thing that answers the question correctly.
+   */
+  const activeTx = new AsyncLocalStorage<TxRecord>();
 
   function snapshotAll() {
     const snap: Record<string, unknown> = {};
@@ -223,18 +254,29 @@ export function createTransactionSeam(
             const isWrite = WRITE_METHODS.has(mProp);
             const isRead = READ_METHODS.has(mProp);
             if (!isWrite && !isRead) return method;
-            return (...args: unknown[]) => {
+            return async (...args: unknown[]) => {
               const key = keyFor(model, args[0]);
-              if (isWrite) {
-                rec.writes.add(key);
-                rec.writeLog.push({ model, method: mProp, args: args[0] });
-              } else {
-                rec.reads.add(key);
-              }
-              return (method as (...a: unknown[]) => unknown).apply(
+              const call = (method as (...a: unknown[]) => unknown).apply(
                 mTarget,
                 args,
               );
+              if (isRead) {
+                rec.reads.add(key);
+                return call;
+              }
+              rec.writes.add(key);
+              const result = await call;
+              // Pin a stub-GENERATED id into the replayable call. Rolling
+              // another transaction back re-runs this write; without the id
+              // the stub mints a fresh one, the row comes back under a
+              // different id, and the request that captured it inside its own
+              // (committed) transaction then 404s on its own row.
+              rec.writeLog.push({
+                model,
+                method: mProp,
+                args: pinGeneratedId(mProp, args[0], result),
+              });
+              return result;
             };
           },
         });
@@ -291,9 +333,10 @@ export function createTransactionSeam(
       }
 
       // A nested call joins its parent: one snapshot, one conflict entry.
-      if (depth > 0 && current) {
+      const parent = activeTx.getStore();
+      if (parent) {
         optionsLog.push(options);
-        return fn(track(opts.client(), current));
+        return fn(track(opts.client(), parent));
       }
 
       optionsLog.push(options);
@@ -311,19 +354,13 @@ export function createTransactionSeam(
 
       await opts.onEnter?.({ options, index: optionsLog.length - 1 });
 
-      depth += 1;
-      const prev = current;
-      current = rec;
       let result: unknown;
       try {
-        result = await fn(track(opts.client(), rec));
+        result = await activeTx.run(rec, () => fn(track(opts.client(), rec)));
       } catch (err) {
         restoreAll(snap);
         await replayCommittedAfter(rec.openedAt, rec);
         throw err;
-      } finally {
-        depth -= 1;
-        current = prev;
       }
 
       if (conflictsWith(rec)) {
@@ -352,8 +389,6 @@ export function createTransactionSeam(
       conflictCount = 0;
       clock = 0;
       live = [];
-      depth = 0;
-      current = null;
       $transaction.mockClear();
     },
   };

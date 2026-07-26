@@ -243,6 +243,102 @@ describe("WARP-1570 seam — concurrent transactions (read-write skew)", () => {
     expect(remaining).toBe(1);
   });
 
+  it("a transaction opened while another is MID-CALLBACK is a sibling, not a nested join", async () => {
+    // Regression: tracking "am I inside a transaction?" with a shared depth
+    // counter conflates overlap with nesting. The second $transaction saw
+    // depth > 0, joined the first as a nested call, and so never got its own
+    // record — no snapshot, no conflict check, no rollback. Every concurrency
+    // test would then pass vacuously. Nesting must be decided per async
+    // context, not by a global counter.
+    const { self, seam } = makeStub([
+      ["a1", { role: "admin" }],
+      ["a2", { role: "admin" }],
+    ]);
+    const tx = self.$transaction as (
+      fn: (tx: any) => Promise<unknown>,
+      o?: unknown,
+    ) => Promise<unknown>;
+
+    // Party of 2 with only ONE arrival parks the first transaction until we
+    // release it by hand — a held-open transaction, not a rendezvous.
+    const firstMayFinish = gate(2);
+
+    const first = tx(async (t: any) => {
+      await t.user.count({ where: { role: "admin" } });
+      await firstMayFinish.arriveAndWait();
+      await t.user.update({ where: { id: "a1" }, data: { role: "guest" } });
+    }, SERIALIZABLE);
+
+    // Yield until the first transaction is genuinely mid-callback.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(firstMayFinish.arrived()).toBe(1);
+
+    // Opens, runs and COMMITS entirely inside the first one's lifetime.
+    await tx(async (t: any) => {
+      await t.user.count({ where: { role: "admin" } });
+      await t.user.update({ where: { id: "a2" }, data: { role: "guest" } });
+    }, SERIALIZABLE);
+
+    firstMayFinish.release();
+    const outcome = await Promise.allSettled([first]);
+
+    // Two top-level calls ⇒ two recorded options entries either way; the
+    // real tell is that the second one is a transaction of its own, so the
+    // first must now lose the conflict race.
+    expect(seam.calls()).toEqual([SERIALIZABLE, SERIALIZABLE]);
+    expect(outcome[0].status).toBe("rejected");
+    expect((outcome[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: P2034_WRITE_CONFLICT,
+    });
+    expect(seam.conflicts()).toBe(1);
+  });
+
+  it("rolling back around a concurrent commit preserves the WINNER's generated ids", async () => {
+    // The loser's rollback must not disturb the winner. Naive rollback
+    // (restore-then-replay) re-runs the winner's `create` against a stub
+    // that mints ids, so the row comes back under a DIFFERENT id — and the
+    // winning request, which captured the id inside its transaction, then
+    // 404s on its own freshly-created row and 500s. The id the write
+    // actually produced has to be pinned into the replay.
+    const rows = new Map<string, { id: string; slug: string }>();
+    let nextId = 1;
+    const self: Record<string, unknown> = {
+      role: {
+        findMany: vi.fn(async () => [...rows.values()]),
+        create: vi.fn(async ({ data }: { data: { id?: string; slug: string } }) => {
+          const id = data.id ?? `role-${nextId++}`;
+          const row = { ...data, id };
+          rows.set(id, row);
+          return row;
+        }),
+      },
+    };
+    const seam = createTransactionSeam({ client: () => self, stores: { rows } });
+    self.$transaction = seam.$transaction;
+    const tx = self.$transaction as (
+      fn: (tx: any) => Promise<unknown>,
+      o?: unknown,
+    ) => Promise<unknown>;
+
+    const bothRead = gate(2);
+    const create = (slug: string) =>
+      tx(async (t: any) => {
+        await t.role.findMany({ where: { slug: { startsWith: "r" } } });
+        await bothRead.arriveAndWait();
+        const created = await t.role.create({ data: { slug } });
+        return created.id as string;
+      }, SERIALIZABLE);
+
+    const settled = await Promise.allSettled([create("a"), create("b")]);
+    const winner = settled.find((s) => s.status === "fulfilled");
+    expect(winner).toBeDefined();
+    expect(seam.conflicts()).toBe(1);
+
+    const winnerId = (winner as PromiseFulfilledResult<string>).value;
+    expect([...rows.keys()]).toEqual([winnerId]);
+    expect(rows.get(winnerId)).toBeDefined();
+  });
+
   it("non-overlapping serializable transactions never conflict", async () => {
     const { self, users } = makeStub([
       ["a1", { role: "admin" }],
