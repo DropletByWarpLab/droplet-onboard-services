@@ -87,6 +87,17 @@
   color: var(--text-muted);
   margin-top: 2px;
 }
+/* WARP-1560 — an ARCHIVED role keeps the full card (it is still a real
+   role you can read, restore, or delete) and gives up only the brand tint
+   on its glyph, landing on the same neutral inset the built-in rows use.
+   Deliberately NOT dimmed with opacity: the "Archived" chip already carries
+   the state in a word, and dimming the whole card would push its metadata
+   under the contrast floor to say the same thing twice. */
+.acc-rolecard.archived .acc-glyph {
+  background: var(--inset);
+  color: var(--text-muted);
+}
+
 .acc-rolecard.builtin {
   padding: 9px 12px;
   border-radius: 10px;

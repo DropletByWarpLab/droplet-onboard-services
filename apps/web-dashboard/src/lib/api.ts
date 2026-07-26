@@ -6732,6 +6732,17 @@ export async function archiveAccessRole(
   return updateAccessRole(id, { state: "archived" });
 }
 
+/** WARP-1560 — archive's symmetric partner. The server treats the
+ *  transition as its own event: it writes an "Access role restored"
+ *  Activity row and, when the role carries a storage default that members
+ *  are back to inheriting, kicks the usage reconciler and answers
+ *  `pending` — so the caller's sync chip has something true to say. */
+export async function restoreAccessRole(
+  id: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  return updateAccessRole(id, { state: "active" });
+}
+
 export async function deleteAccessRole(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
     method: "DELETE",

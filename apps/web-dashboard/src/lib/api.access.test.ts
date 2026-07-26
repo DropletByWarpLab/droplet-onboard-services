@@ -20,6 +20,7 @@ import {
   duplicateAccessRole,
   updateAccessRole,
   archiveAccessRole,
+  restoreAccessRole,
   deleteAccessRole,
   assignAccessRole,
   setPersonAccess,
@@ -97,6 +98,16 @@ describe("WARP-1532 — roles CRUD", () => {
     expect(url).toMatch(/\/api\/access\/roles\/r1$/);
     expect(init.method).toBe("PATCH");
     expect(JSON.parse(init.body as string)).toEqual({ state: "archived" });
+  });
+
+  it("restoreAccessRole PATCHes { state: 'active' } (WARP-1560)", async () => {
+    authFetchMock.mockResolvedValue(res({ role: { id: "r1", state: "active" }, syncState: "pending" }));
+    const out = await restoreAccessRole("r1");
+    const [url, init] = authFetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/access\/roles\/r1$/);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ state: "active" });
+    expect(out.syncState).toBe("pending");
   });
 
   it("deleteAccessRole DELETEs and surfaces the server error body", async () => {
