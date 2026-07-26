@@ -332,10 +332,11 @@ export function normalizeGatePath(path: string): string {
  * invariant test is what makes that loud rather than silent).
  */
 export function foreignOwnedPaths(moduleId: ModuleId, prefix: string): string[] {
+  const nested = new Set(foreignSubPrefixes(moduleId, prefix));
   const out = new Set<string>();
   for (const def of MODULES) {
     if (def.id === moduleId) continue;
-    if (!def.routePrefixes.some((p) => p.startsWith(`${prefix}/`))) continue;
+    if (!def.routePrefixes.some((p) => nested.has(p))) continue;
     for (const owned of def.ownedPaths ?? []) {
       if (pathIsUnder(owned, prefix)) out.add(normalizeGatePath(owned));
     }
