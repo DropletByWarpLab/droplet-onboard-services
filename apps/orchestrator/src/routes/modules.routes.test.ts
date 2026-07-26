@@ -95,16 +95,16 @@ function createPrismaStub(seed: Seed) {
 
 const GATE = { requireModuleEnabled: () => (_r: Request, _s: Response, n: NextFunction) => n(), invalidate: vi.fn() };
 
-function makeApp(seed: Seed, user: AuthUser | null) {
+function makeApp(seed: Seed, user: AuthUser | null, cfg: AvailabilityConfig = CFG) {
   const prisma = createPrismaStub(seed);
-  _setEffectiveAccessForTests(prisma as never, CFG);
+  _setEffectiveAccessForTests(prisma as never, cfg);
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
     if (user) req.user = user;
     next();
   });
-  app.use("/api", createModulesRouter(prisma as never, CFG, GATE as never));
+  app.use("/api", createModulesRouter(prisma as never, cfg, GATE as never));
   return { app, prisma };
 }
 
@@ -226,6 +226,35 @@ describe("GET /api/modules — additive, resilient, unchanged", () => {
       enabled: expect.any(Boolean),
       effective: expect.any(Boolean),
     });
+  });
+
+  it("a role-holder on a box with AI_GATEWAY_URL unset still gets `chat`, never []", async () => {
+    // WARP-1528 (QA): `chat` is core — exempt from workspace ENABLEMENT
+    // everywhere else — but its AVAILABILITY is isSet(AI_GATEWAY_URL). With
+    // the gateway unset, a role-holder whose grants don't survive the
+    // intersection used to resolve to an empty set, and the dashboard's
+    // fail-open guard then fell back to the FULL workspace list: the "Droplet
+    // full of locked doors" this feature exists to prevent.
+    const { app } = makeApp(
+      {
+        // Grant a module the workspace has switched off, so nothing but the
+        // always-on floor can survive.
+        moduleSettings: [{ moduleId: "cameras", enabled: false }],
+        user: {
+          id: "u-staff",
+          role: "family",
+          accessRole: { featureGrants: [{ moduleId: "cameras", level: "view" }] },
+        },
+      },
+      STAFF,
+      { ...CFG, AI_GATEWAY_URL: "" },
+    );
+    const res = await request(app).get("/api/modules");
+    expect(res.status).toBe(200);
+    expect(ids(res.body)).toEqual(["chat"]);
+    // The field must be PRESENT — an omission here would silently fall the
+    // nav back to the workspace view instead of narrowing.
+    expect(res.body.effectiveForUser).toBeDefined();
   });
 
   it("OMITS the field when the resolver can't resolve the caller (fail OPEN in nav)", async () => {

@@ -69,9 +69,18 @@ async function fetchModules(): Promise<ModulesView> {
  *  - otherwise: module known → its `effective` flag
  *  - module unknown to the registry → shown (never hide what we can't classify)
  *
- * An EMPTY `effectiveForUser` is treated as unresolved, not as "nothing": the
- * always-on chat floor makes a genuinely empty set impossible, so an empty
- * array is a malformed/partial payload and must not blank the whole nav.
+ * An EMPTY `effectiveForUser` is treated as unresolved, not as "nothing" — a
+ * malformed/partial payload must not blank the whole nav.
+ *
+ * WARP-1528 (QA): the reason a genuinely empty set is impossible is that the
+ * always-on floor is EXEMPT FROM THE WORKSPACE INTERSECTION in the resolver
+ * (effective-access.service.ts) — not merely that "chat is always on". The
+ * distinction is load-bearing: `chat` is a core module but its registry
+ * availability is `isSet(AI_GATEWAY_URL)`, so on a gateway-less box it does
+ * drop out of the workspace-effective set, and before that exemption a
+ * role-holder with no surviving grants resolved to `[]`. The server also now
+ * omits the field rather than sending `[]`, so this guard is defence in depth
+ * on both counts.
  */
 export function isModuleEffective(
   data: ModulesView | undefined,

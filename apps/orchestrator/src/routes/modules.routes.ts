@@ -100,7 +100,13 @@ export function createModulesRouter(
       const view = await getModulesView(prisma, cfg);
       const effectiveForUser = await resolveEffectiveForUser(req);
       res.setHeader("Cache-Control", "private, max-age=30");
-      res.json(effectiveForUser ? { ...view, effectiveForUser } : view);
+      // `?.length`, not a bare truthiness check: `[]` is truthy, so the bare
+      // form SENT an empty array while the client's contract says the field is
+      // omitted when unresolvable. The resolver's always-on floor now makes a
+      // genuinely empty set unreachable, so this is belt-and-braces — but a
+      // server and a client that disagree about the wire shape is exactly how
+      // the next person gets misled.
+      res.json(effectiveForUser?.length ? { ...view, effectiveForUser } : view);
     } catch (e) { next(e); }
   });
 
