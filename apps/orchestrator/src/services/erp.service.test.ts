@@ -351,4 +351,68 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       await expect(svc.confirmWriteRequest("wr-x", FAMILY)).rejects.toMatchObject({ code: "FORBIDDEN" });
     });
   });
+
+  // ── WARP-1530 / ADR-032 §8 O-2 ──────────────────────────────────
+  //
+  // The route resolves the person's connector reach (effective-access
+  // service) and threads it down as `ErpUser.connectorLevel`. The service
+  // keeps its OWN assertion so a future mis-registered route can never
+  // fail open onto PHI: the tier set is NOT widened — `family` is admitted
+  // only when it arrives carrying a resolved grant.
+  describe("RBAC — O-2 connector floor (WARP-1530)", () => {
+    const RECEPTION = { id: "u-reception", role: "family", connectorLevel: "read" as const };
+    const FAMILY_NO_GRANT = { id: "u-family", role: "family" };
+    const A_GUEST = { id: "u-guest", role: "guest" };
+
+    it("admits a family person carrying a resolved connector grant to every PHI read", async () => {
+      for (const call of [
+        () => svc.getSchedule({ date: "2026-07-08" }, RECEPTION),
+        () => svc.searchPatients({ query: "smith" }, RECEPTION),
+        () => svc.getPatient("p-1", RECEPTION),
+        () => svc.getArSummary(RECEPTION),
+        () => svc.getRecallDue(RECEPTION),
+      ]) {
+        const before = mock._state.auditLog.length;
+        await expect(call()).resolves.toMatchObject({ connected: false });
+        // An admitted read is audited like any other (§14).
+        expect(mock._state.auditLog.length).toBe(before + 1);
+        expect(mock._state.auditLog.at(-1)!.actor).toBe(RECEPTION.id);
+      }
+    });
+
+    it("still refuses a family person with NO resolved grant (the tier set is not widened)", async () => {
+      await expect(
+        svc.getSchedule({ date: "2026-07-08" }, FAMILY_NO_GRANT),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(
+        svc.getSchedule({ date: "2026-07-08" }, { ...FAMILY_NO_GRANT, connectorLevel: null }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    });
+
+    it("refuses a guest even with a grant somehow attached — reads are family-AND-UP", async () => {
+      await expect(
+        svc.getSchedule({ date: "2026-07-08" }, { ...A_GUEST, connectorLevel: "read_write" as const }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    });
+
+    it("keeps writes admin-tier: a family person with read_write reach still cannot stage or confirm", async () => {
+      build({ writeEnabled: true });
+      const familyRw = { id: "u-reception", role: "family", connectorLevel: "read_write" as const };
+      await expect(
+        svc.createWriteRequest({ command: "reschedule_appointment", params: {} }, familyRw),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(svc.confirmWriteRequest("wr-x", familyRw)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    });
+
+    it("leaves owner/admin unchanged whether or not a level is threaded (no accessRole = today)", async () => {
+      await expect(svc.getSchedule({ date: "2026-07-08" }, OWNER)).resolves.toMatchObject({
+        connected: false,
+      });
+      await expect(
+        svc.getSchedule({ date: "2026-07-08" }, { id: "u-admin", role: "admin" }),
+      ).resolves.toMatchObject({ connected: false });
+    });
+  });
 });
