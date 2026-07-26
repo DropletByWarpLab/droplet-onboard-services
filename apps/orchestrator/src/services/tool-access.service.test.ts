@@ -11,9 +11,11 @@ import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import { MODULES } from "../modules/module-registry.js";
 import {
   DENY_ALL_TOOL_SCOPE,
+  firstForbiddenToolName,
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesToScope,
+  resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
   type ToolAccessScope,
@@ -295,5 +297,170 @@ describe("resolveToolAccessScope", () => {
     await expect(
       resolveToolAccessScope(fakePrisma(null), { role: "family" }),
     ).resolves.toEqual(DENY_ALL_TOOL_SCOPE);
+  });
+});
+
+// ── WARP-1580: the pre-flight + the attributed principal ────────────
+
+describe("firstForbiddenToolName — the whole-list pre-flight", () => {
+  it("returns the FIRST out-of-reach name so the refusal names one tool", () => {
+    const scope = scopeOf(["files"], ["files"]);
+    expect(
+      firstForbiddenToolName(
+        [nameOf("files", false), nameOf("cameras", false), nameOf("network", false)],
+        scope,
+      ),
+    ).toBe(nameOf("cameras", false));
+  });
+
+  it("returns null when every name is in reach", () => {
+    const scope = scopeOf(["files"], ["files"]);
+    expect(
+      firstForbiddenToolName([nameOf("files", false), nameOf("files", true)], scope),
+    ).toBeNull();
+  });
+
+  it("treats a null/absent scope as no narrowing (owner, service, role-less)", () => {
+    expect(firstForbiddenToolName(["control_device", "not_a_tool"], null)).toBeNull();
+    expect(firstForbiddenToolName(["control_device"], undefined)).toBeNull();
+  });
+
+  it("fails closed on an unregistered name under a scope", () => {
+    expect(firstForbiddenToolName(["not_a_tool"], scopeOf([...TOOL_DOMAINS]))).toBe(
+      "not_a_tool",
+    );
+  });
+
+  it("admits nothing under DENY_ALL_TOOL_SCOPE", () => {
+    expect(firstForbiddenToolName([nameOf("files", false)], DENY_ALL_TOOL_SCOPE)).toBe(
+      nameOf("files", false),
+    );
+  });
+});
+
+interface FakeAttributedRow {
+  role: string;
+  directoryStatus: "ACTIVE" | "DEACTIVATED";
+  accessRoleId: string | null;
+  accessRole: { toolGrants: Array<{ domain: string; level: "view" | "use" }> } | null;
+}
+
+const fakeAttributedPrisma = (row: FakeAttributedRow | null | Error) =>
+  ({
+    user: {
+      findUnique: vi.fn(async () => {
+        if (row instanceof Error) throw row;
+        return row;
+      }),
+    },
+  }) as never;
+
+describe("resolveAttributedToolAccess — the no-token principal", () => {
+  beforeEach(() => {
+    resolveEffectiveAccessMock.mockReset();
+  });
+
+  it("DENIES an absent principal — the inversion vs. the request path", async () => {
+    // resolveToolAccessScope(undefined) means "AUTH_ENABLED=false, owner".
+    // Here it means "we do not know who is asking", which must never widen.
+    await expect(
+      resolveAttributedToolAccess(fakeAttributedPrisma(null), null),
+    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "no_principal" });
+  });
+
+  it("DENIES a principal whose row no longer exists", async () => {
+    await expect(
+      resolveAttributedToolAccess(fakeAttributedPrisma(null), "ghost"),
+    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_missing" });
+  });
+
+  it("DENIES a deactivated principal even at owner tier", async () => {
+    await expect(
+      resolveAttributedToolAccess(
+        fakeAttributedPrisma({
+          role: "owner",
+          directoryStatus: "DEACTIVATED",
+          accessRoleId: null,
+          accessRole: null,
+        }),
+        "u1",
+      ),
+    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_deactivated" });
+  });
+
+  it("DENIES when the row read throws", async () => {
+    await expect(
+      resolveAttributedToolAccess(fakeAttributedPrisma(new Error("db down")), "u1"),
+    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "read_failed" });
+  });
+
+  it("bypasses for an ACTIVE owner — row-derived, no §3 resolve", async () => {
+    await expect(
+      resolveAttributedToolAccess(
+        fakeAttributedPrisma({
+          role: "owner",
+          directoryStatus: "ACTIVE",
+          accessRoleId: null,
+          accessRole: null,
+        }),
+        "u1",
+      ),
+    ).resolves.toEqual({ scope: null, unresolved: null });
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("does not narrow a role-less person — today's world, bit-for-bit", async () => {
+    await expect(
+      resolveAttributedToolAccess(
+        fakeAttributedPrisma({
+          role: "family",
+          directoryStatus: "ACTIVE",
+          accessRoleId: null,
+          accessRole: null,
+        }),
+        "u1",
+      ),
+    ).resolves.toEqual({ scope: null, unresolved: null });
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("composes the SAME scope the request path does for a role holder", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["files"],
+      locks: false,
+    });
+    const row: FakeAttributedRow = {
+      role: "admin",
+      directoryStatus: "ACTIVE",
+      accessRoleId: "r1",
+      accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+    };
+    const attributed = await resolveAttributedToolAccess(
+      fakeAttributedPrisma(row),
+      "u1",
+    );
+    const viaRequest = await resolveToolAccessScope(
+      fakePrisma({ accessRoleId: "r1", accessRole: row.accessRole }),
+      { id: "u1", role: "admin" },
+    );
+    expect(attributed.unresolved).toBeNull();
+    expect(attributed.scope).toEqual(viaRequest);
+  });
+
+  it("DENIES when the §3 resolve fails for an attributed role holder", async () => {
+    resolveEffectiveAccessMock.mockRejectedValueOnce(new Error("unwired"));
+    const attributed = await resolveAttributedToolAccess(
+      fakeAttributedPrisma({
+        role: "family",
+        directoryStatus: "ACTIVE",
+        accessRoleId: "r1",
+        accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+      }),
+      "u1",
+    );
+    // `unresolved` stays null — the identity WAS resolved; it is the §3
+    // composition that failed, and that already fails closed to DENY_ALL.
+    expect(attributed.scope).toEqual(DENY_ALL_TOOL_SCOPE);
   });
 });

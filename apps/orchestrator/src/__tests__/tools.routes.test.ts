@@ -224,6 +224,14 @@ function createPrismaMock(
         },
       ),
     },
+    // WARP-1580 — run-now resolves the caller's §3 tool scope before
+    // dispatching, which means one indexed User read. Every fixture in THIS
+    // suite is deliberately role-less (`accessRoleId: null`) so it keeps
+    // pinning the pre-RBAC-v2 behaviour: no narrowing, byte-for-byte.
+    // The narrowed-role cases live in tool-spec-access.test.ts.
+    user: {
+      findUnique: vi.fn(async () => ({ accessRoleId: null, accessRole: null })),
+    },
     toolRun: {
       create: vi.fn(
         async ({

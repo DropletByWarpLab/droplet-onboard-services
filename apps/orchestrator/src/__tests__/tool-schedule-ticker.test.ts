@@ -30,6 +30,8 @@ interface SpecRow {
   slug: string;
   name: string;
   status: "live" | "draft" | "suggested";
+  /** WARP-1580 — the attributed principal a scheduled fire runs as. */
+  ownerId: string | null;
   writes: boolean;
   reversible: boolean;
   steps: Array<{ id: string; idx: number; kind: string; args: unknown }>;
@@ -100,6 +102,20 @@ function createPrismaMock(opts: {
           specs.get(where.id) ?? null,
       ),
     },
+    // WARP-1580 — a scheduled fire now runs as the spec's attributed creator
+    // (`ToolSpec.ownerId`), resolved fresh on every fire. This suite's specs
+    // are owned by an ACTIVE owner-tier row, so the access gate is a no-op
+    // and every WARP-463 semantic below is pinned exactly as before. The
+    // narrowed / unattributable / deactivated cases live in
+    // tool-spec-access.test.ts.
+    user: {
+      findUnique: vi.fn(async () => ({
+        role: "owner",
+        directoryStatus: "ACTIVE",
+        accessRoleId: null,
+        accessRole: null,
+      })),
+    },
     toolRun: {
       create: vi.fn(
         async ({
@@ -147,6 +163,7 @@ describe("WARP-463 — tickToolSchedules", () => {
         {
           id: "spec-1",
           slug: "demo",
+          ownerId: "user-owner",
           name: "Demo",
           status: "live",
           writes: false,
@@ -176,6 +193,7 @@ describe("WARP-463 — tickToolSchedules", () => {
         {
           id: "spec-r",
           slug: "delete-all-logs",
+          ownerId: "user-owner",
           name: "Wipe logs",
           status: "live",
           writes: true,
@@ -211,6 +229,7 @@ describe("WARP-463 — tickToolSchedules", () => {
         {
           id: "spec-d",
           slug: "draft",
+          ownerId: "user-owner",
           name: "Draft",
           status: "draft",
           writes: false,
@@ -253,6 +272,7 @@ describe("WARP-463 — tickToolSchedules", () => {
         {
           id: "spec-b",
           slug: "x",
+          ownerId: "user-owner",
           name: "x",
           status: "live",
           writes: false,
@@ -285,6 +305,7 @@ describe("WARP-463 — tickToolSchedules", () => {
         {
           id: "spec-d",
           slug: "demo",
+          ownerId: "user-owner",
           name: "Demo",
           status: "live",
           writes: false,
