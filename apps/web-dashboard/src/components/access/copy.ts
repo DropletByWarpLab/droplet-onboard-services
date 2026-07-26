@@ -103,6 +103,18 @@ export const ACCESS_COPY = {
   // `emptyRoles` claims "No custom roles yet", which stops being true the
   // moment every custom role is merely filed away rather than absent.
   emptyRolesAllArchived: "Every custom role is archived — restore one, or create a new role.",
+
+  // ── Retained quota (WARP-1576) ──
+  // Clearing a role's storage default deliberately pushes nothing (a cleared
+  // default means "unmanaged", never "unlimited" — WARP-1531's semantics), so
+  // the members who had no quota of their own stay on whatever Nextcloud
+  // already enforces. The server returns the count precisely so this can be
+  // said out loud; without it the operator gets silence where a consequence
+  // happened. WARP-1576-authored on the ticket's own phrasing.
+  retainedQuota: (n: number) =>
+    n === 1
+      ? "1 person keeps their current storage limit until it's changed."
+      : `${n} people keep their current storage limit until it's changed.`,
   removePerson: (name: string) =>
     `Remove ${name}? They lose access to this Droplet immediately and are signed out.`,
 

@@ -6711,7 +6711,18 @@ export async function duplicateAccessRole(
 export async function updateAccessRole(
   id: string,
   patch: Partial<AccessRolePayload> & { state?: "active" | "archived" },
-): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+): Promise<{
+  role: AccessRole;
+  syncState?: AccessSyncState;
+  /** WARP-1576 — present only when this PATCH CLEARED the role's storage
+   *  default: how many members had no person-level quota and therefore keep
+   *  whatever Nextcloud currently enforces until someone edits it. The server
+   *  deliberately pushes nothing in that case (a cleared default means
+   *  "unmanaged", never "unlimited" — WARP-1531's semantics), so this count
+   *  is the operator's only signal that people were left on a retained
+   *  value. */
+  retainedQuotaCount?: number;
+}> {
   const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

@@ -110,6 +110,14 @@ describe("WARP-1532 — roles CRUD", () => {
     expect(out.syncState).toBe("pending");
   });
 
+  it("updateAccessRole passes retainedQuotaCount straight through (WARP-1576)", async () => {
+    authFetchMock.mockResolvedValue(
+      res({ role: { id: "r1" }, syncState: "synced", retainedQuotaCount: 3 }),
+    );
+    const out = await updateAccessRole("r1", { storageQuotaBytes: null });
+    expect(out.retainedQuotaCount).toBe(3);
+  });
+
   it("deleteAccessRole DELETEs and surfaces the server error body", async () => {
     authFetchMock.mockResolvedValue(
       res({ error: "In use by 4 people — reassign them first." }, false, 409),

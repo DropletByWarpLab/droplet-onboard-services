@@ -172,6 +172,17 @@ export function RolesAccessPanel({
   const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<AccessRole | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<AccessRole | null>(null);
+  // WARP-1576 — what the LAST save of this role left behind. Clearing a
+  // role's storage default is the one usage edit that pushes nothing (a
+  // cleared default means "unmanaged", never "unlimited"), so the members
+  // who had no quota of their own quietly stay on whatever Nextcloud already
+  // enforces. The server counts them; without this the operator gets silence
+  // where a consequence happened. Held rather than toasted because it stays
+  // TRUE until someone edits those people — a 4-second toast would be the
+  // wrong lifetime for a fact about other people's storage.
+  const [retainedQuota, setRetainedQuota] = useState<{ roleId: string; count: number } | null>(
+    null,
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // §8 delete-in-use escape hatch: "Reassign people →" moves focus to the
@@ -353,11 +364,21 @@ export function RolesAccessPanel({
         touchedId = role.id;
         noteSyncState(role.id, syncState);
       } else if (builder.base.id) {
-        const { syncState } = await updateAccessRole(builder.base.id, payload);
+        const roleId = builder.base.id;
+        const { syncState, retainedQuotaCount } = await updateAccessRole(roleId, payload);
         setBuilder(null);
         await reload();
-        touchedId = builder.base.id;
-        noteSyncState(builder.base.id, syncState);
+        touchedId = roleId;
+        noteSyncState(roleId, syncState);
+        // WARP-1576 — the field only comes back on a CLEAR, and a count of
+        // zero is a real answer ("nobody was left behind"), not something to
+        // announce. Every other save retires whatever the previous one said,
+        // so the line can never outlive the edit it describes.
+        setRetainedQuota(
+          retainedQuotaCount && retainedQuotaCount > 0
+            ? { roleId, count: retainedQuotaCount }
+            : null,
+        );
       }
       toast(`'${payload.name}' saved — applying now.`, "success");
       scheduleSyncRefetch(touchedId);
@@ -414,6 +435,11 @@ export function RolesAccessPanel({
     scheduleSyncRefetch(id);
   }
 
+  /** WARP-1576 asked whether the delete confirm should carry
+   *  `retainedQuotaCount` too. It cannot: DELETE is refused (409) while ANY
+   *  member or pending invite references the role, so a delete that succeeds
+   *  had nobody to leave on a retained quota. The disclosure belongs to the
+   *  clear-the-default path alone. */
   async function performDelete() {
     if (!deleteTarget) return;
     try {
@@ -625,6 +651,22 @@ export function RolesAccessPanel({
           <AccessChip mono>
             {role.maxUploadSizeMb != null ? `${role.maxUploadSizeMb} MB` : "Box default"} upload
           </AccessChip>
+        </div>
+        {/* WARP-1576 — the consequence sits WITH the axis it belongs to, one
+            line under the chips it explains, rather than in a toast whose
+            lifetime is wrong for a fact about other people's storage.
+            The live region is PERMANENTLY MOUNTED and only its content is
+            conditional — the WARP-1528 SyncChip lesson: a screen reader only
+            reliably announces mutations to a region it was already watching,
+            so creating the region together with its text is a coin-flip.
+            `display: contents` keeps it out of the parent's 16px column gap
+            while leaving the element in the accessibility tree. */}
+        <div role="status" aria-live="polite" style={{ display: "contents" }}>
+          {retainedQuota?.roleId === role.id && (
+            <GuardNote icon={<Gauge size={15} aria-hidden="true" />}>
+              {ACCESS_COPY.retainedQuota(retainedQuota.count)}
+            </GuardNote>
+          )}
         </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
           <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>

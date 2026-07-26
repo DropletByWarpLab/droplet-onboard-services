@@ -194,3 +194,17 @@ describe("§12 Sync + §10 system states", () => {
     expect(ACCESS_COPY.addException).toBe("+ Add an exception");
   });
 });
+
+describe("§12 Retained quota (WARP-1576)", () => {
+  it("states the consequence of clearing a role's storage default", () => {
+    // WARP-1576-authored from the ticket's own phrasing. Calm,
+    // consequence-stating, no exclamation; singular gets its own form
+    // because "1 people" is the kind of thing this surface never ships.
+    expect(ACCESS_COPY.retainedQuota(1)).toBe(
+      "1 person keeps their current storage limit until it's changed.",
+    );
+    expect(ACCESS_COPY.retainedQuota(4)).toBe(
+      "4 people keep their current storage limit until it's changed.",
+    );
+  });
+});

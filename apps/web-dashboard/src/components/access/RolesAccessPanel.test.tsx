@@ -642,3 +642,116 @@ describe("WARP-1560 — archived roles + restore", () => {
     );
   });
 });
+
+
+// ── WARP-1576: the cleared-storage-default disclosure ────────────────
+//
+// Clearing a role's storage default is the one usage edit that pushes
+// NOTHING (a cleared default means "unmanaged", never "unlimited"), so the
+// members who had no quota of their own silently stay on whatever Nextcloud
+// already enforces. The API has always returned `retainedQuotaCount` to say
+// how many; T8 shipped with no consumer, so the operator got silence.
+describe("WARP-1576 — retainedQuotaCount is surfaced, not swallowed", () => {
+  /** The role carries a limit BEFORE the edit and none after — a change
+   *  event on an already-empty input never reaches React, so a role seeded
+   *  as already-cleared could not be cleared. */
+  function seedListClearedAfterFirstLoad() {
+    listAccessRolesMock.mockResolvedValueOnce({ roles: [role()] });
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ storageQuotaBytes: null })] });
+  }
+
+  async function clearStorageAndSave() {
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const storage = await screen.findByLabelText("Storage limit");
+    fireEvent.change(storage, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    await waitFor(() => expect(updateAccessRoleMock).toHaveBeenCalled());
+    expect(updateAccessRoleMock.mock.calls[0][1].storageQuotaBytes).toBeNull();
+  }
+
+  it("states how many people were left on a retained quota", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 3,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.retainedQuota(3))).toBeInTheDocument(),
+    );
+  });
+
+  it("uses the singular form for one person", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 1,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("1 person keeps their current storage limit until it's changed."),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("says nothing when the clear left nobody on a retained quota", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 0,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    expect(screen.queryByText(/keeps? their current storage limit/)).not.toBeInTheDocument();
+  });
+
+  it("says nothing on an ordinary save — the field only comes back on a CLEAR", async () => {
+    updateAccessRoleMock.mockResolvedValue({ role: role(), syncState: "pending" });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    // Edit mode labels the name field rather than placeholder-ing it.
+    const name = await screen.findByLabelText("Role name");
+    fireEvent.change(name, { target: { value: "Finance & billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() => expect(updateAccessRoleMock).toHaveBeenCalled());
+    expect(screen.queryByText(/keeps? their current storage limit/)).not.toBeInTheDocument();
+  });
+
+  it("a later save that no longer clears anything retires the line", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValueOnce({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 2,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.retainedQuota(2))).toBeInTheDocument(),
+    );
+
+    updateAccessRoleMock.mockResolvedValueOnce({ role: role(), syncState: "pending" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const name = await screen.findByLabelText("Role name");
+    fireEvent.change(name, { target: { value: "Finance & billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(ACCESS_COPY.retainedQuota(2))).not.toBeInTheDocument(),
+    );
+  });
+});
