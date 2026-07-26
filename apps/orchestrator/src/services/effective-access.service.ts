@@ -27,6 +27,17 @@
  * today's behavior bit-for-bit; the coarse requireRole floors stay
  * enforcing unchanged at layer 1.
  *
+ * ARCHIVE ≠ REVOKE (deliberate, review C2). `AccessRole.state` is NOT read
+ * here: archiving a role stops it being ASSIGNABLE (both assign paths 409
+ * on an archived role) but never silently strips access from the people who
+ * already hold it — that would be a mass, invisible permission change fired
+ * by a UI action whose copy says "archive". The operator's explicit path to
+ * remove access is reassignment (or delete, which is blocked until the role
+ * is empty). `GET /api/access/roles` therefore returns archived and active
+ * roles alike, each carrying its `state` for the client to group by.
+ * Pinned by "an ARCHIVED role still resolves its grants for existing
+ * members (archive is not revoke)".
+ *
  * Shape: scope-loader-shaped singleton (module-bound Prisma + availability
  * config, idempotent boot init beside initScopeLoader, fail-closed throw
  * when unwired, `_setForTests` hook). DB-read per request; box scale is

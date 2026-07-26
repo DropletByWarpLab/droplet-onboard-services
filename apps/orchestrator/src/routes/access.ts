@@ -51,6 +51,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
   RoleMutationRefusedError,
+  SERIALIZABLE_TX,
   ASSIGNABLE_ROLES,
   type AssignableRole,
   assertAssignableForCreate,
@@ -306,6 +307,23 @@ function isForeignKeyError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2003";
 }
 
+/**
+ * Route-level precondition failure raised from INSIDE a transaction (404 /
+ * 409 outcomes that must be decided against transactionally-consistent
+ * reads — review B2). Throwing rolls the transaction back; the route catch
+ * maps `status`/`body` exactly like RoleMutationRefusedError. Kept local:
+ * these are HTTP shapes, not guard rails.
+ */
+class AccessPreconditionError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: Record<string, unknown>,
+  ) {
+    super(typeof body.error === "string" ? body.error : "Precondition failed");
+    this.name = "AccessPreconditionError";
+  }
+}
+
 const ROLE_IN_USE = {
   error:
     "This role is still assigned. Move its people (and pending invites) to another role first.",
@@ -437,18 +455,27 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           });
         }
 
-        const roleId = await prisma.$transaction(async (tx) =>
-          createRoleTx(tx as PrismaClient, {
-            name,
-            description,
-            startingPoint,
-            storageQuotaBytes,
-            maxUploadSizeMb,
-            llmDailyMessageCap,
-            cloudModelsAllowed,
-            grants,
-            createdBy: actorId,
-          }),
+        // SERIALIZABLE_TX explicitly (WARP-1526: the isolation level is passed
+        // at every call site, never defaulted). Needed on its own merits here:
+        // deriveUniqueSlug is a RANGE READ (`slug startsWith base`) followed by
+        // an insert into that range, so under READ COMMITTED two concurrent
+        // creates of the same name both read the same taken-set and race for
+        // one slug — the @unique then 500s the loser instead of handing it
+        // "-3". Under SERIALIZABLE the loser aborts cleanly (P2034).
+        const roleId = await prisma.$transaction(
+          async (tx) =>
+            createRoleTx(tx as PrismaClient, {
+              name,
+              description,
+              startingPoint,
+              storageQuotaBytes,
+              maxUploadSizeMb,
+              llmDailyMessageCap,
+              cloudModelsAllowed,
+              grants,
+              createdBy: actorId,
+            }),
+          SERIALIZABLE_TX,
         );
 
         const created = (await loadRole(roleId)) as RoleWithMeta;
@@ -500,34 +527,29 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           existing.startingPoint) as AssignableRole;
         const startingPointChanged = nextStartingPoint !== existing.startingPoint;
 
-        // Members are loaded only when the change re-tiers people.
+        // Rail 3 + 7 on the NEW tier. Pure actor-vs-requested (no DB read),
+        // so it stays OUT of the transaction to fail fast.
+        if (startingPointChanged) {
+          assertAssignableForCreate({
+            actorRole: req.user?.role,
+            requestedRole: nextStartingPoint,
+            rankMessage: "You cannot move a role above your own rank",
+          });
+        }
+
+        // The member list is read INSIDE the transaction below (review B2):
+        // a pre-transaction snapshot silently skips anyone assigned to the
+        // role between the read and the write, leaving User.role at the OLD
+        // (higher) tier while startingPoint moved down — layer-1 requireRole
+        // then honours that stale tier indefinitely, and nothing reconciles
+        // it. Declared here only so the post-commit rail-6 loop can see what
+        // the transaction actually re-tiered.
         let members: Array<{
           id: string;
           role: string;
           username: string;
           nextcloudUsername: string | null;
         }> = [];
-        if (startingPointChanged) {
-          // Rails 3 + 7 on the NEW tier, then the per-member rails.
-          assertAssignableForCreate({
-            actorRole: req.user?.role,
-            requestedRole: nextStartingPoint,
-            rankMessage: "You cannot move a role above your own rank",
-          });
-          members = (await prisma.user.findMany({
-            where: { accessRoleId: existing.id },
-            select: { id: true, role: true, username: true, nextcloudUsername: true },
-          })) as typeof members;
-          for (const member of members) {
-            // Rail 2 (self) + rail 1 (owner-untouchable, drifted data) +
-            // rank + assignable — identical to a direct role change.
-            assertRoleChangeAllowed({
-              actor: { id: req.user?.id, role: req.user?.role },
-              target: { id: member.id, role: member.role as never },
-              requestedRole: nextStartingPoint,
-            });
-          }
-        }
 
         // Grant axes: a provided array replaces wholesale (normalized for
         // the EFFECTIVE starting point); an absent axis re-clamps its
@@ -618,10 +640,27 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           }
 
           if (startingPointChanged) {
+            // B2: read the membership INSIDE the transaction, so anyone
+            // assigned to this role concurrently is either included here or
+            // serialized behind us — never silently left on the old tier.
+            members = (await tx.user.findMany({
+              where: { accessRoleId: existing.id },
+              select: { id: true, role: true, username: true, nextcloudUsername: true },
+            })) as typeof members;
+
             for (const member of members) {
-              // Rails 4 + 5 per member, inside the same transaction — a
-              // demotion that would strand the box without operators rolls
-              // the whole role change back.
+              // Rails 2 + 1 + 3 + 7 per member (self, owner-untouchable on
+              // drifted data, rank, assignable). Moved in with the read —
+              // RoleMutationRefusedError propagates out of the transaction,
+              // rolling it back, and the route catch maps it to its 4xx
+              // (the people.ts DELETE precedent).
+              assertRoleChangeAllowed({
+                actor: { id: req.user?.id, role: req.user?.role },
+                target: { id: member.id, role: member.role as never },
+                requestedRole: nextStartingPoint,
+              });
+              // Rails 4 + 5 per member — a demotion that would strand the
+              // box without operators rolls the whole role change back.
               await assertRoleChangeInvariantsTx(tx, {
                 target: { id: member.id, role: member.role as never },
                 requestedRole: nextStartingPoint,
@@ -632,21 +671,30 @@ export function createAccessRouter(prisma: PrismaClient): Router {
               });
             }
           }
-        });
+        }, SERIALIZABLE_TX);
 
-        // Rail 6 per re-tiered member (revoke → NC cascade → audit).
+        // Rail 6 per member. A member whose tier ACTUALLY crossed runs the
+        // consolidated runner (revoke → NC droplet-admins cascade → the
+        // "Role changed" audit row); a member already sitting at the target
+        // tier only gets their sessions revoked — emitting
+        // "Role changed: family → family" would be a lie in the audit log.
+        // Matches how the assign route distinguishes the two cases.
         for (const member of members) {
-          await runRoleChangePostEffects({
-            target: {
-              id: member.id,
-              username: member.username,
-              nextcloudUsername: member.nextcloudUsername,
-            },
-            previousRole: member.role as never,
-            nextRole: nextStartingPoint,
-            actorUsername: req.user?.username ?? null,
-            actor: actorFromRequest(req),
-          });
+          if (member.role !== nextStartingPoint) {
+            await runRoleChangePostEffects({
+              target: {
+                id: member.id,
+                username: member.username,
+                nextcloudUsername: member.nextcloudUsername,
+              },
+              previousRole: member.role as never,
+              nextRole: nextStartingPoint,
+              actorUsername: req.user?.username ?? null,
+              actor: actorFromRequest(req),
+            });
+          } else {
+            await revokeAllSessions(member.id);
+          }
         }
 
         const updated = (await loadRole(existing.id)) as RoleWithMeta;
@@ -770,7 +818,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
             data: { accessRoleId: null },
           });
           await tx.accessRole.delete({ where: { id: existing.id } });
-        });
+        }, SERIALIZABLE_TX);
 
         await recordActivity({
           kind: "auth",
@@ -817,61 +865,68 @@ export function createAccessRouter(prisma: PrismaClient): Router {
             .json({ error: "Invalid request", details: parsed.error.flatten() });
         }
 
-        const role = await prisma.accessRole.findUnique({ where: { id: req.params.id } });
-        if (!role) return res.status(404).json({ error: "Role not found" });
-        if (role.state === "archived") {
-          return res.status(409).json({
-            error: "This role is archived — restore it before assigning people.",
-            code: "ACCESS_ROLE_ARCHIVED",
-          });
-        }
-        const startingPoint = role.startingPoint as AssignableRole;
-
-        const targets = (await prisma.user.findMany({
-          where: { id: { in: parsed.data.userIds } },
-          select: {
-            id: true,
-            role: true,
-            username: true,
-            nextcloudUsername: true,
-            accessRoleId: true,
-          },
-        })) as Array<{
+        // B2: the role row (state + startingPoint) AND the target rows are
+        // read INSIDE the transaction. Read outside, a concurrent archive or
+        // re-base would let us write `role: <stale startingPoint>` — the
+        // person lands on a tier the role no longer carries, with layer-1
+        // requireRole honouring it indefinitely.
+        type AssignTarget = {
           id: string;
           role: string;
           username: string;
           nextcloudUsername: string | null;
           accessRoleId: string | null;
-        }>;
-        const foundIds = new Set(targets.map((t) => t.id));
-        const missing = parsed.data.userIds.filter((id) => !foundIds.has(id));
-        if (missing.length > 0) {
-          return res.status(404).json({ error: "User not found", missing });
-        }
-
-        // Pre-tx rails per target — self, owner-untouchable, rank cap,
-        // assignable enum (via the role's startingPoint). ALL targets must
-        // pass before ANY row changes (all-or-nothing, §2 "the assignment
-        // transaction").
-        const changed = targets.filter(
-          (t) => t.accessRoleId !== role.id || t.role !== startingPoint,
-        );
-        for (const target of changed) {
-          assertRoleChangeAllowed({
-            actor: { id: req.user?.id, role: req.user?.role },
-            target: { id: target.id, role: target.role as never },
-            requestedRole: startingPoint,
-          });
-        }
-
-        if (changed.length === 0) {
-          // Everyone already holds this role at its tier — a quiet no-op
-          // (the people.ts no-op-PATCH precedent): no writes, no revoke,
-          // no audit noise.
-          return res.json({ syncState: "synced" });
-        }
+        };
+        let startingPoint: AssignableRole = "guest";
+        let roleName = "";
+        let changed: AssignTarget[] = [];
 
         await prisma.$transaction(async (tx) => {
+          const role = await tx.accessRole.findUnique({ where: { id: req.params.id } });
+          if (!role) {
+            throw new AccessPreconditionError(404, { error: "Role not found" });
+          }
+          if (role.state === "archived") {
+            throw new AccessPreconditionError(409, {
+              error: "This role is archived — restore it before assigning people.",
+              code: "ACCESS_ROLE_ARCHIVED",
+            });
+          }
+          startingPoint = role.startingPoint as AssignableRole;
+          roleName = role.name;
+
+          const targets = (await tx.user.findMany({
+            where: { id: { in: parsed.data.userIds } },
+            select: {
+              id: true,
+              role: true,
+              username: true,
+              nextcloudUsername: true,
+              accessRoleId: true,
+            },
+          })) as AssignTarget[];
+          const foundIds = new Set(targets.map((t) => t.id));
+          const missing = parsed.data.userIds.filter((id) => !foundIds.has(id));
+          if (missing.length > 0) {
+            throw new AccessPreconditionError(404, { error: "User not found", missing });
+          }
+
+          changed = targets.filter(
+            (t) => t.accessRoleId !== role.id || t.role !== startingPoint,
+          );
+
+          // Rails per target — self, owner-untouchable, rank cap, assignable
+          // enum (via the role's startingPoint). ALL targets must pass before
+          // ANY row changes (all-or-nothing, §2 "the assignment
+          // transaction"); a refusal throws out and rolls back.
+          for (const target of changed) {
+            assertRoleChangeAllowed({
+              actor: { id: req.user?.id, role: req.user?.role },
+              target: { id: target.id, role: target.role as never },
+              requestedRole: startingPoint,
+            });
+          }
+
           for (const target of changed) {
             await assertRoleChangeInvariantsTx(tx, {
               target: { id: target.id, role: target.role as never },
@@ -882,7 +937,13 @@ export function createAccessRouter(prisma: PrismaClient): Router {
               data: { accessRoleId: role.id, role: startingPoint },
             });
           }
-        });
+        }, SERIALIZABLE_TX);
+
+        if (changed.length === 0) {
+          // Everyone already holds this role at its tier — a quiet no-op
+          // (the people.ts no-op-PATCH precedent): no revoke, no audit noise.
+          return res.json({ syncState: "synced" });
+        }
 
         // Rail 6 per member. A tier crossing runs the full consolidated
         // runner (revoke → NC droplet-admins cascade → "Role changed");
@@ -911,11 +972,11 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           severity: "ok",
           sourceIcon: "shield",
           what: "Access role assigned",
-          sub: `${role.name} → ${changed.length} ${changed.length === 1 ? "person" : "people"}`,
+          sub: `${roleName} → ${changed.length} ${changed.length === 1 ? "person" : "people"}`,
           refs: {
             actor: req.user?.username ?? null,
-            roleId: role.id,
-            roleName: role.name,
+            roleId: req.params.id,
+            roleName,
             userIds: changed.map((t) => t.id),
           },
           actor: actorFromRequest(req),
@@ -925,6 +986,9 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // follows) — the UI's "Saved. Applying…" line keys off pending.
         res.json({ syncState: "pending" });
       } catch (err) {
+        if (err instanceof AccessPreconditionError) {
+          return res.status(err.status).json(err.body);
+        }
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }

@@ -128,6 +128,26 @@ describe("effective-access — owner bypass", () => {
   });
 });
 
+describe("effective-access — archive is not revoke (C2)", () => {
+  it("an ARCHIVED role still resolves its grants for existing members (archive is not revoke)", () => {
+    // Deliberate semantics, pinned so a future 'archived ⇒ no access'
+    // change has to break a test and argue for itself: archiving stops a
+    // role being ASSIGNABLE (both assign paths 409), it never silently
+    // strips access from the people already holding it. The resolver
+    // therefore does not read AccessRole.state at all.
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-arch",
+          role: "family",
+          accessRole: role({ featureGrants: [{ moduleId: "files", level: "act" }] }),
+        },
+      }),
+    );
+    expect(featureLevel(res, "files")).toBe("act");
+  });
+});
+
 describe("effective-access — role narrowing (admins narrowable, no short-circuit)", () => {
   it("an admin-based role narrows an admin: absent grant row = feature OFF", () => {
     const res = computeEffectiveAccess(
