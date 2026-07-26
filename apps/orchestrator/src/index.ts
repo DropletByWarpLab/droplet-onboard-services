@@ -782,7 +782,11 @@ async function main() {
         result.membershipsFailed > 0 ||
         result.membershipsRemoved > 0 ||
         result.usagePoliciesSynced > 0 ||
-        result.usagePoliciesFailed > 0
+        result.usagePoliciesFailed > 0 ||
+        // WARP-1526: droplet-admins tier-vs-group drift corrections are
+        // rare and always worth a line in the log.
+        result.adminGroupAdded > 0 ||
+        result.adminGroupRemoved > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }

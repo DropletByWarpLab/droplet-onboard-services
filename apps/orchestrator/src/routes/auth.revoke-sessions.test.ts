@@ -98,10 +98,16 @@ import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 
-/** Prisma stub: findUnique by nextcloudUsername (the username→id resolution). */
+/**
+ * Prisma stub: findUnique by nextcloudUsername (the username→id resolution).
+ * WARP-1526: the disable path now runs the guard rails in a $transaction and
+ * writes directoryStatus on the LOCAL row (the ADR-013 source of truth), so
+ * the stub also carries update / count / $transaction.
+ */
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
   const self: any = {};
+  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
   self.user = {
     findUnique: vi.fn(async ({ where }: any) => {
       return (
@@ -111,6 +117,33 @@ function createPrismaMock(seed: any[] = []) {
             u.nextcloudUsername === where.nextcloudUsername,
         ) ?? null
       );
+    }),
+    update: vi.fn(async ({ where, data }: any) => {
+      const idx = users.findIndex((u) => u.id === where.id);
+      if (idx < 0) {
+        const err: any = new Error("not found");
+        err.code = "P2025";
+        throw err;
+      }
+      users[idx] = { ...users[idx], ...data };
+      return users[idx];
+    }),
+    count: vi.fn(async ({ where }: any = {}) => {
+      let n = 0;
+      for (const u of users) {
+        const roleOk =
+          where?.role === undefined
+            ? true
+            : typeof where.role === "string"
+              ? u.role === where.role
+              : (where.role.in ?? []).includes(u.role);
+        const statusOk =
+          where?.directoryStatus === undefined ||
+          u.directoryStatus === where.directoryStatus;
+        const idOk = where?.id?.not === undefined || u.id !== where.id.not;
+        if (roleOk && statusOk && idOk) n += 1;
+      }
+      return n;
     }),
   };
   self._users = users;
@@ -140,6 +173,7 @@ function seededAlice() {
     nextcloudUsername: "alice",
     displayName: "Alice",
     role: "family",
+    directoryStatus: "ACTIVE",
   };
 }
 
@@ -285,5 +319,181 @@ describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
         }),
       }),
     );
+  });
+});
+
+/**
+ * WARP-1526 — role-mutation-guard rails on the disable/enable paths.
+ *
+ * The disable path now runs rails 1/2/5 through the shared guard service
+ * and — the load-bearing change — writes `directoryStatus` on the LOCAL
+ * row inside the guard transaction. ADR-013 made the local directory the
+ * auth source of truth, yet dashboard-disable only ever flipped the
+ * Nextcloud flag: a "disabled" member could still sign in through
+ * /auth/login. The local write closes that and is what makes the
+ * last-operator count honest. The NC flag becomes the downstream mirror
+ * (best-effort + logged, same posture as the droplet-admins cascade).
+ */
+describe("POST /api/auth/users/:username/disable — WARP-1526 rails", () => {
+  it("disabling the OWNER → 403 OWNER_IMMUTABLE; Nextcloud untouched, nothing revoked, no audit row", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "u-boss",
+        username: "boss",
+        nextcloudUsername: "boss",
+        displayName: "Boss",
+        role: "owner",
+        directoryStatus: "ACTIVE",
+      },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app).post("/api/auth/users/boss/disable");
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+    expect(prisma._users[0].directoryStatus).toBe("ACTIVE");
+  });
+
+  it("disabling YOURSELF → 409 SELF_ACTION_NOT_ALLOWED; Nextcloud untouched", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "admin-id", // buildApp's synthetic req.user.id for callerRole=admin
+        username: "user-admin",
+        nextcloudUsername: "selfadmin",
+        displayName: "Self Admin",
+        role: "admin",
+        directoryStatus: "ACTIVE",
+      },
+      // A second ACTIVE operator so the refusal provably comes from the
+      // self-action rail, not the last-operator invariant.
+      {
+        id: "u-other",
+        username: "other",
+        nextcloudUsername: "other",
+        displayName: "Other",
+        role: "admin",
+        directoryStatus: "ACTIVE",
+      },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app).post("/api/auth/users/selfadmin/disable");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+  });
+
+  it("disabling the last ACTIVE operator → 409 LAST_OPERATOR_INVARIANT with the design copy; nothing disabled anywhere", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "u-sam",
+        username: "sam",
+        nextcloudUsername: "sam",
+        displayName: "Sam",
+        role: "admin",
+        directoryStatus: "ACTIVE",
+      },
+    ]);
+    const app = buildApp(prisma, "admin"); // synthetic admin session, no local row
+
+    const res = await request(app).post("/api/auth/users/sam/disable");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    expect(res.body.error).toBe(
+      "This is the last person who can manage access — give someone else an admin role first.",
+    );
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(prisma._users[0].directoryStatus).toBe("ACTIVE");
+  });
+
+  it("a permitted disable writes directoryStatus=DEACTIVATED on the local row (the ADR-013 truth) AND mirrors to Nextcloud", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "alice", false);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+  });
+
+  it("an NC outage no longer fails the disable — the local row is truth; the mirror is best-effort (logged)", async () => {
+    // SEMANTICS CHANGE (WARP-1526, conscious): previously ncSetUserEnabled
+    // ran FIRST and its failure 500'd the whole disable with nothing done.
+    // Now the guard transaction commits the local DEACTIVATED (login +
+    // middleware fail closed immediately) and the NC mirror failure is
+    // logged for the operator — same best-effort posture as the
+    // droplet-admins cascade.
+    (nc.ncSetUserEnabled as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User disabled" }),
+    );
+  });
+});
+
+describe("POST /api/auth/users/:username/enable — WARP-1526 local re-activate", () => {
+  it("flips the local row back to ACTIVE and mirrors enabled=true to Nextcloud", async () => {
+    const prisma = createPrismaMock([
+      { ...seededAlice(), directoryStatus: "DEACTIVATED" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/enable");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "enabled", username: "alice" });
+    expect(prisma._users[0].directoryStatus).toBe("ACTIVE");
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "alice", true);
+  });
+
+  it("legacy NC-only enable (no local row) keeps working", async () => {
+    const prisma = createPrismaMock([]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/legacy/enable");
+
+    expect(res.status).toBe(200);
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "legacy", true);
+  });
+});
+
+/**
+ * pr-reviewer (#1229) — the disable path's rail-5 count + local
+ * directoryStatus write must run at SERIALIZABLE, not the READ COMMITTED
+ * default Postgres/Prisma actually give you. Under READ COMMITTED two
+ * concurrent disables of the last two operators both count "one other
+ * operator remains", both pass, and both commit — zero non-disabled
+ * owner∪admin, the exact state LAST_OPERATOR_INVARIANT exists to prevent.
+ * The mock runs the callback serially, so only the OPTION can be asserted;
+ * that is what stops the silent regression coming back.
+ */
+describe("POST /api/auth/users/:username/disable — serializable isolation", () => {
+  it("passes { isolationLevel: 'Serializable' } to the guard $transaction", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
   });
 });

@@ -155,9 +155,15 @@ describe("POST /api/people/invite — accessRoleId", () => {
     const prisma = createPrismaMock([{ ...ACTIVE_ROLE, startingPoint: "owner" }]);
     const app = buildApp(prisma);
 
+    // The invite TIER is `admin`, not `owner`: WARP-1526 rail 7 refuses an
+    // owner-tier invite outright (403 ROLE_NOT_ASSIGNABLE — there is exactly
+    // one owner by design, design brief §6.2), so an owner tier would never
+    // reach the access-role service. The case under test is the ROLE's
+    // corrupt owner startingPoint, which is still reached — and still
+    // fail-closed — on a legitimately-assignable tier.
     const res = await request(app).post("/api/people/invite").send({
       email: "reception@acme.co",
-      role: "owner",
+      role: "admin",
       accessRoleId: ACTIVE_ROLE.id,
     });
 

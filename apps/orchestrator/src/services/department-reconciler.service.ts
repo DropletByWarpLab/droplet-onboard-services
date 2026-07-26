@@ -10,7 +10,7 @@
  * gets reassigned on NC reinstall; UUID-keyed Department rows survive
  * that, the cached `ncGroupfolderId` doesn't).
  *
- * Two independent sweeps per tick:
+ * Three independent sweeps per tick:
  *   1. Department state machine — pending/provisioning/failed rows are
  *      (re)provisioned; archiving rows are (re)archived; every ACTIVE
  *      DEPARTMENT/TEAM row is re-converged (drift overwrite + the
@@ -19,6 +19,12 @@
  *   2. Membership state machine — pending/failed memberships are pushed
  *      to their target NC group; `removing` memberships are pulled from
  *      both groups and then their row is deleted.
+ *   3. WARP-1526 (rail 6): droplet-admins USER membership — stateless
+ *      tier-vs-group drift correction. Expectation derived from
+ *      `User.role` alone (owner∪admin with an NC mapping — no sync
+ *      columns); ncListGroupMembers is compared and corrected both ways.
+ *      Converges the best-effort cascade the role-change post-effects
+ *      push (role-mutation-guard.service.ts) after an NC outage.
  *
  * `gfDeleteFolder` is called from exactly one place in this whole
  * service: the `archiving` branch of `reconcileDepartmentRow`. No other
@@ -46,6 +52,9 @@ import {
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
+// WARP-1526: the operator tier the droplet-admins group tracks — single
+// source in the role-mutation guard (no inlined {owner, admin} copies).
+import { ADMIN_TIER_ROLES } from "./role-mutation-guard.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("department-reconciler");
@@ -89,6 +98,9 @@ export interface ReconcileResult {
   roleDefaultQuotasSwept: number;
   roleDefaultQuotasSynced: number;
   roleDefaultQuotasFailed: number;
+  // WARP-1526 (rail 6): droplet-admins tier-vs-group drift corrections.
+  adminGroupAdded: number;
+  adminGroupRemoved: number;
 }
 
 /**
@@ -507,6 +519,90 @@ async function sweepMemberships(
 }
 
 /**
+ * WARP-1526 (rail 6) — droplet-admins user-membership drift sweep.
+ *
+ * The role-change post-effects (role-mutation-guard.service.ts) push the
+ * box-wide `droplet-admins` NC group best-effort; an NC outage used to
+ * leave user↔group drift with no convergence pass at all. This sweep is
+ * STATELESS on purpose: the expectation is recomputed from `User.role`
+ * every tick (owner∪admin rows that have a Nextcloud mapping — Prisma is
+ * truth, no sync-state columns), the actual set comes from
+ * `ncListGroupMembers`, and both directions are corrected:
+ *   - missing operator → re-added (heals a failed promotion cascade);
+ *   - non-operator member → removed (heals a failed demotion cascade, or
+ *     an out-of-band NC admin-UI edit — declared unsupported, ADR-029
+ *     §3.6 posture, same as removeDriftedGroupMembers above).
+ * The NC system admin account is never removed — it owns the
+ * provisioning credential and lives outside the local directory.
+ * Failure containment matches the sibling sweeps: any NC error is
+ * logged and the tick reports zeros; the next tick retries.
+ */
+async function sweepAdminGroupMembership(
+  prisma: PrismaClient,
+  adminToken: string,
+): Promise<{ added: number; removed: number }> {
+  let added = 0;
+  let removed = 0;
+  // The Prisma read sits OUTSIDE the containment — a DB-connectivity
+  // failure propagates, matching the tick's documented posture (nothing
+  // useful to converge without a DB). Only the NC half is contained.
+  const operators = (await prisma.user.findMany({
+    where: {
+      role: { in: [...ADMIN_TIER_ROLES] },
+      nextcloudUsername: { not: null },
+    },
+    select: { nextcloudUsername: true },
+  })) as { nextcloudUsername: string | null }[];
+  const expected = new Set<string>();
+  for (const row of operators) {
+    if (row.nextcloudUsername) expected.add(row.nextcloudUsername);
+  }
+
+  try {
+    const actual = await ncListGroupMembers(adminToken, DROPLET_ADMINS_GROUP);
+    const actualIds = new Set(actual.map((m) => m.id));
+    const systemAdmin = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+
+    for (const ncUsername of expected) {
+      if (actualIds.has(ncUsername)) continue;
+      await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
+      added += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Restored drifted admin-group member (role tier is truth)",
+        sub: `${ncUsername} · ${DROPLET_ADMINS_GROUP}`,
+        refs: { ncUsername, group: DROPLET_ADMINS_GROUP },
+        actor: { type: "system" },
+      });
+    }
+
+    for (const member of actual) {
+      if (expected.has(member.id)) continue;
+      if (member.id.toLowerCase() === systemAdmin) continue;
+      await ncRemoveUserFromGroup(adminToken, member.id, DROPLET_ADMINS_GROUP);
+      removed += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Removed drifted admin-group member (role tier is truth)",
+        sub: `${member.id} · ${DROPLET_ADMINS_GROUP}`,
+        refs: { ncUsername: member.id, group: DROPLET_ADMINS_GROUP },
+        actor: { type: "system" },
+      });
+    }
+  } catch (err) {
+    logger.error(
+      { err },
+      "admin-group membership sweep failed (non-fatal; next tick retries)",
+    );
+  }
+  return { added, removed };
+}
+
+/**
  * Run one convergence tick. Never throws — every per-row failure is
  * caught, logged, and reflected in the row's own state/syncState so the
  * next tick retries; a Prisma-connectivity-level failure at the
@@ -523,6 +619,7 @@ export async function reconcileDepartments(
   const deptResult = await sweepDepartments(prisma, adminToken);
   const memberResult = await sweepMemberships(prisma, adminToken);
   const usageResult = await sweepUsagePolicies(prisma, adminToken);
+  const adminGroupResult = await sweepAdminGroupMembership(prisma, adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -538,6 +635,8 @@ export async function reconcileDepartments(
     roleDefaultQuotasSwept: usageResult.roleDefaultQuotasSwept,
     roleDefaultQuotasSynced: usageResult.roleDefaultQuotasSynced,
     roleDefaultQuotasFailed: usageResult.roleDefaultQuotasFailed,
+    adminGroupAdded: adminGroupResult.added,
+    adminGroupRemoved: adminGroupResult.removed,
   };
 
   logger.debug(result, "department-reconciler tick complete");

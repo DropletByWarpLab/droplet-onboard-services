@@ -109,6 +109,9 @@ interface MockUser {
   role: string;
   isLocal: boolean;
   nextcloudUsername?: string | null;
+  // WARP-1526: the last-operator invariant counts NON-DISABLED operators
+  // via the explicit DirectoryUserStatus enum column.
+  directoryStatus: "ACTIVE" | "DEACTIVATED";
   createdAt: Date;
   updatedAt: Date;
   // WARP-1539 — the three secret-bearing columns the People surface must
@@ -136,6 +139,7 @@ function seedUser(over: Partial<MockUser> = {}): MockUser {
     role: over.role ?? "family",
     isLocal: over.isLocal ?? true,
     nextcloudUsername: over.nextcloudUsername ?? null,
+    directoryStatus: over.directoryStatus ?? "ACTIVE",
     createdAt: over.createdAt ?? new Date("2026-05-25T10:00:00Z"),
     updatedAt: over.updatedAt ?? new Date("2026-05-25T10:00:00Z"),
     passwordHash:
@@ -223,12 +227,35 @@ function createPrismaMock(initialRows: MockUser[] = []) {
         return existing;
       }),
       count: vi.fn(
-        async ({ where }: { where?: { role?: string } } = {}) => {
+        async (
+          {
+            where,
+          }: {
+            where?: {
+              role?: string | { in?: string[] };
+              directoryStatus?: string;
+              id?: { not?: string };
+            };
+          } = {},
+        ) => {
           if (!where || where.role === undefined) {
             return rows.size;
           }
+          // WARP-1526 last-operator shape: role.in + directoryStatus +
+          // id.not — mirrors the real Prisma where the guard issues.
           let n = 0;
-          for (const u of rows.values()) if (u.role === where.role) n += 1;
+          for (const u of rows.values()) {
+            const roleOk =
+              typeof where.role === "string"
+                ? u.role === where.role
+                : (where.role.in ?? []).includes(u.role);
+            const statusOk =
+              where.directoryStatus === undefined ||
+              u.directoryStatus === where.directoryStatus;
+            const idOk =
+              where.id?.not === undefined || u.id !== where.id.not;
+            if (roleOk && statusOk && idOk) n += 1;
+          }
           return n;
         },
       ),
@@ -384,6 +411,13 @@ beforeEach(() => {
   denylistUserMock.mockClear();
   ncAddUserToGroupMock.mockClear();
   ncRemoveUserFromGroupMock.mockClear();
+  // Restore the NC usage-client defaults globally — some specs install
+  // PERSISTENT rejections (mockRejectedValue, not ...Once), which would
+  // otherwise bleed into later describes (the WARP-1526 rails block).
+  ncUpdateUserMock.mockClear().mockResolvedValue(undefined);
+  ncGetUserQuotaAdminMock
+    .mockClear()
+    .mockResolvedValue({ used: 0, free: null, total: null, quota: null });
 });
 
 describe("GET /api/people", () => {
@@ -726,7 +760,15 @@ describe("PATCH /api/people/:id/role — WARP-1523 ROLE_RANK cap", () => {
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
   });
 
-  it("owner promoting a user to owner (equal rank at the top) is ALLOWED", async () => {
+  it("owner assigning the owner role → 403 ROLE_NOT_ASSIGNABLE (WARP-1526 supersession of the #1221 owner→owner pin)", async () => {
+    // SUPERSEDED (WARP-1526, conscious): #1221 pinned owner→owner as ALLOWED
+    // purely to document the rank-cap rail's <= semantics (equal rank is not
+    // an escalation). The assignable-enum narrowing now runs AFTER the rank
+    // cap and refuses `owner` outright — people are only ever
+    // {admin, family, guest} (design brief §6.2 "never Owner or Service");
+    // there is exactly ONE owner by design and ownership transfer is a
+    // future dedicated flow, not a role assignment. The equal-rank
+    // semantics of the cap itself stay pinned by the admin→admin case above.
     const prisma = createPrismaMock([
       seedUser({ id: "u1", username: "alice", role: "admin" }),
     ]);
@@ -736,8 +778,11 @@ describe("PATCH /api/people/:id/role — WARP-1523 ROLE_RANK cap", () => {
       .patch("/api/people/u1/role")
       .send({ role: "owner" });
 
-    expect(res.status).toBe(200);
-    expect(res.body.user.role).toBe("owner");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
   it("admin no-op re-submit of an existing owner row stays 200 (cap runs after the no-op short-circuit)", async () => {
@@ -783,17 +828,21 @@ describe("PATCH /api/people/:id/role — WARP-1259 droplet-admins NC sync", () =
     expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
   });
 
-  it("promote admin -> owner adds to droplet-admins (still admin-tier)", async () => {
-    // admin -> owner: both are admin-tier, so this is NOT a tier crossing
-    // and must NOT touch the NC group.
+  it("a non-crossing change (family -> guest) must NOT touch the NC group", async () => {
+    // SUPERSEDED FIXTURE (WARP-1526): this spec used admin→owner as its
+    // "both sides admin-tier, no crossing" case — `owner` is no longer an
+    // assignable role (ROLE_NOT_ASSIGNABLE), so the only route-reachable
+    // non-crossing change is now non-operator → non-operator. The
+    // admin→owner runner-level behavior stays pinned in
+    // role-mutation-guard.service.test.ts (runRoleChangePostEffects).
     const prisma = createPrismaMock([
-      seedUser({ id: "u1", username: "alice", role: "admin", nextcloudUsername: "alice" }),
+      seedUser({ id: "u1", username: "alice", role: "family", nextcloudUsername: "alice" }),
     ]);
     const app = buildApp(prisma);
 
     const res = await request(app)
       .patch("/api/people/u1/role")
-      .send({ role: "owner" });
+      .send({ role: "guest" });
 
     expect(res.status).toBe(200);
     expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
@@ -801,7 +850,11 @@ describe("PATCH /api/people/:id/role — WARP-1259 droplet-admins NC sync", () =
   });
 
   it("demote admin -> family removes from droplet-admins", async () => {
+    // WARP-1526 fixture note: an ACTIVE owner row is seeded so the
+    // last-operator rail passes — demoting the DIRECTORY'S ONLY operator
+    // is now refused (see the rail-5 describe below).
     const prisma = createPrismaMock([
+      seedUser({ id: "owner-row", username: "stefan", role: "owner" }),
       seedUser({ id: "u1", username: "alice", role: "admin", nextcloudUsername: "alice" }),
     ]);
     const app = buildApp(prisma);
@@ -1110,10 +1163,13 @@ describe("WARP-480 self-action invariants", () => {
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
-  it("PATCH owner→family on the only remaining owner → 409 LAST_OWNER_INVARIANT, no ActivityRow", async () => {
-    // Admin actor tries to demote the sole owner. Self-guard does NOT
-    // fire (different ids); requireRole passes (admin is allowed); the
-    // last-owner check is the only thing standing in the way.
+  it("PATCH owner→family on the only remaining owner → 403 OWNER_IMMUTABLE (rail 1 now fires before the last-owner backstop), no ActivityRow", async () => {
+    // SUPERSEDED (WARP-1526, conscious): this case used to reach the
+    // LAST_OWNER_INVARIANT (409). The owner-untouchable rail now refuses
+    // ANY mutation targeting an owner row first — the more specific,
+    // design-copy refusal. The last-owner invariant itself is kept as the
+    // in-tx backstop and stays pinned by the guard-service unit suite
+    // (role-mutation-guard.service.test.ts).
     const prisma = createPrismaMock([
       seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
       seedUser({ id: "admin-id", username: "sam", role: "admin" }),
@@ -1128,14 +1184,18 @@ describe("WARP-480 self-action invariants", () => {
       .patch("/api/people/owner-id/role")
       .send({ role: "family" });
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("LAST_OWNER_INVARIANT");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(res.body.error).toBe(
+      "The owner has full control and can't be changed here.",
+    );
     expect(prisma.user.update).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
-  it("DELETE on the only remaining owner → 409 LAST_OWNER_INVARIANT, no ActivityRow", async () => {
-    // Admin actor tries to remove the sole owner row.
+  it("DELETE on the only remaining owner → 403 OWNER_IMMUTABLE (rail 1 shadows the last-owner backstop), no ActivityRow", async () => {
+    // SUPERSEDED (WARP-1526, conscious): was 409 LAST_OWNER_INVARIANT —
+    // see the PATCH sibling above for the rationale.
     const prisma = createPrismaMock([
       seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
       seedUser({ id: "admin-id", username: "sam", role: "admin" }),
@@ -1148,17 +1208,18 @@ describe("WARP-480 self-action invariants", () => {
 
     const res = await request(app).delete("/api/people/owner-id");
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("LAST_OWNER_INVARIANT");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
     expect(prisma.user.delete).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
-  it("DELETE one of two owners → 200 (last-owner invariant only fires at count <= 1)", async () => {
-    // Positive case: two owners exist, an admin can remove one of
-    // them. Proves the invariant is gated on `count <= 1`, not on
-    // \"target row is an owner\" — otherwise we couldn't ever
-    // off-board an owner who is no longer with the household.
+  it("DELETE one of two owners → 403 OWNER_IMMUTABLE (owner rows are untouchable regardless of owner count)", async () => {
+    // SUPERSEDED (WARP-1526, conscious): before rail 1, an admin could
+    // off-board one of two owners (200). Owner rows are now immutable on
+    // the people surface for EVERY actor — there is exactly one owner by
+    // design (a second owner row is drifted data), and off-boarding an
+    // owner belongs to the future ownership-transfer flow, not here.
     const prisma = createPrismaMock([
       seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
       seedUser({ id: "owner-2", username: "romain", role: "owner" }),
@@ -1172,17 +1233,12 @@ describe("WARP-480 self-action invariants", () => {
 
     const res = await request(app).delete("/api/people/owner-2");
 
-    expect(res.status).toBe(200);
-    expect(prisma.user.delete).toHaveBeenCalledWith({
-      where: { id: "owner-2" },
-    });
-    // Happy path DOES emit an ActivityRow — only refused calls are
-    // silent. Asserting this here keeps a future refactor from
-    // accidentally swallowing the audit on the positive path.
-    expect(recordActivityMock).toHaveBeenCalledTimes(1);
-    expect(recordActivityMock.mock.calls[0][0].refs.targetUserId).toBe(
-      "owner-2",
-    );
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(denylistUserMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1328,5 +1384,356 @@ describe("GET /api/people/:id/usage", () => {
     const app = buildApp(prisma);
     const res = await request(app).get("/api/people/ghost/usage");
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * WARP-1526 (RBAC v2 T2) — role-mutation-guard rails on the people surface.
+ *
+ * Rail 1 (owner untouchable), rail 5 (last-operator), and rail 7
+ * (assignable-enum narrowing) are NEW; rails 2/3/4 keep their WARP-480 /
+ * WARP-1523 pins above. Everything here goes through
+ * services/role-mutation-guard.service.ts — one implementation, both
+ * surfaces.
+ */
+describe("WARP-1526 rail 1 — owner untouchable on /api/people", () => {
+  it("PATCH role targeting an owner → 403 OWNER_IMMUTABLE even with a second owner present (rail 1, not the owner-count)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "owner-2", username: "romain", role: "owner" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/owner-2/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(res.body.error).toBe(
+      "The owner has full control and can't be changed here.",
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("another OWNER cannot mutate an owner row either — rail 1 has no actor bypass (ownership transfer is a future dedicated flow)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "owner-2", username: "romain", role: "owner" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "owner-1",
+      username: "stefan",
+      role: "owner",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/owner-2/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+  });
+
+  it("PATCH scope targeting the owner → 403 OWNER_IMMUTABLE, bindings untouched", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/owner-1/scope")
+      .send({ scopes: ["team"] });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(prisma.scopeBinding.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.scopeBinding.createMany).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("PUT usage targeting the owner → 403 OWNER_IMMUTABLE, no policy write (the people usage PATCH is rail-1-guarded too)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({
+        id: "owner-1",
+        username: "stefan",
+        role: "owner",
+        nextcloudUsername: "stefan",
+      }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .put("/api/people/owner-1/usage")
+      .send({ storageQuotaBytes: "1000000" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(prisma.userUsagePolicy.upsert).not.toHaveBeenCalled();
+  });
+
+  it("usage self-edit by a NON-owner stays allowed (rail 2 intentionally does not apply to usage)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({
+        id: "admin-id",
+        username: "sam",
+        role: "admin",
+        nextcloudUsername: "sam",
+      }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .put("/api/people/admin-id/usage")
+      .send({ maxUploadSizeMb: 100 });
+
+    expect(res.status).toBe(200);
+    expect(prisma.userUsagePolicy.upsert).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WARP-1526 rail 7 — assignable-enum narrowing on PATCH /api/people/:id/role", () => {
+  it("role 'service' → 403 ROLE_NOT_ASSIGNABLE (rank −1 clears the cap; the narrowing is what refuses it)", async () => {
+    // Before WARP-1526 this was a LIVE GAP: zod's roleSchema accepts the
+    // full Role vocabulary and service's rank (−1) passes the <= cap, so
+    // an admin could park a person on the non-human service tier.
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-id",
+      username: "adm",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "service" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("admin → owner keeps the exact WARP-1523 ROLE_RANK_EXCEEDED refusal (rank runs before the narrowing)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-id",
+      username: "adm",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
+  });
+});
+
+describe("WARP-1526 rail 5 — last-operator invariant on /api/people", () => {
+  it("demoting the sole ACTIVE admin of an owner-less directory → 409 LAST_OPERATOR_INVARIANT with the design copy", async () => {
+    // Drifted directory: no owner row at all (e.g. a legacy box whose owner
+    // never got mirrored locally). The one ACTIVE admin is "the final
+    // owner-or-admin" — demoting them would leave nobody who can manage
+    // access. The synthetic actor holds an admin session without a local
+    // row (OCS-validated legacy session), so the self-action rail does not
+    // fire and the invariant is what refuses.
+    const prisma = createPrismaMock([
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    expect(res.body.error).toBe(
+      "This is the last person who can manage access — give someone else an admin role first.",
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("demoting one of two ACTIVE admins → 200 (a peer operator remains)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+      seedUser({ id: "adm-2", username: "kim", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.role).toBe("family");
+  });
+
+  it("an ACTIVE owner satisfies the invariant — demoting the only admin under an owner → 200 (owner-never-counts-as-removable)", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "owner-1",
+      username: "stefan",
+      role: "owner",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("a DEACTIVATED owner does NOT count — demoting the sole ACTIVE admin → 409", async () => {
+    const prisma = createPrismaMock([
+      seedUser({
+        id: "owner-1",
+        username: "stefan",
+        role: "owner",
+        directoryStatus: "DEACTIVATED",
+      }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "guest" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+  });
+
+  it("DELETE on the sole ACTIVE admin of an owner-less directory → 409 LAST_OPERATOR_INVARIANT, nothing revoked", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "adm-ghost",
+      username: "ghost",
+      role: "admin",
+    });
+
+    const res = await request(app).delete("/api/people/adm-1");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(denylistUserMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * pr-reviewer (#1229) — EVERY rail-4/5 transaction on this surface must run
+ * at SERIALIZABLE.
+ *
+ * The rails count operators and then write inside one interactive
+ * `$transaction`, and the code used to assert (falsely) that "serializable
+ * isolation is the default for Prisma $transaction on Postgres". It is not:
+ * Postgres — and therefore Prisma — defaults to READ COMMITTED, under which
+ * two concurrent demotions of the last two admins BOTH read "one other
+ * operator remains", BOTH pass rail 5, and BOTH commit — leaving zero
+ * non-disabled owner∪admin, which is precisely what LAST_OPERATOR_INVARIANT
+ * (and the older LAST_OWNER_INVARIANT) exist to prevent.
+ *
+ * The regression is silent — every functional test still passes at READ
+ * COMMITTED because the mock runs the callback serially — so these
+ * assertions pin the OPTION at each call site. Precedent: reset.service.ts
+ * (#549 finding 1) and setup.service.ts.
+ */
+describe("WARP-1526 — serializable isolation on every guarded $transaction", () => {
+  it("PATCH /role runs its rail-4/5 count + update at SERIALIZABLE", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/adm-1/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("DELETE /people/:id runs its rail-4/5 count + delete at SERIALIZABLE", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "adm-1", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).delete("/api/people/adm-1");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("PATCH /scope runs its delete+recreate rewrite at SERIALIZABLE", async () => {
+    // Not a rail-4/5 count, but the same false "serializable is the default"
+    // comment sat on it: the deleteMany + createMany pair must not interleave
+    // with a concurrent rewrite of the same user's bindings.
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/scope")
+      .send({ scopes: ["team", "finance"] });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
   });
 });

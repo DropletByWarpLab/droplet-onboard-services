@@ -107,11 +107,23 @@ import type { Role } from "../services/jwt.service.js";
  * Prisma stub for the edit-user handler. `updateMany` mutates seeded rows
  * matched by `nextcloudUsername` (or `username`) and reports the row count —
  * mirroring Prisma's contract so the route's 404-on-zero-rows path is exercised.
+ * WARP-1526: `findUnique` resolves the target row by nextcloudUsername — the
+ * role-relevant branch now looks the target up to run the owner-untouchable
+ * and self-action rails.
  */
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
   const self: any = {};
   self.user = {
+    findUnique: vi.fn(async ({ where }: any) => {
+      return (
+        users.find(
+          (u) =>
+            where.nextcloudUsername !== undefined &&
+            u.nextcloudUsername === where.nextcloudUsername,
+        ) ?? null
+      );
+    }),
     updateMany: vi.fn(async ({ where, data }: any) => {
       let count = 0;
       for (let i = 0; i < users.length; i += 1) {
@@ -337,5 +349,91 @@ describe("PUT /api/auth/users/:username — WARP-1523 ROLE_RANK cap", () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_REQUEST");
     expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /api/auth/users/:username — WARP-1526 rails on the role-relevant branch", () => {
+  // The legacy surface gets the SAME rails as PATCH /api/people/:id/role,
+  // through the same guard service — the surfaces can't drift again.
+  it("a role key targeting the OWNER row → 403 OWNER_IMMUTABLE, nothing written to directory or Nextcloud", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "u-boss",
+        username: "boss",
+        nextcloudUsername: "boss",
+        displayName: "Boss",
+        email: "boss@warp.test",
+        passwordHash: "$argon2id$OLD-HASH",
+        role: "owner",
+      },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ displayName: "Renamed", role: "family" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(res.body.error).toBe(
+      "The owner has full control and can't be changed here.",
+    );
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("a role key targeting YOURSELF → 409 SELF_ACTION_NOT_ALLOWED (same rail as the people surface)", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "admin-id", // matches buildApp's synthetic req.user.id for callerRole=admin
+        username: "user-admin",
+        nextcloudUsername: "selfadmin",
+        displayName: "Self Admin",
+        email: "self@warp.test",
+        passwordHash: "$argon2id$OLD-HASH",
+        role: "admin",
+      },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/selfadmin")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("owner sending role: owner → 403 ROLE_NOT_ASSIGNABLE (narrowing runs after the rank cap; owner is never assignable)", async () => {
+    // Sibling of the create/invite-site supersessions: before WARP-1526 a
+    // within-rank owner key was silently STRIPPED (200). The refusal is
+    // now explicit — people are {admin, family, guest} only (§6.2).
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ role: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("role: service → 403 ROLE_NOT_ASSIGNABLE (service principals are env-var-only; rank −1 cleared the old cap)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ role: "service", displayName: "Sneaky" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
   });
 });

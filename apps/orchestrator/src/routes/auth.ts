@@ -47,10 +47,28 @@ import {
   unregisterRefreshSession,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
-  roleOutranks,
   isRole,
   type Role,
 } from "../services/jwt.service.js";
+// WARP-1526 (RBAC v2 T2): the person-mutation rails — owner-untouchable,
+// self-action, rank cap, assignable narrowing, last-owner/last-operator
+// invariants, and the consolidated post-commit effects — are shared with
+// routes/people.ts through ONE guard service (ADR-032 draft §4). The
+// per-route inline rank checks this file used to carry live there now.
+import {
+  RoleMutationRefusedError,
+  SERIALIZABLE_TX,
+  assertRankCap,
+  assertRoleAssignable,
+  assertRoleChangeAllowed,
+  assertRemovalAllowed,
+  assertDisableAllowed,
+  assertAssignableForCreate,
+  assertRemovalInvariantsTx,
+  assertDisableInvariantsTx,
+  runRemovalPostEffects,
+  runDisablePostEffects,
+} from "../services/role-mutation-guard.service.js";
 import {
   SESSION_COOKIE_NAME,
   REFRESH_COOKIE_NAME,
@@ -2706,20 +2724,28 @@ export function createProtectedAuthRouter(
 
       const { email, password, displayName, mustChangePassword, role } = parsed.data;
 
-      // WARP-1042: privilege-escalation guard — SAME cap as POST /auth/invites.
-      // `requireRole("owner","admin")` proved the caller may create users, but
-      // NOT which role they may assign. Without this an `admin` could mint an
-      // `owner` account (local row role + NC `admin` group) — a straight
-      // privilege escalation. Reject any assigned role that outranks the
-      // caller's own; owner→owner is allowed, admin→owner is not. Fail closed
-      // if the role claim is somehow absent.
-      const creatorRole = req.user?.role;
-      if (!creatorRole || roleOutranks(role, creatorRole)) {
-        res.status(403).json({
-          error: "You cannot create an account with a role higher than your own",
-          code: "ROLE_RANK_EXCEEDED",
+      // Rails 3 + 7 (WARP-1526, guard service): the WARP-1042 rank cap —
+      // requireRole proved the caller may create users, not WHICH role they
+      // may assign; fail closed on a missing claim — plus the assignable
+      // narrowing: accounts are only ever created as {admin, family, guest}
+      // (design brief §6.2 "never Owner or Service"; exactly one owner by
+      // design, so even an owner cannot mint a second owner account — this
+      // consciously supersedes the earlier owner→owner-allowed pin).
+      // `service` was already schema-impossible (createUserSchema excludes
+      // it); the guard makes the policy explicit for every recognized role.
+      try {
+        assertAssignableForCreate({
+          actorRole: req.user?.role,
+          requestedRole: role,
+          rankMessage:
+            "You cannot create an account with a role higher than your own",
         });
-        return;
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       const token = await resolveNcToken(req);
@@ -2890,25 +2916,51 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      // WARP-1523: ROLE_RANK cap on the role-UPDATE path. updateUserSchema
+      // WARP-1523 → WARP-1526: the role-relevant branch. updateUserSchema
       // has no `role` field, so a `role` key in the body used to be silently
       // STRIPPED by zod — an admin probing { role: "owner" } saw either a
       // validation 400 or, mixed with a real field, a 200 that looked like a
-      // successful promotion. Enforce the SAME cap as the create sites
-      // (WARP-1042 / WARP-623) BEFORE validation: any recognized requested
-      // role that outranks the caller is refused outright and nothing is
-      // half-applied. Within-rank role keys keep the pre-existing semantics
+      // successful promotion. Any RECOGNIZED role key now runs the full
+      // pre-tx rails through the guard service BEFORE validation, so nothing
+      // is half-applied: self-action (409), owner-untouchable (403 — an
+      // admin can no longer even probe the owner's row with a role key),
+      // the WARP-1523 rank cap (403, fail closed on a missing claim), and
+      // the assignable narrowing (never owner or service, §6.2). A
+      // within-rank ASSIGNABLE role key keeps the pre-existing semantics
       // (stripped by the schema — PATCH /api/people/:id/role owns actual
-      // role changes). Fail closed if the actor's role claim is absent.
+      // role changes). Unrecognized strings still fall through to schema
+      // validation (400 INVALID_REQUEST).
       const requestedRole: unknown = req.body?.role;
       if (isRole(requestedRole)) {
-        const actorRole = req.user?.role;
-        if (!actorRole || roleOutranks(requestedRole, actorRole)) {
-          res.status(403).json({
-            error: "You cannot assign a role higher than your own",
-            code: "ROLE_RANK_EXCEEDED",
-          });
-          return;
+        try {
+          const target = prisma
+            ? await prisma.user.findUnique({
+                where: { nextcloudUsername: req.params.username },
+                select: { id: true, role: true },
+              })
+            : null;
+          if (target) {
+            assertRoleChangeAllowed({
+              actor: { id: req.user?.id, role: req.user?.role },
+              target,
+              requestedRole,
+            });
+          } else {
+            // No local row (legacy shim / NC-only account): the row-
+            // dependent rails can't run, but rank + narrowing still hold.
+            assertRankCap(
+              req.user?.role,
+              requestedRole,
+              "You cannot assign a role higher than your own",
+            );
+            assertRoleAssignable(requestedRole);
+          }
+        } catch (err) {
+          if (err instanceof RoleMutationRefusedError) {
+            res.status(err.status).json(err.toJSON());
+            return;
+          }
+          throw err;
         }
       }
 
@@ -3011,47 +3063,83 @@ export function createProtectedAuthRouter(
           res.status(401).json({ error: "Authentication required" });
           return;
         }
-        await ncSetUserEnabled(token, req.params.username, false);
-        // WARP-116: a disabled user must lose access effectively immediately,
-        // not at their next ≤15-min access-token expiry. Resolve the local
-        // row (the session index is keyed by User.id == JWT.sub) and denylist
-        // every live refresh token so the next /auth/refresh fails. Best-effort
-        // — a missing local row (legacy NC-only account) just means there were
-        // no JWT sessions to revoke.
-        let targetUserId: string | null = null;
-        let revoked = 0;
-        if (prisma) {
-          const row = await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
+
+        // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
+        // the auth source of truth and the guard rails key off it.
+        const row = prisma
+          ? await prisma.user.findUnique({
+              where: { nextcloudUsername: req.params.username },
+              select: { id: true, role: true, directoryStatus: true },
+            })
+          : null;
+
+        if (row && prisma) {
+          // Rails 2 + 1 pre-tx (self-disable and disabling the owner are
+          // refused), then rail 5 + the LOCAL write inside one SERIALIZABLE
+          // $transaction (SERIALIZABLE_TX — passed explicitly, because
+          // Postgres/Prisma default to READ COMMITTED, under which two
+          // concurrent disables of the last two operators both count "one
+          // other operator remains" and both commit): disabling the final
+          // non-disabled owner-or-admin is refused, and a permitted
+          // disable parks the row on
+          // directoryStatus=DEACTIVATED. That local write is load-bearing —
+          // /auth/login, SSO, WebAuthn and the auth middleware all fail
+          // closed on DEACTIVATED, whereas the NC flag alone never gated
+          // directory logins (the pre-WARP-1526 gap: a "disabled" member
+          // could still sign in). It is also what makes the rail-5 operator
+          // count honest.
+          assertDisableAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: row,
           });
-          // WARP-247 — kill session RECORDS (access tokens die at the next
-          // middleware check) as well as the refresh denylist (swept
-          // internally by revokeAllSessions).
-          if (row) {
-            targetUserId = row.id;
-            revoked = await revokeAllSessions(row.id);
+          await prisma.$transaction(async (tx) => {
+            await assertDisableInvariantsTx(tx, { target: row });
+            await tx.user.update({
+              where: { id: row.id },
+              data: { directoryStatus: "DEACTIVATED" },
+            });
+          }, SERIALIZABLE_TX);
+
+          // The Nextcloud flag is the downstream mirror — best-effort and
+          // non-blocking (same posture as the droplet-admins cascade): an
+          // NC outage must not fail a disable whose authoritative local
+          // write already committed. Logged at error for operator
+          // follow-up; re-running disable is idempotent.
+          try {
+            await ncSetUserEnabled(token, req.params.username, false);
+          } catch (err) {
+            logger.error(
+              { err, username: req.params.username },
+              "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
+            );
           }
-        }
-        // WARP-1062 (audit item B): account disablement is a mandatory-emit
-        // privileged action — it revokes sessions too, yet was the one
-        // unaudited sibling of enable/revoke-sessions. Same row shape as the
-        // revoke-sessions emit below (WARP-237).
-        await recordActivity({
-          kind: "auth",
-          severity: "warn",
-          sourceIcon: "shield-off",
-          what: "User disabled",
-          sub: req.params.username,
-          refs: {
+
+          // Rail 6 (consolidated): WARP-116/247 session-record revocation +
+          // the WARP-1062 mandatory-emit audit row.
+          await runDisablePostEffects({
+            targetUserId: row.id,
             username: req.params.username,
-            targetUserId,
-            sessionsRevoked: revoked,
-          },
+            actor: actorFromRequest(req),
+          });
+          res.json({ status: "disabled", username: req.params.username });
+          return;
+        }
+
+        // Legacy NC-only account (no local row): pre-WARP-1526 semantics —
+        // the NC call IS the disable (fatal on failure), nothing to revoke,
+        // audit row keeps the null targetUserId shape.
+        await ncSetUserEnabled(token, req.params.username, false);
+        await runDisablePostEffects({
+          targetUserId: null,
+          username: req.params.username,
           actor: actorFromRequest(req),
         });
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
           return;
@@ -3071,6 +3159,24 @@ export function createProtectedAuthRouter(
         if (!token) {
           res.status(401).json({ error: "Authentication required" });
           return;
+        }
+        // WARP-1526: dashboard-disable parks the LOCAL row on
+        // directoryStatus=DEACTIVATED (see the disable handler) — re-enable
+        // must flip it back or the account stays locally locked out
+        // forever. Local truth first, then the NC mirror (fatal on failure,
+        // as before — a retry converges both sides). No guard rails here:
+        // enabling restores access, it can never strand the box.
+        if (prisma) {
+          const row = await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          });
+          if (row) {
+            await prisma.user.update({
+              where: { id: row.id },
+              data: { directoryStatus: "ACTIVE" },
+            });
+          }
         }
         await ncSetUserEnabled(token, req.params.username, true);
         res.json({ status: "enabled", username: req.params.username });
@@ -3154,6 +3260,37 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-1526 rails. This surface predated every people-surface
+      // invariant — an admin could delete the owner's account here. Resolve
+      // the local row and run rails 2 + 1 pre-tx (self-delete, owner
+      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
+      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
+      // COMMITTED) for a consistent count snapshot (the actual NC delete
+      // runs after commit — the same post-commit-mirror posture as every
+      // other NC effect).
+      // NOTE (out of WARP-1526 scope, pre-existing): this route still does
+      // NOT delete the local User row — it removes the Nextcloud account +
+      // brain data only. That also bounds what the isolation level can buy
+      // here: with no write in the transaction, two concurrent removals do
+      // not conflict under SSI either. The level is passed for consistency
+      // with every other guarded site; fully closing this race needs the
+      // missing local write, which is that pre-existing gap.
+      const row = prisma
+        ? await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true, username: true, role: true },
+          })
+        : null;
+      if (row && prisma) {
+        assertRemovalAllowed({
+          actor: { id: req.user?.id, role: req.user?.role },
+          target: row,
+        });
+        await prisma.$transaction(async (tx) => {
+          await assertRemovalInvariantsTx(tx, { target: row });
+        }, SERIALIZABLE_TX);
+      }
+
       await ncDeleteUser(token, req.params.username);
 
       if (prisma) {
@@ -3185,8 +3322,26 @@ export function createProtectedAuthRouter(
         );
       }
 
+      // Rail 6 (consolidated, WARP-490 parity): this surface previously
+      // revoked NOTHING and audited NOTHING on delete — the removed user's
+      // sessions rode out their TTL. Hard-revoke + denylist + the
+      // mandatory-emit "User removed" row now land here exactly as on
+      // DELETE /api/people/:id (legacy NC-only rows keep a null
+      // targetUserId and skip the revocation they never had).
+      await runRemovalPostEffects({
+        targetUserId: row?.id ?? null,
+        targetUsername: row?.username ?? req.params.username,
+        targetRole: row?.role ?? null,
+        actorUsername: req.user?.username ?? null,
+        actor: actorFromRequest(req),
+      });
+
       res.json({ status: "deleted", username: req.params.username });
     } catch (err) {
+      if (err instanceof RoleMutationRefusedError) {
+        res.status(err.status).json(err.toJSON());
+        return;
+      }
       next(err);
     }
   });
@@ -3228,22 +3383,35 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      // Privilege-escalation guard. `requireRole("owner","admin")` proved the
-      // caller may issue invites, but NOT which role they may assign. Without
-      // this cap an `admin` could mint an `owner` invite — the accept path
-      // grants the invite's canonical role as the session role (WARP-1051)
-      // and an owner/admin invite still lands the Nextcloud `admin` group
-      // (see POST /auth/invites/accept/:token above) — a straight privilege
-      // escalation. Reject any assigned role that outranks the inviter's
-      // own; owner→owner is allowed, admin→owner is not. Fail closed if the
-      // role claim is somehow absent.
+      // Rails 3 + 7 (WARP-1526, guard service). The rank cap: requireRole
+      // proved the caller may issue invites, but NOT which role they may
+      // assign — without it an admin could mint an owner invite (the accept
+      // path grants the invite's canonical role as the session role,
+      // WARP-1051, plus the Nextcloud admin group); fail closed on a
+      // missing claim. Then the assignable narrowing: invites only ever
+      // assign {admin, family, guest} (design brief §6.2 "never Owner or
+      // Service"; exactly one owner by design — even the owner cannot mint
+      // a second owner invite, which consciously supersedes the earlier
+      // owner→owner-allowed pin).
+      //
+      // `inviterRole` is still read out here because the WARP-1533
+      // access-role validation below applies the SAME rank cap to the custom
+      // role's startingPoint — the guard rails cover the tier, the shared
+      // invite-access-role service covers the custom role.
       const inviterRole = req.user?.role;
-      if (!inviterRole || roleOutranks(parsed.data.role, inviterRole)) {
-        res.status(403).json({
-          error: "You cannot invite someone to a role higher than your own",
-          code: "ROLE_RANK_EXCEEDED",
+      try {
+        assertAssignableForCreate({
+          actorRole: req.user?.role,
+          requestedRole: parsed.data.role,
+          rankMessage:
+            "You cannot invite someone to a role higher than your own",
         });
-        return;
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       // WARP-1533 (RBAC v2 T9): validate the optional custom access role
