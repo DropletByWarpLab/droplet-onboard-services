@@ -11,6 +11,7 @@ import { vi } from "vitest";
 // all hash the email before touching prisma). Install a deterministic key via
 // the module's own test seam — NOT process.env, which would silently satisfy
 // encryption.test.ts's "no key configured" path through config.ts.
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.js";
 __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
 
@@ -209,6 +210,22 @@ vi.mock("@prisma/client", () => {
       findMany: vi.fn().mockResolvedValue([]),
     },
   };
+
+  // WARP-1583: the T3 resolver composes its whole read set inside ONE
+  // RepeatableRead transaction, so a stub without `$transaction` throws where
+  // it used to read — and the failure lands in the feature gate, which fails
+  // closed. Same lesson, same place, as the WARP-1528 note above: every gated
+  // route in a suite disappears because of a model the mock never grew.
+  //
+  // The SHARED seam (WARP-1570), not `(fn) => fn(self)`: the hand-rolled shape
+  // discards the options argument, so a regression that dropped the isolation
+  // level would stay green in every suite that builds the real app. Here it
+  // also gives rollback for free, which is what a route test asserting "the
+  // guard refused, so nothing was written" actually needs.
+  (mockPrisma as { $transaction?: unknown }).$transaction = createTransactionSeam({
+    client: () => mockPrisma,
+  }).$transaction;
+
   return {
     PrismaClient: vi.fn(() => mockPrisma),
     // Mirrors the generated client's top-level enum exports (const objects
