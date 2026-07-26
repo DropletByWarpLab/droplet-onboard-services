@@ -50,20 +50,24 @@ import type {
 } from "@/lib/types";
 import {
   ACCESS_FEATURES,
+  CONNECTOR_LEVELS,
   TIER_RANK,
   TOOL_DOMAIN_GROUPS,
+  connectorAxisBlocked,
+  connectorFloorReason,
   connectorLevelsFor,
   dependencyBlockedReason,
   draftToRolePayload,
   refloorFeatures,
   slugifyRoleName,
   tierLabel,
+  tierPlural,
   featureDef,
   type RoleDraft,
 } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import { AccessToggle, GuardNote, LevelPills } from "./bits";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Lock } from "lucide-react";
 import "./access.css";
 
 const FEATURE_ICON: Record<string, typeof Home> = {
@@ -132,6 +136,7 @@ export function RoleBuilderSheet({
   onOpenDepartments,
 }: RoleBuilderSheetProps) {
   const headingId = useId();
+  const floorNoteId = `${headingId}-connector-floor`;
   const [draft, setDraft] = useState<RoleDraft>(base);
   const [refloorNotice, setRefloorNotice] = useState<string | null>(null);
   const [cloudConfirm, setCloudConfirm] = useState(false);
@@ -155,15 +160,23 @@ export function RoleBuilderSheet({
     // Review F3: the O-2 cap shrinks the connector options on a downgrade —
     // clamp the draft value too (the select would otherwise sit valueless)
     // and say so in the same §5.1 notice; connectors are never silent.
+    //
+    // WARP-1578 adds the harder downgrade: a GUEST-based role holds no
+    // connector grant at all, so the level is not capped but CLEARED. It gets
+    // the §12 re-floor sentence verbatim rather than the cap sentence — the
+    // grant is turned off, not narrowed, and the copy has to say which.
     const allowedLevels = new Set(connectorLevelsFor(tier));
+    const axisBlocked = connectorAxisBlocked(tier);
     const nextConnectors = { ...draft.connectors };
     let connectorNotice: string | null = null;
     for (const [provider, level] of Object.entries(nextConnectors)) {
       if (level === "none" || allowedLevels.has(level)) continue;
-      nextConnectors[provider] = "read";
+      const label = connectors.find((c) => c.provider === provider)?.label ?? provider;
+      nextConnectors[provider] = axisBlocked ? "none" : "read";
       if (!connectorNotice) {
-        const label = connectors.find((c) => c.provider === provider)?.label ?? provider;
-        connectorNotice = `Switching to ${tierLabel(tier)} caps ${label} at Read — Read & write is available on Admin-based roles.`;
+        connectorNotice = axisBlocked
+          ? `Switching to ${tierLabel(tier)} turns off ${label} — ${tierPlural(tier)} can't reach connectors.`
+          : `Switching to ${tierLabel(tier)} caps ${label} at Read — Read & write is available on Admin-based roles.`;
       }
     }
     const combined = [notice, connectorNotice].filter(Boolean).join(" ");
@@ -206,7 +219,19 @@ export function RoleBuilderSheet({
     setCloudConfirm(true);
   };
 
-  const connectorLevels = connectorLevelsFor(draft.startingPoint);
+  // WARP-1578 — §5.2 for the connectors axis: every level RENDERS, the ones
+  // this starting point can't hold render disabled with the reason. Hiding
+  // them taught an operator nothing about the ceiling and let a Guest-based
+  // role save a grant that can never take effect.
+  const connectorAllowed = new Set(connectorLevelsFor(draft.startingPoint));
+  const connectorsBlocked = connectorAxisBlocked(draft.startingPoint);
+  const connectorReason = connectorFloorReason(draft.startingPoint);
+  // A grant held over from before the floor existed. The value stays visible
+  // — hiding it would be the same dishonesty in reverse — and the sheet says
+  // what Save will do to it, up front, rather than dropping it quietly.
+  const blockedGrantHeldOver =
+    connectorsBlocked &&
+    connectors.some((c) => (draft.connectors[c.provider] ?? "none") !== "none");
 
   return (
     <Dialog
@@ -607,15 +632,25 @@ export function RoleBuilderSheet({
                         </span>
                         <select
                           aria-label={`${connector.label} access`}
+                          // The reason travels WITH the control, not just
+                          // beside it — a floor is not decoration (§13).
+                          aria-describedby={connectorReason ? floorNoteId : undefined}
                           value={value}
+                          disabled={connectorsBlocked}
                           onChange={(e) =>
                             setConnector(connector.provider, e.target.value as ConnectorAccessLevel | "none")
                           }
-                          className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-                          style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontSize: 13 }}
+                          className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow disabled:cursor-not-allowed"
+                          style={{
+                            background: connectorsBlocked ? "var(--inset)" : "var(--surface)",
+                            border: `1px solid ${connectorsBlocked ? "var(--card-bd)" : "var(--border)"}`,
+                            borderRadius: "var(--radius-input)",
+                            color: connectorsBlocked ? "var(--text-muted)" : "var(--text)",
+                            fontSize: 13,
+                          }}
                         >
-                          {connectorLevels.map((lvl) => (
-                            <option key={lvl} value={lvl}>
+                          {CONNECTOR_LEVELS.map((lvl) => (
+                            <option key={lvl} value={lvl} disabled={!connectorAllowed.has(lvl)}>
                               {CONNECTOR_LEVEL_LABEL[lvl]}
                             </option>
                           ))}
@@ -623,10 +658,23 @@ export function RoleBuilderSheet({
                       </div>
                     );
                   })}
-                  <div className="acc-consequence">{ACCESS_COPY.connectorHint}</div>
-                  {draft.startingPoint !== "admin" && (
-                    <div className="acc-consequence">Read &amp; write is available on Admin-based roles.</div>
+                  {/* Floor reason — the same Lock + sentence recipe the
+                      feature-level pills use, so both floors read as one
+                      idea. Text-first and neutral: never the --role-* ramp.
+                      Placed control → reason → caption, matching LevelPills:
+                      the ceiling is stated before the copy explaining levels
+                      this role may not be able to pick. */}
+                  {connectorReason && (
+                    <div className="acc-floor-note" id={floorNoteId}>
+                      <Lock size={12} aria-hidden="true" />
+                      <span>
+                        {blockedGrantHeldOver
+                          ? `${connectorReason.replace(/\.$/, "")} — saving removes this.`
+                          : connectorReason}
+                      </span>
+                    </div>
                   )}
+                  <div className="acc-consequence">{ACCESS_COPY.connectorHint}</div>
                 </>
               ) : (
                 <div className="acc-consequence" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>

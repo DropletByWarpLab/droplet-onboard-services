@@ -30,6 +30,8 @@ import {
   storageInputToBytes,
   connectorLevelsFor,
   dependencyBlockedReason,
+  CONNECTOR_LEVELS,
+  connectorFloorReason,
   draftToRolePayload,
   roleToDraft,
   blankRoleDraft,
@@ -221,10 +223,27 @@ describe("slug + storage formatting (BigInt strings never lossy)", () => {
 });
 
 describe("connector levels (O-2 — Read & write only on Admin-based roles)", () => {
-  it("caps non-admin starting points at Read", () => {
+  it("caps Family-based starting points at Read", () => {
     expect(connectorLevelsFor("family")).toEqual(["none", "read"]);
-    expect(connectorLevelsFor("guest")).toEqual(["none", "read"]);
     expect(connectorLevelsFor("admin")).toEqual(["none", "read", "read_write"]);
+  });
+
+  // WARP-1578 — the Guest floor. O-2's read floor is family-and-UP and
+  // routes/erp.ts refuses a guest at the tier floor BEFORE the resolver is
+  // even read, so a connector grant on a Guest-based role can never take
+  // effect. Offering it lets an operator save a setting that silently does
+  // nothing. Mirrors the server's clampConnectorLevel().
+  it("offers Guest-based roles no connector level at all", () => {
+    expect(connectorLevelsFor("guest")).toEqual(["none"]);
+  });
+
+  it("names the floor honestly — shown disabled, never hidden (§5.2)", () => {
+    // Every level stays RENDERABLE; `connectorLevelsFor` says which are
+    // SELECTABLE, and the builder disables the rest with this reason.
+    expect(CONNECTOR_LEVELS).toEqual(["none", "read", "read_write"]);
+    expect(connectorFloorReason("guest")).toBe("Connectors are for staff and admins.");
+    expect(connectorFloorReason("family")).toBe("Read & write is for admins.");
+    expect(connectorFloorReason("admin")).toBeNull();
   });
 });
 
@@ -267,6 +286,16 @@ describe("draft → API payload (absent row = OFF; always-on rows never sent)", 
     draft.connectors.eaglesoft = "read_write";
     const payload = draftToRolePayload(draft);
     expect(payload.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  it("drops connector grants entirely on a Guest-based draft (WARP-1578)", () => {
+    // Not a client-side policy call: the server's normalizeGrants drops these
+    // unconditionally, so emitting them would make the builder show a value
+    // the very next GET contradicts. The sheet discloses the removal.
+    const draft = blankRoleDraft("guest");
+    draft.connectors.eaglesoft = "read";
+    draft.connectors["eaglesoft-api"] = "read_write";
+    expect(draftToRolePayload(draft).connectorGrants).toEqual([]);
   });
 
   it("string-encodes storage and leaves empty usage fields null", () => {
