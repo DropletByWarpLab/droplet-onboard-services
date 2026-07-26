@@ -25,20 +25,35 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: vi.fn(),
 }));
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { extractCitedFilePaths } from "../services/llm-agent.service.js";
+import { parseToolResultPayload } from "../services/tool-result-payload.js";
+import { mcpWirePayload, mcpWireText } from "./fixtures/mcp-wire.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { createFilesRouter } from "../routes/files.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 // ── 1. Extractor ──────────────────────────────────────────────────
+//
+// WARP-1604 — every case below feeds the PRODUCTION payload: a real
+// `ToolResult` run through mcp-server's serializer (`mcpWirePayload`), which
+// drops the `{ ok, data }` envelope and puts the handler's own object on the
+// wire. The previous version of this suite hand-built the envelope, so it
+// passed against an extractor that could only ever return `[]` in
+// production — the FileCitation table went unwritten for an entire release.
 describe("WARP-473 — extractCitedFilePaths", () => {
-  it("pulls data.path from single-file tool results (read_file shape)", () => {
-    const parsed = { ok: true, data: { path: "/Documents/foo.pdf", content: "…" } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/Documents/foo.pdf"]);
+  it("pulls the root `path` from single-file tool results (read_file shape)", () => {
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { path: "/Documents/foo.pdf", content: "…" },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Documents/foo.pdf"]);
   });
 
-  it("pulls every data.results[].path from search hits", () => {
-    const parsed = {
+  it("pulls every root `results[].path` from search hits (search_content shape)", () => {
+    const payload = mcpWirePayload({
       ok: true,
       data: {
         query: "invoices",
@@ -47,48 +62,149 @@ describe("WARP-473 — extractCitedFilePaths", () => {
           { path: "/Documents/inv-2.pdf", text: "…" },
         ],
       },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual([
+    });
+    expect(extractCitedFilePaths(payload)).toEqual([
       "/Documents/inv-1.pdf",
       "/Documents/inv-2.pdf",
     ]);
   });
 
-  it("handles data.files[].path (list_files shape)", () => {
-    const parsed = {
+  it("handles root `files[].path` (list_files / list_recent_files shape)", () => {
+    const payload = mcpWirePayload({
       ok: true,
       data: { files: [{ path: "/a.txt" }, { path: "/b.txt" }] },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/a.txt", "/b.txt"]);
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
+  });
+
+  it("handles root `items[].path` (older listing shape)", () => {
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { items: [{ path: "/a.txt" }, { path: "/b.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
   });
 
   it("de-dupes identical paths within one tool result", () => {
-    const parsed = {
+    const payload = mcpWirePayload({
       ok: true,
-      data: {
-        path: "/a.txt",
-        results: [{ path: "/a.txt" }, { path: "/b.txt" }],
-      },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/a.txt", "/b.txt"]);
+      data: { path: "/a.txt", results: [{ path: "/a.txt" }, { path: "/b.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
   });
 
   it("caps at 20 paths per result", () => {
     const results = Array.from({ length: 50 }, (_, i) => ({ path: `/f${i}.txt` }));
-    const parsed = { ok: true, data: { results } };
-    expect(extractCitedFilePaths(parsed)).toHaveLength(20);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: { results } }))).toHaveLength(
+      20,
+    );
   });
 
   it("returns empty for non-file results", () => {
-    expect(extractCitedFilePaths({ ok: true, data: { status: "ok" } })).toEqual([]);
-    expect(extractCitedFilePaths(null)).toEqual([]);
-    expect(extractCitedFilePaths({})).toEqual([]);
-    expect(extractCitedFilePaths({ ok: false, error: { code: "X" } })).toEqual([]);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: { status: "ok" } }))).toEqual(
+      [],
+    );
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: {} }))).toEqual([]);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: null }))).toEqual([]);
+  });
+
+  it("returns empty for the failure + confirmation branches of the wire contract", () => {
+    expect(
+      extractCitedFilePaths(
+        mcpWirePayload({
+          ok: false,
+          status: "error",
+          error: { code: "LIST_FAILED", message: "nextcloud returned 500" },
+        }),
+      ),
+    ).toEqual([]);
+    // confirmation_required is NOT an error to the agent loop, so it does
+    // reach the extractor — it must still yield nothing (nothing was read).
+    expect(
+      extractCitedFilePaths(
+        mcpWirePayload({
+          ok: false,
+          status: "confirmation_required",
+          error: { code: "CONFIRM", message: "approve first", details: { type: "delete_file" } },
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("ignores non-string path values", () => {
-    const parsed = { ok: true, data: { results: [{ path: 123 }, { path: "/real.txt" }] } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/real.txt"]);
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { results: [{ path: 123 }, { path: "/real.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/real.txt"]);
+  });
+
+  it("survives non-JSON wire text (the `{ raw }` degrade path)", () => {
+    expect(extractCitedFilePaths(parseToolResultPayload("not json at all"))).toEqual([]);
+  });
+
+  // THE regression. Before WARP-1604 the extractor walked `data.*`, which is
+  // only ever populated if someone puts the envelope itself on the wire —
+  // something mcp-server does not do. Assert the dead shape stays dead so a
+  // future "let me also support the envelope" patch has to argue with a test
+  // instead of silently reviving two competing contracts.
+  it("does NOT read the legacy `{ ok, data }` envelope (WARP-1604 regression)", () => {
+    const legacyEnvelopeOnTheWire = parseToolResultPayload(
+      JSON.stringify({ ok: true, data: { path: "/Documents/foo.pdf" } }),
+    );
+    expect(extractCitedFilePaths(legacyEnvelopeOnTheWire)).toEqual([]);
+  });
+});
+
+// ── 1b. Shape-drift guard ─────────────────────────────────────────
+//
+// `fixtures/mcp-wire.ts` models mcp-server's serializer. mcp-server lives in
+// another workspace and the orchestrator does not import it at runtime, so
+// nothing but this canary stops the two from drifting. If it reds, read
+// `toolResultToContent` and update BOTH the fixture and
+// `services/tool-result-payload.ts` — do not just relax the assertion.
+function locateMcpServerSource(): string {
+  // CJS-safe (this package builds to CommonJS — `import.meta` is a tsc
+  // error here). Same candidates idiom as network-tool-paths.contract.test.ts
+  // so it works from apps/orchestrator or the repo root.
+  const candidates = [
+    resolve(process.cwd(), "../../services/mcp-server/src/server.ts"),
+    resolve(process.cwd(), "services/mcp-server/src/server.ts"),
+  ];
+  for (const p of candidates) {
+    try {
+      readFileSync(p, "utf8");
+      return p;
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error(
+    `Could not locate services/mcp-server/src/server.ts from ${process.cwd()}`,
+  );
+}
+
+describe("WARP-1604 — mcp-server ↔ extractor payload contract", () => {
+  const source = readFileSync(locateMcpServerSource(), "utf8").replace(/\s+/g, "");
+
+  it("still UNWRAPS the envelope on success (JSON.stringify(result.data))", () => {
+    expect(source).toContain("JSON.stringify(result.data)");
+    // The envelope itself must not be what goes on the wire.
+    expect(source).not.toContain("JSON.stringify(result)");
+  });
+
+  it("still emits { status, error } — no ok, no data — on failure", () => {
+    expect(source).toContain("status:result.status");
+    expect(source).toContain("error:result.error");
+  });
+
+  it("fixture text matches the contract the extractor is written against", () => {
+    // Success: the handler payload, at the root. No `ok`, no `data`.
+    expect(mcpWireText({ ok: true, data: { path: "/x.txt" } })).toBe('{"path":"/x.txt"}');
+    // Failure: status + error, at the root.
+    expect(
+      mcpWireText({ ok: false, status: "error", error: { code: "E", message: "m" } }),
+    ).toBe('{"status":"error","error":{"code":"E","message":"m"}}');
   });
 });
 
