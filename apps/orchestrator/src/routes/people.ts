@@ -969,8 +969,13 @@ export function createPeopleRouter(
           accessRoleId = null;
         }
 
+        // WARP-1539 — projected at the query: this row feeds the guards and
+        // the post-effect runners, so the hash/blind-index must never
+        // materialize here even though the response body is only
+        // `{ syncState }`.
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
@@ -1096,8 +1101,10 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected at the query (see PATCH /:id/access above).
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
