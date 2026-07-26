@@ -63,3 +63,15 @@ packages/shared-types/src/anchor.ts text eol=lf
 # Linux-runtime hazard as the scripts above, and the session ini's save_path is
 # byte-sensitive, so pin them rather than rely on the host's autocrlf setting.
 docker/nextcloud/* text eol=lf
+
+# Vitest snapshots. The snapshot serializer builds its output in JS and
+# always emits `\n`; vitest then byte-compares that against the `.snap` on
+# disk. A Windows checkout (core.autocrlf=true) with no pin materializes
+# every committed snapshot as CRLF, so the comparison is CRLF-on-disk vs
+# LF-in-memory: the suite fails on snapshots nothing changed, and a `-u`
+# run rewrites the whole file — which the clean filter converts straight
+# back to LF on commit. Permanent phantom churn plus snapshot assertions
+# that don't mean anything on Windows. Same class of bug as the migration
+# SQL and anchor-codegen pins above; same fix (WARP-1567). Guarded by
+# apps/orchestrator/src/__tests__/snapshot-eol.test.ts.
+*.snap text eol=lf
