@@ -3426,13 +3426,11 @@ export function createProtectedAuthRouter(
       // COMMITTED) for a consistent count snapshot (the actual NC delete
       // runs after commit — the same post-commit-mirror posture as every
       // other NC effect).
-      // NOTE (out of WARP-1526 scope, pre-existing): this route still does
-      // NOT delete the local User row — it removes the Nextcloud account +
-      // brain data only. That also bounds what the isolation level can buy
-      // here: with no write in the transaction, two concurrent removals do
-      // not conflict under SSI either. The level is passed for consistency
-      // with every other guarded site; fully closing this race needs the
-      // missing local write, which is that pre-existing gap.
+      // WARP-1565 residual 1 — the removal is no longer half-done. The
+      // transaction below still only REVOKES (directoryStatus=DEACTIVATED),
+      // because that is the half that must be atomic with the rails; the
+      // local row is deleted at the end, once Nextcloud has confirmed the
+      // account is gone. See the delete below for why that order.
       const row = prisma
         ? await prisma.user.findUnique({
             where: { nextcloudUsername: req.params.username },
@@ -3453,13 +3451,13 @@ export function createProtectedAuthRouter(
         //   • /auth/login verifies the LOCAL passwordHash, so once the
         //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
         //     simply sign back in with full admin.
-        // Deleting the local row outright is WARP-1565's scope. What this
-        // route CAN do — atomically, inside the guarded transaction — is
-        // revoke local access via the same directoryStatus lever the
-        // disable path uses, which /auth/login, SSO, WebAuthn and the auth
-        // middleware all already fail closed on. Check and change now
-        // commit together, at SERIALIZABLE, with the write optimistically
-        // pinned to the role the rails were evaluated against.
+        // What this transaction owns is the REVOCATION: the same
+        // directoryStatus lever the disable path uses, which /auth/login,
+        // SSO, WebAuthn and the auth middleware all already fail closed on.
+        // Check and change commit together, at SERIALIZABLE, with the write
+        // optimistically pinned to the role the rails were evaluated
+        // against. The row's DELETION (WARP-1565) is deliberately not in
+        // here — see below.
         await prisma.$transaction(async (tx) => {
           const fresh = await readGuardTargetTx(tx, row.id);
           if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
@@ -3502,6 +3500,43 @@ export function createProtectedAuthRouter(
         );
       }
 
+      // WARP-1565 residual 1 — finish the removal.
+      //
+      // WARP-1526 bounded the exposure of the surviving row (DEACTIVATED,
+      // and every login gate fails closed on it), but a route called DELETE
+      // whose Nextcloud account is genuinely gone left the local row behind.
+      // The consequence an operator actually hits is not the roster entry:
+      // `username`, `email` and `nextcloudUsername` are UNIQUE columns, so
+      // the orphan keeps holding an identity that is supposed to be free —
+      // and re-inviting the same person (the obvious next action after a
+      // mistaken removal, or when someone returns) collides on it.
+      //
+      // ORDER IS THE CONTRACT: after ncDeleteUser, never before. A row
+      // deleted first, followed by a failing NC call, would strand an
+      // account with working WebDAV — Nextcloud is proxied without
+      // orchestrator auth in front — and nothing local to reconcile it
+      // from. This way a failed NC delete leaves a fully-revoked row to
+      // retry against, which is exactly the pre-WARP-1565 state rather than
+      // a new hole.
+      //
+      // `deleteMany` pinned to DEACTIVATED, not `delete` by id: it is
+      // idempotent on a retry, and it refuses to remove a row that someone
+      // re-activated in the window since the transaction above — that row
+      // is live again and deleting it would be a silent second decision.
+      // No rails re-run here: a DEACTIVATED row holds no operator capacity
+      // (rail 5 already excludes it), so removing it cannot strand the box.
+      if (prisma && row) {
+        const removed = await prisma.user.deleteMany({
+          where: { id: row.id, directoryStatus: "DEACTIVATED" },
+        });
+        if (removed.count === 0) {
+          logger.warn(
+            { username: req.params.username, userId: row.id },
+            "local row not deleted after Nextcloud removal — re-activated concurrently; left for operator review",
+          );
+        }
+      }
+
       // Rail 6 (consolidated, WARP-490 parity): this surface previously
       // revoked NOTHING and audited NOTHING on delete — the removed user's
       // sessions rode out their TTL. Hard-revoke + denylist + the
@@ -3514,11 +3549,12 @@ export function createProtectedAuthRouter(
         targetRole: row?.role ?? null,
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
-        // pr-reviewer #1229 B3: name what actually happened. The Nextcloud
-        // account is gone and local access is revoked, but the local row
-        // survives (WARP-1565) — "User removed" would be a false statement
-        // in an append-only, signature-chained audit log.
-        what: "User removed from Nextcloud; local access revoked",
+        // WARP-1565: the qualified headline existed only while the removal
+        // was half-done (pr-reviewer #1229 B3 — "User removed" would have
+        // been a false statement in an append-only, signature-chained audit
+        // log). The Nextcloud account is gone AND the local row is deleted,
+        // so the shipped default is true again and this surface reads
+        // identically to DELETE /api/people/:id.
       });
 
       res.json({ status: "deleted", username: req.params.username });

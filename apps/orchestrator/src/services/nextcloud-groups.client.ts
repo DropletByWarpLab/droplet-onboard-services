@@ -208,12 +208,27 @@ export interface GroupMember {
   displayName: string;
 }
 
+/** Parse the members out of a successful OCS group response. */
+function membersFromOcs(data: unknown): GroupMember[] | null {
+  const users = (data as { ocs?: { data?: { users?: unknown } } })?.ocs?.data?.users;
+  if (!Array.isArray(users)) return null;
+  return users.map((id: string) => ({
+    id,
+    displayName: id, // OCS v2 list endpoint doesn't include displayName; only id
+  }));
+}
+
 /**
  * List members of an OCS group.
  * OCS v2 `GET /cloud/groups/{gid}`.
  *
  * Returns an array of group members with id and displayName. Empty array if the group
  * doesn't exist (rather than throwing, to match Nextcloud's behavior on 404).
+ *
+ * LENIENT — every failure collapses to `[]`, so a caller cannot tell "no
+ * members" from "could not find out". That is fine for a display read and
+ * WRONG for a convergence sweep; see `ncListGroupMembersStrict` below
+ * (WARP-1565).
  */
 export async function ncListGroupMembers(
   adminToken: string,
@@ -233,16 +248,69 @@ export async function ncListGroupMembers(
     }
 
     const data = await resp.json();
-    const members = data?.ocs?.data?.users || [];
-
-    return members.map((id: string) => ({
-      id,
-      displayName: id, // OCS v2 list endpoint doesn't include displayName; only id
-    }));
+    return membersFromOcs(data) ?? [];
   } catch (err) {
     logger.warn({ err, groupId }, "Failed to list group members");
     return [];
   }
+}
+
+/**
+ * STRICT membership listing — the variant convergence sweeps must use
+ * (WARP-1565 residual 3).
+ *
+ * A sweep compares an EXPECTED set against the ACTUAL one and corrects the
+ * difference. Handed a lenient `[]`, it cannot tell an empty group from a
+ * Nextcloud that is refusing to answer — so in a list-broken /
+ * writes-working outage (an OCS 500, a proxy hiccup, a wedged PHP session
+ * store) the admin-group sweep reads "nobody is in droplet-admins", decides
+ * every operator is missing, and re-adds all of them on every tick. The
+ * writes are idempotent so nothing breaks, but the Activity log fills with
+ * fictional drift and the reconciler burns a full pass each time. The
+ * removal direction fails the safe way for the same reason — an empty
+ * "actual" removes nobody — which is precisely why the bug is quiet.
+ *
+ * ONE distinction, and it is the whole design:
+ *
+ *   404      → `[]`. A group that does not exist genuinely has no members;
+ *              the reconciler's group-creation pass owns fixing that, and a
+ *              sweep that skipped the tick here would never converge a box
+ *              whose group is simply missing.
+ *   anything → THROW. A non-404 error status, a transport failure, or a 200
+ *   else       whose payload has no `users` array are all the same answer:
+ *              UNKNOWN. Acting on it means acting on a fiction.
+ *
+ * Deliberately a SIBLING rather than a change to `ncListGroupMembers`. The
+ * lenient contract is depended on by callers whose worst case is an empty
+ * render; re-pointing a shared client's error posture to satisfy two sweeps
+ * is a blast radius nobody needs. Two names put the choice at the call site,
+ * where the consequence actually lives.
+ */
+export async function ncListGroupMembersStrict(
+  adminToken: string,
+  groupId: string
+): Promise<GroupMember[]> {
+  const url = ocsUrl(`/ocs/v2.php/cloud/groups/${encodeURIComponent(groupId)}`);
+  const resp = await fetch(url, { headers: ocsHeaders(adminToken) });
+
+  if (resp.status === 404) return [];
+  if (!resp.ok) {
+    throw new NextcloudOcsError(
+      `OCS list group members '${groupId}': HTTP ${resp.status}`,
+      resp.status
+    );
+  }
+
+  const members = membersFromOcs(await resp.json().catch(() => null));
+  if (members === null) {
+    // A malformed success is NOT an empty group. Returning `[]` here would
+    // hand a sweep an authoritative-looking answer it never received.
+    throw new NextcloudOcsError(
+      `OCS list group members '${groupId}': response carried no users array`,
+      resp.status
+    );
+  }
+  return members;
 }
 
 // ── Groupfolders REST API ──

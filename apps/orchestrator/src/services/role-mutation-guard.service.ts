@@ -716,6 +716,14 @@ export async function runRoleChangePostEffects(args: {
  * `targetUserId: null` is the legacy NC-only path (no local row): nothing
  * to revoke or denylist, but the mandatory-emit audit row still lands —
  * previously DELETE /auth/users/:username emitted nothing at all.
+ *
+ * WARP-1565 removed the `what` headline override. It existed for exactly one
+ * caller: DELETE /api/auth/users/:username, which deleted the Nextcloud
+ * account but left the local row, so "User removed" would have been a false
+ * statement in an append-only, signature-chained audit log (pr-reviewer
+ * #1229 B3). That route now deletes the row, so both removal surfaces
+ * describe the same event — and an override with no caller is a seam for the
+ * two audit vocabularies to diverge through again.
  */
 export async function runRemovalPostEffects(args: {
   targetUserId: string | null;
@@ -723,15 +731,6 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
-  /**
-   * Audit headline override (pr-reviewer #1229 B3). Defaults to the
-   * shipped "User removed" used by DELETE /api/people/:id, which really
-   * does delete the row. DELETE /api/auth/users/:username removes the
-   * Nextcloud account and revokes local access WITHOUT deleting the local
-   * row (WARP-1565 owns that), so it passes its own honest wording rather
-   * than claiming a removal that did not happen.
-   */
-  what?: string;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
@@ -741,7 +740,7 @@ export async function runRemovalPostEffects(args: {
     kind: "auth",
     severity: "warn",
     sourceIcon: "user-x",
-    what: args.what ?? "User removed",
+    what: "User removed",
     sub: args.targetUsername,
     refs: {
       actor: args.actorUsername,
