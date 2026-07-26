@@ -238,6 +238,10 @@ function createPrismaMock(roles: Array<Record<string, unknown>> = [FAMILY_ROLE, 
       return { count };
     }),
   };
+  self.userInvite.findMany = vi.fn(async () =>
+    // Most-recent-first, matching the route's `orderBy: { createdAt: "desc" }`.
+    [...invites].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()),
+  );
   self.accessRole = {
     findUnique: vi.fn(async ({ where }: any) => roles.find((r) => r.id === where?.id) ?? null),
   };
@@ -561,5 +565,127 @@ describe("accept path — accessRoleId assignment in the mint (WARP-1051 pattern
         (c: any[]) => c[0]?.what === "Invite accepted without access role",
       ),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * WARP-1566 — the two READ surfaces T9 left behind.
+ *
+ * T9 (WARP-1533) taught the invite to CARRY an accessRoleId and the accept
+ * path to ASSIGN it, but neither read surface exposes it. The operator
+ * consequence is concrete: the "Pending invites" list can show that someone
+ * was invited, and at which built-in tier, but not which custom role they
+ * will actually land in — so the one screen that exists to review pending
+ * grants cannot review the T9 grant at all.
+ *
+ * Both surfaces return an EXPLICIT `null` for a plain-tier invite rather
+ * than omitting the key. Omission is indistinguishable on the wire from "an
+ * orchestrator too old to send it", and the dashboard has to tell those
+ * apart to decide between rendering a tier label and rendering nothing (the
+ * same three-state discipline the T8 roster extension uses for `role`).
+ */
+describe("WARP-1566 — accessRoleId on the invite READ surfaces", () => {
+  describe("GET /api/auth/invites (admin list)", () => {
+    it("carries accessRoleId for a role-bearing invite", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      await issueInvite(app, {
+        email: "reception@warp.test",
+        role: "family",
+        accessRoleId: FAMILY_ROLE.id,
+      });
+
+      const res = await request(app).get("/api/auth/invites");
+      expect(res.status).toBe(200);
+      expect(res.body.invites).toHaveLength(1);
+      expect(res.body.invites[0].accessRoleId).toBe(FAMILY_ROLE.id);
+    });
+
+    it("carries an EXPLICIT null for a plain-tier invite — the key is never omitted", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      await issueInvite(app, { email: "plain@warp.test", role: "guest" });
+
+      const res = await request(app).get("/api/auth/invites");
+      expect(res.status).toBe(200);
+      const [row] = res.body.invites;
+      expect(row).toHaveProperty("accessRoleId");
+      expect(row.accessRoleId).toBeNull();
+    });
+
+    it("still refuses a non-admin caller — the new field widens no guard", async () => {
+      const prisma = createPrismaMock();
+      await issueInvite(buildApp(prisma), {
+        email: "reception@warp.test",
+        role: "family",
+        accessRoleId: FAMILY_ROLE.id,
+      });
+
+      const res = await request(
+        buildApp(prisma, {
+          id: "u-fam",
+          username: "family-user",
+          displayName: "Fam",
+          role: "family",
+        }),
+      ).get("/api/auth/invites");
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("GET /api/auth/invites/accept/:token (public accept metadata)", () => {
+    it("carries accessRoleId for a role-bearing invite", async () => {
+      const prisma = createPrismaMock();
+      const token = await issueInvite(buildApp(prisma), {
+        email: "opslead@warp.test",
+        role: "admin",
+        accessRoleId: ADMIN_ROLE.id,
+      });
+
+      const res = await request(buildApp(prisma, null)).get(
+        `/api/auth/invites/accept/${token}`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.accessRoleId).toBe(ADMIN_ROLE.id);
+    });
+
+    it("carries an EXPLICIT null for a plain-tier invite", async () => {
+      const prisma = createPrismaMock();
+      const token = await issueInvite(buildApp(prisma), {
+        email: "plain@warp.test",
+        role: "guest",
+      });
+
+      const res = await request(buildApp(prisma, null)).get(
+        `/api/auth/invites/accept/${token}`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("accessRoleId");
+      expect(res.body.accessRoleId).toBeNull();
+    });
+
+    it("leaks NOTHING else — the projection stays an explicit allowlist", async () => {
+      // The row carries `token`, `createdBy`, `email` and the send-state
+      // columns. This endpoint is PUBLIC (the URL token is the only
+      // credential), so its projection is an allowlist, not a row spread —
+      // adding accessRoleId must not turn it into one.
+      const prisma = createPrismaMock();
+      const token = await issueInvite(buildApp(prisma), {
+        email: "opslead@warp.test",
+        role: "admin",
+        accessRoleId: ADMIN_ROLE.id,
+      });
+
+      const res = await request(buildApp(prisma, null)).get(
+        `/api/auth/invites/accept/${token}`,
+      );
+      expect(Object.keys(res.body).sort()).toEqual([
+        "accessRoleId",
+        "displayName",
+        "expiresAt",
+        "role",
+        "username",
+      ]);
+    });
   });
 });

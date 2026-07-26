@@ -396,3 +396,94 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
     expect(select.value).toBe(`role:${FINANCE.id}`);
   }, 15000);
 });
+
+/**
+ * WARP-1566 — the pending-invites row must name the role the invitee will
+ * actually land in.
+ *
+ * The invite modal has been able to GRANT a custom role since T9. The list
+ * below it was still rendering
+ *
+ *     {i.role === "admin" ? "admin" : "user"}
+ *
+ * — a ternary written against the legacy `InviteRole = "user" | "admin"`
+ * type, which was never what the server sent: `UserInvite.role` is the
+ * Prisma `Role` enum. So every non-admin invite read "user" regardless of
+ * whether it was Staff, Guest, or a custom Finance role, and the one screen
+ * that exists to review pending grants could not review them.
+ *
+ * The row now resolves the same way the roster does (`roleLabelFor`):
+ * custom-role name when one is assigned and the catalog has it, else the
+ * built-in tier label.
+ */
+describe("Users page — pending-invite role label (WARP-1566)", () => {
+  function pendingInvite(over: Record<string, unknown> = {}) {
+    return {
+      token: "z".repeat(43),
+      username: "diana",
+      displayName: "Diana",
+      email: null,
+      role: "family",
+      accessRoleId: null,
+      createdBy: "admin",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+      acceptedAt: null,
+      revokedAt: null,
+      ...over,
+    };
+  }
+
+  /** The pending-invite row's secondary line ("<username> · <role> · invited by …"). */
+  async function inviteSubline(): Promise<string> {
+    render(<UsersPage />);
+    const name = await screen.findByText("Diana");
+    const sub = name.parentElement?.querySelector(".sub");
+    expect(sub).not.toBeNull();
+    return sub!.textContent ?? "";
+  }
+
+  it("names the custom role when the invite carries one", async () => {
+    listInvitesMock.mockResolvedValue({
+      invites: [pendingInvite({ role: "family", accessRoleId: FINANCE.id })],
+    });
+
+    const text = await inviteSubline();
+    expect(text).toContain("Finance");
+    expect(text).not.toMatch(/\buser\b/);
+  });
+
+  it("shows the built-in tier label for a plain-tier invite — never the legacy 'user'", async () => {
+    listInvitesMock.mockResolvedValue({
+      invites: [pendingInvite({ role: "family", accessRoleId: null })],
+    });
+
+    const text = await inviteSubline();
+    // `family` displays as "Staff" (§0.1) — the same relabel the roster uses.
+    expect(text).toContain("Staff");
+    expect(text).not.toMatch(/\buser\b/);
+  });
+
+  it("distinguishes guest from staff — the legacy ternary collapsed both to 'user'", async () => {
+    listInvitesMock.mockResolvedValue({
+      invites: [pendingInvite({ role: "guest", accessRoleId: null })],
+    });
+
+    const text = await inviteSubline();
+    expect(text).toContain("Guest");
+    expect(text).not.toContain("Staff");
+  });
+
+  it("falls back to the tier label when the role catalog does not have the id", async () => {
+    // Degraded, not fabricated: the roles read can fail (the page already
+    // tracks that separately) or the role can have been deleted. Rendering
+    // a raw UUID at the operator would be worse than the honest tier.
+    listInvitesMock.mockResolvedValue({
+      invites: [pendingInvite({ role: "admin", accessRoleId: "ar-vanished" })],
+    });
+
+    const text = await inviteSubline();
+    expect(text).toContain("Admin");
+    expect(text).not.toContain("ar-vanished");
+  });
+});

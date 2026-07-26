@@ -56,6 +56,7 @@ import type {
   AccessRole,
   AccessExceptionInput,
   AccessStartingPoint,
+  AccessTier,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
@@ -413,11 +414,25 @@ export default function UsersPage() {
       .catch(() => setConnectors([]));
   }, [isAdmin, reloadAccessRoles]);
 
-  /** Roster row → its display role label: the custom role's name when
+  /** Anything carrying an assigned tier + optional custom role: a roster
+   *  row, or (WARP-1566) a pending invite. */
+  type RoleBearing = { role?: AccessTier | null; accessRoleId?: string | null };
+
+  /** Role-bearing record → its display label: the custom role's name when
    *  assigned, else the built-in tier label (family displays as Staff —
-   *  §0.1). Null when the roster doesn't carry role data yet. */
+   *  §0.1). Null when the record carries no role data at all.
+   *
+   *  WARP-1566 widened this from RosterUser to any role-bearing shape so
+   *  the pending-invites row resolves through the SAME function as the
+   *  roster. A second copy is how the two drift — and the invite row's
+   *  previous private copy (`role === "admin" ? "admin" : "user"`) is
+   *  exactly what that drift looks like once it has shipped.
+   *
+   *  Falls back to the tier when `accessRoleId` is set but the catalog has
+   *  no such role — deleted, or the roles read failed. An unresolvable id
+   *  must never render as a raw UUID. */
   const roleLabelFor = useCallback(
-    (u: RosterUser): string | null => {
+    (u: RoleBearing): string | null => {
       if (u.accessRoleId) {
         const role = accessRoles.find((r) => r.id === u.accessRoleId);
         if (role) return role.name;
@@ -1246,6 +1261,11 @@ export default function UsersPage() {
               // Mirror the row's primary visible label (displayName falls
               // back to username) so the screen-reader announcement matches.
               const inviteLabel = i.displayName || i.username;
+              // WARP-1566: the role this person will actually land in —
+              // custom-role name when the invite carries one, else the
+              // built-in tier. Omitted entirely rather than faked when the
+              // orchestrator predates the field (`role` absent).
+              const inviteRoleLabel = roleLabelFor(i);
               return (
                 <div key={i.token} className="lrow">
                   <span className="ri brand">
@@ -1254,7 +1274,8 @@ export default function UsersPage() {
                   <span className="rt">
                     <span className="nm">{i.displayName || i.username}</span>
                     <span className="sub mono">
-                      {i.username} · {i.role === "admin" ? "admin" : "user"} · invited by{" "}
+                      {i.username}
+                      {inviteRoleLabel ? ` · ${inviteRoleLabel}` : ""} · invited by{" "}
                       {i.createdBy}
                     </span>
                   </span>
