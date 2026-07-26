@@ -499,6 +499,23 @@
   height: 1px;
   background: var(--card-bd);
 }
+/* WARP-1578 — the caution block's floor-blocked reason. Same idea as
+   .acc-lvl-reason (Lock + one muted sentence), at THIS block's type metrics
+   so the constraint and the explanations beside it read as one column.
+   Top-aligned, not centre: these sentences wrap in a 520px sheet and a
+   centred Lock would float against the middle of a two-line paragraph. */
+.acc-floor-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.acc-floor-note svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
 
 /* ── effective-access drawer (§6.3) ── */
 .acc-drawer {

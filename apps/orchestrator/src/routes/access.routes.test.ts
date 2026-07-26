@@ -621,6 +621,40 @@ describe("POST /api/access/roles (create)", () => {
     expect(stored.storageQuotaBytes).toBe(9_000_000_000n);
   });
 
+  // WARP-1578 — the Guest floor at create time. O-2's read floor is
+  // family-and-UP; erp.ts enforces the "and-up" half at the consumption site,
+  // so a connector grant on a Guest-based role is inert by construction. The
+  // builder disables the option with the reason (never hides it), and the
+  // server drops it — the client is never trusted, and the roles list must
+  // not advertise reach that does not exist.
+  it("drops connector grants on a Guest-based role at create (WARP-1578)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(
+        payload({
+          startingPoint: "guest",
+          connectorGrants: [
+            { provider: "eaglesoft", level: "read" },
+            { provider: "eaglesoft-api", level: "read_write" },
+          ],
+        }),
+      );
+    expect(res.status).toBe(200);
+    expect(res.body.role.connectorGrants).toEqual([]);
+    // …and nothing was persisted, so a later resolve cannot resurrect them.
+    expect(prisma._roles().get(res.body.role.id).connectorGrants).toEqual([]);
+  });
+
+  it("keeps them on a Family-based role — the floor is a floor, not a ban (WARP-1578)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "family" }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
   it("uniquifies a colliding slug with a numeric suffix", async () => {
     const prisma = createPrismaMock({
       roles: [{ id: "r1", name: "Reception", slug: "reception", startingPoint: "family" }],
@@ -840,6 +874,41 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(res.status).toBe(200);
     expect(res.body.role.startingPoint).toBe("family");
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  // WARP-1578 — the Guest floor. O-2's read floor is family-and-UP, and
+  // erp.ts enforces the "and-up" half at the consumption site, so a connector
+  // grant saved on a Guest-based role can NEVER take effect. Storing it lets
+  // an operator save something that silently does nothing, and makes the
+  // roles list claim a reach that does not exist. Dropped here, on every
+  // write path, exactly like the read_write cap above it.
+  it("drops connector grants on a Guest-based role — they can never take effect (WARP-1578)", async () => {
+    const prisma = createPrismaMock({ roles: [baseRole] });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({
+        startingPoint: "guest",
+        connectorGrants: [{ provider: "eaglesoft", level: "read" }],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.role.startingPoint).toBe("guest");
+    expect(res.body.role.connectorGrants).toEqual([]);
+  });
+
+  it("…and drops STORED ones when the starting point drops to Guest (WARP-1578)", async () => {
+    const prisma = createPrismaMock({
+      roles: [
+        {
+          ...baseRole,
+          connectorGrants: [{ provider: "eaglesoft", level: "read" }],
+        },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ startingPoint: "guest" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.connectorGrants).toEqual([]);
   });
 
   it("keeps read_write on an Admin-based role (the cap is a floor, not a ban)", async () => {

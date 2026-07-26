@@ -16,6 +16,7 @@
  *   cloud         = workspace.cloud_model_escape && role.cloudModelsAllowed
  *   connectors[p] = min(roleConnectorGrant(p),
  *                       connection.writeEnabled ? read_write : read)
+ *   connectorGrants[p] = roleConnectorGrant(p)      (raw — WARP-1579)
  *   usage         = UserUsagePolicy ?? roleDefaults ?? box default   (T7)
  *   deptRights    = read-only reference (ADR-029 owns them)
  *
@@ -144,6 +145,25 @@ export interface EffectiveAccessResult {
   locks: boolean;
   cloud: boolean;
   connectors: Record<string, ConnectorLevel>;
+  /**
+   * WARP-1579 — the RAW per-provider ROLE grant, reported beside `connectors`
+   * and NOT clamped by the connection.
+   *
+   * `connectors` folds `connection.writeEnabled` in via `min()`, which makes
+   * "this role is deliberately read-only" and "this CONNECTION has writes
+   * turned off" the same value. The ERP write gate has to tell those apart:
+   * the first is a 403 about the role, the second is today's 409
+   * `WRITE_NOT_ENABLED` about the connection, and each names a different
+   * remedy. Collapsing them would trade one wrong answer for another.
+   *
+   * `null` = **nothing narrows this axis** — a role-less person (every user
+   * before RBAC v2) or an owner (§3's one bypass). Deliberately distinct from
+   * `{}`, which is the sharply different "this role holds no connector grants
+   * at all" and is a denial, not a pass-through.
+   *
+   * Additive on the §5 wire shape; the dashboard ignores unknown extras.
+   */
+  connectorGrants: Record<string, ConnectorLevel> | null;
   usage: {
     storageQuotaBytes: string | null;
     maxUploadSizeMb: number | null;
@@ -226,6 +246,8 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
       // fail-closed 451 applies to owners too, so the resolver stays honest.
       cloud: inputs.cloudEscapeEnabled,
       connectors: Object.fromEntries(connLevels),
+      // §3: an owner is never narrowed, so no role grant applies to them.
+      connectorGrants: null,
       usage: usageWire,
       deptRights: inputs.deptRights,
       exceptions: inputs.exceptions,
@@ -336,15 +358,23 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
 
   // ── connectors[p] = min(grant, connection) ──
   const connectors: Record<string, ConnectorLevel> = {};
+  // WARP-1579: the same grants, unclamped. Built in the SAME branch as the
+  // min() so the two can never disagree about which rows exist.
+  let connectorGrants: Record<string, ConnectorLevel> | null = null;
   if (user.accessRole === null) {
     // Today's floor: the connector routes gate owner/admin (O-2 widens
     // family reads only THROUGH a role grant, which a role-less user
-    // cannot hold).
+    // cannot hold). No role ⇒ nothing narrows the axis ⇒ null, not {}.
     if (tier === "admin") {
       for (const [provider, level] of connLevels) connectors[provider] = level;
     }
   } else {
+    connectorGrants = {};
     for (const grant of user.accessRole.connectorGrants) {
+      // Reported whether or not a connection exists: the role's grant is a
+      // statement of INTENT, and a box with nothing connected yet has not
+      // thereby granted anything. (`connectors` still needs the connection.)
+      connectorGrants[grant.provider] = grant.level;
       const connLevel = connLevels.get(grant.provider);
       if (!connLevel) continue; // no connection = no reach
       connectors[grant.provider] = minConnectorLevel(grant.level, connLevel);
@@ -358,6 +388,7 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
     locks,
     cloud,
     connectors,
+    connectorGrants,
     usage: usageWire,
     deptRights: inputs.deptRights,
     exceptions: inputs.exceptions,

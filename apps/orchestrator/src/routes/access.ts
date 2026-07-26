@@ -19,7 +19,9 @@
  *   - feature-grant levels re-clamp to the §9 catalog ceiling of the
  *     role's startingPoint (access-catalog.service);
  *   - connector read_write grants clamp to read on non-admin starting
- *     points (O-2 floor honesty);
+ *     points, and Guest-based roles hold NO connector grant at all —
+ *     a guest sits below O-2's family-and-up read floor, so the row could
+ *     never take effect (O-2 floor honesty; WARP-1578);
  *   - mayOperateLocks is forced false without a smart_home feature grant;
  *   - startingPoint ∈ {admin, family, guest} via the T2 guard vocabulary —
  *     never owner/service;
@@ -64,6 +66,7 @@ import { kickReconcile } from "../services/department-reconciler.service.js";
 import {
   GATEABLE_MODULE_IDS,
   GRANTABLE_TOOL_DOMAINS,
+  clampConnectorLevel,
   clampLevel,
   type ConnectorLevel,
   type FeatureLevel,
@@ -167,13 +170,15 @@ function normalizeGrants(args: {
     moduleId: g.moduleId as ModuleId,
     level: clampLevel(args.startingPoint, g.moduleId, g.level),
   }));
-  const connectorGrants = args.connectorGrants.map((g) => ({
-    provider: g.provider,
-    level:
-      g.level === "read_write" && args.startingPoint !== "admin"
-        ? ("read" as ConnectorLevel)
-        : g.level,
-  }));
+  // O-2's connector floors, both of them, from the one authoritative helper:
+  // read_write only on Admin-based roles, and (WARP-1578) NO grant at all on
+  // Guest-based roles — a guest sits below O-2's family-and-up read floor, so
+  // the row could never take effect and storing it would let an operator save
+  // a setting that silently does nothing.
+  const connectorGrants = args.connectorGrants.flatMap((g) => {
+    const level = clampConnectorLevel(args.startingPoint, g.level);
+    return level === null ? [] : [{ provider: g.provider, level }];
+  });
   const smartHomeOn = featureGrants.some((g) => g.moduleId === "smart_home");
   return {
     featureGrants,

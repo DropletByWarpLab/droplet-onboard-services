@@ -601,6 +601,97 @@ describe("effective-access — connector min", () => {
   });
 });
 
+/**
+ * WARP-1579 — the RAW grant, reported BESIDE the min().
+ *
+ * `connectors` folds `connection.writeEnabled` into the level, which makes
+ * "the role is read-only" and "the connection has writes off" the same value.
+ * The ERP write gate has to tell those apart — one is a 403 about the role,
+ * the other today's 409 `WRITE_NOT_ENABLED` about the connection — so the
+ * resolver reports the role's own grant untouched as well.
+ *
+ * `null` means "no custom role narrows this axis": role-less people and owners
+ * (§3's one bypass). It is deliberately NOT `{}`, which is the sharply
+ * different "this role holds no connector grants at all".
+ */
+describe("effective-access — raw connector grants (WARP-1579)", () => {
+  const connsRw = [{ provider: "eaglesoft", writeEnabled: true }];
+  const connsRo = [{ provider: "eaglesoft", writeEnabled: false }];
+
+  it("reports the role's own level, unclamped by the connection, beside the min()", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({ eaglesoft: "read" }); // min() unchanged
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" }); // the raw fact
+  });
+
+  it("distinguishes a read-only ROLE from a write-disabled CONNECTION — both min() to 'read'", () => {
+    const readOnlyRole = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRw,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read" }] }),
+        },
+      }),
+    );
+    const readOnlyConnection = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(readOnlyRole.connectors).toEqual(readOnlyConnection.connectors);
+    expect(readOnlyRole.connectorGrants).toEqual({ eaglesoft: "read" });
+    expect(readOnlyConnection.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("reports a grant even when NO connection exists — the role's intent is not a connection fact", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({}); // no connection = no reach
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("{} for a role holding no connector grants — sharply different from null", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: role() } }),
+    );
+    expect(res.connectorGrants).toEqual({});
+  });
+
+  it("null for a role-LESS person and for an owner — nothing narrows this axis", () => {
+    const roleLess = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: null } }),
+    );
+    expect(roleLess.connectorGrants).toBeNull();
+    const owner = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "owner", accessRole: null } }),
+    );
+    expect(owner.connectorGrants).toBeNull();
+  });
+});
+
 describe("effective-access — usage passthrough (T7)", () => {
   it("person ?? role ?? default, field-by-field, BigInt string-encoded, sources carried", () => {
     const res = computeEffectiveAccess(

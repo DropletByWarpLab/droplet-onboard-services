@@ -643,14 +643,49 @@ export {
 } from "./storage-units";
 export type { StorageUnit };
 
-// ── Connectors (O-2 floor) ─────────────────────────────────────────────────
+// ── Connectors (O-2 floors) ────────────────────────────────────────────────
 
-/** Selectable connector levels for a starting point — Read & write is only
- *  offered on Admin-based roles (O-2); the server re-clamps regardless. */
+/** Every connector level, in ladder order. The builder RENDERS all of them —
+ *  §5.2's "shown, never hidden" — and disables the ones the starting point
+ *  cannot hold, exactly like the feature-level pills. */
+export const CONNECTOR_LEVELS: ReadonlyArray<ConnectorAccessLevel | "none"> = [
+  "none",
+  "read",
+  "read_write",
+];
+
+/**
+ * SELECTABLE connector levels for a starting point. Mirrors the server's
+ * `clampConnectorLevel` (access-catalog.ts), which re-clamps regardless.
+ *
+ *   • Admin  — both levels. O-2: Read & write is Admin-only.
+ *   • Family — caps at Read.
+ *   • Guest  — none at all (WARP-1578). O-2's read floor is family-and-UP and
+ *     routes/erp.ts refuses a guest at the tier floor before the resolver is
+ *     even consulted, so a grant here is inert by construction. Offering it
+ *     would let an operator save a setting that silently does nothing.
+ */
 export function connectorLevelsFor(
   sp: AccessStartingPoint,
 ): Array<ConnectorAccessLevel | "none"> {
-  return sp === "admin" ? ["none", "read", "read_write"] : ["none", "read"];
+  if (sp === "admin") return ["none", "read", "read_write"];
+  if (sp === "guest") return ["none"];
+  return ["none", "read"];
+}
+
+/** The honest disabled reason for whatever this starting point cannot hold on
+ *  the connectors axis — the §12 `{Thing} is for {tier}s.` pattern, the same
+ *  shape as `floorBlockedReason`. `null` when nothing is blocked. */
+export function connectorFloorReason(sp: AccessStartingPoint): string | null {
+  if (sp === "guest") return `Connectors are for ${tierPlural("family")} and admins.`;
+  if (sp === "admin") return null;
+  return "Read & write is for admins.";
+}
+
+/** True when this starting point holds NO connector grant at all — the axis,
+ *  not just a level, is floor-blocked. */
+export function connectorAxisBlocked(sp: AccessStartingPoint): boolean {
+  return connectorLevelsFor(sp).every((level) => level === "none");
 }
 
 // ── Draft ⇄ wire ───────────────────────────────────────────────────────────
@@ -693,15 +728,22 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
     toolGrants.push({ domain: row.domain, level: row.level });
   }
 
-  const connectorGrants = Object.entries(draft.connectors)
-    .filter(([, level]) => level !== "none")
-    .map(([provider, level]) => ({
-      provider,
-      level:
-        level === "read_write" && draft.startingPoint !== "admin"
-          ? ("read" as ConnectorAccessLevel)
-          : (level as ConnectorAccessLevel),
-    }));
+  // Connectors — the O-2 floors, mirroring the server's clampConnectorLevel.
+  // A Guest-based role emits NO grant (WARP-1578): the server drops these
+  // unconditionally, so emitting them would make the sheet show a value the
+  // very next GET contradicts. The sheet discloses the removal rather than
+  // performing it silently.
+  const connectorAllowed = new Set(connectorLevelsFor(draft.startingPoint));
+  const connectorGrants = connectorAxisBlocked(draft.startingPoint)
+    ? []
+    : Object.entries(draft.connectors)
+        .filter(([, level]) => level !== "none")
+        .map(([provider, level]) => ({
+          provider,
+          level: (connectorAllowed.has(level)
+            ? level
+            : "read") as ConnectorAccessLevel,
+        }));
 
   // Usage — same untouched-verbatim rule as the tool axis (review F2):
   // the GB/TB input is lossy, so its parsed value only becomes the payload
