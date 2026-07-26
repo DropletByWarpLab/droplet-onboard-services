@@ -20,22 +20,26 @@ import type { ShareDetail } from "@/lib/types";
 interface HookState {
   items: ShareDetail[];
   isLoading: boolean;
+  // WARP-1555 — the page dropped `error` on the floor; the tests below drive it.
+  error: unknown;
 }
-const withMeState: HookState = { items: [], isLoading: false };
-const byMeState: HookState = { items: [], isLoading: false };
+const withMeState: HookState = { items: [], isLoading: false, error: undefined };
+const byMeState: HookState = { items: [], isLoading: false, error: undefined };
+const withMeRefresh = vi.fn();
+const byMeRefresh = vi.fn();
 
 vi.mock("@/lib/hooks/useShares", () => ({
   useSharedWithMe: () => ({
     items: withMeState.items,
     isLoading: withMeState.isLoading,
-    error: undefined,
-    refresh: vi.fn(),
+    error: withMeState.error,
+    refresh: withMeRefresh,
   }),
   useSharedByMe: () => ({
     items: byMeState.items,
     isLoading: byMeState.isLoading,
-    error: undefined,
-    refresh: vi.fn(),
+    error: byMeState.error,
+    refresh: byMeRefresh,
   }),
 }));
 
@@ -118,10 +122,14 @@ function openByMeTab() {
 }
 
 beforeEach(() => {
+  withMeRefresh.mockClear();
+  byMeRefresh.mockClear();
   withMeState.items = INBOUND;
   withMeState.isLoading = false;
+  withMeState.error = undefined;
   byMeState.items = OUTBOUND;
   byMeState.isLoading = false;
+  byMeState.error = undefined;
 });
 
 describe("<SharedPage /> — Shared by me (WARP-941)", () => {
@@ -183,5 +191,74 @@ describe("<SharedPage /> — Shared by me (WARP-941)", () => {
     render(<SharedPage />);
 
     expect(screen.getByText(/nothing shared with you yet/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-1555 — the page destructured neither hook's `error`, so a failed
+ * shares fetch rendered "Nothing shared with you yet" / "You haven't shared
+ * anything yet". Both read as a fact about the user's data, not about ours.
+ */
+describe("<SharedPage /> — fetch failure ≠ nothing shared (WARP-1555)", () => {
+  it("renders an error state, never the empty state, on the with-me tab", () => {
+    withMeState.items = [];
+    withMeState.error = new Error("Failed to fetch shares: 500");
+    render(<SharedPage />);
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(
+      screen.getByText(/couldn't load what's been shared with you/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/nothing shared with you yet/i)).not.toBeInTheDocument();
+  });
+
+  it("renders an error state, never the empty state, on the by-me tab", () => {
+    byMeState.items = [];
+    byMeState.error = new Error("Failed to fetch shares: 500");
+    render(<SharedPage />);
+    openByMeTab();
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/couldn't load what you've shared/i)).toBeInTheDocument();
+    expect(screen.queryByText(/you haven't shared anything yet/i)).not.toBeInTheDocument();
+  });
+
+  it("says nothing was unshared, rather than a bare 'something went wrong'", () => {
+    withMeState.items = [];
+    withMeState.error = new Error("boom");
+    render(<SharedPage />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toMatch(/nothing has been unshared/i);
+    expect(alert.textContent).not.toMatch(/something went wrong/i);
+  });
+
+  it("offers a retry that re-runs the failing tab's fetch", () => {
+    byMeState.items = [];
+    byMeState.error = new Error("boom");
+    render(<SharedPage />);
+    openByMeTab();
+
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(byMeRefresh).toHaveBeenCalledTimes(1);
+    expect(withMeRefresh).not.toHaveBeenCalled();
+  });
+
+  it("scopes the failure to the tab that failed", () => {
+    // Inbound is fine, outbound is broken: the with-me tab must still list.
+    byMeState.items = [];
+    byMeState.error = new Error("boom");
+    render(<SharedPage />);
+
+    expect(screen.getByText("from-bob.pdf")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps showing rows when a background refresh fails", () => {
+    withMeState.error = new Error("poll failed");
+    render(<SharedPage />);
+
+    expect(screen.getByText("from-bob.pdf")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
