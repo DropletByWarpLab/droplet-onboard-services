@@ -23,9 +23,14 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
+  plannedToolNames,
   runToolSpec,
   type StepDispatcher,
 } from "../services/tool-spec-runner.service.js";
+import {
+  firstForbiddenToolName,
+  resolveToolAccessScope,
+} from "../services/tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -292,6 +297,20 @@ export function createToolsRouter(
           return;
         }
 
+        // WARP-1580 — attribution at promotion. The WARP-464 pattern miner
+        // writes `suggested` specs with NO ownerId (no human authored them),
+        // so a promoted suggestion would carry no principal for a scheduled
+        // fire to run as, and the ticker's fail-closed gate would refuse it
+        // forever. The operator who publishes it is taking ownership, so
+        // stamp them — but ONLY when the field is still empty; a promotion
+        // must never re-attribute someone else's spec.
+        const adoptOwnerId =
+          parsed.data.status === "live" &&
+          existing.ownerId === null &&
+          typeof req.user?.id === "string"
+            ? req.user.id
+            : undefined;
+
         // Bump version on every PATCH that actually mutates the spec —
         // simple, conservative: even a description-only edit bumps. The
         // dashboard's run-detail drawer pins runs to the spec version
@@ -316,6 +335,7 @@ export function createToolsRouter(
           return tx.toolSpec.update({
             where: { slug: req.params.slug },
             data: {
+              ownerId: adoptOwnerId,
               name: parsed.data.name,
               category: parsed.data.category,
               description: parsed.data.description,
@@ -394,12 +414,43 @@ export function createToolsRouter(
           }
         }
 
+        // WARP-1580 — layer 2. The ADR-004 `requireRole` floor above is the
+        // COARSE gate; it says nothing about which tool domains this person's
+        // AccessRole actually grants. Without this, a spec is a laundering
+        // path around the WARP-1529 narrowing that chat enforces: a family
+        // user whose role was never granted `smart-home` could still make
+        // `control_device` fire by pressing Run on a spec someone else wrote.
+        //
+        // Resolved ONCE and handed to the runner, which re-checks per step —
+        // the same resolve-once / enforce-at-dispatch shape routes/llm.ts
+        // uses for a chat turn. `null` for the owner, service principals, and
+        // everyone with no AccessRole: that path is byte-for-byte unchanged.
+        const scope = await resolveToolAccessScope(prisma, req.user);
+        // Pre-flight so a forbidden spec is refused with an honest 403 and
+        // NO ToolRun row, rather than half-running to the offending step.
+        const forbiddenTool = firstForbiddenToolName(
+          plannedToolNames(spec.steps),
+          scope,
+        );
+        if (forbiddenTool !== null) {
+          res.status(403).json({
+            error: "forbidden_tool_for_role",
+            detail:
+              "this spec uses a tool your access role does not permit — " +
+              "ask your administrator",
+            slug: spec.slug,
+            tool: forbiddenTool,
+          });
+          return;
+        }
+
         const triggeredBy = req.user?.username ?? null;
         const { runId, outcome } = await runToolSpec(prisma, dispatcher, {
           specId: spec.id,
           specName: spec.name,
           steps: spec.steps,
           triggeredBy,
+          scope,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({

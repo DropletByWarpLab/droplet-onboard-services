@@ -11,6 +11,13 @@
  *      a replayed tool_call) cannot invoke a tool the catalog would have
  *      dropped. The catalog filter is a courtesy; THIS is the boundary.
  *
+ * WARP-1580 added a THIRD consumer of the same predicate — the ToolSpec
+ * runner (services/tool-spec-runner.service.ts), reached from run-now
+ * (routes/tools.ts) and the WARP-463 schedule ticker. It imports
+ * `firstForbiddenToolName` + `toolDispatchDenial` from here rather than
+ * re-deriving anything; a second copy of the narrowing is exactly how two
+ * surfaces drift apart (the shape of both WARP-1523 and WARP-1564).
+ *
  * §3 verbatim for this axis:
  *
  *   toolDomains = writeFilter(tier) ∩ moduleToolDomains(features) ∩ roleToolGrants
@@ -137,6 +144,33 @@ export function narrowToolNamesToScope(
   return names.filter((n) => toolAllowedInScope(n, scope));
 }
 
+/**
+ * WARP-1580 — the whole-list PRE-FLIGHT: the first name in `names` this scope
+ * may not invoke, or `null` when every name is in reach.
+ *
+ * Used by the ToolSpec surfaces, which — unlike a chat turn — know the entire
+ * call sequence before the first dispatch. Checking up front is what lets a
+ * forbidden spec be refused WHOLE instead of half-executing up to the
+ * offending step. `null`/absent scope means no narrowing applies and nothing
+ * is forbidden (owner, service, and every role-less user).
+ *
+ * NAME-ONLY by construction. The args-dependent rule (§3 `locks`) cannot be
+ * decided here because a step's args may carry a `${prev}` reference that
+ * only resolves once the previous step has returned — so `lockOperationDenied`
+ * stays where it can see resolved args, at dispatch. This pre-flight is the
+ * courtesy; the runner's per-step {@link toolDispatchDenial} is the boundary.
+ */
+export function firstForbiddenToolName(
+  names: readonly string[],
+  scope: ToolAccessScope | null | undefined,
+): string | null {
+  if (!scope) return null;
+  for (const name of names) {
+    if (!toolAllowedInScope(name, scope)) return name;
+  }
+  return null;
+}
+
 // ── mayOperateLocks (§3 locks) ─────────────────────────────────────
 
 /**
@@ -260,10 +294,7 @@ export async function resolveToolAccessScope(
     return DENY_ALL_TOOL_SCOPE;
   }
 
-  let row: {
-    accessRoleId: string | null;
-    accessRole: { toolGrants: Array<{ domain: string; level: string }> } | null;
-  } | null;
+  let row: AccessRoleIdRow | null;
   try {
     row = await prisma.user.findUnique({
       where: { id: userId },
@@ -280,6 +311,24 @@ export async function resolveToolAccessScope(
     logger.error({ userId }, "tool_access_scope_user_missing");
     return DENY_ALL_TOOL_SCOPE;
   }
+  return composeScopeForRow(userId, row);
+}
+
+interface AccessRoleIdRow {
+  accessRoleId: string | null;
+  accessRole: { toolGrants: Array<{ domain: string; level: string }> } | null;
+}
+
+/**
+ * The shared tail of BOTH resolvers: the user row is in hand, decide the
+ * scope. Split out by WARP-1580 so the request-principal path and the
+ * attributed (no-token) path compose identically — the §3 composition has
+ * exactly one implementation.
+ */
+async function composeScopeForRow(
+  userId: string,
+  row: AccessRoleIdRow,
+): Promise<ToolAccessScope | null> {
   // The pre-T5 world: nobody assigned this person a role, so nothing narrows.
   if (row.accessRoleId === null) return null;
 
@@ -303,4 +352,93 @@ export async function resolveToolAccessScope(
     }
   }
   return { domains, writeDomains, locks: access.locks };
+}
+
+// ── WARP-1580: the ATTRIBUTED principal (no request, no token) ──────
+
+/** Why an attributed principal could not be resolved. Audit-facing. */
+export type AttributionFailure =
+  | "no_principal"
+  | "user_missing"
+  | "user_deactivated"
+  | "read_failed";
+
+export interface AttributedToolAccess {
+  /**
+   * `null` means "resolved, and provably needs no narrowing" — the §3 owner
+   * bypass or a person with no AccessRole. NOT "unknown": an unresolvable
+   * principal yields {@link DENY_ALL_TOOL_SCOPE} with `unresolved` set.
+   */
+  scope: ToolAccessScope | null;
+  /** Non-null ⇔ `scope` is DENY_ALL because the identity could not be trusted. */
+  unresolved: AttributionFailure | null;
+}
+
+/**
+ * WARP-1580 — resolve the tool reach of a stored user id, with NO request
+ * principal in play.
+ *
+ * WHY THIS EXISTS. A scheduled ToolSpec fire has no session, no JWT and no
+ * `req.user`, so `resolveToolAccessScope`'s claim-driven short-circuits have
+ * nothing to read. Before this, the ticker dispatched through the singleton
+ * MCP client with no scope at all — i.e. at FULL registry reach — which made
+ * a schedule a laundering path around the T5 narrowing that chat enforces.
+ *
+ * HOW IT DIFFERS from the request path, deliberately:
+ *
+ *   - The tier comes off the User ROW, because there is no token to trust.
+ *   - `directoryStatus = DEACTIVATED` denies, ahead of the owner bypass. A
+ *     deactivated identity is not permitted to act (the login route and the
+ *     SSO callback already fail closed on it), so nothing may act AS it —
+ *     including a schedule the person left behind.
+ *   - An absent / unknown / unreadable id denies instead of resolving to
+ *     "no narrowing". This is the inversion that matters: on the request
+ *     path "no principal" means AUTH_ENABLED=false and legitimately resolves
+ *     to owner; on this path "no principal" means we do not know who is
+ *     asking, and a run we cannot attribute must not run at all.
+ *
+ * `service` rows are not special-cased: service principals are synthetic
+ * (`_service:*`) and own no User row, so they resolve to `user_missing` and
+ * deny — which is correct, nothing should be scheduling specs as a service.
+ */
+export async function resolveAttributedToolAccess(
+  prisma: PrismaClient,
+  userId: string | null | undefined,
+): Promise<AttributedToolAccess> {
+  const deny = (unresolved: AttributionFailure): AttributedToolAccess => ({
+    scope: DENY_ALL_TOOL_SCOPE,
+    unresolved,
+  });
+
+  if (!userId) return deny("no_principal");
+
+  let row:
+    | (AccessRoleIdRow & { role: string; directoryStatus: string })
+    | null;
+  try {
+    row = (await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        role: true,
+        directoryStatus: true,
+        accessRoleId: true,
+        accessRole: { select: { toolGrants: { select: { domain: true, level: true } } } },
+      },
+    })) as (AccessRoleIdRow & { role: string; directoryStatus: string }) | null;
+  } catch (err) {
+    logger.error({ err, userId }, "attributed_tool_access_read_failed");
+    return deny("read_failed");
+  }
+  if (!row) {
+    logger.error({ userId }, "attributed_tool_access_user_missing");
+    return deny("user_missing");
+  }
+  if (row.directoryStatus === "DEACTIVATED") {
+    logger.warn({ userId }, "attributed_tool_access_user_deactivated");
+    return deny("user_deactivated");
+  }
+  // §3 owner bypass, read off the row. Service rows never reach here.
+  if (row.role === "owner") return { scope: null, unresolved: null };
+
+  return { scope: await composeScopeForRow(userId, row), unresolved: null };
 }

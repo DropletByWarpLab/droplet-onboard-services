@@ -277,6 +277,16 @@ Saved multi-step "tools"/macros the LLM agent can run (slug-addressed).
 
 `safety` ∈ 1..3; `slug` matches `SLUG_RE` (2..80 chars). Missing spec → `404 Spec not found`.
 
+WARP-1580 — the `requireRole` column above is the coarse ADR-004 floor only. `POST
+/tools/:slug/runs` additionally resolves the caller's ADR-032 §3 tool reach and refuses
+a spec that names a tool their access role does not grant:
+`403 { error: "forbidden_tool_for_role", detail, slug, tool }`. The refusal is
+whole-spec and pre-dispatch — no step runs and no `ToolRun` row is written. Callers with
+no `AccessRole` (every user on a box today), service principals and the owner are
+unaffected. A caller whose scope cannot be resolved is refused the same way (fail-closed).
+Lock-flavoured `control_device` args are additionally refused at dispatch, surfacing as a
+`207` run whose failing step carries `LOCK_OPERATION_NOT_PERMITTED`.
+
 #### Brain memory / indexed attachments (`/api/files/brain`)
 
 The "AI memory" store of files the chat has ingested (BrainMemoryItem). Per-user.
