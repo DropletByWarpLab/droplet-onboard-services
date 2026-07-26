@@ -48,7 +48,6 @@ import type {
   AuthUser,
   RosterUser,
   InviteListItem,
-  InviteRole,
   CreateUserRole,
   InviteCreateResponse,
   AdminUsageUserRow,
@@ -71,7 +70,15 @@ import {
 } from "@/components/access/PersonAccessSection";
 import type { ConnectorOption } from "@/components/access/RoleBuilderSheet";
 import { ACCESS_COPY } from "@/components/access/copy";
+// WARP-1533 (T9): the invite modal's role picker shares the person editor's
+// option builder — identical control, no new pattern (design §7).
+import { RoleSelectOptions, parseRoleOption } from "@/components/access/role-options";
 import { formatStorageBytes, tierLabel } from "@/lib/access";
+
+// WARP-1533 (design §7): the invite picker defaults to the most-restrictive
+// sensible role — the built-in Guest tier (fail-toward-least-privilege; a
+// hasty invite can only under-grant, never over-grant).
+const INVITE_ROLE_DEFAULT = "tier:guest";
 
 const DEPT_RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
 const DEPT_RIGHT_LABEL: Record<DepartmentRight, string> = {
@@ -191,7 +198,10 @@ export default function UsersPage() {
   const [invitePhase, setInvitePhase] = useState<"form" | "share">("form");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteDisplay, setInviteDisplay] = useState("");
-  const [inviteRole, setInviteRole] = useState<InviteRole>("user");
+  // WARP-1533: the picker's value is the shared `role:<id>` / `tier:<tier>`
+  // scheme (same as the person editor); parsed to { role, accessRoleId } at
+  // submit time.
+  const [inviteRoleOption, setInviteRoleOption] = useState<string>(INVITE_ROLE_DEFAULT);
   const [inviteTtlHours, setInviteTtlHours] = useState<number>(72);
   const [inviteResult, setInviteResult] = useState<InviteCreateResponse | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
@@ -276,6 +286,9 @@ export default function UsersPage() {
   // Best-effort: until the T3 routes merge this endpoint is absent and the
   // People extensions degrade gracefully (no chip, built-in group only).
   const [accessRoles, setAccessRoles] = useState<AccessRole[]>([]);
+  // WARP-1533: distinguishes a failed roles read (degraded invite picker +
+  // honest caption) from the legitimate "no custom roles yet" empty state.
+  const [accessRolesFailed, setAccessRolesFailed] = useState(false);
   // Configured connectors for the role builder's off-box axis (§5.4) —
   // best-effort for the same parallel-build reason.
   const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
@@ -372,8 +385,24 @@ export default function UsersPage() {
   // surface fully functional, minus the role affordances.
   const reloadAccessRoles = useCallback(() => {
     listAccessRoles()
-      .then((data) => setAccessRoles((data.roles || []).filter((r) => r.state !== "archived")))
-      .catch(() => setAccessRoles([]));
+      .then((data) => {
+        setAccessRoles((data.roles || []).filter((r) => r.state !== "archived"));
+        setAccessRolesFailed(false);
+      })
+      .catch(() => {
+        setAccessRoles([]);
+        // WARP-1533: "failed to load" ≠ "no custom roles" — the invite
+        // modal's picker degrades to built-in tiers with an honest caption
+        // instead of silently pretending no roles exist (design §7).
+        setAccessRolesFailed(true);
+        // UX note N1: a stale role:<id> selection must not survive the
+        // degrade — its option is gone, so the native select would silently
+        // show (and submit) whichever option comes first, and the server
+        // would 400 ROLE_TIER_MISMATCH on the vanished id. Reset to the
+        // most-restrictive default. Functional update: this callback has []
+        // deps, so reading the state var here would be a stale closure.
+        setInviteRoleOption((cur) => (cur.startsWith("role:") ? INVITE_ROLE_DEFAULT : cur));
+      });
   }, []);
 
   useEffect(() => {
@@ -408,7 +437,7 @@ export default function UsersPage() {
   const resetInviteForm = () => {
     setInviteEmail("");
     setInviteDisplay("");
-    setInviteRole("user");
+    setInviteRoleOption(INVITE_ROLE_DEFAULT);
     setInviteTtlHours(72);
     setInvitePhase("form");
     setInviteResult(null);
@@ -550,10 +579,16 @@ export default function UsersPage() {
               right,
             }))
           : undefined;
+      // WARP-1533: a custom role sends { role: startingPoint, accessRoleId };
+      // a built-in tier sends the canonical enum value alone (retiring the
+      // legacy "user" alias — the server's preprocess keeps accepting it
+      // from older builds, we just no longer send it).
+      const pickedRole = parseRoleOption(inviteRoleOption, accessRoles);
       const result = await createInvite({
         email,
         displayName: inviteDisplay.trim() || undefined,
-        role: inviteRole,
+        role: pickedRole.tier as CreateUserRole,
+        accessRoleId: pickedRole.accessRoleId ?? undefined,
         ttlHours: inviteTtlHours,
         departments: deptGrants,
       });
@@ -1372,9 +1407,13 @@ export default function UsersPage() {
                       </label>
                       <select
                         id={inviteRoleId}
-                        value={inviteRole}
-                        onChange={(e) => setInviteRole(e.target.value as InviteRole)}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        value={inviteRoleOption}
+                        onChange={(e) => setInviteRoleOption(e.target.value)}
+                        aria-describedby={accessRolesFailed ? `${inviteRoleId}-degraded` : undefined}
+                        // UX note N2: ring focus idiom — this control is
+                        // declared identical to the person editor's role
+                        // select, which uses focus:ring (the house rule).
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -1382,9 +1421,24 @@ export default function UsersPage() {
                           color: "var(--text)",
                         }}
                       >
-                        <option value="user">User</option>
-                        <option value="admin">Admin</option>
+                        {/* WARP-1533 (design §7): custom roles grouped above
+                            the built-in tiers — the person editor's option
+                            builder verbatim. Rank options above the inviter's
+                            tier disable (WARP-623). */}
+                        <RoleSelectOptions
+                          roles={accessRoles}
+                          actingTier={currentUser?.role ?? "admin"}
+                        />
                       </select>
+                      {accessRolesFailed && (
+                        <p
+                          id={`${inviteRoleId}-degraded`}
+                          className="type-caption-1 mt-1.5"
+                          style={{ color: "var(--text-muted)", lineHeight: 1.5 }}
+                        >
+                          {ACCESS_COPY.inviteRolesDegraded}
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label htmlFor={inviteTtlId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>

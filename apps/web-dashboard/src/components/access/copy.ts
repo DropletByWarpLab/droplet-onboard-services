@@ -84,6 +84,17 @@ export const ACCESS_COPY = {
   staffMeta: "Everyday staff access",
   guestMeta: "View-mostly, limited",
 
+  // ── Invite modal (§7 / WARP-1533 T9) ──
+  // T9-authored (no §12 string exists for the degraded picker): the honest
+  // caption when custom roles can't load and the invite modal falls back to
+  // built-in tiers only. Flagged for design-packet ratification.
+  inviteRolesDegraded:
+    "Couldn't load your custom roles — you can invite with the built-in roles for now.",
+  // The role pickers' second optgroup label (person editor + invite modal).
+  // Deliberately distinct from `builtinRoles` ("Built-in roles"), which is
+  // Surface A's roles-list section header — keep both.
+  builtIn: "Built-in",
+
   // ── Person editor (§6) ──
   addException: "+ Add an exception",
   exceptionsHint: "One-off grants or denials on top of the role. Most people never need one.",

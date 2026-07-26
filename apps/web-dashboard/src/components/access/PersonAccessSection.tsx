@@ -34,13 +34,15 @@ import type {
 } from "@/lib/types";
 import {
   GATEABLE_FEATURES,
-  TIER_RANK,
   featureDef,
   formatStorageBytes,
   tierLabel,
 } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import { AccessChip, GuardNote } from "./bits";
+// WARP-1533: the option-building logic is shared with the invite modal's
+// role picker (design §7 — "identical control, no new pattern").
+import { RoleSelectOptions } from "./role-options";
 import "./access.css";
 
 export type PersonAccessValue = `role:${string}` | `tier:${string}`;
@@ -116,13 +118,6 @@ export function PersonAccessSection({
   );
   const { isOwner, isSelf, lastAdminBlocked, locked } = guards;
 
-  const tierOf = (option: string): AccessTier => {
-    if (option.startsWith("tier:")) return option.slice(5) as AccessTier;
-    const role = roles.find((r) => r.id === option.slice(5));
-    return role?.startingPoint ?? "guest";
-  };
-  const optionBlocked = (option: string) => TIER_RANK[tierOf(option)] > TIER_RANK[actingTier];
-
   const guard = isOwner ? (
     <GuardNote icon={<Lock size={15} aria-hidden="true" />}>{ACCESS_COPY.ownerTooltip}</GuardNote>
   ) : isSelf ? (
@@ -189,35 +184,7 @@ export function PersonAccessSection({
           className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
           style={{ ...fieldStyle, opacity: locked ? 0.55 : 1 }}
         >
-          {roles.length > 0 && (
-            <optgroup label="Your roles">
-              {roles.map((role) => (
-                <option
-                  key={role.id}
-                  value={`role:${role.id}`}
-                  disabled={optionBlocked(`role:${role.id}`)}
-                  title={optionBlocked(`role:${role.id}`) ? ACCESS_COPY.rankCap : undefined}
-                >
-                  {role.name}
-                </option>
-              ))}
-            </optgroup>
-          )}
-          <optgroup label="Built-in">
-            {(["admin", "family", "guest"] as const).map((tier) => (
-              <option
-                key={tier}
-                value={`tier:${tier}`}
-                disabled={optionBlocked(`tier:${tier}`)}
-                title={optionBlocked(`tier:${tier}`) ? ACCESS_COPY.rankCap : undefined}
-              >
-                {tierLabel(tier)}
-              </option>
-            ))}
-            {/* The current owner value renders (read-only) so the disabled
-                select still shows the truth — never an empty control. */}
-            {isOwner && <option value="tier:owner">{tierLabel("owner")}</option>}
-          </optgroup>
+          <RoleSelectOptions roles={roles} actingTier={actingTier} includeOwnerOption={isOwner} />
         </select>
         {!locked && (
           <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)", lineHeight: 1.5 }}>

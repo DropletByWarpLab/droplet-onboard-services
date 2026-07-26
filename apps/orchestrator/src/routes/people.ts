@@ -42,6 +42,11 @@ import {
   InvalidInviteRoleError,
 } from "../services/onboarding-team-invite.service.js";
 import {
+  validateInviteAccessRole,
+  InviteAccessRoleError,
+} from "../services/invite-access-role.service.js";
+import type { AccessRole } from "@prisma/client";
+import {
   sendInviteEmail,
   type SendOptions,
 } from "../services/email-channel.service.js";
@@ -164,6 +169,11 @@ const scopeSchema = z.object({
 const inviteSchema = z.object({
   email: z.string().min(1).max(200),
   role: z.string().min(1).max(32),
+  // WARP-1533 (RBAC v2 T9): optional custom access role granted by this
+  // invite. Shape-checked here; existence/state/rank/tier-agreement are
+  // validated by invite-access-role.service in the handler (shared with the
+  // legacy POST /auth/invites surface so the two can never diverge).
+  accessRoleId: z.string().uuid().optional(),
 });
 
 // WARP-1271 (T19a): per-user usage settings. `null` explicitly clears the
@@ -340,12 +350,35 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1533 (RBAC v2 T9): validate the optional custom access role
+        // BEFORE any write — fail-closed via the shared service (exists,
+        // active, assignable startingPoint, WARP-623 rank cap on the role's
+        // startingPoint with the same 403 shape as the tier cap above, and
+        // tier agreement so the accept path's fallback tier can never drift
+        // from the operator's pick).
+        let accessRole: AccessRole | null = null;
+        if (parsed.data.accessRoleId) {
+          try {
+            accessRole = await validateInviteAccessRole(prisma, {
+              accessRoleId: parsed.data.accessRoleId,
+              inviteTier: parsed.data.role,
+              inviterRole,
+            });
+          } catch (err) {
+            if (err instanceof InviteAccessRoleError) {
+              return res.status(err.status).json({ error: err.message, code: err.code });
+            }
+            throw err;
+          }
+        }
+
         let invite;
         try {
           invite = await createTeamInvite(prisma, {
             email: parsed.data.email,
             role: parsed.data.role,
             createdBy: req.user?.username ?? "unknown",
+            accessRoleId: accessRole?.id ?? null,
           });
         } catch (err) {
           // Typed validation errors → 400 with the service's `code` so the
@@ -380,17 +413,30 @@ export function createPeopleRouter(
         // delivery outcome — but NEVER the token (it's a bearer credential; an
         // audit row is not the place for it). Lifecycle events go on the `auth`
         // kind (matches the DELETE /people/:id "User removed" convention above).
+        // WARP-1533: an access-role invite gets the ADR-032 §5 wording
+        // ("Invite created with access role" — the free-text house style,
+        // same kind/refs shape as the shipped "Teammate invited"); plain
+        // tier invites keep the existing entry byte-for-byte.
         await recordActivity({
           kind: "auth",
           severity: send.status === "sent" ? "ok" : "warn",
           sourceIcon: "user-plus",
-          what: "Teammate invited",
-          sub: `${invite.email} · ${invite.role}`,
+          what: accessRole ? "Invite created with access role" : "Teammate invited",
+          sub: accessRole
+            ? `${invite.email} · ${accessRole.name}`
+            : `${invite.email} · ${invite.role}`,
           refs: {
             actor: req.user?.username ?? null,
             email: invite.email,
             role: invite.role,
             sendStatus: send.status,
+            ...(accessRole
+              ? {
+                  accessRoleId: accessRole.id,
+                  accessRoleName: accessRole.name,
+                  accessRoleStartingPoint: accessRole.startingPoint,
+                }
+              : {}),
           },
           actor: actorFromRequest(req),
         });
@@ -400,6 +446,7 @@ export function createPeopleRouter(
           token: invite.token,
           email: invite.email,
           role: invite.role,
+          access_role_id: invite.accessRoleId,
           expires_at: invite.expiresAt,
           send_status: send.status,
         });
