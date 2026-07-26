@@ -460,6 +460,15 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       // keyed on that select shape so the BUG-11 password-change gate (which
       // also calls user.findUnique each request) keeps seeing its null.
       describe("role-level defaults (WARP-1531)", () => {
+        // WARP-1528 (T4): the SAME `user.findUnique({select:{accessRole}})`
+        // read now serves two consumers — the T7 usage resolver here and the
+        // T4 feature gate mounted on /api/files. So the stub has to be a
+        // faithful role row, not just its usage columns: a real AccessRole
+        // always carries its grant set, and a role with zero feature grants
+        // genuinely means "this person has no features" (the gate would 404
+        // the upload before the cap could be asserted, which is correct
+        // behavior, just not what these cases are about). Files is granted at
+        // `manage` so the cap — not the gate — is what these tests measure.
         const stubRole = (
           role: {
             storageQuotaBytes?: bigint | null;
@@ -469,7 +478,20 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         ) => {
           (prismaMock.user.findUnique as any).mockImplementation(
             async (args: any) =>
-              args?.select?.accessRole ? { accessRole: role } : null,
+              args?.select?.accessRole
+                ? {
+                    id: "u-test",
+                    role: "family",
+                    accessRole: role && {
+                      mayOperateLocks: false,
+                      cloudModelsAllowed: false,
+                      featureGrants: [{ moduleId: "files", level: "manage" }],
+                      toolGrants: [],
+                      connectorGrants: [],
+                      ...role,
+                    },
+                  }
+                : null,
           );
         };
 
@@ -477,6 +499,14 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           // Restore the setup.ts default (no directory row → gate fails open).
           (prismaMock.user.findUnique as any).mockReset();
           (prismaMock.user.findUnique as any).mockResolvedValue(null);
+          // WARP-1528: these cases stub the policy row PERSISTENTLY rather
+          // than with `…Once`. The T4 feature gate resolves effective access
+          // ahead of the handler and legitimately reads the same model, so a
+          // one-shot queue would be drained by the gate and the handler would
+          // silently see the default — pinning behavior to call ORDER across
+          // two independent consumers. Reset it here instead.
+          (prismaMock.userUsagePolicy.findUnique as any).mockReset();
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValue(null);
         });
 
         it("a role default caps the upload when the person has no policy row", async () => {
@@ -490,7 +520,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         });
 
         it("a person row whose upload field is UNSET still inherits the role cap (field-by-field)", async () => {
-          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValue({
             storageQuotaBytes: 5_000_000n, // storage set…
             maxUploadSizeMb: null, // …upload cap unset → role's 1 MB applies
           });
@@ -503,7 +533,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         });
 
         it("the person override beats a looser role default", async () => {
-          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValue({
             maxUploadSizeMb: 1,
           });
           stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 500, llmDailyMessageCap: null });
@@ -515,7 +545,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         });
 
         it("the person override beats a TIGHTER role default (override semantics, not min())", async () => {
-          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValue({
             maxUploadSizeMb: 5,
           });
           stubRole({ storageQuotaBytes: null, maxUploadSizeMb: 1, llmDailyMessageCap: null });

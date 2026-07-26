@@ -28,6 +28,7 @@ import {
 } from "../modules/module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
 import { recordAccessDenied } from "../middleware/auth.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 
 const logger = createLogger("modules-route");
 
@@ -39,6 +40,12 @@ function userId(req: Request): string | null {
   const u = getUser(req);
   return u?.username ?? u?.id ?? null;
 }
+/** The LOCAL User.id UUID — the only key the resolver (and every FK) accepts.
+ *  Never the Nextcloud username: that is the WARP-881 IDOR rule. `userId()`
+ *  above is the human-readable `setBy` / log label and is NOT interchangeable. */
+function localUserId(req: Request): string | null {
+  return getUser(req)?.id ?? null;
+}
 function isAdmin(req: Request): boolean {
   const r = getUser(req)?.role;
   return r === "owner" || r === "admin";
@@ -46,6 +53,29 @@ function isAdmin(req: Request): boolean {
 
 const patchBody = z.object({ enabled: z.boolean() });
 const businessTypeBody = z.object({ type: z.string() });
+
+/**
+ * The caller's §9 feature set, or `null` when we can't resolve them.
+ *
+ * Fails OPEN — deliberately, and only here. This field drives NAV: a resolver
+ * hiccup or a principal with no local row (AUTH_ENABLED=false dev session, the
+ * OCS fallback) must leave the client on the workspace view rather than blank
+ * every surface. The enforcement boundary is the server gate
+ * (`requireFeatureAccess`), which fails CLOSED on the same inputs — the two
+ * postures are the two halves of "the nav is a convenience, the gate is the
+ * wall" and must not be conflated.
+ */
+async function resolveEffectiveForUser(req: Request) {
+  const id = localUserId(req);
+  if (!id) return null;
+  try {
+    const access = await resolveEffectiveAccess(id);
+    return access?.features ?? null;
+  } catch (e) {
+    logger.warn({ err: e, user: id }, "effective_for_user_unresolved");
+    return null;
+  }
+}
 
 export function createModulesRouter(
   prisma: PrismaClient,
@@ -55,12 +85,18 @@ export function createModulesRouter(
   const router = Router();
 
   // ── GET /api/modules ───────────────────────────────────────────────────────
+  // WARP-1528 / ADR-032 §5: the workspace view is UNCHANGED (Settings →
+  // Features is box-wide by design — "Applies to everyone on this Droplet"),
+  // and gains an ADDITIVE `effectiveForUser` = workspace-effective ∩ the
+  // caller's §9 grants, straight from the T3 resolver (consumed, never
+  // re-derived). The nav reads that when it's there.
   router.get("/modules", async (req, res, next) => {
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
       const view = await getModulesView(prisma, cfg);
+      const effectiveForUser = await resolveEffectiveForUser(req);
       res.setHeader("Cache-Control", "private, max-age=30");
-      res.json(view);
+      res.json(effectiveForUser ? { ...view, effectiveForUser } : view);
     } catch (e) { next(e); }
   });
 
