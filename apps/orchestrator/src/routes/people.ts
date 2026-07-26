@@ -72,8 +72,8 @@ import {
 import {
   validateInviteAccessRole,
   InviteAccessRoleError,
+  type ValidatedInviteAccessRole,
 } from "../services/invite-access-role.service.js";
-import type { AccessRole } from "@prisma/client";
 import {
   sendInviteEmail,
   type SendOptions,
@@ -413,7 +413,7 @@ export function createPeopleRouter(
         // startingPoint with the same 403 shape as the tier cap above, and
         // tier agreement so the accept path's fallback tier can never drift
         // from the operator's pick).
-        let accessRole: AccessRole | null = null;
+        let accessRole: ValidatedInviteAccessRole | null = null;
         if (parsed.data.accessRoleId) {
           try {
             accessRole = await validateInviteAccessRole(prisma, {
@@ -435,7 +435,9 @@ export function createPeopleRouter(
             email: parsed.data.email,
             role: parsed.data.role,
             createdBy: req.user?.username ?? "unknown",
-            accessRoleId: accessRole?.id ?? null,
+            // Branded object, not a bare id — the seam only accepts a role
+            // that went through validateInviteAccessRole (review F4).
+            accessRole,
           });
         } catch (err) {
           // Typed validation errors → 400 with the service's `code` so the
@@ -944,58 +946,57 @@ export function createPeopleRouter(
           });
         }
 
-        let requestedRole: AssignableRole;
-        let accessRoleId: string | null;
-        let roleName: string | null = null;
-        if (parsed.data.accessRoleId !== null) {
-          const role = await prisma.accessRole.findUnique({
-            where: { id: parsed.data.accessRoleId },
-          });
-          if (!role) {
-            return res.status(404).json({ error: "Role not found" });
-          }
-          if (role.state === "archived") {
-            return res.status(409).json({
-              error: "This role is archived — restore it before assigning people.",
-              code: "ACCESS_ROLE_ARCHIVED",
+        // Everything that DECIDES the write — the role row (state +
+        // startingPoint), the target row, the rails — is read INSIDE the
+        // serializable transaction (review B2). Read outside, a concurrent
+        // archive or re-base of the role would let this write a tier the
+        // role no longer carries, and layer-1 requireRole would honour that
+        // stale tier indefinitely. SERIALIZABLE_TX is passed EXPLICITLY,
+        // exactly like the sibling role/scope/delete paths (WARP-1526):
+        // Prisma/Postgres default to READ COMMITTED. Precondition failures
+        // return a discriminated outcome rather than throwing — nothing has
+        // been written on those paths, so the empty transaction commits.
+        const outcome = await prisma.$transaction(async (tx) => {
+          let requestedRole: AssignableRole;
+          let accessRoleId: string | null;
+          let roleName: string | null = null;
+          if (parsed.data.accessRoleId !== null) {
+            const role = await tx.accessRole.findUnique({
+              where: { id: parsed.data.accessRoleId },
             });
+            if (!role) return { kind: "role_not_found" } as const;
+            if (role.state === "archived") return { kind: "role_archived" } as const;
+            requestedRole = role.startingPoint as AssignableRole;
+            accessRoleId = role.id;
+            roleName = role.name;
+          } else {
+            // zod's refine guarantees tier is present on this branch.
+            requestedRole = parsed.data.tier as AssignableRole;
+            accessRoleId = null;
           }
-          requestedRole = role.startingPoint as AssignableRole;
-          accessRoleId = role.id;
-          roleName = role.name;
-        } else {
-          // zod's refine guarantees tier is present on this branch.
-          requestedRole = parsed.data.tier as AssignableRole;
-          accessRoleId = null;
-        }
 
-        // WARP-1539 — projected at the query: this row feeds the guards and
-        // the post-effect runners, so the hash/blind-index must never
-        // materialize here even though the response body is only
-        // `{ syncState }`.
-        const existing = await prisma.user.findUnique({
-          where: { id: req.params.id },
-          select: PUBLIC_USER_SELECT,
-        });
-        if (!existing) {
-          return res.status(404).json({ error: "User not found" });
-        }
+          // WARP-1539 — projected at the query: this row feeds the guards
+          // and the post-effect runners, so the hash/blind-index must never
+          // materialize here even though the response body is only
+          // `{ syncState }`.
+          const existing = await tx.user.findUnique({
+            where: { id: req.params.id },
+            select: PUBLIC_USER_SELECT,
+          });
+          if (!existing) return { kind: "user_not_found" } as const;
 
-        // Rails 1 → 3 → 7 — identical to a direct role change: the
-        // assigned tier is the role's startingPoint (or the tier itself).
-        assertRoleChangeAllowed({
-          actor: { id: req.user?.id, role: req.user?.role },
-          target: { id: existing.id, role: existing.role },
-          requestedRole,
-        });
+          // Rails 1 → 3 → 7 — identical to a direct role change: the
+          // assigned tier is the role's startingPoint (or the tier itself).
+          // A refusal throws out of the transaction and rolls it back; the
+          // route catch maps it (the DELETE /people/:id precedent).
+          assertRoleChangeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: { id: existing.id, role: existing.role },
+            requestedRole,
+          });
 
-        // Rails 4 + 5 in-transaction, then the paired write — accessRoleId
-        // and the enum tier move together or not at all. SERIALIZABLE_TX
-        // passed EXPLICITLY, exactly like the sibling role/scope/delete
-        // paths (WARP-1526): Prisma/Postgres default to READ COMMITTED, so
-        // without it a concurrent demotion could slip past the invariant
-        // check window.
-        await prisma.$transaction(async (tx) => {
+          // Rails 4 + 5, then the paired write — accessRoleId and the enum
+          // tier move together or not at all.
           await assertRoleChangeInvariantsTx(tx, {
             target: { id: existing.id, role: existing.role },
             requestedRole,
@@ -1004,7 +1005,23 @@ export function createPeopleRouter(
             where: { id: existing.id },
             data: { accessRoleId, role: requestedRole },
           });
+
+          return { kind: "ok", existing, requestedRole, accessRoleId, roleName } as const;
         }, SERIALIZABLE_TX);
+
+        if (outcome.kind === "role_not_found") {
+          return res.status(404).json({ error: "Role not found" });
+        }
+        if (outcome.kind === "role_archived") {
+          return res.status(409).json({
+            error: "This role is archived — restore it before assigning people.",
+            code: "ACCESS_ROLE_ARCHIVED",
+          });
+        }
+        if (outcome.kind === "user_not_found") {
+          return res.status(404).json({ error: "User not found" });
+        }
+        const { existing, requestedRole, accessRoleId, roleName } = outcome;
 
         // Rail 6. A tier crossing runs the consolidated runner (revoke →
         // NC droplet-admins cascade → "Role changed" audit); a same-tier

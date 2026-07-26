@@ -53,6 +53,7 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 }));
 
 import { createAccessRouter } from "./access.js";
+import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
 
 // ── in-memory prisma stub ──────────────────────────────────────────
 
@@ -140,11 +141,44 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
     _count: { users: [...users.values()].filter((u) => u.accessRoleId === row.id).length },
   });
 
+  // Every $transaction call's options argument, in call order. The old stub
+  // dropped this argument entirely, which is what let four bare
+  // `prisma.$transaction(fn)` calls ship green (review T1) — a READ
+  // COMMITTED transaction is invisible to Postgres SSI, so it silently
+  // defeats the isolation on the serializable paths it races.
+  const txOpts: Array<unknown> = [];
+  // Snapshot/restore so a throw inside the callback ROLLS BACK, like a real
+  // interactive transaction. Without this no test could prove atomicity —
+  // partial writes survived a refusal and nothing noticed.
+  const snapshot = () => ({
+    roles: new Map([...roles].map(([k, v]) => [k, structuredClone(v)])),
+    users: new Map([...users].map(([k, v]) => [k, structuredClone(v)])),
+    invites: new Map([...invites].map(([k, v]) => [k, structuredClone(v)])),
+  });
+  const restore = (snap: ReturnType<typeof snapshot>) => {
+    roles.clear();
+    for (const [k, v] of snap.roles) roles.set(k, v);
+    users.clear();
+    for (const [k, v] of snap.users) users.set(k, v);
+    invites.clear();
+    for (const [k, v] of snap.invites) invites.set(k, v);
+  };
+
   const self: any = {
     _roles: () => roles,
     _users: () => users,
     _invites: () => invites,
-    $transaction: async (fn: (tx: any) => Promise<unknown>) => fn(self),
+    _txOpts: () => txOpts,
+    $transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>, opts?: unknown) => {
+      txOpts.push(opts);
+      const snap = snapshot();
+      try {
+        return await fn(self);
+      } catch (err) {
+        restore(snap);
+        throw err;
+      }
+    }),
     accessRole: {
       findMany: vi.fn(async ({ where }: any = {}) => {
         let out = [...roles.values()];
@@ -331,6 +365,93 @@ beforeEach(() => {
   recordActivityMock.mockClear();
   revokeAllSessionsMock.mockClear();
   kickReconcileMock.mockClear();
+});
+
+// ── transaction isolation (review B1/T1) ───────────────────────────
+
+/** Every transaction this request opened ran at SERIALIZABLE. */
+function expectAllSerializable(prisma: any) {
+  const opts = prisma._txOpts();
+  expect(opts.length).toBeGreaterThan(0);
+  for (const o of opts) expect(o).toEqual(SERIALIZABLE_TX);
+}
+
+describe("every mutating route opens its transaction at SERIALIZABLE", () => {
+  // Postgres SSI only serializes transactions that are THEMSELVES
+  // serializable: a READ COMMITTED transaction is invisible to conflict
+  // tracking, so a bare $transaction here doesn't merely race its own
+  // siblings — it defeats the isolation on the already-correct people.ts
+  // paths it races (e.g. role re-tier vs PATCH /people/:id/role both
+  // committing into zero remaining operators).
+  const roleSeed: RoleSeed = {
+    id: "r1",
+    name: "Reception",
+    slug: "reception",
+    startingPoint: "family",
+    featureGrants: [{ moduleId: "files", level: "act" }],
+  };
+
+  it("POST /access/roles (create) — slug derivation is a range-read-then-insert", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma)).post("/api/access/roles").send(payload());
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("POST /access/roles (duplicate)", async () => {
+    const prisma = createPrismaMock({ roles: [roleSeed] });
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ sourceRoleId: "r1" });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("PATCH /access/roles/:id (plain update)", async () => {
+    const prisma = createPrismaMock({ roles: [roleSeed] });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ name: "Front Desk" });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("PATCH /access/roles/:id (re-tier loop — rails 4/5 COUNT-then-write)", async () => {
+    const prisma = createPrismaMock({
+      roles: [roleSeed],
+      users: [
+        { id: "u1", username: "ana", role: "family", accessRoleId: "r1" },
+        { id: "owner-1", username: "own", role: "owner" },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ startingPoint: "guest" });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("DELETE /access/roles/:id", async () => {
+    const prisma = createPrismaMock({ roles: [roleSeed] });
+    const res = await request(buildApp(prisma)).delete("/api/access/roles/r1");
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("POST /access/roles/:id/assign — rails 4/5 COUNT-then-write", async () => {
+    const prisma = createPrismaMock({
+      roles: [roleSeed],
+      users: [
+        { id: "u1", username: "ana", role: "guest" },
+        { id: "owner-1", username: "own", role: "owner" },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles/r1/assign")
+      .send({ userIds: ["u1"] });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
 });
 
 // ── auth floor ─────────────────────────────────────────────────────
@@ -557,6 +678,76 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u2");
   });
 
+  it("re-tiers a member assigned DURING the change — the membership is read inside the transaction", async () => {
+    // B2 regression. The old code snapshotted members before the tx, so
+    // anyone assigned in the window kept User.role at the OLD, higher tier
+    // while startingPoint moved down — layer-1 requireRole then honours the
+    // stale admin tier forever, with nothing to reconcile it.
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "admin" }],
+      users: [
+        { id: "u1", username: "ana", role: "admin", accessRoleId: "r1" },
+        { id: "owner-1", username: "own", role: "owner" },
+        { id: "admin-keeper", username: "keeper", role: "admin" },
+      ],
+    });
+    // Land the concurrent assignment at a point that DISCRIMINATES the two
+    // orderings: inside the transaction, on the first grant write — which
+    // happens AFTER the old code's pre-tx membership snapshot but BEFORE
+    // the new code's in-tx membership read. Old code → u2-late is missed
+    // and keeps role "admin"; new code → it is re-tiered.
+    const realDeleteMany = prisma.accessRoleFeatureGrant.deleteMany;
+    prisma.accessRoleFeatureGrant.deleteMany = vi.fn(async (args: any) => {
+      const out = await realDeleteMany(args);
+      if (!prisma._users().has("u2-late")) {
+        prisma._users().set("u2-late", {
+          id: "u2-late",
+          username: "late",
+          displayName: "Late",
+          role: "admin",
+          nextcloudUsername: null,
+          directoryStatus: "ACTIVE",
+          accessRoleId: "r1",
+          usagePolicy: null,
+        });
+      }
+      return out;
+    });
+
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ startingPoint: "family" });
+
+    expect(res.status).toBe(200);
+    expect(prisma._users().get("u1").role).toBe("family");
+    // the late arrival is re-tiered too — no stale admin left behind
+    expect(prisma._users().get("u2-late").role).toBe("family");
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u2-late");
+  });
+
+  it("does not emit a 'Role changed: X → X' audit row for a member already at the target tier", async () => {
+    // Rider: the post-effect loop used to run the full tier-change runner
+    // for every member, so a member already sitting at the target tier got
+    // an audit row claiming family → family. They still get revoked.
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "admin" }],
+      users: [
+        // drifted: holds the admin-based role but is already family
+        { id: "u1", username: "ana", role: "family", accessRoleId: "r1" },
+        { id: "owner-1", username: "own", role: "owner" },
+        { id: "admin-keeper", username: "keeper", role: "admin" },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .patch("/api/access/roles/r1")
+      .send({ startingPoint: "family" });
+    expect(res.status).toBe(200);
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u1");
+    expect(recordActivityMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Role changed" }),
+    );
+  });
+
   it("re-clamps stored grants when the starting point drops below their floor", async () => {
     const prisma = createPrismaMock({
       roles: [
@@ -585,6 +776,13 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
     expect(prisma._users().get("actor-1").role).toBe("family");
+    // ATOMICITY: the rail now fires INSIDE the transaction, after the role
+    // row and its grants were already rewritten — the rollback must undo
+    // them, or the role keeps a startingPoint its members never received.
+    expect(prisma._roles().get("r1").startingPoint).toBe("family");
+    expect(prisma._roles().get("r1").featureGrants).toEqual([
+      { moduleId: "files", level: "act" },
+    ]);
   });
 
   it("refuses demoting the role that holds the last active operators (last-operator invariant)", async () => {
@@ -595,6 +793,13 @@ describe("PATCH /api/access/roles/:id", () => {
     const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ startingPoint: "family" });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    // ATOMICITY: same window — the role update + grant rewrite precede the
+    // in-tx invariant, so a refusal must leave the row untouched.
+    expect(prisma._roles().get("r1").startingPoint).toBe("admin");
+    expect(prisma._roles().get("r1").featureGrants).toEqual([
+      { moduleId: "files", level: "act" },
+    ]);
+    expect(prisma._users().get("u1").role).toBe("admin");
   });
 
   it("a set/changed storage default with members kicks the reconciler → syncState pending", async () => {
@@ -699,7 +904,12 @@ describe("DELETE /api/access/roles/:id", () => {
     expect((await request(buildApp(createPrismaMock())).delete("/api/access/roles/nope")).status).toBe(404);
   });
 
-  it("a pending invite racing in after the pre-check keeps its pointer — the Restrict FK rolls the delete back", async () => {
+  // Renamed (review): the previous title claimed to prove ROLLBACK, but the
+  // seed held only a pending invite — which the release filter skips on its
+  // own merits — so nothing was ever written to roll back. This case proves
+  // exactly what it says: the release filter is the complement of the
+  // pre-check, so a raced PENDING row keeps its pointer and the FK refuses.
+  it("a pending invite racing in after the pre-check keeps its pointer — the Restrict FK refuses the delete", async () => {
     const prisma = createPrismaMock({
       roles: [roleSeed],
       invites: [
@@ -716,6 +926,32 @@ describe("DELETE /api/access/roles/:id", () => {
     expect(res.body.code).toBe("ACCESS_ROLE_IN_USE");
     expect(prisma._roles().has("r1")).toBe(true);
     expect(prisma._invites().get("inv-raced").accessRoleId).toBe("r1");
+  });
+
+  it("ROLLS BACK the non-pending invite release when the FK refuses on a raced pending row", async () => {
+    // Both kinds present: the non-pending row IS released inside the
+    // transaction (a real write), then the raced pending row makes the
+    // delete fail. The release must not survive — otherwise a refused
+    // delete has silently detached historical invites from their role.
+    const prisma = createPrismaMock({
+      roles: [roleSeed],
+      invites: [
+        { id: "inv-accepted", username: "old", accessRoleId: "r1", acceptedAt: PAST, expiresAt: FUTURE },
+        { id: "inv-raced", username: "raced", accessRoleId: "r1", expiresAt: FUTURE },
+      ],
+    });
+    prisma.userInvite.findMany.mockResolvedValueOnce([]); // pre-check misses the race
+    const res = await request(buildApp(prisma)).delete("/api/access/roles/r1");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("ACCESS_ROLE_IN_USE");
+    expect(prisma._roles().has("r1")).toBe(true);
+    // the raced pending row was never touched…
+    expect(prisma._invites().get("inv-raced").accessRoleId).toBe("r1");
+    // …and the released non-pending row is back to pointing at the role.
+    expect(prisma._invites().get("inv-accepted").accessRoleId).toBe("r1");
+    expect(recordActivityMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Access role deleted" }),
+    );
   });
 });
 

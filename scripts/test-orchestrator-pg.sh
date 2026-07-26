@@ -7,12 +7,17 @@
 # self-gated on RUN_PG_INTEGRATION=1).
 #
 # Backend selection:
-#   * Docker present  -> throwaway `postgres:16` container (matches CI).
+#   * Docker present  -> throwaway `pgvector/pgvector:pg16` container
+#     (matches CI).
 #   * Docker absent   -> throwaway NATIVE cluster via initdb/pg_ctl
 #     (Homebrew postgresql@14+ on PATH). The concurrency behaviour under
 #     test — SELECT ... FOR UPDATE vs pg_advisory_xact_lock under READ
 #     COMMITTED — is identical across PG 14/16, so the proof is valid on
-#     either backend. CI always uses the postgres:16 service container.
+#     either backend. NOTE: the migration set runs `CREATE EXTENSION IF
+#     NOT EXISTS vector` (20260412000000_add_file_content_index), so the
+#     native server needs pgvector installed (e.g. `brew install pgvector`);
+#     the Docker backend gets it from the image. CI always uses the
+#     pgvector/pgvector:pg16 service container.
 #
 # Prerequisites: Node on the host; plus EITHER Docker OR a local
 # PostgreSQL server (initdb/pg_ctl/pg_isready on PATH). Runtime: ~60-90 s.
@@ -47,21 +52,28 @@ run_pg_tests() {
 }
 
 # ---------------------------------------------------------------------------
-# Backend A: Docker (postgres:16), matches CI.
+# Backend A: Docker (pgvector/pgvector:pg16), matches CI.
+#
+# WARP-1541: the image MUST stay identical to the pg-integration job in
+# .github/workflows/orchestrator-tests.yml. Plain postgres:16 does not ship
+# the pgvector extension, so `prisma migrate deploy` fails on
+# 20260412000000_add_file_content_index (`CREATE EXTENSION ... vector`).
+# Parity is pinned by
+# apps/orchestrator/src/__tests__/pg-lane-image-parity.test.ts.
 # ---------------------------------------------------------------------------
 run_with_docker() {
   local PG_CONTAINER="droplet-warp1026-pg-$SUFFIX"
   cleanup() { docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true; }
   trap cleanup EXIT
 
-  echo "--- booting throwaway postgres:16 container on :${PG_PORT} ---"
+  echo "--- booting throwaway pgvector/pgvector:pg16 container on :${PG_PORT} ---"
   docker run -d --rm \
     --name "$PG_CONTAINER" \
     -e POSTGRES_USER="$PG_USER" \
     -e POSTGRES_PASSWORD="$PG_PASSWORD" \
     -e POSTGRES_DB="$PG_DB" \
     -p "${PG_PORT}:5432" \
-    postgres:16 >/dev/null
+    pgvector/pgvector:pg16 >/dev/null
 
   for i in $(seq 1 30); do
     if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then

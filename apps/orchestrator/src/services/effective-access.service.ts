@@ -4,7 +4,7 @@
  * The ONE layer-2 resolver every per-person authorization surface consults
  * (module gate T4, tool-catalog builder T5, cloud router + connector routes
  * T6, and the People UI's read-only drawer via GET
- * /api/people/:id/effective-access). §3 verbatim:
+ * /api/people/:id/effective-access). The COMPOSITION below follows §3:
  *
  *   tier          = User.role                       (the ADR-004 floor)
  *   features      = tier==owner ? ALL
@@ -26,6 +26,45 @@
  * `accessRoleId` (every user today) resolves to the tier's FULL catalog —
  * today's behavior bit-for-bit; the coarse requireRole floors stay
  * enforcing unchanged at layer 1.
+ *
+ * ARCHIVE ≠ REVOKE (deliberate, review C2). `AccessRole.state` is NOT read
+ * here: archiving a role stops it being ASSIGNABLE (both assign paths 409
+ * on an archived role) but never silently strips access from the people who
+ * already hold it — that would be a mass, invisible permission change fired
+ * by a UI action whose copy says "archive". The operator's explicit path to
+ * remove access is reassignment (or delete, which is blocked until the role
+ * is empty). `GET /api/access/roles` therefore returns archived and active
+ * roles alike, each carrying its `state` for the client to group by.
+ * Pinned by "an ARCHIVED role still resolves its grants for existing
+ * members (archive is not revoke)".
+ *
+ * READ CONSISTENCY (review C1 — known, accepted for v1). The composition
+ * follows §3, but the reads it composes span MULTIPLE snapshots: the user
+ * row and the parallel batch below each take their own, with no enclosing
+ * transaction. A role change committing mid-resolve can therefore yield a
+ * mixed view (e.g. the new tier against the old grant rows).
+ *
+ * On the FEATURE axis the consequence is bounded and one-directional:
+ * `clampLevel` re-clamps every grant against the tier at compose time, so a
+ * torn read can only UNDER-permit, never over-permit.
+ *
+ * That guarantee does NOT extend to the CONNECTORS axis, which applies no
+ * compose-time tier floor — only `min(roleGrant, connection.writeEnabled)`.
+ * The O-2 floor (read_write is selectable only on Admin-based roles) lives
+ * in `normalizeGrants` at WRITE time, so a resolve that reads
+ * `connectorGrants` before a `PATCH {startingPoint: admin→family}` commits
+ * and the rest after can return `read_write` — WIDER than committed state,
+ * with nothing to clamp it. The window is one request, and the connection's
+ * own `writeEnabled` gate plus the staged-outbox human confirm still sit
+ * above it, so the practical blast radius is small — but T6 (WARP-1530)
+ * owns the connector enforcement path and must not read this paragraph as
+ * promising a floor the resolver does not apply.
+ *
+ * Closing the tear properly means wrapping the reads in a `RepeatableRead`
+ * transaction and threading that handle into `getEffectiveModuleIds` (the
+ * array form of $transaction does NOT help) — deferred to a follow-up
+ * because it changes a modules.service signature shared with the module
+ * gate.
  *
  * Shape: scope-loader-shaped singleton (module-bound Prisma + availability
  * config, idempotent boot init beside initScopeLoader, fail-closed throw

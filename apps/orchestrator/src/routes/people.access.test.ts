@@ -54,6 +54,7 @@ vi.mock("../services/effective-access.service.js", () => ({
 }));
 
 import { createPeopleRouter } from "./people.js";
+import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
 import type { ScopeName } from "../middleware/scope.js";
 
 interface UserSeed {
@@ -95,10 +96,36 @@ function createPrismaMock(seed: {
   for (const r of seed.roles ?? []) roles.set(r.id, { state: "active", ...r });
   for (const x of seed.exceptions ?? []) exceptions.push({ createdAt: new Date(), ...x });
 
+  // Options argument of every $transaction call, in order (review T1: the
+  // old stub dropped it, so a bare READ COMMITTED transaction shipped green
+  // — and RC transactions are invisible to Postgres SSI, defeating the
+  // isolation on the serializable paths they race). Snapshot/restore gives
+  // the stub real rollback so atomicity is provable.
+  const txOpts: Array<unknown> = [];
+  const snapshot = () => ({
+    users: new Map([...users].map(([k, v]) => [k, structuredClone(v)])),
+    roles: new Map([...roles].map(([k, v]) => [k, structuredClone(v)])),
+    exceptions: exceptions.map((x) => structuredClone(x)),
+  });
+
   const self: any = {
     _users: () => users,
     _exceptions: () => exceptions,
-    $transaction: async (fn: (tx: any) => Promise<unknown>) => fn(self),
+    _txOpts: () => txOpts,
+    $transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>, opts?: unknown) => {
+      txOpts.push(opts);
+      const snap = snapshot();
+      try {
+        return await fn(self);
+      } catch (err) {
+        users.clear();
+        for (const [k, v] of snap.users) users.set(k, v);
+        roles.clear();
+        for (const [k, v] of snap.roles) roles.set(k, v);
+        exceptions = snap.exceptions;
+        throw err;
+      }
+    }),
     user: {
       findUnique: vi.fn(async ({ where: { id } }: any) => {
         const row = users.get(id);
@@ -175,6 +202,45 @@ beforeEach(() => {
   recordActivityMock.mockClear();
   revokeAllSessionsMock.mockClear();
   resolveEffectiveAccessMock.mockReset();
+});
+
+// ── transaction isolation (review B1/T1) ───────────────────────────
+
+function expectAllSerializable(prisma: any) {
+  const opts = prisma._txOpts();
+  expect(opts.length).toBeGreaterThan(0);
+  for (const o of opts) expect(o).toEqual(SERIALIZABLE_TX);
+}
+
+describe("every mutating people-access route opens its transaction at SERIALIZABLE", () => {
+  it("PATCH /people/:id/access", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ id: "r1", name: "Reception", startingPoint: "family" as const }],
+      users: [
+        { id: "u1", username: "ana", role: "guest" },
+        { id: "owner-1", username: "own", role: "owner" },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .patch("/api/people/u1/access")
+      .send({ accessRoleId: "r1" });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("PUT /people/:id/access-exceptions", async () => {
+    const prisma = createPrismaMock({
+      users: [
+        { id: "u1", username: "ana", role: "family" },
+        { id: "owner-1", username: "own", role: "owner" },
+      ],
+    });
+    const res = await request(buildApp(prisma))
+      .put("/api/people/u1/access-exceptions")
+      .send({ exceptions: [{ moduleId: "email", effect: "deny" }] });
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
 });
 
 // ── PATCH /api/people/:id/access ───────────────────────────────────

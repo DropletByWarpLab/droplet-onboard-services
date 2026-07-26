@@ -302,4 +302,97 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
     expect(createInviteMock.mock.calls[0][0].role).toBe("guest");
     expect(createInviteMock.mock.calls[0][0].accessRoleId).toBeUndefined();
   }, 15000);
+
+  it("resets a selection whose role was ARCHIVED mid-session (review F3 — success branch)", async () => {
+    // Same bug class as N1, opposite branch: the refetch SUCCEEDS but the
+    // selected role is now archived, so it's filtered out of `accessRoles`
+    // and its <option> disappears while state still holds role:<id>. The
+    // native select then displays the first option (Admin!) while a submit
+    // sends the archived id — a ROLE_TIER_MISMATCH 400 the operator can't
+    // explain, having just seen "Admin" in the box.
+    listAccessRolesMock.mockReset();
+    listAccessRolesMock
+      .mockResolvedValueOnce({ roles: [FINANCE] })
+      .mockResolvedValueOnce({ roles: [{ ...FINANCE, state: "archived" }] });
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { id: "alice", username: "alice", displayName: "Alice", userId: "u-alice", role: "family" },
+      ],
+    });
+    createInviteMock.mockResolvedValueOnce({
+      token: "x".repeat(43),
+      url: "http://droplet.local/invite/" + "x".repeat(43),
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+    });
+
+    const select = await openInviteModal();
+    await waitFor(() => {
+      expect(within(select).queryByRole("option", { name: "Finance" })).toBeInTheDocument();
+    });
+    fireEvent.change(select, { target: { value: `role:${FINANCE.id}` } });
+    expect(select.value).toBe(`role:${FINANCE.id}`);
+
+    // Same real refetch trigger as N1: a person-access save.
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    const editDialog = await screen.findByRole("dialog", { name: /edit alice/i });
+    fireEvent.change(within(editDialog).getByLabelText("Assigned role"), {
+      target: { value: "tier:guest" },
+    });
+    fireEvent.click(within(editDialog).getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(listAccessRolesMock).toHaveBeenCalledTimes(2), {
+      timeout: 5000,
+    });
+
+    // The guard: the vanished selection falls back to the default.
+    await waitFor(() => {
+      expect(select.value).toBe("tier:guest");
+    });
+    expect(within(select).queryByRole("option", { name: "Finance" })).toBeNull();
+    // The read SUCCEEDED, so this is NOT the degraded state — no caption.
+    expect(screen.queryByText(/couldn't load your custom roles/i)).toBeNull();
+
+    // Submit sends the plain tier, never the archived role id.
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "reception@acme.co" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /generate (invite )?link|generate$/i }),
+    );
+    await waitFor(() => expect(createInviteMock).toHaveBeenCalledTimes(1));
+    expect(createInviteMock.mock.calls[0][0].role).toBe("guest");
+    expect(createInviteMock.mock.calls[0][0].accessRoleId).toBeUndefined();
+  }, 15000);
+
+  it("keeps a still-valid custom-role selection across a successful refetch (no over-reset)", async () => {
+    // The guard must reconcile ONLY vanished selections — a role that
+    // survives the refetch keeps the admin's pick.
+    listAccessRolesMock.mockReset();
+    listAccessRolesMock
+      .mockResolvedValueOnce({ roles: [FINANCE, OPS] })
+      .mockResolvedValueOnce({ roles: [FINANCE, OPS] });
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { id: "alice", username: "alice", displayName: "Alice", userId: "u-alice", role: "family" },
+      ],
+    });
+
+    const select = await openInviteModal();
+    await waitFor(() => {
+      expect(within(select).queryByRole("option", { name: "Finance" })).toBeInTheDocument();
+    });
+    fireEvent.change(select, { target: { value: `role:${FINANCE.id}` } });
+
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    const editDialog = await screen.findByRole("dialog", { name: /edit alice/i });
+    fireEvent.change(within(editDialog).getByLabelText("Assigned role"), {
+      target: { value: "tier:guest" },
+    });
+    fireEvent.click(within(editDialog).getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(listAccessRolesMock).toHaveBeenCalledTimes(2), {
+      timeout: 5000,
+    });
+    expect(select.value).toBe(`role:${FINANCE.id}`);
+  }, 15000);
 });
