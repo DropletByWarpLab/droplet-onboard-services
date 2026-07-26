@@ -146,6 +146,7 @@ import {
   denyRefreshToken,
 } from "../services/jwt.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 // ── In-memory User + Invite mock (sync layout with auth.invites.test.ts) ──
 interface UserRow {
@@ -169,7 +170,14 @@ function createPrismaMock(seed: UserRow[] = []) {
   const invites: any[] = [];
   let inviteCounter = 0;
   const self: any = {};
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  // WARP-1570: shared seam (auth.ts opens its guard rails with
+  // SERIALIZABLE_TX — the old stub could not see the option at all).
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { users, invites },
+  });
+  self.$transaction = seam.$transaction;
+  self._seam = () => seam;
   // PR #375 — login checks for an enabled TOTP factor post-password. These
   // UUID-shape fixtures have none, so the delegate returns null (gate skipped).
   self.totpCredential = {

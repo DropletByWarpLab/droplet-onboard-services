@@ -54,6 +54,11 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 
 import { createAccessRouter } from "./access.js";
 import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+  gate,
+} from "../__tests__/helpers/prisma-tx-harness.js";
 
 // ── in-memory prisma stub ──────────────────────────────────────────
 
@@ -141,44 +146,26 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
     _count: { users: [...users.values()].filter((u) => u.accessRoleId === row.id).length },
   });
 
-  // Every $transaction call's options argument, in call order. The old stub
-  // dropped this argument entirely, which is what let four bare
-  // `prisma.$transaction(fn)` calls ship green (review T1) — a READ
-  // COMMITTED transaction is invisible to Postgres SSI, so it silently
-  // defeats the isolation on the serializable paths it races.
-  const txOpts: Array<unknown> = [];
-  // Snapshot/restore so a throw inside the callback ROLLS BACK, like a real
-  // interactive transaction. Without this no test could prove atomicity —
-  // partial writes survived a refusal and nothing noticed.
-  const snapshot = () => ({
-    roles: new Map([...roles].map(([k, v]) => [k, structuredClone(v)])),
-    users: new Map([...users].map(([k, v]) => [k, structuredClone(v)])),
-    invites: new Map([...invites].map(([k, v]) => [k, structuredClone(v)])),
+  // WARP-1570: the transaction seam is SHARED (__tests__/helpers/
+  // prisma-tx-harness.ts), not hand-rolled here. It records every call's
+  // options argument — the argument the old stub dropped entirely, which is
+  // what let bare `prisma.$transaction(fn)` calls ship green (review T1); a
+  // READ COMMITTED transaction is invisible to Postgres SSI, so it silently
+  // defeats the isolation on the serializable paths it races. It also
+  // snapshots/restores the stores so a throw inside the callback ROLLS
+  // BACK, like a real interactive transaction: without that no test could
+  // prove atomicity, and partial writes survived a refusal unnoticed.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { roles, users, invites },
   });
-  const restore = (snap: ReturnType<typeof snapshot>) => {
-    roles.clear();
-    for (const [k, v] of snap.roles) roles.set(k, v);
-    users.clear();
-    for (const [k, v] of snap.users) users.set(k, v);
-    invites.clear();
-    for (const [k, v] of snap.invites) invites.set(k, v);
-  };
 
   const self: any = {
     _roles: () => roles,
     _users: () => users,
     _invites: () => invites,
-    _txOpts: () => txOpts,
-    $transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>, opts?: unknown) => {
-      txOpts.push(opts);
-      const snap = snapshot();
-      try {
-        return await fn(self);
-      } catch (err) {
-        restore(snap);
-        throw err;
-      }
-    }),
+    _seam: () => seam,
+    $transaction: seam.$transaction,
     accessRole: {
       findMany: vi.fn(async ({ where }: any = {}) => {
         let out = [...roles.values()];
@@ -371,10 +358,83 @@ beforeEach(() => {
 
 /** Every transaction this request opened ran at SERIALIZABLE. */
 function expectAllSerializable(prisma: any) {
-  const opts = prisma._txOpts();
-  expect(opts.length).toBeGreaterThan(0);
-  for (const o of opts) expect(o).toEqual(SERIALIZABLE_TX);
+  expectAllTransactionsAt(prisma._seam(), SERIALIZABLE_TX);
 }
+
+// ── concurrent mutation (WARP-1570) ────────────────────────────────
+//
+// The assertion above proves the route ASKED for SERIALIZABLE. It cannot
+// prove the isolation is load-bearing — with a serial stub the second
+// request always sees the first one's commit, so a route that dropped
+// SERIALIZABLE_TX would keep this suite green. These two tests close that
+// gap by driving both requests through the shared seam's overlapping
+// transactions, gated so their interleaving is deterministic rather than
+// whatever the event loop happens to order.
+
+describe("concurrent same-name creates (WARP-1570 — isolation is load-bearing)", () => {
+  /**
+   * Park both requests inside their transaction, immediately after
+   * deriveUniqueSlug's RANGE READ (`slug startsWith base`) and before the
+   * insert into that range. That is the exact window access.ts §POST
+   * documents as the reason SERIALIZABLE_TX is passed there.
+   */
+  function raceTwoCreates(prisma: any) {
+    const app = buildApp(prisma);
+    const bothRead = gate(2);
+    const realFindMany = prisma.accessRole.findMany;
+    prisma.accessRole.findMany = vi.fn(async (args: any) => {
+      const rows = await realFindMany(args);
+      if (args?.where?.slug?.startsWith !== undefined) {
+        await bothRead.arriveAndWait();
+      }
+      return rows;
+    });
+    return Promise.all([
+      request(app).post("/api/access/roles").send(payload({ name: "Reception" })),
+      request(app).post("/api/access/roles").send(payload({ name: "Reception" })),
+    ]);
+  }
+
+  it("SERIALIZABLE: exactly one create commits, the loser aborts, slugs stay unique", async () => {
+    const prisma = createPrismaMock();
+    const responses = await raceTwoCreates(prisma);
+
+    // Exactly one transaction hit the SSI conflict rule.
+    expect(prisma._seam().conflicts()).toBe(1);
+    expect(responses.filter((r) => r.status === 200)).toHaveLength(1);
+
+    const slugs = [...prisma._roles().values()].map((r: any) => r.slug);
+    expect(slugs).toEqual(["reception"]);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    expectAllSerializable(prisma);
+
+    // NOTE (handoff, not this ticket): the aborted request currently falls
+    // through to `next(err)`, so the client sees a generic 500 rather than a
+    // retry or a 409. Asserting "exactly one 200" instead of the loser's
+    // exact status keeps this a regression guard on the INVARIANT without
+    // pinning that mapping as correct.
+    expect(responses.filter((r) => r.status !== 200)).toHaveLength(1);
+  });
+
+  it("REGRESSION CANARY — dropping the isolation option lets both creates commit the same slug", async () => {
+    // Simulate exactly the regression: the call site loses SERIALIZABLE_TX
+    // and inherits Postgres' default, READ COMMITTED. Nothing else changes.
+    const prisma = createPrismaMock();
+    const serializable = prisma.$transaction;
+    prisma.$transaction = (fn: any) => serializable(fn);
+
+    await raceTwoCreates(prisma);
+
+    expect(prisma._seam().conflicts()).toBe(0);
+    const slugs = [...prisma._roles().values()].map((r: any) => r.slug);
+    // Both rows land on "reception" — in Postgres the @unique then 500s the
+    // loser instead of handing it "reception-2". Under the OLD serial stub
+    // this scenario could not be expressed at all, which is why the bare
+    // `$transaction(fn)` shape shipped CI-green (WARP-1570).
+    expect(slugs).toEqual(["reception", "reception"]);
+    expect(new Set(slugs).size).toBeLessThan(slugs.length);
+  });
+});
 
 describe("every mutating route opens its transaction at SERIALIZABLE", () => {
   // Postgres SSI only serializes transactions that are THEMSELVES

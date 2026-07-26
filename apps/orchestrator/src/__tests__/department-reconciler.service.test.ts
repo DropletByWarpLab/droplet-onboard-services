@@ -64,6 +64,7 @@ import {
   _resetReconcileKickForTests,
 } from "../services/department-reconciler.service.js";
 import { DROPLET_ADMINS_GROUP, MASK_ADMIN } from "../services/department-provisioner.service.js";
+import { createReconcilerSeam } from "./helpers/prisma-tx-harness.js";
 
 interface FakeDepartment {
   id: string;
@@ -906,5 +907,109 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
     expect(result.adminGroupAdded).toBe(0);
     expect(result.adminGroupRemoved).toBe(0);
+  });
+});
+
+// ── Multi-tick convergence through the shared seam (WARP-1570) ─────
+//
+// Every route suite mocks `kickReconcile` to a bare `vi.fn()`, so everything
+// the reconciler does AFTER the response is invisible to it: a route test can
+// prove the kick was scheduled and nothing about whether the work it schedules
+// ever lands. This file could always call `reconcileDepartments()` twice by
+// hand, but "twice" is a guess — nothing failed if convergence actually needed
+// three ticks, and nothing failed if it needed infinitely many. The seam turns
+// the tick into something a suite can DRIVE: kicks are accounted for, ticks run
+// on demand, and convergence is a predicate with a runaway cap.
+
+describe("reconcileDepartments — multi-tick convergence (WARP-1570 seam)", () => {
+  /** A pending department whose first provisioning attempt fails at NC. */
+  function transientlyFailingProvision() {
+    const d = dept({ state: "pending" });
+    const m = membership({ syncState: "pending", right: "reader" });
+    const u: FakeUser = { id: "user-1", nextcloudUsername: "alice" };
+    const prisma = buildPrisma([d], [m], [u]);
+    // Tick 1 only: the groupfolder create 5xxs, so the department cannot go
+    // active and the membership is parked "department not active yet".
+    gfCreateFolderMock.mockRejectedValueOnce(new Error("nc groupfolders 503"));
+    return { prisma, d, m };
+  }
+
+  it("records the route's kick WITHOUT running it (routes must not block on convergence)", async () => {
+    const { prisma } = transientlyFailingProvision();
+    const seam = createReconcilerSeam(() => reconcileDepartments(prisma as any));
+
+    seam.kickReconcile();
+    seam.kickReconcile();
+
+    expect(seam.kicks()).toBe(2);
+    // Nothing has swept yet — the response returned before convergence, which
+    // is the whole point of the debounced kick.
+    expect(ncEnsureGroupMock).not.toHaveBeenCalled();
+    expect(prisma.deptRows.get("dept-1")!.state).toBe("pending");
+  });
+
+  it("drainKicks() runs exactly one tick per kick", async () => {
+    const { prisma } = transientlyFailingProvision();
+    const seam = createReconcilerSeam(() => reconcileDepartments(prisma as any));
+
+    seam.kickReconcile();
+    seam.kickReconcile();
+    const results = await seam.drainKicks();
+
+    expect(results).toHaveLength(2);
+    expect(seam.kicks()).toBe(0);
+  });
+
+  it("converges in TWO ticks — the second tick's work is the part route suites cannot see", async () => {
+    const { prisma, m } = transientlyFailingProvision();
+    const seam = createReconcilerSeam(() => reconcileDepartments(prisma as any));
+
+    const [first] = await seam.runTicks(1);
+    // Tick 1: department did not converge, so the membership is parked with
+    // the explicit reason — never silently reported as synced.
+    expect(first.membershipsSynced).toBe(0);
+    expect(prisma.deptRows.get("dept-1")!.state).not.toBe("active");
+    expect(prisma.memRows.get(m.id)!.syncState).toBe("failed");
+    expect(prisma.memRows.get(m.id)!.syncError).toBe("department not active yet");
+
+    const [second] = await seam.runTicks(1);
+    // Tick 2: NC is healthy, the department lands active AND the membership
+    // attaches on the same sweep.
+    expect(prisma.deptRows.get("dept-1")!.state).toBe("active");
+    expect(second.membershipsSynced).toBe(1);
+    expect(prisma.memRows.get(m.id)!.syncState).toBe("synced");
+    expect(prisma.memRows.get(m.id)!.syncError).toBeNull();
+  });
+
+  it("runToConvergence settles on the membership sync, well inside the cap", async () => {
+    const { prisma } = transientlyFailingProvision();
+    const seam = createReconcilerSeam(() => reconcileDepartments(prisma as any));
+
+    const ticks = await seam.runToConvergence({
+      settled: (r) => r.membershipsSynced > 0,
+      maxTicks: 5,
+    });
+
+    expect(ticks).toHaveLength(2);
+    expect(prisma.memRows.get("mem-1")!.syncState).toBe("synced");
+  });
+
+  it("a permanently failing sweep is reported as NON-convergence, not as slowness", async () => {
+    // The guarantee the hand-rolled "call it twice" idiom never had. A
+    // reconciler that re-pushes the same drift on every tick forever is an
+    // infinite-work bug; without a cap it reads as a tick that just needs one
+    // more try, and a suite asserting a fixed number of ticks says nothing.
+    const d = dept({ state: "pending" });
+    const prisma = buildPrisma([d]);
+    gfCreateFolderMock.mockRejectedValue(new Error("nc groupfolders 503"));
+    const seam = createReconcilerSeam(() => reconcileDepartments(prisma as any));
+
+    await expect(
+      seam.runToConvergence({
+        settled: (r) => r.departmentsConverged > 0,
+        maxTicks: 4,
+      }),
+    ).rejects.toThrow(/did not converge within 4 ticks/i);
+    expect(prisma.deptRows.get(d.id)!.state).not.toBe("active");
   });
 });
