@@ -58,6 +58,11 @@ import {
   InvalidInviteRoleError,
 } from "../services/onboarding-team-invite.service.js";
 import {
+  validateInviteAccessRole,
+  InviteAccessRoleError,
+} from "../services/invite-access-role.service.js";
+import type { AccessRole } from "@prisma/client";
+import {
   sendInviteEmail,
   type SendOptions,
 } from "../services/email-channel.service.js";
@@ -96,6 +101,43 @@ const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
 // 403s known-but-unassignable ROLES (ROLE_NOT_ASSIGNABLE) — two different
 // failure classes on purpose.
 
+/**
+ * WARP-1539 — the ONLY columns the People surface may serialize.
+ *
+ * These routes used to hand back whole `prisma.user` rows, which carry
+ * three things no client may ever receive:
+ *
+ *   • `passwordHash`    — the argon2id PHC hash. schema.prisma states it is
+ *                         "NEVER logged"; shipping it in a JSON body is
+ *                         strictly worse than a log line.
+ *   • `emailLookupHash` — the WARP-233 HMAC-SHA256 blind index over the
+ *                         normalized email. It carries the plaintext-
+ *                         uniqueness guarantee that `email @unique` used to
+ *                         hold; handing it out lets a holder confirm-by-guess
+ *                         which address a row belongs to, defeating the
+ *                         property the blind index exists to provide.
+ *   • `email`           — an encrypted dcv1: blob at rest (WARP-233). These
+ *                         routes never call `decryptColumn`, so it was only
+ *                         ever emitted as ciphertext: useless to the client
+ *                         and needless exposure. No consumer reads it.
+ *
+ * owner/admin-only is not a mitigation — it just narrows *whose* session
+ * has to leak. This is an allow-list on purpose: a column added to the
+ * schema later is excluded by default and must be opted in deliberately,
+ * which is the failure direction we want.
+ */
+const PUBLIC_USER_SELECT = {
+  id: true,
+  username: true,
+  displayName: true,
+  role: true,
+  isLocal: true,
+  nextcloudUsername: true,
+  accessRoleId: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 const SCOPE_VALUES = [
   "team",
   "exec_only",
@@ -132,6 +174,11 @@ const scopeSchema = z.object({
 const inviteSchema = z.object({
   email: z.string().min(1).max(200),
   role: z.string().min(1).max(32),
+  // WARP-1533 (RBAC v2 T9): optional custom access role granted by this
+  // invite. Shape-checked here; existence/state/rank/tier-agreement are
+  // validated by invite-access-role.service in the handler (shared with the
+  // legacy POST /auth/invites surface so the two can never diverge).
+  accessRoleId: z.string().uuid().optional(),
 });
 
 // WARP-1271 (T19a): per-user usage settings. `null` explicitly clears the
@@ -236,7 +283,12 @@ export function createPeopleRouter(
     requireRole("owner", "admin"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const people = await prisma.user.findMany();
+        // WARP-1539 — project at the query, not after: the hash never
+        // enters this process's memory, so it cannot reach a heap dump,
+        // an error serializer, or a future `res.json(row)` added here.
+        const people = await prisma.user.findMany({
+          select: PUBLIC_USER_SELECT,
+        });
         res.json({ people });
       } catch (err) {
         next(err);
@@ -292,6 +344,12 @@ export function createPeopleRouter(
         // Only recognized invite roles reach the rails; an unknown role
         // string falls through to createTeamInvite's typed 400. Fail closed
         // if the actor's role claim is absent (inside the guard).
+        //
+        // `inviterRole` is still read out here because the WARP-1533
+        // access-role validation below applies the SAME rank cap to the
+        // custom role's startingPoint — the guard rails cover the tier, the
+        // shared invite-access-role service covers the custom role.
+        const inviterRole = req.user?.role;
         if (isInviteRole(parsed.data.role)) {
           assertAssignableForCreate({
             actorRole: req.user?.role,
@@ -301,12 +359,35 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1533 (RBAC v2 T9): validate the optional custom access role
+        // BEFORE any write — fail-closed via the shared service (exists,
+        // active, assignable startingPoint, WARP-623 rank cap on the role's
+        // startingPoint with the same 403 shape as the tier cap above, and
+        // tier agreement so the accept path's fallback tier can never drift
+        // from the operator's pick).
+        let accessRole: AccessRole | null = null;
+        if (parsed.data.accessRoleId) {
+          try {
+            accessRole = await validateInviteAccessRole(prisma, {
+              accessRoleId: parsed.data.accessRoleId,
+              inviteTier: parsed.data.role,
+              inviterRole,
+            });
+          } catch (err) {
+            if (err instanceof InviteAccessRoleError) {
+              return res.status(err.status).json({ error: err.message, code: err.code });
+            }
+            throw err;
+          }
+        }
+
         let invite;
         try {
           invite = await createTeamInvite(prisma, {
             email: parsed.data.email,
             role: parsed.data.role,
             createdBy: req.user?.username ?? "unknown",
+            accessRoleId: accessRole?.id ?? null,
           });
         } catch (err) {
           // Typed validation errors → 400 with the service's `code` so the
@@ -341,17 +422,30 @@ export function createPeopleRouter(
         // delivery outcome — but NEVER the token (it's a bearer credential; an
         // audit row is not the place for it). Lifecycle events go on the `auth`
         // kind (matches the DELETE /people/:id "User removed" convention above).
+        // WARP-1533: an access-role invite gets the ADR-032 §5 wording
+        // ("Invite created with access role" — the free-text house style,
+        // same kind/refs shape as the shipped "Teammate invited"); plain
+        // tier invites keep the existing entry byte-for-byte.
         await recordActivity({
           kind: "auth",
           severity: send.status === "sent" ? "ok" : "warn",
           sourceIcon: "user-plus",
-          what: "Teammate invited",
-          sub: `${invite.email} · ${invite.role}`,
+          what: accessRole ? "Invite created with access role" : "Teammate invited",
+          sub: accessRole
+            ? `${invite.email} · ${accessRole.name}`
+            : `${invite.email} · ${invite.role}`,
           refs: {
             actor: req.user?.username ?? null,
             email: invite.email,
             role: invite.role,
             sendStatus: send.status,
+            ...(accessRole
+              ? {
+                  accessRoleId: accessRole.id,
+                  accessRoleName: accessRole.name,
+                  accessRoleStartingPoint: accessRole.startingPoint,
+                }
+              : {}),
           },
           actor: actorFromRequest(req),
         });
@@ -361,6 +455,7 @@ export function createPeopleRouter(
           token: invite.token,
           email: invite.email,
           role: invite.role,
+          access_role_id: invite.accessRoleId,
           expires_at: invite.expiresAt,
           send_status: send.status,
         });
@@ -405,8 +500,14 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: this row is both read for the guards
+        // below AND returned verbatim by the no-op short-circuit, so it
+        // must never carry the secret columns. Every field the handler
+        // reads (id, username, role, nextcloudUsername) is in the
+        // allow-list.
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });
@@ -447,9 +548,12 @@ export function createPeopleRouter(
             target: { id: existing.id, role: existing.role },
             requestedRole: parsed.data.role,
           });
+          // WARP-1539 — the updated row is returned to the caller, so it
+          // gets the same projection as every other read here.
           return tx.user.update({
             where: { id: req.params.id },
             data: { role: parsed.data.role },
+            select: PUBLIC_USER_SELECT,
           });
         });
 
@@ -506,8 +610,11 @@ export function createPeopleRouter(
           });
         }
 
+        // WARP-1539 — projected: returned to the caller at the end of this
+        // handler. Only `id` and `username` are read off it (the audit row).
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
+          select: PUBLIC_USER_SELECT,
         });
         if (!existing) {
           return res.status(404).json({ error: "User not found" });

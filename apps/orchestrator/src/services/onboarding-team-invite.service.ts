@@ -147,6 +147,11 @@ export interface TeamInviteInput {
   createdBy: string;
   /** Acceptance window in hours (defaults to 72). */
   ttlHours?: number;
+  /** WARP-1533 (RBAC v2 T9): optional custom access role this invite grants.
+   *  VALIDATED BY THE ROUTE (invite-access-role.service — existence, active
+   *  state, assignable startingPoint, WARP-623 rank cap, tier agreement)
+   *  before it reaches here; this service only persists the reference. */
+  accessRoleId?: string | null;
 }
 
 /** What {@link createTeamInvite} returns to the route. */
@@ -156,6 +161,8 @@ export interface TeamInviteResult {
   token: string;
   email: string;
   role: InviteRole;
+  /** WARP-1533: the persisted custom access role, null for plain tier invites. */
+  accessRoleId: string | null;
   expiresAt: Date;
 }
 
@@ -199,6 +206,8 @@ export async function createTeamInvite(
       role: input.role,
       createdBy: input.createdBy,
       expiresAt,
+      // WARP-1533: route-validated custom access role (null = plain tier).
+      accessRoleId: input.accessRoleId ?? null,
     },
   });
 
@@ -207,6 +216,7 @@ export async function createTeamInvite(
     token: created.token,
     email,
     role: input.role,
+    accessRoleId: created.accessRoleId ?? null,
     expiresAt: created.expiresAt,
   };
 }

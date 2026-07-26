@@ -1,5 +1,6 @@
 import { Router, Request } from "express";
 import { randomBytes, createHash } from "node:crypto";
+import type { AccessRole } from "@prisma/client";
 import { z } from "zod";
 import {
   generateInviteToken,
@@ -9,6 +10,12 @@ import {
   isRevoked,
 } from "../services/invite.service.js";
 import { convertInviteDepartmentGrants } from "../services/provisioning-invite.service.js";
+import {
+  validateInviteAccessRole,
+  resolveInviteAccessRoleForAccept,
+  InviteAccessRoleError,
+  type AcceptAccessRoleResolution,
+} from "../services/invite-access-role.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
@@ -274,6 +281,12 @@ const createInviteSchema = z.object({
       right: z.enum(["reader", "contributor", "manager"]).optional(),
     })
   ).optional(),
+  // WARP-1533 (RBAC v2 T9): optional custom access role granted by this
+  // invite. Shape-checked here; existence/state/rank/tier-agreement run in
+  // the handler via invite-access-role.service — the SAME validation the
+  // canonical POST /api/people/invite applies, so the two create surfaces
+  // never diverge (the WARP-1523 lesson). Assigned at accept in the mint.
+  accessRoleId: z.string().uuid().optional(),
 });
 
 const acceptInviteSchema = z.object({
@@ -1723,7 +1736,34 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Build the Nextcloud groups list from the invite's role.
+      // WARP-1533 (RBAC v2 T9): resolve the invite's custom access role
+      // ONCE, before any provisioning, so every downstream consumer — the
+      // Nextcloud groups, the User row, the session role — sees ONE resolved
+      // tier. Fail-OPEN toward least privilege: a role that vanished or was
+      // archived between invite and accept must never fail the accept (the
+      // invitee holds a valid credential); we fall back to the invite's
+      // plain tier and Activity-note the fallback once the account exists.
+      const accessRoleResolution: AcceptAccessRoleResolution | null = invite.accessRoleId
+        ? await resolveInviteAccessRoleForAccept(prisma, invite.accessRoleId)
+        : null;
+      const acceptedAccessRole = accessRoleResolution?.role ?? null;
+      if (invite.accessRoleId && !acceptedAccessRole) {
+        logger.warn(
+          {
+            inviteId: invite.id,
+            accessRoleId: invite.accessRoleId,
+            reason: accessRoleResolution?.fallback,
+            fallbackRole: invite.role,
+          },
+          "invite-accept: access role could not be applied; falling back to the invite's tier",
+        );
+      }
+
+      // Build the Nextcloud groups list from the RESOLVED tier (the access
+      // role's startingPoint when applied, else the invite's role — the two
+      // agree for every invite minted after WARP-1533's tier-agreement
+      // check; the resolved tier wins for drifted/legacy rows so NC groups
+      // can never disagree with the User.role written below).
       // WARP-171: the invite role is now the canonical Role enum (was
       // a free-form String). The mapping below preserves the
       // pre-WARP-171 wire contract — "admin" invitee still lands in
@@ -1739,7 +1779,7 @@ export function createPublicAuthRouter(
       // home. buildNcGroups preserves the pre-WARP-883 role→group mapping and
       // appends the household group without duplication.
       const groups: string[] = buildNcGroups(
-        invite.role as Role,
+        acceptedAccessRole ? acceptedAccessRole.startingPoint : (invite.role as Role),
         householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
 
@@ -1815,10 +1855,16 @@ export function createPublicAuthRouter(
       // yielded an owner session, defeating the ROLE_RANK_EXCEEDED cap on
       // the create endpoint. Unknown/legacy values still collapse to
       // "family" (fail-toward-least-privilege).
-      const role: Role =
+      //
+      // WARP-1533: with an applied access role, the RESOLVED tier is the
+      // role's startingPoint — the same value the upsert below writes to
+      // User.role, so the first session matches every subsequent login and
+      // refresh (the canonical-role rule stays intact).
+      const fallbackTier: Role =
         invite.role === "owner" || invite.role === "admin" || invite.role === "guest"
           ? (invite.role as Role)
           : "family";
+      const role: Role = acceptedAccessRole ? acceptedAccessRole.startingPoint : fallbackTier;
 
       // WARP-485 round 2 — provision the local User row mapping this
       // Nextcloud identity to a local UUID BEFORE signing the JWT, so
@@ -1856,6 +1902,18 @@ export function createPublicAuthRouter(
       // login fails closed — an accepted invite that can never sign in.
       // The plaintext is hashed before it touches the row and never logged.
       const passwordHash = await hashPassword(password);
+      // WARP-1533: when the invite carries an APPLIED access role, BOTH
+      // User.accessRoleId AND User.role = startingPoint land in this ONE
+      // atomic upsert — the "same transaction" contract (a two-step write
+      // could crash between the tier and the role reference and leave them
+      // out of lockstep). The re-acceptance (update) branch refreshes the
+      // pair too — the invite states the operator's intended access. On
+      // fallback the pair is NOT written: the accept lands on the plain
+      // tier exactly as a pre-T9 invite would (least privilege, and an
+      // existing row's access is never silently stripped by a retry).
+      const accessRoleAssignment = acceptedAccessRole
+        ? { role: acceptedAccessRole.startingPoint, accessRoleId: acceptedAccessRole.id }
+        : null;
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -1869,6 +1927,7 @@ export function createPublicAuthRouter(
           displayName: invite.displayName || invite.username,
           ...emailWriteDataOrNull(inviteEmail),
           passwordHash,
+          ...(accessRoleAssignment ?? {}),
         },
         create: {
           username: invite.username,
@@ -1876,12 +1935,45 @@ export function createPublicAuthRouter(
           ...emailWriteDataOrNull(inviteEmail),
           nextcloudUsername: invite.username,
           passwordHash,
-          role: invite.role as any, // canonical Role enum from the invite
+          // Canonical Role enum: the applied role's startingPoint, else the
+          // invite's tier (pre-T9 behavior, bit-for-bit).
+          role: invite.role,
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
+          ...(accessRoleAssignment ?? {}),
         },
       });
       const userId = userRow.id; // local UUID — fed into JWT.sub
+
+      // WARP-1533: the fallback is now FACT (the account exists on the plain
+      // tier) — Activity-note it so an operator can see the invite's
+      // intended role was not applied. Best-effort: an audit-write failure
+      // must never fail the accept (same posture as the department and NC
+      // provisioning below).
+      if (invite.accessRoleId && !acceptedAccessRole) {
+        try {
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "user-plus",
+            what: "Invite accepted without access role",
+            sub: `${invite.email ?? invite.username} · fell back to ${role}`,
+            refs: {
+              userId,
+              inviteId: invite.id,
+              accessRoleId: invite.accessRoleId,
+              fallbackReason: accessRoleResolution?.fallback ?? null,
+              role,
+            },
+            actor: actorFromRequest(req),
+          });
+        } catch (activityErr) {
+          logger.warn(
+            { err: activityErr, userId },
+            "invite-accept: failed to record the access-role fallback activity",
+          );
+        }
+      }
 
       // WARP-1265: convert pending UserInviteDepartment rows to active
       // DepartmentMembership rows. Must run AFTER the User + Nextcloud account
@@ -3290,6 +3382,12 @@ export function createProtectedAuthRouter(
       // Service"; exactly one owner by design — even the owner cannot mint
       // a second owner invite, which consciously supersedes the earlier
       // owner→owner-allowed pin).
+      //
+      // `inviterRole` is still read out here because the WARP-1533
+      // access-role validation below applies the SAME rank cap to the custom
+      // role's startingPoint — the guard rails cover the tier, the shared
+      // invite-access-role service covers the custom role.
+      const inviterRole = req.user?.role;
       try {
         assertAssignableForCreate({
           actorRole: req.user?.role,
@@ -3303,6 +3401,29 @@ export function createProtectedAuthRouter(
           return;
         }
         throw err;
+      }
+
+      // WARP-1533 (RBAC v2 T9): validate the optional custom access role
+      // BEFORE any write — the shared fail-closed service (exists, active,
+      // assignable startingPoint, WARP-623 rank cap on the role's
+      // startingPoint with the same 403 shape as the tier cap above, tier
+      // agreement). Shared with POST /api/people/invite (the canonical
+      // people surface) so the two create paths can never diverge.
+      let inviteAccessRole: AccessRole | null = null;
+      if (parsed.data.accessRoleId) {
+        try {
+          inviteAccessRole = await validateInviteAccessRole(prisma, {
+            accessRoleId: parsed.data.accessRoleId,
+            inviteTier: parsed.data.role,
+            inviterRole,
+          });
+        } catch (err) {
+          if (err instanceof InviteAccessRoleError) {
+            res.status(err.status).json({ error: err.message, code: err.code });
+            return;
+          }
+          throw err;
+        }
       }
 
       // Derive the unique userid from the email local-part. The derived
@@ -3364,6 +3485,8 @@ export function createProtectedAuthRouter(
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
           expiresAt,
+          // WARP-1533: validated custom access role (null = plain tier).
+          accessRoleId: inviteAccessRole?.id ?? null,
           // WARP-1265: write UserInviteDepartment rows in the same tx as the invite.
           departmentGrants: {
             createMany: {
@@ -3380,11 +3503,35 @@ export function createProtectedAuthRouter(
         {
           username,
           role: parsed.data.role,
+          accessRoleId: inviteAccessRole?.id ?? null,
           createdBy: req.user?.username,
           expiresAt,
         },
         "User invite created",
       );
+
+      // WARP-1533: an access-role invite lands in Activity with the ADR-032
+      // §5 wording (kind `auth`, free-text `what`, refs carry the role UUID).
+      // Plain tier invites keep this surface's shipped behavior (log-only) —
+      // the people surface owns the "Teammate invited" entry.
+      if (inviteAccessRole) {
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-plus",
+          what: "Invite created with access role",
+          sub: `${parsed.data.email} · ${inviteAccessRole.name}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            email: parsed.data.email,
+            role: parsed.data.role,
+            accessRoleId: inviteAccessRole.id,
+            accessRoleName: inviteAccessRole.name,
+            accessRoleStartingPoint: inviteAccessRole.startingPoint,
+          },
+          actor: actorFromRequest(req),
+        });
+      }
 
       // BUG-11 — deliver the invite email. The row is created above; the email
       // is a separate, fallible step over the operator's SMTP relay.
