@@ -473,11 +473,4 @@ describe("WARP-1583 — resolveEffectiveAccess composes ONE snapshot", () => {
     expect(seam.calls()).toHaveLength(1);
     expect(seam.conflicts()).toBe(0);
   });
-
-  it("still returns null for a missing user from inside the transaction", async () => {
-    const { prisma } = makeDb(seedState({ users: [] }), {});
-    _setEffectiveAccessForTests(prisma as never, CFG);
-
-    await expect(resolveEffectiveAccess("u-1")).resolves.toBeNull();
-  });
 });

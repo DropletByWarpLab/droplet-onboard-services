@@ -137,14 +137,15 @@ export type RoleMutationRefusalCode =
  * routes map to CONCURRENT_MUTATION rather than a 500.
  *
  * Same finding class and same remedy as reset.service.ts (pr-reviewer #549
- * finding 1). The string literal (rather than
- * `Prisma.TransactionIsolationLevel.Serializable`) keeps this module free of
- * a RUNTIME `@prisma/client` import — the standalone-compile discipline the
- * Role / DirectoryUserStatus mirrors exist for — while the `$transaction`
- * options type still checks it against the generated union, so a typo is a
- * compile error, not a silent downgrade.
+ * finding 1).
+ *
+ * WARP-1583 moved the DEFINITION to `lib/prisma-tx.ts`, next to
+ * `REPEATABLE_READ_TX`, so the two isolation levels this app uses are
+ * chosen from one place rather than discovered separately. Re-exported here
+ * because this module is where the contract that requires it is documented,
+ * and where every call site already imports it from.
  */
-export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
+export { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 /**
  * Prisma error codes that mean "another writer touched this row while we
