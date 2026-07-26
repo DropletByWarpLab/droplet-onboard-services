@@ -46,6 +46,11 @@ scripts/image/grub-autoinstall.cfg text eol=lf
 # byte-level assertions hold on every platform.
 apps/orchestrator/prisma/migrations/**/migration.sql text eol=lf
 
+# WARP-1542 — the documented schema-drift baseline is line-compared against
+# freshly-generated `prisma migrate diff` output (which is always LF). Same
+# CRLF hazard as the migration SQL above; same pin.
+apps/orchestrator/prisma/schema-drift-baseline.sql text eol=lf
+
 # Anchor codegen artifacts. schemas/__tests__/codegen-drift.test.ts re-runs
 # scripts/gen-anchor-schema.mjs and byte-compares its output against the
 # checked-in TS + Python mirrors. The generator always emits LF (Node

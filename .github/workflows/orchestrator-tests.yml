@@ -20,6 +20,9 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      # WARP-1542: the drift gate's script lives outside apps/orchestrator,
+      # so a change to it must still re-prove the lane.
+      - "scripts/check-schema-drift.sh"
       - ".github/workflows/orchestrator-tests.yml"
   push:
     branches: [main]
@@ -27,6 +30,9 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      # WARP-1542: the drift gate's script lives outside apps/orchestrator,
+      # so a change to it must still re-prove the lane.
+      - "scripts/check-schema-drift.sh"
       - ".github/workflows/orchestrator-tests.yml"
   workflow_dispatch:
 
@@ -39,7 +45,8 @@ jobs:
   # leg) runs with mocked Prisma and structurally cannot catch chain
   # forks — those are READ COMMITTED visibility artifacts. This job applies the full
   # migration set to a real Postgres and runs only the pg-gated files
-  # (src/**/*.pg.test.ts, self-gated on RUN_PG_INTEGRATION).
+  # (src/**/*.pg.test.ts, self-gated on RUN_PG_INTEGRATION), then gates
+  # schema.prisma against that same migration set (WARP-1542).
   #
   # Image is pgvector/pgvector:pg16, NOT plain postgres:16: the migration
   # set includes 20260412000000_add_file_content_index, which does
@@ -200,6 +207,28 @@ jobs:
 
       - name: Run pg-gated vitest files
         run: npm run -w @droplet/orchestrator test -- pg.test
+
+      # WARP-1542. `migrate deploy` never reads schema.prisma and the client
+      # generator never reads the migrations, so the two can diverge silently
+      # while every suite stays green — the unit lane mocks Prisma, and the
+      # pg lane above only touches the tables its own files touch. This is
+      # the only place in CI with both a real Postgres and the full migration
+      # set, so the diff belongs here.
+      #
+      # A dedicated shadow DB (dropped first so a re-run on a warm container
+      # is deterministic); `migrate diff` replays every migration into it.
+      # Same container, so it is a pgvector build and CREATE EXTENSION vector
+      # resolves.
+      - name: Create drift shadow database
+        run: |
+          set -euo pipefail
+          docker exec "$PG_CONTAINER" dropdb -U "$POSTGRES_USER" --if-exists drift_shadow
+          docker exec "$PG_CONTAINER" createdb -U "$POSTGRES_USER" drift_shadow
+
+      - name: Gate schema.prisma vs migration-set drift
+        env:
+          SHADOW_DATABASE_URL: postgresql://droplet_test:droplet_test_pw@localhost:5432/drift_shadow?schema=public
+        run: bash scripts/check-schema-drift.sh
 
       - name: Postgres logs (on failure)
         if: failure()
