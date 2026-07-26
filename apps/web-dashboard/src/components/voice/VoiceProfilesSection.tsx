@@ -49,6 +49,11 @@ const COPY = {
 const REMOVED_TOAST = "Voice removed — the voiceprint is gone from this box.";
 const REMOVE_FAILED_TOAST = "Couldn't remove the voice — try again.";
 
+/* §7.2 — why an enrollment entry point is disabled, when the caller
+   doesn't name a more specific reason. */
+const CANT_ENROLL_TITLE =
+  "Voice recognition isn't available on this Droplet right now.";
+
 /** "today" / "yesterday" / "3 days ago" — the meta line is a human
  *  sentence (§3.3: mono is NOT wanted here). */
 export function lastRecognizedLabel(epochS: number, nowS: number): string {
@@ -68,6 +73,11 @@ export interface VoiceProfilesSectionProps {
   profiles: VoiceProfileInfo[] | null;
   /** §7.2 gate for every enrollment entry point on this section. */
   enrollmentAllowed: boolean;
+  /** WARP-1599 — the tooltip a disabled entry point carries, so the
+   *  reason travels with the gate (the kill switch and a broken mic
+   *  disable the same controls for very different reasons). Defaults to
+   *  the §7.2 "not available on this Droplet" sentence. */
+  enrollmentBlockedReason?: string;
   nowS: number;
   onAddVoice: () => void;
   /** Re-record = Flow B with the person preselected. */
@@ -79,6 +89,7 @@ export interface VoiceProfilesSectionProps {
 export function VoiceProfilesSection({
   profiles,
   enrollmentAllowed,
+  enrollmentBlockedReason = CANT_ENROLL_TITLE,
   nowS,
   onAddVoice,
   onReRecord,
@@ -136,6 +147,9 @@ export function VoiceProfilesSection({
   const rows = profiles ?? [];
   const removeName =
     removeTarget?.display_name ?? removeTarget?.user_id ?? "";
+  // One reason, both enrollment entry points — a disabled control that
+  // doesn't say why is a dead end (§7.2).
+  const blockedTitle = enrollmentAllowed ? undefined : enrollmentBlockedReason;
 
   return (
     <section aria-labelledby="voice-profiles-h">
@@ -145,11 +159,7 @@ export function VoiceProfilesSection({
           type="button"
           className="btn ghost sm vsect-action"
           disabled={!enrollmentAllowed}
-          title={
-            enrollmentAllowed
-              ? undefined
-              : "Voice recognition isn't available on this Droplet right now."
-          }
+          title={blockedTitle}
           onClick={onAddVoice}
         >
           {COPY.addVoice}
@@ -206,6 +216,7 @@ export function VoiceProfilesSection({
                           type="button"
                           role="menuitem"
                           disabled={!enrollmentAllowed}
+                          title={blockedTitle}
                           onClick={() => {
                             setMenuFor(null);
                             onReRecord(p.user_id);

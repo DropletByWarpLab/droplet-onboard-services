@@ -98,6 +98,7 @@ const COPY = {
   ctaTurnOn: "Turn voice on",
   ctaTurnOff: "Turn off voice",
   toastOn: "Voice is back on — listening for the wake word.",
+  offEnrollTitle: "Voice is off — turn it back on to record a voice.",
 } as const;
 
 /* Sub-line reasons (§3.1 "always concrete"; §7.2 verbatim). */
@@ -390,7 +391,19 @@ export function VoiceSurface({
   const enrollLinkConsumedRef = useRef(false);
   // Broken covers unavailable / no_mic / flatlined — a mic that can't
   // capture real audio can't enroll a voice either.
-  const enrollmentAllowed = speakerModelAvailable && surface.kind !== "broken";
+  //
+  // WARP-1599 — and `off` joins them, for the reverse reason: Flow B's
+  // captures land on voice-io's `_capture_speaker_pcm`, which opens the
+  // mic directly and works perfectly well with the wake pipeline gone.
+  // Recording four scripted lines while the hero promises "no audio is
+  // captured" would make that promise false, and a false privacy
+  // promise on the kill-switch page is the worst thing this surface
+  // could ship. Nothing is lost by waiting: a voiceprint enrolled while
+  // voice is off can't match anything until voice is back on.
+  const enrollmentAllowed =
+    speakerModelAvailable &&
+    surface.kind !== "broken" &&
+    surface.kind !== "off";
   useEffect(() => {
     if (!initialEnrollUserId || enrollLinkConsumedRef.current) return;
     if (!enrollmentAllowed) return;
@@ -671,6 +684,9 @@ export function VoiceSurface({
       <VoiceProfilesSection
         profiles={profiles}
         enrollmentAllowed={enrollmentAllowed}
+        enrollmentBlockedReason={
+          surface.kind === "off" ? COPY.offEnrollTitle : undefined
+        }
         nowS={now}
         onAddVoice={() => {
           setEnrollPreset(null);

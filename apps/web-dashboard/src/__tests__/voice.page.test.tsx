@@ -77,6 +77,7 @@ import { ToastProvider } from "@/components/Toast";
 import type {
   VoiceActivityItem,
   VoiceCalibrationInfo,
+  VoiceProfileInfo,
   VoiceStatusInfo,
 } from "@/lib/types";
 
@@ -114,6 +115,22 @@ function calibration(
     wake_detections: 3,
     echo_ok: true,
     flags: [],
+    ...overrides,
+  };
+}
+
+function profile(overrides: Partial<VoiceProfileInfo> = {}): VoiceProfileInfo {
+  return {
+    user_id: "u-nadia",
+    display_name: "Nadia",
+    enrolled_at: NOW - 30 * 24 * 3600,
+    updated_at: NOW - 30 * 24 * 3600,
+    last_recognized_at: NOW - 60,
+    learning: false,
+    confused_with: null,
+    confused_with_name: null,
+    lines: 4,
+    voice_model: "campplus-voxceleb-en",
     ...overrides,
   };
 }
@@ -579,6 +596,7 @@ describe("VoiceSurface kill switch (WARP-1599)", () => {
   const OFF_SUB =
     "The wake word does nothing and no audio is captured. Voiceprints and calibration stay on this box.";
   const ON_TOAST = "Voice is back on — listening for the wake word.";
+  const OFF_ENROLL_TITLE = "Voice is off — turn it back on to record a voice.";
 
   it("off: ONE calm hero replaces hero + health strip + calibration entry", () => {
     const { container } = renderSurface({
@@ -699,6 +717,45 @@ describe("VoiceSurface kill switch (WARP-1599)", () => {
     await waitFor(() => expect(off).toBeDisabled());
     fireEvent.click(off);
     expect(setEnabledMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("off: enrollment entry points are disabled and say why; Remove stays live", () => {
+    renderSurface({
+      enabled: false,
+      status: status({ state: "off", listening: false }),
+      profiles: [profile()],
+      speakerModelAvailable: true,
+    });
+
+    // Flow B's captures ride the same always-open mic path as the
+    // calibration endpoints, so recording a voice while off would make
+    // the hero's "no audio is captured" a lie.
+    const add = screen.getByRole("button", { name: "Add a voice" });
+    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute("title", OFF_ENROLL_TITLE);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Voice options for Nadia" }),
+    );
+    const reRecord = screen.getByRole("menuitem", { name: /Re-record voice/ });
+    expect(reRecord).toBeDisabled();
+    expect(reRecord).toHaveAttribute("title", OFF_ENROLL_TITLE);
+    // Remove captures nothing, and someone switching voice off may well
+    // want to purge the voiceprints next.
+    expect(screen.getByRole("menuitem", { name: /Remove voice/ })).toBeEnabled();
+  });
+
+  it("on: the same enrollment entry points are live again", () => {
+    renderSurface({ profiles: [profile()], speakerModelAvailable: true });
+
+    expect(screen.getByRole("button", { name: "Add a voice" })).toBeEnabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Voice options for Nadia" }),
+    );
+    expect(
+      screen.getByRole("menuitem", { name: /Re-record voice/ }),
+    ).toBeEnabled();
+    expect(screen.getByRole("menuitem", { name: /Remove voice/ })).toBeEnabled();
   });
 
   it("no toggle while voice-io is unreachable — the POST could only 503", () => {
