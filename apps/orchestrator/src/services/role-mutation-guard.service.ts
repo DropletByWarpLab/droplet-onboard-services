@@ -29,8 +29,14 @@
  *        assignment. This consciously supersedes the #1221-era owner→owner-
  *        allowed pins, which existed purely to document the rank-cap rail.
  *
- *   in-transaction (SERIALIZABLE — see SERIALIZABLE_TX below; the isolation
- *   level is passed EXPLICITLY at every call site, it is not a default):
+ *   in-transaction (SERIALIZABLE — opened with the exported
+ *   `SERIALIZABLE_TX` options at every call site. NOT a default: Prisma's
+ *   interactive `$transaction` inherits the Postgres default, READ
+ *   COMMITTED, which admits the write skew these rails exist to stop. The
+ *   pre-#1229 version of this comment claimed otherwise and was wrong.
+ *   Callers additionally re-read the target INSIDE the transaction
+ *   (`readGuardTargetTx`) and pin `role` in the write's `where`, so neither
+ *   the decision nor the write can be made against stale state):
  *     4. Last-owner      — 409 LAST_OWNER_INVARIANT (WARP-480). At least one
  *        role="owner" row must remain. With rail 1 in place this is
  *        unreachable from the routes (every owner-targeting mutation is
@@ -56,6 +62,7 @@
  * `res.status(err.status).json(err.toJSON())`. Refused mutations never emit
  * Activity rows (the audit log records state changes, not noise).
  */
+import type { Prisma } from "@prisma/client";
 import type { Role } from "./jwt.service.js";
 import { ACCESS_TOKEN_TTL_SECONDS, ROLE_RANK } from "./jwt.service.js";
 import { revokeAllSessions } from "./session.service.js";
@@ -93,14 +100,61 @@ export const ADMIN_TIER_ROLES = ["owner", "admin"] as const satisfies readonly R
 const ADMIN_TIER = new Set<Role>(ADMIN_TIER_ROLES);
 const ASSIGNABLE = new Set<Role>(ASSIGNABLE_ROLES);
 
-/** Machine-readable refusal codes, one per rail. */
+/** Machine-readable refusal codes, one per rail (+ the concurrency answer). */
 export type RoleMutationRefusalCode =
   | "OWNER_IMMUTABLE"
   | "SELF_ACTION_NOT_ALLOWED"
   | "ROLE_RANK_EXCEEDED"
   | "ROLE_NOT_ASSIGNABLE"
   | "LAST_OWNER_INVARIANT"
-  | "LAST_OPERATOR_INVARIANT";
+  | "LAST_OPERATOR_INVARIANT"
+  | "CONCURRENT_MUTATION";
+
+/**
+ * The `$transaction` options EVERY guarded mutation must be opened with
+ * (pr-reviewer #1229 B1) — one exported constant so no call site can drift
+ * back to the default.
+ *
+ * Prisma's interactive `$transaction` does NOT default to Serializable: it
+ * inherits the database default, which on Postgres is READ COMMITTED. Rails
+ * 4 and 5 are check-then-write (COUNT the surviving owner∪admin rows, then
+ * demote / disable / delete in the same transaction), so under RC two
+ * concurrent requests each removing one of the last two operators BOTH read
+ * "one other operator remains", BOTH pass, and BOTH commit — landing exactly
+ * the zero-operator state the rails exist to prevent, unrecoverable from the
+ * dashboard. Under SERIALIZABLE the loser aborts (P2034) instead, which the
+ * routes map to CONCURRENT_MUTATION rather than a 500.
+ *
+ * Same finding class and same remedy as reset.service.ts (pr-reviewer #549
+ * finding 1). The string literal (rather than
+ * `Prisma.TransactionIsolationLevel.Serializable`) keeps this module free of
+ * a RUNTIME `@prisma/client` import — the standalone-compile discipline the
+ * Role / DirectoryUserStatus mirrors exist for — while the `$transaction`
+ * options type still checks it against the generated union, so a typo is a
+ * compile error, not a silent downgrade.
+ */
+export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
+
+/**
+ * Prisma error codes that mean "another writer touched this row while we
+ * were deciding" (pr-reviewer #1229 B1/B2):
+ *
+ *   P2034 — transaction write conflict / serialization failure: the loser
+ *           of a SERIALIZABLE conflict. Adding the isolation level without
+ *           mapping this would turn a safe concurrent mutation into a 500.
+ *   P2025 — record required but not found: our optimistic-concurrency
+ *           `where: { id, role }` guard missed because the row changed (or
+ *           vanished) between the in-transaction re-read and the write.
+ *
+ * Both are the same story to the caller: nothing was applied, retry. They
+ * are NOT mapped to a specific rail's code — we genuinely cannot know which
+ * invariant the concurrent writer would have tripped, and claiming one would
+ * be a lie in the audit trail.
+ */
+export function isConcurrencyConflict(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return code === "P2034" || code === "P2025";
+}
 
 /**
  * Typed refusal. `status` is the HTTP status the route maps; `toJSON()` is
@@ -174,6 +228,21 @@ export class RoleMutationRefusedError extends Error {
       "This is the last person who can manage access — give someone else an admin role first.",
     );
   }
+
+  /**
+   * Not a rail — the answer when a guarded mutation loses a race
+   * (SERIALIZABLE conflict, or an optimistic-write miss). 409 matches the
+   * other state-conflict refusals: the request was well-formed and the
+   * caller was authorized; the resource moved underneath it. Nothing was
+   * applied, so retrying is safe and is what the copy asks for.
+   */
+  static concurrentMutation(): RoleMutationRefusedError {
+    return new RoleMutationRefusedError(
+      409,
+      "CONCURRENT_MUTATION",
+      "Someone else changed this person at the same time. Try again.",
+    );
+  }
 }
 
 /** The actor fields the rails need, straight off `req.user`. */
@@ -197,49 +266,61 @@ export interface GuardTarget {
 export type GuardDirectoryStatus = "ACTIVE" | "DEACTIVATED";
 
 /**
- * The `$transaction` options EVERY guarded mutation must be opened with —
- * one constant so no call site can drift back to the default.
+ * The target as the IN-TRANSACTION invariants require it: the tier AND the
+ * current enable state, both re-read inside the transaction.
  *
- * SERIALIZABLE, not the READ COMMITTED default (pr-reviewer #1229; same
- * finding class as reset.service.ts / setup.service.ts, pr-reviewer #549
- * finding 1). Rails 4 and 5 are check-then-write: they COUNT the surviving
- * owner∪admin rows and then demote / disable / delete inside the same
- * transaction. Under READ COMMITTED — which is what Postgres, and therefore
- * Prisma's `$transaction`, actually default to — two concurrent requests
- * each removing one of the last two operators BOTH read "one other operator
- * remains", BOTH pass the check, and BOTH commit, landing zero non-disabled
- * owner∪admin. That is exactly the state LAST_OPERATOR_INVARIANT (and the
- * older WARP-480 LAST_OWNER_INVARIANT this branch carries forward) exists to
- * prevent, and it is unrecoverable from the dashboard. Under SERIALIZABLE
- * the losing side aborts with a serialization failure instead.
- *
- * The string literal (rather than `Prisma.TransactionIsolationLevel
- * .Serializable`) keeps this module free of a RUNTIME `@prisma/client`
- * import — the standalone-compile discipline the Role / DirectoryUserStatus
- * mirrors above exist for, and the same choice setup.service.ts documents.
- * The `$transaction` options type still checks it against the generated
- * isolation-level union, so a typo is a compile error, not a silent
- * downgrade.
- *
- * NOT handled here (conscious, matches the shipped precedent): the loser of
- * a serialization conflict surfaces as Prisma P2034 and falls through the
- * routes' `next(err)` to a 500. reset.service.ts maps it to a domain error
- * and setup.service.ts retries a bounded number of times because its
- * operation is idempotent; neither pattern is introduced on these routes in
- * this change. Failing closed on a rare concurrent mutation is the correct
- * direction — the alternative that shipped was failing OPEN.
+ * Deliberately distinct from `GuardTarget` (pr-reviewer #1229 N2). Rail 5
+ * counts NON-DISABLED operators, so it must know whether the target itself
+ * is one — otherwise a DEACTIVATED sole admin becomes unremovable AND
+ * undemotable, a stuck row with no route-level exit. Making the field
+ * REQUIRED here (rather than optional on the shared type) is what stops a
+ * call site from silently omitting it; the PRE-tx composites keep the
+ * two-field `GuardTarget` unchanged, because the T3–T6 stack builds on that
+ * seam.
  */
-export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
+export interface GuardTxTarget extends GuardTarget {
+  directoryStatus: GuardDirectoryStatus;
+}
 
 /**
- * Minimal structural tx handle — the invariants only ever COUNT users, so
- * they accept any client that can (the interactive $transaction handle in
- * production, an in-memory stub in tests).
+ * The transaction handle the in-transaction invariants take.
+ *
+ * `Prisma.TransactionClient` — NOT a hand-rolled structural type
+ * (pr-reviewer #1229 N5). A minimal `{ user: { count } }` interface is
+ * satisfied by the full `PrismaClient` too, so
+ * `assertRemovalInvariantsTx(prisma, …)` type-checked and ran the invariant
+ * OUTSIDE any transaction — precisely the B1/B3 mistake this seam should
+ * make unrepresentable. `TransactionClient` is structurally the client
+ * MINUS `$transaction`/`$connect`/…, so passing the top-level client is now
+ * a compile error.
  */
-export interface GuardTx {
-  user: {
-    count(args: { where: Record<string, unknown> }): Promise<number>;
-  };
+export type GuardTx = Prisma.TransactionClient;
+
+/**
+ * Re-read the target INSIDE the transaction (pr-reviewer #1229 B2).
+ *
+ * The pre-tx rails necessarily decide on a snapshot read before the
+ * transaction opens. The in-tx rails must NOT: whether rail 5 runs at all
+ * is derived from the target's tier, so a stale `role` lets a concurrent
+ * promotion slip a demotion past a check that was never evaluated (target
+ * read as `family` → rail skipped → promoted to `admin` by another writer →
+ * this transaction demotes the now-sole admin). Callers pass THIS row to
+ * the invariants, and guard their write with `where: { id, role }` so the
+ * window between this read and the write is closed too.
+ *
+ * Projected to the three columns the rails use — WARP-1539's "never pull
+ * passwordHash into memory" rule applies to internal reads as much as to
+ * serialized ones.
+ */
+export async function readGuardTargetTx(
+  tx: GuardTx,
+  targetId: string,
+): Promise<GuardTxTarget | null> {
+  const row = await tx.user.findUnique({
+    where: { id: targetId },
+    select: { id: true, role: true, directoryStatus: true },
+  });
+  return row as GuardTxTarget | null;
 }
 
 // ── individual rails ────────────────────────────────────────────
@@ -386,13 +467,21 @@ async function assertNotLastOwner(tx: GuardTx, losesAnOwner: boolean): Promise<v
  * (role ∈ owner∪admin, directoryStatus="ACTIVE", excluding the target);
  * zero remaining means the target is "the final owner-or-admin" and the
  * mutation is refused. Explicit enum column, never IS-NULL-derived.
+ *
+ * A target that is ALREADY disabled is never the last operator (N2): it
+ * holds no live access, so demoting or removing it cannot strand the box —
+ * and refusing would strand the ROW instead, with no route-level exit.
  */
-async function assertNotLastOperator(tx: GuardTx, targetId: string): Promise<void> {
+async function assertNotLastOperator(
+  tx: GuardTx,
+  target: GuardTxTarget,
+): Promise<void> {
+  if (target.directoryStatus === "DEACTIVATED") return;
   const remaining = await tx.user.count({
     where: {
       role: { in: [...ADMIN_TIER_ROLES] },
       directoryStatus: "ACTIVE",
-      id: { not: targetId },
+      id: { not: target.id },
     },
   });
   if (remaining === 0) {
@@ -400,28 +489,35 @@ async function assertNotLastOperator(tx: GuardTx, targetId: string): Promise<voi
   }
 }
 
-/** Role change: rails 4 → 5, only when the change actually crosses down. */
+/**
+ * Role change: rails 4 → 5, only when the change actually crosses down.
+ * `target` MUST be the in-transaction re-read (`readGuardTargetTx`) — the
+ * decision to run rail 5 at all is derived from `target.role`.
+ */
 export async function assertRoleChangeInvariantsTx(
   tx: GuardTx,
-  args: { target: GuardTarget; requestedRole: Role },
+  args: { target: GuardTxTarget; requestedRole: Role },
 ): Promise<void> {
+  // Rail 4 is deliberately NOT status-gated: it protects the existence of
+  // an owner ROW (owner-only routes must stay reachable after a re-enable),
+  // which disabling does not change.
   await assertNotLastOwner(
     tx,
     args.target.role === "owner" && args.requestedRole !== "owner",
   );
   if (ADMIN_TIER.has(args.target.role) && !ADMIN_TIER.has(args.requestedRole)) {
-    await assertNotLastOperator(tx, args.target.id);
+    await assertNotLastOperator(tx, args.target);
   }
 }
 
-/** Removal: rails 4 → 5 for any operator-tier target. */
+/** Removal: rails 4 → 5 for any operator-tier target (in-tx re-read). */
 export async function assertRemovalInvariantsTx(
   tx: GuardTx,
-  args: { target: GuardTarget },
+  args: { target: GuardTxTarget },
 ): Promise<void> {
   await assertNotLastOwner(tx, args.target.role === "owner");
   if (ADMIN_TIER.has(args.target.role)) {
-    await assertNotLastOperator(tx, args.target.id);
+    await assertNotLastOperator(tx, args.target);
   }
 }
 
@@ -432,11 +528,12 @@ export async function assertRemovalInvariantsTx(
  */
 export async function assertDisableInvariantsTx(
   tx: GuardTx,
-  args: { target: GuardTarget & { directoryStatus: GuardDirectoryStatus } },
+  args: { target: GuardTxTarget },
 ): Promise<void> {
-  if (args.target.directoryStatus === "DEACTIVATED") return;
   if (ADMIN_TIER.has(args.target.role)) {
-    await assertNotLastOperator(tx, args.target.id);
+    // The already-DEACTIVATED early return now lives in
+    // assertNotLastOperator, shared by all three composites (N2).
+    await assertNotLastOperator(tx, args.target);
   }
 }
 
@@ -523,6 +620,15 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
+  /**
+   * Audit headline override (pr-reviewer #1229 B3). Defaults to the
+   * shipped "User removed" used by DELETE /api/people/:id, which really
+   * does delete the row. DELETE /api/auth/users/:username removes the
+   * Nextcloud account and revokes local access WITHOUT deleting the local
+   * row (WARP-1565 owns that), so it passes its own honest wording rather
+   * than claiming a removal that did not happen.
+   */
+  what?: string;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
@@ -532,7 +638,7 @@ export async function runRemovalPostEffects(args: {
     kind: "auth",
     severity: "warn",
     sourceIcon: "user-x",
-    what: "User removed",
+    what: args.what ?? "User removed",
     sub: args.targetUsername,
     refs: {
       actor: args.actorUsername,

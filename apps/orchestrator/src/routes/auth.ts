@@ -66,6 +66,9 @@ import {
   assertAssignableForCreate,
   assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
+  readGuardTargetTx,
+  isConcurrencyConflict,
+  SERIALIZABLE_TX,
   runRemovalPostEffects,
   runDisablePostEffects,
 } from "../services/role-mutation-guard.service.js";
@@ -3092,10 +3095,17 @@ export function createProtectedAuthRouter(
             actor: { id: req.user?.id, role: req.user?.role },
             target: row,
           });
+          // pr-reviewer #1229 B1/B2: SERIALIZABLE (Prisma inherits READ
+          // COMMITTED otherwise, under which two concurrent disables of the
+          // last two operators both pass rail 5 and both commit), and the
+          // rails decide on a row re-read INSIDE the transaction — the
+          // snapshot above is only good enough for the pre-tx rails.
           await prisma.$transaction(async (tx) => {
-            await assertDisableInvariantsTx(tx, { target: row });
+            const fresh = await readGuardTargetTx(tx, row.id);
+            if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+            await assertDisableInvariantsTx(tx, { target: fresh });
             await tx.user.update({
-              where: { id: row.id },
+              where: { id: fresh.id, role: fresh.role },
               data: { directoryStatus: "DEACTIVATED" },
             });
           }, SERIALIZABLE_TX);
@@ -3138,6 +3148,12 @@ export function createProtectedAuthRouter(
       } catch (err: any) {
         if (err instanceof RoleMutationRefusedError) {
           res.status(err.status).json(err.toJSON());
+          return;
+        }
+        // pr-reviewer #1229 B1 — see the DELETE sibling.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          res.status(conflict.status).json(conflict.toJSON());
           return;
         }
         if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -3286,8 +3302,30 @@ export function createProtectedAuthRouter(
           actor: { id: req.user?.id, role: req.user?.role },
           target: row,
         });
+        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
+        // no write — a read-only transaction pins nothing, so it read as
+        // protection without being any, and because the route never touched
+        // the local row the "removed" admin stayed role=admin/ACTIVE:
+        //   • it kept counting as a live operator for the NEXT removal's
+        //     rail 5, so admins could be emptied one DELETE at a time; and
+        //   • /auth/login verifies the LOCAL passwordHash, so once the
+        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
+        //     simply sign back in with full admin.
+        // Deleting the local row outright is WARP-1565's scope. What this
+        // route CAN do — atomically, inside the guarded transaction — is
+        // revoke local access via the same directoryStatus lever the
+        // disable path uses, which /auth/login, SSO, WebAuthn and the auth
+        // middleware all already fail closed on. Check and change now
+        // commit together, at SERIALIZABLE, with the write optimistically
+        // pinned to the role the rails were evaluated against.
         await prisma.$transaction(async (tx) => {
-          await assertRemovalInvariantsTx(tx, { target: row });
+          const fresh = await readGuardTargetTx(tx, row.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.update({
+            where: { id: fresh.id, role: fresh.role },
+            data: { directoryStatus: "DEACTIVATED" },
+          });
         }, SERIALIZABLE_TX);
       }
 
@@ -3334,12 +3372,24 @@ export function createProtectedAuthRouter(
         targetRole: row?.role ?? null,
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
+        // pr-reviewer #1229 B3: name what actually happened. The Nextcloud
+        // account is gone and local access is revoked, but the local row
+        // survives (WARP-1565) — "User removed" would be a false statement
+        // in an append-only, signature-chained audit log.
+        what: "User removed from Nextcloud; local access revoked",
       });
 
       res.json({ status: "deleted", username: req.params.username });
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
+        return;
+      }
+      // pr-reviewer #1229 B1: SERIALIZABLE's loser (P2034) and the
+      // optimistic-write miss (P2025) are 409s, not 500s.
+      if (isConcurrencyConflict(err)) {
+        const conflict = RoleMutationRefusedError.concurrentMutation();
+        res.status(conflict.status).json(conflict.toJSON());
         return;
       }
       next(err);

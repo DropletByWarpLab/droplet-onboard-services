@@ -41,6 +41,8 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   RoleMutationRefusedError,
   SERIALIZABLE_TX,
+  isConcurrencyConflict,
+  readGuardTargetTx,
   assertNotSelf,
   assertRoleChangeAllowed,
   assertScopeChangeAllowed,
@@ -482,6 +484,13 @@ export function createPeopleRouter(
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -557,22 +566,32 @@ export function createPeopleRouter(
         });
 
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
-        // WARP-1526 last-operator), then the write — count + update inside
-        // a single interactive $transaction at SERIALIZABLE
-        // (SERIALIZABLE_TX; explicitly passed, because Postgres/Prisma
-        // default to READ COMMITTED, under which two concurrent demotions
-        // both pass the count and both commit) so a concurrent demotion
-        // can't slip past the check window. Refusals throw out of the
-        // transaction and roll it back; the catch below maps them to 4xx.
+        // WARP-1526 last-operator), then the write — all inside ONE
+        // SERIALIZABLE transaction (pr-reviewer #1229 B1: Prisma inherits
+        // the Postgres default, READ COMMITTED, under which two concurrent
+        // demotions of the last two operators both pass the count and both
+        // commit). Refusals throw out of the transaction and roll it back;
+        // the catch below maps them to their 4xx, and a serialization
+        // loser to CONCURRENT_MUTATION rather than a 500.
         const updated = await prisma.$transaction(async (tx) => {
+          // B2 — re-read INSIDE the transaction. `existing` is a pre-tx
+          // snapshot, and whether rail 5 runs at all is derived from the
+          // target's tier: a stale `family` would skip the operator check
+          // entirely while a concurrent promotion made this row the only
+          // admin. The rails decide on THIS row, never the snapshot.
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
           await assertRoleChangeInvariantsTx(tx, {
-            target: { id: existing.id, role: existing.role },
+            target: fresh,
             requestedRole: parsed.data.role,
           });
           // WARP-1539 — the updated row is returned to the caller, so it
           // gets the same projection as every other read here.
+          // B2 — optimistic concurrency: pinning `role` closes the window
+          // between the re-read above and this write. A miss is P2025,
+          // mapped to CONCURRENT_MUTATION below.
           return tx.user.update({
-            where: { id: req.params.id },
+            where: { id: req.params.id, role: fresh.role },
             data: { role: parsed.data.role },
             select: PUBLIC_USER_SELECT,
           });
@@ -599,6 +618,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         next(err);
       }
@@ -699,6 +725,13 @@ export function createPeopleRouter(
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
+        }
         next(err);
       }
     },
@@ -754,14 +787,17 @@ export function createPeopleRouter(
         // Rails 4 + 5 in-transaction (WARP-480 last-owner backstop +
         // WARP-1526 last-operator: removing the final non-disabled
         // owner-or-admin is refused), then the delete — checks + write in
-        // one interactive $transaction at SERIALIZABLE (SERIALIZABLE_TX,
-        // explicit: Prisma/Postgres default to READ COMMITTED) so a
-        // concurrent demotion or removal can't slip past the check window.
+        // one interactive $transaction so a concurrent demotion can't slip
+        // past the check window.
+        // SERIALIZABLE + in-tx re-read + optimistic delete (pr-reviewer
+        // #1229 B1/B2), same shape as PATCH /role above.
         await prisma.$transaction(async (tx) => {
-          await assertRemovalInvariantsTx(tx, {
-            target: { id: existing.id, role: existing.role },
+          const fresh = await readGuardTargetTx(tx, req.params.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.delete({
+            where: { id: req.params.id, role: fresh.role },
           });
-          await tx.user.delete({ where: { id: req.params.id } });
         }, SERIALIZABLE_TX);
 
         // Rail 6 (consolidated post-commit effects) — WARP-490 hard
@@ -781,6 +817,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         // Prisma's P2025 (record not found) shouldn't reach here
         // because of the findUnique above, but stay defensive.
@@ -854,6 +897,13 @@ export function createPeopleRouter(
       } catch (err) {
         if (err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
+        }
+        // pr-reviewer #1229 B1: the SERIALIZABLE loser (P2034) and the
+        // optimistic-write miss (P2025) both mean "nothing was applied,
+        // retry" — a 409, never the 500 an unmapped Prisma error becomes.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          return res.status(conflict.status).json(conflict.toJSON());
         }
         if (err instanceof TargetUserNotFoundError) {
           return res.status(404).json({ error: "User not found" });

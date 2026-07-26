@@ -109,12 +109,16 @@ function createPrismaMock(seed: any[] = []) {
   const self: any = {};
   self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
   self.user = {
+    // WARP-1526 (pr-reviewer #1229 B2): the routes resolve by
+    // nextcloudUsername, then the guard RE-READS by id inside the
+    // transaction — the stub must answer both keys.
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
           (u) =>
-            where.nextcloudUsername !== undefined &&
-            u.nextcloudUsername === where.nextcloudUsername,
+            (where.nextcloudUsername !== undefined &&
+              u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.id !== undefined && u.id === where.id),
         ) ?? null
       );
     }),
