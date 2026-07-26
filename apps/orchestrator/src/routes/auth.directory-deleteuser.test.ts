@@ -132,14 +132,30 @@ function createPrismaMock(seed: any[] = []) {
   const self: any = {};
   self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
   self.user = {
+    // WARP-1526 (pr-reviewer #1229 B2): the routes resolve by
+    // nextcloudUsername, then the guard RE-READS by id inside the
+    // transaction — the stub must answer both keys.
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
           (u) =>
-            where.nextcloudUsername !== undefined &&
-            u.nextcloudUsername === where.nextcloudUsername,
+            (where.nextcloudUsername !== undefined &&
+              u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.id !== undefined && u.id === where.id),
         ) ?? null
       );
+    }),
+    update: vi.fn(async ({ where, data }: any) => {
+      const idx = users.findIndex(
+        (u) => u.id === where.id && (where.role === undefined || u.role === where.role),
+      );
+      if (idx < 0) {
+        const err: any = new Error("not found");
+        err.code = "P2025";
+        throw err;
+      }
+      users[idx] = { ...users[idx], ...data };
+      return users[idx];
     }),
     count: vi.fn(async ({ where }: any = {}) => {
       let n = 0;
@@ -216,7 +232,10 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
         kind: "auth",
         severity: "warn",
         sourceIcon: "user-x",
-        what: "User removed",
+        // pr-reviewer #1229 B3: this path deletes the NEXTCLOUD account and
+        // revokes local access; the local row survives (WARP-1565), so the
+        // headline must not claim a removal that did not happen.
+        what: "User removed from Nextcloud; local access revoked",
         sub: "alice",
         refs: expect.objectContaining({
           targetUserId: "u-alice",
@@ -239,7 +258,7 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     expect(denylistUserMock).not.toHaveBeenCalled();
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
       expect.objectContaining({
-        what: "User removed",
+        what: "User removed from Nextcloud; local access revoked",
         sub: "legacy",
         refs: expect.objectContaining({ targetUserId: null }),
       }),
@@ -380,5 +399,100 @@ describe("DELETE /api/auth/users/:username — serializable isolation", () => {
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });
+  });
+});
+
+/**
+ * WARP-1526 — pr-reviewer #1229 B3.
+ *
+ * The transaction here used to wrap a COUNT with no write: a read-only
+ * transaction pins nothing, so it read as protection without being any.
+ * Worse, the route never touched the local row, so an NC-deleted admin
+ * stayed `role="admin" / directoryStatus=ACTIVE` and kept counting as a
+ * live operator for the NEXT removal's rail 5 — sequentially deleting
+ * every admin never tripped the invariant — while `/auth/login` verifies
+ * the LOCAL passwordHash, so the "removed" admin could sign back in once
+ * the ACCESS_TOKEN_TTL denylist entry expired.
+ *
+ * The fix keeps full local-row deletion out of scope (WARP-1565) but makes
+ * check + change atomic: the transaction now writes
+ * `directoryStatus="DEACTIVATED"`, which is the same lever the disable
+ * path uses and which /auth/login, SSO, WebAuthn and the auth middleware
+ * all already fail closed on.
+ */
+describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write", () => {
+  it("deactivates the local row INSIDE the guarded transaction (login fails closed; the row stops counting as an operator)", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(200);
+    expect(prisma._users.find((u: any) => u.id === "u-alice").directoryStatus).toBe(
+      "DEACTIVATED",
+    );
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable",
+    });
+  });
+
+  it("sequential admin removals DO trip the last-operator rail (the deactivated row no longer counts)", async () => {
+    // The pre-fix bug: both admins stayed ACTIVE in the directory, so each
+    // removal counted the other as a surviving operator and the box could
+    // be emptied of operators one DELETE at a time.
+    const prisma = createPrismaMock([
+      { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "admin", directoryStatus: "ACTIVE" },
+      { id: "u-kim", username: "kim", nextcloudUsername: "kim", role: "admin", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const first = await request(app).delete("/api/auth/users/sam");
+    expect(first.status).toBe(200);
+
+    const second = await request(app).delete("/api/auth/users/kim");
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("LAST_OPERATOR_INVARIANT");
+    expect(prisma._users.find((u: any) => u.id === "u-kim").directoryStatus).toBe(
+      "ACTIVE",
+    );
+  });
+
+  it("audits honestly — this path removes the Nextcloud account and deactivates locally, so it must not claim 'User removed'", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    await request(app).delete("/api/auth/users/alice");
+
+    const row = vi.mocked(recordActivity).mock.calls[0][0] as any;
+    expect(row.kind).toBe("auth");
+    expect(row.severity).toBe("warn");
+    expect(row.what).toBe("User removed from Nextcloud; local access revoked");
+    expect(row.refs).toEqual(
+      expect.objectContaining({ targetUserId: "u-alice", targetUsername: "alice" }),
+    );
+  });
+
+  it("a serialization loser (P2034) is a 409 CONCURRENT_MUTATION and never deletes the Nextcloud account", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+    const conflict: any = new Error("could not serialize access");
+    conflict.code = "P2034";
+    prisma.user.update.mockRejectedValueOnce(conflict);
+
+    const res = await request(app).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CONCURRENT_MUTATION");
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
   });
 });
