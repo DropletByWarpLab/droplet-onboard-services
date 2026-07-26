@@ -316,6 +316,109 @@ class TestToggleEndpoint:
         assert main._activity_reporter is None
         assert main._persona_fetcher is None
 
+    def test_a_build_that_fails_before_the_pipeline_strands_nothing(
+        self, client, stub_pipeline_deps, recorded_runtime, monkeypatch,
+    ):
+        # Raise between the client builds and WakePipeline(): `_pipeline`
+        # stays None, so the enable guard would happily let the NEXT
+        # enable overwrite these globals. They have to be freed here —
+        # the guard keys on `_pipeline`, but the objects it protects
+        # aren't `_pipeline`.
+        def _threshold_blew_up(detector):
+            raise RuntimeError("threshold resolution blew up")
+
+        monkeypatch.setattr(main, "resolve_wake_threshold", _threshold_blew_up)
+        assert client.post(
+            "/voice/enabled", json={"enabled": True},
+        ).status_code == 200
+        assert main._pipeline is None
+        assert main._activity_reporter is None
+        assert main._llm is None
+        assert main._persona_fetcher is None
+        assert recorded_runtime["reporters"][0].stops == 1
+        assert recorded_runtime["llms"][0].closes == 1
+        assert recorded_runtime["personas"][0].closes == 1
+
+        # ...and the box still switches on once the fault clears.
+        monkeypatch.setattr(main, "resolve_wake_threshold", lambda detector: 0.7)
+        try:
+            assert client.post(
+                "/voice/enabled", json={"enabled": True},
+            ).status_code == 200
+            assert main._pipeline is not None
+            assert len(recorded_runtime["llms"]) == 2
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
+
+    def test_a_build_that_fails_after_the_pipeline_leaves_no_dead_pipeline(
+        self, client, stub_pipeline_deps, recorded_runtime, monkeypatch,
+    ):
+        # Raise after WakePipeline() but before start(): a non-None but
+        # never-started `_pipeline` has no worker thread, yet every later
+        # enable would no-op on the idempotence guard — the box would
+        # stay deaf until someone restarted the container.
+        def _calibration_blew_up(pipeline):
+            raise RuntimeError("calibration record blew up")
+
+        monkeypatch.setattr(main, "apply_stored_calibration", _calibration_blew_up)
+        assert client.post(
+            "/voice/enabled", json={"enabled": True},
+        ).status_code == 200
+        assert main._pipeline is None
+        assert main._llm is None
+        assert recorded_runtime["llms"][0].closes == 1
+
+        monkeypatch.setattr(main, "apply_stored_calibration", lambda pipeline: None)
+        try:
+            assert client.post(
+                "/voice/enabled", json={"enabled": True},
+            ).status_code == 200
+            assert main._pipeline is not None
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
+
+    def test_a_pipeline_that_refuses_to_stop_still_frees_the_clients(
+        self, client, monkeypatch,
+    ):
+        # Teardown is documented best-effort. A raising stop() must not
+        # escape as a 500 with the flag already persisted off and the
+        # three singletons still live — that is the leak again, on the
+        # error path.
+        class _AngryPipeline:
+            def stop(self) -> None:
+                raise RuntimeError("worker join blew up")
+
+        reporter = _RecordingReporter()
+        llm = _RecordingClient()
+        persona = _RecordingClient()
+        monkeypatch.setattr(main, "_pipeline", _AngryPipeline())
+        monkeypatch.setattr(main, "_activity_reporter", reporter)
+        monkeypatch.setattr(main, "_llm", llm)
+        monkeypatch.setattr(main, "_persona_fetcher", persona)
+
+        resp = client.post("/voice/enabled", json={"enabled": False})
+        assert resp.status_code == 200
+        assert reporter.stops == 1
+        assert llm.closes == 1
+        assert persona.closes == 1
+        assert main._pipeline is None
+        assert VoiceEnabledStore().load() is False
+
+    def test_a_concurrent_toggle_answers_409(self, client):
+        # Part of the wire contract tasks 2/3 consume: overlapping
+        # toggles are refused, never queued behind a stop() that can take
+        # five seconds.
+        assert main._enabled_lock.acquire(blocking=False)
+        try:
+            resp = client.post("/voice/enabled", json={"enabled": False})
+        finally:
+            main._enabled_lock.release()
+        assert resp.status_code == 409
+        # The refused request persisted nothing.
+        assert VoiceEnabledStore().load() is True
+
     def test_enable_after_disable_rebuilds_from_clean_state(
         self, client, stub_pipeline_deps, recorded_runtime,
     ):
@@ -336,12 +439,37 @@ class TestToggleEndpoint:
 
     @pytest.mark.parametrize(
         "body",
-        [{"enabled": "banana"}, {"enabled": None}, {"enabled": [True]}, {}],
+        [
+            {"enabled": "banana"},
+            {"enabled": None},
+            {"enabled": [True]},
+            {},
+            # Coercible-but-not-boolean: pydantic's lax mode would read
+            # these as real booleans and flip the switch. The store
+            # already refuses to read a string "false" out of the file as
+            # intent (test_non_boolean_flag_reads_enabled) — the wire has
+            # to agree, or the same value means two different things
+            # depending on which layer sees it.
+            {"enabled": "false"},
+            {"enabled": "true"},
+            {"enabled": 0},
+            {"enabled": 1},
+        ],
     )
     def test_rejects_a_non_boolean_body(self, client, body):
         assert client.post("/voice/enabled", json=body).status_code == 422
         # A rejected request persists nothing.
         assert VoiceEnabledStore().load() is True
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_accepts_a_real_json_boolean(self, client, stub_pipeline_deps, enabled):
+        try:
+            resp = client.post("/voice/enabled", json={"enabled": enabled})
+            assert resp.status_code == 200
+            assert resp.json() == {"enabled": enabled}
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
 
 
 # ────────────────────────────────────────────────────────────────────

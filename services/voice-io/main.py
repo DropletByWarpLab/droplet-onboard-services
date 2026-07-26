@@ -22,7 +22,7 @@ from typing import Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from voice.audio_io import (
     AudioUnavailable,
@@ -387,9 +387,13 @@ def _build_and_start_pipeline() -> None:
 
     Blocking throughout — device enumeration, a geo lookup, and three
     upstream socket probes — so callers must keep it off the event loop.
-    Every failure is logged and swallowed: `_pipeline` simply stays None
-    and the box behaves like a mic-less boot, which is exactly what the
-    enable path wants when there's no working hardware to listen with.
+
+    Every failure is logged and swallowed, and a partial build is torn
+    back down before returning, so a failed start always leaves the same
+    clean state a never-started box has: `_pipeline` None and no orphaned
+    clients. The box then behaves like a mic-less boot — exactly what the
+    enable path wants when there's no working hardware to listen with —
+    and the NEXT enable can retry from scratch.
     """
     # Resolve audio devices on boot so the first /health hit is cheap.
     # Doesn't fail the boot if PortAudio is missing — we want the
@@ -488,6 +492,16 @@ def _build_and_start_pipeline() -> None:
         ).start()
     except Exception as exc:
         logger.error("wake pipeline failed to start: %s", exc)
+        # Unwind the partial build. The reporter and the two pooled
+        # clients are assigned BEFORE `_pipeline` is, so a raise anywhere
+        # in between leaves them live behind a None `_pipeline` — and the
+        # enable path's idempotence guard keys on `_pipeline`, so the next
+        # enable would re-enter here and overwrite them, stranding a
+        # thread and two socket pools per attempt. A raise AFTER the
+        # assignment is worse: a never-started pipeline has no worker, yet
+        # that same guard would make every later enable a no-op until
+        # someone restarted the container. Tearing down settles both.
+        _teardown_voice_runtime()
 
 
 @app.on_event("startup")
@@ -533,9 +547,21 @@ def _teardown_voice_runtime() -> None:
     pipeline = _pipeline
     _pipeline = None
     if pipeline is not None:
-        pipeline.stop()
+        # Best-effort like the closes below — this runs from a request
+        # path too (the disable toggle), where a raise would escape as a
+        # 500 with the flag already persisted off and the three
+        # singletons below never freed. stop() signals `_shutdown` before
+        # anything that can fail, so the worker is on its way out either
+        # way; giving up on the join is better than skipping the rest.
+        try:
+            pipeline.stop()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            logger.warning("pipeline stop raised", exc_info=True)
     if _activity_reporter is not None:
-        _activity_reporter.stop()
+        try:
+            _activity_reporter.stop()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            logger.warning("activity reporter stop raised", exc_info=True)
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
     # has joined (no reply()/persona fetch is in flight). Both are
@@ -772,10 +798,18 @@ class CalibrationApplyRequest(BaseModel):
 # WARP-1599 — admin kill-switch schemas. One boolean in, the persisted
 # boolean back out: there is no third state and nothing is "pending" —
 # the response is what a subsequent GET /voice/status reports as
-# `enabled`. A body that isn't a boolean is a 422, never a guess.
+# `enabled`.
+#
+# StrictBool, not bool: pydantic's default lax mode reads "false", "off"
+# and 0 as real booleans, so a caller sending a string could silently
+# silence the box. VoiceEnabledStore deliberately refuses to read a
+# string "false" out of the flag file as an admin's intent, and the wire
+# has to agree with the file — otherwise the same value means two
+# different things depending on which layer sees it. Only a JSON
+# `true`/`false` flips the switch; anything else is a 422, never a guess.
 
 class VoiceEnabledRequest(BaseModel):
-    enabled: bool
+    enabled: StrictBool
 
 
 class VoiceEnabledResponse(BaseModel):
