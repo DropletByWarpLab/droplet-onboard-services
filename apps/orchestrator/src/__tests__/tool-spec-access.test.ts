@@ -357,6 +357,17 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(res.status).toBe(207);
     expect(res.body.status).toBe("failed");
     expect(res.body.trace[0].error).toMatch(/lock/i);
+    // Refused, not broken: `warn` + the shield icon, matching the ticker's
+    // own skip gate so the two refusal paths read alike in the feed.
+    const audited = recordActivityMock.mock.calls.map(([a]) => a);
+    expect(
+      audited.some(
+        (a) =>
+          a.severity === "warn" &&
+          a.sourceIcon === "shield" &&
+          a.refs?.reason === "LOCK_OPERATION_NOT_PERMITTED",
+      ),
+    ).toBe(true);
   });
 });
 
