@@ -38,9 +38,19 @@ const logger = createLogger("erp-service");
 /** Roles allowed to view PHI (schedule/patients/AR/recall) — minimum-necessary.
  *  Clinical staff only. NOT the household-default `family` role: roleFromGroups
  *  assigns `family` to any un-grouped account, so admitting it here would make
- *  patient PHI readable by default (fail-open). Non-clinical roles get the lock. */
+ *  patient PHI readable by default (fail-open). Non-clinical roles get the lock.
+ *
+ *  WARP-1530 (ADR-032 §8 O-2) deliberately does NOT add `family` to this set.
+ *  A family person reaches PHI only by arriving with a RESOLVED
+ *  `AccessRoleConnectorGrant` (`ErpUser.connectorLevel`), which the route gate
+ *  reads from the effective-access resolver. Keeping the tier set narrow means
+ *  the fail-open case — a future route registered without the gate — still
+ *  cannot hand patient data to the household default. */
 const PHI_READ_ROLES = new Set(["owner", "admin"]);
-/** Roles allowed to stage/confirm a write back into Eaglesoft. */
+/** Roles that may hold a connector grant at all — O-2's "family-and-up". */
+const GRANTABLE_PHI_READ_ROLES = new Set(["family"]);
+/** Roles allowed to stage/confirm a write back into Eaglesoft. Admin-tier only
+ *  — O-2 leaves this exactly as it was; a connector grant never widens it. */
 const WRITE_ROLES = new Set(["owner", "admin"]);
 /** The registered write-command names — the validation allow-list (brief §11.3). */
 const WRITE_COMMAND_NAMES = new Set(WRITE_COMMANDS.map((c) => c.name));
@@ -48,6 +58,15 @@ const WRITE_COMMAND_NAMES = new Set(WRITE_COMMANDS.map((c) => c.name));
 export interface ErpUser {
   id: string;
   role: string;
+  /**
+   * WARP-1530 — the person's RESOLVED connector reach for this provider, as
+   * the effective-access resolver computed it
+   * (`min(roleConnectorGrant, connection.writeEnabled ? read_write : read)`).
+   * Set by the route's O-2 gate; `null`/absent means "no grant", which is
+   * every caller that predates RBAC v2. Read-side only: writes stay
+   * admin-tier, so this never widens `assertCanWrite`.
+   */
+  connectorLevel?: "read" | "read_write" | null;
 }
 
 export interface ScheduleResult {
@@ -148,7 +167,12 @@ export function createErpService(
   }
 
   function assertCanReadPhi(user: ErpUser): void {
-    if (!PHI_READ_ROLES.has(user.role)) throw ErpError.forbidden();
+    if (PHI_READ_ROLES.has(user.role)) return;
+    // O-2: family-and-up WITH a grant. The tier check and the grant check are
+    // both required — a grant on a guest is not reach, and a family tier
+    // without one is today's denial.
+    if (GRANTABLE_PHI_READ_ROLES.has(user.role) && user.connectorLevel) return;
+    throw ErpError.forbidden();
   }
   function assertCanWrite(user: ErpUser): void {
     if (!WRITE_ROLES.has(user.role)) throw ErpError.forbidden();

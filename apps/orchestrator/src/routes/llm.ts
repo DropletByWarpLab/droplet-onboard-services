@@ -43,6 +43,7 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { decideCloudTurn } from "../services/cloud-access.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
@@ -877,6 +878,23 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // friendlyPreStreamError) surfaces the regression visibly.
       if (!chatReq.messages.some((m) => m.role === "user")) {
         res.status(400).json({ error: "empty_replay" });
+        return;
+      }
+
+      // WARP-1530 / ADR-032 §3 axis (d) — the per-person cloud gate. Consults
+      // the resolver's AND-gated `cloud` BEFORE a cloud provider is selected,
+      // and refuses honestly rather than silently answering with the local
+      // model. Placed here — after validation, before persistence, the
+      // ncToken round-trip and the agent loop — so a refused turn writes no
+      // rows and touches no provider. Local turns never reach the resolver.
+      // ai-gateway's workspace-level 451 is untouched and still backstops this.
+      const cloudDecision = await decideCloudTurn({
+        user: (req as AuthedRequest).user,
+        model: chatReq.model,
+        provider: chatReq.provider,
+      });
+      if (cloudDecision.kind === "refused") {
+        res.status(cloudDecision.status).json(cloudDecision.body);
         return;
       }
 
@@ -1917,6 +1935,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         process.env.DEFAULT_MODEL ??
         process.env.LLM_MODEL ??
         "mistral:7b-instruct";
+
+      // WARP-1530 — the same per-person cloud gate as /llm/chat. `model` is
+      // caller-supplied here too, so without this a person denied cloud could
+      // reach a cloud provider through the single-turn route instead of the
+      // chat one. The registered consumers (translate_text / summarize_file
+      // via the mcp-server service principal) are exempt by §3 and pay
+      // nothing: the gate returns before any lookup for service principals.
+      const cloudDecision = await decideCloudTurn({
+        user: (req as AuthedRequest).user,
+        model,
+      });
+      if (cloudDecision.kind === "refused") {
+        res.status(cloudDecision.status).json(cloudDecision.body);
+        return;
+      }
+
       try {
         const result = await completeOnce({
           system: body.system,
