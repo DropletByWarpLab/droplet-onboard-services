@@ -353,26 +353,28 @@ export function createPeopleRouter(
         // string falls through to createTeamInvite's typed 400. Fail closed
         // if the actor's role claim is absent (inside the guard).
         //
-        // `inviterRole` is still read out here because the WARP-1533
-        // access-role validation below applies the SAME rank cap to the
-        // custom role's startingPoint — the guard rails cover the tier, the
-        // shared invite-access-role service covers the custom role.
+        // `inviterRole` is read out here because BOTH the tier rails (moved
+        // below the access-role validation, see the ORDER note there) and
+        // the WARP-1533 access-role validation apply a rank cap — the guard
+        // rails cover the tier, the shared invite-access-role service
+        // covers the custom role's startingPoint.
         const inviterRole = req.user?.role;
-        if (isInviteRole(parsed.data.role)) {
-          assertAssignableForCreate({
-            actorRole: inviterRole,
-            requestedRole: parsed.data.role,
-            rankMessage:
-              "You cannot invite someone to a role higher than your own",
-          });
-        }
 
         // WARP-1533 (RBAC v2 T9): validate the optional custom access role
         // BEFORE any write — fail-closed via the shared service (exists,
         // active, assignable startingPoint, WARP-623 rank cap on the role's
-        // startingPoint with the same 403 shape as the tier cap above, and
-        // tier agreement so the accept path's fallback tier can never drift
-        // from the operator's pick).
+        // startingPoint, and tier agreement so the accept path's fallback
+        // tier can never drift from the operator's pick).
+        //
+        // ORDER (WARP-1526 × WARP-1533, decided at rebase): when the
+        // operator picked a custom role, its validation runs FIRST so the
+        // specific diagnosis wins — an owner-startingPoint row answers
+        // ACCESS_ROLE_NOT_ASSIGNABLE (400) rather than being masked by the
+        // coarser tier refusal, which would otherwise always fire first
+        // because T9's own tier-agreement check forces tier == startingPoint.
+        // Both are fail-closed and nothing is written by either. With no
+        // accessRoleId (every pre-T9 caller) this block is skipped entirely
+        // and the tier rails below are still the first thing that runs.
         let accessRole: AccessRole | null = null;
         if (parsed.data.accessRoleId) {
           try {
@@ -387,6 +389,15 @@ export function createPeopleRouter(
             }
             throw err;
           }
+        }
+
+        if (isInviteRole(parsed.data.role)) {
+          assertAssignableForCreate({
+            actorRole: inviterRole,
+            requestedRole: parsed.data.role,
+            rankMessage:
+              "You cannot invite someone to a role higher than your own",
+          });
         }
 
         let invite;

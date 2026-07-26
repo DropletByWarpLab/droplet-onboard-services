@@ -3394,32 +3394,21 @@ export function createProtectedAuthRouter(
       // a second owner invite, which consciously supersedes the earlier
       // owner→owner-allowed pin).
       //
-      // `inviterRole` is still read out here because the WARP-1533
-      // access-role validation below applies the SAME rank cap to the custom
-      // role's startingPoint — the guard rails cover the tier, the shared
-      // invite-access-role service covers the custom role.
+      // `inviterRole` is read out here because BOTH the tier rails (moved
+      // below the access-role validation, see the ORDER note there) and the
+      // WARP-1533 access-role validation apply a rank cap: the guard rails
+      // cover the tier, the shared invite-access-role service covers the
+      // custom role's startingPoint.
       const inviterRole = req.user?.role;
-      try {
-        assertAssignableForCreate({
-          actorRole: req.user?.role,
-          requestedRole: parsed.data.role,
-          rankMessage:
-            "You cannot invite someone to a role higher than your own",
-        });
-      } catch (err) {
-        if (err instanceof RoleMutationRefusedError) {
-          res.status(err.status).json(err.toJSON());
-          return;
-        }
-        throw err;
-      }
 
       // WARP-1533 (RBAC v2 T9): validate the optional custom access role
       // BEFORE any write — the shared fail-closed service (exists, active,
       // assignable startingPoint, WARP-623 rank cap on the role's
-      // startingPoint with the same 403 shape as the tier cap above, tier
-      // agreement). Shared with POST /api/people/invite (the canonical
-      // people surface) so the two create paths can never diverge.
+      // startingPoint, tier agreement). Shared with POST /api/people/invite
+      // (the canonical people surface) so the two create paths can never
+      // diverge — including this ordering: with a custom role picked, its
+      // specific refusal wins over the coarser tier rail below (see the
+      // matching ORDER note in routes/people.ts). Both are fail-closed.
       let inviteAccessRole: AccessRole | null = null;
       if (parsed.data.accessRoleId) {
         try {
@@ -3435,6 +3424,21 @@ export function createProtectedAuthRouter(
           }
           throw err;
         }
+      }
+
+      try {
+        assertAssignableForCreate({
+          actorRole: inviterRole,
+          requestedRole: parsed.data.role,
+          rankMessage:
+            "You cannot invite someone to a role higher than your own",
+        });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       // Derive the unique userid from the email local-part. The derived
