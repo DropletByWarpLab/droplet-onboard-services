@@ -58,7 +58,19 @@
  * an unwired §3 resolver — it returns {@link DENY_ALL_TOOL_SCOPE} rather than
  * `null`. "I couldn't check" must never resolve to "full reach": a transient
  * read error would otherwise hand a deliberately-narrowed role the whole
- * registry. The turn still answers; it just answers without tools.
+ * registry. The turn still answers; it just answers without tools, and the
+ * ADR-004 layer-1 route guards keep enforcing throughout.
+ *
+ * WHICH `role` IS AUTHORITATIVE. The owner/service short-circuits read the
+ * REQUEST principal's role — the same claim `requireRole` and
+ * `isPrivilegedRole` already trust app-wide — so the tool surface doesn't
+ * grow a second, divergent authorization identity (and an owner's chat turn
+ * doesn't gain a DB read to answer a question the token already answered).
+ * `writeDomains` below uses the §3 resolver's `tier`, which comes from the
+ * User row. If the two ever disagree (a stale token across a demotion), the
+ * composition stays conservative in BOTH directions: the coarse write filter
+ * in narrowAllowedToolsForRole runs off the request role, this scope's write
+ * axis runs off the row, and a tool needs to clear both.
  */
 import type { PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG } from "@droplet/tools-core";
