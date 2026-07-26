@@ -1,6 +1,6 @@
 # Overlay connect — punch telemetry (WARP-1389)
 
-Stage-3 observability for the direct-punch remote-access overlay (ADR-030 /
+Stage-3 observability for the direct-punch remote-access overlay (ADR-031 /
 WARP-1382). Opt-in, operational only: **no packet contents, no client IPs at
 rest** beyond the session rows that already expire. Two surfaces:
 

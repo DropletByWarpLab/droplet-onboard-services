@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (founder decision, Stefan Cruceru, 2026-07-18) — relay-fallback transport sub-decision pending the WARP-1390 spike
 - **Epic:** [WARP-1382](https://warp-lab.atlassian.net/browse/WARP-1382) · this doc: [WARP-1383](https://warp-lab.atlassian.net/browse/WARP-1383)
-- **Supersedes:** the *customer-facing client* story of ADR-025 as amended by WARP-1000 (Cloudflare One/WARP client + Zero Trust org). The box-side `cloudflared` relay and the `still-credit-6887` Zero Trust org **remain**, re-scoped to *internal-only* (team + WARP-Lab-operated pilot boxes).
+- **Supersedes:** the *customer-facing client* story of ADR-025A (`droplet-fleet-hq`) as amended by WARP-1000 (Cloudflare One/WARP client + Zero Trust org). The box-side `cloudflared` relay and the `still-credit-6887` Zero Trust org **remain**, re-scoped to *internal-only* (team + WARP-Lab-operated pilot boxes).
 - **Builds on:** ADR-009 (no public inbound), ADR-023 (per-device public-CA TLS, split-horizon `<name>.droplet-us.com`), WARP-975 (named addresses), the P1 hybrid home/away peer model (PR #897), and the P2 native WG clients (android #18, iOS #31, windows WARP-359).
 
 ## Context
