@@ -386,6 +386,23 @@ describe("DELETE /api/auth/users/:username — WARP-1526 rails", () => {
  */
 describe("DELETE /api/auth/users/:username — serializable isolation", () => {
   it("passes { isolationLevel: 'Serializable' } to the removal-rails $transaction", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).delete("/api/auth/users/alice");
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: "Serializable",
+    });
+  });
+});
+
+/**
  * WARP-1526 — pr-reviewer #1229 B3.
  *
  * The transaction here used to wrap a COUNT with no write: a read-only
@@ -414,11 +431,6 @@ describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write",
     const res = await request(app).delete("/api/auth/users/alice");
 
     expect(res.status).toBe(200);
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
-      isolationLevel: "Serializable",
-    });
-  });
     expect(prisma._users.find((u: any) => u.id === "u-alice").directoryStatus).toBe(
       "DEACTIVATED",
     );

@@ -57,7 +57,6 @@ import {
 // per-route inline rank checks this file used to carry live there now.
 import {
   RoleMutationRefusedError,
-  SERIALIZABLE_TX,
   assertRankCap,
   assertRoleAssignable,
   assertRoleChangeAllowed,
@@ -3115,9 +3114,11 @@ export function createProtectedAuthRouter(
           // NC outage must not fail a disable whose authoritative local
           // write already committed. Logged at error for operator
           // follow-up; re-running disable is idempotent.
+          let ncMirror: "synced" | "failed" = "synced";
           try {
             await ncSetUserEnabled(token, req.params.username, false);
           } catch (err) {
+            ncMirror = "failed";
             logger.error(
               { err, username: req.params.username },
               "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
@@ -3126,12 +3127,31 @@ export function createProtectedAuthRouter(
 
           // Rail 6 (consolidated): WARP-116/247 session-record revocation +
           // the WARP-1062 mandatory-emit audit row.
+          //
+          // pr-reviewer #1229 N1: a failed mirror is REPORTED, not hidden.
+          // Nextcloud is proxied at /nextcloud/ with no orchestrator auth in
+          // front, so while every orchestrator login gate now refuses this
+          // person, their NC web/WebDAV/desktop-sync session keeps working
+          // until the reconciler's directoryStatus mirror pass converges it.
+          // A bare 200 + an unqualified audit row would tell the operator
+          // the opposite.
           await runDisablePostEffects({
             targetUserId: row.id,
             username: req.params.username,
             actor: actorFromRequest(req),
+            ncMirror,
           });
-          res.json({ status: "disabled", username: req.params.username });
+          res.json({
+            status: "disabled",
+            username: req.params.username,
+            ncMirror,
+            ...(ncMirror === "failed"
+              ? {
+                  warning:
+                    "Access to this Droplet is revoked, but Nextcloud could not be reached — their file access will be cut off automatically when it is back.",
+                }
+              : {}),
+          });
           return;
         }
 
@@ -3143,8 +3163,16 @@ export function createProtectedAuthRouter(
           targetUserId: null,
           username: req.params.username,
           actor: actorFromRequest(req),
+          // No local row: the NC call IS the disable, and it succeeded (a
+          // failure would have thrown), so the mirror is synced by
+          // construction.
+          ncMirror: "synced",
         });
-        res.json({ status: "disabled", username: req.params.username });
+        res.json({
+          status: "disabled",
+          username: req.params.username,
+          ncMirror: "synced",
+        });
       } catch (err: any) {
         if (err instanceof RoleMutationRefusedError) {
           res.status(err.status).json(err.toJSON());

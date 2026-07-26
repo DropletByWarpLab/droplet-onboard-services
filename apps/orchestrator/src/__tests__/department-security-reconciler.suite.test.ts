@@ -281,12 +281,19 @@ function buildWorld(departmentsSeed: DeptRow[], membershipsSeed: MembershipRow[]
         const row = userRows.get(id);
         return row ? { ...row } : null;
       }),
-      // One always-empty findMany serves BOTH same-tick sweeps here
-      // (rebase union): the WARP-1531 role-default pass (no fixture in
-      // this suite assigns AccessRoles) and the WARP-1526 droplet-admins
-      // membership sweep (no fixture seeds operator-tier users) — both
-      // stay no-ops for every pre-existing spec.
-      findMany: vi.fn(async () => []),
+      // pr-reviewer #1229 N4: positive discrimination — every same-tick
+      // caller is named, and an unknown where-shape throws rather than
+      // quietly answering []. No fixture in this suite assigns AccessRoles,
+      // seeds operator-tier users, or deactivates anyone, so all three
+      // sweeps are legitimately no-ops here.
+      findMany: vi.fn(async ({ where }: any = {}) => {
+        if (where?.accessRole) return [];
+        if (where?.directoryStatus === "DEACTIVATED") return [];
+        if (where?.role?.in) return [];
+        throw new Error(
+          `user.findMany: unrecognized where-shape ${JSON.stringify(where)}`,
+        );
+      }),
     },
     userUsagePolicy: {
       findMany: vi.fn().mockResolvedValue([]),

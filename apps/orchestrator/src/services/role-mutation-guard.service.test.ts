@@ -67,7 +67,6 @@ import {
   RoleMutationRefusedError,
   ASSIGNABLE_ROLES,
   ADMIN_TIER_ROLES,
-  SERIALIZABLE_TX,
   assertNotSelf,
   assertTargetNotOwner,
   assertRankCap,
@@ -86,6 +85,7 @@ import {
   SERIALIZABLE_TX,
   isConcurrencyConflict,
   readGuardTargetTx,
+  type GuardTx,
 } from "./role-mutation-guard.service.js";
 
 /** Catch helper — every rail throws RoleMutationRefusedError, never returns. */
@@ -135,7 +135,11 @@ function txStub(counts: { owners: number; activeOperatorsExcludingTarget: number
     }
     throw new Error(`unexpected count where-shape: ${JSON.stringify(where)}`);
   });
-  return { user: { count } };
+  // Cast at the stub boundary: GuardTx is Prisma.TransactionClient
+  // (pr-reviewer #1229 N5) so that PRODUCTION code cannot hand the rails a
+  // full PrismaClient and run an invariant outside a transaction. A unit
+  // stub only needs the one method the invariants call.
+  return { user: { count } } as unknown as GuardTx;
 }
 
 beforeEach(() => {
@@ -432,7 +436,7 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 5 });
     const err = await refusalAsync(() =>
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "own-1", role: "owner" },
+        target: { id: "own-1", role: "owner", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     );
@@ -446,7 +450,9 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
   it("removing the only owner throws LAST_OWNER_INVARIANT (removal variant)", async () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 5 });
     const err = await refusalAsync(() =>
-      assertRemovalInvariantsTx(tx, { target: { id: "own-1", role: "owner" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "own-1", role: "owner", directoryStatus: "ACTIVE" },
+      }),
     );
     expect(err.code).toBe("LAST_OWNER_INVARIANT");
   });
@@ -454,7 +460,9 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
   it("owner→owner-count 2 passes the owner rail (invariant fires at count <= 1 only)", async () => {
     const tx = txStub({ owners: 2, activeOperatorsExcludingTarget: 5 });
     await expect(
-      assertRemovalInvariantsTx(tx, { target: { id: "own-2", role: "owner" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "own-2", role: "owner", directoryStatus: "ACTIVE" },
+      }),
     ).resolves.toBeUndefined();
   });
 
@@ -462,7 +470,7 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 5 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "u1", role: "family" },
+        target: { id: "u1", role: "family", directoryStatus: "ACTIVE" },
         requestedRole: "guest",
       }),
     ).resolves.toBeUndefined();
@@ -474,7 +482,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
     const err = await refusalAsync(() =>
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     );
@@ -489,7 +497,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 1 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     ).resolves.toBeUndefined();
@@ -502,7 +510,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 1 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "guest",
       }),
     ).resolves.toBeUndefined();
@@ -533,7 +541,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     ).resolves.toBeUndefined();
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "u1", role: "guest" },
+        target: { id: "u1", role: "guest", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     ).resolves.toBeUndefined();
@@ -542,7 +550,9 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
   it("removing the sole ACTIVE admin (no owner) throws LAST_OPERATOR_INVARIANT (removal variant)", async () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
     const err = await refusalAsync(() =>
-      assertRemovalInvariantsTx(tx, { target: { id: "adm-1", role: "admin" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
+      }),
     );
     expect(err.code).toBe("LAST_OPERATOR_INVARIANT");
   });

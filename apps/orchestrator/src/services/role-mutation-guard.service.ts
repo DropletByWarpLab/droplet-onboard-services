@@ -658,6 +658,14 @@ export async function runDisablePostEffects(args: {
   targetUserId: string | null;
   username: string;
   actor: ActivityActor;
+  /**
+   * Whether the Nextcloud enable-flag mirror landed (pr-reviewer #1229
+   * N1). Recorded on the audit row so a disable that only took effect
+   * locally is not indistinguishable from a fully-applied one — NC is
+   * proxied without orchestrator auth in front, so the difference is real
+   * access, and the reconciler's mirror pass is what closes it.
+   */
+  ncMirror?: "synced" | "failed";
 }): Promise<void> {
   const sessionsRevoked = args.targetUserId
     ? await revokeAllSessions(args.targetUserId)
@@ -672,6 +680,7 @@ export async function runDisablePostEffects(args: {
       username: args.username,
       targetUserId: args.targetUserId,
       sessionsRevoked,
+      ...(args.ncMirror ? { ncMirror: args.ncMirror } : {}),
     },
     actor: args.actor,
   });

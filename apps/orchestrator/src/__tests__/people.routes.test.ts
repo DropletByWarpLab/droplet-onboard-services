@@ -1698,22 +1698,6 @@ describe("WARP-1526 — serializable isolation on every guarded $transaction", (
     const prisma = createPrismaMock([
       seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
       seedUser({ id: "adm-1", username: "sam", role: "admin" }),
- * WARP-1526 — pr-reviewer #1229 B1 + B2 on the people surface.
- *
- * B1: the guarded transactions must be opened at SERIALIZABLE (Prisma
- *     inherits the Postgres default, READ COMMITTED, which admits the
- *     write skew rails 4/5 exist to stop), and the loser of that conflict
- *     must surface as a 409, never a 500.
- * B2: the decision to RUN rails 4/5 must come from state read INSIDE the
- *     transaction, and the write itself must be optimistically guarded, so
- *     a concurrent promotion can't slip a demotion past a rail that was
- *     never evaluated.
- */
-describe("WARP-1526 B1/B2 — isolation, conflict mapping, and in-tx target re-read", () => {
-  it("PATCH role opens the transaction at SERIALIZABLE isolation", async () => {
-    const prisma = createPrismaMock([
-      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
-      seedUser({ id: "u1", username: "alice", role: "family" }),
     ]);
     const app = buildApp(prisma);
 
@@ -1760,6 +1744,30 @@ describe("WARP-1526 B1/B2 — isolation, conflict mapping, and in-tx target re-r
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });
+  });
+});
+
+/**
+ * WARP-1526 — pr-reviewer #1229 B1 + B2 on the people surface.
+ *
+ * B1: the guarded transactions must be opened at SERIALIZABLE (Prisma
+ *     inherits the Postgres default, READ COMMITTED, which admits the
+ *     write skew rails 4/5 exist to stop), and the loser of that conflict
+ *     must surface as a 409, never a 500.
+ * B2: the decision to RUN rails 4/5 must come from state read INSIDE the
+ *     transaction, and the write itself must be optimistically guarded, so
+ *     a concurrent promotion can't slip a demotion past a rail that was
+ *     never evaluated.
+ */
+describe("WARP-1526 B1/B2 — isolation, conflict mapping, and in-tx target re-read", () => {
+  it("PATCH role opens the transaction at SERIALIZABLE isolation", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
       .patch("/api/people/u1/role")
       .send({ role: "admin" });
 
