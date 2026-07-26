@@ -156,6 +156,7 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 import { createPeopleRouter } from "../routes/people.js";
 import { createProtectedAuthRouter } from "../routes/auth.js";
 import { assertRankCap } from "../services/role-mutation-guard.service.js";
+import * as nc from "../services/nextcloud.client.js";
 import type { Role } from "../services/jwt.service.js";
 
 // ── the shared in-memory directory ─────────────────────────────────
@@ -779,24 +780,13 @@ describe("the built-in-tier path ({accessRoleId: null, tier}) is not a side door
 
 // ── WARP-1564 — the non-role fields of PUT /auth/users/:username ───
 
-describe("WARP-1564 — an admin must not rotate the OWNER's password", () => {
-  /**
-   * KNOWN-FAILING ON THIS BRANCH — the fix is a sibling ticket (WARP-1564)
-   * building off the same main, not this one.
-   *
-   * The hole: `PUT /api/auth/users/:username` runs the rails only when the
-   * body carries a RECOGNIZED `role` key (routes/auth.ts). A body with no
-   * role key skips rail 1 entirely, so `{ password }` against the owner's
-   * username writes `passwordHash` on the owner's local row AND pushes the
-   * new password to their Nextcloud account — full account takeover by an
-   * admin, from the surface whose sibling paths (disable / delete) are all
-   * rail-1 protected.
-   *
-   * `.skip` rather than omitted: when WARP-1564 lands, un-skipping is a
-   * one-line diff that proves the fix, and until then the gap is visible in
-   * the suite that owns the matrix instead of living only in a ticket.
-   */
-  it.skip("refuses a password write against the owner's row (403 OWNER_IMMUTABLE)", async () => {
+describe("WARP-1564 — an admin must not rotate the OWNER's credentials", () => {
+  // Rail 1b (`assertTargetNotOtherOwner`) now guards the WHOLE route, not just
+  // the role branch: refuse when the target is an owner and the actor is not
+  // that same owner. Fixed in #1241; these cases shipped `.skip`-ed on this
+  // branch and were flipped on when it merged.
+
+  it("refuses a password write against the owner's row (403 OWNER_IMMUTABLE)", async () => {
     const prisma = createPrismaMock(DIRECTORY);
     const res = await request(buildApp(prisma, ADMIN))
       .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
@@ -808,11 +798,15 @@ describe("WARP-1564 — an admin must not rotate the OWNER's password", () => {
       "passwordHash",
       "$argon2id$stub",
     );
+    // The Nextcloud mirror is the other half of the takeover — the local hash
+    // and the NC account password are written by the same handler.
+    expect(vi.mocked(nc.ncUpdateUser)).not.toHaveBeenCalled();
   });
 
-  it.skip("refuses an email write against the owner's row (the login key)", async () => {
-    // Same rail, second field: `email` is the ADR-013 directory login key, so
-    // rewriting it is an account takeover by a different route.
+  it("refuses an email write against the owner's row (the login key)", async () => {
+    // Same rail, second field: `email` is the ADR-013 directory login key
+    // (/auth/login resolves the row by email blind-index, then verifies that
+    // row's hash), so rewriting it is an account takeover by a different route.
     const prisma = createPrismaMock(DIRECTORY);
     const res = await request(buildApp(prisma, ADMIN))
       .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
@@ -822,15 +816,144 @@ describe("WARP-1564 — an admin must not rotate the OWNER's password", () => {
     expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
   });
 
-  it("documents TODAY's behaviour so the gap cannot be mistaken for covered", async () => {
-    // This assertion is the honest inverse of the two skips above: it passes
-    // BECAUSE the hole is open. When WARP-1564 lands it goes red, which is
-    // the signal to flip the skips on and delete this case.
+  it("rails the whole route, not a credential allowlist — displayName too", async () => {
+    // The field this branch previously documented as an open hole. It is
+    // railed for the same reason as the rest: an allowlist would default any
+    // field added to updateUserSchema later to UN-railed — "derive state from
+    // absence" in guard form.
     const prisma = createPrismaMock(DIRECTORY);
     const res = await request(buildApp(prisma, ADMIN))
       .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
       .send({ displayName: "Renamed By Admin" });
 
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
+  });
+
+  it("refuses BEFORE schema validation — a weak password is still 403, not 400", async () => {
+    // No validation oracle: an admin probing the owner's row must not be able
+    // to tell a well-formed body from a malformed one. Non-owner targets keep
+    // their 400 WEAK_PASSWORD (asserted below) so this is a scoped change.
+    const prisma = createPrismaMock(DIRECTORY);
+    const res = await request(buildApp(prisma, ADMIN))
+      .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
+      .send({ password: "x" });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
+  });
+
+  it("the OWNER may still maintain their OWN account (the self carve-out)", async () => {
+    // Rail 1b is rail 1 WITH a self carve-out, and the carve-out is the whole
+    // reason it isn't plain rail 1: this route is how the owner changes their
+    // own password / email / display name.
+    const prisma = createPrismaMock(DIRECTORY);
+    const res = await request(buildApp(prisma, OWNER))
+      .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
+      .send({ password: "Owner-Chosen-Pw-9" });
+
     expect(res.status).toBe(200);
+  });
+
+  it("owner A cannot edit owner B (drifted two-owner directory)", async () => {
+    const owner2 = row({
+      id: "warp1534-owner2-cred",
+      username: "warp1534-owner2-cred",
+      role: "owner",
+    });
+    const prisma = createPrismaMock([...DIRECTORY, owner2]);
+    const res = await request(buildApp(prisma, owner2))
+      .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
+      .send({ password: "Other-Owner-Pw-9" });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
+  });
+
+  it("fails CLOSED on a missing actor id (inverse of rail 2's fail-open)", async () => {
+    // Rail 1b uses identity to PERMIT, where rail 2 uses it to REFUSE — so the
+    // safe default inverts. An absent id cannot prove "I am the owner".
+    const prisma = createPrismaMock(DIRECTORY);
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as any).user = { username: "ghost", role: "owner" }; // role, no id
+      next();
+    });
+    app.use("/api", createProtectedAuthRouter(prisma));
+
+    const res = await request(app)
+      .put(`/api/auth/users/${OWNER.nextcloudUsername}`)
+      .send({ password: "No-Actor-Id-Pw-9" });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
+  });
+
+  it("a NON-owner target is untouched by rail 1b — 200, and 400 still validates", async () => {
+    // The scoping assertion. Without it, "everything 403s" would also pass.
+    const prisma = createPrismaMock(DIRECTORY);
+    const app = buildApp(prisma, ADMIN);
+
+    const ok = await request(app)
+      .put(`/api/auth/users/${FAMILY.nextcloudUsername}`)
+      .send({ password: "Rotated-By-Admin-9" });
+    expect(ok.status).toBe(200);
+
+    const weak = await request(app)
+      .put(`/api/auth/users/${FAMILY.nextcloudUsername}`)
+      .send({ password: "x" });
+    expect(weak.status).toBe(400);
+    expect(weak.body).toMatchObject({ code: "WEAK_PASSWORD" });
+  });
+
+  it("a raced promotion answers 409 CONCURRENT_MUTATION, never 404", async () => {
+    // Rail 1b decides on a NON-transactional findUnique, so the write pins
+    // `role` to the value it decided against. The concurrent writer is real:
+    // scim-role-mapping maps any SCIM group whose normalized name contains
+    // "owner" to role "owner", so an Okta push of "Business Owners" mints
+    // owners asynchronously with no coordination with this route.
+    //
+    // The distinction is subtle and easy to regress: a 0-row write means
+    // "user not found" ONLY when no row existed at decision time. Here one
+    // did, so 404 would claim the account is gone when it is very much there
+    // — and would bury the only signal that a promotion was in flight.
+    const prisma = createPrismaMock(DIRECTORY);
+    const stored = prisma._users.find((u: Row) => u.id === FAMILY.id) as Row;
+    const realFindUnique = prisma.user.findUnique;
+    let raced = false;
+    prisma.user.findUnique = vi.fn(async (args: any) => {
+      const found = await realFindUnique(args);
+      if (!found) return null;
+      const snapshot = { ...found }; // what rail 1b decides against
+      if (!raced && found.id === FAMILY.id) {
+        raced = true;
+        stored.role = "owner"; // ...the SCIM promotion lands here
+      }
+      return snapshot;
+    });
+
+    const res = await request(buildApp(prisma, ADMIN))
+      .put(`/api/auth/users/${FAMILY.nextcloudUsername}`)
+      .send({ password: "Raced-Promotion-Pw-9" });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "CONCURRENT_MUTATION" });
+    // Nothing applied locally, and the response returns BEFORE the Nextcloud
+    // mirror — so the now-owner row keeps its credentials on both sides.
+    expect(stored).not.toHaveProperty("passwordHash", "$argon2id$stub");
+    expect(vi.mocked(nc.ncUpdateUser)).not.toHaveBeenCalled();
+  });
+
+  it("no local row at all still answers 404 USER_NOT_FOUND", async () => {
+    // The other side of the split the 409 came from: the pre-existing 404 is
+    // unchanged when the row genuinely never existed.
+    const prisma = createPrismaMock(DIRECTORY);
+    const res = await request(buildApp(prisma, ADMIN))
+      .put("/api/auth/users/warp1534-no-such-user")
+      .send({ password: "Ghost-Account-Pw-9" });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ code: "USER_NOT_FOUND" });
   });
 });
