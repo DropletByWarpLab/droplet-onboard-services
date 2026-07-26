@@ -50,6 +50,11 @@ OUTPUT_DIR=""
 # names from docker/docker-compose.yml — a static check below asserts that.
 VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit)
 
+# WARP-1571 / WARP-1575 — readiness probe for the disposable drill Postgres.
+# MUST stay TCP-gated; see the guard in the static-checks section below for
+# why a unix-socket probe silently false-positives on a cold volume.
+PG_HEALTHCHECK_CMD='pg_isready -h 127.0.0.1 -U droplet'
+
 echo ""
 echo "  ================================================"
 echo "  Full-device backup + restore drill (WARP-570)"
@@ -176,6 +181,45 @@ else
 fi
 
 # =============================================================================
+# Cold-volume readiness race (WARP-1571, dup WARP-1575) — static, no Docker.
+#
+# The postgres docker-entrypoint's FIRST boot (empty volume) runs a TEMPORARY
+# init server with `listen_addresses=''` — it accepts unix-socket connections
+# ONLY. It creates POSTGRES_DB mid-phase, then stops, then the real server
+# starts. A unix-socket `pg_isready` answers "accepting connections" during
+# that temp phase, so docker flips the container to `healthy` while initdb is
+# still running: `wait_healthy` returns, `seed_db_rows` fires its psql into
+# the shutdown window, and the drill dies with "the database system is
+# shutting down" / "database droplet does not exist". It is load-dependent,
+# so it passes on a warm cache and reds under a busy runner — this drill went
+# 19 runs green before it bit.
+#
+# The temp init server NEVER binds TCP. `-h 127.0.0.1` is therefore the gate:
+# it cannot match the temp server, so the first successful probe is the REAL
+# server. (`pg_isready` also distinguishes "starting up" — it exits 1, not 0,
+# while the server is still in recovery, so one TCP success is sufficient.)
+#
+# Same root cause and same fix as the WARP-254 drill-readiness guard in
+# tests/restic-backup.test.sh.
+# =============================================================================
+echo ""
+echo "--- Cold-volume readiness race (WARP-1571) ---"
+
+printf '%s\n' "$PG_HEALTHCHECK_CMD" | grep -qE 'pg_isready[[:space:]]+.*-h[[:space:]]+127\.0\.0\.1' \
+  && pass "drill Postgres healthcheck is TCP-gated (pg_isready -h 127.0.0.1)" \
+  || fail "drill Postgres healthcheck is not TCP-gated (socket pg_isready reports healthy during the initdb temp server)"
+
+# The healthcheck constant is the ONLY readiness probe the disposable compose
+# may use — an inline socket pg_isready sneaking back into the YAML would
+# reopen the race without tripping the assert above.
+compose_probe_lines="$(sed -n '/^make_disposable_compose()/,/^}/p' "${BASH_SOURCE[0]}" | grep -c 'pg_isready' || true)"
+if [ "$compose_probe_lines" -eq 0 ]; then
+  pass "disposable compose has no inline pg_isready (uses \$PG_HEALTHCHECK_CMD)"
+else
+  fail "disposable compose inlines pg_isready ($compose_probe_lines occurrence(s)) instead of using \$PG_HEALTHCHECK_CMD"
+fi
+
+# =============================================================================
 # Live docker drill.
 # =============================================================================
 echo ""
@@ -213,7 +257,9 @@ services:
       - nvrdata:/data/nvr
       - ops-audit:/data/audit
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      # WARP-1571: TCP-gated on purpose — see the cold-volume readiness
+      # guard above. Never inline a socket probe here.
+      test: ["CMD-SHELL", "$PG_HEALTHCHECK_CMD"]
       interval: 2s
       timeout: 3s
       retries: 40
