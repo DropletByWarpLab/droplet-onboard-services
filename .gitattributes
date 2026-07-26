@@ -57,3 +57,9 @@ apps/orchestrator/prisma/migrations/**/migration.sql text eol=lf
 schemas/anchor.schema.json text eol=lf
 scripts/gen-anchor-schema.mjs text eol=lf
 packages/shared-types/src/anchor.ts text eol=lf
+
+# WARP-1607 — Nextcloud config fragments bind-mounted into the container and
+# parsed by PHP *inside* it (config/*.config.php and php conf.d/*.ini). Same
+# Linux-runtime hazard as the scripts above, and the session ini's save_path is
+# byte-sensitive, so pin them rather than rely on the host's autocrlf setting.
+docker/nextcloud/* text eol=lf
