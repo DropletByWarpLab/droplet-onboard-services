@@ -378,6 +378,135 @@ describe("§4.2 role detail", () => {
   });
 });
 
+// ── WARP-1528: the sync-chip contract fix ────────────────────────────
+//
+// The API returns `syncState` as a SIBLING of `role` — `{ role, syncState }`
+// on the mutations, and `serializeAccessRole` never puts it INSIDE the role
+// row (so `role.syncState` is `undefined` against a real box, and the
+// "Applying…" chip the §10 states checklist requires could never appear).
+// `lib/api.ts` has always typed the sibling correctly; the panel was reading
+// the wrong place. These pin the sibling being read — and the pre-T4
+// list-borne field still working, so an orchestrator that later starts
+// emitting it on reads isn't a regression.
+describe("WARP-1528 — sync chip reads the sibling syncState", () => {
+  it("shows Applying… after a create whose response carries a pending sibling", async () => {
+    // The role list, as a real box serves it: no syncState on the row.
+    const listed = role({ id: "r-new", name: "Reception", slug: "reception" });
+    delete (listed as { syncState?: unknown }).syncState;
+    createAccessRoleMock.mockResolvedValue({ role: listed, syncState: "pending" });
+    listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Reception")).toBeInTheDocument());
+    // Nothing pending yet.
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    const name = await screen.findByPlaceholderText("Name this role");
+    fireEvent.change(name, { target: { value: "Reception" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() => expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0));
+  });
+
+  it("shows Applying… after an assign whose response carries a pending sibling", async () => {
+    const listed = role();
+    delete (listed as { syncState?: unknown }).syncState;
+    listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+    assignAccessRoleMock.mockResolvedValue({ syncState: "pending" });
+
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Assign people" }));
+    const dialog = await screen.findByRole("dialog", { name: /Assign people/ });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /Sam Ortega/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    await waitFor(() => expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0));
+  });
+
+  it("completes the §10 sequence: Applying… → Applied, then fades", async () => {
+    // UX (WARP-1528): SyncChip's `applied` arm was unreachable because the only
+    // terminal-success value mapped to null — so the chip DISAPPEARED on
+    // success, which is indistinguishable from the chip never appearing (the
+    // bug this panel just fixed). Nobody could tell convergence from
+    // regression. The client legitimately knows its write returned 2xx and the
+    // re-read succeeded; that is exactly what `Applied` claims.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const listed = role();
+      delete (listed as { syncState?: unknown }).syncState;
+      listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+      assignAccessRoleMock.mockResolvedValue({ syncState: "pending" });
+
+      renderPanel();
+      await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Assign people" }));
+      const dialog = await screen.findByRole("dialog", { name: /Assign people/ });
+      fireEvent.click(within(dialog).getByRole("checkbox", { name: /Sam Ortega/ }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+      await waitFor(() =>
+        expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0),
+      );
+
+      // The delayed re-read lands → the terminal beat, NOT disappearance.
+      await vi.advanceTimersByTimeAsync(1600);
+      await waitFor(() =>
+        expect(screen.getAllByText(ACCESS_COPY.applied).length).toBeGreaterThan(0),
+      );
+      expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+
+      // …and then it retires itself rather than accumulating green ticks.
+      await vi.advanceTimersByTimeAsync(4100);
+      await waitFor(() =>
+        expect(screen.queryByText(ACCESS_COPY.applied)).not.toBeInTheDocument(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a mutation that returns `synced` lands straight on Applied (no false pending)", async () => {
+    const listed = role({ id: "r-new", name: "Reception", slug: "reception" });
+    delete (listed as { syncState?: unknown }).syncState;
+    // The T3 create path answers `synced` — nothing cascaded, nothing to wait
+    // for. Showing "Applying…" first would claim a wait that never happened.
+    createAccessRoleMock.mockResolvedValue({ role: listed, syncState: "synced" });
+    listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Reception")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    const name = await screen.findByPlaceholderText("Name this role");
+    fireEvent.change(name, { target: { value: "Reception" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() => expect(screen.getAllByText(ACCESS_COPY.applied).length).toBeGreaterThan(0));
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+  });
+
+  it("a role merely AT REST in `synced` shows no chip (§12 — not a green tick per card)", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ syncState: "synced" })] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    expect(screen.queryByText(ACCESS_COPY.applied)).not.toBeInTheDocument();
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+  });
+
+  it("still honors a list-borne role.syncState (forward-compatible fallback)", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ syncState: "failed" })] });
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getAllByText(ACCESS_COPY.needsAttention).length).toBeGreaterThan(0),
+    );
+  });
+});
+
 describe("§10 offline", () => {
   it("renders the verbatim offline banner when the browser is offline", async () => {
     Object.defineProperty(window.navigator, "onLine", { value: false, configurable: true });

@@ -57,6 +57,87 @@ function featureLevel(result: ReturnType<typeof computeEffectiveAccess>, moduleI
   return result.features.find((f) => f.moduleId === moduleId)?.level;
 }
 
+// ── WARP-1528 (T4 / QA) — the always-on floor is intersection-EXEMPT ──
+//
+// `chat` is a CORE module, and core modules are exempt from workspace
+// enablement everywhere else in the system: app.ts's workspace gate does
+// `if (def.core) continue`, so `/api/llm` is never enablement-gated, and the
+// owner branch above returns before the intersection so owners keep `chat`
+// unconditionally. But `chat`'s registry availability is
+// `isSet(AI_GATEWAY_URL)`, so on a box with that env unset it drops out of the
+// workspace-effective set — and only ROLE-HOLDERS reach the intersection.
+// The resolver was therefore applying a narrowing to the always-on floor that
+// neither the workspace gate nor the owner path applies: an inconsistency, not
+// a design choice. Worse, it made the "a person's feature set can never be
+// empty" invariant — which the dashboard's fail-open guard leans on — false.
+describe("effective-access — always-on floor survives the workspace intersection", () => {
+  it("a role-holder on a box with AI_GATEWAY_URL unset still resolves `chat`", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "family", accessRole: role({ featureGrants: [] }) },
+        // Availability is off for chat → it is absent from the workspace set.
+        workspaceModuleIds: new Set<ModuleId>(GATEABLE_MODULE_IDS as ModuleId[]),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+    // …and the set is therefore never empty, which is the load-bearing part.
+    expect(res.features.length).toBeGreaterThan(0);
+  });
+
+  it("a grantless role on a gateway-less box resolves to the floor, NOT an empty set", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "guest", accessRole: role({ featureGrants: [] }) },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(res.features).toEqual([{ moduleId: "chat", level: "act" }]);
+  });
+
+  it("still intersects every GATEABLE module against the workspace", () => {
+    // The exemption is scoped to the always-on floor — it must not become a
+    // hole that lets workspace-disabled features through.
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-1",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "manage" },
+              { moduleId: "cameras", level: "view" },
+            ],
+          }),
+        },
+        workspaceModuleIds: new Set<ModuleId>(["files"]),
+      }),
+    );
+    expect(featureLevel(res, "files")).toBe("manage");
+    expect(featureLevel(res, "cameras")).toBeUndefined();
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+
+  it("a role-LESS person keeps the floor too when the gateway is unset", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "family", accessRole: null },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+
+  it("owners are unaffected — they never reached the intersection anyway", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "owner", accessRole: null },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+});
+
 describe("effective-access — tier-only floors (null accessRoleId = today's world)", () => {
   it("family: manage on ordinary modules, view on network/switch, chat act, all domains", () => {
     const res = computeEffectiveAccess(baseInputs());

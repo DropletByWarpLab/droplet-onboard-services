@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
+import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { HELP_PATH } from "@/lib/routing";
@@ -318,6 +319,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // launcher (Onboarding-Flow redesign §4). It mounts here, in the authenticated
   // branch only, so it never appears on the wizard, login, the full-screen tour,
   // or the change-password takeover (each returns earlier).
+  //
+  // WARP-1528 (nav-gate gap c): the module route guard wraps the page content
+  // INSIDE the shell — a person who deep-links into a feature they can't open
+  // keeps their nav and can walk away, instead of landing on a page shell that
+  // renders fully and then fails request by request. It sits below every
+  // earlier takeover branch on purpose: setup, tour and change-password own
+  // their own routing and must never be second-guessed by a feature gate.
   return (
     <>
       <Sidebar />
@@ -326,7 +334,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         tabIndex={-1}
         className="lg:ml-[260px] pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh"
       >
-        {children}
+        <ModuleRouteGuard>{children}</ModuleRouteGuard>
       </main>
       <HelpLauncher />
     </>
