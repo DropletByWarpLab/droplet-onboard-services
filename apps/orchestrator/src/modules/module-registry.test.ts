@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
+import type { ModuleId } from "@prisma/client";
 import {
   MODULES,
   MODULE_BY_ID,
   BUSINESS_TYPES,
   BUSINESS_TYPE_BY_ID,
+  MODULE_REQUIRES,
+  foreignSubPrefixes,
   isModuleId,
   isBusinessType,
+  pathIsUnder,
+  satisfiedModuleIds,
   type AvailabilityConfig,
 } from "./module-registry.js";
 
@@ -80,6 +85,107 @@ describe("route prefixes — must match a real router mount", () => {
     expect(prefixes("calendar")).toEqual(["/api/calendar"]);
     expect(prefixes("smart_home")).toEqual(["/api/matter"]);
     expect(prefixes("smart_home")).not.toContain("/api/devices");
+  });
+});
+
+describe("nested route prefixes — the WARP-1585 collision", () => {
+  /** Every (outer module, inner prefix) pair where one module's prefix sits
+   *  strictly INSIDE another module's prefix. */
+  function nestedPairs(): Array<[ModuleId, string]> {
+    const out: Array<[ModuleId, string]> = [];
+    for (const outer of MODULES) {
+      for (const op of outer.routePrefixes) {
+        for (const inner of MODULES) {
+          if (inner.id === outer.id) continue;
+          for (const ip of inner.routePrefixes) {
+            if (ip.startsWith(`${op}/`)) out.push([outer.id, ip]);
+          }
+        }
+      }
+    }
+    return out.sort((a, b) => `${a[0]}${a[1]}`.localeCompare(`${b[0]}${b[1]}`));
+  }
+
+  it("the catalog's nesting is exactly the known files/knowledge/docs family", () => {
+    // Express `app.use(prefix, handler)` is a PREFIX mount, so a gate at
+    // `/api/files` also fires on `/api/files/knowledge/*` and
+    // `/api/files/docs/*`. This pins the set so a new nested prefix can't be
+    // added without someone reading `foreignSubPrefixes` and deciding.
+    expect(nestedPairs()).toEqual([
+      ["files", "/api/files/docs"],
+      ["files", "/api/files/knowledge"],
+    ]);
+  });
+
+  it("foreignSubPrefixes surfaces exactly the nested sibling namespaces", () => {
+    expect(foreignSubPrefixes("files", "/api/files")).toEqual([
+      "/api/files/docs",
+      "/api/files/knowledge",
+    ]);
+    // A module IS allowed to own a prefix inside its own other prefix — only
+    // FOREIGN nesting matters, because only that steals another module's gate.
+    expect(foreignSubPrefixes("knowledge", "/api/files/knowledge")).toEqual([]);
+    expect(foreignSubPrefixes("docs", "/api/files/docs")).toEqual([]);
+    expect(foreignSubPrefixes("cameras", "/api/cameras")).toEqual([]);
+  });
+
+  it("pathIsUnder honours Express's segment-boundary prefix semantics", () => {
+    expect(pathIsUnder("/api/files/knowledge/recent", "/api/files/knowledge")).toBe(true);
+    expect(pathIsUnder("/api/files/knowledge", "/api/files/knowledge")).toBe(true);
+    expect(pathIsUnder("/api/files/knowledge/", "/api/files/knowledge")).toBe(true);
+    // NOT a sub-path: `app.use` only matches on a segment boundary, so these
+    // belong to `files` and must keep the files gate.
+    expect(pathIsUnder("/api/files/knowledgebase", "/api/files/knowledge")).toBe(false);
+    expect(pathIsUnder("/api/filesknowledge", "/api/files")).toBe(false);
+    expect(pathIsUnder("/api/file", "/api/files")).toBe(false);
+  });
+});
+
+describe("module dependencies (WARP-1585)", () => {
+  it("docs declares files as its parent; knowledge declares none", () => {
+    // Documents has NO surface of its own (`navHrefs: []`): its substantive
+    // act is minting an editor session for a Nextcloud path, which lives on
+    // `/api/files/:filePath(*)/editor-session`. Knowledge, by contrast, reads
+    // FileContentChunk rows out of the orchestrator's own Postgres (sources
+    // `nextcloud` AND `brain`) behind FILE_INDEXER_URL — nothing on that path
+    // touches Nextcloud, so it stands alone.
+    expect(MODULE_BY_ID.get("docs")!.requires).toBe("files");
+    expect(MODULE_BY_ID.get("knowledge")!.requires).toBeUndefined();
+    expect(MODULE_REQUIRES.get("docs")).toBe("files");
+    expect(MODULE_REQUIRES.has("knowledge")).toBe(false);
+  });
+
+  it("every declared parent is a real, non-core module and never self-referential", () => {
+    for (const [child, parent] of MODULE_REQUIRES) {
+      expect(isModuleId(parent)).toBe(true);
+      expect(parent).not.toBe(child);
+      expect(MODULE_BY_ID.get(parent)!.core).toBe(false);
+    }
+  });
+
+  it("drops a child whose parent is absent, keeps it when the parent is held", () => {
+    expect([...satisfiedModuleIds(new Set<ModuleId>(["docs", "knowledge"]))].sort()).toEqual([
+      "knowledge",
+    ]);
+    expect(
+      [...satisfiedModuleIds(new Set<ModuleId>(["docs", "files", "knowledge"]))].sort(),
+    ).toEqual(["docs", "files", "knowledge"]);
+    // No dependency edge → never narrowed.
+    expect([...satisfiedModuleIds(new Set<ModuleId>(["knowledge"]))]).toEqual(["knowledge"]);
+  });
+
+  it("runs to a FIXED POINT so a chain collapses in one pass", () => {
+    // Today's catalog has a single edge, but the closure must not depend on
+    // that: a grandchild has to fall when the grandparent does, whatever the
+    // map's iteration order.
+    const chain = new Map<ModuleId, ModuleId>([
+      ["docs", "files"],
+      ["knowledge", "docs"],
+    ]);
+    expect([...satisfiedModuleIds(new Set<ModuleId>(["docs", "knowledge"]), chain)]).toEqual([]);
+    expect(
+      [...satisfiedModuleIds(new Set<ModuleId>(["files", "docs", "knowledge"]), chain)].sort(),
+    ).toEqual(["docs", "files", "knowledge"]);
   });
 });
 

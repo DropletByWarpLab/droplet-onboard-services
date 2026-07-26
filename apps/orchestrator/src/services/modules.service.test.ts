@@ -81,3 +81,54 @@ describe("effective-state resolution (pure)", () => {
     expect(eff.has("voice")).toBe(false);    // off
   });
 });
+
+// ── WARP-1585 — declared module dependencies (`ModuleDef.requires`) ──
+//
+// The workspace axis of the same rule the resolver applies per person. Docs is
+// not a standalone surface: it edits files that live in Files, so a box with
+// Files switched off has nothing for Documents to open. The registry declares
+// that edge once (`docs.requires = "files"`) and both axes read it, rather
+// than the enforcement falling out of an Express prefix collision.
+describe("declared module dependencies (WARP-1585)", () => {
+  it("a module whose parent is not effective is not effective either", () => {
+    const overrides = new Map<ModuleId, boolean>([["files", false], ["docs", true]]);
+    const eff = computeEffectiveIds(overrides, ALL_AVAILABLE);
+    expect(eff.has("files")).toBe(false);
+    expect(eff.has("docs")).toBe(false);
+    // …and `knowledge`, which declares no parent, is untouched by a Files
+    // toggle: it reads the orchestrator's own chunk store behind the file
+    // indexer, not Nextcloud.
+    expect(eff.has("knowledge")).toBe(true);
+  });
+
+  it("reports the dependency on the state row rather than hiding it in `effective`", () => {
+    // The operator-facing view has to be able to SAY why, not just show a
+    // module that refuses to switch on. `enabled` keeps the operator's stored
+    // intent so re-enabling Files restores Documents exactly as it was.
+    const overrides = new Map<ModuleId, boolean>([["files", false], ["docs", true]]);
+    const s = byId(computeModuleStates(overrides, ALL_AVAILABLE));
+    expect(s.get("docs")).toMatchObject({
+      available: true,
+      enabled: true,
+      effective: false,
+      requires: "files",
+      requiresUnmet: true,
+    });
+    expect(s.get("knowledge")!.requiresUnmet).toBe(false);
+  });
+
+  it("the parent coming back restores the child", () => {
+    const overrides = new Map<ModuleId, boolean>([["files", true], ["docs", true]]);
+    const eff = computeEffectiveIds(overrides, ALL_AVAILABLE);
+    expect(eff.has("docs")).toBe(true);
+  });
+
+  it("an UNAVAILABLE parent also drops the child", () => {
+    // files' availability is `isSet(NEXTCLOUD_URL)` — a box built without
+    // Nextcloud has no document surface either.
+    const overrides = new Map<ModuleId, boolean>([["files", true], ["docs", true]]);
+    const eff = computeEffectiveIds(overrides, { ...ALL_AVAILABLE, NEXTCLOUD_URL: "" });
+    expect(eff.has("files")).toBe(false);
+    expect(eff.has("docs")).toBe(false);
+  });
+});
