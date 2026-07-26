@@ -134,6 +134,63 @@ class _FakeResolution:
     output_device: Optional[object] = None
 
 
+class _RecordingReporter:
+    """Duck-type of ActivityReporter. The pipeline only reaches for it on
+    a wake event, so stop() is the whole surface these tests need."""
+
+    def __init__(self) -> None:
+        self.stops = 0
+
+    def stop(self) -> None:
+        self.stops += 1
+
+
+class _RecordingClient:
+    """Duck-type of LLMClient / PersonaFetcher: pipeline.start() probes
+    `available`, the build path primes `get_block()`, teardown closes."""
+
+    def __init__(self) -> None:
+        self.closes = 0
+
+    @property
+    def available(self) -> bool:
+        return False
+
+    def get_block(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+@pytest.fixture
+def recorded_runtime(monkeypatch):
+    """Record every activity reporter / LLM client / persona fetcher the
+    build path constructs, so a test can assert what was freed."""
+    built: dict[str, list] = {"reporters": [], "llms": [], "personas": []}
+
+    def _recorder(key: str, factory):
+        def _build(*_args):
+            instance = factory()
+            built[key].append(instance)
+            return instance
+
+        return _build
+
+    monkeypatch.setattr(
+        main, "build_reporter_from_env", _recorder("reporters", _RecordingReporter),
+    )
+    monkeypatch.setattr(
+        main, "build_llm_from_env", _recorder("llms", _RecordingClient),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_persona_fetcher_from_env",
+        _recorder("personas", _RecordingClient),
+    )
+    return built
+
+
 @pytest.fixture
 def stub_pipeline_deps(tmp_path, monkeypatch):
     """Let the REAL _build_and_start_pipeline run without hardware or
@@ -218,6 +275,64 @@ class TestToggleEndpoint:
         body = client.get("/voice/status").json()
         assert body["enabled"] is True
         assert body["state"] == "no_mic"
+
+    def test_disable_frees_the_clients_built_alongside_the_pipeline(
+        self, client, stub_pipeline_deps, recorded_runtime,
+    ):
+        # Disable is "stop and free". The pooled httpx clients and the
+        # reporter's daemon thread belong to the pipeline's lifetime, not
+        # the process's.
+        client.post("/voice/enabled", json={"enabled": True})
+        assert main._llm is not None  # the runtime really was built
+        client.post("/voice/enabled", json={"enabled": False})
+        assert recorded_runtime["reporters"][0].stops == 1
+        assert recorded_runtime["llms"][0].closes == 1
+        assert recorded_runtime["personas"][0].closes == 1
+        assert main._pipeline is None
+        assert main._activity_reporter is None
+        assert main._llm is None
+        assert main._persona_fetcher is None
+
+    def test_repeated_toggles_do_not_stack_up_runtime_singletons(
+        self, client, stub_pipeline_deps, recorded_runtime,
+    ):
+        # The leak this guards: a service that runs for months, where
+        # every admin off→on would otherwise strand two httpx pools and a
+        # parked reporter thread.
+        try:
+            for enabled in (True, False, True, False):
+                assert client.post(
+                    "/voice/enabled", json={"enabled": enabled},
+                ).status_code == 200
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
+
+        # One runtime built per enable, and every one of them released.
+        assert [r.stops for r in recorded_runtime["reporters"]] == [1, 1]
+        assert [c.closes for c in recorded_runtime["llms"]] == [1, 1]
+        assert [c.closes for c in recorded_runtime["personas"]] == [1, 1]
+        assert main._llm is None
+        assert main._activity_reporter is None
+        assert main._persona_fetcher is None
+
+    def test_enable_after_disable_rebuilds_from_clean_state(
+        self, client, stub_pipeline_deps, recorded_runtime,
+    ):
+        client.post("/voice/enabled", json={"enabled": True})
+        client.post("/voice/enabled", json={"enabled": False})
+        client.post("/voice/enabled", json={"enabled": True})
+        try:
+            # Exactly one live instance, and it is the NEW one — the
+            # first was closed rather than left behind it.
+            assert main._llm is recorded_runtime["llms"][1]
+            assert main._activity_reporter is recorded_runtime["reporters"][1]
+            assert main._persona_fetcher is recorded_runtime["personas"][1]
+            assert recorded_runtime["llms"][0].closes == 1
+            assert recorded_runtime["llms"][1].closes == 0
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
 
     @pytest.mark.parametrize(
         "body",

@@ -512,30 +512,51 @@ async def startup() -> None:
     await asyncio.to_thread(_build_and_start_pipeline)
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
+def _teardown_voice_runtime() -> None:
+    """Stop the pipeline and release everything built alongside it.
+
+    The mirror image of `_build_and_start_pipeline()`: every module
+    global that one assigns, this one closes and clears. Shared by the
+    shutdown hook and the WARP-1599 disable path — which is what keeps a
+    disable→enable cycle from stacking duplicates: each enable rebuilds
+    from clean state, so an admin flipping the switch can't strand a
+    pooled httpx client or a parked reporter thread per toggle.
+
+    Ordering matters. The pipeline worker holds the same LLM client and
+    persona fetcher, so those are only closed once `stop()` has joined
+    it and no reply()/persona fetch can still be in flight.
+    """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
-    if _pipeline is not None:
-        _pipeline.stop()
-        _pipeline = None
+    # Drop the module reference BEFORE stopping: stop() joins the worker
+    # (up to 5 s) and a join timeout or a raise must never leave
+    # /voice/status handing out a pipeline that is on its way out.
+    pipeline = _pipeline
+    _pipeline = None
+    if pipeline is not None:
+        pipeline.stop()
     if _activity_reporter is not None:
         _activity_reporter.stop()
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
     # has joined (no reply()/persona fetch is in flight). Both are
-    # best-effort: shutdown must never raise.
+    # best-effort: teardown must never raise.
     if _llm is not None:
         try:
             _llm.close()
-        except Exception:  # noqa: BLE001 — shutdown is best-effort
+        except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.debug("llm client close raised", exc_info=True)
         _llm = None
     if _persona_fetcher is not None:
         try:
             _persona_fetcher.close()
-        except Exception:  # noqa: BLE001 — shutdown is best-effort
+        except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.debug("persona fetcher close raised", exc_info=True)
         _persona_fetcher = None
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    _teardown_voice_runtime()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1294,10 +1315,12 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
     """Switch the voice assistant on or off, persistently (WARP-1599).
 
     Off is a real kill switch, not a mute: the wake pipeline is stopped
-    and dropped, which closes the exclusive mic stream, so no PCM is read
-    by the wake path afterwards. The flag is written BEFORE the pipeline
-    is touched — if the process dies mid-toggle, the box comes back in
-    the state the admin asked for, never the one they were leaving.
+    and dropped — closing the exclusive mic stream, so no PCM is read by
+    the wake path afterwards — along with the LLM client, persona fetcher
+    and activity reporter built alongside it. The flag is written BEFORE
+    any of that is touched, so a process death mid-toggle brings the box
+    back in the state the admin asked for, never the one they were
+    leaving.
 
     Idempotent both directions: switching on a box that is already
     listening re-persists the flag and leaves the running pipeline alone
@@ -1312,7 +1335,6 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
     would make the switch un-flippable on precisely the boxes that need
     it most.
     """
-    global _pipeline
     if not _enabled_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
@@ -1330,13 +1352,12 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
             if _pipeline is None:
                 _build_and_start_pipeline()
         else:
-            # Drop the module reference FIRST: stop() joins the worker
-            # (up to 5 s) and a join timeout or a raise must never leave
-            # /voice/status handing out a pipeline the flag says is off.
-            pipeline = _pipeline
-            _pipeline = None
-            if pipeline is not None:
-                pipeline.stop()
+            # "Stop and free", not just "stop": the shared teardown also
+            # closes the LLM client, the persona fetcher and the activity
+            # reporter that were built alongside the pipeline, so the
+            # next enable rebuilds from clean state rather than stranding
+            # a set of them per toggle. Tolerates an already-off box.
+            _teardown_voice_runtime()
     finally:
         _enabled_lock.release()
     return VoiceEnabledResponse(enabled=req.enabled)
