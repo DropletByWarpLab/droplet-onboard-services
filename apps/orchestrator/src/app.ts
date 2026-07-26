@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import { PrismaClient, type ModuleId } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 import { config } from "./config.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { requestIdMiddleware } from "./middleware/request-id.js";
@@ -73,8 +73,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
-import { requireFeatureAccess } from "./middleware/feature-gate.js";
-import { MODULES } from "./modules/module-registry.js";
+import { mountModuleGates } from "./modules/module-mounts.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -251,48 +250,25 @@ export function createApp(
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
 
-  // Module toggles (runtime enablement, per business type). Data-driven from the
-  // registry: 404 a DISABLED module's `/api/*` routes before they reach the
-  // module's router (a disabled module reads as absent, not forbidden). Core
-  // modules (chat) are never gated. Registered here — after auth, before the
-  // module routers below — so the gate precedes what it guards. The `/api/modules`
-  // + `/api/business-types` control-plane mounts alongside.
-  // Spec: docs/superpowers/specs/2026-07-07-module-toggles-design.md.
-  const moduleGate = createModuleGate(prisma, config);
-  for (const def of MODULES) {
-    if (def.core) continue;
-    for (const prefix of def.routePrefixes) {
-      app.use(prefix, moduleGate.requireModuleEnabled(def.id));
-    }
-  }
-
-  // WARP-1528 / ADR-032 §3(a) — layer 2, mounted immediately behind the
-  // WORKSPACE gate above and off the SAME registry `routePrefixes` (one
-  // vocabulary, no parallel list): the workspace says whether the box serves
-  // the module, this says whether THIS PERSON may open it. Denials are the
-  // identical 404, so a narrowed person sees a smaller Droplet rather than a
-  // wall of locked doors.
+  // Module gates — both layers, data-driven from the registry:
+  //   layer 1  requireModuleEnabled  — the WORKSPACE capability gate: 404 a
+  //            DISABLED module's `/api/*` routes before they reach the
+  //            module's router (a disabled module reads as absent, not
+  //            forbidden). Core modules (chat) are never gated.
+  //   layer 2  requireFeatureAccess  — ADR-032 §3(a): whether THIS PERSON may
+  //            open it. Same 404, so a narrowed person sees a smaller Droplet
+  //            rather than a wall of locked doors.
+  // Registered here — after auth, before the module routers below — so the
+  // gates precede what they guard. The `/api/modules` + `/api/business-types`
+  // control-plane mounts alongside.
   //
-  // The first set is deliberate, not app-wide: the four surfaces the design
-  // brief's §9 catalog treats as the load-bearing ones (Files, Cameras,
-  // Network, Devices/smart-home). `view` is the reachability floor — the
-  // ADR-004 enum floors stay authoritative above it and are untouched; this
-  // only ever narrows. Note smart_home's prefix is `/api/matter`, NOT
-  // `/api/devices` (the registry comment: /api/devices hosts appliance
-  // pairing + push, which must never 404 behind a smart-home grant).
-  // The remaining modules follow once the roster has roles in the wild.
-  const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
-    "files",
-    "cameras",
-    "network",
-    "smart_home",
-  ]);
-  for (const def of MODULES) {
-    if (!FEATURE_GATED_MODULES.has(def.id)) continue;
-    for (const prefix of def.routePrefixes) {
-      app.use(prefix, requireFeatureAccess(def.id, "view"));
-    }
-  }
+  // WARP-1585 moved the composition into `mountModuleGates` so it can be
+  // tested: the bug it fixes was in the COMPOSITION (a gate at `/api/files`
+  // prefix-matching `/api/files/knowledge` and `/api/files/docs`, collapsing
+  // three independent toggles onto one enforcement), not in either gate.
+  // Specs: docs/superpowers/specs/2026-07-07-module-toggles-design.md, ADR-032.
+  const moduleGate = createModuleGate(prisma, config);
+  mountModuleGates(app, moduleGate);
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 

@@ -16,6 +16,7 @@ import {
   MODULES,
   getModuleDef,
   BUSINESS_TYPE_BY_ID,
+  satisfiedModuleIds,
   type AvailabilityConfig,
 } from "../modules/module-registry.js";
 
@@ -28,6 +29,13 @@ export interface ModuleState {
   available: boolean;
   enabled: boolean;
   effective: boolean;
+  /** WARP-1585 — the module this one declares it cannot function without. */
+  requires?: ModuleId;
+  /** WARP-1585 — `requires` is declared and that parent is NOT effective, so
+   *  this module isn't either. Surfaced as its own field, separate from
+   *  `available` and `enabled`, so an operator-facing view can say WHY rather
+   *  than showing a module that silently refuses to come on. */
+  requiresUnmet: boolean;
 }
 
 export interface ModulesView {
@@ -58,24 +66,8 @@ function resolveEnabled(id: ModuleId, overrides: Map<ModuleId, boolean>): boolea
   return row !== undefined ? row : def.defaultEnabled;
 }
 
-/** PURE effective-state computation (no DB) — the async readers below just fetch
- *  the overrides + businessType and delegate here. Exported for unit testing. */
-export function computeModuleStates(
-  overrides: Map<ModuleId, boolean>,
-  cfg: AvailabilityConfig
-): ModuleState[] {
-  return MODULES.map((def) => {
-    const available = def.available(cfg);
-    const enabled = resolveEnabled(def.id, overrides);
-    return {
-      id: def.id, label: def.label, description: def.description, category: def.category,
-      core: def.core, available, enabled, effective: available && enabled,
-    };
-  });
-}
-
-/** PURE — effective module ids from overrides + config. */
-export function computeEffectiveIds(
+/** PURE — the two-axis set BEFORE the WARP-1585 dependency closure. */
+function computeSelfEffectiveIds(
   overrides: Map<ModuleId, boolean>,
   cfg: AvailabilityConfig
 ): Set<ModuleId> {
@@ -84,6 +76,48 @@ export function computeEffectiveIds(
     if (def.available(cfg) && resolveEnabled(def.id, overrides)) out.add(def.id);
   }
   return out;
+}
+
+/** PURE effective-state computation (no DB) — the async readers below just fetch
+ *  the overrides + businessType and delegate here. Exported for unit testing. */
+export function computeModuleStates(
+  overrides: Map<ModuleId, boolean>,
+  cfg: AvailabilityConfig
+): ModuleState[] {
+  const effectiveIds = computeEffectiveIds(overrides, cfg);
+  return MODULES.map((def) => {
+    const available = def.available(cfg);
+    const enabled = resolveEnabled(def.id, overrides);
+    return {
+      id: def.id, label: def.label, description: def.description, category: def.category,
+      core: def.core, available, enabled,
+      effective: effectiveIds.has(def.id),
+      // Reported, never folded into `enabled`: the operator's stored intent is
+      // preserved, so re-enabling the parent restores this module exactly as
+      // they left it. Same discipline as `available` — a module can be stored
+      // ON and not be effective (WARP-1585).
+      ...(def.requires ? { requires: def.requires } : {}),
+      requiresUnmet: def.requires !== undefined && !effectiveIds.has(def.requires),
+    };
+  });
+}
+
+/**
+ * PURE — effective module ids from overrides + config, narrowed by the
+ * registry's declared dependencies (WARP-1585).
+ *
+ * The WORKSPACE half of the dependency rule: `docs` requires `files`, so a box
+ * with Files off or unavailable has no document surface either — its editor
+ * sessions are minted on Nextcloud paths. `knowledge` declares no parent and
+ * is untouched by a Files toggle. `satisfiedModuleIds` is the one definition
+ * of the rule; the per-person §9 half applies the same function in
+ * effective-access.service.
+ */
+export function computeEffectiveIds(
+  overrides: Map<ModuleId, boolean>,
+  cfg: AvailabilityConfig
+): Set<ModuleId> {
+  return satisfiedModuleIds(computeSelfEffectiveIds(overrides, cfg));
 }
 
 /** Full view for GET /api/modules and the settings page. */
@@ -147,10 +181,15 @@ export async function setModuleEnabled(
     create: { moduleId: id, enabled, setBy },
   });
 
-  return {
-    id: def.id, label: def.label, description: def.description, category: def.category,
-    core: def.core, available, enabled, effective: available && enabled,
-  };
+  // WARP-1585: re-derive from the stored set rather than answering
+  // `available && enabled` locally. That shortcut was correct while a module's
+  // effectiveness depended only on itself; with declared dependencies it would
+  // report a Documents toggle as effective on a box whose Files module is off.
+  // The extra read is on a rare operator write path, and it means the row the
+  // dashboard renders after a toggle is the same row `GET /api/modules`
+  // returns — one answer, not two that can disagree.
+  const states = computeModuleStates(await readEnablement(prisma), cfg);
+  return states.find((s) => s.id === id)!;
 }
 
 /** Apply a business-type preset: materialize an explicit ModuleSetting row for

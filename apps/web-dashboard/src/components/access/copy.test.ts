@@ -55,6 +55,15 @@ describe("§12 Builder helpers", () => {
     expect(ACCESS_COPY.settingsAlwaysOn).toBe("Everyone can reach their own settings.");
   });
 
+  it("dependency block (WARP-1585 — T9-authored, pending packet ratification)", () => {
+    // No §12 string exists for a feature blocked by its declared parent; the
+    // packet only covers floor-blocks (Lock) and tool auto-off. Authored on
+    // the `inviteRolesDegraded` precedent and flagged in copy.ts.
+    expect(ACCESS_COPY.docsNeedsFiles).toBe(
+      "Documents open from your file libraries — turn Files on to include them.",
+    );
+  });
+
   it("tool auto-off + cloud consequence + floor-blocked", () => {
     expect(ACCESS_COPY.toolAutoOff("Cameras")).toBe("Turned off with Cameras.");
     expect(ACCESS_COPY.cloudConsequence).toBe(

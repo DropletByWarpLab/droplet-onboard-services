@@ -6181,6 +6181,18 @@ export interface AppModuleState {
   available: boolean;
   enabled: boolean;
   effective: boolean;
+  /**
+   * WARP-1585 — a module this one declares it cannot function without (`docs`
+   * requires `files`: documents open from the file libraries). Optional on the
+   * wire so an orchestrator that predates the field reads as "no dependency"
+   * rather than breaking the panel.
+   */
+  requires?: string;
+  /** `requires` is declared and that parent is not effective, so neither is
+   *  this. Reported separately from `available` / `enabled` so a panel can say
+   *  WHY instead of showing a module that silently refuses to switch on —
+   *  `enabled` still carries the operator's stored intent. */
+  requiresUnmet?: boolean;
 }
 
 export interface AppModulesView {

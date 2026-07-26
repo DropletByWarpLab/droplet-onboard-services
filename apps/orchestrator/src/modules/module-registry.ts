@@ -48,6 +48,20 @@ export interface ModuleDef {
   /** Core modules are always effective when available and are never toggleable
    *  (a Droplet with no assistant isn't a Droplet). */
   core: boolean;
+  /**
+   * WARP-1585 — an explicit parent module this one cannot function without.
+   *
+   * A DEPENDENCY, not a grouping: the child is never effective (workspace
+   * axis) and never resolves onto a person (§9 axis) unless the parent is.
+   * Declared here, in the one registry, so both axes and the dashboard read
+   * the SAME edge instead of the coupling falling out of an Express prefix
+   * collision — which is what `docs` had, silently, and `knowledge` had
+   * wrongly. See `satisfiedModuleIds`.
+   *
+   * The bar for adding one: the child has no reachable surface of its own
+   * without the parent. It is not for "these feel related".
+   */
+  requires?: ModuleId;
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
@@ -74,6 +88,13 @@ export const MODULES: readonly ModuleDef[] = [
     // WARP-1527: "knowledge" is not a tools-core ToolDomain — the module's
     // agent surface is the memory suite (memory_recall & co.).
     toolDomains: ["memory"], core: false, defaultEnabled: true,
+    // WARP-1585: deliberately NO `requires`. The prefix nests under `/api/files`
+    // for a naming reason recorded in files-knowledge.ts (`/files/recents` and
+    // `/files/search` were already taken by Nextcloud routes), NOT a data one:
+    // these routes read FileContentChunk rows out of the orchestrator's own
+    // Postgres, spanning BOTH the `nextcloud` and `brain` sources, behind the
+    // file-indexer. Nothing on the path touches Nextcloud, and the module has
+    // its own page at /knowledge. It stands alone.
     available: (c) => isSet(c.FILE_INDEXER_URL),
   },
   {
@@ -88,6 +109,18 @@ export const MODULES: readonly ModuleDef[] = [
     description: "In-browser document editing / co-authoring (OnlyOffice).",
     category: "workspace", routePrefixes: ["/api/files/docs"], navHrefs: [],
     toolDomains: [], core: false, defaultEnabled: false,
+    // WARP-1585: Documents genuinely depends on Files, and now says so.
+    // Note `navHrefs: []` — Documents has no surface of its own. Its one
+    // prefix serves the doc-engine health probe; the substantive act is
+    // minting an editor session, which lives on
+    // `/api/files/:filePath(*)/editor-session` — a Nextcloud path, correctly
+    // gated by `files` — and its only entry point is the Files preview pane.
+    // A Documents grant with no Files grant therefore grants nothing
+    // reachable. Before this the coupling was real but accidental (the
+    // `/api/files` prefix mount happened to swallow `/api/files/docs`); it is
+    // now declared, so the UI can show it as blocked WITH A REASON instead of
+    // presenting a toggle that quietly does nothing.
+    requires: "files",
     available: (c) => isTruthy(c.DOCS_ENABLED) && isSet(c.DOCS_INTERNAL_URL),
   },
   {
@@ -170,6 +203,102 @@ export function getModuleDef(id: ModuleId): ModuleDef | undefined {
 /** Runtime membership test for the Prisma enum (route param validation). */
 export function isModuleId(v: string): v is ModuleId {
   return MODULE_BY_ID.has(v as ModuleId);
+}
+
+// ── WARP-1585: nested route prefixes ─────────────────────────────────────────
+//
+// Express `app.use(prefix, handler)` is a PREFIX mount that matches on a
+// SEGMENT BOUNDARY: `/api/files` matches `/api/files`, `/api/files/` and
+// `/api/files/anything`, but not `/api/filesomething`. Three of this catalog's
+// prefixes nest — `/api/files/knowledge` and `/api/files/docs` both sit inside
+// `/api/files` — so a gate registered for `files` silently also guards the two
+// sibling modules' namespaces. That is the WARP-1585 bug: three toggles in the
+// UI, one wire behind them, and the wire attached to the wrong switch.
+//
+// The fix is not to rename the prefixes (they are a published API surface and
+// files-knowledge.ts records why the namespace is what it is). It is to SCOPE
+// each module's gate to its own namespace, deriving the exclusions from this
+// registry so there is no parallel list to drift.
+
+/**
+ * Does `path` fall under `prefix` by Express's `app.use` rules? Matches on a
+ * segment boundary only, so `/api/filesknowledge` is NOT under `/api/files`.
+ *
+ * Compares raw (percent-encoded) pathnames, exactly like Express's own layer
+ * matching. A request that encodes its way past this comparison also fails to
+ * match the sibling router's literal path, so it 404s on the router instead —
+ * and it keeps the OUTER module's gate, which is the fail-closed direction.
+ */
+export function pathIsUnder(path: string, prefix: string): boolean {
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  return rest.length === 0 || rest.startsWith("/");
+}
+
+/**
+ * Prefixes owned by OTHER modules that sit strictly inside `prefix` — the set
+ * a gate mounted at `prefix` for `moduleId` must NOT fire on. Sorted for a
+ * stable, assertable order.
+ *
+ * Only FOREIGN nesting counts. A module nesting its own prefixes inside each
+ * other is harmless: the same gate would run either way.
+ */
+export function foreignSubPrefixes(moduleId: ModuleId, prefix: string): string[] {
+  const out: string[] = [];
+  for (const def of MODULES) {
+    if (def.id === moduleId) continue;
+    for (const p of def.routePrefixes) {
+      if (p.startsWith(`${prefix}/`)) out.push(p);
+    }
+  }
+  return out.sort();
+}
+
+// ── WARP-1585: declared module dependencies ──────────────────────────────────
+
+/** child → parent, from the `requires` declarations above. */
+export const MODULE_REQUIRES: ReadonlyMap<ModuleId, ModuleId> = new Map(
+  MODULES.flatMap((def) => (def.requires ? [[def.id, def.requires] as const] : [])),
+);
+
+/**
+ * Narrow `held` to the modules whose declared parents are also held.
+ *
+ * Runs to a FIXED POINT, so a grandchild falls when the grandparent does
+ * whatever order the edges are declared in. Today's catalog has a single edge
+ * (docs → files); the closure does not depend on that staying true.
+ *
+ * Applied at BOTH axes the dependency governs, from this one definition:
+ *   - the WORKSPACE axis (modules.service `computeEffectiveIds` /
+ *     `computeModuleStates`) — "is Documents on for this box";
+ *   - the PER-PERSON §9 axis (effective-access.service, right after the
+ *     workspace intersection) — "does this person hold Documents".
+ * They are genuinely independent narrowings — a box can have Files on while a
+ * person does not hold it — so each has to apply the rule; what must not
+ * happen, and is what this function exists to prevent, is each deriving the
+ * rule for itself.
+ *
+ * @param edges injectable for testing dependency CHAINS the live catalog does
+ *              not yet contain — the same seam idiom as `requireFeatureAccess`'s
+ *              `resolve` parameter.
+ */
+export function satisfiedModuleIds(
+  held: ReadonlySet<ModuleId>,
+  edges: ReadonlyMap<ModuleId, ModuleId> = MODULE_REQUIRES,
+): Set<ModuleId> {
+  const out = new Set(held);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of out) {
+      const parent = edges.get(id);
+      if (parent !== undefined && !out.has(parent)) {
+        out.delete(id);
+        changed = true;
+      }
+    }
+  }
+  return out;
 }
 
 // ── Business-type presets ────────────────────────────────────────────────────

@@ -39,6 +39,16 @@ export const ACCESS_COPY = {
   cloudConsequence:
     "This is the only setting that sends a person's chat with the assistant off this Droplet — to the cloud AI provider they choose. It's off by default.",
   floorBlockedNetwork: "Network changes are for admins.",
+  // ── WARP-1585: declared feature dependencies ──
+  // Documents has no surface of its own — it opens files that live in Files —
+  // so a Documents grant with no Files grant grants nothing reachable. The
+  // row is shown, disabled, WITH this reason: the same shape as `toolAutoOff`
+  // one level up, and deliberately NOT a padlock (§13 reserves Lock for
+  // floor-blocked-with-reason, which this is not — the operator can clear
+  // this one themselves by turning Files on).
+  // Authored here on the T9 precedent (`inviteRolesDegraded`): no §12 string
+  // exists for a dependency block. Flagged for design-packet ratification.
+  docsNeedsFiles: "Documents open from your file libraries — turn Files on to include them.",
   builderSubline: "What people with this role can see, do, and use.",
   cloudModelsToggle: "Let this role's assistant use cloud models",
   offBoxHeader: "Reaching outside your Droplet",
