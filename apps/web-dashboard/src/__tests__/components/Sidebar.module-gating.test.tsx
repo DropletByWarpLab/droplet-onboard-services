@@ -16,7 +16,7 @@
  * stubbed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: any) => {
@@ -124,5 +124,43 @@ describe("<Sidebar> Projects module gating", () => {
     expect(
       within(aside).getByRole("link", { name: /knowledge/i }),
     ).toHaveAttribute("href", "/knowledge");
+  });
+});
+
+/**
+ * WARP-1554 — the mobile "More" drawer now keeps a bottom-tab primary's
+ * children even though it drops the primary's own row. The Files sub-views
+ * are the only such children today, and they must NOT outlive their parent's
+ * module gate: /files carries `requiresModule: "files"`, so switching the
+ * Files module off has to take the whole subtree with it (children are
+ * filtered with their parent in `visibleItems`, never independently).
+ */
+describe("<Sidebar> Files module gating covers the sub-views (WARP-1554)", () => {
+  beforeEach(() => {
+    modulesRef.current = { projects: true };
+  });
+
+  function openMoreDrawer(): HTMLElement {
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    return screen.getByRole("dialog");
+  }
+
+  it("renders the Files sub-views in the drawer when the module is on", () => {
+    render(<Sidebar />);
+    const dialog = openMoreDrawer();
+    expect(dialog.querySelector("a[href='/files/trash']")).not.toBeNull();
+    expect(dialog.querySelector("a[href='/files/shared']")).not.toBeNull();
+  });
+
+  it("drops every Files sub-view when the orchestrator reports the module off", () => {
+    modulesRef.current = { projects: true, files: false };
+    render(<Sidebar />);
+    openMoreDrawer();
+    // Nothing anywhere in the document — desktop sidebar, bottom tab bar or
+    // More drawer — may link into a surface the box won't serve.
+    expect(document.querySelectorAll("a[href^='/files']")).toHaveLength(0);
   });
 });

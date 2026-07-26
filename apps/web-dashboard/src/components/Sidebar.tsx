@@ -22,6 +22,25 @@ import {
   type NavItem,
 } from "./nav-config";
 
+/** Does this href own a slot in the mobile bottom tab bar? */
+const isMobilePrimary = (href: string): boolean =>
+  (MOBILE_PRIMARY_HREFS as readonly string[]).includes(href);
+
+/**
+ * One block of the mobile "More" drawer: a nav destination plus the
+ * sub-destinations rendered beneath it.
+ *
+ * `captionOnly` marks the WARP-1554 case — the anchor is a bottom-tab
+ * primary, so its own row is omitted (the tab bar already goes there) and it
+ * renders as a non-navigating caption instead. Its children still render, so
+ * they stay reachable without ever appearing orphaned under an absent parent.
+ */
+type DrawerEntry = {
+  item: NavItem;
+  children: NavItem[];
+  captionOnly: boolean;
+};
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -33,6 +52,11 @@ export function Sidebar() {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
   const moreHeadingId = useId();
+  // WARP-1554: base id for the drawer's non-navigating section captions —
+  // each caption labels the group of sub-views rendered beneath it.
+  const drawerSectionBaseId = useId();
+  const sectionCaptionId = (href: string) =>
+    `${drawerSectionBaseId}${href.replace(/[^a-zA-Z0-9]+/g, "-")}`;
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -84,27 +108,41 @@ export function Sidebar() {
   // primary set lands here in group order. Nested children (e.g. Events
   // under Cameras) ride along with their parent: they're flattened into
   // the drawer list right after it so every destination stays reachable
-  // with a single tap. A child whose parent is itself a bottom-tab primary
-  // (e.g. the Files sub-views) is excluded with that parent — the drawer
-  // never orphans a child under an absent parent.
-  const drawerGroups = renderedGroups
-    .map((g) => ({
-      label: g.label,
-      items: g.items
-        .filter(
-          (item) =>
-            !MOBILE_PRIMARY_HREFS.includes(
-              item.href as (typeof MOBILE_PRIMARY_HREFS)[number],
-            ),
-        )
-        .flatMap((item) => {
-          const children = (item.children ?? []).filter(
-            (child) => child.href !== item.href,
-          );
-          return [item, ...children];
-        }),
-    }))
-    .filter((g) => g.items.length > 0);
+  // with a single tap.
+  //
+  // WARP-1554: a bottom-tab primary's OWN row is still dropped (it already
+  // owns a tab), but its children are no longer dropped with it. They used
+  // to be, which left the six Files sub-views (Drives, Recents, Favorites,
+  // Shared, Trash, Sync Devices) with no mobile navigation path at all — not
+  // in the tab bar, not in the drawer, and the desktop sub-nav renders inside
+  // a `hidden lg:flex` aside. Such children now render under a
+  // non-navigating caption carrying the parent's label + glyph, which keeps
+  // the original intent intact: a child is never orphaned under an absent
+  // parent — the parent is present, as a label rather than a link.
+  //
+  // Gating still flows through `visibleItems` alone, so a child hidden on its
+  // own gate (or with its parent) never reaches this point.
+  //
+  // A child whose href is itself a bottom-tab primary (the Files "All files"
+  // index at /files) stays out: the tab bar already goes there, and a
+  // duplicate row would read as a second, different destination.
+  const drawerGroups: Array<{ label: string; entries: DrawerEntry[] }> =
+    renderedGroups
+      .map((g) => ({
+        label: g.label,
+        entries: g.items
+          .map((item): DrawerEntry => {
+            const children = (item.children ?? []).filter(
+              (child) =>
+                child.href !== item.href && !isMobilePrimary(child.href),
+            );
+            return { item, children, captionOnly: isMobilePrimary(item.href) };
+          })
+          // A primary with nothing beneath it (Overview, Ask AI, Devices)
+          // contributes no drawer block at all.
+          .filter((entry) => !entry.captionOnly || entry.children.length > 0),
+      }))
+      .filter((g) => g.entries.length > 0);
 
   // The primary hrefs that survive into the bottom tab bar. WARP-1397: looked
   // up against the GATED `renderedGroups`, NOT the raw NAV_GROUPS — otherwise a
@@ -317,29 +355,72 @@ export function Sidebar() {
                   {group.label}
                 </p>
                 <div className="space-y-0.5">
-                  {group.items.map((item) => {
-                    const Icon = item.icon;
-                    const active = isActive(item.href);
+                  {group.entries.map((entry) => {
+                    const closeDrawer = () => setMoreOpen(false);
+
+                    // WARP-1554: the anchor owns a bottom tab, so it renders
+                    // as a caption rather than a second link to the same
+                    // place — the sub-views beneath it would otherwise have
+                    // no mobile path at all. role="group" + aria-labelledby
+                    // gives assistive tech the same parent/child reading the
+                    // indent gives the eye.
+                    if (entry.captionOnly) {
+                      const CaptionIcon = entry.item.icon;
+                      const captionId = sectionCaptionId(entry.item.href);
+                      return (
+                        <div
+                          key={`drawer-section-${entry.item.href}`}
+                          role="group"
+                          aria-labelledby={captionId}
+                        >
+                          <p
+                            id={captionId}
+                            className="
+                              flex items-center gap-2 px-3 pt-2 pb-1
+                              type-caption-1 text-label-tertiary font-medium
+                            "
+                          >
+                            <CaptionIcon
+                              size={14}
+                              strokeWidth={1.5}
+                              aria-hidden="true"
+                            />
+                            {entry.item.label}
+                          </p>
+                          <div className="space-y-0.5">
+                            {entry.children.map((child) => (
+                              <DrawerLink
+                                key={child.href}
+                                item={child}
+                                active={isActive(child.href)}
+                                onNavigate={closeDrawer}
+                                nested
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+
                     return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setMoreOpen(false)}
-                        aria-current={active ? "page" : undefined}
-                        className={`
-                          flex items-center gap-3 px-3 min-h-[44px] rounded-lg
-                          type-subheadline transition-all duration-200 ease-smooth
-                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                          ${
-                            active
-                              ? "bg-accent-subtle text-accent font-medium"
-                              : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-                          }
-                        `}
+                      <div
+                        key={`drawer-item-${entry.item.href}`}
+                        className="space-y-0.5"
                       >
-                        <Icon size={18} strokeWidth={active ? 2 : 1.5} />
-                        {item.label}
-                      </Link>
+                        <DrawerLink
+                          item={entry.item}
+                          active={isActive(entry.item.href)}
+                          onNavigate={closeDrawer}
+                        />
+                        {entry.children.map((child) => (
+                          <DrawerLink
+                            key={child.href}
+                            item={child}
+                            active={isActive(child.href)}
+                            onNavigate={closeDrawer}
+                          />
+                        ))}
+                      </div>
                     );
                   })}
                 </div>
@@ -390,6 +471,52 @@ export function Sidebar() {
         </div>
       </Dialog>
     </>
+  );
+}
+
+/* ───────────────── Mobile "More" drawer row sub-component ─────────────── */
+
+/**
+ * One tappable row of the mobile drawer. Extracted (WARP-1554) so the three
+ * places that emit a drawer row — a top-level destination, a child flattened
+ * beneath its parent link, and a child nested under a section caption —
+ * share one set of tap-target / focus / active-state rules instead of
+ * drifting apart.
+ */
+function DrawerLink({
+  item,
+  active,
+  onNavigate,
+  nested,
+}: {
+  item: NavItem;
+  active: boolean;
+  onNavigate: () => void;
+  /** Rendered under a section caption — indent to mirror the desktop
+   *  sub-nav's nesting so the row never reads as a top-level destination. */
+  nested?: boolean;
+}) {
+  const Icon = item.icon;
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      aria-current={active ? "page" : undefined}
+      className={`
+        flex items-center gap-3 min-h-[44px] rounded-lg
+        type-subheadline transition-all duration-200 ease-smooth
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+        ${nested ? "pl-8 pr-3" : "px-3"}
+        ${
+          active
+            ? "bg-accent-subtle text-accent font-medium"
+            : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+        }
+      `}
+    >
+      <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+      {item.label}
+    </Link>
   );
 }
 
