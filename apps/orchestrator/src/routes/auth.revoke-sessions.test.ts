@@ -478,7 +478,6 @@ describe("POST /api/auth/users/:username/enable — WARP-1526 local re-activate"
 });
 
 /**
-/**
  * pr-reviewer (#1229) — the disable path's rail-5 count + local
  * directoryStatus write must run at SERIALIZABLE, not the READ COMMITTED
  * default Postgres/Prisma actually give you. Under READ COMMITTED two
