@@ -61,6 +61,25 @@ const ECHO_CHECK_TIMEOUT_MS = 30_000;
  */
 const RESTART_TIMEOUT_MS = 20_000;
 
+/**
+ * WARP-1599 — `/voice/enabled` is not a read, so it does not get the
+ * read budget. On ENABLE voice-io runs `_build_and_start_pipeline()`
+ * inline — the very function its own `startup()` hands to a worker
+ * thread precisely because it blocks. Worst case, summed: persona
+ * `get_block()` 2 s + the ipapi.co geo lookup 5 s + `pipeline.start()`'s
+ * three synchronous upstream probes (STT 5 s, TTS 5 s, LLM 2 s) ≈ 19 s.
+ * Disable is bounded too — `stop(timeout=5.0)` joins two threads.
+ *
+ * Typical is sub-second, but a WAN hiccup or a wedged worker walks past
+ * 10 s, and an abort there is not a cosmetic 503: the box has already
+ * flipped, the non-2xx skips `recordActivity`, and the audit chain ends
+ * up with no record of the single most consequential thing an admin can
+ * do to this surface. Sized the same way RESTART_TIMEOUT_MS above is —
+ * double the real upstream budget — so only a genuinely stuck box times
+ * out.
+ */
+const ENABLED_TIMEOUT_MS = 40_000;
+
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
 
@@ -411,11 +430,17 @@ export function createVoiceRouter(): Router {
       res.status(400).json({ error: "invalid_enabled" });
       return;
     }
-    // Default read timeout: the toggle persists a small file and then
-    // starts or drops the pipeline — no capture window to wait on. A
-    // concurrent toggle's 409 (voice-io's non-blocking lock) relays
-    // verbatim like any other upstream status.
-    const status = await proxy(res, "POST", "/voice/enabled", { enabled });
+    // ENABLED_TIMEOUT_MS, not the read budget: enabling builds and
+    // starts the whole pipeline inline (see the constant). A concurrent
+    // toggle's 409 (voice-io's non-blocking lock) relays verbatim like
+    // any other upstream status.
+    const status = await proxy(
+      res,
+      "POST",
+      "/voice/enabled",
+      { enabled },
+      ENABLED_TIMEOUT_MS,
+    );
     // Silencing the household assistant is the single most consequential
     // thing an admin can do to this surface — it leaves a row so nobody
     // is left wondering why Droplet stopped answering. Only on success:
@@ -425,13 +450,8 @@ export function createVoiceRouter(): Router {
     // swallows recorder failures).
     if (status >= 200 && status < 300) {
       void recordActivity({
-        // Same call WARP-1058 made for the restart row above: kind
-        // `voice`, not `system`, so the row lands in the /voice page's
-        // "Recent voice activity" feed — which is keyed to
-        // `/api/activity?kind=voice` — right beside the switch that
-        // caused it. A box-wide silence is the single most relevant
-        // thing that feed can carry; `system` would surface it
-        // everywhere EXCEPT the page holding the switch.
+        // kind `voice`, not `system`, on WARP-1058's precedent: the row
+        // belongs in the /voice feed, keyed to `/api/activity?kind=voice`.
         kind: "voice",
         severity: "info",
         sourceIcon: "mic",
@@ -439,7 +459,7 @@ export function createVoiceRouter(): Router {
         sub: enabled
           ? "Droplet is listening for the wake word again"
           : "Droplet stopped listening — the wake word is off until voice is turned back on",
-        refs: { surface: "voice" },
+        refs: { surface: "voice-enabled", upstreamStatus: status },
         actor: actorFromRequest(req),
       });
     }

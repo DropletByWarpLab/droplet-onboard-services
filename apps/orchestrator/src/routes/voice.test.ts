@@ -631,15 +631,14 @@ describe("POST /api/voice/enabled (WARP-1599)", () => {
     );
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
-      // kind `voice` (not `system`) so the row reaches the /voice page's
-      // feed, which is keyed to `/api/activity?kind=voice` — the same
-      // call WARP-1058 made for the restart row.
       kind: "voice",
       severity: "info",
       sourceIcon: "mic",
       what: "Voice turned off",
       sub: "Droplet stopped listening — the wake word is off until voice is turned back on",
-      refs: { surface: "voice" },
+      // Route-scoped surface + upstream status, like both sibling
+      // writes (voice-calibration / voice-restart-processor).
+      refs: { surface: "voice-enabled", upstreamStatus: 200 },
       actor: { type: "user", id: "user-owner" },
     });
   });
@@ -662,7 +661,7 @@ describe("POST /api/voice/enabled (WARP-1599)", () => {
       sourceIcon: "mic",
       what: "Voice turned on",
       sub: "Droplet is listening for the wake word again",
-      refs: { surface: "voice" },
+      refs: { surface: "voice-enabled", upstreamStatus: 200 },
       actor: { type: "user", id: "user-admin" },
     });
   });
