@@ -94,6 +94,21 @@ const writeRequestSchema = z.object({
  * Layer 2 only ever runs on top of them, and only ever narrows or widens
  * within the tiers `tierFloor` already admitted.
  *
+ * THE TIER FLOOR IS LOAD-BEARING, not decoration. O-2 is "family-and-UP with
+ * a grant", and the "and-up" half is enforced HERE, at the consumption site,
+ * because T3 does not enforce it: `normalizeGrants` (routes/access.ts) clamps
+ * a connector grant's LEVEL on non-admin starting points but never drops the
+ * grant, so a GUEST-based role can hold one, and the resolver faithfully
+ * reports it as `read` (the `accessRole !== null` branch). Reading
+ * `connectors[p]` on its own would hand that role PHI. Two reasons the floor
+ * stays here rather than being pushed into the resolver: `connectors[p]` is a
+ * provider-agnostic report of what a person was GRANTED — an honest answer to
+ * a different question — while "which tiers may see PHI at all" is this
+ * integration's policy and already lives beside `PHI_READ_ROLES` in
+ * erp.service; and a floor enforced at the consumer survives a change to the
+ * resolver, whereas one enforced only upstream does not. erp.service asserts
+ * it a second time for exactly that reason.
+ *
  * The decision, case by case:
  *
  *   owner              → through. §3: owner is the ONE tier that bypasses

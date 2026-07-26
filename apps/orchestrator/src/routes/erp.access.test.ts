@@ -169,6 +169,43 @@ describe("ERP reads — the O-2 floor (WARP-1530)", () => {
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
+  // ── the family-AND-UP half of O-2, which lives HERE ────────────────
+  //
+  // T3 does not enforce it: `normalizeGrants` (access.ts) only clamps
+  // read_write→read on non-admin starting points, so a GUEST-based role can
+  // hold a connector grant, and the resolver faithfully resolves it to
+  // "read" (effective-access.service.ts, the accessRole !== null branch).
+  // Trusting `connectors[p]` on its own would therefore hand a guest-based
+  // role PHI. The tier floor is what stops that — asserted in both
+  // directions so a future refactor of either layer trips a test.
+  it("a GUEST-based role holding an ERP grant is still refused — the tier floor, not the grant, is the floor", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("guest", { [EAGLESOFT_PROVIDER]: "read" }),
+    );
+    const app = buildApp({ id: "u-guest-role", role: "guest" });
+
+    const res = await request(app).get("/api/erp/schedule");
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "Forbidden: role not permitted" });
+    expect(svcMock.getSchedule).not.toHaveBeenCalled();
+    // Refused BEFORE layer 2 — a grant a guest should never have held is
+    // never even read, let alone honoured.
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("…and the same grant on a FAMILY-based role is honoured (the floor is a floor, not a ban)", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("family", { [EAGLESOFT_PROVIDER]: "read" }),
+    );
+    const app = buildApp({ id: "u-reception", role: "family" });
+
+    const res = await request(app).get("/api/erp/schedule");
+
+    expect(res.status).toBe(200);
+    expect(svcMock.getSchedule).toHaveBeenCalled();
+  });
+
   it("an Admin-based custom role with NO ERP grant loses reach (§3 — admins do not bypass layer 2)", async () => {
     resolveEffectiveAccessMock.mockResolvedValue(access("admin", {}));
     const app = buildApp({ id: "u-narrowed-admin", role: "admin" });
