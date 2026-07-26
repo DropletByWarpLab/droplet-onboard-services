@@ -100,16 +100,6 @@
   align-items: center;
   gap: 8px;
 }
-/* WARP-1599 — with the kill switch beside it the corner is a 30px
-   control, not a 20px label: floated over the card's top-right it would
-   land on the hero's own right-aligned CTA. Give it its own row above
-   the hero instead — the same shape the ≤560px breakpoint below already
-   gives the chip. */
-.vhero-corner.has-action {
-  position: static;
-  justify-content: flex-end;
-  margin-bottom: 12px;
-}
 
 .vring {
   width: 72px;

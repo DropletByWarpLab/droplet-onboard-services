@@ -31,13 +31,15 @@
  *
  * WARP-1599 added the admin kill switch. Off is not a fault and must
  * never wear the red broken styling: it is one calm hero that replaces
- * the mic-status hero, the health strip AND the calibration entry,
- * because with the pipeline gone those three would be reporting on
- * something that isn't running — and the calibration wizard's capture
- * endpoints still open the mic directly, which would contradict the
- * "no audio is captured" promise the hero makes. Voiceprints and the
- * activity feed stay: they're on-box records, and the off event itself
- * lands in that feed.
+ * the mic-status hero, the health strip AND both wizards, because with
+ * the pipeline gone those would be reporting on — or trying to drive —
+ * something that isn't running. voice-io now refuses every mic-opening
+ * endpoint with a 409 while off, so the "no audio is captured" promise
+ * is the box's, not this component's; what the gating here buys is that
+ * an admin never walks into that error, and that an open wizard closes
+ * instead of dead-ending when a SECOND session flips the switch.
+ * Voiceprints and the activity feed stay: they're on-box records, and
+ * the off event itself lands in that feed.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -67,10 +69,13 @@ import {
   deriveVoiceSurfaceState,
   formatClock,
   isVoiceBusyError,
+  isVoiceOn,
+  isVoiceUnreachableError,
   NOISE_FLOOR_PASS_DBFS,
   relTime,
   SPEECH_PEAK_PASS_DBFS,
   type VoiceCheckAction,
+  type VoiceHeroKind,
 } from "./state";
 import "./voice.css";
 
@@ -148,7 +153,11 @@ export interface VoiceSurfaceProps {
   /** WARP-1599 — the admin kill switch (`useVoiceSurfaceData.enabled`,
    *  which reads the authoritative `status.enabled`). Defaults to ON so
    *  a caller without the wiring can't render a working box as
-   *  deliberately silenced. */
+   *  deliberately silenced — but it can only ever be the SECOND vote:
+   *  `status.enabled` is required on the payload beside it, and a
+   *  caller that passes a silenced status without also passing this
+   *  prop must not get a hero that says Droplet is listening. Kept as a
+   *  prop purely so tests can inject the switch without a status. */
   enabled?: boolean;
   /** Initial fetches still in flight (§7.8 skeleton). */
   loading: boolean;
@@ -176,6 +185,32 @@ export interface VoiceSurfaceProps {
 /** §3.4: "A short list (max 5)". The API asks for 5; slice defends the
  *  render if a caller ever passes more. */
 const ACTIVITY_MAX_ROWS = 5;
+
+/**
+ * Hero headline + ring for the four LIVE states.
+ *
+ * `off` is deliberately excluded by the TYPE (WARP-1599): it renders its
+ * own hero from COPY.heroOff / COPY.offSub with a neutral MicOff ring,
+ * and while these were plain if-chains it also fell through them to the
+ * first-run copy — two answers to "what does the hero say when voice is
+ * off", one of them dead. Only the narrowed non-off branch below can
+ * index these, so there is now exactly one.
+ */
+type LiveHeroKind = Exclude<VoiceHeroKind, "off">;
+
+const HERO_HEADLINE: Record<LiveHeroKind, string> = {
+  calibrated: COPY.heroCalibrated,
+  attention: COPY.heroDrift,
+  broken: COPY.heroBroken,
+  uncalibrated: COPY.heroFirstRun,
+};
+
+const HERO_RING: Record<LiveHeroKind, "ok" | "warn" | "err" | "neutral"> = {
+  calibrated: "ok",
+  attention: "warn",
+  broken: "err",
+  uncalibrated: "neutral",
+};
 
 export function VoiceSurface({
   status,
@@ -214,11 +249,19 @@ export function VoiceSurface({
   // is working perfectly.
   const [togglePending, setTogglePending] = useState(false);
 
+  // WARP-1599 — BOTH votes, and either one can silence. The prop is the
+  // wired-up answer (`useVoiceSurfaceData.enabled`, itself `isVoiceOn`
+  // of this same payload) but it defaults to true, so on its own it
+  // would out-vote a `status.enabled: false` from a caller that simply
+  // didn't pass it — rendering a silenced box as listening, the exact
+  // failure this feature exists to prevent.
+  const on = enabled && isVoiceOn(status);
+
   const surface = deriveVoiceSurfaceState({
     status,
     calibration,
     unavailable,
-    enabled,
+    enabled: on,
     noiseSustained,
     nowS: now,
   });
@@ -282,23 +325,32 @@ export function VoiceSurface({
   // a non-2xx never gets to claim the box changed state.
   async function handleToggleEnabled(next: boolean) {
     setTogglePending(true);
+    let applied: boolean;
     try {
-      await setVoiceEnabled(next);
+      // The APPLIED value, not the requested one: the box's response is
+      // what actually happened, and it is what the hero will show once
+      // the poll lands.
+      ({ enabled: applied } = await setVoiceEnabled(next));
     } catch (err) {
-      // The box's own detail (409 "already switching", 503 unreachable)
-      // says more than any copy we could write here.
+      // The box's own detail says more than any copy we could write —
+      // except on the 503, whose "detail" is the machine string
+      // `voice_unavailable` (throwVoiceError puts it in the message).
+      // Same classifier shape the measure handlers below use.
       toast(
-        err instanceof Error && err.message ? err.message : TOGGLE_FAILED_TOAST,
+        err instanceof Error && err.message && !isVoiceUnreachableError(err)
+          ? err.message
+          : TOGGLE_FAILED_TOAST,
         "error",
       );
       return;
     } finally {
       setTogglePending(false);
     }
-    // Re-read before announcing: the hero the admin looks at next comes
-    // from the box, not from what we asked for.
+    // Kick a re-poll so the hero catches up (fire-and-forget — the
+    // toast below announces the value the box just returned, not the
+    // one the refresh will eventually bring back).
     onRefresh();
-    toast(next ? COPY.toastOn : COPY.heroOff, "success");
+    toast(applied ? COPY.toastOn : COPY.heroOff, "success");
   }
 
   // Health-card wake re-test: watch the live poll for a fresh wake.
@@ -393,13 +445,15 @@ export function VoiceSurface({
   // capture real audio can't enroll a voice either.
   //
   // WARP-1599 — and `off` joins them, for the reverse reason: Flow B's
-  // captures land on voice-io's `_capture_speaker_pcm`, which opens the
-  // mic directly and works perfectly well with the wake pipeline gone.
-  // Recording four scripted lines while the hero promises "no audio is
-  // captured" would make that promise false, and a false privacy
-  // promise on the kill-switch page is the worst thing this surface
-  // could ship. Nothing is lost by waiting: a voiceprint enrolled while
-  // voice is off can't match anything until voice is back on.
+  // captures land on voice-io's `_capture_speaker_pcm`, which now
+  // refuses (409) while the switch is off, because recording four
+  // scripted lines under a hero promising "no audio is captured" would
+  // make that promise false — and a false privacy promise on the
+  // kill-switch page is the worst thing this surface could ship. So the
+  // gate here isn't the enforcement, it's the courtesy: no entry point
+  // into a flow whose every capture would error (§7.2). Nothing is lost
+  // by waiting either — a voiceprint enrolled while voice is off can't
+  // match anything until voice is back on.
   const enrollmentAllowed =
     speakerModelAvailable &&
     surface.kind !== "broken" &&
@@ -427,6 +481,20 @@ export function VoiceSurface({
       toast("Voice enrollment canceled — nothing was saved.", "info");
     }
   }
+
+  // WARP-1599 — an open Flow B whose preconditions went away mid-flow is
+  // over, not paused. The render gate below unmounts it; this runs the
+  // ordinary cancel path so the admin gets the "nothing was saved" toast
+  // instead of a wizard silently vanishing, and so `enrollOpen` doesn't
+  // pop it back open the moment voice comes back on. The on-box session
+  // is left to speaker_id.py's SESSION_TTL_S, the same fail-safe a
+  // closed browser tab relies on.
+  useEffect(() => {
+    if (enrollOpen && !enrollmentAllowed) handleEnrollClose({ saved: false });
+    // handleEnrollClose is redefined every render; listing it would
+    // re-run this on every render instead of on the gate flipping.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrollOpen, enrollmentAllowed]);
 
   /* ── §7.8 loading skeleton ── */
   if (loading) {
@@ -460,30 +528,10 @@ export function VoiceSurface({
     );
   }
 
-  /* ── Hero content mapping ── */
-  const headline =
-    surface.kind === "calibrated"
-      ? COPY.heroCalibrated
-      : surface.kind === "attention"
-        ? COPY.heroDrift
-        : surface.kind === "broken"
-          ? COPY.heroBroken
-          : COPY.heroFirstRun;
-
-  const ringStatus =
-    surface.kind === "calibrated"
-      ? ("ok" as const)
-      : surface.kind === "attention"
-        ? ("warn" as const)
-        : surface.kind === "broken"
-          ? ("err" as const)
-          : ("neutral" as const);
-
-  // WARP-1599 — while voice is off the wizard isn't just pointless, it
-  // is misleading: voice-io's `/audio/measure` + `/audio/test-record` +
-  // `/audio/echo-check` still open the mic directly, so a calibration
-  // run would capture audio the off hero just promised nobody was
-  // capturing. Not mounted at all while off.
+  // WARP-1599 — while voice is off the wizard can only dead-end:
+  // voice-io answers 409 on `/audio/measure`, `/audio/test-record` and
+  // `/audio/echo-check` (it refuses to open the mic at all while the
+  // switch is off), so every step of Flow A would fail. Not mounted.
   const wizardAllowed =
     surface.kind !== "off" &&
     (surface.kind !== "broken" || surface.brokenCause === "flatlined");
@@ -498,8 +546,11 @@ export function VoiceSurface({
 
   const meterFlat = surface.kind === "broken" || status?.input_rms_dbfs == null;
 
-  function subline() {
-    if (surface.kind === "broken") {
+  /* The live-hero sub-line. Takes the NARROWED kind for the same reason
+     HERO_HEADLINE / HERO_RING are keyed on it — the off hero says
+     COPY.offSub and nothing here may quietly answer for it too. */
+  function subline(kind: LiveHeroKind) {
+    if (kind === "broken") {
       const text =
         surface.brokenCause === "no_mic"
           ? SUB_NO_MIC
@@ -508,10 +559,10 @@ export function VoiceSurface({
             : SUB_UNAVAILABLE;
       return <p className="subline">{text}</p>;
     }
-    if (surface.kind === "uncalibrated") {
+    if (kind === "uncalibrated") {
       return <p className="subline">{COPY.firstRunSub}</p>;
     }
-    if (surface.kind === "attention") {
+    if (kind === "attention") {
       const reason =
         surface.driftCause === "noise"
           ? "Background noise has increased since calibration."
@@ -625,36 +676,44 @@ export function VoiceSurface({
         <>
           {/* ── Status hero (§3.1) ── */}
           <section className="vcard vhero" aria-labelledby="voice-hero-headline">
-            <div className={"vhero-corner" + (showTurnOff ? " has-action" : "")}>
+            <div className="vhero-corner">
               <SafetyChip safety="Read" />
-              {/* WARP-1599 — the switch sits with the hero's framing,
-                  deliberately quiet: turning the household assistant off
-                  is an admin decision, not the page's suggestion. */}
-              {showTurnOff && (
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  disabled={togglePending}
-                  onClick={() => void handleToggleEnabled(false)}
-                >
-                  {COPY.ctaTurnOff}
-                </button>
-              )}
             </div>
             <div className="vhero-row">
-              <StatusRing status={ringStatus} />
+              <StatusRing status={HERO_RING[surface.kind]} />
               <div className="vhero-stack">
                 <h2 className="headline" id="voice-hero-headline">
-                  {headline}
+                  {HERO_HEADLINE[surface.kind]}
                 </h2>
-                {subline()}
+                {subline(surface.kind)}
                 <LiveMeter
                   dbfs={status?.input_rms_dbfs ?? null}
                   flat={meterFlat}
                   caption={COPY.meterCap}
                 />
               </div>
-              <div className="vhero-cta">{heroCta()}</div>
+              <div className="vhero-cta">
+                {/* WARP-1599 — the switch rides the hero's ACTION area,
+                    beside the calibration CTA, not the corner: that
+                    corner is the SafetyChip's, and the chip reads "Read ·
+                    stays on LAN" — the most consequential write on this
+                    page must not sit inside a label that calls the card
+                    read-only. Same place the off hero puts "Turn voice
+                    on". Deliberately quiet (ghost): silencing the
+                    household assistant is an admin decision, not the
+                    page's suggestion. */}
+                {showTurnOff && (
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    disabled={togglePending}
+                    onClick={() => void handleToggleEnabled(false)}
+                  >
+                    {COPY.ctaTurnOff}
+                  </button>
+                )}
+                {heroCta()}
+              </div>
             </div>
             {/* Drift banner (§6.2) — max one, worst problem wins. */}
             {surface.kind === "attention" && surface.banner && (
@@ -749,8 +808,20 @@ export function VoiceSurface({
 
       {/* ── Flow B (§5 — WARP-1056). Mounted only while open: the
           wizard reads the auth context + fetches the roster, neither of
-          which the closed surface should pay for. ── */}
-      {enrollOpen && (
+          which the closed surface should pay for.
+
+          WARP-1599 — and only while enrollment is still ALLOWED, the
+          same way Flow A above rides `wizardAllowed`. `enrollmentAllowed`
+          gated the entry points but not an already-open wizard, so a
+          second admin session (or a second tab) could switch voice off
+          while this one recorded scripted lines — the reader of the off
+          hero being told no audio was captured while it was. voice-io
+          now refuses those captures outright (409); closing the wizard
+          is what keeps the admin from walking into that error. Dropping
+          the session is safe: it lives in RAM behind speaker_id.py's
+          15-minute SESSION_TTL_S, whose docstring names "browser tab
+          closed mid-flow" as exactly this case. ── */}
+      {enrollOpen && enrollmentAllowed && (
         <EnrollmentWizard
           open
           profiles={profiles}

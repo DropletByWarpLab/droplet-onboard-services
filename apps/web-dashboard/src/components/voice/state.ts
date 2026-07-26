@@ -72,6 +72,26 @@ export function isVoiceOn(status: VoiceStatusInfo | null | undefined): boolean {
   return status?.enabled !== false;
 }
 
+/**
+ * WARP-1599 — true when a voice write failed because the orchestrator
+ * couldn't reach voice-io at all (its explicit 503 `voice_unavailable`).
+ *
+ * `throwVoiceError` (lib/api) puts that machine string in the Error's
+ * MESSAGE, so a handler that toasts `err.message` verbatim shows a
+ * household admin the words "voice_unavailable" — and the human copy
+ * written for exactly this case never fires. Callers use this to pick
+ * their own wording instead. Twin of lib/api's `isVoiceUnavailableError`
+ * (which the setup wizard's auto-skip keys on); it lives here for the
+ * same reason `isVoiceBusyError` does — component tests mock `@/lib/api`
+ * at the module boundary and would otherwise exercise a mock.
+ */
+export function isVoiceUnreachableError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "voice_unavailable"
+  );
+}
+
 export type VoiceHeroKind =
   | "calibrated"
   | "attention"

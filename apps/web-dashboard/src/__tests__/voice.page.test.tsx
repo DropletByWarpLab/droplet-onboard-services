@@ -50,6 +50,24 @@ vi.mock("@/lib/api", () => ({
   // WARP-1059 — the wizard brackets its session in calibration mode.
   enterVoiceCalibrationMode: vi.fn(async () => ({ active: true })),
   exitVoiceCalibrationMode: vi.fn(async () => ({ active: false })),
+  // Flow B mounts for the WARP-1599 "voice went off mid-enrollment"
+  // case; step 1 fetches the roster and the close path discards.
+  fetchUsers: vi.fn(async () => ({
+    users: [
+      { id: "sam", username: "sam", displayName: "Sam", userId: "u-sam" },
+    ],
+  })),
+  startVoiceEnrollment: vi.fn(),
+  captureVoiceEnrollmentLine: vi.fn(),
+  verifyVoiceEnrollment: vi.fn(),
+  commitVoiceEnrollment: vi.fn(),
+  cancelVoiceEnrollment: vi.fn(async () => {}),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: { id: "u-nadia", username: "nadia", displayName: "Nadia" },
+  }),
 }));
 
 // Real <a> for next/link (overrides the setup.ts string-template mock)
@@ -135,7 +153,7 @@ function profile(overrides: Partial<VoiceProfileInfo> = {}): VoiceProfileInfo {
   };
 }
 
-function renderSurface(
+function surfaceTree(
   props: Partial<React.ComponentProps<typeof VoiceSurface>> = {},
 ) {
   const defaults: React.ComponentProps<typeof VoiceSurface> = {
@@ -149,11 +167,17 @@ function renderSurface(
     onRefresh: vi.fn(),
     onCalibrationApplied: vi.fn(),
   };
-  return render(
+  return (
     <ToastProvider>
       <VoiceSurface {...defaults} {...props} />
-    </ToastProvider>,
+    </ToastProvider>
   );
+}
+
+function renderSurface(
+  props: Partial<React.ComponentProps<typeof VoiceSurface>> = {},
+) {
+  return render(surfaceTree(props));
 }
 
 beforeEach(() => {
@@ -646,11 +670,41 @@ describe("VoiceSurface kill switch (WARP-1599)", () => {
     expect(screen.getByText("Voice turned off")).toBeInTheDocument();
   });
 
+  it("a silenced status renders the off hero without the enabled prop", () => {
+    // `enabled` defaults to true and `status.enabled` is REQUIRED on the
+    // payload beside it, so a caller that passes one without the other
+    // must not get a hero saying Droplet is listening — the exact
+    // failure this feature exists to prevent.
+    renderSurface({
+      status: status({ enabled: false, state: "off", listening: false }),
+    });
+    expect(screen.getByText(OFF_HEADLINE)).toBeInTheDocument();
+    expect(screen.queryByText("Microphone calibrated")).toBeNull();
+  });
+
   it('"Turn off voice" is the quiet ghost action while voice is on', () => {
     renderSurface();
     const off = screen.getByRole("button", { name: "Turn off voice" });
     expect(off).toHaveClass("btn", "ghost", "sm");
     expect(off.className).not.toMatch(/dp-btn|type-/);
+  });
+
+  it('"Turn off voice" rides the hero actions, never the Read-chip corner', () => {
+    // The corner is the SafetyChip's, and the chip says "Read · stays on
+    // LAN". The most consequential write on the page cannot sit inside a
+    // label calling the card read-only.
+    const { container } = renderSurface();
+    // eslint-disable-next-line testing-library/no-node-access
+    const corner = container.querySelector(".vhero-corner") as HTMLElement;
+    expect(within(corner).getByText("Read · stays on LAN")).toBeInTheDocument();
+    expect(
+      within(corner).queryByRole("button", { name: "Turn off voice" }),
+    ).toBeNull();
+    // eslint-disable-next-line testing-library/no-node-access
+    const cta = container.querySelector(".vhero-cta") as HTMLElement;
+    expect(
+      within(cta).getByRole("button", { name: "Turn off voice" }),
+    ).toBeInTheDocument();
   });
 
   it('"Turn off voice" is absent while voice is already off', () => {
@@ -681,6 +735,42 @@ describe("VoiceSurface kill switch (WARP-1599)", () => {
     await waitFor(() => expect(setEnabledMock).toHaveBeenCalledWith(true));
     expect(await screen.findByText(ON_TOAST)).toBeInTheDocument();
     expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("announces the value the box APPLIED, not the one requested", async () => {
+    // The response is the only honest answer — an admin must never be
+    // told the box did something it didn't.
+    setEnabledMock.mockResolvedValue({ enabled: true });
+    renderSurface();
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn off voice" }));
+
+    await waitFor(() => expect(setEnabledMock).toHaveBeenCalledWith(false));
+    expect(await screen.findByText(ON_TOAST)).toBeInTheDocument();
+  });
+
+  it("a 503 toasts the human copy, never the machine string", async () => {
+    // `throwVoiceError` puts the orchestrator's `voice_unavailable` in
+    // the Error MESSAGE, so toasting err.message verbatim showed a
+    // household admin the words "voice_unavailable" — and the copy
+    // written for exactly this case could never fire.
+    const down = new Error("voice_unavailable") as Error & {
+      status?: number;
+      code?: string;
+    };
+    down.status = 503;
+    down.code = "voice_unavailable";
+    setEnabledMock.mockRejectedValue(down);
+    renderSurface();
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn off voice" }));
+
+    expect(
+      await screen.findByText(
+        "Couldn't switch voice — the voice service didn't respond.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("voice_unavailable")).toBeNull();
   });
 
   it("a rejected toggle surfaces the error and never claims success", async () => {
@@ -743,6 +833,36 @@ describe("VoiceSurface kill switch (WARP-1599)", () => {
     // Remove captures nothing, and someone switching voice off may well
     // want to purge the voiceprints next.
     expect(screen.getByRole("menuitem", { name: /Remove voice/ })).toBeEnabled();
+  });
+
+  it("an OPEN enrollment wizard closes when voice goes off mid-flow", async () => {
+    // The entry points were gated, the mounted wizard wasn't: admin A
+    // opens "Add a voice", admin B (second session or second tab)
+    // switches voice off, and A's next capture recorded audio while B
+    // read a hero promising none was. Nothing is lost by dropping the
+    // session — it lives in RAM behind speaker_id.py's 15-minute TTL,
+    // whose docstring names "browser tab closed mid-flow" as this case.
+    const base = { profiles: [profile()], speakerModelAvailable: true };
+    const { rerender } = render(surfaceTree(base));
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a voice" }));
+    expect(await screen.findByText("Whose voice is this?")).toBeInTheDocument();
+
+    rerender(
+      surfaceTree({
+        ...base,
+        enabled: false,
+        status: status({ enabled: false, state: "off", listening: false }),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("Whose voice is this?")).toBeNull(),
+    );
+    expect(screen.getByText(OFF_HEADLINE)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Voice enrollment canceled — nothing was saved."),
+    ).toBeInTheDocument();
   });
 
   it("on: the same enrollment entry points are live again", () => {
