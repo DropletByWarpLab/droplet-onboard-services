@@ -144,8 +144,16 @@ describe("lockOperationDenied — mayOperateLocks (§3 locks)", () => {
   });
 });
 
-// ── module-registry ↔ tools-core vocabulary (T3 corrected these; T5 is the
-//    first real consumer of getEnabledToolDomains, so pin the join) ──
+// ── module-registry ↔ tools-core vocabulary ────────────────────────
+//
+// WHICH domains each module claims (the calendar/reminders/notifications
+// grouping, knowledge→memory, projects→pm, smart_home→smart-home, and the
+// four unclaimed pass-through domains) is asserted by T3's
+// access-catalog.test.ts — that suite owns the grouping and this one does
+// NOT fork it. What is pinned here is the one thing T3 cannot see from the
+// resolved side: that no registry entry names a domain tools-core has never
+// heard of. A typo there is silent — `domainsForFeatures` would simply never
+// match it, and the module would gate nothing.
 describe("module-registry toolDomains vocabulary", () => {
   it("every registry toolDomain is a real tools-core catalog domain", () => {
     const known = new Set<string>(TOOL_DOMAINS);
@@ -154,13 +162,6 @@ describe("module-registry toolDomains vocabulary", () => {
         expect(known.has(d), `module ${def.id} claims unknown domain '${d}'`).toBe(true);
       }
     }
-  });
-
-  it("leaves exactly the four unclaimed domains un-module-gated", () => {
-    const claimed = new Set(MODULES.flatMap((m) => m.toolDomains));
-    expect(TOOL_DOMAINS.filter((d) => !claimed.has(d)).sort()).toEqual(
-      ["business", "data", "erp", "system"].sort(),
-    );
   });
 });
 

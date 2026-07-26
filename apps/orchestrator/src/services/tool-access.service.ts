@@ -17,13 +17,28 @@
  *   locks       = role.mayOperateLocks && smart_home ∈ features
  *
  * The first two intersections and the locks flag are resolved by T3
- * (effective-access.service.ts) — consumed here, never re-derived. What T3's
- * §5 wire shape deliberately does NOT carry is the per-domain grant LEVEL
- * (`view` | `use`), because `toolDomains` is a flat domain list; so the level
- * axis is read here, straight off `AccessRoleToolGrant`, and joined onto T3's
- * resolved domains. Write-capability is decided by tools-core's
+ * (effective-access.service.ts) — consumed here, never re-derived. In
+ * particular the module→tool-domain join has exactly ONE derivation in the
+ * tree: access-catalog.ts's MODULE_BY_DOMAIN / domainsForFeatures, which T3's
+ * resolver calls. Nothing in this file walks `MODULES[].toolDomains`; a second
+ * walk is how the two copies drift apart and a module-off stops gating (the
+ * shape of the pre-T3 bug where `matter`/`devices` were never catalog values).
+ *
+ * What T3's §5 wire shape deliberately does NOT carry is the per-domain grant
+ * LEVEL (`view` | `use`), because `toolDomains` is a flat domain list; so the
+ * level axis is read here, straight off `AccessRoleToolGrant`, and joined onto
+ * T3's resolved domains. Write-capability is decided by tools-core's
  * `requiresWrite` on every tool — never a hand-maintained list (the same
  * discipline as the orchestrator's WRITE_TOOLS).
+ *
+ * COST. The scope is resolved ONCE per chat turn, in the route, and passed
+ * down as a plain value; both enforcement points are then pure in-memory
+ * predicates — the dispatch gate never re-reads anything, no matter how many
+ * tools a turn calls. A person with no AccessRole (everyone today) costs one
+ * indexed `User` lookup and never reaches the §3 resolver at all; a role
+ * holder additionally pays that resolver's reads once per turn, against a
+ * turn that is already seconds of inference. T3's "DB-read per request, no
+ * cache in v1" decision stands.
  *
  * WHO IS NARROWED. Only people who actually hold an AccessRole:
  *

@@ -106,19 +106,16 @@ export async function getEffectiveModuleIds(
   return computeEffectiveIds(overrides, cfg);
 }
 
-/** tools-core handler domains belonging to an effective module — the agent's
- *  tool list is filtered to these so a disabled module's tools disappear. */
-export async function getEnabledToolDomains(
-  prisma: PrismaClient,
-  cfg: AvailabilityConfig
-): Promise<Set<string>> {
-  const effective = await getEffectiveModuleIds(prisma, cfg);
-  const domains = new Set<string>();
-  for (const def of MODULES) {
-    if (effective.has(def.id)) for (const d of def.toolDomains) domains.add(d);
-  }
-  return domains;
-}
+// WARP-1529: `getEnabledToolDomains` was removed here. It walked
+// `MODULES[].toolDomains` directly to build the module→tool-domain join — a
+// SECOND derivation of the mapping that `access-catalog.ts` already owns
+// (MODULE_BY_DOMAIN / domainsForFeatures, which also decides which domains are
+// unclaimed and therefore never module-gated). It had no callers, so nothing
+// ever enforced the two copies agreeing. The agent's per-turn tool filtering
+// now goes through the ADR-032 §3 resolver (effective-access.service.ts →
+// domainsForFeatures) instead: ONE derivation, module axis and role axis
+// composed in the same place. Need the effective module ids? Use
+// getEffectiveModuleIds above and hand them to domainsForFeatures.
 
 /** Toggle one module. Throws ModuleToggleError (→ HTTP) on invalid transitions. */
 export async function setModuleEnabled(
