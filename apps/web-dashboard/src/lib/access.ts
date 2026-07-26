@@ -29,6 +29,8 @@ import type {
   ToolAccessLevel,
 } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
+import { bytesToStorageInput, storageInputToBytes } from "./storage-units";
+import type { StorageUnit } from "./storage-units";
 
 // ── Tier ladder + display labels ──────────────────────────────────────────
 
@@ -628,46 +630,18 @@ export function slugifyRoleName(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
-export type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
-const MB_BYTES = 1024 ** 2;
-
-/** Byte count (decimal string per the wire contract) → short human size.
- *  Unknown/invalid → "—", never a fabricated 0 (§10: unknown renders —). */
-export function formatStorageBytes(value: string | null | undefined): string {
-  if (value == null) return ACCESS_COPY.unknownValue;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return ACCESS_COPY.unknownValue;
-  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
-    return `${n / STORAGE_UNIT_BYTES.TB} TB`;
-  }
-  if (n >= STORAGE_UNIT_BYTES.GB) {
-    const gb = n / STORAGE_UNIT_BYTES.GB;
-    return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
-  }
-  return `${Math.round(n / MB_BYTES)} MB`;
-}
-
-/** Admin-typed "{value} {unit}" → decimal byte string; empty/invalid → null
- *  (= no limit). Round-trips exactly for the whole-GB/TB values admins type. */
-export function storageInputToBytes(value: string, unit: StorageUnit): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return String(Math.round(n * STORAGE_UNIT_BYTES[unit]));
-}
-
-/** Byte string → the {value, unit} pair the numeric+unit control edits. */
-export function bytesToStorageInput(bytes: string | null): { value: string; unit: StorageUnit } {
-  if (bytes == null) return { value: "", unit: "GB" };
-  const n = Number(bytes);
-  if (!Number.isFinite(n) || n <= 0) return { value: "", unit: "GB" };
-  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
-    return { value: String(n / STORAGE_UNIT_BYTES.TB), unit: "TB" };
-  }
-  return { value: String(Math.round((n / STORAGE_UNIT_BYTES.GB) * 10) / 10), unit: "GB" };
-}
+/** Storage sizing is shared with the people + departments surfaces, so the
+ *  bytes ⇄ unit contract lives in one module (WARP-1561). Re-exported here
+ *  because the access components import it from `@/lib/access` — and because
+ *  the three former copies disagreed in ways that cost this panel a quota-
+ *  drift bug (see `storage-units.ts` for the rounding policy). */
+export {
+  STORAGE_UNIT_BYTES,
+  formatStorageBytes,
+  storageInputToBytes,
+  bytesToStorageInput,
+} from "./storage-units";
+export type { StorageUnit };
 
 // ── Connectors (O-2 floor) ─────────────────────────────────────────────────
 
