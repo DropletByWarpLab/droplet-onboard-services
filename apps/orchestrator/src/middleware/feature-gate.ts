@@ -32,10 +32,17 @@
  *
  * Cost: the T3 resolver is a DB read per request with no cache in v1 (its
  * deliberate decision — box scale is tens of users). Two gates can legitimately
- * match one URL (`/api/files` + `/api/files/knowledge`, or a prefix gate plus a
- * route-level level check), so the resolution is memoised ON THE REQUEST. That
- * is de-duplication within a single request, not a cross-request cache: no
- * staleness window is introduced.
+ * match one URL (a module's prefix gate plus a route-level level check, e.g.
+ * `view` on the group and `manage` on one write route), so the resolution is
+ * memoised ON THE REQUEST. That is de-duplication within a single request, not
+ * a cross-request cache: no staleness window is introduced.
+ *
+ * WARP-1585: this comment used to cite `/api/files` + `/api/files/knowledge` as
+ * the overlap example. That overlap was the bug, not a feature — Express's
+ * prefix mount had the `files` gate silently guarding two sibling modules'
+ * namespaces. `mountModuleGates` now scopes each gate to its own namespace, so
+ * two DIFFERENT modules never gate one URL. The memo stays: same-module
+ * stacking is still real, and it is what keeps the resolver to one read.
  */
 import type { Request, RequestHandler, Response, NextFunction } from "express";
 import type { ModuleId } from "@prisma/client";
