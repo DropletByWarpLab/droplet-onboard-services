@@ -17,8 +17,18 @@
  * so legacy consumers don't break.
  *
  * Iteration cap: config.agentMaxIter (env AGENT_MAX_ITER_DEFAULT / CAP,
- * ships 5 / 10) — a confused or prompt-injected
- * model can't burn unbounded tokens.
+ * ships 10 / 10 — config.ts, raised from 5 by the 2026-07-21 tuning sweep)
+ * — a confused or prompt-injected model can't burn unbounded tokens.
+ *
+ * WARP-1602 — channel discipline. The model's ANALYSIS (chain-of-thought)
+ * must never reach the user or `ChatMessage.content`: per OpenAI's harmony
+ * spec analysis text "has not been trained to the same safety standards"
+ * and must not be shown. On a multi-iteration turn the intermediate
+ * iterations are, by construction, analysis — so their `content` is
+ * quarantined into the reasoning stream (`reasoning_step` +
+ * `message.reasoning`), and only the TERMINAL iteration's content is ever
+ * emitted as `content_delta` or persisted as the answer. Both transports
+ * (blocking `chat()` and streaming `chatStream()`) now agree on this.
  */
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
@@ -386,6 +396,37 @@ export interface BlankAnswerDiagnostics {
   completionTokens?: number;
 }
 
+/**
+ * WARP-1602 — the inverse of {@link BlankAnswerDiagnostics}: why a turn's
+ * visible answer looks like it still carries chain-of-thought.
+ *
+ * WARP-1479 attributes a turn that said NOTHING. This attributes a turn that
+ * said TOO MUCH — the answer opens with analysis prose ("We need to answer…",
+ * "The user is asking…") or carries the run-on join that per-iteration
+ * analysis fragments produce when they are concatenated ("…list files.Let's
+ * read csv."). Present ONLY when at least one marker fires, so a healthy turn
+ * stays silent in the logs exactly like a healthy blank-turn check does.
+ *
+ * Labels + counts only; `rawExcerpt` is opt-in behind AGENT_BLANK_TURN_DEBUG
+ * for the same reason (the answer can quote the customer's own documents).
+ */
+export interface PollutedAnswerDiagnostics {
+  /** Which heuristics fired, in declaration order. Never empty. */
+  markers: string[];
+  /** Length of the sanitized answer the customer would see. */
+  visibleChars: number;
+  /** Intermediate steps whose content this turn held back as reasoning. */
+  quarantinedSteps: number;
+  /** Total chars of intermediate content routed to `reasoning` this turn. */
+  quarantinedChars: number;
+  /** Which transport produced the terminal turn. */
+  transport: "streaming" | "blocking";
+  /** Tool dispatches in this turn's trace. */
+  toolCalls: number;
+  /** Bounded (500-char) excerpt of the answer. Opt-in: AGENT_BLANK_TURN_DEBUG=1. */
+  rawExcerpt?: string;
+}
+
 export interface AgentResult {
   message: ChatMessage;
   trace: AgentTraceEntry[];
@@ -399,7 +440,37 @@ export interface AgentResult {
   error?: string;
   /** WARP-1479 — set only when the terminal turn produced no visible answer. */
   blankDiagnostics?: BlankAnswerDiagnostics;
+  /**
+   * WARP-1602 — set only when the visible answer trips an analysis-leak
+   * heuristic. The customer-facing behaviour is unchanged; this is the
+   * operator/eval attribution channel.
+   */
+  pollutedDiagnostics?: PollutedAnswerDiagnostics;
+  /**
+   * WARP-1602 — the turn's reasoning trace with its PER-STEP boundaries
+   * intact, in arrival order: one entry per agent iteration that produced
+   * any thinking (intermediate tool-call steps first, the terminal answer
+   * step last). `message.reasoning` is the same list flattened with
+   * {@link REASONING_STEP_SEPARATOR} for the `ChatMessage.reasoning` column;
+   * in-process consumers should prefer this array over re-splitting the
+   * string. Absent when the turn produced no reasoning at all.
+   */
+  reasoningSteps?: string[];
 }
+
+/**
+ * WARP-1602 — boundary between agent STEPS inside the flattened
+ * `ChatMessage.reasoning` string.
+ *
+ * `ChatMessage.reasoning` is a single `String?` column, so a multi-step trace
+ * has to be flattened to persist. Flattening with the plain `\n\n` that
+ * `parseReasoningTrace` uses WITHIN one step would erase the step boundary,
+ * and a renderer could never put it back. This sentinel keeps it: split on it
+ * to recover the per-step list (WARP-1605 renders these as separate blocks).
+ * Chosen to be human-readable when a raw trace is displayed today and
+ * effectively impossible for a model to emit verbatim on its own line.
+ */
+export const REASONING_STEP_SEPARATOR = "\n\n--- step ---\n\n";
 
 /**
  * WARP-458 — parsed reasoning trace for a single assistant turn.
@@ -599,6 +670,14 @@ function stableStreamedContent(raw: string): string | null {
  * them). By construction the concatenation of every emitted content_delta is
  * byte-identical to the blocking path's single delta:
  *   `sanitizeFinalContent(parseReasoningTrace(raw).cleanedContent)`.
+ *
+ * WARP-1602 — `deferred` mode holds EVERYTHING back until the turn's stop
+ * reason is known. A turn that advertised tools may still resolve to
+ * `tool_calls`, and on such a turn the streamed `delta.content` is the model's
+ * analysis, not its answer (the live gpt-oss shape on the .87 box). Since a
+ * turn is only known non-tool at its terminal chunk, the only way to never put
+ * analysis on the wire is to decide at that point — which is what `settle()`
+ * does: release for a terminal turn, quarantine for a tool-call one.
  */
 class StreamingContentEmitter {
   private raw = "";
@@ -608,17 +687,39 @@ class StreamingContentEmitter {
   constructor(
     private readonly emit: (e: SSEEvent) => void,
     private readonly captureReasoning: boolean,
+    /**
+     * WARP-1602 — when true nothing goes on the wire during the stream; the
+     * turn's shape decides at `settle()`. Set by the caller for iterations
+     * that advertised tools (i.e. could end in `tool_calls`); a zero-tool
+     * iteration cannot, so it streams progressively as before.
+     */
+    private deferred = false,
   ) {}
 
   push(fragment: string): void {
     this.raw += fragment;
-    this.flush(false);
+    if (!this.deferred) this.flush(false);
   }
 
-  /** Flush the final remainder; returns the raw content for message assembly. */
-  finish(): string {
+  /**
+   * Decide the turn, hand back the raw buffer, and say whether the content
+   * reached the wire.
+   *
+   *   - tool-call turn that was DEFERRED → quarantine: nothing was emitted and
+   *     nothing more will be. The loop reclassifies the buffer as this step's
+   *     reasoning.
+   *   - anything else → release: either this content IS the answer (terminal
+   *     turn), or the turn was never deferred and its content already went out
+   *     progressively — flushing the final remainder keeps the emitted deltas
+   *     summing to the whole buffer, which is the WARP-1442 invariant.
+   */
+  settle(isToolCallTurn: boolean): { raw: string; contentReleased: boolean } {
+    if (isToolCallTurn && this.deferred) {
+      return { raw: this.raw, contentReleased: false };
+    }
+    this.deferred = false;
     this.flush(true);
-    return this.raw;
+    return { raw: this.raw, contentReleased: true };
   }
 
   private flush(final: boolean): void {
@@ -677,11 +778,14 @@ function accumulateToolCall(
  * reasoning_step incrementally, and return the synthesised assistant message
  * (identical in shape to `chat()`'s `choice.message`) for the rest of the loop.
  *
- * - `delta.content` → accumulate + emit content_delta incrementally.
+ * - `delta.content` → accumulate + emit content_delta incrementally, UNLESS
+ *   `deferContent` (WARP-1602): a turn that advertised tools may resolve to
+ *   `tool_calls`, and then its content is analysis, not an answer — so it is
+ *   held until the turn's shape is known and quarantined if tool calls landed.
  * - `delta.reasoning_content` (gpt-oss channel) → accumulate; emit as ONE
  *   `reasoning_step` BEFORE the first content_delta (WARP-458 ordering), and
- *   ONLY on a terminal (non-tool-call) turn — matching the blocking path, which
- *   never parses reasoning on a tool-call turn (WARP-495).
+ *   ONLY on a terminal (non-tool-call) turn — a tool-call turn's reasoning is
+ *   emitted by the LOOP instead (one site for both transports, WARP-1602).
  * - `delta.tool_calls` → accumulate fragments BY INDEX into valid calls; never
  *   emitted as content.
  * - client disconnect (WARP-329) → break, which tears the upstream Ollama
@@ -694,8 +798,13 @@ async function consumeChatStream(
     emit: (e: SSEEvent) => void;
     captureReasoning: boolean;
     signal?: AbortSignal;
+    /**
+     * WARP-1602 — hold content back until the turn's stop reason is known.
+     * True for iterations that advertised tools.
+     */
+    deferContent?: boolean;
   },
-): Promise<{ asst: ChatMessage }> {
+): Promise<{ asst: ChatMessage; wireEmitted: boolean; contentReleased: boolean }> {
   const { emit, captureReasoning, signal } = opts;
   // Track whether we've put ANYTHING on the wire this turn. If the stream errors
   // AFTER we've emitted, the loop must NOT fall back to blocking chat() (that
@@ -707,7 +816,11 @@ async function consumeChatStream(
     }
     emit(e);
   };
-  const content = new StreamingContentEmitter(trackedEmit, captureReasoning);
+  const content = new StreamingContentEmitter(
+    trackedEmit,
+    captureReasoning,
+    opts.deferContent ?? false,
+  );
   let reasoningBuf = "";
   let channelReasoningEmitted = false;
   let sawContent = false;
@@ -761,12 +874,22 @@ async function consumeChatStream(
   if (signal?.aborted) throw new AgentStreamAborted();
 
   // Flush the channel reasoning for a terminal turn (content, empty, or
-  // reasoning-only). A tool-call turn does NOT emit reasoning_step — the
-  // blocking path parses reasoning only on the terminal non-tool-call turn
-  // (WARP-495), so streaming matches.
-  if (toolOrder.length === 0) flushChannelReasoning();
+  // reasoning-only) BEFORE releasing the content, so reasoning_step still
+  // precedes content_delta (WARP-458 order) on a deferred turn too.
+  //
+  // WARP-1602 — a tool-call turn deliberately emits nothing here. Its
+  // reasoning (channel text AND the quarantined content) is emitted by
+  // `runAgent`, which is the ONE site that handles intermediate steps for
+  // both the streaming and the blocking transport.
+  const isToolCallTurn = toolOrder.length > 0;
+  if (!isToolCallTurn) flushChannelReasoning();
 
-  const rawContent = content.finish();
+  // Terminal turn → the buffer is the answer, release it. DEFERRED tool-call
+  // turn → the buffer is analysis, quarantine it (WARP-1602). A tool-call turn
+  // that was NOT deferred already streamed its content, so it still flushes:
+  // withholding only the volatile tail would leave the wire short of the
+  // buffer, and the WARP-1442 sum invariant is what catches that.
+  const { raw: rawContent, contentReleased } = content.settle(isToolCallTurn);
 
   const asst: ChatMessage = { role: "assistant", content: rawContent };
   if (toolOrder.length > 0) {
@@ -783,7 +906,12 @@ async function consumeChatStream(
   // `message.reasoning` exactly as the blocking path does (parseReasoningTrace's
   // `providerReasoning`).
   if (reasoningBuf.trim()) asst.reasoning_content = reasoningBuf;
-  return { asst };
+  // WARP-1602 — two flags the loop needs to avoid saying anything twice:
+  // `wireEmitted` (this turn already put content/reasoning on the wire, so the
+  // intermediate-step emission must not repeat it) and `contentReleased` (the
+  // content reached the wire as the ANSWER, so the terminal finalize must not
+  // re-emit it).
+  return { asst, wireEmitted: emittedAny, contentReleased };
 }
 
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
@@ -970,6 +1098,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // byte-for-byte, so every non-streaming caller is unchanged.
   const useStream = Boolean(deps.onEvent && deps.aiGateway.chatStream);
 
+  // WARP-1602 — the turn's reasoning trace, ONE entry per iteration that
+  // produced any thinking, in arrival order. Intermediate (tool-call)
+  // iterations used to be discarded entirely: their `reasoning_content` was
+  // dropped and their `content` either leaked to the client (streaming) or was
+  // swallowed into the transcript (blocking), which is why `reasoning` came
+  // back NULL on every multi-iteration turn. This closes the WARP-495 part 2
+  // deferral that WARP-1442's streaming was supposed to trigger.
+  const reasoningSteps: string[] = [];
+  // Chars of intermediate CONTENT (not channel reasoning) rerouted into the
+  // trace — the polluted-turn diagnostics report it so an eval run can tell a
+  // turn that quarantined analysis from one that never produced any.
+  let quarantinedChars = 0;
+
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
@@ -1032,6 +1173,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // Streamed turns already emitted content_delta + reasoning_step during the
     // stream; the terminal finalize below must NOT re-emit them.
     let streamedTurn = false;
+    // WARP-1602 — did the stream consumer already put text on the wire this
+    // iteration? Only then must the intermediate-reasoning emission below hold
+    // back, to avoid saying the same thing twice.
+    let streamWireEmitted = false;
+    // WARP-1602 — did the stream consumer already emit this turn's content AS
+    // THE ANSWER? Gates the terminal `content_delta` below. Distinct from
+    // `streamedTurn`: the finalize pass strips a rogue `tool_calls` AFTER the
+    // consumer settled, so "streamed" and "content already on the wire as the
+    // answer" are not the same question.
+    let streamContentReleased = false;
     if (useStream) {
       try {
         const streamed = await consumeChatStream(
@@ -1042,10 +1193,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             emit,
             captureReasoning: req.captureReasoning ?? false,
             signal: req.signal,
+            // WARP-1602 — this iteration advertised tools, so it may still
+            // resolve to `tool_calls`; hold its content until we know. An
+            // iteration with ZERO tools (the finalize pass, tool_choice
+            // "none", or a caller with an empty pool) cannot, so it keeps
+            // streaming token-by-token exactly as WARP-1442 shipped it.
+            deferContent: iterTools.length > 0,
           },
         );
         asst = streamed.asst;
         streamedTurn = true;
+        streamWireEmitted = streamed.wireEmitted;
+        streamContentReleased = streamed.contentReleased;
       } catch (err) {
         if (req.signal?.aborted || isAbortError(err)) return abortedResult(iter);
         if (err instanceof AgentStreamPartialError) {
@@ -1156,7 +1315,22 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             finishReason: lastFinishReason,
             usage: lastUsage,
           });
-      if (visible && !streamedTurn) emit({ type: "content_delta", text: visible });
+      // WARP-1602 — the inverse guard to WARP-1479's. A turn that answers
+      // WITH its chain-of-thought must be attributable in eval runs instead of
+      // scoring as healthy just because the bubble wasn't empty.
+      const pollutedDiagnostics = describePollutedAnswer({
+        visible,
+        quarantinedSteps: reasoningSteps.length,
+        quarantinedChars,
+        transport: streamedTurn ? "streaming" : "blocking",
+        toolCalls: trace.length,
+      });
+      // WARP-1602 — `streamContentReleased`, not `streamedTurn`: a streamed
+      // turn whose content was QUARANTINED never reached the wire, so the
+      // answer would silently vanish if the flag were merely "was streamed".
+      if (visible && !(streamedTurn && streamContentReleased)) {
+        emit({ type: "content_delta", text: visible });
+      }
       emit({
         type: "done",
         iterations: iter + 1,
@@ -1169,29 +1343,85 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // is our parsed, structured trace; strip the raw provider passthrough
       // `reasoning_content` out of `...asst` so the same reasoning isn't exposed
       // twice on `result.message` — a public /api/llm/chat wart that confuses
-      // downstream consumers. (Deferred follow-up: when ai-gateway gains real
-      // token-streaming, audit mid-loop reasoning extraction — WARP-495 part 2,
-      // since parseReasoningTrace only runs on this terminal, non-tool-call turn.)
+      // downstream consumers.
+      //
+      // WARP-1602 (closes the WARP-495 part 2 deferral): the trace is no longer
+      // this terminal turn ALONE. Every intermediate step's thinking was
+      // captured on its way past, so `reasoning` now carries the whole turn —
+      // steps in order, separated by REASONING_STEP_SEPARATOR so a renderer can
+      // put the boundaries back (`reasoningSteps` carries the same list
+      // unflattened for in-process consumers).
       const { reasoning_content: _reasoningContent, ...asstClean } = asst;
+      const allReasoningSteps =
+        reasoning.fullReasoning != null
+          ? [...reasoningSteps, reasoning.fullReasoning]
+          : reasoningSteps;
+      const fullReasoning =
+        allReasoningSteps.length > 0
+          ? allReasoningSteps.join(REASONING_STEP_SEPARATOR)
+          : null;
       const finalMessage: ChatMessage = {
         ...asstClean,
         content: visible,
-        ...(reasoning.fullReasoning != null
-          ? { reasoning: reasoning.fullReasoning }
-          : {}),
+        ...(fullReasoning != null ? { reasoning: fullReasoning } : {}),
       };
       return {
         message: finalMessage,
         trace,
         iterations: iter + 1,
         stop_reason: finalizeReason ?? "model_done",
+        ...(allReasoningSteps.length > 0
+          ? { reasoningSteps: allReasoningSteps }
+          : {}),
         ...(blankDiagnostics ? { blankDiagnostics } : {}),
+        ...(pollutedDiagnostics ? { pollutedDiagnostics } : {}),
       };
+    }
+
+    // WARP-1602 — this iteration resolved to tool_calls, so whatever it wrote
+    // is thinking, not an answer: harmony analysis ("We need to answer…"), or
+    // at best a commentary preamble. Both are reclassified into the reasoning
+    // stream here — the ONE site that handles intermediate steps for both
+    // transports (the stream consumer deliberately emitted nothing).
+    //
+    // Per the harmony spec analysis "has not been trained to the same safety
+    // standards" and must never be shown as the answer; commentary preambles
+    // ARE showable, but Ollama's OpenAI-compat stream collapses both into
+    // `delta.content` with no channel marker, so — indistinguishable — they
+    // are treated as reasoning, which is the safe classification.
+    const stepTrace = parseReasoningTrace({
+      content: typeof asst.content === "string" ? asst.content : null,
+      providerReasoning: asst.reasoning_content ?? null,
+    });
+    const stepParts = [...stepTrace.reasoningSteps];
+    // Reuse the answer sanitizer so bare tool-args JSON and citation cruft
+    // don't land in the trace either — the same classifier, same verdict.
+    const stepContent = sanitizeFinalContent(stepTrace.cleanedContent);
+    if (stepContent) {
+      stepParts.push(stepContent);
+      quarantinedChars += stepContent.length;
+    }
+    if (stepParts.length > 0) {
+      reasoningSteps.push(stepParts.join("\n\n"));
+      // Wire emission stays gated on captureReasoning exactly like the
+      // terminal turn's; `streamWireEmitted` suppresses a double-say on the
+      // (zero-tools-advertised) turn where the emitter already streamed.
+      if (req.captureReasoning && !streamWireEmitted) {
+        for (const step of stepParts) {
+          emit({ type: "reasoning_step", text: step });
+        }
+      }
     }
 
     // Otherwise: append the assistant's tool-call-issuing message
     // (required by the OpenAI protocol so role="tool" messages have a
     // parent), then dispatch every requested tool and feed results back.
+    //
+    // The raw `asst` (analysis included) stays in `messages`: harmony keeps
+    // the chain-of-thought between tool calls WITHIN a turn, and the protocol
+    // needs this message as the parent of the role="tool" replies. It is
+    // dropped from the next turn because only `message.content` (terminal
+    // only) is ever persisted as history.
     messages.push(asst);
     // Per-iteration tallies feeding the FINDING 1 circuit breaker: how many
     // calls this turn only hit the guard vs. actually dispatched a real tool.
@@ -1586,10 +1816,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   emit({ type: "content_delta", text: fallbackText });
   emit({ type: "done", iterations: maxIter, stop_reason: "iteration_limit" });
   return {
-    message: { role: "assistant", content: fallbackText },
+    message: {
+      role: "assistant",
+      content: fallbackText,
+      // WARP-1602 — every iteration here ended in tool_calls, so the ONLY
+      // record of what the model was thinking is the quarantined trace.
+      // Persist it rather than throwing away the whole turn's reasoning.
+      ...(reasoningSteps.length > 0
+        ? { reasoning: reasoningSteps.join(REASONING_STEP_SEPARATOR) }
+        : {}),
+    },
     trace,
     iterations: maxIter,
     stop_reason: "iteration_limit",
+    ...(reasoningSteps.length > 0 ? { reasoningSteps } : {}),
   };
 }
 
@@ -1682,6 +1922,70 @@ function describeBlankAnswer(args: {
       : {}),
     ...(args.usage?.completion_tokens !== undefined
       ? { completionTokens: args.usage.completion_tokens }
+      : {}),
+  };
+}
+
+/**
+ * WARP-1602 — analysis-leak heuristics for the VISIBLE answer.
+ *
+ * Deliberately narrow and anchored: each pattern describes prose the model
+ * writes to ITSELF, not to the customer. They are diagnostics, never a filter
+ * — nothing is rewritten or suppressed on a match, so a false positive costs
+ * one log line and an eval label, never a lost answer.
+ *
+ * `step_join_run_on` is the signature the live .87 row carried: per-iteration
+ * analysis fragments concatenated with no separator, so a sentence ends and
+ * the next fragment starts immediately ("…list files.Let's read csv.You
+ * spent…"). It is the one marker that proves CONCATENATION rather than a
+ * single leaked analysis block.
+ */
+const ANALYSIS_LEAK_MARKERS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["first_person_plan", /^\s*(?:we|i)\s+(?:need|should|must|have)\s+to\b/i],
+  ["user_framing", /^\s*(?:the\s+)?user\s+(?:is\s+)?(?:asking|wants|said|means)\b/i],
+  // Deliberately NOT a bare `^let's` — a helpful answer legitimately opens
+  // "Let's go through them one by one." Only the retrieval verbs the model
+  // uses when narrating its own plan count.
+  [
+    "lets_investigate_prefix",
+    /^\s*let'?s\s+(?:look|check|see|read|list|search|find|open|start by|think|figure)\b/i,
+  ],
+  ["deliberation_prefix", /^\s*(?:ok|okay|alright|so|hmm)[,.]?\s+(?:let'?s|we|i|the user)\b/i],
+  ["likely_hedge", /^\s*likely\s+(?:refers|means|the)\b/i],
+  ["channel_label", /^\s*(?:analysis|assistantanalysis|commentary)\b/i],
+  ["harmony_control_token", /<\|(?:channel|start|end|message)\|>/],
+  ["step_join_run_on", /[a-z]{2}\.(?:Let'?s|We\s|I\s|The user|You\s|Now\s)/],
+];
+
+/**
+ * WARP-1602 — attribute an answer that still looks like chain-of-thought.
+ * Pure. Returns `undefined` for a healthy turn so the field (and the log line
+ * behind it) is absent unless something actually fired — the same contract
+ * WARP-1479's blank diagnostics follow.
+ */
+function describePollutedAnswer(args: {
+  visible: string;
+  quarantinedSteps: number;
+  quarantinedChars: number;
+  transport: "streaming" | "blocking";
+  toolCalls: number;
+}): PollutedAnswerDiagnostics | undefined {
+  const visible = args.visible;
+  // A blank answer is WARP-1479's case, not this one; don't file it twice.
+  if (!visible.trim()) return undefined;
+  const markers = ANALYSIS_LEAK_MARKERS.filter(([, re]) => re.test(visible)).map(
+    ([name]) => name,
+  );
+  if (markers.length === 0) return undefined;
+  return {
+    markers,
+    visibleChars: visible.length,
+    quarantinedSteps: args.quarantinedSteps,
+    quarantinedChars: args.quarantinedChars,
+    transport: args.transport,
+    toolCalls: args.toolCalls,
+    ...(config.AGENT_BLANK_TURN_DEBUG
+      ? { rawExcerpt: visible.slice(0, 500) }
       : {}),
   };
 }
