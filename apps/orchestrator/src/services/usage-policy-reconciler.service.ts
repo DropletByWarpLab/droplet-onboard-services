@@ -27,6 +27,16 @@
  *      null means "box default = unmanaged", the same as today's
  *      no-policy-row world — never an implicit push of "none".
  *
+ * WARP-1569 — ONLY AN ACTIVE ROLE MANAGES QUOTA. Both passes read
+ * `AccessRole.state` and treat an archived role as no role at all. An
+ * archived role is inert everywhere else (unassignable; filed away in the
+ * admin surface), so it must not keep pushing a storage default to
+ * everyone still holding it on every 5-minute tick. Those people fall
+ * through to the box default — "stop managing", not "push none", the same
+ * reading T7 gave a cleared default. Archiving is therefore what stops the
+ * pushes, and restoring (WARP-1560) is what resumes them, both on the next
+ * tick, with no dirty flag on either side.
+ *
  * Prisma (and now AccessRole) is the desired state; NC is never read
  * back as truth here — only pushed to.
  *
@@ -42,6 +52,9 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("usage-policy-reconciler");
 
 const SWEEP_STATES = ["pending", "failed"] as const;
+
+/** `AccessRole.state` — the only value that keeps a role's defaults live. */
+const ROLE_STATE_ACTIVE = "active";
 
 interface UsagePolicySweepRow {
   userId: string;
@@ -63,6 +76,18 @@ export interface UsagePolicySweepResult {
 /** OCS quota field value; `null` desired quota → "none" (unlimited). */
 function quotaFieldValue(storageQuotaBytes: bigint | null): string {
   return storageQuotaBytes === null ? "none" : `${storageQuotaBytes.toString()} B`;
+}
+
+/**
+ * WARP-1569 — only an ACTIVE role manages anybody's usage. An archived role
+ * is inert by design (it can't be assigned and the admin surface files it
+ * away), so its defaults stop contributing to the effective value; the
+ * people still holding it fall through to the box default exactly like a
+ * role-less user. Deliberately "stop managing", not "push none" — same
+ * reading as T7's cleared-default rule.
+ */
+function managingRole<T extends { state: string }>(role: T | null | undefined): T | null {
+  return role && role.state === ROLE_STATE_ACTIVE ? role : null;
 }
 
 export async function sweepUsagePolicies(
@@ -88,7 +113,7 @@ export async function sweepUsagePolicies(
         where: { id: row.userId },
         select: {
           nextcloudUsername: true,
-          accessRole: { select: { storageQuotaBytes: true } },
+          accessRole: { select: { storageQuotaBytes: true, state: true } },
         },
       });
       const ncUsername = user?.nextcloudUsername ?? null;
@@ -104,7 +129,7 @@ export async function sweepUsagePolicies(
       // is set does the legacy "none" (explicit unlimited) push remain.
       const effectiveQuota = resolveEffectiveUsage(
         { storageQuotaBytes: row.storageQuotaBytes },
-        user?.accessRole ?? null,
+        managingRole(user?.accessRole),
       ).storageQuotaBytes.value;
       await ncUpdateUser(adminToken, ncUsername, "quota", quotaFieldValue(effectiveQuota));
       await prisma.userUsagePolicy.update({
@@ -130,12 +155,17 @@ export async function sweepUsagePolicies(
   }
 
   // ── Pass 2 (WARP-1531): stateless role-default convergence ──
+  // WARP-1569: `state` is part of the candidate predicate, not an
+  // afterthought — an archived role never enters the pass at all, so
+  // archiving a role is what STOPS its pushes on the very next tick.
   const roleUsers = await prisma.user.findMany({
-    where: { accessRole: { storageQuotaBytes: { not: null } } },
+    where: {
+      accessRole: { state: ROLE_STATE_ACTIVE, storageQuotaBytes: { not: null } },
+    },
     select: {
       id: true,
       nextcloudUsername: true,
-      accessRole: { select: { storageQuotaBytes: true } },
+      accessRole: { select: { storageQuotaBytes: true, state: true } },
       usagePolicy: { select: { storageQuotaBytes: true } },
     },
   });
@@ -151,7 +181,7 @@ export async function sweepUsagePolicies(
     // Row mid-lifecycle this tick → pass 1 already pushed the effective
     // (role) value; skip so each user is pushed at most once per sweep.
     if (rowSweptUserIds.has(user.id)) continue;
-    const roleQuota = user.accessRole?.storageQuotaBytes ?? null;
+    const roleQuota = managingRole(user.accessRole)?.storageQuotaBytes ?? null;
     if (roleQuota === null) continue; // defensive; the where-clause filters
 
     if (!user.nextcloudUsername) {
