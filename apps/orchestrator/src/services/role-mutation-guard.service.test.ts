@@ -67,7 +67,6 @@ import {
   RoleMutationRefusedError,
   ASSIGNABLE_ROLES,
   ADMIN_TIER_ROLES,
-  SERIALIZABLE_TX,
   assertNotSelf,
   assertTargetNotOwner,
   assertRankCap,
@@ -83,6 +82,10 @@ import {
   runRoleChangePostEffects,
   runRemovalPostEffects,
   runDisablePostEffects,
+  SERIALIZABLE_TX,
+  isConcurrencyConflict,
+  readGuardTargetTx,
+  type GuardTx,
 } from "./role-mutation-guard.service.js";
 
 /** Catch helper — every rail throws RoleMutationRefusedError, never returns. */
@@ -132,7 +135,11 @@ function txStub(counts: { owners: number; activeOperatorsExcludingTarget: number
     }
     throw new Error(`unexpected count where-shape: ${JSON.stringify(where)}`);
   });
-  return { user: { count } };
+  // Cast at the stub boundary: GuardTx is Prisma.TransactionClient
+  // (pr-reviewer #1229 N5) so that PRODUCTION code cannot hand the rails a
+  // full PrismaClient and run an invariant outside a transaction. A unit
+  // stub only needs the one method the invariants call.
+  return { user: { count } } as unknown as GuardTx;
 }
 
 beforeEach(() => {
@@ -429,7 +436,7 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 5 });
     const err = await refusalAsync(() =>
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "own-1", role: "owner" },
+        target: { id: "own-1", role: "owner", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     );
@@ -443,7 +450,9 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
   it("removing the only owner throws LAST_OWNER_INVARIANT (removal variant)", async () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 5 });
     const err = await refusalAsync(() =>
-      assertRemovalInvariantsTx(tx, { target: { id: "own-1", role: "owner" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "own-1", role: "owner", directoryStatus: "ACTIVE" },
+      }),
     );
     expect(err.code).toBe("LAST_OWNER_INVARIANT");
   });
@@ -451,7 +460,9 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
   it("owner→owner-count 2 passes the owner rail (invariant fires at count <= 1 only)", async () => {
     const tx = txStub({ owners: 2, activeOperatorsExcludingTarget: 5 });
     await expect(
-      assertRemovalInvariantsTx(tx, { target: { id: "own-2", role: "owner" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "own-2", role: "owner", directoryStatus: "ACTIVE" },
+      }),
     ).resolves.toBeUndefined();
   });
 
@@ -459,7 +470,7 @@ describe("rail 4 (in-tx backstop) — last-owner invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 5 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "u1", role: "family" },
+        target: { id: "u1", role: "family", directoryStatus: "ACTIVE" },
         requestedRole: "guest",
       }),
     ).resolves.toBeUndefined();
@@ -471,7 +482,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
     const err = await refusalAsync(() =>
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     );
@@ -486,7 +497,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 1 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     ).resolves.toBeUndefined();
@@ -499,7 +510,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 1 });
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "adm-1", role: "admin" },
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
         requestedRole: "guest",
       }),
     ).resolves.toBeUndefined();
@@ -530,7 +541,7 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
     ).resolves.toBeUndefined();
     await expect(
       assertRoleChangeInvariantsTx(tx, {
-        target: { id: "u1", role: "guest" },
+        target: { id: "u1", role: "guest", directoryStatus: "ACTIVE" },
         requestedRole: "family",
       }),
     ).resolves.toBeUndefined();
@@ -539,7 +550,9 @@ describe("rail 5 (in-tx) — last-operator invariant", () => {
   it("removing the sole ACTIVE admin (no owner) throws LAST_OPERATOR_INVARIANT (removal variant)", async () => {
     const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
     const err = await refusalAsync(() =>
-      assertRemovalInvariantsTx(tx, { target: { id: "adm-1", role: "admin" } }),
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
+      }),
     );
     expect(err.code).toBe("LAST_OPERATOR_INVARIANT");
   });
@@ -699,5 +712,130 @@ describe("rail 6 — runDisablePostEffects (revoke + pinned 'User disabled' Acti
         refs: { username: "legacy", targetUserId: null, sessionsRevoked: 0 },
       }),
     );
+  });
+});
+
+// ── pr-reviewer #1229 review fixes ──────────────────────────────
+
+describe("B1 — SERIALIZABLE_TX + CONCURRENT_MUTATION (isolation is explicit, its loser is not a 500)", () => {
+  it("SERIALIZABLE_TX pins the isolation level every guarded mutation must open with", () => {
+    // Prisma's interactive $transaction inherits the DATABASE default,
+    // which on Postgres is READ COMMITTED — not Serializable. Rails 4/5
+    // are check-then-write, so RC admits write skew (two concurrent
+    // disables of the last two operators both read "one other remains").
+    expect(SERIALIZABLE_TX).toEqual({ isolationLevel: "Serializable" });
+  });
+
+  it("concurrentMutation() is a 409 CONCURRENT_MUTATION — the honest code for a conflict we cannot attribute to one rail", () => {
+    const err = RoleMutationRefusedError.concurrentMutation();
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("CONCURRENT_MUTATION");
+    expect(err.message).toBe(
+      "Someone else changed this person at the same time. Try again.",
+    );
+  });
+
+  it("isConcurrencyConflict recognizes BOTH the serialization loser (P2034) and the optimistic-write miss (P2025)", () => {
+    expect(isConcurrencyConflict({ code: "P2034" })).toBe(true);
+    expect(isConcurrencyConflict({ code: "P2025" })).toBe(true);
+  });
+
+  it("isConcurrencyConflict does NOT swallow unrelated failures (they must keep 500-ing)", () => {
+    expect(isConcurrencyConflict({ code: "P2002" })).toBe(false);
+    expect(isConcurrencyConflict(new Error("boom"))).toBe(false);
+    expect(isConcurrencyConflict(null)).toBe(false);
+    expect(isConcurrencyConflict(undefined)).toBe(false);
+  });
+});
+
+describe("B2 — readGuardTargetTx (the in-transaction re-read that makes the rails decide on fresh state)", () => {
+  it("returns id + role + directoryStatus read INSIDE the transaction", async () => {
+    const findUnique = vi.fn(async () => ({
+      id: "u1",
+      role: "admin",
+      directoryStatus: "ACTIVE",
+    }));
+    const tx = { user: { findUnique, count: vi.fn() } } as never;
+
+    await expect(readGuardTargetTx(tx, "u1")).resolves.toEqual({
+      id: "u1",
+      role: "admin",
+      directoryStatus: "ACTIVE",
+    });
+    // Projected — the re-read must not drag passwordHash/email into memory
+    // (WARP-1539's rule applies to internal reads too).
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: "u1" },
+      select: { id: true, role: true, directoryStatus: true },
+    });
+  });
+
+  it("returns null when the row vanished between the pre-tx read and the transaction", async () => {
+    const tx = {
+      user: { findUnique: vi.fn(async () => null), count: vi.fn() },
+    } as never;
+    await expect(readGuardTargetTx(tx, "ghost")).resolves.toBeNull();
+  });
+});
+
+describe("N2 — a DEACTIVATED target is never the last OPERATOR (no stuck rows)", () => {
+  // Rail 5 counts NON-DISABLED operators. A row that is already disabled
+  // holds no live access, so demoting or removing it cannot strand the
+  // box — and refusing would leave an unremovable, undemotable row with
+  // no route-level exit. The disable path already early-returned on this;
+  // threading directoryStatus into the other two composites closes the gap.
+  it("demoting a DEACTIVATED sole admin is allowed", async () => {
+    const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
+    await expect(
+      assertRoleChangeInvariantsTx(tx, {
+        target: { id: "adm-1", role: "admin", directoryStatus: "DEACTIVATED" },
+        requestedRole: "family",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("removing a DEACTIVATED sole admin is allowed", async () => {
+    const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
+    await expect(
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "adm-1", role: "admin", directoryStatus: "DEACTIVATED" },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("an ACTIVE sole admin is still refused on both paths (the rail did not go soft)", async () => {
+    const tx = txStub({ owners: 0, activeOperatorsExcludingTarget: 0 });
+    expect(
+      (
+        await refusalAsync(() =>
+          assertRoleChangeInvariantsTx(tx, {
+            target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
+            requestedRole: "family",
+          }),
+        )
+      ).code,
+    ).toBe("LAST_OPERATOR_INVARIANT");
+    expect(
+      (
+        await refusalAsync(() =>
+          assertRemovalInvariantsTx(tx, {
+            target: { id: "adm-1", role: "admin", directoryStatus: "ACTIVE" },
+          }),
+        )
+      ).code,
+    ).toBe("LAST_OPERATOR_INVARIANT");
+  });
+
+  it("rail 4 (last-owner) still fires for a DEACTIVATED owner — an owner row is structural, not access-based", async () => {
+    // Distinct from rail 5 on purpose: LAST_OWNER_INVARIANT protects the
+    // existence of an owner ROW (owner-only routes must stay reachable
+    // after a re-enable), which disabling does not change.
+    const tx = txStub({ owners: 1, activeOperatorsExcludingTarget: 5 });
+    const err = await refusalAsync(() =>
+      assertRemovalInvariantsTx(tx, {
+        target: { id: "own-1", role: "owner", directoryStatus: "DEACTIVATED" },
+      }),
+    );
+    expect(err.code).toBe("LAST_OWNER_INVARIANT");
   });
 });

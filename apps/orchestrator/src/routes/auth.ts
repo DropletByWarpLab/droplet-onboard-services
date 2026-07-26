@@ -57,7 +57,6 @@ import {
 // per-route inline rank checks this file used to carry live there now.
 import {
   RoleMutationRefusedError,
-  SERIALIZABLE_TX,
   assertRankCap,
   assertRoleAssignable,
   assertRoleChangeAllowed,
@@ -66,6 +65,9 @@ import {
   assertAssignableForCreate,
   assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
+  readGuardTargetTx,
+  isConcurrencyConflict,
+  SERIALIZABLE_TX,
   runRemovalPostEffects,
   runDisablePostEffects,
 } from "../services/role-mutation-guard.service.js";
@@ -3116,10 +3118,17 @@ export function createProtectedAuthRouter(
             actor: { id: req.user?.id, role: req.user?.role },
             target: row,
           });
+          // pr-reviewer #1229 B1/B2: SERIALIZABLE (Prisma inherits READ
+          // COMMITTED otherwise, under which two concurrent disables of the
+          // last two operators both pass rail 5 and both commit), and the
+          // rails decide on a row re-read INSIDE the transaction — the
+          // snapshot above is only good enough for the pre-tx rails.
           await prisma.$transaction(async (tx) => {
-            await assertDisableInvariantsTx(tx, { target: row });
+            const fresh = await readGuardTargetTx(tx, row.id);
+            if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+            await assertDisableInvariantsTx(tx, { target: fresh });
             await tx.user.update({
-              where: { id: row.id },
+              where: { id: fresh.id, role: fresh.role },
               data: { directoryStatus: "DEACTIVATED" },
             });
           }, SERIALIZABLE_TX);
@@ -3129,9 +3138,11 @@ export function createProtectedAuthRouter(
           // NC outage must not fail a disable whose authoritative local
           // write already committed. Logged at error for operator
           // follow-up; re-running disable is idempotent.
+          let ncMirror: "synced" | "failed" = "synced";
           try {
             await ncSetUserEnabled(token, req.params.username, false);
           } catch (err) {
+            ncMirror = "failed";
             logger.error(
               { err, username: req.params.username },
               "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
@@ -3140,12 +3151,31 @@ export function createProtectedAuthRouter(
 
           // Rail 6 (consolidated): WARP-116/247 session-record revocation +
           // the WARP-1062 mandatory-emit audit row.
+          //
+          // pr-reviewer #1229 N1: a failed mirror is REPORTED, not hidden.
+          // Nextcloud is proxied at /nextcloud/ with no orchestrator auth in
+          // front, so while every orchestrator login gate now refuses this
+          // person, their NC web/WebDAV/desktop-sync session keeps working
+          // until the reconciler's directoryStatus mirror pass converges it.
+          // A bare 200 + an unqualified audit row would tell the operator
+          // the opposite.
           await runDisablePostEffects({
             targetUserId: row.id,
             username: req.params.username,
             actor: actorFromRequest(req),
+            ncMirror,
           });
-          res.json({ status: "disabled", username: req.params.username });
+          res.json({
+            status: "disabled",
+            username: req.params.username,
+            ncMirror,
+            ...(ncMirror === "failed"
+              ? {
+                  warning:
+                    "Access to this Droplet is revoked, but Nextcloud could not be reached — their file access will be cut off automatically when it is back.",
+                }
+              : {}),
+          });
           return;
         }
 
@@ -3157,11 +3187,25 @@ export function createProtectedAuthRouter(
           targetUserId: null,
           username: req.params.username,
           actor: actorFromRequest(req),
+          // No local row: the NC call IS the disable, and it succeeded (a
+          // failure would have thrown), so the mirror is synced by
+          // construction.
+          ncMirror: "synced",
         });
-        res.json({ status: "disabled", username: req.params.username });
+        res.json({
+          status: "disabled",
+          username: req.params.username,
+          ncMirror: "synced",
+        });
       } catch (err: any) {
         if (err instanceof RoleMutationRefusedError) {
           res.status(err.status).json(err.toJSON());
+          return;
+        }
+        // pr-reviewer #1229 B1 — see the DELETE sibling.
+        if (isConcurrencyConflict(err)) {
+          const conflict = RoleMutationRefusedError.concurrentMutation();
+          res.status(conflict.status).json(conflict.toJSON());
           return;
         }
         if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -3310,8 +3354,30 @@ export function createProtectedAuthRouter(
           actor: { id: req.user?.id, role: req.user?.role },
           target: row,
         });
+        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
+        // no write — a read-only transaction pins nothing, so it read as
+        // protection without being any, and because the route never touched
+        // the local row the "removed" admin stayed role=admin/ACTIVE:
+        //   • it kept counting as a live operator for the NEXT removal's
+        //     rail 5, so admins could be emptied one DELETE at a time; and
+        //   • /auth/login verifies the LOCAL passwordHash, so once the
+        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
+        //     simply sign back in with full admin.
+        // Deleting the local row outright is WARP-1565's scope. What this
+        // route CAN do — atomically, inside the guarded transaction — is
+        // revoke local access via the same directoryStatus lever the
+        // disable path uses, which /auth/login, SSO, WebAuthn and the auth
+        // middleware all already fail closed on. Check and change now
+        // commit together, at SERIALIZABLE, with the write optimistically
+        // pinned to the role the rails were evaluated against.
         await prisma.$transaction(async (tx) => {
-          await assertRemovalInvariantsTx(tx, { target: row });
+          const fresh = await readGuardTargetTx(tx, row.id);
+          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+          await assertRemovalInvariantsTx(tx, { target: fresh });
+          await tx.user.update({
+            where: { id: fresh.id, role: fresh.role },
+            data: { directoryStatus: "DEACTIVATED" },
+          });
         }, SERIALIZABLE_TX);
       }
 
@@ -3358,12 +3424,24 @@ export function createProtectedAuthRouter(
         targetRole: row?.role ?? null,
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
+        // pr-reviewer #1229 B3: name what actually happened. The Nextcloud
+        // account is gone and local access is revoked, but the local row
+        // survives (WARP-1565) — "User removed" would be a false statement
+        // in an append-only, signature-chained audit log.
+        what: "User removed from Nextcloud; local access revoked",
       });
 
       res.json({ status: "deleted", username: req.params.username });
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
+        return;
+      }
+      // pr-reviewer #1229 B1: SERIALIZABLE's loser (P2034) and the
+      // optimistic-write miss (P2025) are 409s, not 500s.
+      if (isConcurrencyConflict(err)) {
+        const conflict = RoleMutationRefusedError.concurrentMutation();
+        res.status(conflict.status).json(conflict.toJSON());
         return;
       }
       next(err);
@@ -3418,32 +3496,26 @@ export function createProtectedAuthRouter(
       // a second owner invite, which consciously supersedes the earlier
       // owner→owner-allowed pin).
       //
-      // `inviterRole` is still read out here because the WARP-1533
-      // access-role validation below applies the SAME rank cap to the custom
-      // role's startingPoint — the guard rails cover the tier, the shared
-      // invite-access-role service covers the custom role.
+      // `inviterRole` is read out here because BOTH the tier rails (moved
+      // below the access-role validation, see the ORDER note there) and the
+      // WARP-1533 access-role validation apply a rank cap: the guard rails
+      // cover the tier, the shared invite-access-role service covers the
+      // custom role's startingPoint.
       const inviterRole = req.user?.role;
-      try {
-        assertAssignableForCreate({
-          actorRole: req.user?.role,
-          requestedRole: parsed.data.role,
-          rankMessage:
-            "You cannot invite someone to a role higher than your own",
-        });
-      } catch (err) {
-        if (err instanceof RoleMutationRefusedError) {
-          res.status(err.status).json(err.toJSON());
-          return;
-        }
-        throw err;
-      }
 
       // WARP-1533 (RBAC v2 T9): validate the optional custom access role
       // BEFORE any write — the shared fail-closed service (exists, active,
       // assignable startingPoint, WARP-623 rank cap on the role's
-      // startingPoint with the same 403 shape as the tier cap above, tier
-      // agreement). Shared with POST /api/people/invite (the canonical
-      // people surface) so the two create paths can never diverge.
+      // startingPoint, tier agreement). Shared with POST /api/people/invite
+      // (the canonical people surface) so the two create paths can never
+      // diverge — including this ordering: with a custom role picked, its
+      // specific refusal wins over the coarser tier rail below (see the
+      // matching ORDER note in routes/people.ts). Both are fail-closed.
+      //
+      // WARP-1572 (F4): the declared type is the validator's BRANDED output,
+      // so the only expression that can land here is a successful
+      // validateInviteAccessRole — a bare prisma.accessRole row no longer
+      // type-checks.
       let inviteAccessRole: ValidatedInviteAccessRole | null = null;
       if (parsed.data.accessRoleId) {
         try {
@@ -3459,6 +3531,21 @@ export function createProtectedAuthRouter(
           }
           throw err;
         }
+      }
+
+      try {
+        assertAssignableForCreate({
+          actorRole: inviterRole,
+          requestedRole: parsed.data.role,
+          rankMessage:
+            "You cannot invite someone to a role higher than your own",
+        });
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       // Derive the unique userid from the email local-part. The derived

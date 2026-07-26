@@ -549,6 +549,11 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           role: string;
           username: string;
           nextcloudUsername: string | null;
+          // WARP-1526 (pr-reviewer #1229 N2): rail 5 counts NON-disabled
+          // operators, so the in-tx invariants need each member's current
+          // enable state — a DEACTIVATED member holds no live access and
+          // must not block a starting-point demotion.
+          directoryStatus: string;
         }> = [];
 
         // Grant axes: a provided array replaces wholesale (normalized for
@@ -645,7 +650,13 @@ export function createAccessRouter(prisma: PrismaClient): Router {
             // serialized behind us — never silently left on the old tier.
             members = (await tx.user.findMany({
               where: { accessRoleId: existing.id },
-              select: { id: true, role: true, username: true, nextcloudUsername: true },
+              select: {
+                id: true,
+                role: true,
+                username: true,
+                nextcloudUsername: true,
+                directoryStatus: true,
+              },
             })) as typeof members;
 
             for (const member of members) {
@@ -662,7 +673,11 @@ export function createAccessRouter(prisma: PrismaClient): Router {
               // Rails 4 + 5 per member — a demotion that would strand the
               // box without operators rolls the whole role change back.
               await assertRoleChangeInvariantsTx(tx, {
-                target: { id: member.id, role: member.role as never },
+                target: {
+                  id: member.id,
+                  role: member.role as never,
+                  directoryStatus: member.directoryStatus as never,
+                },
                 requestedRole: nextStartingPoint,
               });
               await tx.user.update({
@@ -876,6 +891,10 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           username: string;
           nextcloudUsername: string | null;
           accessRoleId: string | null;
+          // WARP-1526 (pr-reviewer #1229 N2): carried for the in-tx rails —
+          // rail 5's "last operator" count excludes disabled people, so the
+          // target's own enable state is part of the invariant's input.
+          directoryStatus: string;
         };
         let startingPoint: AssignableRole = "guest";
         let roleName = "";
@@ -903,6 +922,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
               username: true,
               nextcloudUsername: true,
               accessRoleId: true,
+              directoryStatus: true,
             },
           })) as AssignTarget[];
           const foundIds = new Set(targets.map((t) => t.id));
@@ -929,7 +949,11 @@ export function createAccessRouter(prisma: PrismaClient): Router {
 
           for (const target of changed) {
             await assertRoleChangeInvariantsTx(tx, {
-              target: { id: target.id, role: target.role as never },
+              target: {
+                id: target.id,
+                role: target.role as never,
+                directoryStatus: target.directoryStatus as never,
+              },
               requestedRole: startingPoint,
             });
             await tx.user.update({
