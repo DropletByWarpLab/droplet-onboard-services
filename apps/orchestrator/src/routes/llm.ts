@@ -16,6 +16,11 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+import {
+  resolveToolAccessScope,
+  toolAllowedInScope,
+  type ToolAccessScope,
+} from "../services/tool-access.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
@@ -370,25 +375,47 @@ export function resolveReasoningEffort(
   return isVoice ? voiceReasoningEffortDefault() : undefined;
 }
 
+/**
+ * WARP-1529 (RBAC v2 T5) — enforcement point 1 of 2: the CATALOG build.
+ *
+ * `scope` is the caller's resolved §3 tool reach (tool-access.service.ts).
+ * `null`/omitted means no per-role narrowing applies — the owner's §3
+ * bypass, service principals, and every person with no AccessRole (i.e.
+ * every user on a box today). On that path this function is byte-for-byte
+ * what it was before T5.
+ *
+ * With a scope, the §3 tool-domain axis composes ON TOP of the shipped
+ * ADR-004 write filter; the two never fight, because both only ever remove.
+ * Note the `undefined` requested list stays `undefined` for privileged
+ * callers even under a scope: materialising it here would bypass
+ * EXCLUDED_FROM_CHAT_TOOLS in the agent loop and blow the WARP-1118 context
+ * budget. The loop applies the same scope to its own advertised pool
+ * (llm-agent.service.ts), so that path is narrowed there instead.
+ */
 export async function narrowAllowedToolsForRole(
   role: string | undefined,
   requestedAllowed: string[] | undefined,
   isVoice = false,
+  scope: ToolAccessScope | null = null,
 ): Promise<string[] | undefined> {
+  const scopeAllowed = (name: string): boolean =>
+    scope === null || toolAllowedInScope(name, scope);
   if (isPrivilegedRole(role)) {
-    return requestedAllowed;
+    if (requestedAllowed === undefined) return undefined;
+    return requestedAllowed.filter(scopeAllowed);
   }
   // WARP-1398: the voice principal keeps its read tools AND the scoped
   // smart-home control tools (VOICE_WRITE_TOOLS); every other write tool is
   // still stripped. All other non-privileged callers lose every write tool.
   const writeAllowed = (name: string): boolean =>
     !WRITE_TOOLS.has(name) || (isVoice && VOICE_WRITE_TOOLS.has(name));
+  const allowed = (name: string): boolean => writeAllowed(name) && scopeAllowed(name);
   // Distinguish `undefined` (no list supplied → fall through to the
   // role default) from an explicit empty array (caller asked for ZERO
   // tools). `.length` truthiness would conflate the two and grant the
   // full non-write registry for an intentional `allowed_tools: []`.
   if (requestedAllowed !== undefined) {
-    return requestedAllowed.filter(writeAllowed);
+    return requestedAllowed.filter(allowed);
   }
   // Default for unprivileged users: every tool the live MCP server
   // advertises, minus write tools (minus all but VOICE_WRITE_TOOLS for
@@ -396,7 +423,7 @@ export async function narrowAllowedToolsForRole(
   // to an empty allowed set in that case so the model sees zero tools rather
   // than something privileged.
   const tools = await mcpClient.listTools().catch(() => []);
-  return tools.map((t) => t.name).filter(writeAllowed);
+  return tools.map((t) => t.name).filter(allowed);
 }
 
 // D-7: enforcement deferred — UserUsagePolicy.llmDailyMessageCap (WARP-1271)
@@ -881,10 +908,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(403).json({ error: "forbidden_tool_for_role" });
         return;
       }
+      // WARP-1529 (RBAC v2 T5) — resolve the caller's §3 tool reach ONCE per
+      // turn and hand the same value to both enforcement points: the catalog
+      // narrowing just below (UX) and the agent loop's fail-closed
+      // pre-dispatch re-check (the boundary). `null` for the owner, for
+      // service principals, and for everyone with no AccessRole — that path
+      // stays byte-for-byte what it was.
+      const toolAccessScope = await resolveToolAccessScope(
+        prisma,
+        (req as AuthedRequest).user,
+      );
       let allowedForUser = await narrowAllowedToolsForRole(
         role,
         chatReq.allowed_tools,
         isVoice,
+        toolAccessScope,
       );
 
       // WARP-1121 (§9.3) — is this turn part of the live onboarding
@@ -1728,6 +1766,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             context_window: config.OLLAMA_CONTEXT_LENGTH,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
             allowed_tools: allowedForUser,
+            // WARP-1529 — the same §3 scope, re-checked fail-closed before
+            // every tool dispatch inside the loop.
+            toolAccessScope,
             tool_choice: chatReq.tool_choice,
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
@@ -1787,6 +1828,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           context_window: config.OLLAMA_CONTEXT_LENGTH,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
           allowed_tools: allowedForUser,
+          // WARP-1529 — the same §3 scope, re-checked fail-closed before
+          // every tool dispatch inside the loop.
+          toolAccessScope,
           tool_choice: chatReq.tool_choice,
           toolCallContext,
           captureReasoning: chatReq.captureReasoning,
