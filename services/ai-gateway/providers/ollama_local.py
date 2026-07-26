@@ -116,8 +116,26 @@ _CHAT_PATH = "/v1/chat/completions"
 # emits a tool call whose function name carries channel tokens
 # (harmonyparser.go "no reverse mapping found for function name"); the
 # identical retry succeeds. Bounded retry budget for that tool-call path.
+# WARP-1606 puts the STREAMING path on the same budget (pre-first-byte
+# only — see the boundary note in _stream_chat).
 _HARMONY_500_RETRIES = 2
 _HARMONY_500_BACKOFF_S = 0.5
+
+
+def _log_harmony_500_retry(path: str, attempt: int, attempts: int) -> None:
+    """Emit the one harmony-500 retry event shared by both chat paths.
+
+    WARP-1606: both the blocking and the streaming branch log through here so
+    the flake stays observable under a SINGLE event token
+    (``harmony_500_retry``, the field the WARP-1333 log-based counting already
+    keys on), with a ``path=blocking|streaming`` label to tell them apart.
+    ``attempt`` is 1-based and counts the attempt that just failed.
+    """
+    logger.warning(
+        "harmony_500_retry: path=%s POST %s returned 500 "
+        "(attempt %d/%d) — retrying",
+        path, _CHAT_PATH, attempt, attempts,
+    )
 
 
 class _LimitsCache:
@@ -505,11 +523,7 @@ class OllamaLocalProvider(BaseProvider):
                         _CHAT_PATH, json=body, headers=headers
                     )
                 if resp.status_code == 500 and attempt < attempts - 1:
-                    logger.warning(
-                        "harmony_500_retry: POST %s returned 500 "
-                        "(attempt %d/%d) — retrying",
-                        _CHAT_PATH, attempt + 1, attempts,
-                    )
+                    _log_harmony_500_retry("blocking", attempt + 1, attempts)
                     await asyncio.sleep(_HARMONY_500_BACKOFF_S * (attempt + 1))
                     continue
                 break
@@ -527,26 +541,68 @@ class OllamaLocalProvider(BaseProvider):
         return self._stream_chat(body)
 
     async def _stream_chat(self, body: dict) -> AsyncGenerator[str, None]:
+        """Stream Ollama's SSE frames through verbatim.
+
+        WARP-1606 — harmony-500 retry, and where it STOPS. Streaming is the
+        shipped dashboard path (WARP-1442), so it runs the same bounded
+        WARP-1333 retry the blocking branch does: same budget, same backoff,
+        tools-present only. The boundary is that a retry is only legal
+        BEFORE the first frame has been yielded — once the caller has a delta
+        in hand it has already been appended to the assistant turn (and, on
+        /ai/chat, flushed to the client), so replaying the request would
+        duplicate every delta emitted so far.
+
+        That boundary is structural, not a heuristic: the status code arrives
+        with the response HEADERS, so the retry decision below is taken before
+        the `async for` that yields anything. Anything that fails LATER —
+        a mid-stream connection reset, a truncated body, a 200 that dies
+        halfway — is raised from inside that loop and propagates straight out
+        of this generator, exactly as it did before WARP-1606. Never move the
+        retry decision below the yield loop.
+        """
         # Streaming path is also semaphore-gated so we don't exceed num_parallel.
         rid = get_request_id()
         headers = {"x-request-id": rid} if rid else None
         assert self._sema is not None  # set by _ensure_limits in chat()
-        async with self._sema:
-            async with self.client.stream(
-                "POST", _CHAT_PATH, json=body, headers=headers
-            ) as resp:
-                if resp.status_code == 503:
-                    # Same handler the non-streaming branch uses, so a scale-up
-                    # signaled via 503 is not silently missed here (I-4).
-                    body_preview = (await resp.aread()).decode(errors="replace")[:200]
-                    await self._handle_appliance_503(
-                        resp.headers.get("Retry-After", "30"),
-                        body_preview,
+        # Same tools-present condition as the blocking branch: a 500 without
+        # tools isn't the harmony flake, so it stays a real error. `body` is
+        # what chat() built, so the tools key is the authoritative signal.
+        has_tools = bool(body.get("tools"))
+        attempts = (_HARMONY_500_RETRIES + 1) if has_tools else 1
+        for attempt in range(attempts):
+            async with self._sema:
+                async with self.client.stream(
+                    "POST", _CHAT_PATH, json=body, headers=headers
+                ) as resp:
+                    retryable_500 = (
+                        resp.status_code == 500 and attempt < attempts - 1
                     )
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        yield f"{line}\n\n"
+                    if not retryable_500:
+                        if resp.status_code == 503:
+                            # Same handler the non-streaming branch uses, so a
+                            # scale-up signaled via 503 is not silently missed
+                            # here (I-4). 503 never enters the 500 retry loop.
+                            body_preview = (await resp.aread()).decode(
+                                errors="replace"
+                            )[:200]
+                            await self._handle_appliance_503(
+                                resp.headers.get("Retry-After", "30"),
+                                body_preview,
+                            )
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if line.startswith("data: "):
+                                yield f"{line}\n\n"
+                        return
+                    # Retryable harmony 500, and nothing has been yielded yet:
+                    # the retry is invisible to the caller. Drain the error body
+                    # so the connection goes back to the pool.
+                    await resp.aread()
+                    _log_harmony_500_retry("streaming", attempt + 1, attempts)
+            # Back off OUTSIDE the semaphore, and re-acquire it per attempt, so
+            # a retrying stream doesn't hold a concurrency slot while it waits
+            # (mirrors the blocking branch).
+            await asyncio.sleep(_HARMONY_500_BACKOFF_S * (attempt + 1))
 
     async def is_reachable(self) -> bool:
         try:
