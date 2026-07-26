@@ -11,6 +11,9 @@ Contract pinned here:
     a pipeline that can't start still answers 200 `{"enabled": true}`;
   - turning off drops the pipeline, which closes the exclusive mic
     stream — that is the kill-switch guarantee, not a mute;
+  - and every OTHER path that opens the mic (the two wizards' capture
+    endpoints) refuses with 409 while off, so "no audio is captured" is
+    true of the box rather than of the dashboard that gates it;
   - /voice/status tells deliberate silence (`state="off"`) apart from a
     mic fault (`state="no_mic"`), which the box keeps retrying;
   - boot honours a persisted "off": startup() never builds a pipeline.
@@ -19,15 +22,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 import main
 from voice.enabled import VoiceEnabledStore
 from voice.pipeline import WakePipeline
+from voice.speaker_id import REQUIRED_LINES, EnrollmentSessions
 from voice.wake import DisabledWakeWordDetector
 
 
@@ -379,6 +385,34 @@ class TestToggleEndpoint:
             if main._pipeline is not None:
                 main._pipeline.stop()
 
+    def test_a_warm_up_that_cannot_spawn_leaves_the_pipeline_listening(
+        self, client, stub_pipeline_deps, monkeypatch,
+    ):
+        # The STT/TTS warm-up is a best-effort optimisation that runs
+        # AFTER the pipeline is already listening. While its spawn sat
+        # inside the builder's try, a Thread.start() that raised (thread
+        # or memory exhaustion) reached the `except` and tore that live
+        # pipeline back down — the box went silent because a cache
+        # warmer couldn't start, where before it would simply have
+        # answered the first utterance cold.
+        class _RefusesWarmUp(threading.Thread):
+            def start(self) -> None:
+                if self.name == "voice-warmup":
+                    raise RuntimeError("can't start new thread")
+                super().start()
+
+        monkeypatch.setattr(main.threading, "Thread", _RefusesWarmUp)
+        VoiceEnabledStore().save(False)
+        try:
+            resp = client.post("/voice/enabled", json={"enabled": True})
+            assert resp.status_code == 200
+            assert main._pipeline is not None
+            # ...and nothing was unwound with it.
+            assert VoiceEnabledStore().load() is True
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop()
+
     def test_a_pipeline_that_refuses_to_stop_still_frees_the_clients(
         self, client, monkeypatch,
     ):
@@ -470,6 +504,165 @@ class TestToggleEndpoint:
         finally:
             if main._pipeline is not None:
                 main._pipeline.stop()
+
+
+# ────────────────────────────────────────────────────────────────────
+# The capture endpoints refuse while voice is off
+# ────────────────────────────────────────────────────────────────────
+#
+# Dropping the wake pipeline only stops the WAKE path from reading PCM.
+# Every endpoint below opens the mic on its own and worked perfectly on
+# a switched-off box, which made the /voice off hero's "no audio is
+# captured" a promise the dashboard kept rather than the box — and UI
+# gating is not enforcement (a second admin session, a stale tab, or any
+# direct caller of the orchestrator proxy walks straight past it).
+
+
+@dataclass
+class _FakeDevice:
+    name: str = "fake"
+    index: int = 0
+
+
+@dataclass
+class _WorkingAudio:
+    """A box that HAS audio hardware — without it these endpoints 503 on
+    the device check and would hide the switch's own refusal."""
+
+    input_device: Optional[_FakeDevice] = field(default_factory=_FakeDevice)
+    output_device: Optional[_FakeDevice] = field(default_factory=_FakeDevice)
+
+
+class _OneVoiceEmbedder:
+    """Every capture embeds to the same unit vector — enough for the
+    enrollment flow to reach verify/commit without any DSP."""
+
+    def embed(self, pcm, samplerate: int):
+        v = np.zeros(8, dtype=np.float32)
+        v[0] = 1.0
+        return v
+
+
+@pytest.fixture
+def capture_env(tmp_path, monkeypatch):
+    """Stub the audio + embedder layers so the ONLY thing that can refuse
+    a request here is the kill switch. Returns the capture-call counters:
+    the guard has to run BEFORE the mic is opened, not around it."""
+    calls = {"measure": 0, "echo": 0, "record": 0}
+
+    def _measure(**_kw):
+        calls["measure"] += 1
+        return {"rms_dbfs": -50.0, "peak_dbfs": -30.0, "samples": 1}
+
+    def _echo(**_kw):
+        calls["echo"] += 1
+        return {"heard": True, "tone_dbfs": -22.0, "floor_dbfs": -57.0}
+
+    def _record(**_kw):
+        calls["record"] += 1
+        return np.full((16000, 1), 8000, dtype=np.int16)
+
+    monkeypatch.setenv("VOICE_PROFILES_DIR", str(tmp_path / "voiceprints"))
+    monkeypatch.setattr(main, "_resolve", _WorkingAudio)
+    monkeypatch.setattr(main, "measure_input_level", _measure)
+    monkeypatch.setattr(main, "echo_check", _echo)
+    monkeypatch.setattr(main, "record", _record)
+    monkeypatch.setattr(main, "_speaker_embedder", _OneVoiceEmbedder())
+    monkeypatch.setattr(main, "_speaker_embedder_built", True)
+    monkeypatch.setattr(main, "_enroll_sessions", EnrollmentSessions())
+    return calls
+
+
+def _enroll_session(client, user_id: str = "alice") -> str:
+    resp = client.post("/speaker/enroll/start", json={"user_id": user_id})
+    assert resp.status_code == 200
+    return resp.json()["session_id"]
+
+
+class TestCaptureEndpointsRefuseWhileOff:
+    def test_test_record(self, client, capture_env):
+        assert client.post("/audio/test-record").status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/audio/test-record")
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+        # Refused before the mic was opened, not after.
+        assert capture_env["measure"] == 1
+
+    def test_measure(self, client, capture_env):
+        body = {"kind": "noise_floor"}
+        assert client.post("/audio/measure", json=body).status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/audio/measure", json=body)
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+        assert capture_env["measure"] == 1
+
+    def test_echo_check(self, client, capture_env):
+        assert client.post("/audio/echo-check").status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/audio/echo-check")
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+        assert capture_env["echo"] == 1
+
+    def test_enroll_capture(self, client, capture_env):
+        sid = _enroll_session(client)
+        body = {"session_id": sid}
+        assert client.post("/speaker/enroll/capture", json=body).status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/speaker/enroll/capture", json=body)
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+        assert capture_env["record"] == 1
+
+    def test_enroll_verify(self, client, capture_env):
+        sid = _enroll_session(client)
+        body = {"session_id": sid}
+        for _ in range(REQUIRED_LINES):
+            assert client.post("/speaker/enroll/capture", json=body).status_code == 200
+        assert client.post("/speaker/enroll/verify", json=body).status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/speaker/enroll/verify", json=body)
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+        assert capture_env["record"] == REQUIRED_LINES + 1
+
+    def test_speaker_match(self, client, capture_env):
+        # Not one of the five the review named, but it opens the mic
+        # through the same `_capture_speaker_pcm` — guarding the helper
+        # rather than the handlers is what makes that impossible to miss.
+        sid = _enroll_session(client)
+        body = {"session_id": sid}
+        for _ in range(REQUIRED_LINES):
+            client.post("/speaker/enroll/capture", json=body)
+        assert client.post("/speaker/enroll/commit", json=body).status_code == 200
+        assert client.post("/speaker/match").status_code == 200
+        VoiceEnabledStore().save(False)
+        resp = client.post("/speaker/match")
+        assert resp.status_code == 409
+        assert "switched off" in resp.json()["detail"]
+
+    def test_the_capture_lock_is_not_held_by_a_refusal(self, client, capture_env):
+        # The guard runs before the lock is taken, so a run of refusals
+        # can't leave the box permanently "busy" once voice comes back.
+        VoiceEnabledStore().save(False)
+        for _ in range(3):
+            assert client.post("/audio/echo-check").status_code == 409
+        assert main._capture_lock.acquire(blocking=False)
+        main._capture_lock.release()
+        VoiceEnabledStore().save(True)
+        assert client.post("/audio/echo-check").status_code == 200
+
+    def test_the_playback_only_endpoint_is_untouched(
+        self, client, capture_env, monkeypatch,
+    ):
+        # The switch is about CAPTURE. /audio/test-tone plays a tone and
+        # reads no PCM at all, so silencing it would be ceremony: an
+        # admin can still prove the speaker works on a silent box.
+        monkeypatch.setattr(main, "test_tone", lambda **_kw: None)
+        VoiceEnabledStore().save(False)
+        assert client.post("/audio/test-tone").status_code == 200
 
 
 # ────────────────────────────────────────────────────────────────────

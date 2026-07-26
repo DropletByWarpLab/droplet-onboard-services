@@ -481,15 +481,6 @@ def _build_and_start_pipeline() -> None:
         # so the very first captured frame runs at the tuned gain.
         apply_stored_calibration(_pipeline)
         _pipeline.start()
-        # WARP-1433 — prime STT + TTS off the critical path so the first
-        # real utterance isn't cold. Fire-and-forget on a daemon thread:
-        # best-effort, runs once, never blocks startup or /health.
-        threading.Thread(
-            target=_warm_up_upstreams,
-            args=(stt, tts),
-            name="voice-warmup",
-            daemon=True,
-        ).start()
     except Exception as exc:
         logger.error("wake pipeline failed to start: %s", exc)
         # Unwind the partial build. The reporter and the two pooled
@@ -502,6 +493,27 @@ def _build_and_start_pipeline() -> None:
         # that same guard would make every later enable a no-op until
         # someone restarted the container. Tearing down settles both.
         _teardown_voice_runtime()
+        return
+    # WARP-1433 — prime STT + TTS off the critical path so the first real
+    # utterance isn't cold. Fire-and-forget on a daemon thread:
+    # best-effort, runs once, never blocks startup or /health.
+    #
+    # WARP-1599 — spawned BELOW the try, with its own guard. Inside it,
+    # a `Thread.start()` that raised (thread/memory exhaustion) would
+    # reach the `except` above and tear down a pipeline that is ALREADY
+    # LISTENING: the box would go silent because a warm-up couldn't
+    # start, where before it would simply have answered the first
+    # utterance cold. A best-effort optimisation must never unwind a
+    # successful build.
+    try:
+        threading.Thread(
+            target=_warm_up_upstreams,
+            args=(stt, tts),
+            name="voice-warmup",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice warm-up thread not started: %s", exc)
 
 
 @app.on_event("startup")
@@ -1045,6 +1057,35 @@ _CAPTURE_BUSY_DETAIL = (
     "Another microphone measurement is already running — try again in a few seconds."
 )
 
+# WARP-1599 — the kill switch's guarantee, enforced here rather than in
+# the dashboard. The /voice off hero promises, verbatim, that "the wake
+# word does nothing and no audio is captured", and dropping the wake
+# pipeline only makes the first half true: every endpoint below opens
+# the mic on its own and works perfectly well on a switched-off box. UI
+# gating cannot be the enforcement — a second admin session, a stale tab
+# mid-wizard, or any direct caller of the proxy reaches them anyway.
+#
+# Deliberate product decision: while voice is off the box captures
+# NOTHING, not even a diagnostic. An admin who wants to test the mic
+# turns voice back on first. No override flag — an override is just a
+# second way to make the sentence false.
+_VOICE_OFF_CAPTURE_DETAIL = (
+    "The voice assistant is switched off — this Droplet captures no audio "
+    "while it's off. Turn voice back on to use the microphone."
+)
+
+
+def _require_voice_on() -> None:
+    """409 unless the admin switch is on — for every path that opens the mic.
+
+    409 (not 403) for the same reason `_CAPTURE_BUSY_DETAIL` uses it: the
+    request is well-formed and the caller is allowed, the box is just in a
+    state where it won't capture — and flipping the switch makes the very
+    same request work.
+    """
+    if not VoiceEnabledStore().load():
+        raise HTTPException(status_code=409, detail=_VOICE_OFF_CAPTURE_DETAIL)
+
 
 @app.post("/audio/test-record", response_model=TestRecordResponse)
 def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
@@ -1055,6 +1096,7 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
     healthy mic shows roughly -40 to -20 dBFS RMS; silence is below
     -60 dBFS.
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -1111,6 +1153,7 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     either. The sounddevice fallback below only runs when there is NO
     pipeline holding the device (no mic at boot / startup bailed).
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -1164,6 +1207,7 @@ def audio_echo_check() -> EchoCheckResponse:
     in the same window (full-duplex playrec), then judge whether the
     tone arrived (voice.audio_io.detect_tone). Fully automatic — the
     user does nothing."""
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -1451,7 +1495,13 @@ def _capture_speaker_pcm(seconds: float) -> np.ndarray:
     the shared _capture_lock (never two overlapping captures on the hw
     device), AudioUnavailable/PortAudio faults → operational 503s. The
     returned PCM lives only for the embed call — never persisted.
+
+    WARP-1599 — the kill-switch guard sits HERE rather than on each of
+    /speaker/enroll/capture, /speaker/enroll/verify and /speaker/match:
+    this is the one place the speaker surface opens the mic, so a switch
+    that is off cannot be routed around by a fourth caller later.
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
