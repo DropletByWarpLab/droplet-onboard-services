@@ -30,7 +30,7 @@
     "@grpc/proto-loader": "^0.8.1",
     "@matter/main": "^0.16.10",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@prisma/client": "^5.14.0",
+    "@prisma/client": "^7.9.0",
     "@project-chip/matter.js": "^0.16.10",
     "@simplewebauthn/server": "13.3.2",
     "archiver": "^7.0.1",
