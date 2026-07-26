@@ -508,6 +508,39 @@ describe("accept path — accessRoleId assignment in the mint (WARP-1051 pattern
     expect(fallback![0].refs.fallbackReason).toBe("archived");
   });
 
+  it("an infra failure reading the role ABORTS the accept — never a silent plain-tier grant (review F1)", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      email: "reception@warp.test",
+      role: "family",
+      accessRoleId: FAMILY_ROLE.id,
+    });
+    // The role read now fails for an INFRASTRUCTURE reason (not "archived",
+    // not "missing") — the accept must not proceed onto the plain tier.
+    prisma.accessRole.findUnique.mockRejectedValue(
+      new Error("connection terminated unexpectedly"),
+    );
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(res.status).not.toBe(200);
+    expect(res.status).toBe(500);
+    // ZERO mutation: the resolution runs BEFORE the WARP-490 CAS claim and
+    // before ncCreateUser, so the invite stays unclaimed and retryable and
+    // no account is provisioned at any tier.
+    expect(prisma._users).toHaveLength(0);
+    expect(prisma._invites[0].acceptedAt).toBeNull();
+    expect(nc.ncCreateUser).not.toHaveBeenCalled();
+    // And no fallback was recorded — an infra error is not an access verdict.
+    expect(
+      recordActivityMock.mock.calls.find(
+        (c: any[]) => c[0]?.what === "Invite accepted without access role",
+      ),
+    ).toBeUndefined();
+  });
+
   it("a plain tier invite accepts exactly as before — no accessRoleId, no fallback Activity", async () => {
     const prisma = createPrismaMock();
     const token = await issueInvite(buildApp(prisma), {
