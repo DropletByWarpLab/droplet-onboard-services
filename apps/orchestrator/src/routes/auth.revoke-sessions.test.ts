@@ -97,6 +97,7 @@ import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 /**
  * Prisma stub: findUnique by nextcloudUsername (the username→id resolution).
@@ -107,7 +108,12 @@ import type { Role } from "../services/jwt.service.js";
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
   const self: any = {};
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  // WARP-1570: shared seam — the disable path runs its guard rails inside
+  // SERIALIZABLE_TX, so the options argument has to survive, and a refusal
+  // has to roll the directoryStatus write back.
+  const seam = createTransactionSeam({ client: () => self, stores: { users } });
+  self.$transaction = seam.$transaction;
+  self._seam = () => seam;
   self.user = {
     // WARP-1526 (pr-reviewer #1229 B2): the routes resolve by
     // nextcloudUsername, then the guard RE-READS by id inside the

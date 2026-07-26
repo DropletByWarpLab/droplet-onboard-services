@@ -34,6 +34,7 @@ import {
   getResetStatus,
   ResetError,
 } from "./reset.service.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -114,10 +115,17 @@ function makeFakePrisma() {
   // synchronously against the SAME in-memory client, so the count→create
   // sequence (and a thrown ResetError) behave as in production. A real DB's
   // atomicity isn't under unit test here — the service's branching is.
-  prisma.$transaction = vi.fn(
-    async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma),
-  );
-  return { prisma, jobs, audits };
+  // WARP-1570: shared seam. reset.service opens this transaction at
+  // { isolationLevel: Serializable } — the local stand-in dropped the
+  // options argument, so that could be deleted without failing anything —
+  // and it now rolls `jobs` / `audits` back when a ResetError is thrown
+  // inside the callback, which the stand-in also did not.
+  const seam = createTransactionSeam({
+    client: () => prisma,
+    stores: { jobs, audits },
+  });
+  prisma.$transaction = seam.$transaction as typeof prisma.$transaction;
+  return { prisma, jobs, audits, seam };
 }
 
 function mockFetchOnce(status: number, body: unknown) {

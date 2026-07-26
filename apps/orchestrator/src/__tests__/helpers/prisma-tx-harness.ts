@@ -64,7 +64,7 @@
  * `*.pg.test.ts` lane (RUN_PG_INTEGRATION=1) is for.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 
 /** Prisma's write-conflict / deadlock code, thrown by SSI aborts. */
 export const P2034_WRITE_CONFLICT = "P2034";
@@ -93,9 +93,19 @@ export interface TransactionSeamOptions {
   onEnter?: (ctx: { options: unknown; index: number }) => void | Promise<void>;
 }
 
+/**
+ * The seam's `$transaction`, typed as the vitest mock it is so suites keep
+ * `mock.calls`, `mockImplementationOnce`, and friends.
+ */
+export type TransactionMock = Mock<
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [fn: (tx: any) => Promise<unknown>, options?: unknown],
+  Promise<unknown>
+>;
+
 export interface TransactionSeam {
   /** Drop-in replacement for `PrismaClient.$transaction`. */
-  $transaction: ReturnType<typeof vi.fn>;
+  $transaction: TransactionMock;
   /** The options argument of every top-level call, in call order. */
   calls(): readonly unknown[];
   /** How many transactions aborted with P2034. */
@@ -323,8 +333,9 @@ export function createTransactionSeam(
     }
   }
 
-  const $transaction = vi.fn(
-    async (fn: (tx: unknown) => Promise<unknown>, options?: unknown) => {
+  const $transaction: TransactionMock = vi.fn(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (fn: (tx: any) => Promise<unknown>, options?: unknown) => {
       // Prisma's array form (`$transaction([p1, p2])`) is a batch, not an
       // interactive transaction — settle it and return the results.
       if (Array.isArray(fn)) {
