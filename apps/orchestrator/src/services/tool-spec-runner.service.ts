@@ -41,11 +41,23 @@
  *     real args do not exist until the previous step returns, so a
  *     lock-flavoured invocation can only be seen here.
  *
- * `scope` omitted or `null` = no narrowing applies (the §3 owner bypass,
+ * `scope` omitted or `null` = no §3 narrowing applies (the §3 owner bypass,
  * service principals, and every user with no AccessRole, i.e. every user on a
  * box today). On that path this file behaves byte-for-byte as it did before.
  * Callers that cannot attribute a run pass `DENY_ALL_TOOL_SCOPE`, never
  * `null` — "I couldn't check" must not resolve to "full reach".
+ *
+ * WARP-1621 — WHAT THIS FILE DOES *NOT* ENFORCE, deliberately: the ADR-004
+ * coarse WRITE-TIER axis. Both entry points (routes/tools.ts run-now and the
+ * WARP-463 ticker) apply it in their pre-flight, via the same
+ * `firstToolDeniedForPrincipal` in tool-access.service.ts, because that axis
+ * is NAME-only — and a spec's tool names are static, so a whole-list
+ * pre-flight decides it completely. Re-checking it here would buy nothing a
+ * second `scope`-shaped parameter didn't already risk: an optional `tier`
+ * would fail OPEN for any caller that forgot it, which is a worse floor than
+ * an explicit one. The per-step gate below stays for the rule a pre-flight
+ * genuinely cannot decide — the §3 lock rule, whose args only exist after
+ * `${prev}` substitution.
  */
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";

@@ -228,9 +228,14 @@ function createPrismaMock(
     },
     // WARP-1580 — run-now resolves the caller's §3 tool scope before
     // dispatching, which means one indexed User read. Every fixture in THIS
-    // suite is deliberately role-less (`accessRoleId: null`) so it keeps
-    // pinning the pre-RBAC-v2 behaviour: no narrowing, byte-for-byte.
+    // suite is deliberately role-less (`accessRoleId: null`) so the §3 axis
+    // never narrows and these tests keep pinning the WALK, not the RBAC.
     // The narrowed-role cases live in tool-spec-access.test.ts.
+    //
+    // WARP-1621 — role-less is NOT "unrestricted": the coarse ADR-004 write
+    // tier still applies underneath, so the run-now fixtures below that call
+    // a `requiresWrite` tool (`send_notification`) run as `owner`. That gate
+    // has its own suite, tool-spec-write-tier.test.ts.
     user: {
       findUnique: vi.fn(async () => ({ accessRoleId: null, accessRole: null })),
     },
@@ -642,7 +647,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
@@ -669,7 +677,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(200);
     expect(dispatcher.call).toHaveBeenNthCalledWith(2, "send_notification", {
@@ -691,7 +702,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         { id: "x3", specId: "spec-live", idx: 2, kind: "call", args: { tool: "list_files" } },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(207);
     expect(res.body.status).toBe("failed");

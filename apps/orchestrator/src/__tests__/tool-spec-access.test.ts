@@ -27,6 +27,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
@@ -57,6 +58,15 @@ import type { AuthUser } from "../middleware/auth.js";
 // `files` read tool the narrowed role DOES hold.
 const FORBIDDEN_TOOL = "control_device";
 const ALLOWED_TOOL = "list_files";
+/**
+ * WARP-1621 — a tool the §3 axis refuses but the ADR-004 TIER axis allows.
+ *
+ * `control_device` above is `requiresWrite`, so after WARP-1621 every refusal
+ * in this file that uses it is decided by the tier axis, which is checked
+ * FIRST. A read tool outside the granted domains is the only fixture that
+ * isolates §3 — see the `role_grant` test below for why that matters.
+ */
+const ROLE_ONLY_FORBIDDEN_TOOL = "list_cameras";
 
 interface StepRow {
   id: string;
@@ -236,6 +246,44 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(prisma.runs).toEqual([]);
   });
 
+  /**
+   * WARP-1621 put the ADR-004 write-tier axis UNDERNEATH the §3 axis, and the
+   * shared pre-flight checks the tier FIRST. `control_device` is
+   * `requiresWrite`, so every OTHER refusal in this block is now decided by
+   * the tier — meaning that with only those tests, deleting the §3 branch from
+   * `firstToolDeniedForPrincipal` leaves this whole suite green while the
+   * narrowing it is named for is gone. Verified by mutation.
+   *
+   * This case is the one that still discriminates: a READ tool outside the
+   * granted domains. The tier axis ALLOWS it, so a 403 can only have come from
+   * §3 — and `axis` proves which gate answered.
+   */
+  it("refuses a READ tool outside the granted domains — §3, not the tier", async () => {
+    // Self-verifying: were this ever to become a write tool, the test would
+    // silently revert to pinning the tier axis — the exact failure mode above.
+    expect(
+      TOOL_CATALOG.find((t) => t.name === ROLE_ONLY_FORBIDDEN_TOOL)?.requiresWrite,
+      `${ROLE_ONLY_FORBIDDEN_TOOL} must be a READ tool for this test to isolate §3`,
+    ).toBe(false);
+
+    filesOnlyAccess();
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
+    const prisma = createPrismaMock({
+      specs: [spec({ steps: [step(0, ROLE_ONLY_FORBIDDEN_TOOL, {})] })],
+      users: [FILES_ONLY_USER],
+    });
+    const app = buildApp(prisma, dispatcher, mkUser("family", "user-narrowed"));
+
+    const res = await request(app).post("/api/tools/nightly-recap/runs");
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("forbidden_tool_for_role");
+    expect(res.body.tool).toBe(ROLE_ONLY_FORBIDDEN_TOOL);
+    expect(res.body.axis).toBe("role_grant");
+    expect(dispatcher.call).not.toHaveBeenCalled();
+    expect(prisma.runs).toEqual([]);
+  });
+
   it("refuses a multi-step spec whole, never partially — step 0 is allowed", async () => {
     filesOnlyAccess();
     const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
@@ -285,10 +333,20 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
-  it("leaves a role-less caller's reach untouched — every box today, bit-for-bit", async () => {
+  it("applies NO §3 narrowing to a role-less caller — every box today", async () => {
+    // The non-regression THIS ticket owns: a person nobody assigned an
+    // AccessRole to must not be narrowed by the §3 axis, and must not even
+    // reach the §3 resolver. T5 silently dropping tools from every user on
+    // every deployed box would have been a capability regression.
+    //
+    // The tool here is a READ tool on purpose. WARP-1621 later found that the
+    // separate ADR-004 WRITE-tier axis was missing from this route entirely,
+    // so a role-less `family` caller could fire `control_device` — that gap,
+    // and its fix, are pinned in tool-spec-write-tier.test.ts. The claim this
+    // test makes is about the §3 axis only, which is all WARP-1580 changed.
     const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
     const prisma = createPrismaMock({
-      specs: [spec()],
+      specs: [spec({ steps: [step(0, ALLOWED_TOOL, { path: "/" })] })],
       users: [
         {
           id: "user-family",
@@ -304,10 +362,7 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     const res = await request(app).post("/api/tools/nightly-recap/runs");
 
     expect(res.status).toBe(200);
-    expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
-      node_id: "n1",
-      command: "turn_on",
-    });
+    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
     // The §3 resolver is not even consulted on the role-less path.
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
