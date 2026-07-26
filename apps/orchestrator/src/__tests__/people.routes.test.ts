@@ -111,20 +111,54 @@ interface MockUser {
   nextcloudUsername?: string | null;
   createdAt: Date;
   updatedAt: Date;
+  // WARP-1539 — the three secret-bearing columns the People surface must
+  // never serialize. Seeded on every row so a route that forwards a raw
+  // Prisma row fails the leak tests instead of passing by omission.
+  passwordHash?: string | null;
+  emailLookupHash?: string | null;
 }
+
+/** WARP-1539 — keys that must never reach an API response. */
+const SECRET_USER_FIELDS = [
+  "passwordHash",
+  "emailLookupHash",
+  "email",
+] as const;
 
 function seedUser(over: Partial<MockUser> = {}): MockUser {
   return {
     id: over.id ?? `u-${Math.random().toString(16).slice(2, 8)}`,
     username: over.username ?? "alice",
     displayName: over.displayName ?? "Alice",
-    email: over.email ?? null,
+    // WARP-233: `email` is an encrypted dcv1: blob at rest, so even the
+    // ciphertext is not ours to hand out.
+    email: over.email ?? "dcv1:ZW5jcnlwdGVkLWVtYWls",
     role: over.role ?? "family",
     isLocal: over.isLocal ?? true,
     nextcloudUsername: over.nextcloudUsername ?? null,
     createdAt: over.createdAt ?? new Date("2026-05-25T10:00:00Z"),
     updatedAt: over.updatedAt ?? new Date("2026-05-25T10:00:00Z"),
+    passwordHash:
+      over.passwordHash ?? "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA",
+    emailLookupHash: over.emailLookupHash ?? "hmac-sha256-blind-index",
   };
+}
+
+/**
+ * Apply a Prisma `select` to a mock row (WARP-1539).
+ *
+ * The mock previously ignored `select` entirely and always returned the
+ * whole row, which would let the leak tests below pass whether or not the
+ * route actually projects its columns. Honoring it here is what makes
+ * those tests real.
+ */
+function project(row: any, select?: Record<string, boolean>) {
+  if (!row || !select) return row;
+  const out: any = {};
+  for (const [k, want] of Object.entries(select)) {
+    if (want && k in row) out[k] = row[k];
+  }
+  return out;
 }
 
 function createPrismaMock(initialRows: MockUser[] = []) {
@@ -141,21 +175,31 @@ function createPrismaMock(initialRows: MockUser[] = []) {
     rows,
     scopeBindings,
     user: {
-      findMany: vi.fn(async () => {
-        return [...rows.values()].sort(
-          (a, b) => +a.createdAt - +b.createdAt,
-        );
+      findMany: vi.fn(async ({ select }: { select?: any } = {}) => {
+        return [...rows.values()]
+          .sort((a, b) => +a.createdAt - +b.createdAt)
+          .map((r) => project(r, select));
       }),
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
-        return rows.get(where.id) ?? null;
-      }),
+      findUnique: vi.fn(
+        async ({
+          where,
+          select,
+        }: {
+          where: { id: string };
+          select?: any;
+        }) => {
+          return project(rows.get(where.id) ?? null, select);
+        },
+      ),
       update: vi.fn(
         async ({
           where,
           data,
+          select,
         }: {
           where: { id: string };
           data: Partial<MockUser>;
+          select?: any;
         }) => {
           const existing = rows.get(where.id);
           if (!existing) {
@@ -165,7 +209,7 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           }
           const merged = { ...existing, ...data, updatedAt: new Date() };
           rows.set(where.id, merged);
-          return merged;
+          return project(merged, select);
         },
       ),
       delete: vi.fn(async ({ where }: { where: { id: string } }) => {
@@ -542,6 +586,95 @@ describe("PATCH /api/people/:id/role", () => {
     // No state change → no revoke (mirrors the no-op audit short-circuit).
     expect(res.status).toBe(200);
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("People surface never serializes secret columns — WARP-1539", () => {
+  // The People routes used to hand back raw `prisma.user` rows. That row
+  // carries three columns no client may ever see:
+  //   • passwordHash    — the argon2id PHC hash (schema.prisma: "NEVER logged")
+  //   • emailLookupHash — the WARP-233 HMAC-SHA256 blind index; leaking it
+  //                       lets a holder confirm-by-guess which address a row
+  //                       belongs to, which is the exact property the blind
+  //                       index exists to protect
+  //   • email           — stored as an encrypted dcv1: blob (WARP-233); the
+  //                       ciphertext is not ours to hand out either
+  //
+  // owner/admin-only is NOT a mitigation: an admin session, an XSS on the
+  // dashboard, or a proxy log now carries every user's password hash.
+  const leakCases: Array<{
+    name: string;
+    run: (app: any) => Promise<{ status: number; body: any }>;
+  }> = [
+    {
+      name: "GET /api/people (roster)",
+      run: (app) => request(app).get("/api/people"),
+    },
+    {
+      name: "PATCH /api/people/:id/role (no-op short-circuit)",
+      // Same role as seeded → the route returns the pre-read row directly.
+      run: (app) =>
+        request(app).patch("/api/people/u1/role").send({ role: "family" }),
+    },
+    {
+      name: "PATCH /api/people/:id/role (after update)",
+      run: (app) =>
+        request(app).patch("/api/people/u1/role").send({ role: "admin" }),
+    },
+    {
+      // Easy one to miss: `res.json({` and `user: existing` sit on
+      // separate lines here, so a single-line grep for the leak does not
+      // find this route. Pinned so it cannot regress quietly.
+      name: "PATCH /api/people/:id/scope",
+      run: (app) =>
+        request(app)
+          .patch("/api/people/u1/scope")
+          .send({ scopes: ["team"] }),
+    },
+  ];
+
+  for (const c of leakCases) {
+    it(`${c.name} omits every secret column`, async () => {
+      const prisma = createPrismaMock([
+        seedUser({ id: "u1", username: "alice", role: "family" }),
+      ]);
+      const app = buildApp(prisma);
+
+      const res = await c.run(app);
+      expect(res.status).toBe(200);
+
+      // Assert against the serialized payload so a nested row is caught
+      // too — checking Object.keys on the top level alone would miss one.
+      const raw = JSON.stringify(res.body);
+      for (const field of SECRET_USER_FIELDS) {
+        expect(raw).not.toContain(field);
+      }
+      // And the values themselves must not appear under a renamed key.
+      expect(raw).not.toContain("$argon2id$");
+      expect(raw).not.toContain("hmac-sha256-blind-index");
+      expect(raw).not.toContain("dcv1:");
+    });
+  }
+
+  it("still returns the fields the dashboard actually renders", async () => {
+    // The fix must be a projection, not a blanket strip — the People
+    // surface stops working if id/displayName/role go missing.
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).get("/api/people");
+
+    expect(res.status).toBe(200);
+    expect(res.body.people[0]).toMatchObject({
+      id: "u1",
+      username: "alice",
+      displayName: "Alice",
+      role: "family",
+      isLocal: true,
+    });
+    expect(res.body.people[0].createdAt).toBeDefined();
   });
 });
 
