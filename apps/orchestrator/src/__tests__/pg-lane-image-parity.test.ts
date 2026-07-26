@@ -113,6 +113,17 @@ function jobShellText(): string {
   return (job.steps ?? []).map((s) => s.run ?? "").join("\n");
 }
 
+/** The body of the script's Docker backend, where the cold-volume race lives. */
+function scriptDockerBackend(): string {
+  const script = readFileSync(SCRIPT_PATH, "utf-8");
+  const fn = script.match(/^run_with_docker\(\) \{[\s\S]*?^\}/m);
+  expect(
+    fn,
+    "test-orchestrator-pg.sh must define run_with_docker() — the backend that mirrors CI",
+  ).not.toBeNull();
+  return fn![0];
+}
+
 /** The image the script's Docker backend boots (last arg of `docker run`). */
 function scriptPgImage(): string {
   const script = readFileSync(SCRIPT_PATH, "utf-8");
@@ -202,5 +213,67 @@ describe("WARP-1586 pg-lane image provenance", () => {
       "the GHCR mirror must be derived from $GITHUB_REPOSITORY so it can only ever " +
         "resolve inside this repo's package namespace",
     ).toMatch(/\$\(echo "\$GITHUB_REPOSITORY"/);
+  });
+});
+
+/**
+ * WARP-1571 / WARP-1575 — readiness parity.
+ *
+ * The image parity above is only half of "works locally means works in CI".
+ * Both lanes also have to agree on HOW they decide Postgres is ready, and on
+ * a cold volume that is not a detail: the postgres docker-entrypoint's first
+ * boot runs a TEMPORARY init server with `listen_addresses=''`, reachable
+ * over the unix socket ONLY. It creates POSTGRES_DB mid-phase, stops, and
+ * only then starts the real server. A socket `pg_isready` answers "accepting
+ * connections" during that window, so the next client lands mid-shutdown
+ * ("the database system is shutting down" / "database ... does not exist").
+ * Load-dependent, so it passes on a warm cache and bites under load.
+ *
+ * The temp server never binds TCP, so `-h 127.0.0.1` cannot match it: the
+ * first successful probe is the real server. (`pg_isready` also exits
+ * non-zero while a server is still in recovery, so one TCP success suffices.)
+ *
+ * Only the Docker backend is at risk. The native backend runs `initdb`
+ * itself, before pg_ctl start — there is no temp-server phase to race — and
+ * it already probes `-h localhost -p <port>`.
+ *
+ * Shipping image parity while the readiness probe silently diverges would
+ * leave "works locally" unreliable in exactly the way WARP-1571 was filed to
+ * stop, and a flake here burns a developer's afternoon with no CI log to
+ * read afterwards.
+ */
+describe("WARP-1571 pg-lane readiness parity (script vs CI)", () => {
+  it("CI's readiness gate probes over TCP, never the unix socket", () => {
+    const shell = jobShellText();
+    expect(
+      shell,
+      "the pg-integration lane must gate on pg_isready -h 127.0.0.1",
+    ).toMatch(/pg_isready\s+-h\s+127\.0\.0\.1/);
+    const socketOnly = [...shell.matchAll(/^.*\bpg_isready\b.*$/gm)].filter(
+      (m) => !/-h\s+127\.0\.0\.1/.test(m[0]),
+    );
+    expect(
+      socketOnly.map((m) => m[0].trim()),
+      "every pg_isready in the pg-integration job must be TCP-gated — a socket probe " +
+        "reports healthy during the initdb temp server",
+    ).toEqual([]);
+  });
+
+  it("test-orchestrator-pg.sh's Docker backend probes over TCP, never the unix socket", () => {
+    const script = readFileSync(SCRIPT_PATH, "utf-8");
+    expect(
+      script,
+      "the local Docker backend must gate on pg_isready -h 127.0.0.1, like CI does",
+    ).toMatch(/pg_isready\s+-h\s+127\.0\.0\.1/);
+  });
+
+  it("the Docker backend never inlines a pg_isready that bypasses the shared probe", () => {
+    const backend = scriptDockerBackend();
+    const inlined = [...backend.matchAll(/^.*\bpg_isready\b.*$/gm)].map((m) => m[0].trim());
+    expect(
+      inlined,
+      "run_with_docker() must use the $PG_READY_PROBE constant — an inline pg_isready " +
+        "can silently drop the -h flag and reopen the cold-volume race",
+    ).toEqual([]);
   });
 });

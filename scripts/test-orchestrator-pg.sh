@@ -34,6 +34,14 @@ PG_PASSWORD="droplet_test_pw"
 PG_DB="droplet_test"
 export DATABASE_URL="postgresql://${PG_USER}:${PG_PASSWORD}@localhost:${PG_PORT}/${PG_DB}?schema=public"
 
+# WARP-1571 / WARP-1575 — readiness probe for the Docker backend's throwaway
+# Postgres. MUST stay TCP-gated: on a cold volume the postgres entrypoint runs
+# a temporary init server that listens on the unix socket ONLY, so a socket
+# probe reports ready mid-initdb and the next client lands in the shutdown
+# window. The temp server never binds TCP, so -h 127.0.0.1 cannot match it.
+# Guarded by apps/orchestrator/src/__tests__/pg-lane-image-parity.test.ts.
+PG_READY_PROBE=(pg_isready -h 127.0.0.1 -U "$PG_USER" -d "$PG_DB")
+
 # Predeclared so EXIT traps referencing them are safe under `set -u`.
 PG_BIN=""
 DATA_DIR=""
@@ -76,7 +84,7 @@ run_with_docker() {
     pgvector/pgvector:pg16 >/dev/null
 
   for i in $(seq 1 30); do
-    if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
+    if docker exec "$PG_CONTAINER" "${PG_READY_PROBE[@]}" >/dev/null 2>&1; then
       break
     fi
     [ "$i" = 30 ] && { echo "postgres did not become ready" >&2; exit 1; }
