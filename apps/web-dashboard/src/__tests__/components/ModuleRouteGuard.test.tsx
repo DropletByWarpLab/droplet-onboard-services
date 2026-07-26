@@ -84,6 +84,23 @@ describe("<ModuleRouteGuard>", () => {
     expect(screen.getByRole("link", { name: /overview/i })).toHaveAttribute("href", "/");
   });
 
+  it("renders the section's glyph at a READABLE muted tone, not a ghost", () => {
+    // UX (WARP-1528): this glyph carries the identification work a padlock
+    // would otherwise do — §13 reserves Lock for "floor-blocked / off-box +
+    // reason", which contradicts a deliberately reason-free refusal. Since the
+    // glyph is doing that job it has to be visible: `label-tertiary` computed
+    // to 1.71:1 in light mode at 24px/1.5 stroke. `label-secondary` is 5.56:1
+    // light / 9.57:1 dark and still unmistakably muted against EmptyState's
+    // accent-tinted invitation treatment.
+    modulesRef.current = { cameras: false };
+    renderAt("/cameras");
+    const card = screen.getByTestId("module-route-blocked");
+    const glyph = card.querySelector("svg");
+    expect(glyph).not.toBeNull();
+    expect(glyph!.getAttribute("class")).toContain("text-label-secondary");
+    expect(glyph!.getAttribute("class")).not.toContain("text-label-tertiary");
+  });
+
   it("blocks a DEEP route under a denied module, not just its index", () => {
     modulesRef.current = { cameras: false };
     renderAt("/cameras/front-door");

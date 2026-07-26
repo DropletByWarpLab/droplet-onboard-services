@@ -44,14 +44,20 @@ export function ModuleRouteGuard({ children }: { children: React.ReactNode }) {
         className="dp-tile p-10 flex flex-col items-center text-center gap-5 max-w-lg"
         data-testid="module-route-blocked"
       >
-        {/* The SECTION's own glyph, muted — it names where you are without a
-            padlock. A lock would assert a reason ("you're barred"), and the
-            server deliberately makes a per-person denial indistinguishable
-            from a box-wide toggle. Muted rather than accent-tinted: this is
-            not an invitation, so it doesn't get the accent treatment the
-            onboarding empty states use. */}
+        {/* The SECTION's own glyph — it names where you are without a padlock.
+            A lock would assert a reason ("you're barred"), and the server
+            deliberately makes a per-person denial indistinguishable from a
+            box-wide toggle; §13 also assigns Lock a specific meaning
+            ("floor-blocked / off-box + reason"), so a padlock on a reason-free
+            refusal contradicts itself on one card.
+            Because this glyph carries the identification work a padlock would
+            otherwise do, it must be READABLE: `label-secondary` is 5.56:1
+            light / 9.57:1 dark, where `label-tertiary` computed to 1.71:1 — a
+            ghost that undercut the very ruling it implements. Still on the
+            neutral surface tint rather than EmptyState's accent treatment:
+            this is a refusal, not an invitation. */}
         <span className="w-14 h-14 rounded-2xl bg-surface-secondary flex items-center justify-center">
-          <SectionIcon size={24} strokeWidth={1.5} className="text-label-tertiary" aria-hidden="true" />
+          <SectionIcon size={24} strokeWidth={1.5} className="text-label-secondary" aria-hidden="true" />
         </span>
         <div className="space-y-2">
           <h1 className="type-title-2 text-label-primary font-semibold">

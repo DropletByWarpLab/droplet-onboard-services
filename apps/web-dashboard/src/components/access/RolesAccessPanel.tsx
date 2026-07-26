@@ -82,9 +82,22 @@ const BUILTINS: BuiltinDef[] = [
   { id: "service", icon: Cpu, meta: ACCESS_COPY.serviceMeta },
 ];
 
-/** `synced` is the quiet state — it renders no chip at all (§12: the chip is
- *  for work in flight or work that needs a human, never for "fine"). */
-function chipState(state: AccessSyncState | undefined): AccessSyncState | null {
+/** What the panel can locally know about a role's sync: the server's own
+ *  states, plus the client-only `applied` — the terminal-success beat §10
+ *  requires ("Applying… → Applied"). */
+type ChipSyncState = AccessSyncState | "applied";
+
+/** How long `Applied` stays up before fading. Long enough to be seen and
+ *  announced, short enough that a roster of roles doesn't accumulate green
+ *  confetti. */
+const APPLIED_LINGER_MS = 4000;
+
+/** A row that is merely AT REST in `synced` shows nothing — §12 reserves the
+ *  chip for work in flight, work that just landed, or work that needs a human;
+ *  a green tick on every card at page load would be noise, not information.
+ *  `applied` is different: it is only ever set from a mutation THIS client just
+ *  performed, so it reports something the viewer actually did. */
+function chipState(state: ChipSyncState | undefined): ChipSyncState | null {
   return state === undefined || state === "synced" ? null : state;
 }
 
@@ -168,11 +181,35 @@ export function RolesAccessPanel({
   // chip could never appear on a real box. The sibling is captured here; the
   // row's own field stays the fallback so a future orchestrator that does
   // emit it on reads works without another change.
-  const [syncStates, setSyncStates] = useState<Record<string, AccessSyncState>>({});
-  const noteSyncState = useCallback((roleId: string, state: AccessSyncState | undefined) => {
-    if (!state) return;
-    setSyncStates((prev) => ({ ...prev, [roleId]: state }));
+  const [syncStates, setSyncStates] = useState<Record<string, ChipSyncState>>({});
+  // Retires an `applied` chip after its linger. Separate from the refetch
+  // timer: they run back to back, not instead of each other.
+  const appliedTimer = useRef<number | null>(null);
+
+  const clearApplied = useCallback((roleId: string) => {
+    if (appliedTimer.current != null) window.clearTimeout(appliedTimer.current);
+    appliedTimer.current = window.setTimeout(() => {
+      setSyncStates((prev) => {
+        if (prev[roleId] !== "applied") return prev;
+        const next = { ...prev };
+        delete next[roleId];
+        return next;
+      });
+    }, APPLIED_LINGER_MS);
   }, []);
+
+  const noteSyncState = useCallback(
+    (roleId: string, state: AccessSyncState | undefined) => {
+      if (!state) return;
+      // A mutation that comes back already `synced` skipped the cascade
+      // entirely — there is nothing to wait for, so it lands straight on the
+      // terminal beat rather than showing a "pending" that was never true.
+      const resolved: ChipSyncState = state === "synced" ? "applied" : state;
+      setSyncStates((prev) => ({ ...prev, [roleId]: resolved }));
+      if (resolved === "applied") clearApplied(roleId);
+    },
+    [clearApplied],
+  );
 
   const reload = useCallback(async (background = false) => {
     if (!background) setListState((s) => (s === "ready" ? s : "loading"));
@@ -189,15 +226,20 @@ export function RolesAccessPanel({
     void reload();
     return () => {
       if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
+      if (appliedTimer.current != null) window.clearTimeout(appliedTimer.current);
     };
   }, [reload]);
 
   /** One delayed background refetch — lets a "pending" syncState converge
-   *  without a poll loop. The re-read succeeding IS the convergence signal we
-   *  have: the cascade (session revocation + NC group sync) is server-side and
-   *  fire-and-forget, and the read path reports no per-role state, so holding
-   *  "Applying…" on screen forever would be the dishonest option. A `failed`
-   *  marker is kept — that one needs a human. */
+   *  without a poll loop, then reports the landing.
+   *
+   *  On success the chip goes to `applied`, not away. A chip that simply
+   *  VANISHES is indistinguishable from a chip that never appeared — which is
+   *  precisely the bug this panel just had — so disappearance can't be the
+   *  success signal. What the client legitimately knows at this point is
+   *  narrow but real: its own write returned 2xx AND the subsequent re-read
+   *  succeeded. That is what `Applied` claims, and no more. `failed` is never
+   *  auto-cleared; that one needs a human. */
   const scheduleSyncRefetch = useCallback(
     (roleId: string | null) => {
       if (refetchTimer.current != null) window.clearTimeout(refetchTimer.current);
@@ -206,20 +248,19 @@ export function RolesAccessPanel({
           if (!roleId) return;
           setSyncStates((prev) => {
             if (prev[roleId] !== "pending") return prev;
-            const next = { ...prev };
-            delete next[roleId];
-            return next;
+            return { ...prev, [roleId]: "applied" };
           });
+          clearApplied(roleId);
         });
       }, 1500);
     },
-    [reload],
+    [reload, clearApplied],
   );
 
   /** The sync state to render for a role: what the mutation told us, else
    *  whatever the row itself carries. `synced` renders nothing. */
   const syncStateFor = useCallback(
-    (r: AccessRole): AccessSyncState | undefined => syncStates[r.id] ?? r.syncState,
+    (r: AccessRole): ChipSyncState | undefined => syncStates[r.id] ?? r.syncState,
     [syncStates],
   );
 

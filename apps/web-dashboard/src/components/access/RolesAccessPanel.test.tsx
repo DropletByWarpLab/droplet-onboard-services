@@ -428,6 +428,76 @@ describe("WARP-1528 — sync chip reads the sibling syncState", () => {
     await waitFor(() => expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0));
   });
 
+  it("completes the §10 sequence: Applying… → Applied, then fades", async () => {
+    // UX (WARP-1528): SyncChip's `applied` arm was unreachable because the only
+    // terminal-success value mapped to null — so the chip DISAPPEARED on
+    // success, which is indistinguishable from the chip never appearing (the
+    // bug this panel just fixed). Nobody could tell convergence from
+    // regression. The client legitimately knows its write returned 2xx and the
+    // re-read succeeded; that is exactly what `Applied` claims.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const listed = role();
+      delete (listed as { syncState?: unknown }).syncState;
+      listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+      assignAccessRoleMock.mockResolvedValue({ syncState: "pending" });
+
+      renderPanel();
+      await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Assign people" }));
+      const dialog = await screen.findByRole("dialog", { name: /Assign people/ });
+      fireEvent.click(within(dialog).getByRole("checkbox", { name: /Sam Ortega/ }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+      await waitFor(() =>
+        expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0),
+      );
+
+      // The delayed re-read lands → the terminal beat, NOT disappearance.
+      await vi.advanceTimersByTimeAsync(1600);
+      await waitFor(() =>
+        expect(screen.getAllByText(ACCESS_COPY.applied).length).toBeGreaterThan(0),
+      );
+      expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+
+      // …and then it retires itself rather than accumulating green ticks.
+      await vi.advanceTimersByTimeAsync(4100);
+      await waitFor(() =>
+        expect(screen.queryByText(ACCESS_COPY.applied)).not.toBeInTheDocument(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a mutation that returns `synced` lands straight on Applied (no false pending)", async () => {
+    const listed = role({ id: "r-new", name: "Reception", slug: "reception" });
+    delete (listed as { syncState?: unknown }).syncState;
+    // The T3 create path answers `synced` — nothing cascaded, nothing to wait
+    // for. Showing "Applying…" first would claim a wait that never happened.
+    createAccessRoleMock.mockResolvedValue({ role: listed, syncState: "synced" });
+    listAccessRolesMock.mockResolvedValue({ roles: [listed] });
+
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Reception")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    const name = await screen.findByPlaceholderText("Name this role");
+    fireEvent.change(name, { target: { value: "Reception" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() => expect(screen.getAllByText(ACCESS_COPY.applied).length).toBeGreaterThan(0));
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+  });
+
+  it("a role merely AT REST in `synced` shows no chip (§12 — not a green tick per card)", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ syncState: "synced" })] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    expect(screen.queryByText(ACCESS_COPY.applied)).not.toBeInTheDocument();
+    expect(screen.queryByText(ACCESS_COPY.applying)).not.toBeInTheDocument();
+  });
+
   it("still honors a list-borne role.syncState (forward-compatible fallback)", async () => {
     listAccessRolesMock.mockResolvedValue({ roles: [role({ syncState: "failed" })] });
     renderPanel();
