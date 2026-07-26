@@ -674,7 +674,7 @@ export function bytesToStorageInput(bytes: string | null): { value: string; unit
 /** Every connector level, in ladder order. The builder RENDERS all of them —
  *  §5.2's "shown, never hidden" — and disables the ones the starting point
  *  cannot hold, exactly like the feature-level pills. */
-export const CONNECTOR_LEVELS: Array<ConnectorAccessLevel | "none"> = [
+export const CONNECTOR_LEVELS: ReadonlyArray<ConnectorAccessLevel | "none"> = [
   "none",
   "read",
   "read_write",
@@ -711,7 +711,7 @@ export function connectorFloorReason(sp: AccessStartingPoint): string | null {
 /** True when this starting point holds NO connector grant at all — the axis,
  *  not just a level, is floor-blocked. */
 export function connectorAxisBlocked(sp: AccessStartingPoint): boolean {
-  return connectorLevelsFor(sp).length === 1;
+  return connectorLevelsFor(sp).every((level) => level === "none");
 }
 
 // ── Draft ⇄ wire ───────────────────────────────────────────────────────────
