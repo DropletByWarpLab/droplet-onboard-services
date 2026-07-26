@@ -60,6 +60,7 @@ import {
   assertRankCap,
   assertRoleAssignable,
   assertRoleChangeAllowed,
+  assertDirectoryEditAllowed,
   assertRemovalAllowed,
   assertDisableAllowed,
   assertAssignableForCreate,
@@ -2942,29 +2943,67 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      // WARP-1523 → WARP-1526: the role-relevant branch. updateUserSchema
-      // has no `role` field, so a `role` key in the body used to be silently
-      // STRIPPED by zod — an admin probing { role: "owner" } saw either a
-      // validation 400 or, mixed with a real field, a 200 that looked like a
-      // successful promotion. Any RECOGNIZED role key now runs the full
-      // pre-tx rails through the guard service BEFORE validation, so nothing
-      // is half-applied: self-action (409), owner-untouchable (403 — an
-      // admin can no longer even probe the owner's row with a role key),
-      // the WARP-1523 rank cap (403, fail closed on a missing claim), and
-      // the assignable narrowing (never owner or service, §6.2). A
-      // within-rank ASSIGNABLE role key keeps the pre-existing semantics
-      // (stripped by the schema — PATCH /api/people/:id/role owns actual
-      // role changes). Unrecognized strings still fall through to schema
-      // validation (400 INVALID_REQUEST).
-      const requestedRole: unknown = req.body?.role;
-      if (isRole(requestedRole)) {
-        try {
-          const target = prisma
-            ? await prisma.user.findUnique({
-                where: { nextcloudUsername: req.params.username },
-                select: { id: true, role: true },
-              })
-            : null;
+      // The target row, read ONCE and shared by both guarded branches below.
+      // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
+      // on every request, because the credential branch is guarded too.
+      const target = prisma
+        ? await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true, role: true },
+          })
+        : null;
+
+      try {
+        // ── WARP-1564: rail 1b, the owner-credential carve-out. ──
+        // THIS is the residual takeover vector the RBAC v2 epic left open.
+        // The role branch below was railed by WARP-1526, but this route's
+        // OTHER job — rewriting a person's password (local argon2id hash +
+        // the Nextcloud mirror), email, display name and quota — was not.
+        // With every other owner-targeting door shut, an admin could simply
+        // PUT the owner's username a new password and then sign in as the
+        // owner, defeating the whole owner-untouchable doctrine.
+        //
+        // Rail 1 proper can't be used here: it is actor-blind, so it would
+        // also refuse the OWNER's own account maintenance (this route is how
+        // the owner changes their own display name / email / password). Rail
+        // 1b is rail 1 with a self carve-out — refuse when the target is an
+        // owner and the actor is not that same owner. See the guard service
+        // for why this rails the whole route rather than an allowlist of
+        // "credential" fields, and why it fails closed on a missing actor id.
+        //
+        // Runs BEFORE schema validation, like the role branch and for the
+        // same reason: an admin probing the owner's row gets a uniform 403
+        // whatever the body's shape (no validation oracle), and nothing —
+        // local row or Nextcloud — can be half-applied.
+        //
+        // `target === null` (legacy createAuthRouter() shim, or an NC-only
+        // account with no local row) has no owner row to protect: role lives
+        // on the local row, and a credential edit against a rowless username
+        // already fails closed below (500 USERS_NO_PRISMA without the
+        // directory, 404 USER_NOT_FOUND with it) rather than reaching login.
+        if (target) {
+          assertDirectoryEditAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target,
+          });
+        }
+
+        // WARP-1523 → WARP-1526: the role-relevant branch. updateUserSchema
+        // has no `role` field, so a `role` key in the body used to be silently
+        // STRIPPED by zod — an admin probing { role: "owner" } saw either a
+        // validation 400 or, mixed with a real field, a 200 that looked like a
+        // successful promotion. Any RECOGNIZED role key now runs the full
+        // pre-tx rails through the guard service BEFORE validation, so nothing
+        // is half-applied: self-action (409), owner-untouchable (403 — an
+        // admin can no longer even probe the owner's row with a role key),
+        // the WARP-1523 rank cap (403, fail closed on a missing claim), and
+        // the assignable narrowing (never owner or service, §6.2). A
+        // within-rank ASSIGNABLE role key keeps the pre-existing semantics
+        // (stripped by the schema — PATCH /api/people/:id/role owns actual
+        // role changes). Unrecognized strings still fall through to schema
+        // validation (400 INVALID_REQUEST).
+        const requestedRole: unknown = req.body?.role;
+        if (isRole(requestedRole)) {
           if (target) {
             assertRoleChangeAllowed({
               actor: { id: req.user?.id, role: req.user?.role },
@@ -2981,13 +3020,13 @@ export function createProtectedAuthRouter(
             );
             assertRoleAssignable(requestedRole);
           }
-        } catch (err) {
-          if (err instanceof RoleMutationRefusedError) {
-            res.status(err.status).json(err.toJSON());
-            return;
-          }
-          throw err;
         }
+      } catch (err) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
+        throw err;
       }
 
       const parsed = updateUserSchema.safeParse(req.body);

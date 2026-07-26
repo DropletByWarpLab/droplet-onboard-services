@@ -101,6 +101,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 
 /**
@@ -435,5 +436,203 @@ describe("PUT /api/auth/users/:username — WARP-1526 rails on the role-relevant
     expect(res.body.code).toBe("ROLE_NOT_ASSIGNABLE");
     expect(prisma.user.updateMany).not.toHaveBeenCalled();
     expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /api/auth/users/:username — WARP-1564 owner-credential carve-out", () => {
+  // THE RESIDUAL VECTOR the RBAC v2 epic left open. Rail 1 (owner
+  // untouchable) guarded only the ROLE-relevant branch of this route, so an
+  // admin could not promote / demote / disable / remove the owner — but could
+  // send `{ password: "…" }` at the owner's username and rotate BOTH the local
+  // argon2id hash AND the Nextcloud mirror, then simply sign in as the owner.
+  // Every other takeover door being shut is exactly what made this one
+  // decisive.
+  //
+  // A blanket rail 1 on the route is wrong: it would also refuse the OWNER's
+  // own identity self-edits, which are legitimate. The rail is therefore
+  // self-vs-other — refuse when the target is an owner AND the actor is not
+  // that same owner (assertDirectoryEditAllowed).
+  function seededOwner(id = "owner-id") {
+    return {
+      id,
+      username: "boss",
+      nextcloudUsername: "boss",
+      displayName: "Boss",
+      email: "boss@warp.test",
+      passwordHash: "$argon2id$OWNER-HASH",
+      role: "owner",
+    };
+  }
+
+  it("admin rotating the OWNER's password → 403 OWNER_IMMUTABLE; the hash is NOT rotated", async () => {
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Takeover-secret123" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(res.body.error).toBe(
+      "The owner has full control and can't be changed here.",
+    );
+    // The credential is untouched — the whole point.
+    const row = prisma._users.find((u: any) => u.username === "boss");
+    expect(row.passwordHash).toBe("$argon2id$OWNER-HASH");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(hashPassword).not.toHaveBeenCalled();
+  });
+
+  it("the Nextcloud mirror is NOT called on a refusal (no half-applied takeover on the WebDAV side)", async () => {
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Takeover-secret123" });
+
+    expect(res.status).toBe(403);
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("a refusal writes NO Activity row (the audit log records state changes, not noise)", async () => {
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Takeover-secret123" });
+
+    expect(res.status).toBe(403);
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("the OWNER changing their OWN password is still allowed (this is why rail 1 can't be blanket)", async () => {
+    // buildApp's synthetic req.user.id for callerRole="owner" is "owner-id" —
+    // the same id as the seeded row, i.e. a genuine self-edit.
+    const prisma = createPrismaMock([seededOwner("owner-id")]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Owner-newsecret123" });
+
+    expect(res.status).toBe(200);
+    const row = prisma._users.find((u: any) => u.username === "boss");
+    expect(row.passwordHash).toMatch(/^\$argon2id\$/);
+    expect(row.passwordHash).not.toBe("$argon2id$OWNER-HASH"); // actually rotated
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(
+      "test-nc-token",
+      "boss",
+      "password",
+      "Owner-newsecret123",
+    );
+  });
+
+  it("admin rotating a NON-owner's password still works (no regression on the ordinary admin duty)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ password: "Reset-secret123" });
+
+    expect(res.status).toBe(200);
+    const row = prisma._users.find((u: any) => u.username === "alice");
+    expect(row.passwordHash).not.toBe("$argon2id$OLD-HASH");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(
+      "test-nc-token",
+      "alice",
+      "password",
+      "Reset-secret123",
+    );
+  });
+
+  it("admin rewriting the OWNER's email → 403 (email IS the login key /auth/login resolves by)", async () => {
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ email: "attacker@evil.test" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("admin renaming the OWNER (displayName) → 403 — rail 1 is 'any mutation targeting an owner row'", async () => {
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ displayName: "Definitely Not The Owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    const row = prisma._users.find((u: any) => u.username === "boss");
+    expect(row.displayName).toBe("Boss");
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("admin capping the OWNER's quota → 403 — the class PUT /api/people/:id/usage already refuses", async () => {
+    // Surface-parity: assertUsageWriteAllowed rail-1s the owner's usage policy
+    // on the people surface. Leaving quota open here is precisely the
+    // two-surface drift the guard service exists to prevent (WARP-1523).
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ quota: "1 MB" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("refuses BEFORE schema validation — a weak password at the owner's row answers 403, not 400 WEAK_PASSWORD", async () => {
+    // No validation oracle: an admin probing the owner's row learns nothing
+    // about the body's shape, and nothing can be half-applied.
+    const prisma = createPrismaMock([seededOwner()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "weak" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+  });
+
+  it("owner A cannot rotate owner B's password in a drifted two-owner directory (self, not merely owner-role)", async () => {
+    // The rail matches on IDENTITY, not on the actor's tier: holding the
+    // owner role is not permission to edit a DIFFERENT owner's row.
+    const prisma = createPrismaMock([seededOwner("u-other-owner")]);
+    const app = buildApp(prisma, "owner"); // req.user.id = "owner-id" ≠ "u-other-owner"
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Sibling-secret123" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("OWNER_IMMUTABLE");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("the owner's own displayName self-edit is untouched by the rail", async () => {
+    const prisma = createPrismaMock([seededOwner("owner-id")]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ displayName: "The Boss" });
+
+    expect(res.status).toBe(200);
+    const row = prisma._users.find((u: any) => u.username === "boss");
+    expect(row.displayName).toBe("The Boss");
   });
 });
