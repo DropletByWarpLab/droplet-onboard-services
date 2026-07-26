@@ -437,13 +437,42 @@
            min-h-[44px];
   }
 
-  /* Secondary / tinted button */
+  /* Secondary / tinted button.
+
+     WARP-1581 — the label used to be the raw --color-accent on the
+     --color-accent-subtle wash. Because the tint is that same accent at 10 %
+     (light) / 15 % (dark), the label sat on a near-accent background and
+     measured under WCAG AA 1.4.3's 4.5:1 floor for normal text in BOTH
+     themes: 3.94:1 on a white card, 3.56:1 on the page background, and
+     3.72:1 on the dark grouped-row surface. This token ships on ~70 call
+     sites, so that was a dashboard-wide defect, not a one-surface one.
+
+     The label now takes the next step of the same indigo ramp — darker in
+     light, lighter in dark, which is the direction the accent ramp already
+     inverts (see --color-accent-hover). No new brand colour: both values are
+     ramp steps the sheet already carries. Fills, focus rings, borders, the
+     active-nav state and the primary button keep the vivid accent, and the
+     press feedback / 44px target / easing are untouched.
+
+     The token is scoped to this rule rather than the :root/.dark contract
+     blocks, exactly like --color-system-orange-text above: that surface is
+     locked byte-for-byte to the DropletByWarpLab/design-and-style canon
+     (WARP-1277 drift gate), so a new global token has to land in that repo
+     first. Promoting --color-accent-text to the canon is the follow-up. */
   .dp-btn-secondary {
+    /* indigo-600 — 5.01:1 on the page background, 5.55:1 on a card. */
+    --color-accent-text: #4f46e5;
     @apply inline-flex items-center justify-center gap-2 px-5 py-2.5
-           bg-accent-subtle text-accent font-medium rounded-sm
+           bg-accent-subtle font-medium rounded-sm
            active:scale-[0.97]
            transition-all duration-200 ease-smooth
            min-h-[44px];
+    color: var(--color-accent-text);
+  }
+  .dark .dp-btn-secondary {
+    /* The dark ramp inverts — lighter is what raises contrast on a dark
+       tint. indigo-300 — 5.57:1 on the worst-case dark surface. */
+    --color-accent-text: #a5b4fc;
   }
 
   /* Translucent material */

@@ -73,7 +73,13 @@ import { ACCESS_COPY } from "@/components/access/copy";
 // WARP-1533 (T9): the invite modal's role picker shares the person editor's
 // option builder — identical control, no new pattern (design §7).
 import { RoleSelectOptions, parseRoleOption } from "@/components/access/role-options";
-import { formatStorageBytes, tierLabel } from "@/lib/access";
+import { tierLabel } from "@/lib/access";
+import {
+  bytesToStorageInput,
+  formatStorageBytes,
+  storageInputToBytes,
+  type StorageUnit,
+} from "@/lib/storage-units";
 
 // WARP-1533 (design §7): the invite picker defaults to the most-restrictive
 // sensible role — the built-in Guest tier (fail-toward-least-privilege; a
@@ -124,42 +130,16 @@ function generateTempPassword(): string {
 }
 
 // ── WARP-1271 (T19a): usage-settings display helpers ──
-
-/** Byte count (as a decimal string, per the ADR-029 §8 BigInt-string wire
- *  contract) → a short human size ("4.1 GB"). `null`/unparseable → an em
- *  dash — never a fabricated "0 B", which would read as "this user has no
- *  data" rather than "we don't know". */
-function formatBytes(value: string | null | undefined): string {
-  if (value == null || value === "—") return "—";
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return "—";
-  if (n === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  let size = n;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`;
-}
-
-const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
-type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
-
-/** Bytes string → the {value, unit} pair the numeric+unit-select control
- *  edits. Picks TB when the value divides evenly into TB and is at least
- *  1 TB, else GB (rounded to 1 decimal) — a fresh policy always starts
- *  from a whole-GB/TB value an admin typed, so this round-trips cleanly. */
-function bytesToUnitValue(bytes: string | null): { value: string; unit: StorageUnit } {
-  if (bytes == null) return { value: "", unit: "GB" };
-  const n = Number(bytes);
-  if (!Number.isFinite(n) || n <= 0) return { value: "", unit: "GB" };
-  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
-    return { value: String(n / STORAGE_UNIT_BYTES.TB), unit: "TB" };
-  }
-  return { value: String(Math.round((n / STORAGE_UNIT_BYTES.GB) * 10) / 10), unit: "GB" };
-}
+//
+// WARP-1561: the byte ⇄ unit conversions now come from `@/lib/storage-units`,
+// the one implementation the roles, people and departments surfaces share.
+// The local copies rounded the editor's GB view to one decimal, which drifted
+// untouched quotas on save and nulled sub-0.05 GB limits outright.
+//
+// `usedBytes` is usage, not a quota, so 0 means "nothing stored yet" and is
+// rendered as such; a quota of 0 stays an em dash (= we don't know).
+const formatUsedBytes = (value: string | null | undefined): string =>
+  formatStorageBytes(value, { zero: "0 B" });
 
 /**
  * Admin-only user management page. Non-admin callers get a 403 from the
@@ -770,7 +750,7 @@ export default function UsersPage() {
       setEditUsageLoading(true);
       fetchUserUsage(u.userId)
         .then((usage) => {
-          const { value, unit } = bytesToUnitValue(usage.policy?.storageQuotaBytes ?? null);
+          const { value, unit } = bytesToStorageInput(usage.policy?.storageQuotaBytes ?? null);
           setEditStorageValue(value);
           setEditStorageUnit(unit);
           setEditUploadCapMb(
@@ -825,15 +805,12 @@ export default function UsersPage() {
     // save path skips the live usage endpoint entirely).
     let usagePatch: { storageQuotaBytes?: string | null; maxUploadSizeMb?: number | null } | null = null;
     if (editing.userId && editing.role !== "owner") {
-      const trimmedStorage = editStorageValue.trim();
-      let storageQuotaBytes: string | null = null;
-      if (trimmedStorage) {
-        const n = Number(trimmedStorage);
-        if (!Number.isFinite(n) || n <= 0) {
-          setError("Storage limit must be a positive number.");
-          return;
-        }
-        storageQuotaBytes = String(Math.round(n * STORAGE_UNIT_BYTES[editStorageUnit]));
+      // An empty field is an explicit "no limit"; a filled-but-unencodable
+      // one is a typo, and gets told so rather than silently dropping the cap.
+      const storageQuotaBytes = storageInputToBytes(editStorageValue, editStorageUnit);
+      if (editStorageValue.trim() && storageQuotaBytes == null) {
+        setError("Storage limit must be a positive number.");
+        return;
       }
       const trimmedUpload = editUploadCapMb.trim();
       let maxUploadSizeMb: number | null = null;
@@ -1015,9 +992,9 @@ export default function UsersPage() {
           no data", which is worse than showing nothing. */}
       {u.userId && usageRoster[u.userId] && (
         <span className="sub mono" style={{ color: "var(--text-faint)" }}>
-          {formatBytes(usageRoster[u.userId]!.used)} /{" "}
+          {formatUsedBytes(usageRoster[u.userId]!.used)} /{" "}
           {usageRoster[u.userId]!.quota != null
-            ? formatBytes(usageRoster[u.userId]!.quota)
+            ? formatUsedBytes(usageRoster[u.userId]!.quota)
             : "No limit"}
         </span>
       )}
@@ -2125,7 +2102,7 @@ export default function UsersPage() {
                       />
                     </div>
                     <div className="type-caption-1 mono" style={{ color: "var(--text-faint)" }}>
-                      {editUsageLoading ? "Loading usage…" : `${formatBytes(editUsedBytes)} used`}
+                      {editUsageLoading ? "Loading usage…" : `${formatUsedBytes(editUsedBytes)} used`}
                     </div>
                     {editUsageSyncText && (
                       <div
