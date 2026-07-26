@@ -79,6 +79,9 @@ vi.mock("../services/nextcloud.client.js", () => {
     ncGetCurrentUser: vi.fn(),
     ncCreateUser: vi.fn().mockResolvedValue(undefined),
     ncDeleteUser: vi.fn(),
+    // WARP-1558: an admin-tier invite now lands its holder in
+    // `droplet-admins`, which the route ensures exists first.
+    ncEnsureGroup: vi.fn().mockResolvedValue(undefined),
     ncListUsers: vi.fn(),
     ncUpdateUser: vi.fn(),
     ncSetUserEnabled: vi.fn(),
@@ -367,6 +370,33 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
     // the shared "Household" group folder mounts into their home.
     const groupsArg = (nc.ncCreateUser as any).mock.calls[0]?.[4] as string[];
     expect(groupsArg).toContain("household");
+    // WARP-1558: …and NOT to droplet-admins — this invite is family-tier.
+    expect(groupsArg).not.toContain("droplet-admins");
+  });
+
+  /**
+   * WARP-1558 — invite-accept is a create path too, so an invite that starts
+   * its holder at an admin-tier role must land them in `droplet-admins`.
+   * Before this, an admin onboarded purely by invite had ADR-029 §2.5 Tier-1
+   * see-all only if someone later changed their role — the same create-path
+   * hole that left the .87 box's group empty.
+   */
+  it("an admin-role invite lands its holder in droplet-admins (ensure precedes create)", async () => {
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Morpheus",
+      email: "morpheus@warp.test",
+      role: "admin",
+    });
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(res.status).toBe(200);
+
+    const groupsArg = (nc.ncCreateUser as any).mock.calls[0]?.[4] as string[];
+    expect(groupsArg).toContain("droplet-admins");
+    expect(nc.ncEnsureGroup).toHaveBeenCalledWith("droplet-admins");
   });
 
   it("lets the invited member then sign in via the email-keyed /auth/login (true round-trip)", async () => {

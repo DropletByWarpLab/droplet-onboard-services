@@ -1096,3 +1096,139 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     expect(result.adminGroupRemoved).toBe(0);
   });
 });
+
+/**
+ * WARP-1558 — the sweep above IS the backfill, once it can create the group.
+ *
+ * ADR-029 §2.5 Tier-1 admin see-all is exactly `droplet-admins` membership.
+ * On the .87 box that group was attached at MASK_ADMIN to every groupfolder
+ * and had ZERO members, so the capability was inert on an otherwise correctly
+ * provisioned appliance. The create-path fix (routes/auth-groups.ts) stops NEW
+ * admin-tier accounts from landing in that state; these specs cover the other
+ * half — the installs that are already in it.
+ *
+ * The answer is deliberately not a migration or a one-shot script: the sweep
+ * is stateless, so "an install that never had a member" and "an install whose
+ * members an outage dropped" are the same input to it, and the boot tick plus
+ * the 5-minute cron converge both. What it needed was the ability to create
+ * the group: `droplet-admins` is created LAZILY by provisionDepartment, so an
+ * install with no departments has none — and `ncListGroupMembers` returns `[]`
+ * for "no such group" exactly as it does for "empty", so the sweep could not
+ * tell the two apart and every add died on OCS 102 forever.
+ */
+describe("WARP-1558 — droplet-admins membership backfill", () => {
+  const OPERATORS: FakeUser[] = [
+    { id: "u-1", nextcloudUsername: "rjouffret", role: "owner" },
+    { id: "u-2", nextcloudUsername: "scruceru", role: "admin" },
+    { id: "u-3", nextcloudUsername: "srubinchik", role: "admin" },
+  ];
+
+  it("backfills every admin-tier user into an EMPTY group, creating the group first", async () => {
+    // The .87 box, reproduced: three admin-tier users, zero members.
+    const prisma = buildPrisma([], [], [...OPERATORS, {
+      id: "u-4",
+      nextcloudUsername: "kid",
+      role: "family",
+    }]);
+    ncListGroupMembersMock.mockResolvedValue([]);
+
+    const order: string[] = [];
+    ncEnsureGroupMock.mockImplementation(async (group: string) => {
+      order.push(`ensure:${group}`);
+    });
+    ncAddUserToGroupMock.mockImplementation(async (_t: string, uid: string) => {
+      order.push(`add:${uid}`);
+    });
+
+    const result = await reconcileDepartments(prisma as any);
+
+    // The group is created BEFORE anyone is added to it — the whole point.
+    expect(order[0]).toBe(`ensure:${DROPLET_ADMINS_GROUP}`);
+    expect(order.slice(1).sort()).toEqual([
+      "add:rjouffret",
+      "add:scruceru",
+      "add:srubinchik",
+    ]);
+    // The family user is NOT admin-tier and must not be swept in.
+    expect(order).not.toContain("add:kid");
+    expect(result.adminGroupAdded).toBe(3);
+    expect(result.adminGroupFailed).toBe(0);
+  });
+
+  it("is idempotent — the tick after a backfill is a silent no-op with no ensure write", async () => {
+    const prisma = buildPrisma([], [], OPERATORS);
+    ncListGroupMembersMock.mockResolvedValue([]);
+
+    const first = await reconcileDepartments(prisma as any);
+    expect(first.adminGroupAdded).toBe(3);
+
+    // Second tick: NC now reports the members the first tick added.
+    vi.clearAllMocks();
+    ncEnsureGroupMock.mockResolvedValue(undefined);
+    ncListGroupMembersMock.mockResolvedValue(
+      OPERATORS.map((u) => ({ id: u.nextcloudUsername! })),
+    );
+
+    const second = await reconcileDepartments(prisma as any);
+
+    expect(second.adminGroupAdded).toBe(0);
+    expect(second.adminGroupRemoved).toBe(0);
+    expect(second.adminGroupFailed).toBe(0);
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    // A converged box pays NO ensure round-trip: the ensure is gated on there
+    // being someone to add, so this costs nothing every 5 minutes forever.
+    expect(ncEnsureGroupMock).not.toHaveBeenCalledWith(DROPLET_ADMINS_GROUP);
+  });
+
+  it("a failed ensure is contained — the sweep still reports the adds as failed and the tick completes", async () => {
+    const prisma = buildPrisma([], [], OPERATORS);
+    ncListGroupMembersMock.mockResolvedValue([]);
+    ncEnsureGroupMock.mockRejectedValue(new Error("OCS 503"));
+    // With no group, OCS answers 102 for every add.
+    ncAddUserToGroupMock.mockRejectedValue(new Error("group does not exist"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    // Not a throw, not a silent zero: the failure is visible and the next
+    // tick retries, exactly like the sibling sweeps.
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupFailed).toBe(3);
+  });
+
+  it("an ensure failure never starves the revocation direction", async () => {
+    // Removals run first and do not depend on the ensure at all — a demoted
+    // ex-admin must come OUT of the group even on a box where the adds are
+    // all failing.
+    const prisma = buildPrisma([], [], [OPERATORS[0]]);
+    ncListGroupMembersMock.mockResolvedValue([{ id: "eve" }]);
+    ncEnsureGroupMock.mockRejectedValue(new Error("OCS 503"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "eve",
+      DROPLET_ADMINS_GROUP,
+    );
+    expect(result.adminGroupRemoved).toBe(1);
+  });
+
+  it("backfilling is loud — each restored operator emits an ActivityRow", async () => {
+    const prisma = buildPrisma([], [], [OPERATORS[0]]);
+    ncListGroupMembersMock.mockResolvedValue([]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        severity: "warn",
+        what: "Restored drifted admin-group member (role tier is truth)",
+        refs: expect.objectContaining({
+          ncUsername: "rjouffret",
+          group: DROPLET_ADMINS_GROUP,
+        }),
+      }),
+    );
+  });
+});

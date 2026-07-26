@@ -67,6 +67,9 @@ vi.mock("../services/nextcloud.client.js", () => {
     ncGetCurrentUser: vi.fn(),
     ncCreateUser: vi.fn().mockResolvedValue(undefined),
     ncDeleteUser: vi.fn(),
+    // WARP-1558: an access role whose starting point is admin-tier now lands
+    // its holder in `droplet-admins`, which the route ensures exists first.
+    ncEnsureGroup: vi.fn().mockResolvedValue(undefined),
     ncListUsers: vi.fn(),
     ncUpdateUser: vi.fn(),
     ncSetUserEnabled: vi.fn(),

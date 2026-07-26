@@ -275,11 +275,13 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
     // household group so the shared "Household" groupfolder mounts for them.
     // (The mocked config here lacks DROPLET_SHARED_FOLDER_NAME, so
     // householdGroupName() falls back to its canonical "household" default.)
+    // WARP-1558: plus `droplet-admins` — the owner is admin-tier, and
+    // ADR-029 §2.5 Tier-1 see-all is that group membership.
     expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledWith(
       "owner3",
       "Third-secret123",
       undefined,
-      ["admin", "household"],
+      ["admin", "droplet-admins", "household"],
     );
     // Idempotent local write lands BEFORE the one-shot NC provisioning.
     expect(prisma._callOrder).toEqual(["user.upsert", "ncInstallAndCreateAdmin"]);
@@ -676,8 +678,15 @@ describe("WARP-989 — /auth/setup is atomic (NC failure rolls back the local ow
     // The mocked config lacks DROPLET_SHARED_FOLDER_NAME, so
     // householdGroupName() falls back to the canonical "household".
     expect(nc.ncEnsureGroup).toHaveBeenCalledWith("household");
+    // WARP-1558: `droplet-admins` gets the same treatment — the owner's group
+    // list now carries it, and OCS rejects the ENTIRE create-user call when
+    // any listed group is missing. On a fresh appliance no department has been
+    // provisioned yet, so nothing has lazily created this group: without the
+    // ensure, adding it to the owner's list would break setup on every box.
+    expect(nc.ncEnsureGroup).toHaveBeenCalledWith("droplet-admins");
     expect(prisma._callOrder).toEqual([
       "user.upsert",
+      "ncEnsureGroup",
       "ncEnsureGroup",
       "ncInstallAndCreateAdmin",
     ]);
@@ -697,6 +706,35 @@ describe("WARP-989 — /auth/setup is atomic (NC failure rolls back the local ow
 
     expect(res.status).toBe(200);
     expect(prisma._users).toHaveLength(1);
+  });
+
+  /**
+   * WARP-1558 — the droplet-admins ensure carries the same best-effort
+   * posture as the household one. It is a convenience that prevents a
+   * predictable OCS rejection; it must never become a new way for setup to
+   * die. (If the group is genuinely uncreatable, ncInstallAndCreateAdmin
+   * fails on its own and the WARP-989 rollback keeps setup re-runnable.)
+   */
+  it("a failed droplet-admins ensure does NOT block setup either", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncEnsureGroup as any).mockImplementation((group: string) =>
+      group === "droplet-admins"
+        ? Promise.reject(new Error("OCS 503"))
+        : Promise.resolve(undefined),
+    );
+    (nc.ncInstallAndCreateAdmin as any).mockResolvedValueOnce(undefined);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Admins-secret123", email: "owner@warp.test" });
+
+    expect(res.status).toBe(200);
+    expect(prisma._users).toHaveLength(1);
+    // The owner was still provisioned WITH the group in their list — the
+    // reconciler's membership sweep converges the membership either way.
+    const groupsArg = (nc.ncInstallAndCreateAdmin as any).mock.calls[0][3] as string[];
+    expect(groupsArg).toContain("droplet-admins");
   });
 
   it("worst case: rollback itself fails → the typed SETUP_PROVISIONING_FAILED still reaches the client", async () => {
