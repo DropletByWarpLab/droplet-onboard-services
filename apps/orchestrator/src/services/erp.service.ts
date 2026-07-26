@@ -192,10 +192,18 @@ export function createErpService(
     if (!WRITE_ROLES.has(user.role)) throw ErpError.forbidden();
     // WARP-1579 — the tier is necessary, not sufficient. An Admin-based role
     // may hold a deliberately READ-ONLY connector grant, and a grant level the
-    // enforcement ignores is a false statement in the admin UI. Second line
-    // under the route's write gate, for the same reason `assertCanReadPhi`
-    // re-asserts the read floor: a future route registered without the gate
-    // must not silently regain write reach the operator revoked.
+    // enforcement ignores is a false statement in the admin UI.
+    //
+    // SCOPE, honestly: this is a second line under `erpConnectorWriteGate`,
+    // not an independent one. `connectorGrantLevel` is populated BY that gate,
+    // so a future route registered WITHOUT it arrives here with the field
+    // absent and this check cannot fire — the gate is the enforcement point,
+    // and a new write route must register it. What this does catch is the
+    // gate being kept but its refusal weakened, and any future caller that
+    // resolves the grant itself and threads it in. (`assertCanReadPhi` has the
+    // same shape and the same limit — `connectorLevel` likewise comes from the
+    // read gate.) Kept because it costs nothing and pins the level's meaning
+    // at the layer that owns the write.
     //
     // Only an EXPLICIT `read` refuses. Absent = nothing narrows (today's
     // world). Owner is never narrowed (§3's one bypass) — `assertCanReadPhi`

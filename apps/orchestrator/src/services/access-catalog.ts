@@ -227,6 +227,12 @@ export function fullCatalogFeatures(
  *     builder shows the levels **disabled with the reason** (never hidden);
  *     this is the server half that makes the client's honesty enforceable.
  *
+ * This clamp is WRITE-SIDE ONLY and ships with NO BACKFILL: guest connector
+ * rows written before it exist until their role is next edited. It therefore
+ * does NOT make `erpConnectorReadGate`'s family-and-up tier floor redundant —
+ * that floor is what still neutralises those rows, and removing it on the
+ * strength of this function would re-open PHI to them. Read the two together.
+ *
  * Deliberately NOT a 400: the roles surface's contract is "the dashboard
  * pre-clamps for honest UI but is never trusted, and the server re-clamps"
  * (routes/access.ts header). Rejecting would break a contract every other

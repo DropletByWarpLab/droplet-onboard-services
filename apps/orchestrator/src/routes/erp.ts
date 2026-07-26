@@ -101,19 +101,27 @@ const writeRequestSchema = z.object({
  * within the tiers `tierFloor` already admitted.
  *
  * THE TIER FLOOR IS LOAD-BEARING, not decoration. O-2 is "family-and-UP with
- * a grant", and the "and-up" half is enforced HERE, at the consumption site,
- * because T3 does not enforce it: `normalizeGrants` (routes/access.ts) clamps
- * a connector grant's LEVEL on non-admin starting points but never drops the
- * grant, so a GUEST-based role can hold one, and the resolver faithfully
- * reports it as `read` (the `accessRole !== null` branch). Reading
- * `connectors[p]` on its own would hand that role PHI. Two reasons the floor
- * stays here rather than being pushed into the resolver: `connectors[p]` is a
+ * a grant", and the "and-up" half is enforced HERE, at the consumption site.
+ *
+ * DO NOT "SIMPLIFY" IT AWAY on the strength of the WRITE-side clamp. When
+ * this gate shipped (T6), `normalizeGrants` (routes/access.ts) clamped a
+ * connector grant's LEVEL on non-admin starting points but never DROPPED the
+ * grant, so a Guest-based role could hold one and the resolver faithfully
+ * reported it as `read`. WARP-1578 closed that at the writer —
+ * `clampConnectorLevel` now returns null for a guest starting point, so no
+ * NEW guest row can be created — but that is a writer-side clamp with no
+ * backfill: every row written before it is still in the database until its
+ * role is next edited, and the resolver still reports those faithfully.
+ * Reading `connectors[p]` on its own would hand such a role PHI TODAY.
+ *
+ * Two reasons the floor stays here rather than being pushed into the
+ * resolver, and they survive the clamp: `connectors[p]` is a
  * provider-agnostic report of what a person was GRANTED — an honest answer to
  * a different question — while "which tiers may see PHI at all" is this
  * integration's policy and already lives beside `PHI_READ_ROLES` in
- * erp.service; and a floor enforced at the consumer survives a change to the
- * resolver, whereas one enforced only upstream does not. erp.service asserts
- * it a second time for exactly that reason.
+ * erp.service; and a floor enforced at the consumer survives a change to
+ * whatever writes the rows, whereas one enforced only at the writer does not.
+ * erp.service asserts it a second time for exactly that reason.
  *
  * The decision, case by case:
  *
@@ -262,13 +270,24 @@ function erpConnectorReadGate(prisma: PrismaClient) {
  *                            "there is nothing to write to" is not an
  *                            authorization answer, and the service's honest
  *                            `NOT_CONFIGURED` must win.
+ *   no such user           → the grant-absent decision, byte-for-byte. A
+ *                            resolver `null` is NOT a failure: the read
+ *                            SUCCEEDED and answered "this principal has no
+ *                            User row" (a session that outlived it — `req.
+ *                            user` is built from JWT claims alone, so an
+ *                            admin token stays syntactically valid until it
+ *                            expires). The read gate already refuses that
+ *                            case; routing it to the outage fall-back would
+ *                            make WRITES strictly more permissive than READS
+ *                            for the same person, and would log a DB failure
+ *                            that never happened.
  *
- * A resolver failure (throw, or a session that outlived its User row) falls
- * back to today's floor. That is T6's stated posture for this axis, not an
- * oversight: the widening is hard-closed, the NARROWING is deliberately soft,
- * so it is not an availability-independent control and must not be relied on
- * as one for compliance. Locking the box out of its own ERP because a DB read
- * blipped would be the worse failure.
+ * A resolver THROW — and only a throw — falls back to today's floor. That is
+ * T6's stated posture for this axis, not an oversight: the widening is
+ * hard-closed, the NARROWING is deliberately soft, so it is not an
+ * availability-independent control and must not be relied on as one for
+ * compliance. Locking the box out of its own ERP because a DB read blipped
+ * would be the worse failure. "No such user" is not that failure.
  */
 function erpConnectorWriteGate(prisma: PrismaClient) {
   // Layer 1, verbatim — the pre-1579 gate this route registered. Writes stay
@@ -296,13 +315,11 @@ function erpConnectorWriteGate(prisma: PrismaClient) {
       return;
     }
 
-    let grants: Record<string, ConnectorLevel> | null | undefined;
-    let level: ConnectorLevel | undefined;
+    // Only a THROW is the outage fall-back. A `null` return is a successful
+    // read with a negative answer and is handled below, beside the grants.
+    let access: Awaited<ReturnType<typeof resolveEffectiveAccess>>;
     try {
-      const access = await resolveEffectiveAccess(user.id);
-      if (!access) throw new Error("no such user");
-      grants = access.connectorGrants as Record<string, ConnectorLevel> | null;
-      level = access.connectors[EAGLESOFT_PROVIDER] as ConnectorLevel | undefined;
+      access = await resolveEffectiveAccess(user.id);
     } catch (err) {
       logger.warn(
         { err, userId: user.id },
@@ -312,13 +329,26 @@ function erpConnectorWriteGate(prisma: PrismaClient) {
       return;
     }
 
-    // No custom role ⇒ nothing narrows this admin ⇒ today's behaviour exactly.
-    if (!grants) {
+    const grants = access?.connectorGrants;
+    const level = access?.connectors[EAGLESOFT_PROVIDER];
+
+    // The tri-state, tested EXPLICITLY rather than for truthiness:
+    //   null      → no custom role narrows this admin ⇒ today's behaviour.
+    //   {}        → a role holding no connector grants. Truthy, so it falls
+    //               through to the grant-absent decision — which IS a denial.
+    //   undefined → NOT "nothing narrows". Either the resolver found no such
+    //               user (`access` null) or it returned a shape this gate
+    //               cannot read. Neither is a statement that the person is
+    //               unnarrowed, and a security gate must not invent one, so
+    //               both fall through to the same grant-absent decision. A
+    //               truthiness test here (`if (!grants)`) would have made
+    //               this the one fail-OPEN in the change.
+    if (grants === null) {
       next();
       return;
     }
 
-    const grant = grants[EAGLESOFT_PROVIDER];
+    const grant = grants?.[EAGLESOFT_PROVIDER];
     if (grant === "read_write") {
       (req as AuthedRequest).erpConnectorLevel = level ?? null;
       (req as AuthedRequest).erpConnectorGrantLevel = grant;

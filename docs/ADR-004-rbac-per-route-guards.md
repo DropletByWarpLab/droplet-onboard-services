@@ -265,15 +265,30 @@ read_write : read)`, so a `read` there cannot distinguish a read-only ROLE
 `WRITE_NOT_ENABLED`, "turn writes on in Integrations"), and each names a
 different remedy.
 
-The same three fall-backs to the pre-narrowing gate apply, for the same
-reasons: `owner` bypasses layer 2, a person with **no custom role** is not
-narrowed at all (today's world for every admin before RBAC v2), and both a
-resolver failure and a box with **nothing connected** fall through to the
-admin-tier floor. That last posture is deliberate and stated plainly in
-ADR-032: on this axis the widening is hard-closed and **the narrowing is
-soft**, so it is not an availability-independent control and must not be
-relied on as one for compliance. `erp.service.ts` re-asserts it independently
+The same fall-backs to the pre-narrowing gate apply, for the same reasons:
+`owner` bypasses layer 2, a person with **no custom role** is not narrowed at
+all (today's world for every admin before RBAC v2), and both a resolver
+**throw** and a box with **nothing connected** fall through to the admin-tier
+floor. That last posture is deliberate and stated plainly in ADR-032: on this
+axis the widening is hard-closed and **the narrowing is soft**, so it is not
+an availability-independent control and must not be relied on as one for
+compliance.
+
+A resolver **`null`** is not one of those fall-backs. `req.user` is built from
+JWT claims alone, so a session can outlive its `User` row and still present a
+syntactically valid admin token; the resolver then returns `null`, which is a
+*successful* read with a negative answer rather than an outage. Both gates give
+that principal the same answer — the grant-absent decision, i.e. 403
+`erp-connector-grant-missing` where a connection is configured — so writes are
+never softer than reads for the same person. Likewise the raw-grant field is
+read as an explicit tri-state (`null` = unnarrowed, `{}` = a role holding no
+grants = a denial, absent = fail **closed**), never for truthiness.
+
+`erp.service.ts` asserts the same rule a second time below the route
 (`assertCanWrite` refuses an explicit `read`), with absence never a denial.
+That assertion reads `ErpUser.connectorGrantLevel`, which the route gate
+populates — so it hardens the gate rather than replacing it, and a NEW write
+route must register `erpConnectorWriteGate` to be covered.
 
 #### `requireFeatureAccess` narrows within these floors — it never widens them
 

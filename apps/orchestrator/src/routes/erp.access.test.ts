@@ -554,6 +554,65 @@ describe("ERP writes — the connector grant LEVEL is enforced (WARP-1579)", () 
     expect(res.status).toBe(201);
   });
 
+  // ── the soft fall-back is a THROW, and only a throw ──────────────
+  //
+  // `resolveEffectiveAccess` returns null for "no such user" — a session that
+  // outlived its User row, which `requireAuth` cannot catch because `req.user`
+  // is built from JWT claims alone. That is a SUCCESSFUL read with a negative
+  // answer, not an outage, and the READ gate already refuses it. Treating it
+  // as a resolver failure would make writes strictly MORE permissive than
+  // reads for the same person.
+
+  it("a session that outlived its User row is refused — writes are never softer than reads", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(null);
+    const app = buildApp({ id: "u-deleted", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(svcMock.createWriteRequest).not.toHaveBeenCalled();
+    expect(recordAccessDeniedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "erp-connector-grant-missing",
+    );
+
+    // …and the READ gate answers identically for the same principal, which is
+    // the property being pinned: one fact, one answer, both directions.
+    const read = await request(app).get("/api/erp/schedule");
+    expect(read.status).toBe(403);
+  });
+
+  it("…but with nothing connected it still falls through — same exception the read gate makes", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(null);
+    svcMock.createWriteRequest.mockRejectedValue(ErpError.notConfigured(EAGLESOFT_PROVIDER));
+    const app = buildApp({ id: "u-deleted", role: "admin" }, { connectionConfigured: false });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).not.toBe(403);
+    expect(svcMock.createWriteRequest).toHaveBeenCalled();
+  });
+
+  it("an absent connectorGrants field does NOT read as 'nothing narrows' — the tri-state fails CLOSED", async () => {
+    // Production cannot produce this today (`connectorGrants` is a required
+    // field on EffectiveAccessResult and both compose branches set it), but
+    // the gate must not be one field-rename or one partial select away from
+    // handing back full write reach. `undefined` is not a statement that this
+    // person is unnarrowed, so it gets the grant-absent denial, not a pass.
+    const { connectorGrants: _omitted, ...withoutGrants } = access(
+      "admin",
+      { [EAGLESOFT_PROVIDER]: "read_write" },
+      { [EAGLESOFT_PROVIDER]: "read_write" },
+    );
+    resolveEffectiveAccessMock.mockResolvedValue(withoutGrants);
+    const app = buildApp({ id: "u-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(svcMock.createWriteRequest).not.toHaveBeenCalled();
+  });
+
   it("the grant level rides down to the service as the RAW grant, beside the effective level", async () => {
     resolveEffectiveAccessMock.mockResolvedValue(
       access(
