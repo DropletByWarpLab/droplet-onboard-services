@@ -69,6 +69,8 @@ import {
   ADMIN_TIER_ROLES,
   assertNotSelf,
   assertTargetNotOwner,
+  assertTargetNotOtherOwner,
+  assertDirectoryEditAllowed,
   assertRankCap,
   assertRoleAssignable,
   assertRoleChangeAllowed,
@@ -206,6 +208,120 @@ describe("rail 1 — assertTargetNotOwner (OWNER_IMMUTABLE)", () => {
     for (const role of ["admin", "family", "guest", "service"] as const) {
       expect(() => assertTargetNotOwner(role)).not.toThrow();
     }
+  });
+});
+
+describe("rail 1b — assertTargetNotOtherOwner (WARP-1564 owner-credential carve-out)", () => {
+  // Rail 1 with a SELF carve-out. Rail 1 proper is actor-blind, which is
+  // right for role/disable/remove but too broad for the identity-edit route:
+  // a blanket rail there would refuse the OWNER's own password change. This
+  // variant refuses only when the target is an owner AND the actor is
+  // someone else — the exact shape WARP-1564 needs.
+  const ownerTarget = { id: "u-owner", role: "owner" } as const;
+
+  it("throws 403 OWNER_IMMUTABLE (same code + copy as rail 1) when a DIFFERENT actor targets an owner row", () => {
+    const err = refusal(() => assertTargetNotOtherOwner("u-admin", ownerTarget));
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("OWNER_IMMUTABLE");
+    expect(err.message).toBe(
+      "The owner has full control and can't be changed here.",
+    );
+  });
+
+  it("passes when the actor IS the target owner (the self carve-out)", () => {
+    expect(() => assertTargetNotOtherOwner("u-owner", ownerTarget)).not.toThrow();
+  });
+
+  it("refuses owner A editing owner B — identity, not tier, is what carves out", () => {
+    // A drifted directory can hold more than one owner row (rail 4 exists
+    // precisely because that is representable). Holding the owner ROLE is not
+    // permission to rewrite a DIFFERENT owner's credentials.
+    const err = refusal(() =>
+      assertTargetNotOtherOwner("u-owner-a", { id: "u-owner-b", role: "owner" }),
+    );
+    expect(err.code).toBe("OWNER_IMMUTABLE");
+  });
+
+  it("FAILS CLOSED on a missing actor id — the inverse of rail 2's fail-open", () => {
+    // Deliberate asymmetry, and the subtle part of this rail:
+    //   rail 2 (assertNotSelf) uses identity to REFUSE, so an absent id must
+    //   not self-match → it fails OPEN.
+    //   rail 1b uses identity to PERMIT, so an absent id cannot prove "I am
+    //   the owner" → it must fail CLOSED.
+    for (const actorId of [null, undefined, ""]) {
+      const err = refusal(() => assertTargetNotOtherOwner(actorId, ownerTarget));
+      expect(err.code).toBe("OWNER_IMMUTABLE");
+    }
+  });
+
+  it("passes for every non-owner target regardless of actor", () => {
+    for (const role of ["admin", "family", "guest", "service"] as const) {
+      expect(() =>
+        assertTargetNotOtherOwner("u-admin", { id: "u-x", role }),
+      ).not.toThrow();
+      expect(() =>
+        assertTargetNotOtherOwner(null, { id: "u-x", role }),
+      ).not.toThrow();
+    }
+  });
+});
+
+describe("composite — assertDirectoryEditAllowed (PUT /auth/users/:username identity + credential fields)", () => {
+  // The route-level default-deny for the ONE surface that can rewrite a
+  // person's credentials. Deliberately NOT field-scoped: an allowlist of
+  // {password, email} would leave any field ADDED to updateUserSchema later
+  // silently un-railed — the "derive state from absence" anti-pattern, in
+  // guard form. Rail-the-route-unless-self is fail-closed by construction.
+  it("refuses an admin actor editing the owner's row", () => {
+    const err = refusal(() =>
+      assertDirectoryEditAllowed({
+        actor: { id: "u-admin", role: "admin" },
+        target: { id: "u-owner", role: "owner" },
+      }),
+    );
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("OWNER_IMMUTABLE");
+  });
+
+  it("allows the owner editing their OWN row (self-edits stay legal — rail 2 is NOT applied here)", () => {
+    // Contrast with assertRoleChangeAllowed, which runs rail 2 first: a
+    // self-edit of your own DISPLAY NAME or PASSWORD grants nobody anything,
+    // so the self-action rail would be wrong here. Same reasoning the shipped
+    // assertUsageWriteAllowed uses for omitting rail 2.
+    expect(() =>
+      assertDirectoryEditAllowed({
+        actor: { id: "u-owner", role: "owner" },
+        target: { id: "u-owner", role: "owner" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("allows an admin editing a non-owner (the ordinary directory-admin duty)", () => {
+    expect(() =>
+      assertDirectoryEditAllowed({
+        actor: { id: "u-admin", role: "admin" },
+        target: { id: "u-alice", role: "family" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("allows an admin editing their OWN row", () => {
+    expect(() =>
+      assertDirectoryEditAllowed({
+        actor: { id: "u-admin", role: "admin" },
+        target: { id: "u-admin", role: "admin" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("fails closed when the actor carries no id", () => {
+    const err = refusal(() =>
+      assertDirectoryEditAllowed({
+        actor: { id: null, role: "owner" },
+        target: { id: "u-owner", role: "owner" },
+      }),
+    );
+    expect(err.code).toBe("OWNER_IMMUTABLE");
   });
 });
 
