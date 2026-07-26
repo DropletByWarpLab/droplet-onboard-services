@@ -46,7 +46,7 @@ export function ArchiveCitation({ hit, anchor }: ArchiveCitationProps): JSX.Elem
         </div>
         {typeof hit.score === "number" && (
           <span className="type-caption-2 flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-            {relevancePct(hit.score)}%
+            {relevancePct(hit.score, hit.scoreKind)}%
           </span>
         )}
       </header>

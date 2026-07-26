@@ -38,7 +38,7 @@ export function FileCitation({ hit }: FileCitationProps): JSX.Element {
       <span className="truncate">{hit.filename}</span>
       {typeof hit.score === "number" && (
         <span className="type-caption-2 flex-shrink-0 text-[var(--text-muted)]">
-          {relevancePct(hit.score)}%
+          {relevancePct(hit.score, hit.scoreKind)}%
         </span>
       )}
     </>
