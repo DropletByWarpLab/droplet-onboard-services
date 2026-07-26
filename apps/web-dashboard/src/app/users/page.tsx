@@ -386,8 +386,21 @@ export default function UsersPage() {
   const reloadAccessRoles = useCallback(() => {
     listAccessRoles()
       .then((data) => {
-        setAccessRoles((data.roles || []).filter((r) => r.state !== "archived"));
+        const next = (data.roles || []).filter((r) => r.state !== "archived");
+        setAccessRoles(next);
         setAccessRolesFailed(false);
+        // Review F3 — the symmetric half of the N1 guard below. A role
+        // archived mid-session is filtered out here, so its <option>
+        // disappears while state still holds role:<id>: the native select
+        // would then DISPLAY the first option (Admin) while a submit sent
+        // the archived id, 400ing with the operator having just seen
+        // "Admin" in the box. Reconcile only genuinely-vanished selections
+        // so a still-valid pick is never reset out from under the admin.
+        setInviteRoleOption((cur) =>
+          cur.startsWith("role:") && !next.some((r) => r.id === cur.slice(5))
+            ? INVITE_ROLE_DEFAULT
+            : cur,
+        );
       })
       .catch(() => {
         setAccessRoles([]);
@@ -1312,7 +1325,7 @@ export default function UsersPage() {
           {tab === "roles" && (
             <RolesAccessPanel
               people={users}
-              actingTier={currentUser?.role ?? "admin"}
+              actingTier={currentUser?.role ?? "guest"}
               connectors={connectors}
               onOpenPerson={(p) => {
                 setTab("people");
@@ -1427,7 +1440,7 @@ export default function UsersPage() {
                             tier disable (WARP-623). */}
                         <RoleSelectOptions
                           roles={accessRoles}
-                          actingTier={currentUser?.role ?? "admin"}
+                          actingTier={currentUser?.role ?? "guest"}
                         />
                       </select>
                       {accessRolesFailed && (
@@ -2013,7 +2026,7 @@ export default function UsersPage() {
                   person={editing}
                   people={users}
                   roles={accessRoles}
-                  actingTier={currentUser?.role ?? "admin"}
+                  actingTier={currentUser?.role ?? "guest"}
                   actingUserId={currentUser?.id ?? null}
                   value={editAccessValue}
                   onChange={setEditAccessValue}
