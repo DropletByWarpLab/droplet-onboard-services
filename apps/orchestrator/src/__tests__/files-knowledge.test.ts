@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 
@@ -131,6 +132,16 @@ vi.mock("@prisma/client", () => {
       this.clientVersion = opts.clientVersion;
     }
   }
+  // WARP-1583: the T3 effective-access resolver composes its reads inside ONE
+  // RepeatableRead transaction, and app.ts mounts requireFeatureAccess on this
+  // module's prefix — so a stub without `$transaction` makes the gate fail
+  // closed and every route here 404s. Shared seam (WARP-1570) rather than
+  // `(fn) => fn(self)`, which would drop the isolation option and hide a
+  // regression that removed it.
+  (mockPrisma as { $transaction?: unknown }).$transaction = createTransactionSeam({
+    client: () => mockPrisma,
+  }).$transaction;
+
   return {
     PrismaClient: vi.fn(() => mockPrisma),
     Prisma: { PrismaClientKnownRequestError },

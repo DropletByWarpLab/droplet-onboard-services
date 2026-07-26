@@ -18,6 +18,11 @@ import {
   type EffectiveAccessInputs,
 } from "./effective-access.service.js";
 import { GATEABLE_MODULE_IDS } from "./access-catalog.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
 const ALL_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   "chat",
@@ -741,11 +746,20 @@ describe("effective-access — deptRights are a read-only reference", () => {
 
 describe("resolveEffectiveAccess — bound fetch wrapper", () => {
   it("returns null for a missing user (route maps to 404)", async () => {
+    // WARP-1583: the wrapper resolves inside a RepeatableRead transaction, so
+    // the missing-user contract is now "return null OUT of the transaction",
+    // not "return null before opening one". The shared seam (WARP-1570) is
+    // what makes that distinction testable — a hand-rolled
+    // `$transaction: (fn) => fn(self)` would drop the options argument and
+    // let a silent downgrade to READ COMMITTED stay green.
     const prisma: any = {
       user: { findUnique: vi.fn().mockResolvedValue(null) },
     };
+    const seam = createTransactionSeam({ client: () => prisma });
+    prisma.$transaction = seam.$transaction;
     _setEffectiveAccessForTests(prisma, {} as any);
     await expect(resolveEffectiveAccess("nope")).resolves.toBeNull();
+    expectAllTransactionsAt(seam, REPEATABLE_READ_TX);
     _setEffectiveAccessForTests(null, null);
   });
 

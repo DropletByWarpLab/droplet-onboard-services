@@ -137,14 +137,15 @@ export type RoleMutationRefusalCode =
  * routes map to CONCURRENT_MUTATION rather than a 500.
  *
  * Same finding class and same remedy as reset.service.ts (pr-reviewer #549
- * finding 1). The string literal (rather than
- * `Prisma.TransactionIsolationLevel.Serializable`) keeps this module free of
- * a RUNTIME `@prisma/client` import — the standalone-compile discipline the
- * Role / DirectoryUserStatus mirrors exist for — while the `$transaction`
- * options type still checks it against the generated union, so a typo is a
- * compile error, not a silent downgrade.
+ * finding 1).
+ *
+ * WARP-1583 moved the DEFINITION to `lib/prisma-tx.ts`, next to
+ * `REPEATABLE_READ_TX`, so the two isolation levels this app uses are
+ * chosen from one place rather than discovered separately. Re-exported here
+ * because this module is where the contract that requires it is documented,
+ * and where every call site already imports it from.
  */
-export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
+export { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 /**
  * Prisma error codes that mean "another writer touched this row while we
@@ -715,6 +716,14 @@ export async function runRoleChangePostEffects(args: {
  * `targetUserId: null` is the legacy NC-only path (no local row): nothing
  * to revoke or denylist, but the mandatory-emit audit row still lands —
  * previously DELETE /auth/users/:username emitted nothing at all.
+ *
+ * WARP-1565 removed the `what` headline override. It existed for exactly one
+ * caller: DELETE /api/auth/users/:username, which deleted the Nextcloud
+ * account but left the local row, so "User removed" would have been a false
+ * statement in an append-only, signature-chained audit log (pr-reviewer
+ * #1229 B3). That route now deletes the row, so both removal surfaces
+ * describe the same event — and an override with no caller is a seam for the
+ * two audit vocabularies to diverge through again.
  */
 export async function runRemovalPostEffects(args: {
   targetUserId: string | null;
@@ -722,15 +731,6 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
-  /**
-   * Audit headline override (pr-reviewer #1229 B3). Defaults to the
-   * shipped "User removed" used by DELETE /api/people/:id, which really
-   * does delete the row. DELETE /api/auth/users/:username removes the
-   * Nextcloud account and revokes local access WITHOUT deleting the local
-   * row (WARP-1565 owns that), so it passes its own honest wording rather
-   * than claiming a removal that did not happen.
-   */
-  what?: string;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
@@ -740,7 +740,7 @@ export async function runRemovalPostEffects(args: {
     kind: "auth",
     severity: "warn",
     sourceIcon: "user-x",
-    what: args.what ?? "User removed",
+    what: "User removed",
     sub: args.targetUsername,
     refs: {
       actor: args.actorUsername,

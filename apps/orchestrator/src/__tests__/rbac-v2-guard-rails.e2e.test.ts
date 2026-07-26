@@ -290,6 +290,19 @@ function createPrismaMock(seed: Row[]) {
       }
       return users.splice(idx, 1)[0];
     }),
+    // WARP-1565: `DELETE /api/auth/users/:username` finishes the removal by
+    // deleting the local row once Nextcloud has confirmed the account is
+    // gone, and it does so with a PREDICATED `deleteMany` (pinned to
+    // directoryStatus=DEACTIVATED) rather than `delete` by id, so a row
+    // re-activated in the window survives. The stub has to honour the
+    // predicate for that refusal to be expressible here at all — a
+    // `deleteMany` that ignored `where` would delete the row unconditionally
+    // and this suite would go green on the wrong behaviour.
+    deleteMany: vi.fn(async ({ where }: any = {}) => {
+      const doomed = users.filter((u) => matches(u, where));
+      for (const u of doomed) users.splice(users.indexOf(u), 1);
+      return { count: doomed.length };
+    }),
   };
 
   self.accessRole = {

@@ -51,17 +51,37 @@ const rel = (p: string) => path.relative(SRC, p).split(path.sep).join("/");
 const isTest = (p: string) => p.endsWith(".test.ts");
 
 /**
- * Production modules that hand `$transaction` an isolation level — either
- * an inline `{ isolationLevel: ... }` or the shared `SERIALIZABLE_TX`
- * constant in argument position.
+ * The isolation constants, READ OUT OF `lib/prisma-tx.ts` rather than
+ * listed here (WARP-1583).
+ *
+ * That file is the one home for the levels this app opens transactions at.
+ * Naming them in this gate instead would mean a third constant — or the
+ * second one, `REPEATABLE_READ_TX`, which is how this was found — enters
+ * production while the gate silently keeps scanning for the first, and every
+ * suite covering the new call sites drops out of scope with nothing red.
+ * A gate that has to be remembered is a gate that rots.
+ */
+function isolationConstants(): string[] {
+  const src = readFileSync(path.join(SRC, "lib", "prisma-tx.ts"), "utf-8");
+  return [...src.matchAll(/export\s+const\s+(\w+_TX)\b/g)].map((m) => m[1]);
+}
+
+/**
+ * Production modules that declare a transaction isolation level — an inline
+ * `{ isolationLevel: ... }`, or any of the shared constants.
+ *
+ * The constants match ANYWHERE in the file, not just in argument position
+ * (WARP-1583). Argument position is the narrower, more literal reading of
+ * "opens a transaction at this level", but it drops a module that re-exports
+ * a constant out of scope — and the suites covering THAT module are exactly
+ * the ones this gate wants. Over-inclusion costs a suite the harness import
+ * it should have anyway; under-inclusion costs a defect class.
  */
 function isolationDeclaringModules(): string[] {
+  const names = isolationConstants().join("|");
+  const re = new RegExp(`(isolationLevel\\s*:|\\b(${names})\\b)`);
   return ALL_TS.filter((p) => !isTest(p) && !rel(p).startsWith("__tests__/"))
-    .filter((p) =>
-      /(isolationLevel\s*:|SERIALIZABLE_TX\s*[,)])/.test(
-        readFileSync(p, "utf-8"),
-      ),
-    )
+    .filter((p) => re.test(readFileSync(p, "utf-8")))
     .sort();
 }
 
@@ -102,9 +122,32 @@ describe("WARP-1570 — the shared transaction seam is actually inherited", () =
 
   it("production still declares isolation levels somewhere (the gate is not vacuous)", () => {
     // If this list ever empties, the gate below passes trivially. That would
-    // mean every explicit `SERIALIZABLE_TX` was deleted — a far bigger
-    // problem than a test-harness one, and it must not be silent.
+    // mean every explicit isolation level was deleted — a far bigger problem
+    // than a test-harness one, and it must not be silent.
+    expect(isolationConstants().length).toBeGreaterThan(0);
     expect(isolationDeclaringModules().length).toBeGreaterThan(0);
+  });
+
+  it("scope tracks EVERY isolation constant, not just the first one", () => {
+    // WARP-1583. The gate was written against `SERIALIZABLE_TX` alone, so
+    // when the read-side level arrived it saw nothing: the resolver moved its
+    // whole read set into a transaction and every suite covering it stayed
+    // out of scope, free to hand-roll an options-dropping stub. This asserts
+    // the derivation, using the module that exposed the hole.
+    const declaring = isolationDeclaringModules().map(rel);
+    for (const name of isolationConstants()) {
+      const users = ALL_TS.filter(
+        (p) =>
+          !isTest(p) &&
+          !rel(p).startsWith("__tests__/") &&
+          new RegExp(`\\b${name}\\b`).test(readFileSync(p, "utf-8")),
+      ).map(rel);
+      expect(users.length, `${name} has no production call site`).toBeGreaterThan(0);
+      for (const u of users) {
+        expect(declaring, `${u} uses ${name} but is out of the gate's scope`).toContain(u);
+      }
+    }
+    expect(declaring).toContain("services/effective-access.service.ts");
   });
 
   it("no suite covering an isolation-declaring module hand-rolls its own $transaction", () => {

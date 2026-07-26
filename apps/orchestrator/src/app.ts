@@ -107,6 +107,7 @@ import {
   seedWorkspaceSettings,
   seedOffLanChannels,
 } from "./services/workspace-settings.service.js";
+import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
 import { createLogger } from "./lib/logger.js";
 
 export function createApp(
@@ -539,6 +540,22 @@ export function createApp(
     seedLogger.warn(
       { err },
       "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
+    );
+  });
+
+  // WARP-1565: revoke any pending `role="owner"` invite. Rail 7 stopped new
+  // ones being minted; rows written before that narrowing are still pending,
+  // and the accept path honours an invite's canonical role by design
+  // (WARP-1051), so the input is what has to go. On every boot rather than
+  // once in a migration: this box is reflashed and restored from backup, and
+  // a pre-narrowing dump would otherwise put such a row back. Idempotent and
+  // a no-op on a converged box; same fire-and-forget posture as the seeders
+  // above — a DB hiccup here must not block app construction, and the next
+  // boot sweeps again.
+  revokePendingOwnerInvites(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "pending owner-invite sweep failed (invites table may be unbootstrapped)",
     );
   });
 

@@ -8,10 +8,13 @@
  * siblings only). It now runs rails 1/2/4/5 via the shared guard service
  * and the rail-6 removal post-effects (revoke + denylist + "User removed").
  *
- * Deliberately NOT changed here (out of WARP-1526 scope, flagged in the
- * ticket report): this route still does not delete the LOCAL User row —
- * it deletes the Nextcloud account and purges brain memory, exactly as
- * before. Harness mirrors auth.directory-edituser.test.ts.
+ * WARP-1565 finished the removal this route only half-did. The guarded
+ * transaction still owns the REVOCATION (directoryStatus=DEACTIVATED, made
+ * atomically with rails 4 + 5); the local User row is then deleted at the
+ * end of the request, after Nextcloud confirms the account is gone — so a
+ * failing NC delete leaves a fully-revoked row to retry from rather than an
+ * orphaned account with working WebDAV. Harness mirrors
+ * auth.directory-edituser.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -163,6 +166,18 @@ function createPrismaMock(seed: any[] = []) {
       users[idx] = { ...users[idx], ...data };
       return users[idx];
     }),
+    deleteMany: vi.fn(async ({ where }: any = {}) => {
+      const before = users.length;
+      for (let i = users.length - 1; i >= 0; i -= 1) {
+        const u = users[i];
+        const idOk = where?.id === undefined || u.id === where.id;
+        const statusOk =
+          where?.directoryStatus === undefined ||
+          u.directoryStatus === where.directoryStatus;
+        if (idOk && statusOk) users.splice(i, 1);
+      }
+      return { count: before - users.length };
+    }),
     count: vi.fn(async ({ where }: any = {}) => {
       let n = 0;
       for (const u of users) {
@@ -238,10 +253,10 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
         kind: "auth",
         severity: "warn",
         sourceIcon: "user-x",
-        // pr-reviewer #1229 B3: this path deletes the NEXTCLOUD account and
-        // revokes local access; the local row survives (WARP-1565), so the
-        // headline must not claim a removal that did not happen.
-        what: "User removed from Nextcloud; local access revoked",
+        // WARP-1565: the local row is now deleted too, so the plain
+        // shipped headline is true again — the qualified wording existed
+        // only while the removal was half-done (pr-reviewer #1229 B3).
+        what: "User removed",
         sub: "alice",
         refs: expect.objectContaining({
           targetUserId: "u-alice",
@@ -264,7 +279,7 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     expect(denylistUserMock).not.toHaveBeenCalled();
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
       expect.objectContaining({
-        what: "User removed from Nextcloud; local access revoked",
+        what: "User removed",
         sub: "legacy",
         refs: expect.objectContaining({ targetUserId: null }),
       }),
@@ -437,12 +452,73 @@ describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write",
     const res = await request(app).delete("/api/auth/users/alice");
 
     expect(res.status).toBe(200);
-    expect(prisma._users.find((u: any) => u.id === "u-alice").directoryStatus).toBe(
-      "DEACTIVATED",
-    );
+    // WARP-1565 deletes the row at the END of the request, so the final
+    // state can no longer witness this. The property being pinned is
+    // unchanged and still load-bearing: the REVOCATION is a write, made
+    // inside the SERIALIZABLE transaction the rails ran in, pinned to the
+    // role they were evaluated against. (That the row then goes away is the
+    // sibling test; that it SURVIVES revoked when Nextcloud fails is the
+    // one after it.)
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: "u-alice", role: "family" },
+      data: { directoryStatus: "DEACTIVATED" },
+    });
     expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: "Serializable",
     });
+  });
+
+  /**
+   * WARP-1565 residual 1 — the half-delete finished.
+   *
+   * WARP-1526 bounded the exposure (the row is DEACTIVATED inside the
+   * guarded transaction, and every login gate fails closed on that), but the
+   * row itself survived a route called DELETE whose Nextcloud account is
+   * genuinely gone. Two things follow from an orphan row, and the second is
+   * the one an operator actually hits:
+   *
+   *   • the roster carries a person with no account behind them, and
+   *   • `username` / `email` / `nextcloudUsername` are UNIQUE columns, so
+   *     the freed identity is not free. Re-inviting the same person — the
+   *     obvious next action after removing them by mistake, or after an
+   *     employee returns — collides on the orphan.
+   *
+   * Deleting the row LAST, after the Nextcloud account is confirmed gone, is
+   * what makes the two directories agree in the failure case too: an NC
+   * delete that throws leaves a fully-revoked local row to retry from,
+   * which is strictly today's behaviour rather than a new hole.
+   */
+  it("deletes the local row once the Nextcloud account is gone (the identity is reusable)", async () => {
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    expect((await request(app).delete("/api/auth/users/alice")).status).toBe(200);
+
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toBeUndefined();
+    // Ordering is the contract: NC first, local row after. A row deleted
+    // before a failing ncDeleteUser would strand an NC account with working
+    // WebDAV and nothing left locally to reconcile it from.
+    expect(nc.ncDeleteUser).toHaveBeenCalled();
+  });
+
+  it("keeps the revoked local row when the Nextcloud delete fails (nothing to retry from otherwise)", async () => {
+    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([
+      seededAlice(),
+      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    expect((await request(app).delete("/api/auth/users/alice")).status).toBe(500);
+
+    const row = prisma._users.find((u: any) => u.id === "u-alice");
+    expect(row).toBeDefined();
+    // Access is still revoked — the guarded write committed before the
+    // Nextcloud call, and that half must not be undone by its failure.
+    expect(row.directoryStatus).toBe("DEACTIVATED");
   });
 
   it("sequential admin removals DO trip the last-operator rail (the deactivated row no longer counts)", async () => {
@@ -466,7 +542,12 @@ describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write",
     );
   });
 
-  it("audits honestly — this path removes the Nextcloud account and deactivates locally, so it must not claim 'User removed'", async () => {
+  // WARP-1565: this used to assert the OPPOSITE headline, and correctly so —
+  // while the local row survived, "User removed" was a false statement in an
+  // append-only, signature-chained audit log. Now that the row is deleted,
+  // the qualified wording would be the false one, and both removal surfaces
+  // describe the same event in the same words.
+  it("audits 'User removed' — the statement the completed removal makes true", async () => {
     const prisma = createPrismaMock([
       seededAlice(),
       { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
@@ -478,7 +559,9 @@ describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write",
     const row = vi.mocked(recordActivity).mock.calls[0][0] as any;
     expect(row.kind).toBe("auth");
     expect(row.severity).toBe("warn");
-    expect(row.what).toBe("User removed from Nextcloud; local access revoked");
+    expect(row.what).toBe("User removed");
+    // The audit row outlives the row it describes — `targetUserId` is a ref
+    // VALUE, not a foreign key, so the trail survives the delete.
     expect(row.refs).toEqual(
       expect.objectContaining({ targetUserId: "u-alice", targetUsername: "alice" }),
     );

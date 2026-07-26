@@ -62,6 +62,10 @@ import {
 // WARP-1527 (RBAC v2 T3): the per-person access surface — custom-role /
 // built-in-tier assignment, the §3 resolver read, and the feature-axis
 // exception editor.
+import {
+  AccessPreconditionError,
+  isAccessPreconditionError,
+} from "../lib/access-precondition.js";
 import { revokeAllSessions } from "../services/session.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import { GATEABLE_MODULE_IDS, type GateableModuleId } from "../services/access-catalog.js";
@@ -1026,9 +1030,15 @@ export function createPeopleRouter(
         // role no longer carries, and layer-1 requireRole would honour that
         // stale tier indefinitely. SERIALIZABLE_TX is passed EXPLICITLY,
         // exactly like the sibling role/scope/delete paths (WARP-1526):
-        // Prisma/Postgres default to READ COMMITTED. Precondition failures
-        // return a discriminated outcome rather than throwing — nothing has
-        // been written on those paths, so the empty transaction commits.
+        // Prisma/Postgres default to READ COMMITTED.
+        //
+        // WARP-1583: precondition failures THROW `AccessPreconditionError`,
+        // the same mechanism the sibling assign path in routes/access.ts
+        // uses. This path previously returned a discriminated `{ kind }`
+        // union — equivalent while every check precedes the first write, and
+        // fail-OPEN the day one does not, because a returned outcome commits
+        // what the transaction already wrote. Unwinding rolls it back, and
+        // collapses the catch below to the one shape the rails already use.
         const outcome = await prisma.$transaction(async (tx) => {
           let requestedRole: AssignableRole;
           let accessRoleId: string | null;
@@ -1037,8 +1047,8 @@ export function createPeopleRouter(
             const role = await tx.accessRole.findUnique({
               where: { id: parsed.data.accessRoleId },
             });
-            if (!role) return { kind: "role_not_found" } as const;
-            if (role.state === "archived") return { kind: "role_archived" } as const;
+            if (!role) throw AccessPreconditionError.roleNotFound();
+            if (role.state === "archived") throw AccessPreconditionError.roleArchived();
             requestedRole = role.startingPoint as AssignableRole;
             accessRoleId = role.id;
             roleName = role.name;
@@ -1056,7 +1066,7 @@ export function createPeopleRouter(
             where: { id: req.params.id },
             select: PUBLIC_USER_SELECT,
           });
-          if (!existing) return { kind: "user_not_found" } as const;
+          if (!existing) throw AccessPreconditionError.userNotFound();
 
           // Rails 1 → 3 → 7 — identical to a direct role change: the
           // assigned tier is the role's startingPoint (or the tier itself).
@@ -1089,21 +1099,9 @@ export function createPeopleRouter(
             data: { accessRoleId, role: requestedRole },
           });
 
-          return { kind: "ok", existing, requestedRole, accessRoleId, roleName } as const;
+          return { existing, requestedRole, accessRoleId, roleName };
         }, SERIALIZABLE_TX);
 
-        if (outcome.kind === "role_not_found") {
-          return res.status(404).json({ error: "Role not found" });
-        }
-        if (outcome.kind === "role_archived") {
-          return res.status(409).json({
-            error: "This role is archived — restore it before assigning people.",
-            code: "ACCESS_ROLE_ARCHIVED",
-          });
-        }
-        if (outcome.kind === "user_not_found") {
-          return res.status(404).json({ error: "User not found" });
-        }
         const { existing, requestedRole, accessRoleId, roleName } = outcome;
 
         // Rail 6. A tier crossing runs the consolidated runner (revoke →
@@ -1146,7 +1144,9 @@ export function createPeopleRouter(
 
         res.json({ syncState: "pending" });
       } catch (err) {
-        if (err instanceof RoleMutationRefusedError) {
+        // One shape for both (WARP-1583) — see the sibling assign path in
+        // routes/access.ts.
+        if (isAccessPreconditionError(err) || err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
         next(err);
