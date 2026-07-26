@@ -17,11 +17,17 @@ vi.mock("../middleware/auth.js", () => ({
     if (typeof role === "string" && role.length > 0) {
       // Cast through unknown — the real middleware types role as a
       // strict enum; the mock just plumbs the test header through.
-      (req as unknown as { user?: { username: string; role: string } }).user =
-        {
-          username: "test",
-          role,
-        };
+      // WARP-1529: `id` is REQUIRED on a real AuthUser (the OCS path rejects
+      // a Nextcloud user with no local User row outright), and the §3 tool
+      // scope resolver fails closed on a human-tier principal without one.
+      // The stub carries it so this harness models a real session.
+      (req as unknown as {
+        user?: { id: string; username: string; role: string };
+      }).user = {
+        id: "test-user-uuid",
+        username: "test",
+        role,
+      };
     }
     next();
   },
@@ -137,7 +143,21 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
   beforeAll(async () => {
     const { createApp } = await import("../app.js");
     const prisma = new PrismaClient();
-    app = createApp(prisma);
+    // WARP-1529: the chat route now resolves the caller's §3 tool scope from
+    // the User row. This harness's client is never connected, so intercept
+    // that ONE delegate — `accessRoleId: null` is the state of every user on
+    // a box today, i.e. "no per-role narrowing", which is exactly what the
+    // RBAC cases below assert (the coarse ADR-004 write filter, unchanged).
+    // A Proxy rather than a spy: touching `prisma.user` on a real client
+    // instantiates the query engine and hangs an unconnected test.
+    const userStub = {
+      findUnique: async () => ({ accessRoleId: null, accessRole: null }),
+    };
+    const prismaForApp = new Proxy(prisma, {
+      get: (target, prop) =>
+        prop === "user" ? userStub : Reflect.get(target, prop),
+    });
+    app = createApp(prismaForApp);
   }, 30_000);
 
   it("non-streaming returns AgentResult shape (assistant message + trace)", async () => {

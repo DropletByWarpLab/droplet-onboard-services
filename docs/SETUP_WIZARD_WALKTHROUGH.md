@@ -14,8 +14,9 @@ so a non-technical customer can stand the box up alone, end-to-end:
 1. **Internet** ("Set up your network") — name the **Home Wi-Fi the box
    broadcasts** (SSID + password the household joins, since the Droplet is the
    router). Remote access is handled separately by the box's named address
-   (`<name>.droplet-us.com`) served over the Cloudflare Tunnel relay (ADR-025)
-   with a publicly-trusted per-device cert (ADR-023) — no dynamic-DNS setup.
+   (`<name>.droplet-us.com`) served over the Cloudflare Tunnel relay (ADR-025A,
+   `droplet-fleet-hq`) with a publicly-trusted per-device cert (ADR-023) — no
+   dynamic-DNS setup.
 2. **Storage** — name the drives the box discovered ("Wedding Photos",
    "Headshots", etc.) so they show up labelled in Files.
 3. **Cameras** — auto-detect ONVIF cameras on the LAN; if any are present,
@@ -68,7 +69,7 @@ Rationale:
   admin-only, etc.).
 - `internet` before `vpn` because the VPN peer config must include a
   reachable `endpoint_host`; the box's named address
-  (`<name>.droplet-us.com`, served over the ADR-025 relay) is how the
+  (`<name>.droplet-us.com`, served over the ADR-025A relay — `droplet-fleet-hq`) is how the
   customer reaches the box from outside.
 - `storage` before `discovery` because naming drives is fast and
   unambiguous; smart-home / camera discovery is slow and visual.
@@ -149,7 +150,7 @@ Each step gets a section. Format:
 **Home Wi-Fi the box broadcasts** (the SSID + password every device at home
 joins). Remote access is *not* configured here — the box reaches the outside
 world at its named address (`<name>.droplet-us.com`) served over the Cloudflare
-Tunnel relay (ADR-025) with a per-device publicly-trusted cert (ADR-023), set up
+Tunnel relay (ADR-025A, `droplet-fleet-hq`) with a per-device publicly-trusted cert (ADR-023), set up
 automatically at provisioning. The section is optional and skippable.
 
 **Backend calls** — Home Wi-Fi (only when an SSID is entered):

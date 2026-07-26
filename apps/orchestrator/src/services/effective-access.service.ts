@@ -252,7 +252,31 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
       );
     }
   }
+  // WARP-1528 (T4 / QA): the intersection applies to the GATEABLE modules
+  // only — the always-on floor is exempt, the same way `isGateableModuleId`
+  // already makes it exception-immune above.
+  //
+  // Why this is a correction and not a widening: core modules are exempt from
+  // workspace ENABLEMENT everywhere else in the system. app.ts's module gate
+  // does `if (def.core) continue`, so `/api/llm` is never enablement-gated,
+  // and the owner branch returns before this loop, so owners keep `chat`
+  // unconditionally. But `chat`'s registry AVAILABILITY is
+  // `isSet(AI_GATEWAY_URL)`, so on a box with that env unset it drops out of
+  // the workspace-effective set — and only role-holders reach this loop. The
+  // result was a narrowing applied to the always-on floor that neither the
+  // workspace gate nor the owner path applies.
+  //
+  // It also makes "a person's feature set is never empty" TRUE rather than
+  // nearly-true: the dashboard's fail-open guard treats an empty
+  // `effectiveForUser` as unresolved and falls back to the full workspace
+  // list, which on a grantless role would have shown exactly the "Droplet
+  // full of locked doors" this feature exists to prevent.
+  //
+  // Enforcement delta: none. `chat` is not in app.ts's FEATURE_GATED_MODULES,
+  // so `requireFeatureAccess` is never mounted on `/api/llm` — this opens no
+  // route, it only stops the resolver from lying about the floor.
   for (const moduleId of [...levelByModule.keys()]) {
+    if (!isGateableModuleId(moduleId)) continue;
     if (!inputs.workspaceModuleIds.has(moduleId)) levelByModule.delete(moduleId);
   }
   const features = [...levelByModule.entries()].map(([moduleId, level]) => ({

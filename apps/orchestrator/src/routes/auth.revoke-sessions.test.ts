@@ -109,12 +109,16 @@ function createPrismaMock(seed: any[] = []) {
   const self: any = {};
   self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
   self.user = {
+    // WARP-1526 (pr-reviewer #1229 B2): the routes resolve by
+    // nextcloudUsername, then the guard RE-READS by id inside the
+    // transaction — the stub must answer both keys.
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
           (u) =>
-            where.nextcloudUsername !== undefined &&
-            u.nextcloudUsername === where.nextcloudUsername,
+            (where.nextcloudUsername !== undefined &&
+              u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.id !== undefined && u.id === where.id),
         ) ?? null
       );
     }),
@@ -479,9 +483,9 @@ describe("POST /api/auth/users/:username/enable — WARP-1526 local re-activate"
  * default Postgres/Prisma actually give you. Under READ COMMITTED two
  * concurrent disables of the last two operators both count "one other
  * operator remains", both pass, and both commit — zero non-disabled
- * owner∪admin, the exact state LAST_OPERATOR_INVARIANT exists to prevent.
- * The mock runs the callback serially, so only the OPTION can be asserted;
- * that is what stops the silent regression coming back.
+ * owner-union-admin, the exact state LAST_OPERATOR_INVARIANT exists to
+ * prevent. The mock runs the callback serially, so only the OPTION can be
+ * asserted; that is what stops the silent regression coming back.
  */
 describe("POST /api/auth/users/:username/disable — serializable isolation", () => {
   it("passes { isolationLevel: 'Serializable' } to the guard $transaction", async () => {
@@ -495,5 +499,65 @@ describe("POST /api/auth/users/:username/disable — serializable isolation", ()
     expect(prisma.$transaction.mock.calls[0][1]).toEqual({
       isolationLevel: "Serializable",
     });
+  });
+});
+
+/**
+ * WARP-1526 — pr-reviewer #1229 N1.
+ *
+ * This branch introduced the fail-soft disable (local row is truth, NC is
+ * a best-effort mirror), so it owns the consequence: Nextcloud is proxied
+ * at `/nextcloud/` with no orchestrator auth in front, so a still-enabled
+ * NC account keeps web + WebDAV + desktop-sync access even though every
+ * orchestrator login gate now refuses. A bare 200 and an unqualified
+ * "User disabled" audit row would hide that from the operator.
+ */
+describe("POST /api/auth/users/:username/disable — N1 degraded-mirror honesty", () => {
+  it("a failed NC mirror still 200s (local revocation is authoritative) but SAYS SO in the body", async () => {
+    (nc.ncSetUserEnabled as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "disabled",
+      username: "alice",
+      ncMirror: "failed",
+    });
+    expect(res.body.warning).toMatch(/Nextcloud/i);
+    expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+  });
+
+  it("the audit row carries the degraded marker so the trail is not falsely clean", async () => {
+    (nc.ncSetUserEnabled as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    await request(app).post("/api/auth/users/alice/disable");
+
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        what: "User disabled",
+        refs: expect.objectContaining({ ncMirror: "failed" }),
+      }),
+    );
+  });
+
+  it("the happy path reports a synced mirror and no warning", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.body.ncMirror).toBe("synced");
+    expect(res.body.warning).toBeUndefined();
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        refs: expect.objectContaining({ ncMirror: "synced" }),
+      }),
+    );
   });
 });
