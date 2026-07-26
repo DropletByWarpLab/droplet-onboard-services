@@ -125,11 +125,22 @@ interface Hooks {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-/** The read half. `src()` decides WHICH state answers — live, or a snapshot. */
-function readModels(src: () => State, hooks: Hooks): Record<string, Any> {
+/**
+ * The read half. `src()` decides WHICH state answers — live, or a snapshot.
+ *
+ * `note` records every read this layer serves, tagged with the layer it came
+ * from. That is what turns "is `tx` threaded through the WHOLE read set?"
+ * into an assertion instead of a code review (see the threading test below).
+ */
+function readModels(
+  src: () => State,
+  hooks: Hooks,
+  note: (read: string) => void = () => {},
+): Record<string, Any> {
   return {
     user: {
       async findUnique({ where }: Any) {
+        note("user.findUnique");
         const found = src().users.find((u) => u.id === where.id);
         if (!found) return null;
         // MATERIALIZED, not aliased. A query returns a value; holding a live
@@ -170,32 +181,38 @@ function readModels(src: () => State, hooks: Hooks): Record<string, Any> {
     },
     userAccessException: {
       async findMany({ where }: Any) {
+        note("userAccessException.findMany");
         return src().exceptions.filter((x) => x.userId === where.userId);
       },
     },
     moduleSetting: {
       async findMany() {
+        note("moduleSetting.findMany");
         await hooks.beforeModuleRead?.();
         return src().moduleSettings.map((m) => ({ ...m }));
       },
     },
     offLanAllowlistChannel: {
       async findUnique() {
+        note("offLanAllowlistChannel.findUnique");
         return { enabled: src().cloudEscape };
       },
     },
     integrationConnection: {
       async findMany() {
+        note("integrationConnection.findMany");
         return src().connections.map((c) => ({ ...c }));
       },
     },
     userUsagePolicy: {
       async findUnique() {
+        note("userUsagePolicy.findUnique");
         return null;
       },
     },
     departmentMembership: {
       async findMany() {
+        note("departmentMembership.findMany");
         return [];
       },
     },
@@ -283,8 +300,21 @@ function seedState(overrides: Partial<State> = {}): State {
 function makeDb(seed: State, hooks: Hooks) {
   let live = seed;
 
+  // Reads served by the LIVE layer while a transaction is open are the
+  // un-threaded ones — `prisma.x` reached for from inside the callback
+  // instead of `tx.x`. Recording both layers is what lets the threading
+  // test below be non-vacuous in BOTH directions: a leak names the read
+  // that escaped, and an empty snapshot list catches the transaction being
+  // removed altogether (which would otherwise leak nothing and pass).
+  let openTransactions = 0;
+  const leaked: string[] = [];
+  const fromSnapshot: string[] = [];
+  const noteLive = (read: string) => {
+    if (openTransactions > 0) leaked.push(read);
+  };
+
   const self: Record<string, Any> = mergeModels(
-    readModels(() => live, hooks),
+    readModels(() => live, hooks, noteLive),
     writeModels(() => live),
   );
 
@@ -310,7 +340,7 @@ function makeDb(seed: State, hooks: Hooks) {
    */
   function snapshotHandle(tracked: Any): Any {
     const snapshot = structuredClone(live);
-    const reads = readModels(() => snapshot, hooks);
+    const reads = readModels(() => snapshot, hooks, (r) => fromSnapshot.push(r));
     return new Proxy(tracked, {
       get(target, prop, receiver) {
         const value = Reflect.get(target, prop, receiver);
@@ -328,15 +358,25 @@ function makeDb(seed: State, hooks: Hooks) {
     });
   }
 
-  self.$transaction = (fn: Any, options?: unknown) =>
-    Array.isArray(fn)
-      ? rawTransaction(fn as Any, options)
-      : rawTransaction((tracked: Any) => fn(snapshotHandle(tracked)), options);
+  self.$transaction = (fn: Any, options?: unknown) => {
+    if (Array.isArray(fn)) return rawTransaction(fn as Any, options);
+    openTransactions += 1;
+    return rawTransaction(
+      (tracked: Any) => fn(snapshotHandle(tracked)),
+      options,
+    ).finally(() => {
+      openTransactions -= 1;
+    });
+  };
 
   return {
     prisma: self,
     seam,
     state: () => live,
+    /** Reads served from LIVE state while a transaction was open. */
+    leaked: () => [...leaked],
+    /** Reads served from a transaction's snapshot. */
+    fromSnapshot: () => [...fromSnapshot],
   };
 }
 
@@ -454,6 +494,50 @@ describe("WARP-1583 — resolveEffectiveAccess composes ONE snapshot", () => {
     // must be too: `cameras` still resolves, exactly as it did at open.
     expect(access!.features.map((f) => f.moduleId)).toContain("cameras");
     expect(access!.toolDomains).toContain("cameras");
+  });
+
+  /**
+   * THE THREADING CONTRACT, asserted structurally rather than one tear at a
+   * time.
+   *
+   * The two tests above each pin a specific tear, and each needs a hook at
+   * the exact statement boundary it races. That is the right shape for the
+   * tears the ticket is ABOUT, but it only covers the reads someone wrote a
+   * hook for: mutation-testing the resolver showed `tx` could be dropped from
+   * `userAccessException`, `offLanAllowlistChannel`, `integrationConnection`,
+   * `userUsagePolicy` or `departmentMembership` with this file still green.
+   * `integrationConnection` is the one that matters most — `connectors[p] =
+   * min(roleGrant, connection.writeEnabled)` composes it with the role grants,
+   * on the axis the service header says has no compose-time tier floor, so an
+   * un-threaded read there re-opens a WIDENING tear.
+   *
+   * Rather than seven near-duplicate race tests, assert the property the fix
+   * actually claims: every read in the set is served by the transaction
+   * handle, and none by the live client. The stub binds its snapshot reads to
+   * the handle, so this distinguishes `tx.x` from `prisma.x` directly.
+   *
+   * Non-vacuous in both directions. Dropping `tx` from any single read puts it
+   * in `leaked`; deleting the transaction wrapper altogether leaks nothing but
+   * empties `fromSnapshot`, which the second assertion catches.
+   */
+  it("threads tx through EVERY read in the set — none escapes to the live client", async () => {
+    const { prisma, leaked, fromSnapshot } = makeDb(seedState(), {});
+    _setEffectiveAccessForTests(prisma as never, CFG);
+
+    await resolveEffectiveAccess("u-1");
+
+    expect(leaked()).toEqual([]);
+    // The whole read set §3 composes, including the one that lives in
+    // another service (`getEffectiveModuleIds` → `moduleSetting.findMany`).
+    expect([...fromSnapshot()].sort()).toEqual([
+      "departmentMembership.findMany",
+      "integrationConnection.findMany",
+      "moduleSetting.findMany",
+      "offLanAllowlistChannel.findUnique",
+      "user.findUnique",
+      "userAccessException.findMany",
+      "userUsagePolicy.findUnique",
+    ]);
   });
 
   it("opens exactly one transaction, at RepeatableRead", async () => {
