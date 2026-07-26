@@ -425,7 +425,14 @@ export function createVoiceRouter(): Router {
     // swallows recorder failures).
     if (status >= 200 && status < 300) {
       void recordActivity({
-        kind: "system",
+        // Same call WARP-1058 made for the restart row above: kind
+        // `voice`, not `system`, so the row lands in the /voice page's
+        // "Recent voice activity" feed — which is keyed to
+        // `/api/activity?kind=voice` — right beside the switch that
+        // caused it. A box-wide silence is the single most relevant
+        // thing that feed can carry; `system` would surface it
+        // everywhere EXCEPT the page holding the switch.
+        kind: "voice",
         severity: "info",
         sourceIcon: "mic",
         what: enabled ? "Voice turned on" : "Voice turned off",

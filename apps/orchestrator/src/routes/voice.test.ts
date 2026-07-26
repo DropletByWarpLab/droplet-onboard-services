@@ -631,7 +631,10 @@ describe("POST /api/voice/enabled (WARP-1599)", () => {
     );
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
-      kind: "system",
+      // kind `voice` (not `system`) so the row reaches the /voice page's
+      // feed, which is keyed to `/api/activity?kind=voice` — the same
+      // call WARP-1058 made for the restart row.
+      kind: "voice",
       severity: "info",
       sourceIcon: "mic",
       what: "Voice turned off",
@@ -654,7 +657,7 @@ describe("POST /api/voice/enabled (WARP-1599)", () => {
     );
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
-      kind: "system",
+      kind: "voice",
       severity: "info",
       sourceIcon: "mic",
       what: "Voice turned on",
