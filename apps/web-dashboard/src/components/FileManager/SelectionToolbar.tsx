@@ -9,6 +9,7 @@ import {
   Trash2,
   Scissors,
   ClipboardPaste,
+  Link as LinkIcon,
 } from "lucide-react";
 
 interface SelectionToolbarProps {
@@ -24,6 +25,23 @@ interface SelectionToolbarProps {
   onCopyTo: () => void;
   onDelete: () => void;
   onDownload: () => void;
+  /**
+   * WARP-1540 — share the current selection. One selected item opens the
+   * existing ShareDialog; several run the per-path createShare loop the page
+   * owns. Always wired: whether the caller is ALLOWED to share is `canShare`,
+   * never a missing handler.
+   */
+  onShare: () => void;
+  /**
+   * WARP-1540 — may the caller share here, with this selection? Defaults true
+   * so a space with no share restriction is unaffected. False renders Share
+   * visible-but-disabled (never silently absent) with `shareDisabledReason`
+   * as the tooltip — the page decides the cause (reader/non-manager posture,
+   * or a selection over the bulk cap) because only the page knows the space.
+   */
+  canShare?: boolean;
+  /** Honest reason shown as the Share tooltip while `canShare` is false. */
+  shareDisabledReason?: string;
   /**
    * WARP-1267 — true inside a `reader`-right department/team library.
    * Rename/Move/Cut/Paste/Trash render visible-but-disabled with the
@@ -57,9 +75,23 @@ export function SelectionToolbar({
   onCopyTo,
   onDelete,
   onDownload,
+  onShare,
+  canShare = true,
+  shareDisabledReason,
   readOnly = false,
 }: SelectionToolbarProps) {
   if (count === 0 && !hasClipboard) return null;
+
+  // WARP-1540 — `readOnly` is a floor, not the whole rule: a reader can never
+  // share, but a contributor in a department can't either (the share bit is a
+  // manager right, ADR-029). The page passes the precise `canShare`; readOnly
+  // keeps the button honest even for a caller that hasn't wired it yet.
+  const shareDisabled = readOnly || !canShare;
+  const shareTitle = shareDisabled
+    ? shareDisabledReason ?? READER_TOOLTIP
+    : count > 1
+      ? `Share ${count} files — one link each`
+      : "Share link";
 
   return (
     <div
@@ -113,6 +145,19 @@ export function SelectionToolbar({
             <button onClick={onDownload} className="btn sm" title="Download">
               <Download size={14} />
               Download
+            </button>
+            {/* WARP-1540 — Share sits with Download: both are "get this out of
+                here" actions, and both survive reader posture as a question of
+                RIGHTS rather than of write access. */}
+            <button
+              onClick={() => !shareDisabled && onShare()}
+              disabled={shareDisabled}
+              aria-disabled={shareDisabled || undefined}
+              className="btn sm"
+              title={shareTitle}
+            >
+              <LinkIcon size={14} />
+              Share
             </button>
             <button
               onClick={() => !readOnly && onMove()}
