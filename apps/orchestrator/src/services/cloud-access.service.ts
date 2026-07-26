@@ -25,13 +25,31 @@
  *   • a turn with no cloud-resolving provider — the resolver is never read, so
  *     local chat (every box's hot path) takes ZERO new per-turn DB work.
  *
- * WHY AN UNRESOLVABLE MODEL COUNTS AS NOT-CLOUD: the provider comes from the
- * gateway's own model catalogue, which only lists models a configured provider
- * can actually serve. A model absent from it has no reachable cloud provider
- * behind it, and the gateway's fail-closed 451 still guards the workspace limb.
- * The alternative — copying `router.py`'s PROVIDER_PREFIXES table into the
- * orchestrator — would be exactly the kind of duplicated routing knowledge that
- * drifts.
+ * HOW A TURN'S PROVIDER IS RESOLVED, and why the catalogue is not enough:
+ * the gateway's `/ai/models` catalogue is NOT a list of every model a cloud
+ * provider will serve. Its cloud half is six hardcoded ids
+ * (`providers/openai_cloud.py` OPENAI_MODELS, `providers/anthropic_cloud.py`
+ * ANTHROPIC_MODELS). Actual routing is by PREFIX — `router.py`
+ * `resolve_provider` / PROVIDER_PREFIXES — and the cloud providers forward
+ * whatever string they are handed straight to litellm
+ * (`f"openai/{model}"`). So `gpt-5`, `o3-mini`, `gpt-4o-2024-08-06` and
+ * `claude-opus-4-20250514` all reach a cloud provider while resolving to
+ * NOTHING in the catalogue. Trusting the catalogue alone would let a
+ * cloud-denied person out with one crafted model string, and the ai-gateway
+ * backstop cannot help: it is workspace-scoped, and per-person denial only
+ * matters while the workspace escape is ON.
+ *
+ * So the resolution order below mirrors the gateway's, in the same order:
+ *   1. the caller's forwarded provider, when it names a non-local one;
+ *   2. the catalogue, which is authoritative WHEN it resolves (it carries the
+ *      box's actually-pulled local models);
+ *   3. the PROVIDER_PREFIXES mirror below;
+ *   4. otherwise not-cloud — the gateway's own `return self.ollama` default.
+ *
+ * The mirror is duplicated knowledge, deliberately, on the same terms as
+ * `LOCAL_PROVIDERS` above: it is pinned to its source by a parity test that
+ * PARSES `router.py` at test time (`cloud-access.service.test.ts`), so drift
+ * fails CI rather than silently reopening this hole.
  */
 import { getModelProvider } from "./ai-gateway.client.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
@@ -49,6 +67,56 @@ export const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(["ollama", "ollama_l
 /** True for a provider that never leaves the LAN. */
 export function isLocalProvider(provider: string): boolean {
   return LOCAL_PROVIDERS.has(provider.trim().toLowerCase());
+}
+
+/**
+ * The LOCAL half of `router.py`'s PROVIDER_PREFIXES. Checked FIRST, exactly as
+ * the gateway checks it: the dict iterates in insertion order with `ollama`
+ * listed first, so a local family whose name collides with a cloud prefix wins.
+ * `gpt-oss` is the canonical case — OpenAI's OPEN-WEIGHTS model, served by the
+ * local Ollama, whose name starts with the cloud prefix `gpt`. Dropping this
+ * ordering would 451 the box's own model.
+ */
+export const LOCAL_MODEL_PREFIXES: readonly string[] = [
+  "llama",
+  "mistral",
+  "phi",
+  "gemma",
+  "qwen",
+  "codellama",
+  "deepseek",
+  "gpt-oss",
+];
+
+/** The CLOUD half of `router.py`'s PROVIDER_PREFIXES, in the same order. */
+export const CLOUD_MODEL_PREFIXES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["anthropic", ["claude"]],
+  ["openai", ["gpt", "o1", "o3"]],
+];
+
+/**
+ * Which provider `router.py` would route `model` to on NAME alone — the
+ * fallback for everything the catalogue does not know. Mirrors
+ * `resolve_provider`'s order: the configured local model wins outright, then
+ * local prefixes, then cloud prefixes. `undefined` = no prefix matched, which
+ * is the gateway's `return self.ollama` default (i.e. local).
+ */
+export function providerForModelName(model: string): string | undefined {
+  const name = model.trim().toLowerCase();
+  if (!name) return undefined;
+
+  // router.py: `if self._local_model and model_lower == self._local_model`.
+  // The box's configured model routes local even when its name collides with
+  // a cloud prefix — read at call time so a deployment override applies
+  // without a restart, matching how the route reads it elsewhere.
+  const configuredLocal = (process.env.LLM_MODEL ?? "").trim().toLowerCase();
+  if (configuredLocal && name === configuredLocal) return "ollama";
+
+  if (LOCAL_MODEL_PREFIXES.some((p) => name.startsWith(p))) return "ollama";
+  for (const [provider, prefixes] of CLOUD_MODEL_PREFIXES) {
+    if (prefixes.some((p) => name.startsWith(p))) return provider;
+  }
+  return undefined;
 }
 
 /** The sovereignty channel this refusal belongs to (the ai-gateway's key). */
@@ -120,14 +188,13 @@ const ALLOWED: CloudTurnDecision = { kind: "allowed" };
 
 /**
  * Resolve which non-local provider this turn would reach, or `null` when it
- * would stay local.
+ * would stay local. Mirrors `router.py::resolve_provider`'s order (see the
+ * header) so the gate's verdict matches where the request would ACTUALLY go.
  *
- * BOTH signals count, and either one being cloud is enough: the catalogue
- * (authoritative — it is the gateway's own routing table) and the caller's
- * forwarded `provider`. A client that mislabels a cloud model as `ollama`
- * is caught by the catalogue; a client that forwards a cloud provider for a
- * model the catalogue does not know is caught by the forwarded value. Neither
- * direction of a lie opens the gate.
+ * Every signal that says "cloud" is enough, in either direction: a client that
+ * mislabels a cloud model as `ollama` is caught by the catalogue or the prefix
+ * mirror; a client that forwards a cloud provider for a model neither knows is
+ * caught by the forwarded value. No lie opens the gate.
  */
 async function cloudProviderFor(args: CloudTurnArgs): Promise<string | null> {
   const forwarded = args.provider?.trim();
@@ -137,13 +204,23 @@ async function cloudProviderFor(args: CloudTurnArgs): Promise<string | null> {
   try {
     catalogued = await getModelProvider(args.model);
   } catch (err) {
-    // The client already degrades to `undefined` internally; a throw here
-    // would be a transport surprise. Unknown provider = no evidence of a
-    // reachable cloud route (see the header note).
-    logger.warn({ err, model: args.model }, "model-provider lookup failed; treating turn as local");
-    return null;
+    // `findModelInfo` swallows its own transport errors and returns undefined,
+    // so this is defensive against a future client change rather than a path
+    // seen today. It falls through to the prefix mirror instead of returning
+    // "local" — an unreadable catalogue must not become a bypass.
+    logger.warn(
+      { err, model: args.model },
+      "model-provider lookup threw; falling back to the PROVIDER_PREFIXES mirror",
+    );
   }
-  if (catalogued && !isLocalProvider(catalogued)) return catalogued;
+  // The catalogue is authoritative when it resolves: it carries the box's
+  // actually-pulled local models, so a local model whose name collides with a
+  // cloud prefix is settled here before the mirror ever runs.
+  if (catalogued) return isLocalProvider(catalogued) ? null : catalogued;
+
+  // Uncatalogued — the case the six hardcoded cloud ids leave wide open.
+  const byName = providerForModelName(args.model);
+  if (byName && !isLocalProvider(byName)) return byName;
   return null;
 }
 

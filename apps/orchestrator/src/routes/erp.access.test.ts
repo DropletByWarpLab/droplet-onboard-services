@@ -73,6 +73,10 @@ vi.mock("../services/erp.service.js", () => ({
 
 import { createErpRouter } from "./erp.js";
 import { EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
+// The REAL error class — `handleErpError` branches on `instanceof`, so a
+// duck-typed stand-in would fall through to the 500 handler and quietly make
+// the honest-409 assertion below vacuous.
+import { ErpError } from "../services/erp-error.js";
 
 /** Prisma surface the route's connector gate needs (the connection probe). */
 function createPrismaMock(opts: { connectionConfigured: boolean }) {
@@ -264,6 +268,25 @@ describe("ERP reads — a person with NO accessRole behaves exactly as today", (
     expect(res.body).toEqual({ error: "Forbidden: role not permitted" });
   });
 
+  it("a GRANTED family person also gets 403 when nothing is connected — the accepted cost of the fall-through", async () => {
+    // The resolver returns {} for everyone when no IntegrationConnection row
+    // exists (`no connection = no reach`), so a granted family person is
+    // indistinguishable from an ungranted one here and lands on today's
+    // floor: 403 rather than the honest NOT_CONFIGURED an admin would see.
+    // Pinned deliberately — the alternative (letting family through on an
+    // unconfigured box) would regress the role-less family 403 directly
+    // above it, which is the louder promise. Revisit if the resolver ever
+    // reports grants independently of connections.
+    resolveEffectiveAccessMock.mockResolvedValue(access("family", {}));
+    const app = buildApp({ id: "u-reception", role: "family" }, { connectionConfigured: false });
+
+    const res = await request(app).get("/api/erp/schedule");
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "Forbidden: role not permitted" });
+    expect(svcMock.getSchedule).not.toHaveBeenCalled();
+  });
+
   it("falls back to today's floor when the resolver is unavailable — no reach is invented, none is lost", async () => {
     resolveEffectiveAccessMock.mockRejectedValue(new Error("db down"));
 
@@ -321,21 +344,18 @@ describe("ERP writes — admin-tier only, unchanged above that (WARP-1530)", () 
     resolveEffectiveAccessMock.mockResolvedValue(
       access("admin", { [EAGLESOFT_PROVIDER]: "read" }),
     );
-    svcMock.createWriteRequest.mockRejectedValue(
-      Object.assign(new Error("writes are disabled for this integration"), {
-        name: "ErpError",
-        code: "WRITE_NOT_ENABLED",
-        status: 409,
-        toJSON: () => ({ error: "writes are disabled", code: "WRITE_NOT_ENABLED" }),
-      }),
-    );
+    svcMock.createWriteRequest.mockRejectedValue(ErpError.writeNotEnabled());
     const app = buildApp({ id: "u-admin", role: "admin" });
 
     const res = await request(app)
       .post("/api/erp/write-requests")
       .send({ command: "reschedule_appointment", params: {} });
 
-    expect(res.status).not.toBe(403);
+    // The point of the test: the caller reaches the service and gets the
+    // HONEST 409, not a 403 invented by a route gate reading `read` as
+    // "no write permission".
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("WRITE_NOT_ENABLED");
     expect(svcMock.createWriteRequest).toHaveBeenCalled();
   });
 });

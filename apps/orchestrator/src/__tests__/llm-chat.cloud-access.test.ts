@@ -101,6 +101,13 @@ vi.mock("../services/llm-agent.service.js", () => ({
   runAgent: (...args: unknown[]) => mockRunAgent(...args),
 }));
 
+// /llm/complete's single-turn worker. Stubbed so "did the request reach a
+// provider?" is a spy assertion rather than a network call.
+const mockCompleteOnce = vi.fn();
+vi.mock("../services/llm-complete.service.js", () => ({
+  completeOnce: (...a: unknown[]) => mockCompleteOnce(...a),
+}));
+
 // The T3 resolver is the ONE source of the `cloud` verdict. Only the bound
 // fetch wrapper is stubbed; the pure composition stays real for the
 // cloud-access service test.
@@ -154,6 +161,7 @@ beforeEach(() => {
     iterations: 1,
     stop_reason: "model_done",
   });
+  mockCompleteOnce.mockReset().mockResolvedValue({ content: "ok", model: "gpt-4o" });
   mockResolveEffectiveAccess.mockReset();
   mockGetModelProvider.mockReset().mockResolvedValue("openai");
 });
@@ -285,5 +293,101 @@ describe("POST /api/llm/chat — per-person cloud gate (WARP-1530)", () => {
 
     expect(res.status).toBe(200);
     expect(mockResolveEffectiveAccess).not.toHaveBeenCalled();
+  });
+});
+
+// ── the OTHER route that takes a caller-chosen model ────────────────
+//
+// Gating only /llm/chat would have left /llm/complete as a one-line bypass:
+// `model` is caller-supplied there too, the guard admits every human tier
+// down to guest, and `.strict()` means there is no `provider` field to
+// forward — so the model NAME is the only signal, which is exactly the path
+// the PROVIDER_PREFIXES mirror covers. These pin the gate on that route
+// specifically; the existing llm-complete.test.ts cannot, because its auth
+// stub injects `{username, role}` with no `id` and the gate correctly
+// returns before any lookup for an id-less session.
+describe("POST /api/llm/complete — the same per-person cloud gate (WARP-1530)", () => {
+  it("refuses a cloud model for a denied person and never calls the completion worker", async () => {
+    mockResolveEffectiveAccess.mockResolvedValue(accessWith(false));
+    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "gpt-4o" });
+
+    expect(res.status).toBe(451);
+    expect(res.body.error).toBe("off_lan_blocked");
+    expect(res.body.scope).toBe("per_person");
+    expect(res.body.provider).toBe("openai");
+    expect(mockCompleteOnce).not.toHaveBeenCalled();
+  });
+
+  it("refuses an UNCATALOGUED cloud model too — model name is the only signal here", async () => {
+    // `.strict()` rejects a `provider` field, and the catalogue knows nothing
+    // about gpt-5; without the prefix mirror this request would sail through.
+    mockGetModelProvider.mockResolvedValue(undefined);
+    mockResolveEffectiveAccess.mockResolvedValue(accessWith(false));
+    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "gpt-5" });
+
+    expect(res.status).toBe(451);
+    expect(res.body.provider).toBe("openai");
+    expect(mockCompleteOnce).not.toHaveBeenCalled();
+  });
+
+  it("completes normally when the person's resolved access allows cloud", async () => {
+    mockResolveEffectiveAccess.mockResolvedValue(accessWith(true));
+    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "gpt-4o" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.content).toBe("ok");
+    expect(mockCompleteOnce).toHaveBeenCalled();
+  });
+
+  it("leaves a local-model completion untouched — the resolver is never consulted", async () => {
+    mockGetModelProvider.mockResolvedValue("ollama");
+    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "llama3:8b" });
+
+    expect(res.status).toBe(200);
+    expect(mockCompleteOnce).toHaveBeenCalled();
+    expect(mockResolveEffectiveAccess).not.toHaveBeenCalled();
+  });
+
+  it("exempts the mcp-server service principal — the route's registered consumer", async () => {
+    // translate_text / summarize_file ride this route as `_service:mcp`; §3
+    // keeps service principals out of layer 2, and they pay nothing for it.
+    const app = buildApp({ id: "_service:mcp", username: "mcp", role: "service" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "gpt-4o" });
+
+    expect(res.status).toBe(200);
+    expect(mockCompleteOnce).toHaveBeenCalled();
+    expect(mockResolveEffectiveAccess).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED with a 503 when the resolver is unavailable", async () => {
+    mockResolveEffectiveAccess.mockRejectedValue(new Error("db down"));
+    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+
+    const res = await request(app)
+      .post("/api/llm/complete")
+      .send({ text: "translate this", model: "gpt-4o" });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("access_gate_unavailable");
+    expect(mockCompleteOnce).not.toHaveBeenCalled();
   });
 });
