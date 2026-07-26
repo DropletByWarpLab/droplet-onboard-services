@@ -3,6 +3,30 @@ import type { PrivateEnhancement } from "./private-enhancement.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
+/**
+ * WARP-1611 — the scale a retrieval `score` is expressed in.
+ *
+ *   - "similarity" — already a bounded 0-1 relevance (a cosine, or a
+ *     reranker logit the producer already squashed). Rendered as-is.
+ *   - "logit"      — an unbounded cross-encoder output that still needs
+ *     a logistic squash before it means anything as a percentage.
+ *
+ * Mirrors `ScoreKind` in `services/mcp-server/src/file-search.service.ts`
+ * (the producer) and `apps/web-dashboard/src/lib/relevance.ts` (the
+ * renderer).
+ *
+ * ALWAYS optional on the wire. Absent means "the producer didn't say",
+ * and every consumer falls back to inferring the scale from the value
+ * (`inferScoreKind`: inside [0, 1] ⇒ bounded relevance, outside ⇒
+ * logit). That fallback is what keeps payloads from older producers —
+ * and clients that predate the tag — rendering exactly as they do
+ * today. The tag exists so a renderer that CAN be told stops guessing:
+ * the guess is only correct while every producer normalizes, and a
+ * silently mis-binned scale is what made citation chips read 0% in
+ * WARP-859 / WARP-1603.
+ */
+export type ScoreKind = "logit" | "similarity";
+
 export interface HttpClient {
   // WARP-887: `signal` lets callers (e.g. callOrch's 8s deadline) abort the
   // in-flight request so a slow/unresponsive target doesn't leak an open
@@ -77,6 +101,17 @@ export interface ToolContext {
       pageNumber: number | null;
       brainItemId: string | null;
       score: number;
+      /**
+       * WARP-1611 — optional scale tag for `score`. mcp-server's
+       * `rerankPassages` stamps "similarity" because it normalizes the
+       * BGE logit at the source (WARP-1603); a producer that hands back
+       * a raw cross-encoder output would stamp "logit".
+       *
+       * Optional so a shim written before the tag existed stays
+       * assignable to this signature unchanged, and so hits that arrive
+       * without it keep flowing through as untagged.
+       */
+      scoreKind?: ScoreKind;
       snippet: string;
       metadata: Record<string, unknown> | null;
     }>

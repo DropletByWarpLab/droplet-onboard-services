@@ -1,4 +1,7 @@
-export type { Tool, ToolContext, ToolHandler, ToolResult, ToolError, Role, HttpClient, MatterController } from "./types.js";
+// WARP-1611: `ScoreKind` is exported so producers and consumers of a
+// retrieval score can share one declaration of the scale union instead
+// of each restating it.
+export type { Tool, ToolContext, ToolHandler, ToolResult, ToolError, Role, ScoreKind, HttpClient, MatterController } from "./types.js";
 export type { PrivateEnhancement } from "./private-enhancement.js";
 export { TOOLS, getTool } from "./registry.js";
 export {

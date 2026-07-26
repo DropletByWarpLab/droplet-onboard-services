@@ -1,4 +1,4 @@
-import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import type { ScoreKind, Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
   type: "object",
@@ -61,6 +61,28 @@ function parseEnhance(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+const SCORE_KINDS: readonly ScoreKind[] = ["logit", "similarity"];
+
+/**
+ * WARP-1611 — narrow a producer's score-scale tag to a kind the
+ * renderer understands, or drop it.
+ *
+ * Dropping is the safe default, and deliberately so: absent already
+ * means "infer the scale from the value" at every consumer, which is
+ * exactly how untagged hits render today. Forwarding an unrecognized
+ * string would be strictly worse than dropping it — `relevancePct`
+ * treats any kind that isn't "logit" as an already-bounded 0-1
+ * relevance, so a bogus tag would clamp a negative logit to 0% while
+ * looking authoritative. That is the WARP-859 / WARP-1603 failure this
+ * tag exists to make impossible, so the projection must not be the
+ * thing that reintroduces it.
+ */
+function scoreKindOf(raw: unknown): ScoreKind | undefined {
+  return SCORE_KINDS.includes(raw as ScoreKind)
+    ? (raw as ScoreKind)
+    : undefined;
+}
+
 async function handler(
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -101,14 +123,29 @@ async function handler(
     ok: true,
     data: {
       query,
-      results: hits.map((h) => ({
-        source: h.source,
-        path: h.path,
-        chunkIdx: h.chunkIdx,
-        pageNumber: h.pageNumber,
-        score: h.score,
-        text: h.snippet,
-      })),
+      // This projection is the ONLY narrowing between the retrieval
+      // pipeline and the browser — the orchestrator relays the parsed
+      // tool result verbatim onto the SSE `tool_result` event — so a
+      // field the producer stamps and this list omits is a field the
+      // client can never see.
+      results: hits.map((h) => {
+        // WARP-1611: carry the score-scale tag onto the wire so the
+        // citation chip is TOLD the scale instead of inferring it.
+        const scoreKind = scoreKindOf(h.scoreKind);
+        return {
+          source: h.source,
+          path: h.path,
+          chunkIdx: h.chunkIdx,
+          pageNumber: h.pageNumber,
+          score: h.score,
+          text: h.snippet,
+          // Spread rather than assign `undefined`: an untagged hit must
+          // produce a row with NO `scoreKind` key at all, so the payload
+          // an older producer generates stays byte-identical to what it
+          // generated before this change.
+          ...(scoreKind ? { scoreKind } : {}),
+        };
+      }),
     },
   };
 }
