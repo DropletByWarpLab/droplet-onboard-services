@@ -15,6 +15,7 @@ import {
   deriveVoiceSurfaceState,
   deriveHealthChecks,
   isVoiceBusyError,
+  isVoiceOn,
   meterFractionFromDbfs,
   nextNoiseCount,
   NOISE_SUSTAIN_POLLS,
@@ -26,6 +27,7 @@ const NOW = 1_800_000_000; // epoch seconds, injectable
 
 function status(overrides: Partial<VoiceStatusInfo> = {}): VoiceStatusInfo {
   return {
+    enabled: true,
     state: "listening",
     listening: true,
     wake_loaded: true,
@@ -55,6 +57,7 @@ function calibration(
 }
 
 const base = {
+  enabled: true,
   unavailable: false,
   noiseSustained: false,
   nowS: NOW,
@@ -178,6 +181,74 @@ describe("deriveVoiceSurfaceState (WARP-1055)", () => {
     expect(s.driftCause).toBe("wake");
     // Exactly one banner sentence.
     expect(typeof s.banner).toBe("string");
+  });
+});
+
+describe("voice kill switch (WARP-1599)", () => {
+  it("switched off → off, ahead of the whole health-state mapping", () => {
+    const s = deriveVoiceSurfaceState({
+      ...base,
+      enabled: false,
+      status: status({ state: "off", listening: false }),
+      calibration: calibration(),
+    });
+    expect(s.kind).toBe("off");
+    expect(s.banner).toBeUndefined();
+  });
+
+  it("off outranks a mic fault — the pipeline is absent on purpose", () => {
+    const noMic = deriveVoiceSurfaceState({
+      ...base,
+      enabled: false,
+      status: status({ state: "no_mic", listening: false }),
+      calibration: calibration(),
+    });
+    expect(noMic.kind).toBe("off");
+    const flatlined = deriveVoiceSurfaceState({
+      ...base,
+      enabled: false,
+      status: status({ input_flatlined: true }),
+      calibration: calibration(),
+    });
+    expect(flatlined.kind).toBe("off");
+  });
+
+  it("voice_unavailable still outranks off — an unreachable box knows nothing", () => {
+    const s = deriveVoiceSurfaceState({
+      ...base,
+      enabled: false,
+      unavailable: true,
+      status: null,
+      calibration: null,
+    });
+    expect(s.kind).toBe("broken");
+    expect(s.brokenCause).toBe("unavailable");
+  });
+
+  it("drift never reaches the switched-off box", () => {
+    const s = deriveVoiceSurfaceState({
+      ...base,
+      enabled: false,
+      noiseSustained: true,
+      status: status({ wake_loaded: false }),
+      calibration: calibration({ flags: ["Echo check skipped"] }),
+    });
+    expect(s.kind).toBe("off");
+  });
+
+  it("isVoiceOn: `enabled` is authoritative and its absence reads as ON", () => {
+    // The switch, not `state`: /voice/status only reports state "off"
+    // when the pipeline is absent, so an out-of-band edit of the on-box
+    // flag can leave a "listening" state on a switched-off box.
+    expect(isVoiceOn(status({ enabled: false, state: "listening" }))).toBe(false);
+    expect(isVoiceOn(status({ enabled: true }))).toBe(true);
+
+    // An older box (no field at all) and a loading flash (no payload)
+    // must NEVER render as deliberately silenced.
+    const older: Partial<VoiceStatusInfo> = { ...status() };
+    delete older.enabled;
+    expect(isVoiceOn(older as VoiceStatusInfo)).toBe(true);
+    expect(isVoiceOn(null)).toBe(true);
   });
 });
 

@@ -411,13 +411,18 @@ function StatusWidget({ w, h }: WidgetProps) {
       ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
       : voiceState == null
         ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
-        : voiceState.kind === "calibrated"
-          ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
-          : voiceState.kind === "attention"
-            ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
-            : voiceState.kind === "broken"
-              ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
-              : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
+        : // WARP-1599 — an admin switched voice off: a deliberate,
+          // persisted silence, so the row stays quiet grey and says so
+          // rather than reporting on a pipeline that isn't running.
+          voiceState.kind === "off"
+          ? [Mic, "Voice", "Off", "not listening", "var(--color-label-quaternary)"]
+          : voiceState.kind === "calibrated"
+            ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+            : voiceState.kind === "attention"
+              ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+              : voiceState.kind === "broken"
+                ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
+                : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
 
   const stats: [LucideIcon, string, string, string, string][] = [
     [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],

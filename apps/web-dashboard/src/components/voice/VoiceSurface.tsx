@@ -28,15 +28,29 @@
  * (time mono · person-or-Guest · what happened), §6.3 self-heal rows
  * rendered without a person, and the "See all in Activity" deep-link
  * pre-filtered to kind=voice.
+ *
+ * WARP-1599 added the admin kill switch. Off is not a fault and must
+ * never wear the red broken styling: it is one calm hero that replaces
+ * the mic-status hero, the health strip AND the calibration entry,
+ * because with the pipeline gone those three would be reporting on
+ * something that isn't running — and the calibration wizard's capture
+ * endpoints still open the mic directly, which would contradict the
+ * "no audio is captured" promise the hero makes. Voiceprints and the
+ * activity feed stay: they're on-box records, and the off event itself
+ * lands in that feed.
  */
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, MicOff } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { useToast } from "@/components/Toast";
-import { measureVoiceLevel, restartVoiceProcessor } from "@/lib/api";
+import {
+  measureVoiceLevel,
+  restartVoiceProcessor,
+  setVoiceEnabled,
+} from "@/lib/api";
 import type {
   VoiceActivityItem,
   VoiceCalibrationInfo,
@@ -75,6 +89,15 @@ const COPY = {
   cancelToast: "Calibration canceled — previous settings kept.",
   activityEmpty: "No voice activity yet. Say 'Hey Droplet' to try it.",
   connecting: "Connecting to the microphone…",
+  /* WARP-1599 kill switch. `heroOff` doubles as the switched-off toast:
+     the confirmation and the hero the admin is now looking at must say
+     the same thing, word for word. */
+  heroOff: "Voice is off — Droplet isn't listening.",
+  offSub:
+    "The wake word does nothing and no audio is captured. Voiceprints and calibration stay on this box.",
+  ctaTurnOn: "Turn voice on",
+  ctaTurnOff: "Turn off voice",
+  toastOn: "Voice is back on — listening for the wake word.",
 } as const;
 
 /* Sub-line reasons (§3.1 "always concrete"; §7.2 verbatim). */
@@ -110,12 +133,22 @@ const BUSY_CHECK_TOAST =
   "The microphone is busy with another check — try again in a few seconds.";
 const MEASURE_FAILED_TOAST =
   "Couldn't measure — the microphone didn't respond.";
+/* WARP-1599 — fallback for a toggle that failed without a message from
+   the box (the 409 / 422 / 503 paths all carry their own detail up
+   through `throwVoiceError`, which reads better than anything generic). */
+const TOGGLE_FAILED_TOAST =
+  "Couldn't switch voice — the voice service didn't respond.";
 
 export interface VoiceSurfaceProps {
   status: VoiceStatusInfo | null;
   calibration: VoiceCalibrationInfo | null;
   /** Orchestrator answered 503 voice_unavailable (voice-io down). */
   unavailable: boolean;
+  /** WARP-1599 — the admin kill switch (`useVoiceSurfaceData.enabled`,
+   *  which reads the authoritative `status.enabled`). Defaults to ON so
+   *  a caller without the wiring can't render a working box as
+   *  deliberately silenced. */
+  enabled?: boolean;
   /** Initial fetches still in flight (§7.8 skeleton). */
   loading: boolean;
   /** Sustained room level above the calibrated floor (drift input). */
@@ -147,6 +180,7 @@ export function VoiceSurface({
   status,
   calibration,
   unavailable,
+  enabled = true,
   loading,
   noiseSustained,
   profiles = null,
@@ -173,11 +207,17 @@ export function VoiceSurface({
   // success (flatline clears) or failed (still flatlined at deadline).
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
+  // WARP-1599 — one toggle in flight at a time. voice-io serializes
+  // concurrent toggles with a non-blocking lock and answers 409, so a
+  // double-click would earn the admin an error toast for a switch that
+  // is working perfectly.
+  const [togglePending, setTogglePending] = useState(false);
 
   const surface = deriveVoiceSurfaceState({
     status,
     calibration,
     unavailable,
+    enabled,
     noiseSustained,
     nowS: now,
   });
@@ -233,6 +273,31 @@ export function VoiceSurface({
     toast(RESTART_ISSUED_TOAST, "info");
     setRestartPending(true);
     onRefresh();
+  }
+
+  // WARP-1599 — the kill switch. No ConfirmDialog: nothing is
+  // destroyed and the same button undoes it, so a confirm would only
+  // add ceremony. The write is the source of truth for the toast —
+  // a non-2xx never gets to claim the box changed state.
+  async function handleToggleEnabled(next: boolean) {
+    setTogglePending(true);
+    try {
+      await setVoiceEnabled(next);
+    } catch (err) {
+      // The box's own detail (409 "already switching", 503 unreachable)
+      // says more than any copy we could write here.
+      toast(
+        err instanceof Error && err.message ? err.message : TOGGLE_FAILED_TOAST,
+        "error",
+      );
+      return;
+    } finally {
+      setTogglePending(false);
+    }
+    // Re-read before announcing: the hero the admin looks at next comes
+    // from the box, not from what we asked for.
+    onRefresh();
+    toast(next ? COPY.toastOn : COPY.heroOff, "success");
   }
 
   // Health-card wake re-test: watch the live poll for a fresh wake.
@@ -401,8 +466,22 @@ export function VoiceSurface({
           ? ("err" as const)
           : ("neutral" as const);
 
+  // WARP-1599 — while voice is off the wizard isn't just pointless, it
+  // is misleading: voice-io's `/audio/measure` + `/audio/test-record` +
+  // `/audio/echo-check` still open the mic directly, so a calibration
+  // run would capture audio the off hero just promised nobody was
+  // capturing. Not mounted at all while off.
   const wizardAllowed =
-    surface.kind !== "broken" || surface.brokenCause === "flatlined";
+    surface.kind !== "off" &&
+    (surface.kind !== "broken" || surface.brokenCause === "flatlined");
+
+  // The switch needs a real answer from the box to act on: while
+  // voice-io is unreachable the POST could only 503, and §7.2 says
+  // never render an entry point to a flow that cannot succeed.
+  const toggleAvailable = !unavailable && status != null;
+  // Off carries its own hero with its own primary action, so the quiet
+  // ghost switch only rides the on-state hero.
+  const showTurnOff = toggleAvailable && surface.kind !== "off";
 
   const meterFlat = surface.kind === "broken" || status?.input_rms_dbfs == null;
 
@@ -501,47 +580,92 @@ export function VoiceSurface({
 
   return (
     <div className="voice-surface">
-      {/* ── Status hero (§3.1) ── */}
-      <section className="vcard vhero" aria-labelledby="voice-hero-headline">
-        <div className="vhero-corner">
-          <SafetyChip safety="Read" />
-        </div>
-        <div className="vhero-row">
-          <StatusRing status={ringStatus} />
-          <div className="vhero-stack">
-            <h2 className="headline" id="voice-hero-headline">
-              {headline}
-            </h2>
-            {subline()}
-            <LiveMeter
-              dbfs={status?.input_rms_dbfs ?? null}
-              flat={meterFlat}
-              caption={COPY.meterCap}
-            />
+      {surface.kind === "off" ? (
+        /* ── Switched off (WARP-1599): one hero, no live meter, no
+             health strip, no calibration entry. Quiet and neutral —
+             this is a decision the admin made, not a failure. ── */
+        <section className="vcard vhero" aria-labelledby="voice-hero-headline">
+          <div className="vhero-corner">
+            <SafetyChip safety="Read" />
           </div>
-          <div className="vhero-cta">{heroCta()}</div>
-        </div>
-        {/* Drift banner (§6.2) — max one, worst problem wins. */}
-        {surface.kind === "attention" && surface.banner && (
-          <div className="vbanner" role="status">
-            <span className="txt">{surface.banner}</span>
-            <button
-              type="button"
-              className="btn primary sm"
-              onClick={() => setWizardOpen(true)}
-            >
-              {COPY.ctaRecalibrate}
-            </button>
+          <div className="vhero-row">
+            <StatusRing status="neutral" icon={MicOff} />
+            <div className="vhero-stack">
+              <h2 className="headline" id="voice-hero-headline">
+                {COPY.heroOff}
+              </h2>
+              <p className="subline">{COPY.offSub}</p>
+            </div>
+            <div className="vhero-cta">
+              <button
+                type="button"
+                className="btn primary"
+                disabled={togglePending}
+                onClick={() => void handleToggleEnabled(true)}
+              >
+                {COPY.ctaTurnOn}
+              </button>
+            </div>
           </div>
-        )}
-      </section>
+        </section>
+      ) : (
+        <>
+          {/* ── Status hero (§3.1) ── */}
+          <section className="vcard vhero" aria-labelledby="voice-hero-headline">
+            <div className={"vhero-corner" + (showTurnOff ? " has-action" : "")}>
+              <SafetyChip safety="Read" />
+              {/* WARP-1599 — the switch sits with the hero's framing,
+                  deliberately quiet: turning the household assistant off
+                  is an admin decision, not the page's suggestion. */}
+              {showTurnOff && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  disabled={togglePending}
+                  onClick={() => void handleToggleEnabled(false)}
+                >
+                  {COPY.ctaTurnOff}
+                </button>
+              )}
+            </div>
+            <div className="vhero-row">
+              <StatusRing status={ringStatus} />
+              <div className="vhero-stack">
+                <h2 className="headline" id="voice-hero-headline">
+                  {headline}
+                </h2>
+                {subline()}
+                <LiveMeter
+                  dbfs={status?.input_rms_dbfs ?? null}
+                  flat={meterFlat}
+                  caption={COPY.meterCap}
+                />
+              </div>
+              <div className="vhero-cta">{heroCta()}</div>
+            </div>
+            {/* Drift banner (§6.2) — max one, worst problem wins. */}
+            {surface.kind === "attention" && surface.banner && (
+              <div className="vbanner" role="status">
+                <span className="txt">{surface.banner}</span>
+                <button
+                  type="button"
+                  className="btn primary sm"
+                  onClick={() => setWizardOpen(true)}
+                >
+                  {COPY.ctaRecalibrate}
+                </button>
+              </div>
+            )}
+          </section>
 
-      {/* ── Health checks strip (§3.2) ── */}
-      <HealthStrip
-        checks={checks}
-        dspEscalated={dspRetries >= DSP_ESCALATE_AFTER}
-        onAction={(action) => void handleCheckAction(action)}
-      />
+          {/* ── Health checks strip (§3.2) ── */}
+          <HealthStrip
+            checks={checks}
+            dspEscalated={dspRetries >= DSP_ESCALATE_AFTER}
+            onAction={(action) => void handleCheckAction(action)}
+          />
+        </>
+      )}
 
       {/* ── Voice profiles (§3.3 — WARP-1056 Flow B) ── */}
       <VoiceProfilesSection

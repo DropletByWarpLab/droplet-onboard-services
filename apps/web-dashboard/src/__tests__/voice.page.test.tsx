@@ -22,6 +22,9 @@
  *      (time mono · person-or-Guest · what happened), §6.3 self-heal
  *      rows without a person, the kind=voice Activity deep-link, and
  *      the §9 empty state verbatim.
+ *   9. WARP-1599 — the admin kill switch: the calm off hero replacing
+ *      hero + health strip + calibration entry (profiles and the
+ *      activity feed survive), and the toggle in both directions.
  *
  * Proven RED first: VoiceSurface does not exist yet.
  */
@@ -42,6 +45,8 @@ vi.mock("@/lib/api", () => ({
   fetchVoiceCalibration: vi.fn(),
   fetchVoiceStatus: vi.fn(),
   restartVoiceProcessor: vi.fn(),
+  // WARP-1599 — the admin kill switch.
+  setVoiceEnabled: vi.fn(),
   // WARP-1059 — the wizard brackets its session in calibration mode.
   enterVoiceCalibrationMode: vi.fn(async () => ({ active: true })),
   exitVoiceCalibrationMode: vi.fn(async () => ({ active: false })),
@@ -66,6 +71,7 @@ import {
   applyVoiceCalibration,
   measureVoiceLevel,
   restartVoiceProcessor,
+  setVoiceEnabled,
 } from "@/lib/api";
 import { ToastProvider } from "@/components/Toast";
 import type {
@@ -76,11 +82,13 @@ import type {
 
 const restartMock = vi.mocked(restartVoiceProcessor);
 const measureMock = vi.mocked(measureVoiceLevel);
+const setEnabledMock = vi.mocked(setVoiceEnabled);
 
 const NOW = 1_751_000_000;
 
 function status(overrides: Partial<VoiceStatusInfo> = {}): VoiceStatusInfo {
   return {
+    enabled: true,
     state: "listening",
     listening: true,
     wake_loaded: true,
@@ -563,6 +571,140 @@ describe("VoiceSurface buttons use the indigo shell idiom (WARP-1345)", () => {
     const check = screen.getByRole("button", { name: "Check again" });
     expect(check).toHaveClass("btn", "primary");
     expect(check.className).not.toMatch(/dp-btn|type-/);
+  });
+});
+
+describe("VoiceSurface kill switch (WARP-1599)", () => {
+  const OFF_HEADLINE = "Voice is off — Droplet isn't listening.";
+  const OFF_SUB =
+    "The wake word does nothing and no audio is captured. Voiceprints and calibration stay on this box.";
+  const ON_TOAST = "Voice is back on — listening for the wake word.";
+
+  it("off: ONE calm hero replaces hero + health strip + calibration entry", () => {
+    const { container } = renderSurface({
+      enabled: false,
+      status: status({ state: "off", listening: false }),
+      activity: [
+        {
+          id: "31",
+          atS: NOW - 30,
+          what: "Voice turned off",
+          severity: "info",
+          person: null,
+        },
+      ],
+    });
+
+    expect(screen.getByText(OFF_HEADLINE)).toBeInTheDocument();
+    expect(screen.getByText(OFF_SUB)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Turn voice on" }),
+    ).toBeInTheDocument();
+
+    // Deliberate, not broken: the neutral ring, never the red mic-fault
+    // one, and none of the §7.2 failure copy.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(container.querySelector('.vring[data-status="neutral"]')).not.toBeNull();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(container.querySelector('.vring[data-status="err"]')).toBeNull();
+    expect(screen.queryByText("Microphone not working")).toBeNull();
+
+    // Health strip gone — every card would be reporting on a pipeline
+    // that isn't running.
+    expect(screen.queryByText("Input level")).toBeNull();
+    expect(screen.queryByText("Mic processor")).toBeNull();
+    expect(screen.queryByText(/Health checks are paused/)).toBeNull();
+    // Calibration entry gone: its capture endpoints still open the mic
+    // directly, which would contradict the hero's own promise.
+    expect(screen.queryByRole("button", { name: "Recalibrate" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Set up microphone" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fix it" })).toBeNull();
+    // …and no live meter: "no audio is captured" cannot sit beside one.
+    expect(screen.queryByRole("meter")).toBeNull();
+
+    // Profiles + activity stay — the off event itself lands in the feed.
+    expect(screen.getByText("Who Droplet recognizes")).toBeInTheDocument();
+    expect(screen.getByText("Recent voice activity")).toBeInTheDocument();
+    expect(screen.getByText("Voice turned off")).toBeInTheDocument();
+  });
+
+  it('"Turn off voice" is the quiet ghost action while voice is on', () => {
+    renderSurface();
+    const off = screen.getByRole("button", { name: "Turn off voice" });
+    expect(off).toHaveClass("btn", "ghost", "sm");
+    expect(off.className).not.toMatch(/dp-btn|type-/);
+  });
+
+  it('"Turn off voice" is absent while voice is already off', () => {
+    renderSurface({ enabled: false });
+    expect(screen.queryByRole("button", { name: "Turn off voice" })).toBeNull();
+  });
+
+  it("turning voice off calls the API, re-polls, and toasts the off state", async () => {
+    setEnabledMock.mockResolvedValue({ enabled: false });
+    const onRefresh = vi.fn();
+    renderSurface({ onRefresh });
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn off voice" }));
+
+    await waitFor(() => expect(setEnabledMock).toHaveBeenCalledWith(false));
+    // While voice is on, this sentence can only be the toast.
+    expect(await screen.findByText(OFF_HEADLINE)).toBeInTheDocument();
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("turning voice back on calls the API, re-polls, and toasts", async () => {
+    setEnabledMock.mockResolvedValue({ enabled: true });
+    const onRefresh = vi.fn();
+    renderSurface({ enabled: false, onRefresh });
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn voice on" }));
+
+    await waitFor(() => expect(setEnabledMock).toHaveBeenCalledWith(true));
+    expect(await screen.findByText(ON_TOAST)).toBeInTheDocument();
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("a rejected toggle surfaces the error and never claims success", async () => {
+    // The orchestrator relays voice-io's 409 when a toggle is already
+    // in flight; `throwVoiceError` carries its detail on the Error.
+    const busy = new Error(
+      "Another voice toggle is already in progress — try again in a moment.",
+    ) as Error & { status?: number };
+    busy.status = 409;
+    setEnabledMock.mockRejectedValue(busy);
+    const onRefresh = vi.fn();
+    renderSurface({ onRefresh });
+
+    fireEvent.click(screen.getByRole("button", { name: "Turn off voice" }));
+
+    expect(
+      await screen.findByText(
+        "Another voice toggle is already in progress — try again in a moment.",
+      ),
+    ).toBeInTheDocument();
+    // No success toast, and the surface still says voice is on.
+    expect(screen.queryByText(OFF_HEADLINE)).toBeNull();
+    expect(screen.getByText("Microphone calibrated")).toBeInTheDocument();
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it("the toggle disables itself in flight — one click, one POST", async () => {
+    setEnabledMock.mockReturnValue(new Promise(() => {}));
+    renderSurface();
+    const off = screen.getByRole("button", { name: "Turn off voice" });
+
+    fireEvent.click(off);
+
+    await waitFor(() => expect(off).toBeDisabled());
+    fireEvent.click(off);
+    expect(setEnabledMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("no toggle while voice-io is unreachable — the POST could only 503", () => {
+    renderSurface({ status: null, calibration: null, unavailable: true });
+    expect(screen.queryByRole("button", { name: "Turn off voice" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Turn voice on" })).toBeNull();
   });
 });
 
