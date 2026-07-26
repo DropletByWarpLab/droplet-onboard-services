@@ -753,6 +753,68 @@ describe("PATCH /api/access/roles/:id", () => {
     );
   });
 
+  // ── WARP-1560: restore is the archive's symmetric partner ──
+
+  it("restores via { state: 'active' } with its own Activity string", async () => {
+    const prisma = createPrismaMock({ roles: [{ ...baseRole, state: "archived" }] });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ state: "active" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.state).toBe("active");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "auth", what: "Access role restored" }),
+    );
+  });
+
+  it("restoring a role that carries a storage default kicks the reconciler → pending", async () => {
+    // WARP-1569 made an archived role stop managing quota, so a restore
+    // is a real usage-convergence event: pass 2 picks these members back
+    // up. Report it as `pending` (and kick, rather than wait out the
+    // 5-minute tick) — reporting `synced` would be a lie for minutes.
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, state: "archived", storageQuotaBytes: 5_000_000_000n }],
+      users: [{ id: "u1", username: "ana", role: "family", accessRoleId: "r1" }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ state: "active" });
+    expect(res.status).toBe(200);
+    expect(res.body.syncState).toBe("pending");
+    expect(kickReconcileMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("archiving a role that carries a storage default does NOT kick — archive stops managing", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, storageQuotaBytes: 5_000_000_000n }],
+      users: [{ id: "u1", username: "ana", role: "family", accessRoleId: "r1" }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ state: "archived" });
+    expect(res.status).toBe(200);
+    expect(res.body.syncState).toBe("synced");
+    expect(kickReconcileMock).not.toHaveBeenCalled();
+  });
+
+  it("a no-op restore of an ALREADY-active role is an ordinary update — no kick, no restore row", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, storageQuotaBytes: 5_000_000_000n }],
+      users: [{ id: "u1", username: "ana", role: "family", accessRoleId: "r1" }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ state: "active" });
+    expect(res.status).toBe(200);
+    expect(res.body.syncState).toBe("synced");
+    expect(kickReconcileMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Access role updated" }),
+    );
+  });
+
+  it("restoring a role nobody holds converges nothing — no kick", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, state: "archived", storageQuotaBytes: 5_000_000_000n }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ state: "active" });
+    expect(res.status).toBe(200);
+    expect(res.body.syncState).toBe("synced");
+    expect(kickReconcileMock).not.toHaveBeenCalled();
+  });
+
   it("a startingPoint change re-tiers every member in the same transaction + revokes their sessions", async () => {
     const prisma = createPrismaMock({
       roles: [baseRole],

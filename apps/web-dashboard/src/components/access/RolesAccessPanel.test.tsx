@@ -19,6 +19,7 @@ const updateAccessRoleMock = vi.fn();
 const deleteAccessRoleMock = vi.fn();
 const duplicateAccessRoleMock = vi.fn();
 const archiveAccessRoleMock = vi.fn();
+const restoreAccessRoleMock = vi.fn();
 const assignAccessRoleMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
@@ -28,6 +29,7 @@ vi.mock("@/lib/api", () => ({
   deleteAccessRole: (...a: any[]) => deleteAccessRoleMock(...a),
   duplicateAccessRole: (...a: any[]) => duplicateAccessRoleMock(...a),
   archiveAccessRole: (...a: any[]) => archiveAccessRoleMock(...a),
+  restoreAccessRole: (...a: any[]) => restoreAccessRoleMock(...a),
   assignAccessRole: (...a: any[]) => assignAccessRoleMock(...a),
 }));
 
@@ -313,17 +315,17 @@ describe("§4.2 role detail", () => {
     );
   });
 
-  it("archive runs a consequence confirm with honest copy (no restore promise — UX-7)", async () => {
+  it("archive runs a consequence confirm carrying the packet's restore promise (WARP-1560)", async () => {
     archiveAccessRoleMock.mockResolvedValue({ role: role({ state: "archived" }) });
     renderPanel();
     await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
     fireEvent.click(screen.getByRole("button", { name: "Role actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: /Archive/ }));
-    expect(
-      screen.getByText("Archived roles can't be assigned but keep their settings."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/restore them any time/i)).not.toBeInTheDocument();
+    // T8 cut the second sentence because nothing could deliver on it. The
+    // Archived section + Restore below are what make it true again.
+    expect(screen.getByText(ACCESS_COPY.archiveRole)).toBeInTheDocument();
+    expect(screen.getByText(/restore them any time/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     await waitFor(() => expect(archiveAccessRoleMock).toHaveBeenCalledWith("r-finance"));
   });
@@ -512,5 +514,244 @@ describe("§10 offline", () => {
     Object.defineProperty(window.navigator, "onLine", { value: false, configurable: true });
     renderPanel();
     await waitFor(() => expect(screen.getByText(ACCESS_COPY.offlineBanner)).toBeInTheDocument());
+  });
+});
+
+// ── WARP-1560: archived roles are FILED, not vanished ────────────────
+//
+// T8 filtered `state === "archived"` out of the list entirely, which made
+// archive a one-way door with no surface to walk back through — and forced
+// the archive copy to drop its restore sentence. `GET /api/access/roles`
+// has always returned archived rows carrying their `state` precisely so the
+// client can group by it (effective-access.service.ts's ARCHIVE ≠ REVOKE
+// note); these pin the client finally doing so.
+describe("WARP-1560 — archived roles + restore", () => {
+  const archived = () =>
+    role({ id: "r-old", name: "Locum", slug: "locum", state: "archived", peopleCount: 0 });
+
+  it("files an archived role under its own section instead of dropping it", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role(), archived()] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    expect(screen.getByText(ACCESS_COPY.archivedRoles)).toBeInTheDocument();
+    const section = screen.getByTestId("access-archived-roles");
+    expect(within(section).getByText("Locum")).toBeInTheDocument();
+    expect(within(section).getByText(ACCESS_COPY.archived)).toBeInTheDocument();
+    // …and never mixed back into the assignable list.
+    const active = screen.getByTestId("access-active-roles");
+    expect(within(active).queryByText("Locum")).not.toBeInTheDocument();
+  });
+
+  it("shows no Archived section at all when nothing is archived", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role()] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    expect(screen.queryByText(ACCESS_COPY.archivedRoles)).not.toBeInTheDocument();
+  });
+
+  it("an active role still wins auto-selection over an archived one", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived(), role()] });
+    renderPanel();
+    const detail = await screen.findByTestId("access-role-detail");
+    await waitFor(() => expect(within(detail).getByText("Finance")).toBeInTheDocument());
+  });
+
+  it("says so honestly when every custom role is archived", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived()] });
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.emptyRolesAllArchived)).toBeInTheDocument(),
+    );
+    // "No custom roles yet" would be a lie — one exists, it is filed.
+    expect(screen.queryByText(ACCESS_COPY.emptyRoles)).not.toBeInTheDocument();
+  });
+
+  it("offers Restore on an archived role and never Archive… twice", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived()] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Locum")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Locum/ }));
+    expect(screen.getByRole("button", { name: /Restore/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Role actions" }));
+    expect(screen.queryByRole("menuitem", { name: /Archive/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Duplicate/ })).toBeInTheDocument();
+  });
+
+  it("blocks assignment on an archived role DISABLED with the reason, never hidden", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived()] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Locum")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Locum/ }));
+    const assign = screen.getByRole("button", { name: /Assign people/ });
+    expect(assign).toBeDisabled();
+    // Shown, not hover-only: the reason is the payload.
+    const note = screen.getByText(ACCESS_COPY.archivedNotAssignable);
+    expect(note).toBeInTheDocument();
+    // …and wired to the control it explains. A disabled button announces no
+    // `title` anyone can rely on, so the association has to be explicit.
+    const describedBy = assign.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy!)).toContainElement(note);
+  });
+
+  it("confirming Restore PATCHes state → active, refetches, and reports the sync", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived()] });
+    restoreAccessRoleMock.mockResolvedValue({
+      role: { ...archived(), state: "active" },
+      syncState: "pending",
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Locum")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Locum/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Restore/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(ACCESS_COPY.restoreRole)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore role" }));
+    await waitFor(() => expect(restoreAccessRoleMock).toHaveBeenCalledWith("r-old"));
+    await waitFor(() => expect(listAccessRolesMock.mock.calls.length).toBeGreaterThan(1));
+    // The restore's usage tail is real — pass 2 picks these members back up
+    // — so the chip has something true to say.
+    await waitFor(() =>
+      expect(screen.getAllByText(ACCESS_COPY.applying).length).toBeGreaterThan(0),
+    );
+  });
+
+  it("a failed restore surfaces an error toast — never a silent failure (§10)", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [archived()] });
+    restoreAccessRoleMock.mockRejectedValue(new Error("Restore blocked by the box"));
+    // Toasts need their provider mounted (the delete-failure sibling above
+    // does the same) — `renderPanel` deliberately runs without one.
+    render(
+      <ToastProvider>
+        <RolesAccessPanel
+          people={PEOPLE}
+          actingTier="owner"
+          connectors={[]}
+          onOpenPerson={vi.fn()}
+          onOpenDepartments={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("Locum")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Locum/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Restore/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore role" }));
+    await waitFor(() =>
+      expect(screen.getByText("Restore blocked by the box")).toBeInTheDocument(),
+    );
+  });
+});
+
+
+// ── WARP-1576: the cleared-storage-default disclosure ────────────────
+//
+// Clearing a role's storage default is the one usage edit that pushes
+// NOTHING (a cleared default means "unmanaged", never "unlimited"), so the
+// members who had no quota of their own silently stay on whatever Nextcloud
+// already enforces. The API has always returned `retainedQuotaCount` to say
+// how many; T8 shipped with no consumer, so the operator got silence.
+describe("WARP-1576 — retainedQuotaCount is surfaced, not swallowed", () => {
+  /** The role carries a limit BEFORE the edit and none after — a change
+   *  event on an already-empty input never reaches React, so a role seeded
+   *  as already-cleared could not be cleared. */
+  function seedListClearedAfterFirstLoad() {
+    listAccessRolesMock.mockResolvedValueOnce({ roles: [role()] });
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ storageQuotaBytes: null })] });
+  }
+
+  async function clearStorageAndSave() {
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const storage = await screen.findByLabelText("Storage limit");
+    fireEvent.change(storage, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    await waitFor(() => expect(updateAccessRoleMock).toHaveBeenCalled());
+    expect(updateAccessRoleMock.mock.calls[0][1].storageQuotaBytes).toBeNull();
+  }
+
+  it("states how many people were left on a retained quota", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 3,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.retainedQuota(3))).toBeInTheDocument(),
+    );
+  });
+
+  it("uses the singular form for one person", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 1,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("1 person keeps their current storage limit until it's changed."),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("says nothing when the clear left nobody on a retained quota", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValue({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 0,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+
+    expect(screen.queryByText(/keeps? their current storage limit/)).not.toBeInTheDocument();
+  });
+
+  it("says nothing on an ordinary save — the field only comes back on a CLEAR", async () => {
+    updateAccessRoleMock.mockResolvedValue({ role: role(), syncState: "pending" });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    // Edit mode labels the name field rather than placeholder-ing it.
+    const name = await screen.findByLabelText("Role name");
+    fireEvent.change(name, { target: { value: "Finance & billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() => expect(updateAccessRoleMock).toHaveBeenCalled());
+    expect(screen.queryByText(/keeps? their current storage limit/)).not.toBeInTheDocument();
+  });
+
+  it("a later save that no longer clears anything retires the line", async () => {
+    seedListClearedAfterFirstLoad();
+    updateAccessRoleMock.mockResolvedValueOnce({
+      role: role({ storageQuotaBytes: null }),
+      syncState: "synced",
+      retainedQuotaCount: 2,
+    });
+    renderPanel();
+    await clearStorageAndSave();
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.retainedQuota(2))).toBeInTheDocument(),
+    );
+
+    updateAccessRoleMock.mockResolvedValueOnce({ role: role(), syncState: "pending" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const name = await screen.findByLabelText("Role name");
+    fireEvent.change(name, { target: { value: "Finance & billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(ACCESS_COPY.retainedQuota(2))).not.toBeInTheDocument(),
+    );
   });
 });

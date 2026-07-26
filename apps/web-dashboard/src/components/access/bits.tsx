@@ -101,20 +101,28 @@ export function SyncChip({ state }: { state: AccessSyncState | "applied" | null 
   );
 }
 
-/** Quiet guard/info note — the honest-reason surface for §8 rails. */
+/** Quiet guard/info note — the honest-reason surface for §8 rails.
+ *
+ *  `id` (WARP-1560) lets a note be the `aria-describedby` target of the
+ *  control it explains. A disabled button carries no `title` announcement
+ *  anyone can rely on, and a reason sitting in a sibling div is invisible to
+ *  assistive tech unless something points at it — so where a note IS the
+ *  reason for a disabled control, wire the two together. */
 export function GuardNote({
   warn,
   icon,
+  id,
   role,
   children,
 }: {
   warn?: boolean;
   icon?: ReactNode;
+  id?: string;
   role?: string;
   children: ReactNode;
 }) {
   return (
-    <div className={`acc-note${warn ? " warn" : ""}`} role={role}>
+    <div className={`acc-note${warn ? " warn" : ""}`} id={id} role={role}>
       {icon ?? <Lock size={15} aria-hidden="true" />}
       <div>{children}</div>
     </div>

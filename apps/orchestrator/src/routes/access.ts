@@ -8,7 +8,7 @@
  *   GET    /api/access/roles             — { roles: AccessRole[] }
  *   POST   /api/access/roles             — create; { sourceRoleId } duplicates
  *   GET    /api/access/roles/:id         — { role }
- *   PATCH  /api/access/roles/:id         — update / archive ({ state })
+ *   PATCH  /api/access/roles/:id         — update / archive + restore ({ state })
  *   DELETE /api/access/roles/:id         — blocked while in use (reassign first)
  *   POST   /api/access/roles/:id/assign  — { userIds: [] } → { syncState }
  *
@@ -43,7 +43,19 @@
  * "box default = unmanaged" (T7's reviewed semantics — never an implicit
  * push of "none"/unlimited), so the response surfaces
  * `retainedQuotaCount` — how many members keep their current NC quota
- * until edited — for the UI's honest confirm line.
+ * until edited — for the UI's honest confirm line (consumed by the role
+ * editor as of WARP-1576).
+ *
+ * Archive/restore (WARP-1560, WARP-1569). `state` moves both ways through
+ * this same PATCH, and each TRANSITION — not the requested value — gets its
+ * own Activity string ("Access role archived" / "Access role restored"); a
+ * PATCH restating the state a role already holds is an ordinary update.
+ * Archiving stops the role MANAGING anything (unassignable, and the usage
+ * reconciler stands its defaults down) while never stripping access from
+ * the people who hold it (`effective-access.service.ts` deliberately does
+ * not read `state`). Restoring therefore has a usage tail that archiving
+ * does not: the members it stopped managing converge back onto its storage
+ * default, so a restore kicks the reconciler and answers `pending`.
  */
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -598,6 +610,12 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         const storageCleared =
           storageChanged && nextStorage === null && existing.storageQuotaBytes !== null;
 
+        // WARP-1560 — the two state TRANSITIONS, not the requested value: a
+        // PATCH restating the state a role is already in is an ordinary
+        // update and must not claim otherwise in Activity.
+        const archivedNow = body.state === "archived" && existing.state !== "archived";
+        const restoredNow = body.state === "active" && existing.state !== "active";
+
         await prisma.$transaction(async (tx) => {
           await tx.accessRole.update({
             where: { id: existing.id },
@@ -741,12 +759,32 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           }
         }
 
-        const archivedNow = body.state === "archived" && existing.state !== "archived";
+        // WARP-1560 / WARP-1569 — a RESTORE is a usage-convergence event in
+        // its own right: the reconciler stopped pushing this role's storage
+        // default the moment it was archived, so bringing the role back means
+        // every member without a person-level quota converges onto it again.
+        // Kick the same debounced pass a set/changed default kicks, and
+        // report `pending` — `synced` would be a lie for up to a full tick.
+        // Read the POST-patch default (a restore that clears the default in
+        // the same request converges nothing), and never double-kick when the
+        // storage branch above already did. ARCHIVING is deliberately not the
+        // mirror image: it stops managing rather than pushing anything, so
+        // there is nothing to wait for and nothing to report.
+        const storageAfter = nextStorage !== undefined ? nextStorage : existing.storageQuotaBytes;
+        if (restoredNow && storageAfter !== null && memberCount > 0 && !usageConverging) {
+          kickReconcile();
+          usageConverging = true;
+        }
+
         await recordActivity({
           kind: "auth",
           severity: "ok",
           sourceIcon: "shield",
-          what: archivedNow ? "Access role archived" : "Access role updated",
+          what: archivedNow
+            ? "Access role archived"
+            : restoredNow
+              ? "Access role restored"
+              : "Access role updated",
           sub: updated.name,
           refs: {
             actor: req.user?.username ?? null,
