@@ -165,10 +165,25 @@ export function sendablePermissions(bits: number, isDirectory: boolean): number 
 }
 
 /**
+ * WARP-1543: the outcome of one recipient's share attempt within a batch.
+ * A batch settles per target, so three successes and two failures are three
+ * successes and two failures — never one collapsed "it didn't work".
+ */
+interface ShareAttempt {
+  shareWith: string;
+  displayName: string;
+  ok: boolean;
+  /** Translated, user-facing reason — set only when `ok` is false. */
+  message?: string;
+}
+
+/**
  * Full sharing dialog (WARP-879 / WS-1). Two modes:
- *   • Person — share with a named household member (OCS shareType 0). The
- *     member picker is populated from GET /api/files/share-recipients, which
- *     reads the local directory (ADR-013) so every household role can use it.
+ *   • Person — share with one or more named household members (OCS shareType
+ *     0). The member picker is populated from GET /api/files/share-recipients,
+ *     which reads the local directory (ADR-013) so every household role can
+ *     use it. WARP-1543: the picker is multi-select — one Share click creates
+ *     one share per selected member at the dialog's chosen access level.
  *   • Link   — create a public link (OCS shareType 3) with permissions,
  *     expiry, password, and note. Unchanged from the prior behavior.
  *
@@ -199,7 +214,16 @@ export function ShareDialog({
   const [recipients, setRecipients] = useState<ShareRecipient[]>([]);
   const [recipientsLoading, setRecipientsLoading] = useState(true);
   const [recipientsError, setRecipientsError] = useState<string | null>(null);
-  const [selectedRecipient, setSelectedRecipient] = useState<string | null>(null);
+  // WARP-1543: a SET, not a scalar — the picker selects any number of members.
+  const [selectedRecipients, setSelectedRecipients] = useState<Set<string>>(
+    () => new Set()
+  );
+  // Per-target outcome of the last person-mode batch. `error` above stays the
+  // single-message channel for the paths that genuinely have one target: the
+  // link create, a revoke, and an access-level edit.
+  const [recipientResults, setRecipientResults] = useState<ShareAttempt[] | null>(
+    null
+  );
 
   useEffect(() => {
     setShares(existingShares);
@@ -237,35 +261,112 @@ export function ShareDialog({
   const toSendable = (bits: number): number =>
     sendablePermissions(bits, isDirectory);
 
-  const handleCreate = async () => {
-    if (mode === "person" && !selectedRecipient) return;
+  // WARP-1543: roster order, not click order, so the created shares land in the
+  // list in the same order the user sees the members — and it carries the
+  // display names the result report needs.
+  const selectedTargets = recipients.filter((r) =>
+    selectedRecipients.has(r.shareWith)
+  );
+
+  const toggleRecipient = (shareWith: string) => {
+    setSelectedRecipients((prev) => {
+      const next = new Set(prev);
+      if (next.has(shareWith)) next.delete(shareWith);
+      else next.add(shareWith);
+      return next;
+    });
+  };
+
+  // Single-message failures (revoke, access-level edit, link create) clear any
+  // stale batch report so only one thing is ever being reported at a time.
+  const reportError = (err: unknown) => {
+    setRecipientResults(null);
+    // WARP-1148: share failures translate through the share domain — never
+    // the "files" domain, whose fallback is the file-LOADING copy.
+    setError(translateError(err, "share"));
+  };
+
+  /**
+   * WARP-1543: one Share click, one share per selected member.
+   *
+   * The N POSTs are independent (no backend batch endpoint exists — see
+   * apps/orchestrator/src/routes/files.ts), so they are issued together and
+   * settled individually: a recipient Nextcloud rejects must not cancel the
+   * others, roll back the ones that already landed, or hide them. Every target
+   * gets a recorded outcome, and the failures are named on screen.
+   */
+  const createPersonShares = async () => {
+    const targets = selectedTargets;
+    if (targets.length === 0) return;
     setCreating(true);
     setError(null);
+    setRecipientResults(null);
     try {
-      const created =
-        mode === "person"
-          ? await createShare(filePath, {
-              shareType: SHARE_TYPE_USER,
-              shareWith: selectedRecipient as string,
-              permissions: toSendable(permissions),
-            })
-          : await createShare(filePath, {
-              shareType: SHARE_TYPE_LINK,
-              permissions: toSendable(permissions),
-              expireDate: expireDate || undefined,
-              password: password || undefined,
-              note: note || undefined,
-            });
-      setShares([created, ...shares]);
+      const settled = await Promise.allSettled(
+        targets.map((r) =>
+          createShare(filePath, {
+            shareType: SHARE_TYPE_USER,
+            shareWith: r.shareWith,
+            permissions: toSendable(permissions),
+          })
+        )
+      );
+
+      const created: ShareDetail[] = [];
+      const results: ShareAttempt[] = targets.map((r, i) => {
+        const outcome = settled[i];
+        if (outcome.status === "fulfilled") {
+          created.push(outcome.value);
+          return { shareWith: r.shareWith, displayName: r.displayName, ok: true };
+        }
+        return {
+          shareWith: r.shareWith,
+          displayName: r.displayName,
+          ok: false,
+          message: translateError(outcome.reason, "share"),
+        };
+      });
+
+      if (created.length > 0) setShares((prev) => [...created, ...prev]);
+      setRecipientResults(results);
+      // Clear-on-success, per target. A fully successful batch empties the
+      // picker exactly as the single-recipient flow always did; a partial
+      // failure leaves ONLY the failed members ticked, so "retry the ones that
+      // didn't work" is one click rather than a full re-pick.
+      setSelectedRecipients((prev) => {
+        const next = new Set(prev);
+        for (const r of results) if (r.ok) next.delete(r.shareWith);
+        return next;
+      });
+      if (created.length > 0) onChange?.();
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (mode === "person") {
+      await createPersonShares();
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    setRecipientResults(null);
+    try {
+      const created = await createShare(filePath, {
+        shareType: SHARE_TYPE_LINK,
+        permissions: toSendable(permissions),
+        expireDate: expireDate || undefined,
+        password: password || undefined,
+        note: note || undefined,
+      });
+      setShares((prev) => [created, ...prev]);
       setPassword("");
       setNote("");
       setExpireDate("");
-      setSelectedRecipient(null);
       onChange?.();
     } catch (err) {
-      // WARP-1148: share failures translate through the share domain — never
-      // the "files" domain, whose fallback is the file-LOADING copy.
-      setError(translateError(err, "share"));
+      reportError(err);
     } finally {
       setCreating(false);
     }
@@ -284,7 +385,7 @@ export function ShareDialog({
       setRevokeTargetId(null);
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "share"));
+      reportError(err);
       throw err;
     }
   };
@@ -307,12 +408,19 @@ export function ShareDialog({
       );
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "share"));
+      reportError(err);
     }
   };
 
+  // WARP-1543: enabled as soon as at least one member is ticked. Guarded on
+  // the same list the action iterates, so the button can never be live for a
+  // selection that would produce zero calls.
   const createDisabled =
-    creating || (mode === "person" && !selectedRecipient);
+    creating || (mode === "person" && selectedTargets.length === 0);
+
+  const failedResults = recipientResults?.filter((r) => !r.ok) ?? [];
+  const succeededCount = (recipientResults?.length ?? 0) - failedResults.length;
+  const batchWasMulti = (recipientResults?.length ?? 0) > 1;
 
   return (
     <div
@@ -558,14 +666,24 @@ export function ShareDialog({
           <div>
             {mode === "person" ? (
               <>
-                {/* Member picker */}
+                {/* Member picker — multi-select (WARP-1543) */}
                 <div className="space-y-2 mb-3">
-                  <label
-                    className="type-caption-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    Household member
-                  </label>
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      className="type-caption-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Household members
+                    </label>
+                    {selectedRecipients.size > 0 && (
+                      <span
+                        className="type-caption-2"
+                        style={{ color: "var(--brand)" }}
+                      >
+                        {selectedRecipients.size} selected
+                      </span>
+                    )}
+                  </div>
                   {recipientsLoading ? (
                     <p
                       className="type-footnote py-1"
@@ -590,11 +708,15 @@ export function ShareDialog({
                   ) : (
                     <div className="space-y-1.5 max-h-44 overflow-auto">
                       {recipients.map((r) => {
-                        const active = selectedRecipient === r.shareWith;
+                        const active = selectedRecipients.has(r.shareWith);
                         return (
                           <button
                             key={r.shareWith}
-                            onClick={() => setSelectedRecipient(r.shareWith)}
+                            // WARP-1543: toggles membership — clicking a
+                            // selected member deselects them instead of
+                            // silently replacing the previous pick.
+                            aria-pressed={active}
+                            onClick={() => toggleRecipient(r.shareWith)}
                             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--radius-input)] text-left transition-colors ${
                               active ? "" : "hover:bg-[var(--hover)]"
                             }`}
@@ -805,6 +927,65 @@ export function ShareDialog({
               </>
             )}
           </div>
+
+          {/*
+            WARP-1543 — per-target outcome of the last person-mode batch.
+
+            A partial failure has to stay legible: the headline states how many
+            of how many landed, and every failure is named with its own reason.
+            The shares that DID succeed are already in the list above and are
+            never rolled back. With exactly one target the box degrades to the
+            bare message — identical to the pre-batch single-recipient copy.
+          */}
+          {failedResults.length > 0 && (
+            <div
+              role="alert"
+              className="p-2 type-footnote"
+              style={{
+                color: "#ef4444",
+                background: "rgba(239,68,68,0.1)",
+                border: "1px solid rgba(239,68,68,0.2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
+              {batchWasMulti && (
+                <p className="font-medium mb-1">
+                  {succeededCount > 0
+                    ? `Shared with ${succeededCount} of ${recipientResults?.length} people — ${failedResults.length} failed`
+                    : `Couldn't share with any of the ${recipientResults?.length} people you picked`}
+                </p>
+              )}
+              <ul className="space-y-0.5">
+                {failedResults.map((r) => (
+                  <li key={r.shareWith}>
+                    {batchWasMulti ? `${r.displayName}: ${r.message}` : r.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* A whole batch landed — the list above gained several rows at once,
+              so say so rather than leaving the user to count them. */}
+          {batchWasMulti && failedResults.length === 0 && (
+            <div
+              role="status"
+              className="p-2 type-footnote flex items-center gap-2"
+              style={{
+                color: "var(--text)",
+                background: "var(--surface-2)",
+                border: "1px solid var(--card-bd)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
+              <Check
+                size={14}
+                className="flex-shrink-0"
+                style={{ color: "var(--success)" }}
+              />
+              {`Shared with ${succeededCount} people`}
+            </div>
+          )}
 
           {error && (
             <div

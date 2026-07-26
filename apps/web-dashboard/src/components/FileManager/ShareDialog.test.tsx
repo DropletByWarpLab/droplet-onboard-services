@@ -18,6 +18,9 @@
  *   The Files page now fetches the file's existing shares and passes them as
  *   `existingShares`; this pins that the dialog lists them on open (with their
  *   link + permissions).
+ *
+ * WARP-1543 — the Person tab selects MULTIPLE recipients per share action.
+ *   See the describe block at the foot of this file.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -583,6 +586,234 @@ describe("WARP-1601 — file-aware access levels", () => {
       const select = accessSelects()[0];
       expect(select.value).not.toBe("");
       expect(selectedLabel(select)).toBe(label);
+    });
+  });
+});
+
+/**
+ * WARP-1543 — the Person tab shares with MULTIPLE recipients in one action.
+ *
+ * Selection used to be a single nullable string: clicking a second member
+ * silently replaced the first, there was no toggle-off, and `handleCreate`
+ * issued exactly one createShare. Sharing a file with five people meant
+ * repeating the whole flow five times, re-picking after every success.
+ *
+ * Selection is now a Set, the roster row toggles, and one Share click issues
+ * one createShare per selected member at the dialog's single (global for v1)
+ * access level. Because the N calls are independent, they settle individually:
+ * a 3-of-5 outcome must read as three successes and two named failures, and
+ * the three that landed are never rolled back or hidden.
+ */
+describe("WARP-1543 — multi-recipient person shares", () => {
+  const ROSTER: ShareRecipient[] = [
+    { shareWith: "romain", displayName: "Romain", email: "romain@example.com" },
+    { shareWith: "samantha", displayName: "Samantha", email: null },
+    { shareWith: "stefan", displayName: "Stefan", email: null },
+    { shareWith: "camille", displayName: "Camille", email: null },
+    { shareWith: "jonas", displayName: "Jonas", email: null },
+  ];
+
+  /**
+   * Resolve every create with a row that names its own recipient, so the
+   * existing-shares list can be told apart from the roster: the chip reads
+   * "share:romain" while the picker row still reads "Romain".
+   */
+  function resolvePerRecipient(failFor: string[] = []) {
+    let nextId = 100;
+    createShareMock.mockImplementation(
+      (_path: string, opts: { shareWith?: string }) =>
+        failFor.includes(opts.shareWith ?? "")
+          ? Promise.reject(new Error("Nextcloud said no"))
+          : Promise.resolve(
+              makePersonShare({
+                id: nextId++,
+                shareWith: opts.shareWith ?? null,
+                shareWithDisplayName: `share:${opts.shareWith}`,
+              }),
+            ),
+    );
+  }
+
+  /** The roster row for a member (not the existing-share chip of the same name). */
+  function memberRow(displayName: string): HTMLButtonElement {
+    for (const el of screen.getAllByText(displayName)) {
+      const btn = el.closest("button");
+      if (btn) return btn as HTMLButtonElement;
+    }
+    throw new Error(`roster row for ${displayName} not found`);
+  }
+
+  // WARP-1601 note: the footer action must be matched on the EXACT name
+  // "Share", since the "Can edit + reshare" level label also contains it.
+  const shareButton = () => screen.getByRole("button", { name: "Share" });
+
+  const shareWithArgs = () =>
+    createShareMock.mock.calls.map(([, opts]) => opts.shareWith);
+
+  it("toggles a member off when their selected row is clicked again", async () => {
+    renderDialog();
+    const romain = await screen.findByText("Romain");
+
+    fireEvent.click(romain);
+    expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "true");
+    expect(shareButton()).not.toBeDisabled();
+
+    fireEvent.click(romain);
+    expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "false");
+    expect(shareButton()).toBeDisabled();
+  });
+
+  it("keeps the first member selected when a second is picked", async () => {
+    renderDialog();
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+
+    expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "true");
+    expect(memberRow("Samantha")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+  });
+
+  it("one Share click creates one share per selected recipient", async () => {
+    resolvePerRecipient();
+    renderDialog();
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+    fireEvent.click(shareButton());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(2));
+    expect(shareWithArgs()).toEqual(["romain", "samantha"]);
+    for (const [path, opts] of createShareMock.mock.calls) {
+      expect(path).toBe("/report.pdf");
+      // Access level is GLOBAL to the dialog for v1 — same bits for everyone.
+      expect(opts).toMatchObject({ shareType: 0, permissions: 1 });
+    }
+
+    // both brand-new shares land in the existing-shares list
+    expect(await screen.findByText("share:romain")).toBeInTheDocument();
+    expect(screen.getByText("share:samantha")).toBeInTheDocument();
+  });
+
+  it("applies the chosen access level to every recipient in the batch", async () => {
+    resolvePerRecipient();
+    renderDialog(); // a FILE — top level is "Can edit + reshare" (19)
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+    fireEvent.click(screen.getByRole("button", { name: "Can edit + reshare" }));
+    fireEvent.click(shareButton());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(2));
+    for (const [, opts] of createShareMock.mock.calls) {
+      expect(opts.permissions).toBe(19);
+    }
+  });
+
+  it("reports a 3-of-5 partial failure by name, keeping the three that landed", async () => {
+    fetchRecipientsMock.mockResolvedValue(ROSTER);
+    resolvePerRecipient(["samantha", "jonas"]);
+    renderDialog();
+
+    await screen.findByText("Romain");
+    for (const r of ROSTER) fireEvent.click(screen.getByText(r.displayName));
+    fireEvent.click(shareButton());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(5));
+
+    const report = await screen.findByRole("alert");
+    expect(report.textContent).toMatch(/3 of 5 people/);
+    expect(report.textContent).toMatch(/2 failed/);
+    // failures are NAMED, each with its own reason — not swallowed into one line
+    expect(report.textContent).toContain("Samantha: Nextcloud said no");
+    expect(report.textContent).toContain("Jonas: Nextcloud said no");
+    expect(report.textContent).not.toContain("Romain:");
+
+    // the successful shares are neither rolled back nor hidden
+    expect(screen.getByText("share:romain")).toBeInTheDocument();
+    expect(screen.getByText("share:stefan")).toBeInTheDocument();
+    expect(screen.getByText("share:camille")).toBeInTheDocument();
+
+    // only the failures stay ticked, so retrying them is one click
+    expect(memberRow("Samantha")).toHaveAttribute("aria-pressed", "true");
+    expect(memberRow("Jonas")).toHaveAttribute("aria-pressed", "true");
+    expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+  });
+
+  it("says so plainly when every recipient in the batch failed", async () => {
+    createShareMock.mockRejectedValue(new Error("Nextcloud said no"));
+    renderDialog();
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+    fireEvent.click(shareButton());
+
+    const report = await screen.findByRole("alert");
+    expect(report.textContent).toMatch(/Couldn't share with any of the 2 people/);
+    expect(report.textContent).toContain("Romain: Nextcloud said no");
+    expect(report.textContent).toContain("Samantha: Nextcloud said no");
+    // nothing succeeded, so nothing is deselected
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+  });
+
+  it("confirms a fully successful batch and clears the picker", async () => {
+    resolvePerRecipient();
+    renderDialog();
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+    fireEvent.click(shareButton());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(2));
+    const done = await screen.findByRole("status");
+    expect(done.textContent).toMatch(/Shared with 2 people/);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "false");
+    expect(memberRow("Samantha")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByText("2 selected")).not.toBeInTheDocument();
+    expect(shareButton()).toBeDisabled();
+  });
+
+  it("notifies the page once for the whole batch, not once per recipient", async () => {
+    resolvePerRecipient();
+    const onChange = vi.fn();
+    renderDialog({ onChange });
+    fireEvent.click(await screen.findByText("Romain"));
+    fireEvent.click(screen.getByText("Samantha"));
+    fireEvent.click(shareButton());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+  });
+
+  describe("a single recipient behaves exactly as before", () => {
+    it("issues one create, shows no batch summary, and clears the picker", async () => {
+      renderDialog();
+      fireEvent.click(await screen.findByText("Romain"));
+      fireEvent.click(shareButton());
+
+      await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(1));
+      expect(createShareMock.mock.calls[0][1]).toMatchObject({
+        shareType: 0,
+        shareWith: "romain",
+      });
+      // no "1 of 1" ceremony for a single target
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      await waitFor(() =>
+        expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "false"),
+      );
+      expect(shareButton()).toBeDisabled();
+    });
+
+    it("renders a lone failure as the bare message, with the pick preserved", async () => {
+      createShareMock.mockRejectedValue(new Error("Nextcloud said no"));
+      renderDialog();
+      fireEvent.click(await screen.findByText("Romain"));
+      fireEvent.click(shareButton());
+
+      const report = await screen.findByRole("alert");
+      expect(report.textContent).toBe("Nextcloud said no");
+      expect(report.textContent).not.toMatch(/of 1/);
+      expect(memberRow("Romain")).toHaveAttribute("aria-pressed", "true");
     });
   });
 });
