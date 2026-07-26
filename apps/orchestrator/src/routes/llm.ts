@@ -179,6 +179,37 @@ function logBlankAnswer(
   );
 }
 
+/**
+ * WARP-1602 — the inverse of `logBlankAnswer`: record a turn whose visible
+ * answer still reads like the model's chain-of-thought.
+ *
+ * WARP-1479 gave blank turns an attribution line so the eval suite's largest
+ * failure class stopped being a guess. Analysis-polluted turns had no such
+ * line at all — they scored as healthy because the bubble was non-empty, which
+ * is exactly how this leak survived from WARP-495 to the .87 walkthrough. Same
+ * discipline: labels + counts always, the excerpt only under
+ * AGENT_BLANK_TURN_DEBUG (a polluted answer quotes the customer's documents
+ * just as readily as a clean one).
+ */
+function logPollutedAnswer(
+  result: AgentResult,
+  conversationId: string | null,
+  assistantMessageId: string | null,
+): void {
+  if (!result.pollutedDiagnostics) return;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[llm/chat] polluted_final_answer",
+    JSON.stringify({
+      conversationId,
+      assistantMessageId,
+      stop_reason: result.stop_reason,
+      iterations: result.iterations,
+      ...result.pollutedDiagnostics,
+    }),
+  );
+}
+
 // /llm/chat accepts tool-role messages on replay so a client can resume a
 // session that already went through the agent loop. tool_call_id / tool_calls
 // are optional so plain chat callers don't have to care.
@@ -1781,7 +1812,25 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // persists, enabling lazy-load reasoning on rehydrate
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
+          // WARP-1602 — persist the TERMINAL answer, not the delta
+          // accumulator. `liveAssistantContent` sums every `content_delta`
+          // the turn emitted; on a multi-iteration turn that used to include
+          // every intermediate iteration's analysis, so the stored `content`
+          // was the model's chain-of-thought welded to its answer while the
+          // blocking path (below) stored `result.message.content` clean. The
+          // agent loop now quarantines intermediate content, so the two agree
+          // by construction — this assignment makes the DB row depend on the
+          // loop's own contract rather than on nothing having been mis-emitted
+          // upstream, which is what let the divergence go unnoticed.
+          //
+          // Only on a real terminal: an `error` stop_reason (client abort,
+          // mid-stream death) carries an EMPTY message, and overwriting there
+          // would erase the partial answer the debounced flush already wrote.
+          if (streamResult.stop_reason !== "error") {
+            liveAssistantContent = contentToText(streamResult.message.content);
+          }
           logBlankAnswer(streamResult, conversationId, assistantMessageId);
+          logPollutedAnswer(streamResult, conversationId, assistantMessageId);
         } catch (err) {
           // Use the name-based check rather than instanceof DOMException:
           // aligns with the codebase pattern and stays robust against
@@ -1836,6 +1885,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           citationContext,
         });
         logBlankAnswer(result, conversationId, assistantMessageId);
+        logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
         // WARP-458 — agent loop populates message.reasoning regardless
         // of captureReasoning; persist whenever present so the
