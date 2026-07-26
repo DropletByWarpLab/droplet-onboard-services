@@ -4,7 +4,7 @@
  * The ONE layer-2 resolver every per-person authorization surface consults
  * (module gate T4, tool-catalog builder T5, cloud router + connector routes
  * T6, and the People UI's read-only drawer via GET
- * /api/people/:id/effective-access). §3 verbatim:
+ * /api/people/:id/effective-access). The COMPOSITION below follows §3:
  *
  *   tier          = User.role                       (the ADR-004 floor)
  *   features      = tier==owner ? ALL
@@ -37,6 +37,19 @@
  * roles alike, each carrying its `state` for the client to group by.
  * Pinned by "an ARCHIVED role still resolves its grants for existing
  * members (archive is not revoke)".
+ *
+ * READ CONSISTENCY (review C1 — known, accepted for v1). The composition
+ * follows §3, but the reads it composes span MULTIPLE snapshots: the user
+ * row and the parallel batch below each take their own, with no enclosing
+ * transaction. A role change committing mid-resolve can therefore yield a
+ * mixed view (e.g. the new tier against the old grant rows). The
+ * consequence is bounded and one-directional: `clampLevel` re-clamps every
+ * grant against the tier at compose time, so a torn read can only
+ * UNDER-permit, never over-permit. Closing it properly means wrapping the
+ * reads in a `RepeatableRead` transaction and threading that handle into
+ * `getEffectiveModuleIds` (the array form of $transaction does NOT help) —
+ * deferred to a follow-up because it changes a modules.service signature
+ * shared with the module gate.
  *
  * Shape: scope-loader-shaped singleton (module-bound Prisma + availability
  * config, idempotent boot init beside initScopeLoader, fail-closed throw
