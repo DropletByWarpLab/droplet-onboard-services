@@ -4,4 +4,4 @@ httpx==0.28.1
 # interval job instead of a hand-rolled `while True` loop — the canonical
 # scheduling pattern per CLAUDE.md (architecture-guard rule 9). Pinned to
 # the same version services/routing + services/camera-discovery use.
-APScheduler==3.10.4
+APScheduler==3.11.3

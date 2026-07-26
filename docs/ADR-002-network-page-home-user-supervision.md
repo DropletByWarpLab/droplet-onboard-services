@@ -1,5 +1,10 @@
 # ADR-002: Network Page Redesign for Home-User Router Supervision
 
+> **2026-07-26 note:** Home mode was removed wholesale by WARP-1341 (commit
+> `34d4ce6d` — the workspace is business-only). This ADR's home-persona scope
+> is therefore historical; the network-page supervision principles survive,
+> but the "everyday home user" persona framing no longer applies.
+
 **Status:** Proposed
 **Date:** 2026-04-16
 **Deciders:** Engineering team

@@ -2,7 +2,7 @@
 
 > The concrete first provider of the [integrations framework](README.md). Eaglesoft is Patterson Dental's practice-management system; Droplet reads it **directly over its SQL database**, as a **dedicated least-privilege user we provision inside that database** — no Patterson API, nothing off the LAN.
 >
-> Facts below are load-bearing and web-verified (some correct earlier assumptions — flagged **⚠**). Full workings: `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` + `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md`.
+> Facts below are load-bearing and web-verified (some correct earlier assumptions — flagged **⚠**). The full workings (`EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` + `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md`) are unpublished working docs, not in-repo — this file + [`README.md`](README.md) are the in-repo authority.
 
 ---
 
@@ -112,9 +112,10 @@ Direct database access is powerful and **not sanctioned by Patterson** — clear
 
 ## 8. References
 
-- **Build spec:** `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md`
-- **Deep research (10 corrections):** `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md`
-- **PR plan (dependency-ordered):** `EAGLESOFT-INTEGRATION-PLAN-AND-PRS-2026-07-07.md`
-- **Adversarial brief review:** `EAGLESOFT-BRIEF-REVIEW-2026-07-07.md`
+- **Build spec:** `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` *(unpublished working doc — not in-repo)*
+- **Deep research (10 corrections):** `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` *(unpublished working doc — not in-repo)*
+- **PR plan (dependency-ordered):** `EAGLESOFT-INTEGRATION-PLAN-AND-PRS-2026-07-07.md` *(unpublished working doc — not in-repo)*
+- **Adversarial brief review:** `EAGLESOFT-BRIEF-REVIEW-2026-07-07.md` *(unpublished working doc — not in-repo)*
+- **In-repo authority:** this file + [`README.md`](README.md)
 - **Design packet + prototype:** `shared_brain/content/brand/handoffs/erp-integrations/`
 - **Epic:** WARP-1093 · **legal gate:** WARP-1100 · **driver:** WARP-1106 · **field spike:** WARP-1108
