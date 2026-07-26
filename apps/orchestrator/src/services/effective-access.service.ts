@@ -42,14 +42,29 @@
  * follows §3, but the reads it composes span MULTIPLE snapshots: the user
  * row and the parallel batch below each take their own, with no enclosing
  * transaction. A role change committing mid-resolve can therefore yield a
- * mixed view (e.g. the new tier against the old grant rows). The
- * consequence is bounded and one-directional: `clampLevel` re-clamps every
- * grant against the tier at compose time, so a torn read can only
- * UNDER-permit, never over-permit. Closing it properly means wrapping the
- * reads in a `RepeatableRead` transaction and threading that handle into
- * `getEffectiveModuleIds` (the array form of $transaction does NOT help) —
- * deferred to a follow-up because it changes a modules.service signature
- * shared with the module gate.
+ * mixed view (e.g. the new tier against the old grant rows).
+ *
+ * On the FEATURE axis the consequence is bounded and one-directional:
+ * `clampLevel` re-clamps every grant against the tier at compose time, so a
+ * torn read can only UNDER-permit, never over-permit.
+ *
+ * That guarantee does NOT extend to the CONNECTORS axis, which applies no
+ * compose-time tier floor — only `min(roleGrant, connection.writeEnabled)`.
+ * The O-2 floor (read_write is selectable only on Admin-based roles) lives
+ * in `normalizeGrants` at WRITE time, so a resolve that reads
+ * `connectorGrants` before a `PATCH {startingPoint: admin→family}` commits
+ * and the rest after can return `read_write` — WIDER than committed state,
+ * with nothing to clamp it. The window is one request, and the connection's
+ * own `writeEnabled` gate plus the staged-outbox human confirm still sit
+ * above it, so the practical blast radius is small — but T6 (WARP-1530)
+ * owns the connector enforcement path and must not read this paragraph as
+ * promising a floor the resolver does not apply.
+ *
+ * Closing the tear properly means wrapping the reads in a `RepeatableRead`
+ * transaction and threading that handle into `getEffectiveModuleIds` (the
+ * array form of $transaction does NOT help) — deferred to a follow-up
+ * because it changes a modules.service signature shared with the module
+ * gate.
  *
  * Shape: scope-loader-shaped singleton (module-bound Prisma + availability
  * config, idempotent boot init beside initScopeLoader, fail-closed throw
