@@ -1823,9 +1823,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // loop's own contract rather than on nothing having been mis-emitted
           // upstream, which is what let the divergence go unnoticed.
           //
-          // Only on a real terminal: an `error` stop_reason (client abort,
-          // mid-stream death) carries an EMPTY message, and overwriting there
-          // would erase the partial answer the debounced flush already wrote.
+          // Only on a real terminal. An `error` stop_reason (client abort,
+          // mid-stream death) keeps the ACCUMULATOR instead: the agent loop
+          // now settles its emitter on both teardown paths (WARP-1602 review
+          // B1/B2), so the salvaged partial has already arrived here as
+          // `content_delta` — and on a turn that mixed deferred and
+          // non-deferred iterations the accumulator is the SUPERSET, while
+          // `streamResult.message.content` carries only the torn-down
+          // iteration's share. Overwriting would truncate the answer.
           if (streamResult.stop_reason !== "error") {
             liveAssistantContent = contentToText(streamResult.message.content);
           }
