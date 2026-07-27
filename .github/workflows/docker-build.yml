@@ -379,7 +379,7 @@ jobs:
       # write the cache: PR runs stay read-only, and GHCR sees no per-PR
       # cache churn.
       - name: Build ${{ matrix.image }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ steps.meta.outputs.context }}
           file: ${{ steps.meta.outputs.file }}
