@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
@@ -550,39 +551,58 @@ async function resolveSearchCaller(
   return { id, role };
 }
 
+/** One ACTIVE department the caller is visible into, with the `aclVersion`
+ * that any cache key derived from it must carry. */
+interface VisibleDept {
+  id: string;
+  kind: string;
+  aclVersion: number;
+}
+
 /**
- * WARP-1264 — resolve which FileContentChunk owners this request may
- * search: always the user's own corpus, plus one `__dept_<uuid>__` sentinel
- * per ACTIVE department the caller is visible into — owner/admin see ALL
- * active departments (audited "see-all", same posture as
- * `checkSpaceAccess`); everyone else sees only their own active
- * `DepartmentMembership` rows.
+ * The caller's department visibility, as read from Prisma.
  *
- * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
- * among the caller's visible departments, BOTH the legacy `__household__`
- * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
- * under either form (old watcher builds vs. WARP-1264 builds) stays
- * searchable without a reindex.
+ * `resolved: false` is the FAIL-CLOSED sentinel (WARP-1556): the walk could
+ * not be completed — no resolvable caller identity, or a DB hiccup — so
+ * nothing is known about this caller's cross-space visibility. Two different
+ * degradations are correct for the two kinds of consumer:
  *
- * No WebDAV probes — membership is read straight from Postgres (the
- * `?space=` middleware's ONE-`findUnique`-per-space philosophy, but
- * aggregated for the whole visible set in a single query here).
- *
- * Best-effort by design: any failure (no session, DB hiccup) means
- * "personal only" — content search must never fail outright just because
- * the corpus lookup can't run.
+ *   • a consumer that only WIDENS a corpus (`deptSearchCorpora`) degrades to
+ *     personal-only and carries on;
+ *   • a consumer that GATES CONTENT VISIBILITY (the user-keyed Files caches)
+ *     must bypass its cache entirely — reading a "personal-only" key after a
+ *     failed walk could serve, and writing one could poison it with, content
+ *     from a department the caller may no longer be in.
  */
-async function deptSearchCorpora(
+interface CallerDeptVisibility {
+  depts: VisibleDept[];
+  /** max(`aclVersion`) across `depts`; 0 when there are none. */
+  aclVersion: number;
+  resolved: boolean;
+}
+
+/**
+ * WARP-1264 (extracted for WARP-1556) — the ACTIVE departments this caller is
+ * visible into: owner/admin see ALL active departments (audited "see-all",
+ * same posture as `checkSpaceAccess`); everyone else sees only their own
+ * active `DepartmentMembership` rows.
+ *
+ * No WebDAV probes and no Nextcloud state — membership is read straight from
+ * Postgres (ADR-029:47/:181 → ADR-013), in a single query, mirroring the
+ * `?space=` middleware's ONE-`findUnique`-per-space philosophy.
+ *
+ * Never throws: every failure path returns the `resolved: false` sentinel and
+ * lets the caller pick its own (documented) degradation.
+ */
+async function visibleDeptsForCaller(
   req: Request,
   prisma: PrismaClient,
-  user: string,
-): Promise<DeptSearchCorpora> {
+): Promise<CallerDeptVisibility> {
   try {
     const caller = await resolveSearchCaller(req, prisma);
-    if (!caller) return { corpora: [user], aclVersion: 0 };
+    if (!caller) return { depts: [], aclVersion: 0, resolved: false };
 
     const isOwnerOrAdmin = caller.role === "owner" || caller.role === "admin";
-    type VisibleDept = { id: string; kind: string; aclVersion: number };
     let depts: VisibleDept[];
     if (isOwnerOrAdmin) {
       depts = await prisma.department.findMany({
@@ -597,23 +617,94 @@ async function deptSearchCorpora(
       depts = memberships.map((m) => m.department);
     }
 
-    const corpora = [user];
     let aclVersion = 0;
     for (const dept of depts) {
       if (dept.aclVersion > aclVersion) aclVersion = dept.aclVersion;
-      if (dept.kind === "HOUSEHOLD") {
-        corpora.push(HOUSEHOLD_INDEX_USER);
-      }
-      corpora.push(deptSentinel(dept.id));
     }
-    return { corpora, aclVersion };
+    return { depts, aclVersion, resolved: true };
   } catch (err) {
     logger.debug(
       { err },
-      "deptSearchCorpora: department lookup failed; personal corpus only",
+      "visibleDeptsForCaller: department lookup failed; caller visibility unresolved",
     );
-    return { corpora: [user], aclVersion: 0 };
+    return { depts: [], aclVersion: 0, resolved: false };
   }
+}
+
+/**
+ * WARP-1556 — the membership/ACL dimension every user-keyed Files cache that
+ * can carry CROSS-SPACE content must fold into its key.
+ *
+ * Shape: `acl<maxAclVersion>-<digest>`, where the digest covers the sorted
+ * `<departmentId>:<aclVersion>` pairs of every department the caller is
+ * currently visible into. Both halves are load-bearing:
+ *
+ *   • the max version busts the key on a RIGHTS change against an unchanged
+ *     department set (this is what `deptSearchCorpora` folds into the
+ *     content-search key, WARP-1264);
+ *   • the digest busts it on a MEMBERSHIP change. `max()` alone does not: a
+ *     caller in Alpha(acl=3) + Beta(acl=9) revoked from Alpha still maxes at
+ *     9, and would keep reading Alpha's file names out of the pre-revocation
+ *     entry until TTL. The content-search key is safe from that only because
+ *     it ALSO carries the full corpus list; this digest is the same defence,
+ *     kept to a bounded key length.
+ *
+ * The digest is hashed rather than inlined so a key stays short (and no
+ * department id leaks into Redis key space / slow-log output).
+ *
+ * Returns `null` when the caller's visibility could not be resolved. That is
+ * NOT "no departments" — it is "unknown", and the caller MUST fail closed by
+ * skipping the cache in both directions. Deliberately the opposite posture
+ * from `activeDeptMountNames` above, which fails OPEN (`[]`, nothing hidden):
+ * that is right for a cosmetic hide-filter over a live upstream response and
+ * wrong for a cache that gates what content a caller is handed back.
+ */
+async function aclCacheTag(
+  req: Request,
+  prisma: PrismaClient,
+): Promise<string | null> {
+  const { depts, aclVersion, resolved } = await visibleDeptsForCaller(req, prisma);
+  if (!resolved) return null;
+  const fingerprint = depts
+    .map((d) => `${d.id}:${d.aclVersion}`)
+    .sort()
+    .join(",");
+  const digest = createHash("sha256").update(fingerprint).digest("hex").slice(0, 16);
+  return `acl${aclVersion}-${digest}`;
+}
+
+/**
+ * WARP-1264 — resolve which FileContentChunk owners this request may
+ * search: always the user's own corpus, plus one `__dept_<uuid>__` sentinel
+ * per ACTIVE department the caller is visible into (see
+ * `visibleDeptsForCaller` for the visibility rule).
+ *
+ * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
+ * among the caller's visible departments, BOTH the legacy `__household__`
+ * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
+ * under either form (old watcher builds vs. WARP-1264 builds) stays
+ * searchable without a reindex.
+ *
+ * Best-effort by design: any failure (no session, DB hiccup) means
+ * "personal only" — content search must never fail outright just because
+ * the corpus lookup can't run. Safe here (unlike for a cache key) because
+ * the corpus list is a *filter* on a live query: narrowing it can only ever
+ * hide content, never disclose it.
+ */
+async function deptSearchCorpora(
+  req: Request,
+  prisma: PrismaClient,
+  user: string,
+): Promise<DeptSearchCorpora> {
+  const { depts, aclVersion } = await visibleDeptsForCaller(req, prisma);
+  const corpora = [user];
+  for (const dept of depts) {
+    if (dept.kind === "HOUSEHOLD") {
+      corpora.push(HOUSEHOLD_INDEX_USER);
+    }
+    corpora.push(deptSentinel(dept.id));
+  }
+  return { corpora, aclVersion };
 }
 
 /**
@@ -705,6 +796,67 @@ export function createFilesRouter(
   emailSendOptions: EmailSendOptions = {},
 ): Router {
   const router = Router();
+
+  /**
+   * WARP-1556 — build a user-keyed Files cache key that carries the caller's
+   * membership/ACL dimension: `<prefix><user>:<aclTag>[:<suffix>…]`.
+   *
+   * Returns `null` when the caller's department visibility could not be
+   * resolved. `null` means FAIL CLOSED — the route must skip the cache in
+   * BOTH directions (no read, no write, no del): reading the personal-only
+   * key after a failed lookup could hand back another space's content, and
+   * writing it could poison that key for a caller who really has no
+   * departments. Serving a fresh upstream response is always safe; serving a
+   * cached one when we cannot prove what the caller may see is not.
+   *
+   * Costs one indexed Prisma read per request on the routes that use it —
+   * the same read `GET /api/files/search/content` has paid since WARP-1264.
+   */
+  async function aclScopedKey(
+    req: Request,
+    prefix: string,
+    user: string,
+    ...suffix: string[]
+  ): Promise<string | null> {
+    const tag = await aclCacheTag(req, prisma);
+    if (!tag) return null;
+    return [`${prefix}${user}`, tag, ...suffix].join(":");
+  }
+
+  /**
+   * WARP-1556 — the ONE builder for the directory-listing cache key, shared by
+   * the `GET /api/files` read and every write route's invalidation, so a key
+   * written by the read is always the key a later `cacheDel` names. Never
+   * inline `CACHE_PREFIX + user + ":" + path` again: that shape has no ACL
+   * dimension, and a read/del pair built from two different shapes silently
+   * stops invalidating.
+   *
+   * `null` (unresolved visibility) → skip the cache; see `aclScopedKey`.
+   */
+  function listCacheKey(
+    req: Request,
+    user: string,
+    resolvedPath: string,
+  ): Promise<string | null> {
+    return aclScopedKey(req, CACHE_PREFIX, user, resolvedPath);
+  }
+
+  /**
+   * Invalidate the listing cache for one already-resolved path.
+   *
+   * WARP-1556: goes through `listCacheKey` so the del names exactly the key
+   * the read wrote. A null key means the caller's ACL tag couldn't be
+   * resolved — there is nothing to name, and nothing readable either (the
+   * read path bypasses the cache in that state), so skipping is correct.
+   */
+  async function invalidateListing(
+    req: Request,
+    user: string,
+    resolvedPath: string,
+  ): Promise<void> {
+    const key = await listCacheKey(req, user, resolvedPath);
+    if (key) await cacheDel(key);
+  }
 
   /**
    * WARP-941 — best-effort notification email for person shares (shareType 0).
@@ -1462,16 +1614,27 @@ export function createFilesRouter(
         const user = getUser(req);
         const isPersonalRoot = space === "personal" && filePath === "/";
 
-      // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"), not
-      // the (space, requestedPath) pair — the shared prefix already makes the
-      // path distinct from any personal path, and keeping the same key shape
-      // means the existing write routes' `cacheDel(CACHE_PREFIX + user + ":" +
-      // path)` invalidations still land for shared-space mutations.
-      const cacheKey = CACHE_PREFIX + user + ":" + filePath;
-      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
-      if (cached) {
-        res.json(cached);
-        return;
+      // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"),
+      // not the (space, requestedPath) pair — the shared prefix already makes
+      // the path distinct from any personal path, and every write route
+      // invalidates through the SAME `listCacheKey` builder, so a mutation in
+      // a shared/dept space still lands on the entry this read wrote.
+      //
+      // WARP-1556 adds the caller's ACL tag to that key. This route IS gated
+      // per-request by requireSpaceAccess, but the gate only authorizes the
+      // DECLARED `?space=`, and `space=personal` resolves the path verbatim —
+      // so `?path=/Alpha` (no space) lands on the very same resolved path the
+      // gated `?space=dept:<alpha>` read cached, with no membership check at
+      // all. Without the ACL dimension a just-revoked member could keep
+      // pulling that library's listing out of Redis for the whole CACHE_TTL
+      // window.
+      const cacheKey = await listCacheKey(req, user, filePath);
+      if (cacheKey) {
+        const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+        if (cached) {
+          res.json(cached);
+          return;
+        }
       }
 
       const raw = await ncListFiles(await getToken(req), user, filePath);
@@ -1491,7 +1654,7 @@ export function createFilesRouter(
         }
         entries = raw.filter((e) => !hideNames.has(e.name));
       }
-      await cacheSet(cacheKey, entries, CACHE_TTL);
+      if (cacheKey) await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
       handleFileError(err, res, next, []);
@@ -1836,7 +1999,7 @@ export function createFilesRouter(
         }
       }
 
-      await cacheDel(CACHE_PREFIX + user + ":" + targetPath);
+      await invalidateListing(req, user, targetPath);
       safePublish(`droplet/files/${user}/uploaded`, {
         path: targetPath,
         files: results.map((r) => r.name),
@@ -1870,7 +2033,7 @@ export function createFilesRouter(
       await ncDeleteFile(await getToken(req), user, filePath);
 
       const parentPath = path.posix.dirname(filePath) || "/";
-      await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
+      await invalidateListing(req, user, parentPath);
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
@@ -1914,7 +2077,7 @@ export function createFilesRouter(
       await ncCreateDirectory(await getToken(req), user, targetPath);
 
       const parentPath = path.posix.dirname(targetPath) || "/";
-      await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
+      await invalidateListing(req, user, parentPath);
 
       res.json({ created: targetPath });
     } catch (err) {
@@ -2101,13 +2264,17 @@ export function createFilesRouter(
   }
 
   /** Invalidate listing caches for the given parent paths (source + destination). */
-  async function invalidateParents(user: string, ...paths: string[]): Promise<void> {
+  async function invalidateParents(
+    req: Request,
+    user: string,
+    ...paths: string[]
+  ): Promise<void> {
     const parents = new Set<string>();
     for (const p of paths) {
       parents.add(path.posix.dirname(p) || "/");
     }
     for (const parent of parents) {
-      await cacheDel(CACHE_PREFIX + user + ":" + parent);
+      await invalidateListing(req, user, parent);
     }
   }
 
@@ -2172,7 +2339,7 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
-      await invalidateParents(user, filePath);
+      await invalidateParents(req, user, filePath);
       safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
       res.json({ renamed: { from: filePath, to: newPath } });
     } catch (err) {
@@ -2231,7 +2398,7 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
-      await invalidateParents(user, from, to);
+      await invalidateParents(req, user, from, to);
       safePublish(`droplet/files/${user}/moved`, { from, to });
       res.json({ moved: { from, to } });
     } catch (err) {
@@ -2287,7 +2454,7 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
-      await invalidateParents(user, to);
+      await invalidateParents(req, user, to);
       safePublish(`droplet/files/${user}/copied`, { from, to });
       res.json({ copied: { from, to } });
     } catch (err) {
@@ -2327,7 +2494,7 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(user, ...paths);
+      await invalidateParents(req, user, ...paths);
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-deleted`, {
         count: okCount,
@@ -2380,7 +2547,7 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(user, ...paths, normalizedDir + "/_");
+      await invalidateParents(req, user, ...paths, normalizedDir + "/_");
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-moved`, {
         toDir: normalizedDir,
@@ -2434,7 +2601,7 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(user, normalizedDir + "/_");
+      await invalidateParents(req, user, normalizedDir + "/_");
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-copied`, {
         toDir: normalizedDir,
@@ -2587,7 +2754,7 @@ export function createFilesRouter(
       }
       await ncRestoreVersion(token, user, fileId, versionId);
 
-      await invalidateParents(user, filePath);
+      await invalidateParents(req, user, filePath);
       safePublish(`droplet/files/${user}/version-restored`, { path: filePath, versionId });
       res.json({ restored: { path: filePath, versionId } });
     } catch (err) {
@@ -2600,6 +2767,13 @@ export function createFilesRouter(
   // ────────────────────────────────────────────────────────────
 
   // Redis cache prefixes — let callers invalidate one feature independently.
+  //
+  // WARP-1556: favorites / recents / name-search are all fed by a Nextcloud
+  // query scoped to the caller's HOME, and every active department/team
+  // groupfolder is mounted inside that home (the very reason
+  // `activeDeptMountNames` exists). So all three can return cross-space file
+  // names and paths, and all three used to be keyed per-user with no
+  // membership dimension. Each key below now goes through `aclScopedKey`.
   const FAVORITES_CACHE_PREFIX = "files:favorites:";
   const RECENTS_CACHE_PREFIX = "files:recents:";
   const SEARCH_CACHE_PREFIX = "files:search:";
@@ -2629,7 +2803,12 @@ export function createFilesRouter(
       const { favorite } = parsed.data;
       const user = getUser(req);
       await ncSetFavorite(await getToken(req), user, filePath, favorite);
-      await cacheDel(FAVORITES_CACHE_PREFIX + user);
+      // WARP-1556: the read key is ACL-scoped, so the invalidation must be
+      // too. An unresolved tag means we can't name the entry — skip the del
+      // (the entry self-expires in FAVORITES_TTL seconds; the worst case is a
+      // briefly stale star, never a disclosure).
+      const favKey = await aclScopedKey(req, FAVORITES_CACHE_PREFIX, user);
+      if (favKey) await cacheDel(favKey);
       safePublish(`droplet/files/${user}/favorited`, { path: filePath, favorite });
       res.json({ path: filePath, favorite });
     } catch (err) {
@@ -2641,14 +2820,16 @@ export function createFilesRouter(
   router.get("/files/favorites", async (req, res, next) => {
     try {
       const user = getUser(req);
-      const cacheKey = FAVORITES_CACHE_PREFIX + user;
-      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
-      if (cached) {
-        res.json({ items: cached });
-        return;
+      const cacheKey = await aclScopedKey(req, FAVORITES_CACHE_PREFIX, user);
+      if (cacheKey) {
+        const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+        if (cached) {
+          res.json({ items: cached });
+          return;
+        }
       }
       const items = await ncListFavorites(await getToken(req), user);
-      await cacheSet(cacheKey, items, FAVORITES_TTL);
+      if (cacheKey) await cacheSet(cacheKey, items, FAVORITES_TTL);
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next, { items: [] });
@@ -2663,14 +2844,21 @@ export function createFilesRouter(
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
       const user = getUser(req);
-      const cacheKey = `${RECENTS_CACHE_PREFIX}${user}:${limit}`;
-      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
-      if (cached) {
-        res.json({ items: cached });
-        return;
+      const cacheKey = await aclScopedKey(
+        req,
+        RECENTS_CACHE_PREFIX,
+        user,
+        String(limit),
+      );
+      if (cacheKey) {
+        const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+        if (cached) {
+          res.json({ items: cached });
+          return;
+        }
       }
       const items = await ncListRecents(await getToken(req), user, limit);
-      await cacheSet(cacheKey, items, RECENTS_TTL);
+      if (cacheKey) await cacheSet(cacheKey, items, RECENTS_TTL);
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next, { items: [] });
@@ -2695,18 +2883,27 @@ export function createFilesRouter(
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
       const user = getUser(req);
-      const cacheKey = `${SEARCH_CACHE_PREFIX}${user}:${q}:${mime ?? ""}:${limit}`;
-      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
-      if (cached) {
-        res.json({ items: cached });
-        return;
+      const cacheKey = await aclScopedKey(
+        req,
+        SEARCH_CACHE_PREFIX,
+        user,
+        q,
+        mime ?? "",
+        String(limit),
+      );
+      if (cacheKey) {
+        const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+        if (cached) {
+          res.json({ items: cached });
+          return;
+        }
       }
       const items = await ncSearchFiles(await getToken(req), user, {
         query: q,
         mime,
         limit,
       });
-      await cacheSet(cacheKey, items, SEARCH_TTL);
+      if (cacheKey) await cacheSet(cacheKey, items, SEARCH_TTL);
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next);

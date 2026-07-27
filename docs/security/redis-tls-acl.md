@@ -24,7 +24,7 @@ evidence: `scripts/host/droplet-verify-encryption.sh` checks
 | `orchestrator` | `REDIS_PASSWORD_ORCHESTRATOR` | `~*` (sessions, `ratelimit:login:*`, SWR cache — many prefixes) | `@read @write @keyspace @transaction @scripting`, `-@dangerous` (no KEYS/FLUSH*/CONFIG), `+info` (ioredis ready check) | `cache.service.ts` usage |
 | `ai-gateway` | `REDIS_PASSWORD_AI_GATEWAY` | `~session:* ~sessions:index ~ratelimit:*` | `@read @write @keyspace @scripting`, `-@dangerous` | `sessions/store.py` + `middleware/rate_limit.py` (Lua) |
 | `mcp-server` | `REDIS_PASSWORD_MCP` | `~rerank:*` | `+get +setex +info` only | `file-search.service.ts` rerank cache |
-| `nextcloud` | `REDIS_HOST_PASSWORD` | `~*` (instanceid-derived prefixes) | `@read @write @keyspace @string @scripting`, `-@dangerous`, `+keys` (phpredis `clear()`) | Nextcloud memcache/locking |
+| `nextcloud` | `REDIS_HOST_PASSWORD` | `~*` (instanceid-derived prefixes, `PHPREDIS_SESSION:*`) | `@read @write @keyspace @string @scripting`, `-@dangerous`, `+keys` (phpredis `clear()`) | Nextcloud memcache/locking **and PHP sessions** |
 
 Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
 
@@ -38,10 +38,40 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
 - **ai-gateway (redis-py):** the compose URL carries
   `?ssl_cert_reqs=required&ssl_ca_certs=/data/service-tls/ca.pem` —
   `from_url` maps query params onto ssl kwargs; no Python changes.
-- **nextcloud (phpredis):** `docker/nextcloud/zz-redis-tls.config.php`
-  (sorts after the entrypoint's plaintext `redis.config.php`, so its
-  `redis` key wins) dials `tls://cache:6380` as the `nextcloud` ACL user
-  with `ssl_context.cafile` pinned to the bundle.
+- **nextcloud (phpredis) — TWO surfaces, one contract (WARP-1607).**
+  Nextcloud reaches Redis from two independent places, and migrating only
+  one is silent: the failure surfaces as an opaque
+  `Groupfolder add group: 500` and departments/teams never converge to
+  ACTIVE (ADR-029), not as a Redis error.
+  1. **Distributed cache + file locking** —
+     `docker/nextcloud/zz-redis-tls.config.php`, mounted into
+     `config/` where it sorts after the image's baked `redis.config.php`
+     so its `redis` key wins.
+  2. **PHP sessions** — `docker/nextcloud/zz-redis-session.ini`, mounted
+     into `/usr/local/etc/php/conf.d/` where it sorts after the
+     `redis-session.ini` the image entrypoint **rewrites on every boot**.
+     That generated file hardcodes a plaintext scheme and exposes no
+     CA-bundle knob, so no combination of `REDIS_HOST*` variables can make
+     it speak TLS — overriding it is the only option. A `before-starting`
+     hook cannot do the job either: the image runs hooks via
+     `su -p www-data`, which cannot write into root-owned `conf.d`.
+
+  Both files resolve the endpoint from the **same env contract** on the
+  `nextcloud` service in `docker/docker-compose.yml` — `REDIS_TLS_SCHEME`,
+  `REDIS_HOST`, `REDIS_HOST_PORT`, `REDIS_HOST_USER`, `REDIS_TLS_CAFILE`,
+  `REDIS_HOST_PASSWORD` — so they cannot drift apart again. Neither file
+  contains a literal host/port/user, and the session ini carries no secret
+  material: `${...}` is expanded at runtime by PHP's ini parser, which
+  falls back to `getenv()`. `scripts/test-security.sh` (Test 21) fails if
+  the two surfaces ever stop reading the identical set of variables.
+
+  The session `save_path` shape is dictated by phpredis 6.2.0, the version
+  baked into the digest-pinned `nextcloud:29-apache` image: the scheme is
+  passed straight to `php_stream_xport_create` (so `tls://` selects the TLS
+  transport), `auth[user]`/`auth[pass]` reaches `redis_extract_auth_info`
+  for a real ACL identity, and `stream[...]` maps onto the `ssl` stream
+  context, which is the only way to pin the internal CA for the session
+  socket. Re-verify these against `redis_session.c` if the image pin moves.
 - The `.env` `REDIS_URL` (default user) is ping-only by design — anything
   still using it for data fails loudly with NOPERM instead of silently
   riding a shared credential.
@@ -60,6 +90,13 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
   `./setup.sh --sync-secrets` (regenerates `data/secrets/redis/users.acl`
   from the new values — idempotent, hash-only), then
   `docker compose … restart cache <affected clients>`.
+  **Keep `REDIS_HOST_PASSWORD` alphanumeric.** Since WARP-1607 it is
+  interpolated into a URL (PHP's `session.save_path`), and phpredis splits
+  that on whitespace/commas then URL-decodes each value — so a space, comma,
+  `&`, `=`, `+`, `#` or `%` breaks Nextcloud *sessions* while the
+  cache/locking surface keeps working, which is a confusing half-failure.
+  `setup.sh`'s generator only emits `[A-Za-z0-9]`; hand-rotation must match.
+  Follow-up: teach `_generate_redis_acl` to reject an unsafe value outright.
 - **Upgrade path for existing boxes:** `migrate_env` backfills the three
   per-service passwords and rewrites the legacy plaintext `REDIS_URL`;
   `materialize_artifacts` writes the ACL file on every setup run.
@@ -71,4 +108,21 @@ sudo bash scripts/host/droplet-verify-encryption.sh \
   --checks transit.redis.plaintext-refused,transit.redis.tls
 bash scripts/test/redis-tls.test.sh   # dockerized: boots the real launch shape
 bash tests/redis-acl.test.sh          # ACL generator unit test
+./scripts/test-security.sh            # static invariants (Test 18 + Test 21)
+```
+
+Nextcloud's session hop is the one part CI cannot prove end-to-end — the
+static guard pins the wiring, but only a real container resolves the ini
+`${...}` expansion and completes the TLS handshake. On a box:
+
+```bash
+# 1. the override won the conf.d scan and the variables expanded
+docker compose -p droplet -f docker/docker-compose.yml exec nextcloud \
+  php -r 'echo ini_get("session.save_path"), "\n";'   # tls://cache:6380?auth[user]=nextcloud…
+# 2. sessions actually write (this is what was 500ing)
+docker compose -p droplet -f docker/docker-compose.yml exec nextcloud \
+  php -r 'session_start(); $_SESSION["t"]=1; session_write_close(); echo "session ok\n";'
+# 3. no session errors are still being logged
+docker compose -p droplet -f docker/docker-compose.yml logs --tail 200 nextcloud \
+  | grep -c "Redis connection not available"          # expect 0
 ```

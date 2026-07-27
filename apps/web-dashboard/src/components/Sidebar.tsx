@@ -3,302 +3,43 @@
 import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  Activity,
-  Blocks,
-  BookOpen,
-  Calendar as CalendarIcon,
-  Cpu,
-  Film,
-  FlaskConical,
-  FolderKanban,
-  FolderLock,
-  FolderOpen,
-  Globe,
-  HardDrive,
-  HeartPulse,
-  HelpCircle,
-  Laptop,
-  LayoutDashboard,
-  LogOut,
-  Mail,
-  MessageSquare,
-  Mic,
-  MoreHorizontal,
-  Network,
-  ScrollText,
-  Settings,
-  ShieldCheck,
-  Sparkles,
-  Stethoscope,
-  Trash2,
-  Star,
-  Clock,
-  Share2,
-  Users,
-  Video,
-  Wrench,
-  type LucideIcon,
-} from "lucide-react";
+import { LogOut, MoreHorizontal } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
+// The nav definition + its pure gate predicates live beside this component
+// (WARP-1528) so the route guard and the tests can read them without pulling
+// in the chrome. This file owns rendering; nav-config owns what there is to
+// render and who may see it.
+import {
+  MOBILE_PRIMARY_HREFS,
+  NAV_GROUPS,
+  visibleItems,
+  type AuthRole,
+  type NavItem,
+} from "./nav-config";
 
-type NavItem = {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-  /** Restrict visibility by role. Default: visible to all. */
-  roles?: Array<NonNullable<AuthRole>>;
-  /**
-   * Hide unless the named backend capability is wired (GET
-   * /api/admin/capabilities). Used for optional admin surfaces whose backing
-   * integration may be unconfigured. Default: no capability gate.
-   */
-  requiresCapability?: "claudeActivity" | "ragEval";
-  /**
-   * Hide unless the named user-facing module is EFFECTIVE (available && enabled)
-   * on this Droplet — GET /api/modules, readable by every authenticated role.
-   * WARP-1397: every toggleable module's nav entry carries its registry id
-   * here, so flipping a feature off in Settings → Features removes its nav
-   * entry (no dead, module-gated 404). The gate fails open, so an entry only
-   * disappears on a positive "off". Core modules (chat) are never tagged.
-   * The id must match the orchestrator module-registry id.
-   *
-   * Applies to TOP-LEVEL items only (visibleItems filters the group items).
-   * Children ride their parent's visibility — to gate a sub-nav entry, gate
-   * its parent, not the child (a child `requiresModule` is currently a no-op).
-   */
-  requiresModule?:
-    | "files"
-    | "email"
-    | "calendar"
-    | "projects"
-    | "knowledge"
-    | "cameras"
-    | "network"
-    | "smart_home"
-    | "voice";
-  /**
-   * Nested sub-navigation. When present, the desktop sidebar reveals these
-   * children indented under the parent whenever the user is anywhere inside
-   * the parent section (the parent's href OR any child's href). Mirrors the
-   * Files sub-nav pattern, generalized so any section can nest (e.g. Events
-   * under Cameras). Children are rendered flat in the mobile "More" drawer so
-   * every destination stays reachable with a single tap.
-   */
-  children?: NavItem[];
-  /**
-   * Match this item's active state by exact path equality instead of the
-   * default `startsWith` prefix match. Used by section-index sub-items (e.g.
-   * the Cameras index sits at /cameras, but /events is a sibling child — the
-   * index must not light up when a deeper child route is active).
-   */
-  exact?: boolean;
+/** Does this href own a slot in the mobile bottom tab bar? */
+const isMobilePrimary = (href: string): boolean =>
+  (MOBILE_PRIMARY_HREFS as readonly string[]).includes(href);
+
+/**
+ * One block of the mobile "More" drawer: a nav destination plus the
+ * sub-destinations rendered beneath it.
+ *
+ * `captionOnly` marks the WARP-1554 case — the anchor is a bottom-tab
+ * primary, so its own row is omitted (the tab bar already goes there) and it
+ * renders as a non-navigating caption instead. Its children still render, so
+ * they stay reachable without ever appearing orphaned under an absent parent.
+ */
+type DrawerEntry = {
+  item: NavItem;
+  children: NavItem[];
+  captionOnly: boolean;
 };
-
-type AuthRole = "owner" | "admin" | "family" | "guest";
-
-type NavGroup = {
-  /** Caption shown above the group (sentence case is intentional — the
-   *  caption is rendered with `uppercase tracking-[0.18em] type-caption-1`
-   *  so we let CSS handle the visual upper-casing instead of duplicating
-   *  it in copy). */
-  label: string;
-  items: NavItem[];
-};
-
-/* ─────────── Nav definition (re-pointed 2026-05-18 from flat lists) ───────────
-   Groups mirror the redesign's Workspace / Operations / Admin IA.
-   Routes are unchanged — only labels and grouping are new. WARP-1341:
-   business-only build, so the landing surface is labelled "Overview"
-   (route stays "/"). */
-const NAV_GROUPS: NavGroup[] = [
-  {
-    label: "Workspace",
-    items: [
-      { href: "/", label: "Overview", icon: LayoutDashboard },
-      { href: "/chat", label: "Ask AI", icon: MessageSquare },
-      {
-        href: "/files",
-        label: "Files",
-        icon: FolderOpen,
-        requiresModule: "files",
-        // Files sub-nav — the original nesting, now expressed via the
-        // generalized `children` mechanism (was the standalone filesSubNav
-        // const). Reveals on any /files/* route. "All files" is `exact` so
-        // it doesn't stay lit while you're in a deeper Files view.
-        children: [
-          { href: "/files", label: "All files", icon: FolderOpen, exact: true },
-          { href: "/files/drives", label: "Drives", icon: HardDrive },
-          { href: "/files/recents", label: "Recents", icon: Clock },
-          { href: "/files/favorites", label: "Favorites", icon: Star },
-          { href: "/files/shared", label: "Shared", icon: Share2 },
-          { href: "/files/trash", label: "Trash", icon: Trash2 },
-          { href: "/files/devices", label: "Sync Devices", icon: Laptop },
-        ],
-      },
-      // WARP-837: Email triage surface. Left unrestricted — the backend allows
-      // owner/admin/family and RBAC-scopes accounts per user; the send tier is
-      // gated to owner/admin in the UI + server. No unread-count badge (the
-      // NavItem type has no count field; out of scope).
-      { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
-      { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
-      // ADR-026: native PM surface — sits next to Calendar (both are
-      // time/workflow-oriented) and ahead of Knowledge (the read-only search
-      // index). Page at /projects renders natively off /api/pm/* under the
-      // dashboard session — no embedded stack, no second login.
-      // WARP-1154/1155: hidden when the orchestrator says the Projects module
-      // is off, so the nav never advertises a surface the box won't serve.
-      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
-      { href: "/knowledge", label: "Knowledge", icon: BookOpen, requiresModule: "knowledge" },
-      // WARP-225: per-user context-meter. Lives next to Knowledge so the
-      // eye reads them paired — /knowledge is "what's indexed" by file,
-      // /context is "what's indexed" by capability density.
-      { href: "/context", label: "Context", icon: Sparkles },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      // Cameras owns the surveillance section. Events nests beneath it
-      // (Samantha QA #bugs) — they were flat siblings, which read as two
-      // unrelated destinations. The sub-nav reveals on /cameras or /events
-      // (mirrors the Files sub-nav). The Cameras parent link IS the section
-      // index; its default prefix match keeps it lit on /cameras and the
-      // /cameras/[name] detail pages, but NOT on the /events sibling (which
-      // owns its own active state).
-      {
-        href: "/cameras",
-        label: "Cameras",
-        icon: Video,
-        requiresModule: "cameras",
-        children: [
-          // Events replaces the old "Clips" entry — same icon, expanded UX.
-          // The /clips route still resolves (kept as a redirect) so external
-          // links and the LLM tool list_clips don't 404.
-          { href: "/events", label: "Events", icon: Film },
-        ],
-      },
-      { href: "/network", label: "Network", icon: Network, requiresModule: "network" },
-      // WARP-302: "Devices" uses Cpu so it doesn't visually collide with
-      // the Overview tab's LayoutDashboard glyph at thumb distance.
-      { href: "/devices", label: "Devices", icon: Cpu, requiresModule: "smart_home" },
-      // WARP-1055: mic health + guided calibration. A peer surface, not
-      // a Settings subpage — calibration is living, health-bearing state
-      // (design brief §2). Ordered Cameras · Network · Devices · Voice.
-      { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
-      { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
-      // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
-      // provider #1 (the Patterson dental PMS Droplet reads directly over its
-      // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
-      {
-        href: "/integrations",
-        label: "Integrations",
-        icon: Blocks,
-        children: [
-          { href: "/integrations/eaglesoft", label: "Eaglesoft", icon: Stethoscope },
-        ],
-      },
-    ],
-  },
-  {
-    label: "Admin",
-    items: [
-      // /users is the existing People surface. Label kept as "Users" in
-      // Phase 1 so the WARP-290 a11y test contract (queries by /users/i)
-      // doesn't regress; Phase 3 renames to "People" alongside test
-      // updates and adds the full Roles / Groups / Sessions entries
-      // with workspace:"business" set.
-      { href: "/users", label: "Users", icon: Users },
-      // WARP-1270 (T18): company-wide storage usage roster (people +
-      // libraries). Owner/admin — mirrors the server-side
-      // `requireRole("owner","admin")` gate on GET /api/admin/files/usage.
-      {
-        href: "/admin/files",
-        label: "Company files",
-        icon: FolderLock,
-        roles: ["owner", "admin"],
-      },
-      // WARP-555: read-only catalog of the assistant's built-in tools.
-      // No role restriction — the /api/llm/tools/catalog route filters
-      // write tools out for non-privileged roles, so family/guest see a
-      // safe read-only subset. Visible in both workspaces.
-      { href: "/tools", label: "Tools", icon: Wrench },
-      // WARP-836: read-only Models status surface (local LLMs + opt-in cloud).
-      // Unrestricted — GET /api/models is open to any authenticated principal
-      // (ADR-004 §3), so family/guest see the same status-only view. Reuses the
-      // Cpu glyph already imported for /devices. Active-state is automatic.
-      { href: "/models", label: "Models", icon: Cpu },
-      { href: "/settings", label: "Settings", icon: Settings },
-      // PR #382: appliance/service health status page. Reads the existing
-      // WARP-43 aggregate; sits in the support/reference zone next to Help.
-      { href: "/health", label: "Health", icon: HeartPulse },
-      // WARP-174: customer-facing manual + "How Droplet works" replay
-      // modal. Sits next to Settings — same "support / reference" zone.
-      { href: "/help", label: "Help", icon: HelpCircle },
-      // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
-      // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
-      {
-        href: "/admin/claude-activity",
-        label: "Activity",
-        icon: Activity,
-        roles: ["owner", "admin"],
-        requiresCapability: "claudeActivity",
-      },
-      // WARP-519: ad-hoc RAGAS run + baseline bootstrap trigger surface.
-      // Hidden unless RAG_EVAL_URL is set (capabilities.ragEval) — #15.
-      {
-        href: "/admin/rag-eval",
-        label: "RAG eval",
-        icon: FlaskConical,
-        roles: ["owner", "admin"],
-        requiresCapability: "ragEval",
-      },
-      // WARP-246: signed activity log viewer. Role-gated to owner/admin
-      // (mirrors the orchestrator's owner/admin gate on /api/activity);
-      // no capability gate — the activity surface always exists.
-      {
-        href: "/admin/audit",
-        label: "Audit log",
-        icon: ScrollText,
-        roles: ["owner", "admin"],
-      },
-      // WARP-246: Trust Center placeholder — visible to every signed-in
-      // member (support/reference zone, next to Help).
-      { href: "/trust", label: "Trust Center", icon: ShieldCheck },
-    ],
-  },
-];
-
-// Mobile bottom tab bar — capped at 4 + a "More" trigger. Per WARP-290
-// the cap is iOS convention (7 tabs at 360px crowded each label to
-// ~51px). The four hrefs below win a tab spot; the fifth slot is the
-// "More" trigger that opens the drawer (see below). Everything else
-// from NAV_GROUPS routes through the drawer.
-const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
-
-/** Filter a group's items by role + capabilities. Returns the same
- *  shape with items shaped to render order; empty groups are caller's
- *  responsibility to skip. */
-function visibleItems(
-  items: NavItem[],
-  role: AuthRole | undefined,
-  capabilities: { claudeActivity: boolean; ragEval: boolean },
-  isModuleOn: (moduleId: string) => boolean,
-): NavItem[] {
-  return items.filter((item) => {
-    if (item.roles && (!role || !item.roles.includes(role))) return false;
-    if (item.requiresCapability && !capabilities[item.requiresCapability])
-      return false;
-    // WARP-1397: hide a switched-off feature's nav entry (module not effective).
-    if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
-    return true;
-  });
-}
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -311,6 +52,11 @@ export function Sidebar() {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
   const moreHeadingId = useId();
+  // WARP-1554: base id for the drawer's non-navigating section captions —
+  // each caption labels the group of sub-views rendered beneath it.
+  const drawerSectionBaseId = useId();
+  const sectionCaptionId = (href: string) =>
+    `${drawerSectionBaseId}${href.replace(/[^a-zA-Z0-9]+/g, "-")}`;
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -362,27 +108,41 @@ export function Sidebar() {
   // primary set lands here in group order. Nested children (e.g. Events
   // under Cameras) ride along with their parent: they're flattened into
   // the drawer list right after it so every destination stays reachable
-  // with a single tap. A child whose parent is itself a bottom-tab primary
-  // (e.g. the Files sub-views) is excluded with that parent — the drawer
-  // never orphans a child under an absent parent.
-  const drawerGroups = renderedGroups
-    .map((g) => ({
-      label: g.label,
-      items: g.items
-        .filter(
-          (item) =>
-            !MOBILE_PRIMARY_HREFS.includes(
-              item.href as (typeof MOBILE_PRIMARY_HREFS)[number],
-            ),
-        )
-        .flatMap((item) => {
-          const children = (item.children ?? []).filter(
-            (child) => child.href !== item.href,
-          );
-          return [item, ...children];
-        }),
-    }))
-    .filter((g) => g.items.length > 0);
+  // with a single tap.
+  //
+  // WARP-1554: a bottom-tab primary's OWN row is still dropped (it already
+  // owns a tab), but its children are no longer dropped with it. They used
+  // to be, which left the six Files sub-views (Drives, Recents, Favorites,
+  // Shared, Trash, Sync Devices) with no mobile navigation path at all — not
+  // in the tab bar, not in the drawer, and the desktop sub-nav renders inside
+  // a `hidden lg:flex` aside. Such children now render under a
+  // non-navigating caption carrying the parent's label + glyph, which keeps
+  // the original intent intact: a child is never orphaned under an absent
+  // parent — the parent is present, as a label rather than a link.
+  //
+  // Gating still flows through `visibleItems` alone, so a child hidden on its
+  // own gate (or with its parent) never reaches this point.
+  //
+  // A child whose href is itself a bottom-tab primary (the Files "All files"
+  // index at /files) stays out: the tab bar already goes there, and a
+  // duplicate row would read as a second, different destination.
+  const drawerGroups: Array<{ label: string; entries: DrawerEntry[] }> =
+    renderedGroups
+      .map((g) => ({
+        label: g.label,
+        entries: g.items
+          .map((item): DrawerEntry => {
+            const children = (item.children ?? []).filter(
+              (child) =>
+                child.href !== item.href && !isMobilePrimary(child.href),
+            );
+            return { item, children, captionOnly: isMobilePrimary(item.href) };
+          })
+          // A primary with nothing beneath it (Overview, Ask AI, Devices)
+          // contributes no drawer block at all.
+          .filter((entry) => !entry.captionOnly || entry.children.length > 0),
+      }))
+      .filter((g) => g.entries.length > 0);
 
   // The primary hrefs that survive into the bottom tab bar. WARP-1397: looked
   // up against the GATED `renderedGroups`, NOT the raw NAV_GROUPS — otherwise a
@@ -595,29 +355,72 @@ export function Sidebar() {
                   {group.label}
                 </p>
                 <div className="space-y-0.5">
-                  {group.items.map((item) => {
-                    const Icon = item.icon;
-                    const active = isActive(item.href);
+                  {group.entries.map((entry) => {
+                    const closeDrawer = () => setMoreOpen(false);
+
+                    // WARP-1554: the anchor owns a bottom tab, so it renders
+                    // as a caption rather than a second link to the same
+                    // place — the sub-views beneath it would otherwise have
+                    // no mobile path at all. role="group" + aria-labelledby
+                    // gives assistive tech the same parent/child reading the
+                    // indent gives the eye.
+                    if (entry.captionOnly) {
+                      const CaptionIcon = entry.item.icon;
+                      const captionId = sectionCaptionId(entry.item.href);
+                      return (
+                        <div
+                          key={`drawer-section-${entry.item.href}`}
+                          role="group"
+                          aria-labelledby={captionId}
+                        >
+                          <p
+                            id={captionId}
+                            className="
+                              flex items-center gap-2 px-3 pt-2 pb-1
+                              type-caption-1 text-label-tertiary font-medium
+                            "
+                          >
+                            <CaptionIcon
+                              size={14}
+                              strokeWidth={1.5}
+                              aria-hidden="true"
+                            />
+                            {entry.item.label}
+                          </p>
+                          <div className="space-y-0.5">
+                            {entry.children.map((child) => (
+                              <DrawerLink
+                                key={child.href}
+                                item={child}
+                                active={isActive(child.href)}
+                                onNavigate={closeDrawer}
+                                nested
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+
                     return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setMoreOpen(false)}
-                        aria-current={active ? "page" : undefined}
-                        className={`
-                          flex items-center gap-3 px-3 min-h-[44px] rounded-lg
-                          type-subheadline transition-all duration-200 ease-smooth
-                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                          ${
-                            active
-                              ? "bg-accent-subtle text-accent font-medium"
-                              : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-                          }
-                        `}
+                      <div
+                        key={`drawer-item-${entry.item.href}`}
+                        className="space-y-0.5"
                       >
-                        <Icon size={18} strokeWidth={active ? 2 : 1.5} />
-                        {item.label}
-                      </Link>
+                        <DrawerLink
+                          item={entry.item}
+                          active={isActive(entry.item.href)}
+                          onNavigate={closeDrawer}
+                        />
+                        {entry.children.map((child) => (
+                          <DrawerLink
+                            key={child.href}
+                            item={child}
+                            active={isActive(child.href)}
+                            onNavigate={closeDrawer}
+                          />
+                        ))}
+                      </div>
                     );
                   })}
                 </div>
@@ -668,6 +471,52 @@ export function Sidebar() {
         </div>
       </Dialog>
     </>
+  );
+}
+
+/* ───────────────── Mobile "More" drawer row sub-component ─────────────── */
+
+/**
+ * One tappable row of the mobile drawer. Extracted (WARP-1554) so the three
+ * places that emit a drawer row — a top-level destination, a child flattened
+ * beneath its parent link, and a child nested under a section caption —
+ * share one set of tap-target / focus / active-state rules instead of
+ * drifting apart.
+ */
+function DrawerLink({
+  item,
+  active,
+  onNavigate,
+  nested,
+}: {
+  item: NavItem;
+  active: boolean;
+  onNavigate: () => void;
+  /** Rendered under a section caption — indent to mirror the desktop
+   *  sub-nav's nesting so the row never reads as a top-level destination. */
+  nested?: boolean;
+}) {
+  const Icon = item.icon;
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      aria-current={active ? "page" : undefined}
+      className={`
+        flex items-center gap-3 min-h-[44px] rounded-lg
+        type-subheadline transition-all duration-200 ease-smooth
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+        ${nested ? "pl-8 pr-3" : "px-3"}
+        ${
+          active
+            ? "bg-accent-subtle text-accent font-medium"
+            : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+        }
+      `}
+    >
+      <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+      {item.label}
+    </Link>
   );
 }
 

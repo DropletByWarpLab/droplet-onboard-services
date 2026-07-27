@@ -1,8 +1,8 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+fastapi==0.140.0
+uvicorn[standard]==0.51.0
 # APScheduler owns the IDLE per-account loops + the outbound SMTP
 # poller. No `while True` per droplet-architecture-guard rule 9.
-APScheduler==3.10.4
+APScheduler==3.11.3
 # aioimaplib is the canonical async IMAP client; supports IDLE.
 aioimaplib==2.0.1
 # Fernet decryption of EmailAccount.passwordEnc. Key lives at
@@ -10,7 +10,7 @@ aioimaplib==2.0.1
 cryptography==49.0.0
 # Service-principal POST to the orchestrator's ingest endpoint +
 # outbound SMTP status callback.
-httpx==0.27.2
+httpx==0.28.1
 # MQTT publishes on new mail land via the orchestrator's existing
 # bridge — the indexer publishes `email/<accountId>/new` on insert
 # so dashboard tabs / future mobile clients can refresh in real time.
@@ -22,4 +22,4 @@ aiosmtplib==5.1.2
 # asyncpg for read-only WHO-AM-I queries against EmailAccount when the
 # orchestrator surface isn't enough (e.g. listing all accounts at boot
 # without paying an extra HTTP round-trip).
-asyncpg==0.30.0
+asyncpg==0.31.0

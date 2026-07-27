@@ -54,6 +54,7 @@ const NOW = 1_751_000_000;
 
 function status(overrides: Partial<VoiceStatusInfo> = {}): VoiceStatusInfo {
   return {
+    enabled: true,
     state: "listening",
     listening: true,
     wake_loaded: true,

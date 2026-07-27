@@ -53,11 +53,30 @@ export function AccessChip({
 }
 
 /** Sync-state chip — §12 vocabulary; color + icon + word, never color alone.
- *  Wrapped in a polite live region so state changes announce (§11/§13). */
+ *  Wrapped in a polite live region so state changes announce (§11/§13).
+ *
+ *  WARP-1528: the live region is now PERMANENTLY MOUNTED and only the inner
+ *  chip is conditional. Previously the wrapper was created together with its
+ *  content (early `return null`), so at the moment the state changed the
+ *  `role="status"` element did not yet exist in the DOM — screen readers only
+ *  reliably announce mutations to a region they were already observing, so the
+ *  announcement was a coin-flip across SR/browser pairs. This path is exercised
+ *  for the first time now that the chip actually renders, so it has to be right.
+ *
+ *  Empty state uses `display: contents`, not `inline-flex`: both call sites sit
+ *  in flex rows WITH a gap (`.acc-rolecard .meta` 6px, the detail header 12px),
+ *  and a permanently-mounted empty flex item would inject a phantom gap on
+ *  every role card. `contents` generates no box at all, while keeping the
+ *  element — and its explicit non-generic `status` role — in the DOM and the
+ *  accessibility tree. */
 export function SyncChip({ state }: { state: AccessSyncState | "applied" | null | undefined }) {
-  if (state !== "pending" && state !== "applied" && state !== "failed") return null;
+  const showing = state === "pending" || state === "applied" || state === "failed";
   return (
-    <span role="status" aria-live="polite" style={{ display: "inline-flex" }}>
+    <span
+      role="status"
+      aria-live="polite"
+      style={{ display: showing ? "inline-flex" : "contents" }}
+    >
       {state === "pending" && (
         <AccessChip
           tone="orange"
@@ -82,20 +101,28 @@ export function SyncChip({ state }: { state: AccessSyncState | "applied" | null 
   );
 }
 
-/** Quiet guard/info note — the honest-reason surface for §8 rails. */
+/** Quiet guard/info note — the honest-reason surface for §8 rails.
+ *
+ *  `id` (WARP-1560) lets a note be the `aria-describedby` target of the
+ *  control it explains. A disabled button carries no `title` announcement
+ *  anyone can rely on, and a reason sitting in a sibling div is invisible to
+ *  assistive tech unless something points at it — so where a note IS the
+ *  reason for a disabled control, wire the two together. */
 export function GuardNote({
   warn,
   icon,
+  id,
   role,
   children,
 }: {
   warn?: boolean;
   icon?: ReactNode;
+  id?: string;
   role?: string;
   children: ReactNode;
 }) {
   return (
-    <div className={`acc-note${warn ? " warn" : ""}`} role={role}>
+    <div className={`acc-note${warn ? " warn" : ""}`} id={id} role={role}>
       {icon ?? <Lock size={15} aria-hidden="true" />}
       <div>{children}</div>
     </div>

@@ -1,12 +1,12 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
+fastapi==0.140.0
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
 httpx==0.28.1
 # WARP-221 — Lantronix driver keepalive runs on AsyncIOScheduler instead of a
 # banned `while True: await asyncio.sleep(N)` loop. Pinned to match
 # services/file-indexer (apscheduler 3.x and 4.x have incompatible APIs).
 # IntervalTrigger is tz-agnostic, so no tzlocal is needed here.
-apscheduler==3.10.4
+apscheduler==3.11.3
 # WARP-1023 — FIPS boot self-test. services/_shared/fips_selftest.py is
 # COPY'd into this image and its is_fips_enabled() probe reads
 # cryptography's backend `_fips_enabled` flag. Nothing above pulls

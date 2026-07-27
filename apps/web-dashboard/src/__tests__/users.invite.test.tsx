@@ -175,7 +175,9 @@ describe("Users page — invite UX", () => {
           username: "diana",
           displayName: "Diana",
           email: null,
-          role: "user",
+          // WARP-1566: canonical Role enum value — the server never sent "user".
+          role: "family",
+          accessRoleId: null,
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
@@ -219,7 +221,9 @@ describe("Users page — invite UX", () => {
           username: "diana",
           displayName: "Diana",
           email: null,
-          role: "user",
+          // WARP-1566: canonical Role enum value — the server never sent "user".
+          role: "family",
+          accessRoleId: null,
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
@@ -406,7 +410,9 @@ describe("Users page — invite UX", () => {
           username: "diana",
           displayName: "Diana Prince",
           email: null,
-          role: "user",
+          // WARP-1566: canonical Role enum value — the server never sent "user".
+          role: "family",
+          accessRoleId: null,
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),
@@ -441,7 +447,9 @@ describe("Users page — invite UX", () => {
           username: "eve",
           displayName: null,
           email: null,
-          role: "user",
+          // WARP-1566: canonical Role enum value — the server never sent "user".
+          role: "family",
+          accessRoleId: null,
           createdBy: "admin",
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 86400_000).toISOString(),

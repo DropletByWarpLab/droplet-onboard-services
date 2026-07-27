@@ -13,7 +13,15 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useReducedMotion } from "framer-motion";
-import { CheckCircle2, AlertTriangle, Ear, Mic, Check, Volume2 } from "lucide-react";
+import {
+  CheckCircle2,
+  AlertTriangle,
+  Ear,
+  Mic,
+  Check,
+  Volume2,
+  type LucideIcon,
+} from "lucide-react";
 import { meterFractionFromDbfs } from "./state";
 import type { VoiceCheckStatus } from "./state";
 
@@ -102,12 +110,17 @@ export function ZoneMeter({
 /* ── Status ring (hero, §3.1): 72px, color = status color ── */
 export function StatusRing({
   status,
+  icon: Icon = Mic,
 }: {
   status: "ok" | "warn" | "err" | "neutral";
+  /** WARP-1599 — the off hero swaps in `MicOff`: state is never carried
+   *  by color alone (§8), and a live mic glyph over "no audio is
+   *  captured" would say the opposite of the words beside it. */
+  icon?: LucideIcon;
 }) {
   return (
     <div className="vring" data-status={status} aria-hidden="true">
-      <Mic size={28} strokeWidth={1.5} />
+      <Icon size={28} strokeWidth={1.5} />
     </div>
   );
 }

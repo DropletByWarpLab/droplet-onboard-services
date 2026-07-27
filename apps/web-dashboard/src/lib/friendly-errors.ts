@@ -359,8 +359,13 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
   // pm.service.ts) plus the module gate's `module_disabled`. Anything unmapped
   // falls through to the domain fallback — the raw code NEVER reaches a toast.
   projects: {
+    // WARP-1528: `module_disabled` is emitted by BOTH the workspace module
+    // gate and the per-person feature gate (identical bodies by design), so
+    // this string can no longer name the workspace as the reason — it would be
+    // false for a narrowed person. Same reason-free formulation as
+    // ModuleRouteGuard and the Projects index error.
     module_disabled:
-      "Projects isn't enabled on this Droplet. An owner or admin can turn it on.",
+      "Projects isn't available. This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
     project_not_found:
       "We couldn't find that project anymore. It may have been deleted.",
     work_item_not_found:

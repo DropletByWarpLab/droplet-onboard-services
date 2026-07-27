@@ -13,7 +13,7 @@
  *       per ADR-013) must be removed by the next reconcile tick, because
  *       Prisma — not Nextcloud — is truth. This is a genuinely new
  *       production code path (services/nextcloud-groups.client.ts's
- *       `ncListGroupMembers` existed but was never called anywhere before
+ *       `ncListGroupMembersStrict` existed but was never called anywhere before
  *       this ticket).
  *   (d) A groupfolder-id reassignment (NC reinstall) must NOT perturb the
  *       search-corpus sentinel a caller's requests are keyed under — the
@@ -114,6 +114,7 @@ const {
   ncAddUserToGroupMock,
   ncRemoveUserFromGroupMock,
   ncListGroupMembersMock,
+  ncListGroupMembersStrictMock,
 } = vi.hoisted(() => ({
   gfListFoldersMock: vi.fn().mockResolvedValue([]),
   gfCreateFolderMock: vi.fn().mockResolvedValue(42),
@@ -124,7 +125,18 @@ const {
   gfSetQuotaMock: vi.fn().mockResolvedValue(undefined),
   ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
   ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
-  ncListGroupMembersMock: vi.fn().mockResolvedValue([]),
+  // WARP-1565: the drift-overwrite sweep reads through the STRICT variant,
+  // so that is the mock these specs seed. The LENIENT one is wired to fail
+  // loudly — it collapses an outage to `[]`, which is indistinguishable from
+  // "no drift", so a sweep reaching for it again must be red rather than a
+  // quiet fiction.
+  ncListGroupMembersStrictMock: vi.fn().mockResolvedValue([]),
+  ncListGroupMembersMock: vi.fn(async () => {
+    throw new Error(
+      "reconciler sweeps must call ncListGroupMembersStrict — the lenient " +
+        "variant reports an outage as an empty group (WARP-1565)",
+    );
+  }),
 }));
 vi.mock("../services/nextcloud-groups.client.js", () => ({
   gfListFolders: gfListFoldersMock,
@@ -137,6 +149,7 @@ vi.mock("../services/nextcloud-groups.client.js", () => ({
   ncAddUserToGroup: ncAddUserToGroupMock,
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
   ncListGroupMembers: ncListGroupMembersMock,
+  ncListGroupMembersStrict: ncListGroupMembersStrictMock,
   // WARP-1557: "did this write land?" classifier. Always false here — every
   // fixture in this suite either succeeds or fails unambiguously, so the
   // pinned drift-overwrite / id-reassignment invariants below behave exactly
@@ -337,7 +350,7 @@ beforeEach(() => {
   gfSetQuotaMock.mockResolvedValue(undefined);
   ncAddUserToGroupMock.mockResolvedValue(undefined);
   ncRemoveUserFromGroupMock.mockResolvedValue(undefined);
-  ncListGroupMembersMock.mockResolvedValue([]);
+  ncListGroupMembersStrictMock.mockResolvedValue([]);
   searchByLexicalMock.mockResolvedValue([]);
 });
 
@@ -366,7 +379,7 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
 
     // NC reports TWO members in the rw group: alice (expected, Prisma
     // knows her) and mallory (hand-added out of band — drift).
-    ncListGroupMembersMock.mockImplementation(async (_token: string, groupId: string) => {
+    ncListGroupMembersStrictMock.mockImplementation(async (_token: string, groupId: string) => {
       if (groupId === "dept-engineering") {
         return [
           { id: "alice", displayName: "alice" },
@@ -408,7 +421,7 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     const m = membership({ id: "mem-1", departmentId: "dept-1", userId: "user-1", right: "reader", syncState: "synced" });
     const prisma = buildWorld([d], [m], [{ id: "user-1", nextcloudUsername: "alice" }]);
 
-    ncListGroupMembersMock.mockImplementation(async (_token: string, groupId: string) =>
+    ncListGroupMembersStrictMock.mockImplementation(async (_token: string, groupId: string) =>
       groupId === "dept-engineering-ro" ? [{ id: "alice", displayName: "alice" }] : [],
     );
 
@@ -444,7 +457,7 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     // Simulate: the immediate inline push in department-membership.service
     // already landed the NC-side add (so alice IS actually in the group),
     // but this tick's read of `synced` rows doesn't know that yet.
-    ncListGroupMembersMock.mockImplementation(async (_token: string, groupId: string) =>
+    ncListGroupMembersStrictMock.mockImplementation(async (_token: string, groupId: string) =>
       groupId === "dept-engineering" ? [{ id: "alice", displayName: "alice" }] : [],
     );
 
@@ -459,7 +472,7 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     expect(prisma.memRows.get("mem-1")!.syncState).toBe("synced");
   });
 
-  it("never calls ncListGroupMembers for a HOUSEHOLD department's groups (D-5 deferred)", async () => {
+  it("never calls ncListGroupMembersStrict for a HOUSEHOLD department's groups (D-5 deferred)", async () => {
     const d = dept({ id: "hh-1", kind: "HOUSEHOLD", state: "active", ncGroupfolderId: 1 });
     const prisma = buildWorld([d]);
 
@@ -470,7 +483,7 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     // call is unrelated to household rights convergence, so the D-5 pin
     // narrows to "no HOUSEHOLD/department group is ever read": the only
     // membership read on this tick is the admin-group one.
-    for (const call of ncListGroupMembersMock.mock.calls) {
+    for (const call of ncListGroupMembersStrictMock.mock.calls) {
       expect(call[1]).toBe("droplet-admins");
     }
   });

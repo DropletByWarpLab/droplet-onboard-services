@@ -305,6 +305,18 @@ export interface DeviceInfo {
 
 // --- File types ---
 
+/**
+ * A file or folder as every listing endpoint returns it. `path` is always
+ * HOME-relative — groupfolders mount inside each member's home, so a library
+ * file's path is "/Finance/Q1/plan.xlsx", not a separate namespace.
+ *
+ * WARP-1549 deliberately did NOT add a `space`/`spaceName` field here. Which
+ * library a path belongs to is derived at render time from the caller's own
+ * space list (`lib/space-attribution.ts`), so it can never keep asserting a
+ * library after the membership behind it is revoked. The rationale, and what
+ * a backend-populated field would still be good for (MCP and mobile, which
+ * have no `useSpaces()`), is written up at the top of that module.
+ */
 export interface FileEntryInfo {
   name: string;
   path: string;
@@ -662,6 +674,13 @@ export interface OverlayApproveResult {
  *  as STT and the reply complete. `state === "no_mic"` drives the
  *  plug-in-a-mic panel (hot-plug recovery needs no restart). */
 export interface VoiceStatusInfo {
+  /** WARP-1599 — the admin kill switch, relayed verbatim. `false` means
+   *  the wake pipeline is not running at all: no detector, no capture
+   *  stream, nothing listening. This is the AUTHORITATIVE field for
+   *  "is voice on?" — `state` only reports "off" when the pipeline is
+   *  absent, so an out-of-band edit of the on-box flag file can leave
+   *  `state: "listening"` on a switched-off box. Key the UI on this. */
+  enabled: boolean;
   state: string;
   listening: boolean;
   wake_loaded: boolean;
@@ -1199,7 +1218,10 @@ export interface EffectiveAccess {
 export interface InvitePublicInfo {
   username: string;
   displayName: string | null;
-  role: InviteRole;
+  /** WARP-1566 — see the note on {@link InviteListItem.role}. */
+  role: AccessTier;
+  /** WARP-1566 — the custom role this invite grants; null = plain tier. */
+  accessRoleId: string | null;
   expiresAt: string;
 }
 
@@ -1208,7 +1230,20 @@ export interface InviteListItem {
   username: string;
   displayName: string | null;
   email: string | null;
-  role: InviteRole;
+  /** WARP-1566 — the server's `UserInvite.role` column is the Prisma `Role`
+   *  pgEnum, so this was NEVER the legacy `InviteRole` ("user" | "admin").
+   *  The mistyping was load-bearing: the pending-invites row rendered
+   *  `role === "admin" ? "admin" : "user"`, which is only exhaustive under
+   *  the wrong type, and it silently collapsed Staff, Guest and every
+   *  custom-role invite into the single word "user". Typed as the full
+   *  tier enum, that ternary no longer type-checks as a complete mapping
+   *  and the label has to be resolved properly. */
+  role: AccessTier;
+  /** WARP-1566 — the custom access role this invite grants, null for a
+   *  plain built-in tier. Resolve id → name against the role catalog
+   *  (`listAccessRoles`) the same way the roster does; the server sends the
+   *  reference, never a denormalised name that could go stale on rename. */
+  accessRoleId: string | null;
   createdBy: string;
   createdAt: string;
   expiresAt: string;

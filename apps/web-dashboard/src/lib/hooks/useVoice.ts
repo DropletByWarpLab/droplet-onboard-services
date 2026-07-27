@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import {
   deriveVoiceSurfaceState,
+  isVoiceOn,
   nextNoiseCount,
   NOISE_SUSTAIN_POLLS,
   type VoiceSurfaceState,
@@ -41,6 +42,9 @@ export interface VoiceSurfaceData {
   unavailable: boolean;
   /** Generic fetch failure — render the standard offline pattern. */
   offline: boolean;
+  /** WARP-1599 — the admin kill switch; true unless the box says
+   *  otherwise (see `isVoiceOn`). */
+  enabled: boolean;
   loading: boolean;
   noiseSustained: boolean;
   refresh: () => void;
@@ -125,6 +129,10 @@ export function useVoiceSurfaceData(): VoiceSurfaceData {
     calibration: calibration ?? null,
     unavailable,
     offline: (statusError != null && !unavailable) || calibrationOffline,
+    // WARP-1599 — the status poll above keeps running while voice is
+    // off (it is the only thing that reports the switch), so flipping
+    // it back on from anywhere shows up here within one poll.
+    enabled: isVoiceOn(status),
     loading:
       (statusLoading && !status && !statusError) ||
       (!unavailable && calibrationLoading && !calibration && !calibrationError),
@@ -169,6 +177,7 @@ export function useVoiceHealthSummary(): {
       status: status ?? null,
       calibration: calibration ?? null,
       unavailable,
+      enabled: isVoiceOn(status),
       noiseSustained: false,
       nowS: Math.floor(Date.now() / 1000),
     }),

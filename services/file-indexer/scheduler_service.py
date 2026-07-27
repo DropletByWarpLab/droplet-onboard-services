@@ -15,6 +15,7 @@ the canonical Python-side replacement for hand-rolled `time.sleep` loops.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -77,3 +78,39 @@ def build_scheduler() -> AsyncIOScheduler:
         str(tz),
     )
     return scheduler
+
+
+def run_scheduler_loop(holder: dict, loop_holder: dict) -> None:
+    """Run the scheduler on its own event loop until that loop is stopped.
+
+    This is the body of main()'s daemon thread, extracted so it can be
+    tested — the bug it guards against lives in the *ordering* here, not in
+    build_scheduler(), and a test that only calls build_scheduler() cannot
+    see it.
+
+    apscheduler >= 3.11 binds AsyncIOScheduler to the *running* loop via
+    `asyncio.get_running_loop()`. Building the scheduler here, before
+    `run_forever()`, raises RuntimeError("no running event loop"), and
+    because the caller swallows that the daily transcription pass would
+    silently never register. So the build is deferred into the loop with
+    `call_soon`.
+
+    `holder["scheduler"]` and `loop_holder["loop"]` are how main() reaches
+    both for shutdown.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop_holder["loop"] = loop
+
+    def _start_scheduler() -> None:
+        try:
+            holder["scheduler"] = build_scheduler()
+        except Exception:
+            logger.exception("scheduler_service.build_scheduler failed")
+            loop.stop()
+
+    loop.call_soon(_start_scheduler)
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()

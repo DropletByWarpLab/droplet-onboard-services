@@ -59,6 +59,35 @@ describe("SearchTab", () => {
     expect(list.textContent).toContain("spec.pdf");
   });
 
+  /**
+   * WARP-1603 — /knowledge is the second consumer of `relevancePct`, and
+   * its hits come off the orchestrator's `/api/files/knowledge/search`
+   * route, which still returns RAW BGE-reranker logits. The renderer-side
+   * fix has to hold here too: a negative logit is a weak match, not a 0%
+   * one.
+   */
+  it("renders a negative reranker logit as a small-but-nonzero percent", async () => {
+    searchKnowledgeMock.mockResolvedValue({
+      hits: [
+        {
+          source: "nextcloud",
+          path: "/docs/spec.pdf",
+          score: -1, // sigmoid(-1) ≈ 0.269 → 27%
+          snippet: "the answer is 42",
+          pageNumber: 5,
+          brainItemId: null,
+        },
+      ],
+    });
+    render(<SearchTab />);
+    const input = screen.getByTestId("knowledge-search-input");
+    fireEvent.change(input, { target: { value: "answer" } });
+    fireEvent.submit(input.closest("form")!);
+    const list = await screen.findByTestId("knowledge-search-results");
+    expect(list.textContent).toContain("27%");
+    expect(list.textContent).not.toContain("0%");
+  });
+
   it("renders the persona-on-tone unavailable card when WARP-202 hasn't merged", async () => {
     searchKnowledgeMock.mockResolvedValue({
       unavailable: true,

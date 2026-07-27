@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Folder,
   FolderPlus,
@@ -76,8 +76,27 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+// WARP-1547 — the Files page's address is the (space, path) PAIR, and this is
+// the only function that writes it. Both live in the query string
+// (`/files?space=dept:<uuid>&path=/Contracts/2026`); both are read back by the
+// single URL→view effect below.
+//
+// The defaults — the personal space and a space's root — are OMITTED, so the
+// plain surface stays `/files`, a volume deep-link stays `/files?path=…`, and
+// the library jump stays exactly the `/files?space=dept%3A<id>` shape
+// /admin/files already links to (URLSearchParams percent-encodes the same way
+// encodeURIComponent does for these values).
+function buildFilesUrl(space: FileSpaceId, path: string): string {
+  const qs = new URLSearchParams();
+  if (space && space !== "personal") qs.set("space", space);
+  if (path && path !== "/") qs.set("path", path);
+  const query = qs.toString();
+  return query ? `/files?${query}` : "/files";
+}
+
 export default function FilesPage() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const initialPath = searchParams?.get("path") ?? "/";
   const [currentPath, setCurrentPath] = useState(initialPath);
   // WARP-883 — active Files space (My Files vs shared Household). Switching
@@ -143,9 +162,16 @@ export default function FilesPage() {
   // not the space-relative "/Trips/x.pdf" the write routes expect. Any
   // handler that operates on an entry path (delete/rename/move/copy/
   // favorite) must convert with this helper before calling the API.
+  //
+  // WARP-1623: keyed on the ACTIVE space's root, not on the `shared` id. The
+  // old form only stripped the Household mount, so once a `dept:` listing
+  // reached the wire, a library row's "/Finance/Q1/x.pdf" would have been sent
+  // verbatim to a write route that re-prefixes the mount. The personal root is
+  // "/", for which `toSpaceRelativePath` is the identity — so personal needs no
+  // special case here.
   const toActiveSpaceRelative = useCallback(
-    (p: string) => (space === "shared" ? toSpaceRelativePath(p, sharedRoot) : p),
-    [space, sharedRoot]
+    (p: string) => toSpaceRelativePath(p, activeSpaceRoot),
+    [activeSpaceRoot]
   );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -175,14 +201,10 @@ export default function FilesPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // React to ?path= changes after mount (e.g. Recents page deep-links back in)
-  useEffect(() => {
-    const p = searchParams?.get("path");
-    if (p && p !== currentPath) {
-      setCurrentPath(p);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  // NOTE (WARP-1547): `?path=` used to be re-applied by its own effect here,
+  // separately from `?space=` further down — the two raced and the space one
+  // won, so `?space=…&path=/Sub` always landed on the library root. Both
+  // params are now applied together by the single URL→view effect below.
 
   // Subscribe to live file events so uploads/renames/etc. from other tabs,
   // the CLI, or native clients show up immediately — no polling.
@@ -247,34 +269,88 @@ export default function FilesPage() {
     [space, drives, pools]
   );
 
+  // WARP-1547 — THE funnel. Every change of the active (space, path) pair
+  // goes through here: the space switcher, the breadcrumbs, opening a folder,
+  // picking a search result, and the URL→view effect below. Nothing else may
+  // call `setSpace` — a second setter is how the rail, the listing and the URL
+  // drift apart (the `SearchBar.onPickResult` bypass this ticket removed).
+  //
+  // WARP-883 — changing space clears the outgoing space's selection so it
+  // can't leak across. The LANDING PATH is the caller's decision: the switcher
+  // passes the new space's root (the preserved "switching resets to root"
+  // behavior), while a deep link or a Back/Forward step passes the folder it
+  // is actually addressing.
+  const clearSelection = fm.clearSelection;
+  const applyLocation = useCallback(
+    (nextSpace: FileSpaceId, nextPath: string) => {
+      if (nextSpace !== space) {
+        setSpace(nextSpace);
+        clearSelection();
+      }
+      setCurrentPath(nextPath || "/");
+    },
+    [space, clearSelection]
+  );
+
+  // WARP-1547 — funnel + URL write-back, for everything that MOVES the user.
+  // The page previously never wrote the URL at all, so a folder inside a
+  // library had no shareable link and browser Back left Files entirely.
+  //
+  // `push`, not `replace`: each folder needs its own history entry, which is
+  // what makes Back/Forward walk folder history. The guard keeps a re-click on
+  // the folder you're already in from stacking duplicate entries.
+  const navigateTo = useCallback(
+    (nextSpace: FileSpaceId, nextPath: string) => {
+      const target = buildFilesUrl(nextSpace, nextPath || "/");
+      applyLocation(nextSpace, nextPath);
+      if (target !== buildFilesUrl(space, currentPath)) router.push(target);
+    },
+    [applyLocation, router, space, currentPath]
+  );
+
   // WARP-883 — switch space: jump to that space's root and clear selection so
   // the previous space's selection/clipboard doesn't leak across.
   const handleSpaceChange = useCallback(
     (next: FileSpaceId) => {
       if (next === space) return;
-      setSpace(next);
-      setCurrentPath("/");
-      fm.clearSelection();
+      navigateTo(next, "/");
     },
-    [space, fm]
+    [space, navigateTo]
   );
 
-  // WARP-1270 (T18) — deep-link a specific space via `?space=` (the
-  // /admin/files "Open library" jump, design brief §5: "arrives on Surface
-  // A with the admin banner"). Applies once, as soon as `spaces` has loaded
-  // and actually contains the requested id — a stale/unknown id (space
-  // archived, typo'd link) is silently ignored rather than dead-ending on
-  // an empty listing.
-  const appliedSpaceParamRef = useRef(false);
+  // WARP-1270 (T18) / WARP-1547 — URL → view, for BOTH params at once.
+  //
+  // `?space=` deep-links a specific library (the /admin/files "Open library"
+  // jump, design brief §5) and `?path=` deep-links a folder inside it. These
+  // used to be applied by two separate effects — `?path=` seeded state on
+  // mount, then `?space=` landed once `spaces` resolved and reset the path to
+  // the library root — so the pair could never round-trip. Applying them
+  // together is the fix; holding the whole pair until `spaces` has loaded is
+  // what stops the space from arriving late and clobbering the path again.
+  //
+  // Keyed on the query STRING (not the params object, whose identity churns),
+  // so it re-runs for each distinct URL — including the ones the browser's
+  // Back/Forward buttons restore, which is what moves the view through folder
+  // history. `appliedSearchRef` makes it idempotent per URL, so a manual space
+  // switch afterwards is not re-clobbered by the original deep link.
+  const searchKey = searchParams?.toString() ?? "";
+  const appliedSearchRef = useRef<string | null>(null);
   useEffect(() => {
-    if (appliedSpaceParamRef.current) return;
-    const requested = searchParams?.get("space");
-    if (!requested || spaces.length === 0) return;
-    appliedSpaceParamRef.current = true;
-    if (spaces.some((s) => s.id === requested)) {
-      handleSpaceChange(requested);
-    }
-  }, [searchParams, spaces, handleSpaceChange]);
+    if (appliedSearchRef.current === searchKey) return;
+    const requestedSpace = searchParams?.get("space") ?? null;
+    if (requestedSpace && spaces.length === 0) return;
+    appliedSearchRef.current = searchKey;
+    // A stale/unknown/inaccessible space id (archived library, typo'd link, a
+    // library this viewer can't reach) falls back to the personal space
+    // silently — same fail-safe as before. Deliberately no error surface and
+    // no server call: the response must not confirm or deny that the id
+    // exists.
+    const nextSpace =
+      requestedSpace && spaces.some((s) => s.id === requestedSpace)
+        ? requestedSpace
+        : "personal";
+    applyLocation(nextSpace, searchParams?.get("path") ?? "/");
+  }, [searchKey, searchParams, spaces, applyLocation]);
 
   const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
   const favoritedPaths = useMemo(
@@ -536,14 +612,20 @@ export default function FilesPage() {
       // entry path back verbatim while the Household tab is active
       // double-prefixed the next listing ("/Household/Household/…"), which
       // rendered as a silently empty folder.
-      setCurrentPath(
-        space === "shared" ? toSpaceRelativePath(file.path, sharedRoot) : file.path
-      );
+      //
+      // WARP-1547: through the funnel, so the URL follows the user into the
+      // folder — that link is now shareable and Back returns to the parent.
+      //
+      // WARP-1623: that translation now runs for EVERY space with a mount, not
+      // just Household — otherwise the same double-prefix reappears the moment
+      // a `dept:` space is really listed ("/Finance/Finance/Q1"), and the URL
+      // the funnel writes carries the double-prefixed path with it.
+      navigateTo(space, toSpaceRelativePath(file.path, activeSpaceRoot));
       fm.clearSelection();
     } else {
       handlePreview(file);
     }
-  }, [fm, handlePreview, space, sharedRoot]);
+  }, [fm, handlePreview, space, activeSpaceRoot, navigateTo]);
 
   // ── Context menu ──
   const handleRowContextMenu = useCallback(
@@ -726,17 +808,19 @@ export default function FilesPage() {
               file.path,
               sharedAvailable ? sharedRoot : null
             );
-            if (target.space !== space) {
-              setSpace(target.space);
-              fm.clearSelection();
-            }
+            // WARP-1547: this handler used to call `setSpace` directly —
+            // the second space setter, bypassing the funnel, so a search
+            // pick moved the listing without clearing selection through the
+            // same path or touching the URL. It now goes through
+            // `navigateTo` like every other move; the funnel owns the
+            // space-change selection clear.
             if (file.isDirectory) {
-              setCurrentPath(target.path);
+              navigateTo(target.space, target.path);
             } else {
               // Jump to parent dir and mark the file selected (selection
               // compares against entry paths, which stay home-relative).
               const parent = target.path.replace(/\/[^/]*$/, "") || "/";
-              setCurrentPath(parent);
+              navigateTo(target.space, parent);
               setSelectedFile(file);
             }
           }}
@@ -760,7 +844,9 @@ export default function FilesPage() {
       <div className="mb-4">
         <BreadcrumbNav
           path={currentPath}
-          onNavigate={setCurrentPath}
+          // WARP-1547 — through the funnel: crumb jumps are navigation, so
+          // they get a URL and a history entry like any other move.
+          onNavigate={(next) => navigateTo(space, next)}
           prefixCrumb={isTeamSpace ? activeSpace?.parentName : undefined}
           labelForSegment={crumbLabelForSegment}
         />
