@@ -23,9 +23,14 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
+  plannedToolNames,
   runToolSpec,
   type StepDispatcher,
 } from "../services/tool-spec-runner.service.js";
+import {
+  firstToolDeniedForPrincipal,
+  resolveToolAccessScope,
+} from "../services/tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -292,6 +297,20 @@ export function createToolsRouter(
           return;
         }
 
+        // WARP-1580 — attribution at promotion. The WARP-464 pattern miner
+        // writes `suggested` specs with NO ownerId (no human authored them),
+        // so a promoted suggestion would carry no principal for a scheduled
+        // fire to run as, and the ticker's fail-closed gate would refuse it
+        // forever. The operator who publishes it is taking ownership, so
+        // stamp them — but ONLY when the field is still empty; a promotion
+        // must never re-attribute someone else's spec.
+        const adoptOwnerId =
+          parsed.data.status === "live" &&
+          existing.ownerId === null &&
+          typeof req.user?.id === "string"
+            ? req.user.id
+            : undefined;
+
         // Bump version on every PATCH that actually mutates the spec —
         // simple, conservative: even a description-only edit bumps. The
         // dashboard's run-detail drawer pins runs to the spec version
@@ -316,6 +335,7 @@ export function createToolsRouter(
           return tx.toolSpec.update({
             where: { slug: req.params.slug },
             data: {
+              ownerId: adoptOwnerId,
               name: parsed.data.name,
               category: parsed.data.category,
               description: parsed.data.description,
@@ -394,12 +414,62 @@ export function createToolsRouter(
           }
         }
 
+        // The `requireRole` floor above only asks WHICH ROLES may press Run
+        // at all. It says nothing about which TOOLS this person may invoke,
+        // and the ToolSpec surface must answer that identically to chat —
+        // otherwise a stored spec is a laundering path around the narrowing
+        // chat enforces. Two axes, both required, resolved once here and
+        // handed to the runner (which re-checks per step for the
+        // args-dependent lock rule):
+        //
+        //   A. ADR-004 write tier (WARP-1621). Non-privileged tiers lose
+        //      every `requiresWrite` tool. This is what chat's
+        //      `narrowAllowedToolsForRole` has always applied and what this
+        //      route never did: a `family` user — i.e. every family user on
+        //      every box in the field, because AccessRoles are new — could
+        //      press Run on a live spec calling `control_device` and it
+        //      fired, while the same tool was stripped from their chat turn
+        //      before the model saw it.
+        //   B. WARP-1580 / §3 per-role tool domains, for the people who
+        //      actually hold an AccessRole. `null` for the owner, service
+        //      principals, and everyone with no AccessRole — that resolver
+        //      path is byte-for-byte unchanged, and axis A is deliberately
+        //      the layer UNDERNEATH it.
+        //
+        // Same predicate as chat, from the same module (never a second copy
+        // — two copies of a tool filter is how these two surfaces came to
+        // disagree in the first place).
+        const scope = await resolveToolAccessScope(prisma, req.user);
+        // Pre-flight so a forbidden spec is refused with an honest 403 and
+        // NO ToolRun row, rather than half-running to the offending step.
+        const denied = firstToolDeniedForPrincipal(
+          plannedToolNames(spec.steps),
+          req.user?.role,
+          scope,
+        );
+        if (denied !== null) {
+          res.status(403).json({
+            error: "forbidden_tool_for_role",
+            detail:
+              denied.axis === "write_tier"
+                ? "this spec uses a tool your role may not run — " +
+                  "ask an owner or admin to run it"
+                : "this spec uses a tool your access role does not permit — " +
+                  "ask your administrator",
+            slug: spec.slug,
+            tool: denied.tool,
+            axis: denied.axis,
+          });
+          return;
+        }
+
         const triggeredBy = req.user?.username ?? null;
         const { runId, outcome } = await runToolSpec(prisma, dispatcher, {
           specId: spec.id,
           specName: spec.name,
           steps: spec.steps,
           triggeredBy,
+          scope,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({

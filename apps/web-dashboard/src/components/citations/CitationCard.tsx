@@ -23,6 +23,7 @@
  */
 
 import type { Anchor } from "@droplet/shared-types";
+import type { ScoreKind } from "@/lib/relevance";
 import { PdfCitation } from "./PdfCitation";
 import { MediaCitation } from "./MediaCitation";
 import { EmailCitation } from "./EmailCitation";
@@ -39,7 +40,21 @@ export interface CitationHit {
   filename: string;
   mimeType: string;
   chunkText: string;
-  score: number;
+  /**
+   * WARP-1603 — OPTIONAL on purpose. Every viewer that renders a percent
+   * guards on `typeof hit.score === "number"` so a hit whose score didn't
+   * survive extraction shows NO badge. Call sites must pass `undefined`
+   * rather than coercing a missing score to `0` — a literal "0%" is a
+   * factual claim about relevance that the pipeline never made.
+   */
+  score?: number;
+  /**
+   * WARP-1603 — the scale `score` is expressed in, when the call site
+   * knows it. Omit to let `relevancePct` infer (see `lib/relevance.ts`);
+   * absent is the correct value for any producer that doesn't tag its
+   * payload yet, so this stays backward compatible.
+   */
+  scoreKind?: ScoreKind;
   anchor: Anchor | null;
   /**
    * WARP-859 — resolved click target for the fall-through `<FileCitation>`

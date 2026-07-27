@@ -11,9 +11,13 @@
  *      them. Per the §7 contract: "write-tier specs that aren't
  *      `reversible:true && !writes` emit a confirm_action card and
  *      pause until accept" — v1 pause = skip + audit + advance.
- *   3. Otherwise dispatches via the imperative walker (WARP-462's
+ *   3. ACCESS gate (WARP-1580, WARP-1621) — resolves the spec's ATTRIBUTED
+ *      principal and skips the fire when that identity may not invoke the
+ *      spec's tools, on EITHER axis: the ADR-004 write tier or its §3
+ *      per-role tool domains. See "WHOSE ACCESS" below.
+ *   4. Otherwise dispatches via the imperative walker (WARP-462's
  *      `runToolSpec`) with `triggeredBy="scheduler"`.
- *   4. Advances `nextFireAt` via the RRULE parser. Malformed or
+ *   5. Advances `nextFireAt` via the RRULE parser. Malformed or
  *      unsupported rules → disable the schedule + emit ActivityRow,
  *      so a typo in the dashboard editor can't pin the ticker on
  *      `nextFireAt <= now()` forever.
@@ -21,9 +25,67 @@
  * The ticker is mounted in `index.ts` via `cronRuntime.scheduleInterval`
  * with a pg advisory lock — multi-instance deploys (warm standby, K8s
  * replicas) only fire each due schedule once.
+ *
+ * ── WHOSE ACCESS (WARP-1580) ──────────────────────────────────────
+ *
+ * A scheduled fire has no session, no token and no `req.user`, so before
+ * this it dispatched with NO principal — i.e. at the full registry reach of
+ * the singleton MCP client. That made a schedule a laundering path around
+ * the WARP-1529 (RBAC v2 T5) per-role narrowing that chat enforces: narrow a
+ * person's role to `files` and their spec still fired `control_device` every
+ * morning. It is not enough to narrow the interactive run-now path; a run
+ * with no principal has nothing to narrow AGAINST.
+ *
+ * DECISION: a scheduled run executes as its spec's CREATOR (`ToolSpec.
+ * ownerId`, stamped from `req.user.id` at POST /api/tools and, since
+ * WARP-1580, at draft→live promotion for miner-suggested specs), and that
+ * identity's CURRENT effective access is resolved at EVERY fire. A run that
+ * cannot be attributed does not run.
+ *
+ * Why resolve at fire time, not schedule time: narrowing is dynamic. Grants,
+ * tier and directory status all change after a schedule is written, so a
+ * schedule-time check is stale by construction — and stale in the fail-OPEN
+ * direction, which is the only direction that matters. Resolving per fire is
+ * what makes "the creator was demoted last week" actually stop the run. It
+ * costs one indexed read per due schedule, on a path that already does
+ * several per row.
+ *
+ * Why NOT an explicit system principal: a system identity is by construction
+ * un-narrowable, and any operator-authored spec could borrow it. That
+ * re-opens this exact hole one hop further away, where it is harder to see.
+ *
+ * Why NOT refusing to SCHEDULE specs that touch narrowed domains: same
+ * staleness problem, plus it would refuse at the wrong moment (an owner
+ * scheduling an owner-reach spec is legitimate; the question is who it runs
+ * as later).
+ *
+ * FAIL-CLOSED. `resolveAttributedToolAccess` answers DENY_ALL — never "no
+ * narrowing" — for an absent ownerId, a deleted or deactivated creator, and
+ * a failed read. The fire is then skipped, audited with the reason, and
+ * `nextFireAt` still advances so a re-grant resumes the cadence cleanly
+ * (the same skip-and-advance posture as the writes/!reversible gate).
+ *
+ * ── WHICH GATE (WARP-1621) ─────────────────────────────────────────
+ *
+ * A resolved creator still has TWO independent gates to clear, and a scope
+ * alone cannot express the first: a creator with no AccessRole resolves to
+ * `scope: null`, which means "axis B does not narrow this person", NOT "this
+ * person may run anything". So the attributed TIER is carried alongside the
+ * scope and the coarse ADR-004 write filter is applied to it — otherwise a
+ * `family`-owned spec calling `control_device` fires unattended every morning
+ * at reach the same person's chat turn never had. Since custom roles are new,
+ * a role-less creator is the normal case on a deployed box, not an edge one.
  */
 import type { PrismaClient } from "@prisma/client";
-import { runToolSpec, type StepDispatcher } from "./tool-spec-runner.service.js";
+import {
+  plannedToolNames,
+  runToolSpec,
+  type StepDispatcher,
+} from "./tool-spec-runner.service.js";
+import {
+  firstToolDeniedForPrincipal,
+  resolveAttributedToolAccess,
+} from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
@@ -42,6 +104,8 @@ interface SpecRow {
   slug: string;
   name: string;
   status: "live" | "draft" | "suggested";
+  /** WARP-1580 — the attributed principal a scheduled fire runs as. */
+  ownerId: string | null;
   writes: boolean;
   reversible: boolean;
 }
@@ -126,12 +190,68 @@ export async function tickToolSchedules(
       continue;
     }
 
+    // Access gate — see "WHOSE ACCESS" in the file header. Both axes, in one
+    // pre-flight, against the SAME predicate chat and run-now use:
+    //   A. ADR-004 write tier (WARP-1621), read off the creator's User row.
+    //   B. WARP-1580 / §3 per-role tool domains.
+    // Axis A matters most here precisely because axis B skips role-less
+    // creators: without it a family-owned spec calling `control_device` fired
+    // every morning at reach the same person's chat turn never had.
+    const attributed = await resolveAttributedToolAccess(prisma, spec.ownerId);
+    const denied =
+      attributed.unresolved !== null
+        ? null
+        : firstToolDeniedForPrincipal(
+            plannedToolNames(spec.steps),
+            attributed.tier ?? undefined,
+            attributed.scope,
+          );
+    if (attributed.unresolved !== null || denied !== null) {
+      const reason = attributed.unresolved ?? "forbidden_tool_for_role";
+      await recordActivity({
+        kind: "tool_run",
+        severity: "warn",
+        sourceIcon: "shield",
+        what: "Scheduled run skipped (access)",
+        actor: { type: "system" },
+        sub:
+          denied === null
+            ? `${spec.name} (no resolvable owner)`
+            : `${spec.name} (${denied.tool} not permitted for its owner)`,
+        refs: {
+          specId: spec.id,
+          scheduleId: schedule.id,
+          reason,
+          ownerId: spec.ownerId,
+          // `axis` says WHICH gate refused — the coarse tier floor or a
+          // missing per-role grant. Same fix, very different remediation.
+          ...(denied !== null ? { tool: denied.tool, axis: denied.axis } : {}),
+        },
+      });
+      logger.warn(
+        {
+          specId: spec.id,
+          scheduleId: schedule.id,
+          reason,
+          ...(denied !== null ? { axis: denied.axis } : {}),
+          ownerId: spec.ownerId,
+        },
+        "scheduled run skipped on access",
+      );
+      await advanceOrDisable(prisma, schedule, now);
+      skipped += 1;
+      continue;
+    }
+
     try {
       await runToolSpec(prisma, dispatcher, {
         specId: spec.id,
         specName: spec.name,
         steps: spec.steps,
         triggeredBy: "scheduler",
+        // The runner re-checks per step: `${prev}` substitution means the §3
+        // lock rule can only see a step's real args at dispatch.
+        scope: attributed.scope,
       });
       fired += 1;
     } catch (err) {

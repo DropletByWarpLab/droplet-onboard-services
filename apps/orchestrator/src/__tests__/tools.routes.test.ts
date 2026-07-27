@@ -172,6 +172,7 @@ function createPrismaMock(
         }: {
           where: { slug: string };
           data: {
+            ownerId?: string;
             name?: string;
             category?: string | null;
             description?: string | null;
@@ -189,6 +190,7 @@ function createPrismaMock(
         }) => {
           const existing = specs.get(where.slug);
           if (!existing) throw new Error("not found");
+          if (data.ownerId !== undefined) existing.ownerId = data.ownerId;
           if (data.name) existing.name = data.name;
           if (data.category !== undefined) existing.category = data.category;
           if (data.description !== undefined) existing.description = data.description;
@@ -223,6 +225,19 @@ function createPrismaMock(
           return { count: 0 };
         },
       ),
+    },
+    // WARP-1580 — run-now resolves the caller's §3 tool scope before
+    // dispatching, which means one indexed User read. Every fixture in THIS
+    // suite is deliberately role-less (`accessRoleId: null`) so the §3 axis
+    // never narrows and these tests keep pinning the WALK, not the RBAC.
+    // The narrowed-role cases live in tool-spec-access.test.ts.
+    //
+    // WARP-1621 — role-less is NOT "unrestricted": the coarse ADR-004 write
+    // tier still applies underneath, so the run-now fixtures below that call
+    // a `requiresWrite` tool (`send_notification`) run as `owner`. That gate
+    // has its own suite, tool-spec-write-tier.test.ts.
+    user: {
+      findUnique: vi.fn(async () => ({ accessRoleId: null, accessRole: null })),
     },
     toolRun: {
       create: vi.fn(
@@ -435,6 +450,88 @@ describe("WARP-462 — Tool spec CRUD", () => {
     expect(res.body.version).toBe(2);
   });
 
+  // WARP-1580 — a scheduled fire runs as the spec's attributed creator, so a
+  // spec with no creator can never be scheduled (the ticker fails closed).
+  // The WARP-464 miner writes `suggested` specs with ownerId null, so
+  // promotion is the moment a human takes ownership.
+  it("PATCH draft→live adopts an unowned spec for the publisher", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "s1",
+        slug: "mined",
+        name: "Mined suggestion",
+        category: "suggested",
+        description: null,
+        version: 1,
+        status: "suggested",
+        ownerId: null,
+        share: null,
+        safety: 1,
+        writes: false,
+        reversible: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        steps: [],
+      },
+    ]);
+    const app = buildApp(prisma, noopDispatcher, mkUser("admin"));
+    const res = await request(app).patch("/api/tools/mined").send({ status: "live" });
+    expect(res.status).toBe(200);
+    expect(res.body.ownerId).toBe("user-admin");
+  });
+
+  it("PATCH never re-attributes a spec that already has an owner", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "s1",
+        slug: "owned",
+        name: "Owned",
+        category: null,
+        description: null,
+        version: 1,
+        status: "draft",
+        ownerId: "someone-else",
+        share: null,
+        safety: 1,
+        writes: false,
+        reversible: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        steps: [],
+      },
+    ]);
+    const app = buildApp(prisma, noopDispatcher, mkUser("admin"));
+    const res = await request(app).patch("/api/tools/owned").send({ status: "live" });
+    expect(res.status).toBe(200);
+    expect(res.body.ownerId).toBe("someone-else");
+  });
+
+  it("PATCH that does not publish leaves an unowned spec unowned", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "s1",
+        slug: "mined",
+        name: "Mined suggestion",
+        category: "suggested",
+        description: null,
+        version: 1,
+        status: "suggested",
+        ownerId: null,
+        share: null,
+        safety: 1,
+        writes: false,
+        reversible: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        steps: [],
+      },
+    ]);
+    const app = buildApp(prisma, noopDispatcher, mkUser("admin"));
+    const res = await request(app).patch("/api/tools/mined").send({ name: "Renamed" });
+    expect(res.status).toBe(200);
+    expect(res.body.ownerId).toBeNull();
+  });
+
   it("PATCH replaces steps wholesale", async () => {
     const prisma = createPrismaMock([
       {
@@ -550,7 +647,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
@@ -577,7 +677,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(200);
     expect(dispatcher.call).toHaveBeenNthCalledWith(2, "send_notification", {
@@ -599,7 +702,10 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
         { id: "x3", specId: "spec-live", idx: 2, kind: "call", args: { tool: "list_files" } },
       ]),
     ]);
-    const app = buildApp(prisma, dispatcher, mkUser("family"));
+    // owner: this spec calls `send_notification` (requiresWrite) and the
+    // WARP-1621 tier gate refuses that for `family`. What's under test is the
+    // step walk, not the RBAC.
+    const app = buildApp(prisma, dispatcher, mkUser("owner"));
     const res = await request(app).post("/api/tools/demo/runs").send({});
     expect(res.status).toBe(207);
     expect(res.body.status).toBe("failed");

@@ -255,11 +255,19 @@ describe("IndexView", () => {
   // WARP-1154: the orchestrator's module gate answers 404 module_disabled — a
   // PERMANENT condition. It must read as "not enabled" (honest copy, calm
   // tone, no Retry), never "server error, try again in a moment".
-  it("module_disabled reads as 'not enabled' with NO retry affordance", () => {
+  // WARP-1528: …and REASON-FREE. `module_disabled` now also means "your role
+  // wasn't granted this feature", so naming the workspace would be false for a
+  // narrowed person (and leak by contradiction to anyone who has seen a
+  // colleague using Projects).
+  it("module_disabled reads as 'not available' — reason-free — with NO retry affordance", () => {
     const onRetry = vi.fn();
     renderError(err(404, "module_disabled"), onRetry);
+    expect(screen.getByText(/projects isn't available/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/projects isn't enabled on this droplet/i),
+      screen.queryByText(/isn't enabled on this droplet/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/switched off for this droplet, or it isn't part of your access/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/an owner or admin can turn it on/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();

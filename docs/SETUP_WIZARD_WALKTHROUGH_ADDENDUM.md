@@ -23,7 +23,7 @@
 
 - **Adjacent milestones already done:** M2.6 WireGuard remote access
   (`[x]` done — full backend + `/remote-access` page + the Cloudflare
-  Tunnel relay/named-address model, ADR-025); my wizard's VPN step is the
+  Tunnel relay/named-address model, ADR-025A in `droplet-fleet-hq`); my wizard's VPN step is the
   *first-run wrapper* over an already-shipped feature, not a new feature.
   Similarly Frigate parity is **complete**
   per `docs/FRIGATE_PARITY.md` (April 2026) — my Cameras step surfaces
@@ -154,7 +154,7 @@ The earlier draft of this addendum flagged a gap around auto-deriving
 `WIREGUARD_ENDPOINT_HOST` from dynamic-DNS state inside `vpn.ts`. That
 gap no longer exists: remote access moved to the box's provisioned named
 address (`<name>.droplet-us.com`) served over the Cloudflare Tunnel relay
-(ADR-025) with a per-device publicly-trusted cert (ADR-023). The endpoint
+(ADR-025A, `droplet-fleet-hq`) with a per-device publicly-trusted cert (ADR-023). The endpoint
 host is set from that named address at provisioning time, so
 `GET /api/vpn/status` reports `endpointConfigured: true` without the
 Internet step having to configure any dynamic DNS — the VPN step's

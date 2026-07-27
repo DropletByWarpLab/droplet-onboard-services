@@ -614,6 +614,101 @@ describe("POST /api/voice/events (WARP-1058)", () => {
   });
 });
 
+describe("POST /api/voice/enabled (WARP-1599)", () => {
+  it("forwards {enabled:false} and audits the switch-off with the admin-facing copy", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { enabled: false }));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/enabled")
+      .send({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ enabled: false });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/enabled",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: "mic",
+      what: "Voice turned off",
+      sub: "Droplet stopped listening — the wake word is off until voice is turned back on",
+      // Route-scoped surface + upstream status, like both sibling
+      // writes (voice-calibration / voice-restart-processor).
+      refs: { surface: "voice-enabled", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-owner" },
+    });
+  });
+
+  it("forwards {enabled:true} and audits the switch-on with the admin-facing copy", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { enabled: true }));
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/enabled")
+      .send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ enabled: true });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/enabled",
+      expect.objectContaining({ body: JSON.stringify({ enabled: true }) }),
+    );
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: "mic",
+      what: "Voice turned on",
+      sub: "Droplet is listening for the wake word again",
+      refs: { surface: "voice-enabled", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-admin" },
+    });
+  });
+
+  it("rejects a missing/non-boolean enabled with 400 and never calls upstream", async () => {
+    const app = buildApp(mkUser("owner"));
+    for (const body of [
+      {},
+      { enabled: "true" },
+      { enabled: "false" },
+      { enabled: 1 },
+      { enabled: 0 },
+      { enabled: null },
+    ]) {
+      const res = await request(app).post("/api/voice/enabled").send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_enabled");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 voice_unavailable when unreachable — and records no toggle row", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/enabled")
+      .send({ enabled: false });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("voice_unavailable");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("relays an upstream 409 (concurrent toggle) verbatim and records no row", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(409, {
+        detail: "The voice assistant is already being switched on or off",
+      }),
+    );
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/enabled")
+      .send({ enabled: true });
+    expect(res.status).toBe(409);
+    expect(res.body.detail).toMatch(/already being switched on or off/);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("voice routes RBAC (owner/admin only — service principals denied)", () => {
   const DENIED: (Role | null)[] = ["family", "guest", "service", null];
   const ROUTES: {
@@ -648,6 +743,9 @@ describe("voice routes RBAC (owner/admin only — service principals denied)", (
       body: { ttl_s: 60 },
     },
     { method: "delete", path: "/api/voice/calibration-mode" },
+    // WARP-1599 — the kill switch rides the same guard: only owner/admin
+    // may silence (or un-silence) the household's assistant.
+    { method: "post", path: "/api/voice/enabled", body: { enabled: true } },
   ];
 
   for (const route of ROUTES) {

@@ -228,8 +228,42 @@ Resolution O-2 amends the ADR-004 per-route guard catalog for the ERP connector 
 | T8 | WARP-1532 | UI: Roles & access tab + role builder + person-editor/People extensions | T3–T7 + design packet | **Review-ready** (PR #1224, contract-first; merge after T3/T4/T7) |
 | T9 | WARP-1533 | Invite-modal extension + accept-path assignment | T1, T8 | Pending |
 | T10 | WARP-1534 | E2E + ADR-004 catalog note + handbook sync | all | Pending |
+| F1 | WARP-1580 | ToolSpec runner consults the §3 resolver; scheduled fires run as the spec's attributed creator | T3, T5 | In flight |
 
 One PR per ticket through the harness, bottom-up merges (the WARP-1117..1123 precedent).
+
+### F1 (WARP-1580) — the scheduled-principal decision
+
+T5 narrowed the two surfaces a chat turn reaches tools through. The ToolSpec
+runner reaches the same registry through neither, so a spec was a laundering
+path around the narrowing — and a **scheduled** spec had no principal at all
+to narrow against.
+
+Interactive run-now (`POST /api/tools/:slug/runs`) is the easy half: there IS a
+principal, so it resolves the same `resolveToolAccessScope` a chat turn does
+and hands it to the runner, which re-checks with the same `toolDispatchDenial`
+the agent loop runs before `mcp.callTool`. One predicate, now three
+enforcement points, still zero copies.
+
+**Scheduled fires run as the spec's CREATOR (`ToolSpec.ownerId`), and that
+identity's CURRENT effective access is resolved at EVERY fire.** Resolving at
+fire time rather than schedule time is the load-bearing part: grants, tier and
+directory status all change after a schedule is written, so a schedule-time
+check is stale by construction — and stale in the fail-OPEN direction. Per-fire
+resolution is what makes "the creator was demoted last week" actually stop the
+run. The two alternatives were rejected for the same underlying reason: an
+explicit **system principal** is by construction un-narrowable and any
+operator-authored spec could borrow it (this hole, one hop further away), and
+**refusing to schedule** specs that touch narrowed domains refuses at the wrong
+moment and goes stale identically.
+
+Fail-closed, deliberately inverted against the request path: there, "no
+principal" means `AUTH_ENABLED=false` and resolves to owner; on the attributed
+path it means we do not know who is asking, so an absent `ownerId`, a missing
+or `DEACTIVATED` creator, or a failed read all resolve to `DENY_ALL_TOOL_SCOPE`
+and the fire is skipped, audited with its reason, and `nextFireAt` advanced.
+Deactivation is checked ahead of the owner bypass — an identity that may not
+act cannot be acted AS.
 
 ## Decisions (O-1..O-4) — resolved 2026-07-24 (founder: "go with your recommendations")
 

@@ -15,10 +15,37 @@ import {
 } from "lucide-react";
 import type { TrashItemInfo } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { LibraryChip } from "./FileListSimple";
+import { isTrashUnsupportedError } from "@/lib/api";
 
 interface TrashViewProps {
   items: TrashItemInfo[];
   isLoading: boolean;
+  /**
+   * WARP-1555 — the fetch error from `useTrash`. "Trash is empty" is the
+   * most dangerous empty state in the product: shown after a failed load it
+   * reads as "your deleted files are gone". A `TrashUnsupportedError` (the
+   * backend 501) gets its own copy again — it is not a failure and not empty.
+   */
+  error?: unknown;
+  /** Re-runs the trash fetch. Pass `useTrash().refresh`. */
+  onRetry?: () => void;
+  /**
+   * WARP-1549 — the same library slot `FileListSimple` has, feeding Trash's
+   * existing "Original location" column. Return the library a deleted item
+   * came out of, or null/undefined to say nothing.
+   *
+   * Saying nothing matters here more than anywhere else: a deleted item whose
+   * library the caller can no longer see must not be relabelled "My Files",
+   * because the next thing the user does with that row is decide whether to
+   * restore it.
+   */
+  spaceLabel?: (item: TrashItemInfo) => string | null | undefined;
+  /**
+   * WARP-1549 — overrides `item.originalLocation` with its in-library form,
+   * so the mount name isn't repeated next to the chip.
+   */
+  locationLabel?: (item: TrashItemInfo) => string;
   onRestore: (name: string) => void | Promise<void>;
   onDeleteForever: (name: string) => void | Promise<void>;
   onEmpty: () => void | Promise<void>;
@@ -64,6 +91,10 @@ function formatDate(iso: string): string {
 export function TrashView({
   items,
   isLoading,
+  error,
+  onRetry,
+  spaceLabel,
+  locationLabel,
   onRestore,
   onDeleteForever,
   onEmpty,
@@ -102,6 +133,62 @@ export function TrashView({
   const performEmpty = async () => {
     await onEmpty();
   };
+
+  /*
+    WARP-1555: the trash has no trash bin behind it (backend 501). Not a
+    failure and emphatically not "empty" — say plainly that deletes here are
+    immediate so nobody goes looking for a file that was never kept. No retry
+    button: retrying cannot make a backend grow a trashbin.
+  */
+  if (isTrashUnsupportedError(error) && items.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <Trash2 size={24} />
+          </span>
+          <p className="eh">Trash isn&apos;t available on this Droplet</p>
+          <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
+            This box&apos;s storage doesn&apos;t keep a trash bin, so deleting a
+            file removes it straight away. Nothing is being hidden here — check
+            a backup if you need a deleted file back.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /*
+    WARP-1555: a failed fetch, checked before `isLoading` (SWR turns loading
+    back on for each backoff retry) and before the empty state. Gated on an
+    empty list so a failed background poll never hides items already shown.
+  */
+  if (error && items.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <AlertTriangle size={24} />
+          </span>
+          <p className="eh">We couldn&apos;t load your trash</p>
+          <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
+            The box didn&apos;t answer when we asked what&apos;s in the trash.
+            Nothing has been deleted for good — try again in a moment.
+          </p>
+          {onRetry && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={onRetry}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (!isLoading && items.length === 0) {
     return (
@@ -146,7 +233,10 @@ export function TrashView({
           style={{ color: "var(--text-faint)", fontSize: "11px", borderBottom: "1px solid var(--card-bd)" }}
         >
           <span className="flex-1">Name</span>
-          <span className="w-32 hidden md:block">Original location</span>
+          {/* WARP-1549: widened from w-32 — the column now carries the owning
+              library alongside the folder, so a restore decision doesn't
+              depend on guessing which library the item came out of. */}
+          <span className="w-44 hidden md:block">Original location</span>
           <span className="w-20 text-right hidden sm:block">Size</span>
           <span className="w-28 text-right hidden lg:block">Deleted</span>
           <span className="w-20" />
@@ -164,6 +254,8 @@ export function TrashView({
         <div className="rows">
           {items.map((item) => {
             const Icon = getIconForName(item.originalName, item.isDirectory);
+            const library = spaceLabel?.(item);
+            const location = locationLabel?.(item) ?? item.originalLocation;
             return (
               <div
                 key={item.name}
@@ -182,11 +274,14 @@ export function TrashView({
                   </span>
                 </div>
 
-                <span
-                  className="w-32 truncate hidden md:block"
-                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
-                >
-                  {item.originalLocation}
+                <span className="w-44 hidden md:flex items-center gap-1.5 min-w-0">
+                  {library && <LibraryChip label={library} />}
+                  <span
+                    className="truncate"
+                    style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+                  >
+                    {location}
+                  </span>
                 </span>
 
                 <span

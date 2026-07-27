@@ -21,9 +21,15 @@ import type { FileEntryInfo, FileSpace } from "@/lib/types";
 // useSearchParams. `let` so the WARP-1270 deep-link tests can point it at a
 // `?space=` query before rendering; reset in beforeEach below.
 let mockSearchParamsString = "";
+// WARP-1547 — the page now WRITES the URL too, so `push` has to be a stable
+// module-level spy the tests can assert against (a fresh `vi.fn()` per
+// useRouter() call would be a different mock on every render, and would also
+// make the router identity churn).
+const pushMock = vi.fn();
+const replaceMock = vi.fn();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(mockSearchParamsString),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: pushMock, replace: replaceMock }),
   usePathname: () => "/files",
 }));
 
@@ -87,13 +93,20 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 // at call time; reset in beforeEach below.
 let mockFiles: FileEntryInfo[] = FILES;
 let mockFilesError: unknown = undefined;
+// WARP-1623 — the (path, space) pair the page actually asks for. `currentPath`
+// is space-root-relative, so this is what proves a library listing is requested
+// relative to its own mount rather than double-prefixed. Reset in beforeEach.
+let mockFilesCalls: Array<[string, string]> = [];
 vi.mock("@/lib/hooks/useFiles", () => ({
-  useFiles: () => ({
-    files: mockFilesError ? [] : mockFiles,
-    error: mockFilesError,
-    isLoading: false,
-    refresh: vi.fn(),
-  }),
+  useFiles: (path: string, space: string) => {
+    mockFilesCalls.push([path, space]);
+    return {
+      files: mockFilesError ? [] : mockFiles,
+      error: mockFilesError,
+      isLoading: false,
+      refresh: vi.fn(),
+    };
+  },
 }));
 
 // WARP-1338 (UX review) — the page feeds the breadcrumb the same volume
@@ -118,6 +131,19 @@ vi.mock("@/lib/hooks/usePools", () => ({
     bridgeError: undefined,
     refresh: vi.fn(),
   }),
+}));
+
+// WARP-1547 — the page's `onPickResult` handler is the funnel's other entry
+// point (it used to call `setSpace` directly, bypassing `handleSpaceChange`).
+// Stub the SearchBar down to a button that fires a fixture result, so the
+// handler can be driven without the real component's debounced network search.
+let mockSearchResult: FileEntryInfo = FILES[0];
+vi.mock("@/components/FileManager/SearchBar", () => ({
+  SearchBar: ({ onPickResult }: { onPickResult: (f: FileEntryInfo) => void }) => (
+    <button type="button" onClick={() => onPickResult(mockSearchResult)}>
+      pick search result
+    </button>
+  ),
 }));
 
 vi.mock("@/lib/hooks/useFavorites", () => ({
@@ -171,6 +197,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     fetchShares: vi.fn().mockResolvedValue([]),
     fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+    // WARP-1623 — asserted below: an entry path must be converted to the
+    // active space's relative form before it reaches a space-threaded write.
+    deleteFile: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -186,6 +215,8 @@ beforeEach(() => {
   mockFilesError = undefined;
   mockDrives = [];
   mockPools = [];
+  mockSearchResult = FILES[0];
+  mockFilesCalls = [];
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -540,5 +571,301 @@ describe("<FilesPage /> — ?space= deep-link (WARP-1270)", () => {
       "aria-selected",
       "true",
     );
+  });
+});
+
+// WARP-1547 — `(space, path)` is ONE address.
+//
+// The two params used to be applied by two effects: `?path=` seeded state on
+// mount, then `?space=` landed once `spaces` resolved and reset the path to
+// the library root — so `/files?space=dept:x&path=/Sub` reliably opened the
+// library ROOT and no folder inside a library could be linked. The page also
+// never wrote the URL at all, so in-page folder navigation produced no
+// shareable link and browser Back left Files entirely.
+describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547)", () => {
+  const FINANCE_DEPT: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "contributor",
+    isMember: true,
+  };
+
+  const CONTRACTS: FileEntryInfo = {
+    name: "Contracts",
+    path: "/Contracts",
+    isDirectory: true,
+    size: 0,
+    mimeType: null,
+    modifiedAt: "2026-04-16T00:00:00.000Z",
+  };
+
+  const crumbs = () => screen.getByRole("navigation", { name: /breadcrumbs/i });
+
+  // ── URL → view ──────────────────────────────────────────────────────────
+
+  it("lands on the deep-linked FOLDER inside the library, not the library root", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance&path=%2FContracts%2F2026";
+    render(<FilesPage />);
+
+    // Both halves survive: the library is active AND the path is the linked
+    // folder. Before the fix the space effect clobbered the path back to "/".
+    expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(within(crumbs()).getByText("Contracts")).toBeInTheDocument();
+    expect(within(crumbs()).getByText("2026")).toBeInTheDocument();
+  });
+
+  it("keeps failing safe on an unknown space id — no error surface, no existence leak", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Aarchived-long-ago&path=%2FContracts";
+    render(<FilesPage />);
+
+    expect(screen.getByRole("tab", { name: /my files/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // Nothing that would confirm or deny the id: no alert, no space named.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/archived-long-ago/i)).not.toBeInTheDocument();
+  });
+
+  // ── view → URL ──────────────────────────────────────────────────────────
+
+  it("writes the (space, path) pair back to the URL when a folder is opened", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance";
+    mockFiles = [CONTRACTS];
+    render(<FilesPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /folder contracts/i }));
+    expect(pushMock).toHaveBeenCalledWith(
+      "/files?space=dept%3Afinance&path=%2FContracts",
+    );
+  });
+
+  it("keeps the plain /files?path= shape in the personal space (no redundant space param)", () => {
+    mockFiles = [CONTRACTS];
+    render(<FilesPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /folder contracts/i }));
+    expect(pushMock).toHaveBeenCalledWith("/files?path=%2FContracts");
+  });
+
+  it("writes a breadcrumb jump back to the URL too", () => {
+    mockSearchParamsString = "path=%2FContracts%2F2026";
+    render(<FilesPage />);
+
+    fireEvent.click(within(crumbs()).getByRole("button", { name: /my files/i }));
+    expect(pushMock).toHaveBeenLastCalledWith("/files");
+  });
+
+  it("switching space writes that space's ROOT — the old path never carries over", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "path=%2FDocs";
+    render(<FilesPage />);
+    expect(within(crumbs()).getByText("Docs")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    expect(pushMock).toHaveBeenLastCalledWith("/files?space=dept%3Afinance");
+    // Preserved behavior: the switch lands on the new space's root.
+    expect(within(crumbs()).queryByText("Docs")).not.toBeInTheDocument();
+  });
+
+  // ── Back / Forward ──────────────────────────────────────────────────────
+  //
+  // The browser restoring an earlier entry re-renders the page with that
+  // entry's params; the single URL→view effect is what turns that into a
+  // folder move instead of Files losing its place.
+
+  it("moves back up a folder when the browser restores the previous URL", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance&path=%2FContracts%2F2026";
+    const { rerender } = render(<FilesPage />);
+    expect(within(crumbs()).getByText("2026")).toBeInTheDocument();
+
+    mockSearchParamsString = "space=dept%3Afinance&path=%2FContracts";
+    rerender(<FilesPage />);
+
+    expect(within(crumbs()).getByText("Contracts")).toBeInTheDocument();
+    expect(within(crumbs()).queryByText("2026")).not.toBeInTheDocument();
+    // Still inside the library — Back moves within Files, it doesn't leave it.
+    expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("restores the personal root when the browser goes back to the bare /files URL", () => {
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockSearchParamsString = "space=dept%3Afinance&path=%2FContracts";
+    const { rerender } = render(<FilesPage />);
+    expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    mockSearchParamsString = "";
+    rerender(<FilesPage />);
+
+    expect(screen.getByRole("tab", { name: /my files/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(within(crumbs()).queryByText("Contracts")).not.toBeInTheDocument();
+  });
+
+  // ── one funnel ──────────────────────────────────────────────────────────
+
+  it("funnels a search pick through the same navigation path as every other move", () => {
+    // Was the second space setter: `onPickResult` called `setSpace` directly,
+    // so a pick moved the listing without touching the URL.
+    mockSearchResult = {
+      name: "Trips",
+      path: "/Household/Trips",
+      isDirectory: true,
+      size: 0,
+      mimeType: null,
+      modifiedAt: "2026-04-16T00:00:00.000Z",
+    };
+    render(<FilesPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /pick search result/i }));
+
+    expect(screen.getByRole("tab", { name: /household/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(pushMock).toHaveBeenCalledWith("/files?space=shared&path=%2FTrips");
+  });
+
+  it("funnels a picked FILE to its parent folder, in that file's space", () => {
+    mockSearchResult = {
+      name: "itinerary.pdf",
+      path: "/Household/Trips/itinerary.pdf",
+      isDirectory: false,
+      size: 128,
+      modifiedAt: "2026-04-16T00:00:00.000Z",
+      mimeType: "application/pdf",
+    };
+    render(<FilesPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /pick search result/i }));
+
+    expect(pushMock).toHaveBeenCalledWith("/files?space=shared&path=%2FTrips");
+  });
+});
+
+// WARP-1623 — browsing a department library.
+//
+// `currentPath` is space-root-relative (the page states this at the
+// `homeRelativeCurrentPath` memo and again at the breadcrumb and Move/Copy
+// call sites), and the server prefixes the mount for the declared space. Two
+// helpers in the page still special-cased `shared` when the listing request
+// itself dropped every `dept:` space, so the mismatch was invisible. Once the
+// space reaches the wire, they become the bug — and with the WARP-1547 funnel
+// writing the URL, a double-prefixed path would be baked into the link too.
+describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
+  const FINANCE: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "manager",
+    isMember: true,
+  };
+
+  // Listing entries always carry HOME-relative paths, mount included.
+  const FINANCE_ENTRIES: FileEntryInfo[] = [
+    {
+      name: "Q1",
+      path: "/Finance/Q1",
+      isDirectory: true,
+      size: 0,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType: "httpd/unix-directory",
+    },
+    {
+      name: "budget.xlsx",
+      path: "/Finance/budget.xlsx",
+      isDirectory: false,
+      size: 4096,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+  ];
+
+  beforeEach(() => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = FINANCE_ENTRIES;
+    mockUser = { id: "u1", email: "family@example.com", role: "family" };
+  });
+
+  // NOT a pin on the WARP-1623 bug — a regression guard on the page contract
+  // it depends on. `useFiles` is mocked wholesale here and the page has always
+  // passed the real space into it; the drop happened one layer below, inside
+  // `fetchFiles`. The wire-level pin lives in `lib/api.spaces.test.ts`. This
+  // guards the other half: that a space switch still lands on the space ROOT
+  // rather than carrying the previous space's path across.
+  it("lands a space switch on the library root, carrying the space id", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/", "dept:finance"]);
+  });
+
+  it("opening a folder asks for it relative to the library, not double-prefixed", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    // "/Finance/Q1" fed back verbatim would be re-prefixed server-side to
+    // "/Finance/Finance/Q1" — the WARP-1140 double-prefix, which renders as a
+    // silently empty folder.
+    expect(mockFilesCalls.at(-1)).toEqual(["/Q1", "dept:finance"]);
+  });
+
+  // The WARP-1547 funnel writes the URL on every move, so a double-prefixed
+  // path would not merely mislist — it would be baked into the shareable link.
+  // Mirrors the Household assertion the 1547 suite already makes.
+  it("writes a space-relative URL for a folder opened inside a library", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    expect(pushMock).toHaveBeenCalledWith("/files?space=dept%3Afinance&path=%2FQ1");
+  });
+
+  it("converts an entry path to space-relative form before a write", async () => {
+    const { deleteFile } = await import("@/lib/api");
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete budget\.xlsx/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(deleteFile).toHaveBeenCalledWith("/budget.xlsx", "dept:finance");
+  });
+
+  // Must open a FOLDER: `handleRowOpen` only reaches the path translation on a
+  // directory — a file routes to the preview modal instead, so clicking one
+  // would assert nothing but the mount-time listing call.
+  it("leaves the personal space home-relative — no prefix stripped", () => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = [
+      {
+        name: "Docs",
+        path: "/Docs",
+        isDirectory: true,
+        size: 0,
+        modifiedAt: "2026-07-01T00:00:00.000Z",
+        mimeType: "httpd/unix-directory",
+      },
+    ];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^folder docs$/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/Docs", "personal"]);
   });
 });
