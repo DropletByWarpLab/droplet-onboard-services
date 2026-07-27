@@ -79,6 +79,9 @@ function grants(
     locks: false,
     cloud: false,
     connectors: {},
+    // WARP-1579: null = "no custom role narrows the connectors axis", which
+    // is what this module-mount fixture has always modelled.
+    connectorGrants: null,
     usage: {
       storageQuotaBytes: null,
       maxUploadSizeMb: null,

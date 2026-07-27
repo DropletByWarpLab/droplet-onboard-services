@@ -18,6 +18,11 @@ import {
   type EffectiveAccessInputs,
 } from "./effective-access.service.js";
 import { GATEABLE_MODULE_IDS } from "./access-catalog.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
 const ALL_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   "chat",
@@ -601,6 +606,97 @@ describe("effective-access — connector min", () => {
   });
 });
 
+/**
+ * WARP-1579 — the RAW grant, reported BESIDE the min().
+ *
+ * `connectors` folds `connection.writeEnabled` into the level, which makes
+ * "the role is read-only" and "the connection has writes off" the same value.
+ * The ERP write gate has to tell those apart — one is a 403 about the role,
+ * the other today's 409 `WRITE_NOT_ENABLED` about the connection — so the
+ * resolver reports the role's own grant untouched as well.
+ *
+ * `null` means "no custom role narrows this axis": role-less people and owners
+ * (§3's one bypass). It is deliberately NOT `{}`, which is the sharply
+ * different "this role holds no connector grants at all".
+ */
+describe("effective-access — raw connector grants (WARP-1579)", () => {
+  const connsRw = [{ provider: "eaglesoft", writeEnabled: true }];
+  const connsRo = [{ provider: "eaglesoft", writeEnabled: false }];
+
+  it("reports the role's own level, unclamped by the connection, beside the min()", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({ eaglesoft: "read" }); // min() unchanged
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" }); // the raw fact
+  });
+
+  it("distinguishes a read-only ROLE from a write-disabled CONNECTION — both min() to 'read'", () => {
+    const readOnlyRole = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRw,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read" }] }),
+        },
+      }),
+    );
+    const readOnlyConnection = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(readOnlyRole.connectors).toEqual(readOnlyConnection.connectors);
+    expect(readOnlyRole.connectorGrants).toEqual({ eaglesoft: "read" });
+    expect(readOnlyConnection.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("reports a grant even when NO connection exists — the role's intent is not a connection fact", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({}); // no connection = no reach
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("{} for a role holding no connector grants — sharply different from null", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: role() } }),
+    );
+    expect(res.connectorGrants).toEqual({});
+  });
+
+  it("null for a role-LESS person and for an owner — nothing narrows this axis", () => {
+    const roleLess = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: null } }),
+    );
+    expect(roleLess.connectorGrants).toBeNull();
+    const owner = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "owner", accessRole: null } }),
+    );
+    expect(owner.connectorGrants).toBeNull();
+  });
+});
+
 describe("effective-access — usage passthrough (T7)", () => {
   it("person ?? role ?? default, field-by-field, BigInt string-encoded, sources carried", () => {
     const res = computeEffectiveAccess(
@@ -650,11 +746,20 @@ describe("effective-access — deptRights are a read-only reference", () => {
 
 describe("resolveEffectiveAccess — bound fetch wrapper", () => {
   it("returns null for a missing user (route maps to 404)", async () => {
+    // WARP-1583: the wrapper resolves inside a RepeatableRead transaction, so
+    // the missing-user contract is now "return null OUT of the transaction",
+    // not "return null before opening one". The shared seam (WARP-1570) is
+    // what makes that distinction testable — a hand-rolled
+    // `$transaction: (fn) => fn(self)` would drop the options argument and
+    // let a silent downgrade to READ COMMITTED stay green.
     const prisma: any = {
       user: { findUnique: vi.fn().mockResolvedValue(null) },
     };
+    const seam = createTransactionSeam({ client: () => prisma });
+    prisma.$transaction = seam.$transaction;
     _setEffectiveAccessForTests(prisma, {} as any);
     await expect(resolveEffectiveAccess("nope")).resolves.toBeNull();
+    expectAllTransactionsAt(seam, REPEATABLE_READ_TX);
     _setEffectiveAccessForTests(null, null);
   });
 

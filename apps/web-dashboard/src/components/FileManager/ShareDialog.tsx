@@ -33,6 +33,11 @@ interface ShareDialogProps {
    * ("File shares cannot have create or delete permissions"), so for files the
    * dialog masks those bits out of whatever preset the user picks before
    * sending. Folders keep the full bitmask.
+   *
+   * WARP-1601: it also selects which access levels the dialog offers at all —
+   * see FILE_LEVELS / FOLDER_LEVELS below. A file and a folder do not have the
+   * same set of assignable levels, so this prop drives both existing-share
+   * selects and both create forms.
    */
   isDirectory?: boolean;
   existingShares?: ShareDetail[];
@@ -53,40 +58,110 @@ const PERM_CREATE = 4;
 const PERM_DELETE = 8;
 const PERM_SHARE = 16;
 
-const PRESETS = [
-  { label: "View only", bits: PERM_READ },
-  { label: "Can edit", bits: PERM_READ | PERM_UPDATE },
-  { label: "Full access", bits: PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE | PERM_SHARE },
-] as const;
-
-// The bits that distinguish the presets from one another. The SHARE bit (16) is
-// deliberately excluded: Nextcloud attaches it to almost every share regardless
-// of access level, so it must not push a "View only" or "Can edit" share into
-// "Full access".
-const PRESET_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE;
+export interface AccessLevel {
+  label: string;
+  bits: number;
+  /** Plain-language expansion of the label, surfaced as a native tooltip. */
+  hint: string;
+}
 
 /**
- * Snap a raw Nextcloud OCS permission bitmask onto one of the three presets so
- * the access-level <select> always has a matching <option>.
+ * WARP-1601: the assignable access levels are NOT the same for a file and a
+ * folder, so the dialog offers a different list for each instead of one static
+ * set.
+ *
+ * CREATE (4) and DELETE (8) describe what a recipient may do to the *contents*
+ * of a container, and Nextcloud rejects them outright on a single-file share.
+ * "Full access" (31) is therefore unrepresentable on a file: picking it used to
+ * send 19 and then render as "Can edit", making the two options look identical
+ * while silently flipping the recipient's re-share bit.
+ *
+ * The honest third level for a file is re-share (19) — a real, distinct,
+ * storable state — so files get it under its own name. Levels that a file
+ * cannot hold are ABSENT rather than greyed out: a file has no contents to
+ * create or delete, so "Full access" could never become available, and a
+ * permanently-disabled option would be dead UI in every share row. The same
+ * list drives the person select, the link select, and both create forms, so the
+ * treatment is consistent everywhere.
+ */
+const FILE_LEVELS: readonly AccessLevel[] = [
+  { label: "View only", bits: PERM_READ, hint: "Can open and download this file" },
+  {
+    label: "Can edit",
+    bits: PERM_READ | PERM_UPDATE,
+    hint: "Can open and change this file",
+  },
+  {
+    label: "Can edit + reshare",
+    bits: PERM_READ | PERM_UPDATE | PERM_SHARE,
+    hint: "Can open, change, and share this file with other people",
+  },
+];
+
+const FOLDER_LEVELS: readonly AccessLevel[] = [
+  { label: "View only", bits: PERM_READ, hint: "Can open and download the contents" },
+  {
+    label: "Can edit",
+    bits: PERM_READ | PERM_UPDATE,
+    hint: "Can open and change the contents",
+  },
+  {
+    label: "Full access",
+    bits: PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE | PERM_SHARE,
+    hint: "Can edit, add, and delete items, and share this folder with other people",
+  },
+];
+
+export function accessLevelsFor(isDirectory: boolean): readonly AccessLevel[] {
+  return isDirectory ? FOLDER_LEVELS : FILE_LEVELS;
+}
+
+// The bits that distinguish the levels of a FOLDER from one another. The SHARE
+// bit (16) is deliberately excluded: Nextcloud attaches it to almost every
+// share regardless of access level, so it must not push a "View only" or "Can
+// edit" folder share into "Full access".
+const FOLDER_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE;
+
+// On a FILE, SHARE is the only bit separating "Can edit" (3) from "Can edit +
+// reshare" (19) — CREATE/DELETE can never be set — so here it must be matched
+// rather than ignored, or the two levels collapse again (WARP-1601).
+const FILE_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_SHARE;
+
+/**
+ * Snap a raw Nextcloud OCS permission bitmask onto one of the levels offered
+ * for this target kind, so the access-level <select> always has a matching
+ * <option>.
  *
  * WARP-939: the OCS API returns masks like 17 (READ|SHARE) or 19
  * (READ|UPDATE|SHARE) that never equal a bare preset value (1 / 3 / 31). A
  * controlled <select value={rawMask}> then matched no option, fell back to the
  * first ("View only"), and the user could not see or change the real level.
- * We choose the most-capable preset whose editing bits are all granted by the
- * mask, ignoring the ubiquitous SHARE bit.
+ * We choose the most-capable level whose distinguishing bits are all granted by
+ * the mask.
  */
-export function presetBitsFor(rawPermissions: number): number {
-  const editing = rawPermissions & PRESET_MATCH_BITS;
-  // Walk presets from most to least capable; first whose editing bits are a
-  // subset of the mask's editing bits wins.
-  for (let i = PRESETS.length - 1; i >= 0; i--) {
-    const presetEditing = PRESETS[i].bits & PRESET_MATCH_BITS;
-    if ((editing & presetEditing) === presetEditing) {
-      return PRESETS[i].bits;
+export function presetBitsFor(rawPermissions: number, isDirectory = false): number {
+  const levels = accessLevelsFor(isDirectory);
+  const matchBits = isDirectory ? FOLDER_MATCH_BITS : FILE_MATCH_BITS;
+  const granted = rawPermissions & matchBits;
+  // Walk levels from most to least capable; first whose distinguishing bits are
+  // a subset of the mask's wins.
+  for (let i = levels.length - 1; i >= 0; i--) {
+    const required = levels[i].bits & matchBits;
+    if ((granted & required) === required) {
+      return levels[i].bits;
     }
   }
   return PERM_READ;
+}
+
+/**
+ * WARP-1148/1149: Nextcloud's generalCreateChecks rejects any share of a single
+ * FILE whose bitmask carries CREATE or DELETE. The file level list no longer
+ * offers those bits, but this stays as the last line of defence on every
+ * outbound write — a mask can also arrive from a stored share row.
+ */
+export function sendablePermissions(bits: number, isDirectory: boolean): number {
+  return isDirectory ? bits : bits & ~(PERM_CREATE | PERM_DELETE);
 }
 
 /**
@@ -157,13 +232,10 @@ export function ShareDialog({
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
-  // WARP-1148/1149: Nextcloud's generalCreateChecks rejects any share of a
-  // single FILE whose bitmask carries CREATE or DELETE — so the "Full access"
-  // preset (31) could never be created or applied on a file. Mask those bits
-  // for files (leaving READ|UPDATE|SHARE) so the most-capable valid share is
-  // sent instead of a guaranteed 400.
-  const sendablePermissions = (bits: number): number =>
-    isDirectory ? bits : bits & ~(PERM_CREATE | PERM_DELETE);
+  // WARP-1601: files and folders do not offer the same access levels.
+  const levels = accessLevelsFor(isDirectory);
+  const toSendable = (bits: number): number =>
+    sendablePermissions(bits, isDirectory);
 
   const handleCreate = async () => {
     if (mode === "person" && !selectedRecipient) return;
@@ -175,11 +247,11 @@ export function ShareDialog({
           ? await createShare(filePath, {
               shareType: SHARE_TYPE_USER,
               shareWith: selectedRecipient as string,
-              permissions: sendablePermissions(permissions),
+              permissions: toSendable(permissions),
             })
           : await createShare(filePath, {
               shareType: SHARE_TYPE_LINK,
-              permissions: sendablePermissions(permissions),
+              permissions: toSendable(permissions),
               expireDate: expireDate || undefined,
               password: password || undefined,
               note: note || undefined,
@@ -225,7 +297,7 @@ export function ShareDialog({
   };
 
   const handleUpdatePermissions = async (shareId: number, bits: number) => {
-    const masked = sendablePermissions(bits);
+    const masked = toSendable(bits);
     try {
       await updateShare(shareId, { permissions: masked });
       setShares(
@@ -325,7 +397,8 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={presetBitsFor(share.permissions)}
+                          aria-label="Access level"
+                          value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
@@ -337,9 +410,13 @@ export function ShareDialog({
                             color: "var(--text)",
                           }}
                         >
-                          {PRESETS.map((preset) => (
-                            <option key={preset.label} value={preset.bits}>
-                              {preset.label}
+                          {levels.map((level) => (
+                            <option
+                              key={level.label}
+                              value={level.bits}
+                              title={level.hint}
+                            >
+                              {level.label}
                             </option>
                           ))}
                         </select>
@@ -395,7 +472,8 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={presetBitsFor(share.permissions)}
+                          aria-label="Access level"
+                          value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
@@ -407,9 +485,13 @@ export function ShareDialog({
                             color: "var(--text)",
                           }}
                         >
-                          {PRESETS.map((preset) => (
-                            <option key={preset.label} value={preset.bits}>
-                              {preset.label}
+                          {levels.map((level) => (
+                            <option
+                              key={level.label}
+                              value={level.bits}
+                              title={level.hint}
+                            >
+                              {level.label}
                             </option>
                           ))}
                         </select>
@@ -580,12 +662,13 @@ export function ShareDialog({
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => {
-                      const active = permissions === preset.bits;
+                    {levels.map((level) => {
+                      const active = permissions === level.bits;
                       return (
                         <button
-                          key={preset.label}
-                          onClick={() => setPermissions(preset.bits)}
+                          key={level.label}
+                          onClick={() => setPermissions(level.bits)}
+                          title={level.hint}
                           className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                             active ? "font-medium" : "hover:bg-[var(--hover)]"
                           }`}
@@ -601,7 +684,7 @@ export function ShareDialog({
                                 }
                           }
                         >
-                          {preset.label}
+                          {level.label}
                         </button>
                       );
                     })}
@@ -619,12 +702,13 @@ export function ShareDialog({
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => {
-                      const active = permissions === preset.bits;
+                    {levels.map((level) => {
+                      const active = permissions === level.bits;
                       return (
                         <button
-                          key={preset.label}
-                          onClick={() => setPermissions(preset.bits)}
+                          key={level.label}
+                          onClick={() => setPermissions(level.bits)}
+                          title={level.hint}
                           className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                             active ? "font-medium" : "hover:bg-[var(--hover)]"
                           }`}
@@ -640,7 +724,7 @@ export function ShareDialog({
                                 }
                           }
                         >
-                          {preset.label}
+                          {level.label}
                         </button>
                       );
                     })}

@@ -13,7 +13,7 @@
  * own `_setEffectiveAccessForTests` seam — so the intersection is proven
  * end-to-end, not stubbed at the boundary it is meant to exercise.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
@@ -23,6 +23,13 @@ vi.mock("../config.js", () => ({
 
 import { createModulesRouter } from "./modules.routes.js";
 import { _setEffectiveAccessForTests } from "../services/effective-access.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+  type TransactionMock,
+  type TransactionSeam,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { AvailabilityConfig } from "../modules/module-registry.js";
 
@@ -56,7 +63,7 @@ interface Seed {
 }
 
 function createPrismaStub(seed: Seed) {
-  return {
+  const self: Record<string, unknown> = {
     moduleSetting: {
       findMany: vi.fn().mockResolvedValue(seed.moduleSettings ?? []),
     },
@@ -91,6 +98,21 @@ function createPrismaStub(seed: Seed) {
     userUsagePolicy: { findUnique: vi.fn().mockResolvedValue(null) },
     departmentMembership: { findMany: vi.fn().mockResolvedValue([]) },
   };
+  // WARP-1583: the §3 resolver now composes its whole read set inside one
+  // RepeatableRead transaction, so this stub needs a real `$transaction`.
+  // The shared seam (WARP-1570) rather than `(fn) => fn(self)`, because the
+  // options argument is exactly what must not be silently dropped here — the
+  // assertion below is `expectAllTransactionsAt`.
+  const seam = createTransactionSeam({ client: () => self });
+  self.$transaction = seam.$transaction;
+  return Object.assign(self, { _seam: () => seam }) as unknown as PrismaStub;
+}
+
+interface PrismaStub {
+  user: { findUnique: Mock };
+  moduleSetting: { findMany: Mock };
+  $transaction: TransactionMock;
+  _seam: () => TransactionSeam;
 }
 
 const GATE = { requireModuleEnabled: () => (_r: Request, _s: Response, n: NextFunction) => n(), invalidate: vi.fn() };
@@ -277,6 +299,25 @@ describe("GET /api/modules — additive, resilient, unchanged", () => {
   it("still 401s an unauthenticated caller", async () => {
     const { app } = makeApp({ user: null }, null);
     expect((await request(app).get("/api/modules")).status).toBe(401);
+  });
+
+  it("resolves the caller's view from ONE RepeatableRead snapshot (WARP-1583)", async () => {
+    // The route composes the nav out of the workspace module set AND the
+    // caller's grants. Read across snapshots, a module toggle landing
+    // mid-request could produce a nav that hides a surface the person's
+    // grants still reach, or shows one they no longer do.
+    const { app, prisma } = makeApp(
+      {
+        user: {
+          id: "u-staff",
+          role: "family",
+          accessRole: { featureGrants: [{ moduleId: "cameras", level: "view" }] },
+        },
+      },
+      STAFF,
+    );
+    await request(app).get("/api/modules");
+    expectAllTransactionsAt(prisma._seam(), REPEATABLE_READ_TX);
   });
 
   it("resolves against the local User.id UUID, never the username (WARP-881)", async () => {

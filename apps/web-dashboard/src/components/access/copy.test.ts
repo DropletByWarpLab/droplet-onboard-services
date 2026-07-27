@@ -114,6 +114,40 @@ describe("§12 Guardrails", () => {
   });
 });
 
+describe("§12 Archive / restore (WARP-1560)", () => {
+  it("the archive body ships the packet's SECOND sentence again", () => {
+    // T8 shipped this string with "You can restore them any time." cut,
+    // because at the time no restore surface existed and §12 never promises
+    // an affordance you can't reach. The surface exists now, so the packet's
+    // own sentence (prototype access-app.jsx) goes back in — verbatim.
+    expect(ACCESS_COPY.archiveRole).toBe(
+      "Archived roles can't be assigned but keep their settings. You can restore them any time.",
+    );
+  });
+
+  it("the restore side is authored, and honest that archive was never a revoke", () => {
+    // WARP-1560-authored — no §12 string covers restore (same footing as
+    // `docsNeedsFiles` / `inviteRolesDegraded`; flagged for packet
+    // ratification). Mirrors the archive + delete bodies: consequence first,
+    // then the reassurance. The last sentence is load-bearing, not filler —
+    // `effective-access.service.ts` deliberately never reads `state`, so
+    // people holding an archived role never lost access and cannot "regain"
+    // it (the Departments restore body says the opposite, correctly, for
+    // Departments).
+    expect(ACCESS_COPY.restoreRole).toBe(
+      "Restored roles can be assigned again, and their usage defaults start applying again. This doesn't change anyone's access right now.",
+    );
+    expect(ACCESS_COPY.archivedRoles).toBe("Archived roles");
+    expect(ACCESS_COPY.archived).toBe("Archived");
+    expect(ACCESS_COPY.archivedNotAssignable).toBe(
+      "Archived roles can't be assigned — restore this one to put it back to work.",
+    );
+    expect(ACCESS_COPY.emptyRolesAllArchived).toBe(
+      "Every custom role is archived — restore one, or create a new role.",
+    );
+  });
+});
+
 describe("§12 Sync + §10 system states", () => {
   it("sync vocabulary", () => {
     expect(ACCESS_COPY.applying).toBe("Applying…");
@@ -158,5 +192,19 @@ describe("§12 Sync + §10 system states", () => {
       "What people with this role can see, do, and use.",
     );
     expect(ACCESS_COPY.addException).toBe("+ Add an exception");
+  });
+});
+
+describe("§12 Retained quota (WARP-1576)", () => {
+  it("states the consequence of clearing a role's storage default", () => {
+    // WARP-1576-authored from the ticket's own phrasing. Calm,
+    // consequence-stating, no exclamation; singular gets its own form
+    // because "1 people" is the kind of thing this surface never ships.
+    expect(ACCESS_COPY.retainedQuota(1)).toBe(
+      "1 person keeps their current storage limit until it's changed.",
+    );
+    expect(ACCESS_COPY.retainedQuota(4)).toBe(
+      "4 people keep their current storage limit until it's changed.",
+    );
   });
 });

@@ -28,7 +28,7 @@ import {
   type StepDispatcher,
 } from "../services/tool-spec-runner.service.js";
 import {
-  firstForbiddenToolName,
+  firstToolDeniedForPrincipal,
   resolveToolAccessScope,
 } from "../services/tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -414,32 +414,51 @@ export function createToolsRouter(
           }
         }
 
-        // WARP-1580 — layer 2. The ADR-004 `requireRole` floor above is the
-        // COARSE gate; it says nothing about which tool domains this person's
-        // AccessRole actually grants. Without this, a spec is a laundering
-        // path around the WARP-1529 narrowing that chat enforces: a family
-        // user whose role was never granted `smart-home` could still make
-        // `control_device` fire by pressing Run on a spec someone else wrote.
+        // The `requireRole` floor above only asks WHICH ROLES may press Run
+        // at all. It says nothing about which TOOLS this person may invoke,
+        // and the ToolSpec surface must answer that identically to chat —
+        // otherwise a stored spec is a laundering path around the narrowing
+        // chat enforces. Two axes, both required, resolved once here and
+        // handed to the runner (which re-checks per step for the
+        // args-dependent lock rule):
         //
-        // Resolved ONCE and handed to the runner, which re-checks per step —
-        // the same resolve-once / enforce-at-dispatch shape routes/llm.ts
-        // uses for a chat turn. `null` for the owner, service principals, and
-        // everyone with no AccessRole: that path is byte-for-byte unchanged.
+        //   A. ADR-004 write tier (WARP-1621). Non-privileged tiers lose
+        //      every `requiresWrite` tool. This is what chat's
+        //      `narrowAllowedToolsForRole` has always applied and what this
+        //      route never did: a `family` user — i.e. every family user on
+        //      every box in the field, because AccessRoles are new — could
+        //      press Run on a live spec calling `control_device` and it
+        //      fired, while the same tool was stripped from their chat turn
+        //      before the model saw it.
+        //   B. WARP-1580 / §3 per-role tool domains, for the people who
+        //      actually hold an AccessRole. `null` for the owner, service
+        //      principals, and everyone with no AccessRole — that resolver
+        //      path is byte-for-byte unchanged, and axis A is deliberately
+        //      the layer UNDERNEATH it.
+        //
+        // Same predicate as chat, from the same module (never a second copy
+        // — two copies of a tool filter is how these two surfaces came to
+        // disagree in the first place).
         const scope = await resolveToolAccessScope(prisma, req.user);
         // Pre-flight so a forbidden spec is refused with an honest 403 and
         // NO ToolRun row, rather than half-running to the offending step.
-        const forbiddenTool = firstForbiddenToolName(
+        const denied = firstToolDeniedForPrincipal(
           plannedToolNames(spec.steps),
+          req.user?.role,
           scope,
         );
-        if (forbiddenTool !== null) {
+        if (denied !== null) {
           res.status(403).json({
             error: "forbidden_tool_for_role",
             detail:
-              "this spec uses a tool your access role does not permit — " +
-              "ask your administrator",
+              denied.axis === "write_tier"
+                ? "this spec uses a tool your role may not run — " +
+                  "ask an owner or admin to run it"
+                : "this spec uses a tool your access role does not permit — " +
+                  "ask your administrator",
             slug: spec.slug,
-            tool: forbiddenTool,
+            tool: denied.tool,
+            axis: denied.axis,
           });
           return;
         }

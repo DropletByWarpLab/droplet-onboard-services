@@ -28,7 +28,16 @@ import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
 
 interface StubUser {
   nextcloudUsername: string | null;
-  accessRole?: { storageQuotaBytes: bigint | null } | null;
+  /** `state` defaults to "active" — an archived role is opted into per-test
+   *  (WARP-1569), so every pre-existing spec keeps its original meaning. */
+  accessRole?: { storageQuotaBytes: bigint | null; state?: string } | null;
+}
+
+/** The role as the service SELECTS it — `state` materialised so the
+ *  archived-role predicate is exercised, not assumed (WARP-1569). */
+function selectRole(u: StubUser) {
+  if (!u.accessRole) return null;
+  return { storageQuotaBytes: u.accessRole.storageQuotaBytes, state: u.accessRole.state ?? "active" };
 }
 
 function buildPrisma(
@@ -58,19 +67,28 @@ function buildPrisma(
   self.user = {
     findUnique: vi.fn(async ({ where }: any) => {
       const u = users[where.id];
-      return u ? { nextcloudUsername: u.nextcloudUsername, accessRole: u.accessRole ?? null } : null;
+      return u ? { nextcloudUsername: u.nextcloudUsername, accessRole: selectRole(u) } : null;
     }),
-    // Emulates the pass-2 relation filter:
-    //   where: { accessRole: { storageQuotaBytes: { not: null } } }
-    findMany: vi.fn(async () =>
+    // Applies the pass-2 relation filter the service ACTUALLY sends rather
+    // than a hardcoded copy of it — otherwise a missing predicate (the
+    // WARP-1569 defect) can never be caught here.
+    findMany: vi.fn(async ({ where }: any) =>
       Object.entries(users)
-        .filter(([, u]) => u.accessRole?.storageQuotaBytes != null)
+        .filter(([, u]) => {
+          const role = selectRole(u);
+          const pred = where?.accessRole;
+          if (!pred) return true;
+          if (!role) return false;
+          if (pred.storageQuotaBytes?.not === null && role.storageQuotaBytes == null) return false;
+          if (pred.state !== undefined && role.state !== pred.state) return false;
+          return true;
+        })
         .map(([id, u]) => {
           const p = policyRows.get(id);
           return {
             id,
             nextcloudUsername: u.nextcloudUsername,
-            accessRole: u.accessRole ?? null,
+            accessRole: selectRole(u),
             usagePolicy: p
               ? { storageQuotaBytes: p.storageQuotaBytes, quotaSyncState: p.quotaSyncState }
               : null,
@@ -382,5 +400,98 @@ describe("sweepUsagePolicies", () => {
 
     expect(ncUpdateUserMock).toHaveBeenNthCalledWith(1, "basic:token", "bob", "quota", "9000 B");
     expect(ncUpdateUserMock).toHaveBeenNthCalledWith(2, "basic:token", "bob", "quota", "12000 B");
+  });
+
+  // ── WARP-1569: an ARCHIVED role is inert — it manages nobody's quota ──
+
+  it("pass 2: an ARCHIVED role's storage default is never pushed", async () => {
+    const { self } = buildPrisma([], {
+      u2: {
+        nextcloudUsername: "bob",
+        accessRole: { storageQuotaBytes: 9_000n, state: "archived" },
+      },
+    });
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      usagePoliciesSwept: 0,
+      usagePoliciesSynced: 0,
+      usagePoliciesFailed: 0,
+      ...ZERO_ROLE_COUNTS,
+    });
+  });
+
+  it("pass 2: archiving a role stops the pushes that were landing the tick before", async () => {
+    const users: Record<string, StubUser> = {
+      u2: { nextcloudUsername: "bob", accessRole: { storageQuotaBytes: 9_000n } },
+    };
+    const { self } = buildPrisma([], users);
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    await sweepUsagePolicies(self as PrismaClient, "basic:token");
+    users.u2.accessRole!.state = "archived";
+    const after = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledTimes(1);
+    expect(after.roleDefaultQuotasSwept).toBe(0);
+  });
+
+  it("pass 2: an active sibling still converges while an archived role stands down", async () => {
+    const { self } = buildPrisma([], {
+      u1: { nextcloudUsername: "alice", accessRole: { storageQuotaBytes: 3_000n } },
+      u2: {
+        nextcloudUsername: "bob",
+        accessRole: { storageQuotaBytes: 4_000n, state: "archived" },
+      },
+    });
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledTimes(1);
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "alice", "quota", "3000 B");
+    expect(result.roleDefaultQuotasSwept).toBe(1);
+  });
+
+  it("pass 1: a pending row under an ARCHIVED role falls through to the box default", async () => {
+    // Same treatment a role-LESS user with an unset storage field already
+    // gets: the row lifecycle still owns the push, but the archived role
+    // contributes nothing to the effective value.
+    const { self, policyRows } = buildPrisma(
+      [{ userId: "u1", storageQuotaBytes: null, quotaSyncState: "pending" }],
+      {
+        u1: {
+          nextcloudUsername: "alice",
+          accessRole: { storageQuotaBytes: 7_000n, state: "archived" },
+        },
+      },
+    );
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    const result = await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledTimes(1);
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "alice", "quota", "none");
+    expect(policyRows.get("u1")!.quotaSyncState).toBe("synced");
+    expect(result.usagePoliciesSynced).toBe(1);
+  });
+
+  it("pass 1: a person value under an ARCHIVED role is still their own to push", async () => {
+    const { self } = buildPrisma(
+      [{ userId: "u1", storageQuotaBytes: 5_000n, quotaSyncState: "pending" }],
+      {
+        u1: {
+          nextcloudUsername: "alice",
+          accessRole: { storageQuotaBytes: 7_000n, state: "archived" },
+        },
+      },
+    );
+    ncUpdateUserMock.mockResolvedValue(undefined);
+
+    await sweepUsagePolicies(self as PrismaClient, "basic:token");
+
+    expect(ncUpdateUserMock).toHaveBeenCalledWith("basic:token", "alice", "quota", "5000 B");
   });
 });

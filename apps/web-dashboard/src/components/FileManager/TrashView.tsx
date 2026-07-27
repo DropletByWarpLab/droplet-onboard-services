@@ -15,10 +15,20 @@ import {
 } from "lucide-react";
 import type { TrashItemInfo } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { isTrashUnsupportedError } from "@/lib/api";
 
 interface TrashViewProps {
   items: TrashItemInfo[];
   isLoading: boolean;
+  /**
+   * WARP-1555 — the fetch error from `useTrash`. "Trash is empty" is the
+   * most dangerous empty state in the product: shown after a failed load it
+   * reads as "your deleted files are gone". A `TrashUnsupportedError` (the
+   * backend 501) gets its own copy again — it is not a failure and not empty.
+   */
+  error?: unknown;
+  /** Re-runs the trash fetch. Pass `useTrash().refresh`. */
+  onRetry?: () => void;
   onRestore: (name: string) => void | Promise<void>;
   onDeleteForever: (name: string) => void | Promise<void>;
   onEmpty: () => void | Promise<void>;
@@ -64,6 +74,8 @@ function formatDate(iso: string): string {
 export function TrashView({
   items,
   isLoading,
+  error,
+  onRetry,
   onRestore,
   onDeleteForever,
   onEmpty,
@@ -102,6 +114,62 @@ export function TrashView({
   const performEmpty = async () => {
     await onEmpty();
   };
+
+  /*
+    WARP-1555: the trash has no trash bin behind it (backend 501). Not a
+    failure and emphatically not "empty" — say plainly that deletes here are
+    immediate so nobody goes looking for a file that was never kept. No retry
+    button: retrying cannot make a backend grow a trashbin.
+  */
+  if (isTrashUnsupportedError(error) && items.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <Trash2 size={24} />
+          </span>
+          <p className="eh">Trash isn&apos;t available on this Droplet</p>
+          <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
+            This box&apos;s storage doesn&apos;t keep a trash bin, so deleting a
+            file removes it straight away. Nothing is being hidden here — check
+            a backup if you need a deleted file back.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /*
+    WARP-1555: a failed fetch, checked before `isLoading` (SWR turns loading
+    back on for each backoff retry) and before the empty state. Gated on an
+    empty list so a failed background poll never hides items already shown.
+  */
+  if (error && items.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <AlertTriangle size={24} />
+          </span>
+          <p className="eh">We couldn&apos;t load your trash</p>
+          <p style={{ maxWidth: "42ch", fontSize: "13px" }}>
+            The box didn&apos;t answer when we asked what&apos;s in the trash.
+            Nothing has been deleted for good — try again in a moment.
+          </p>
+          {onRetry && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={onRetry}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (!isLoading && items.length === 0) {
     return (

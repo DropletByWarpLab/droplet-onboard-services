@@ -6,7 +6,8 @@ name: orchestrator-tests
 # tsc --noEmit + vitest) runs in ci.yml's path-aware `orchestrator` leg on
 # every PR and main push — its duplicate job here was retired in the 2026-07
 # CI budget optimization. What remains is the coverage no ci.yml leg has:
-# the pg-gated vitest files against a real service-container Postgres.
+# the pg-gated vitest files against a real Postgres (started as a step, not
+# a `services:` container — see the WARP-1586 note on the job below).
 #
 # Paths are only what the pg lane consumes: the app itself (source,
 # migrations, prisma schema) and the root npm workspace manifests. The old
@@ -19,6 +20,9 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      # WARP-1542: the drift gate's script lives outside apps/orchestrator,
+      # so a change to it must still re-prove the lane.
+      - "scripts/check-schema-drift.sh"
       - ".github/workflows/orchestrator-tests.yml"
   push:
     branches: [main]
@@ -26,6 +30,9 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      # WARP-1542: the drift gate's script lives outside apps/orchestrator,
+      # so a change to it must still re-prove the lane.
+      - "scripts/check-schema-drift.sh"
       - ".github/workflows/orchestrator-tests.yml"
   workflow_dispatch:
 
@@ -37,35 +44,125 @@ jobs:
   # WARP-1026: real-Postgres lane. The unit suite (ci.yml's orchestrator
   # leg) runs with mocked Prisma and structurally cannot catch chain
   # forks — those are READ COMMITTED visibility artifacts. This job applies the full
-  # migration set to a service-container Postgres and runs only the
-  # pg-gated files (src/**/*.pg.test.ts, self-gated on RUN_PG_INTEGRATION).
+  # migration set to a real Postgres and runs only the pg-gated files
+  # (src/**/*.pg.test.ts, self-gated on RUN_PG_INTEGRATION), then gates
+  # schema.prisma against that same migration set (WARP-1542).
   #
   # Image is pgvector/pgvector:pg16, NOT plain postgres:16: the migration
   # set includes 20260412000000_add_file_content_index, which does
   # `CREATE EXTENSION vector`, so `prisma migrate deploy` needs pgvector
   # present (same image tests/migrations.test.sh uses).
+  #
+  # ── Why Postgres is started by a STEP, not a `services:` block (WARP-1586) ──
+  # Docker Hub meters anonymous pulls per source IP and GitHub's hosted
+  # runners share egress IPs, so `pgvector/pgvector:pg16` intermittently
+  # comes back TOOMANYREQUESTS. When that happens to a `services:` container
+  # the failure lands in "Initialize containers" — BEFORE the first step —
+  # so there is nowhere to hang a retry and the whole job reds on a registry
+  # hiccup (it took out two PRs during the WARP-1522 epic). A service
+  # container is structurally un-retryable and un-cacheable.
+  #
+  # Starting the container from a step buys three things: a bounded retry
+  # around the pull, a GHCR mirror that PR runs read instead of Docker Hub
+  # (same ghcr.io/<repo>/... convention and same "PR tokens degrade to read"
+  # posture as docker-build.yml's layer cache), and a readiness gate we
+  # control. Nothing about the test surface changes — same image, same
+  # credentials, same localhost:5432, same DATABASE_URL.
   pg-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: droplet_test
-          POSTGRES_PASSWORD: droplet_test_pw
-          POSTGRES_DB: droplet_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U droplet_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    permissions:
+      contents: read
+      packages: write # GHCR image mirror; PR tokens degrade to read
     env:
       DATABASE_URL: postgresql://droplet_test:droplet_test_pw@localhost:5432/droplet_test?schema=public
       RUN_PG_INTEGRATION: "1"
+      PG_CONTAINER: droplet-ci-postgres
+      PG_UPSTREAM_IMAGE: pgvector/pgvector:pg16
+      POSTGRES_USER: droplet_test
+      POSTGRES_PASSWORD: droplet_test_pw
+      POSTGRES_DB: droplet_test
     steps:
       - uses: actions/checkout@v7
+
+      # continue-on-error on purpose: the mirror is an availability
+      # optimisation, not a dependency. If GHCR is down or the token can't
+      # log in, the next step must still be free to fall through to Docker
+      # Hub — a hard failure here would trade one registry outage for
+      # another, which is the exact fragility this change removes.
+      - name: Log in to GHCR (Postgres image mirror)
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Resolves which ref to actually run. PR runs prefer the mirror so they
+      # never touch Docker Hub; main pushes / dispatches go upstream first so
+      # the mirror tracks the real `pg16` tag instead of rotting at whatever
+      # digest happened to bootstrap it. Either path falls back to the other,
+      # and only a write-capable token (re)populates the mirror.
+      - name: Resolve Postgres image (GHCR mirror, Docker Hub fallback)
+        id: pgimage
+        run: |
+          set -euo pipefail
+          mirror="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/ci-mirror:pgvector-pg16"
+          upstream="$PG_UPSTREAM_IMAGE"
+
+          # Docker Hub throttles by IP, so an immediate re-pull is pointless —
+          # back off far enough to outlast a burst from a sibling runner.
+          pull_upstream() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if docker pull --quiet "$upstream"; then return 0; fi
+              echo "::warning::docker pull $upstream failed (attempt $attempt/5)"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+
+          image=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if docker pull --quiet "$mirror"; then
+              image="$mirror"
+            elif pull_upstream; then
+              # Mirror not populated yet (first run after this lands, or the
+              # package was pruned). PR tokens are read-only on forks, so do
+              # NOT try to push — main's next run repopulates it.
+              image="$upstream"
+              echo "::warning::GHCR mirror $mirror unavailable — fell back to Docker Hub"
+            fi
+          else
+            if pull_upstream; then
+              image="$upstream"
+              docker tag "$upstream" "$mirror"
+              docker push --quiet "$mirror" \
+                || echo "::warning::could not push $mirror — PR runs will keep hitting Docker Hub"
+            elif docker pull --quiet "$mirror"; then
+              image="$mirror"
+              echo "::warning::Docker Hub unreachable — ran against the GHCR mirror instead"
+            fi
+          fi
+
+          if [ -z "$image" ]; then
+            echo "::error::could not obtain a Postgres image from $upstream or $mirror"
+            exit 1
+          fi
+          echo "Using Postgres image: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      # Started here rather than immediately before the migrations so initdb
+      # overlaps `npm ci`; the readiness gate below is what actually blocks.
+      - name: Start Postgres
+        run: |
+          set -euo pipefail
+          docker run -d --name "$PG_CONTAINER" \
+            -e POSTGRES_USER="$POSTGRES_USER" \
+            -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            -e POSTGRES_DB="$POSTGRES_DB" \
+            -p 5432:5432 \
+            "${{ steps.pgimage.outputs.image }}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -88,9 +185,61 @@ jobs:
       - name: Build workspace packages the orchestrator imports
         run: npm run -w @droplet/tools-core build
 
+      # WARP-1571's lesson, applied here too: on a cold volume the postgres
+      # entrypoint runs a TEMPORARY init server bound to the unix socket only
+      # (listen_addresses=''), so a socket `pg_isready` answers "accepting
+      # connections" while initdb is still going and the next client lands in
+      # the shutdown window. The temp server never binds TCP, so probing
+      # 127.0.0.1 cannot match it. `pg_isready` also exits non-zero while a
+      # server is still in recovery, so one successful TCP probe is enough.
+      - name: Wait for Postgres (TCP-gated)
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if docker exec "$PG_CONTAINER" \
+                 pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+              echo "Postgres is accepting TCP connections"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Postgres never became ready"
+          docker logs "$PG_CONTAINER" || true
+          exit 1
+
       - name: Apply migrations
         run: npx prisma migrate deploy
         working-directory: apps/orchestrator
 
       - name: Run pg-gated vitest files
         run: npm run -w @droplet/orchestrator test -- pg.test
+
+      # WARP-1542. `migrate deploy` never reads schema.prisma and the client
+      # generator never reads the migrations, so the two can diverge silently
+      # while every suite stays green — the unit lane mocks Prisma, and the
+      # pg lane above only touches the tables its own files touch. This is
+      # the only place in CI with both a real Postgres and the full migration
+      # set, so the diff belongs here.
+      #
+      # A dedicated shadow DB (dropped first so a re-run on a warm container
+      # is deterministic); `migrate diff` replays every migration into it.
+      # Same container, so it is a pgvector build and CREATE EXTENSION vector
+      # resolves.
+      - name: Create drift shadow database
+        run: |
+          set -euo pipefail
+          docker exec "$PG_CONTAINER" dropdb -U "$POSTGRES_USER" --if-exists drift_shadow
+          docker exec "$PG_CONTAINER" createdb -U "$POSTGRES_USER" drift_shadow
+
+      - name: Gate schema.prisma vs migration-set drift
+        env:
+          SHADOW_DATABASE_URL: postgresql://droplet_test:droplet_test_pw@localhost:5432/drift_shadow?schema=public
+        run: bash scripts/check-schema-drift.sh
+
+      - name: Postgres logs (on failure)
+        if: failure()
+        run: docker logs "$PG_CONTAINER" || true
+
+      - name: Tear down Postgres
+        if: always()
+        run: docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true

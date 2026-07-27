@@ -19,6 +19,7 @@ const {
   ncAddUserToGroupMock,
   ncRemoveUserFromGroupMock,
   ncListGroupMembersMock,
+  ncListGroupMembersStrictMock,
   recordActivityMock,
 } = vi.hoisted(() => ({
   ncEnsureGroupMock: vi.fn().mockResolvedValue(undefined),
@@ -31,10 +32,22 @@ const {
   gfSetQuotaMock: vi.fn().mockResolvedValue(undefined),
   ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
   ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
-  // WARP-1274 (T21): drift-overwrite reads actual NC group membership via
-  // ncListGroupMembers. Default empty — "no drift" — so every pre-existing
-  // spec in this file (none of which seed NC-side members) is unaffected.
-  ncListGroupMembersMock: vi.fn().mockResolvedValue([]),
+  // WARP-1274 (T21): drift-overwrite reads actual NC group membership.
+  // Default empty — "no drift" — so every pre-existing spec in this file
+  // (none of which seed NC-side members) is unaffected.
+  //
+  // WARP-1565: the sweeps read through the STRICT variant, so that is the
+  // mock they seed. The LENIENT one is wired to fail loudly: it collapses
+  // every outage to `[]`, which is indistinguishable from "no drift" — if a
+  // sweep ever reaches for it again, that must be a red test and not a
+  // quiet fiction.
+  ncListGroupMembersStrictMock: vi.fn().mockResolvedValue([]),
+  ncListGroupMembersMock: vi.fn(async () => {
+    throw new Error(
+      "reconciler sweeps must call ncListGroupMembersStrict — the lenient " +
+        "variant reports an outage as an empty group (WARP-1565)",
+    );
+  }),
   recordActivityMock: vi.fn().mockResolvedValue(null),
 }));
 
@@ -53,6 +66,7 @@ vi.mock("../services/nextcloud-groups.client.js", () => ({
   ncAddUserToGroup: ncAddUserToGroupMock,
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
   ncListGroupMembers: ncListGroupMembersMock,
+  ncListGroupMembersStrict: ncListGroupMembersStrictMock,
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({
@@ -332,7 +346,7 @@ beforeEach(() => {
   gfSetQuotaMock.mockResolvedValue(undefined);
   ncAddUserToGroupMock.mockResolvedValue(undefined);
   ncRemoveUserFromGroupMock.mockResolvedValue(undefined);
-  ncListGroupMembersMock.mockResolvedValue([]);
+  ncListGroupMembersStrictMock.mockResolvedValue([]);
 });
 
 describe("reconcileDepartments — membership convergence", () => {
@@ -734,7 +748,7 @@ describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
     const fam: FakeUser = { id: "u-fam", nextcloudUsername: "fam", role: "family" };
     const prisma = buildPrisma([], [], [sam, fam]);
-    ncListGroupMembersMock.mockResolvedValue([]); // NC lost the membership
+    ncListGroupMembersStrictMock.mockResolvedValue([]); // NC lost the membership
 
     const result = await reconcileDepartments(prisma as any);
 
@@ -758,7 +772,7 @@ describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
   it("removes a drifted non-operator member but never the NC system admin", async () => {
     const owner: FakeUser = { id: "u-own", nextcloudUsername: "stefan", role: "owner" };
     const prisma = buildPrisma([], [], [owner]);
-    ncListGroupMembersMock.mockResolvedValue([
+    ncListGroupMembersStrictMock.mockResolvedValue([
       { id: "stefan" }, // expected (owner)
       { id: "eve" },    // drifted — no operator row backs her
       { id: "admin" },  // NC system admin — excluded from removal
@@ -786,7 +800,7 @@ describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
     const owner: FakeUser = { id: "u-own", nextcloudUsername: "stefan", role: "owner" };
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
     const prisma = buildPrisma([], [], [owner, sam]);
-    ncListGroupMembersMock.mockResolvedValue([
+    ncListGroupMembersStrictMock.mockResolvedValue([
       { id: "stefan" },
       { id: "sam" },
       { id: "admin" },
@@ -803,12 +817,60 @@ describe("WARP-1526 — droplet-admins tier-vs-group drift sweep", () => {
   it("an NC failure inside the sweep is contained — the tick still completes with zero counts", async () => {
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
     const prisma = buildPrisma([], [], [sam]);
-    ncListGroupMembersMock.mockRejectedValue(new Error("nc OCS 503"));
+    ncListGroupMembersStrictMock.mockRejectedValue(new Error("nc OCS 503"));
 
     const result = await reconcileDepartments(prisma as any);
 
     expect(result.adminGroupAdded).toBe(0);
     expect(result.adminGroupRemoved).toBe(0);
+  });
+
+  /**
+   * WARP-1565 residual 3 — the defect the containment above could not
+   * actually reach.
+   *
+   * That test proved the sweep survives a listing that THROWS. The shipped
+   * `ncListGroupMembers` never threw: it collapsed every outage — OCS 500,
+   * proxy hiccup, wedged PHP session store — to `[]`. So in a
+   * list-broken/writes-working Nextcloud the sweep read "droplet-admins is
+   * empty", concluded every operator was missing, and re-added all of them.
+   * Every tick. Forever. Idempotent on the NC side, so nothing visibly
+   * broke; the cost was an Activity log full of drift that never happened
+   * and a sweep that never converged.
+   *
+   * The counts alone cannot catch it — a re-add storm reports
+   * `adminGroupAdded > 0`, which reads like the sweep WORKING. What pins it
+   * is that no write is attempted at all when the actual set is unknown.
+   */
+  it("does not re-add operators when the listing fails (an outage is not an empty group)", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const kim: FakeUser = { id: "u-kim", nextcloudUsername: "kim", role: "owner" };
+    const prisma = buildPrisma([], [], [sam, kim]);
+    ncListGroupMembersStrictMock.mockRejectedValue(new Error("nc OCS 500"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
+    expect(result.adminGroupAdded).toBe(0);
+    // `failed` is for per-member write failures. Skipping the tick is not a
+    // member failing, so it must not be reported as one.
+    expect(result.adminGroupFailed).toBe(0);
+  });
+
+  it("still converges a genuinely empty group (200 + no members ≠ outage)", async () => {
+    const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
+    const prisma = buildPrisma([], [], [sam]);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncAddUserToGroupMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "sam",
+      "droplet-admins",
+    );
+    expect(result.adminGroupAdded).toBe(1);
   });
 });
 
@@ -831,7 +893,7 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     const prisma = buildPrisma([], [], [ghost, owner]);
     // NC lost `ghost` entirely (account deleted) but still carries a
     // drifted ex-admin `eve` who must be revoked.
-    ncListGroupMembersMock.mockResolvedValue([{ id: "stefan" }, { id: "eve" }]);
+    ncListGroupMembersStrictMock.mockResolvedValue([{ id: "stefan" }, { id: "eve" }]);
     ncAddUserToGroupMock.mockRejectedValue(new Error("OCS 404 no such user"));
 
     const result = await reconcileDepartments(prisma as any);
@@ -851,7 +913,7 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     const a: FakeUser = { id: "u-a", nextcloudUsername: "aaa", role: "admin" };
     const b: FakeUser = { id: "u-b", nextcloudUsername: "bbb", role: "admin" };
     const prisma = buildPrisma([], [], [a, b]);
-    ncListGroupMembersMock.mockResolvedValue([]);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
     ncAddUserToGroupMock
       .mockRejectedValueOnce(new Error("OCS 404"))
       .mockResolvedValueOnce(undefined);
@@ -866,7 +928,7 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
   it("removals run BEFORE adds so revocation is never behind a broken add", async () => {
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
     const prisma = buildPrisma([], [], [sam]);
-    ncListGroupMembersMock.mockResolvedValue([{ id: "eve" }]);
+    ncListGroupMembersStrictMock.mockResolvedValue([{ id: "eve" }]);
     const order: string[] = [];
     ncRemoveUserFromGroupMock.mockImplementation(async () => {
       order.push("remove");
@@ -883,7 +945,7 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
   it("a listing failure still contains to zero counts (nothing to compare against)", async () => {
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "sam", role: "admin" };
     const prisma = buildPrisma([], [], [sam]);
-    ncListGroupMembersMock.mockRejectedValue(new Error("nc OCS 503"));
+    ncListGroupMembersStrictMock.mockRejectedValue(new Error("nc OCS 503"));
 
     const result = await reconcileDepartments(prisma as any);
 
@@ -899,7 +961,7 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     // single tick — an infinite flap. One convention, applied throughout.
     const sam: FakeUser = { id: "u-sam", nextcloudUsername: "Sam", role: "admin" };
     const prisma = buildPrisma([], [], [sam]);
-    ncListGroupMembersMock.mockResolvedValue([{ id: "sam" }]);
+    ncListGroupMembersStrictMock.mockResolvedValue([{ id: "sam" }]);
 
     const result = await reconcileDepartments(prisma as any);
 

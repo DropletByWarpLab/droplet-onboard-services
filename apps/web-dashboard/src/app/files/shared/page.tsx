@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import {
   ArrowLeft,
+  AlertTriangle,
   Share2,
   Globe,
   User,
@@ -56,8 +57,12 @@ export default function SharedPage() {
   const byMe = useSharedByMe();
   const { toast } = useToast();
 
-  const visibleShares: ShareDetail[] = tab === "with-me" ? withMe.items : byMe.items;
-  const isLoading = tab === "with-me" ? withMe.isLoading : byMe.isLoading;
+  // WARP-1555: read every state off the tab's own hook — including `error`,
+  // which both hooks always exposed and this page used to drop on the floor.
+  const active = tab === "with-me" ? withMe : byMe;
+  const visibleShares: ShareDetail[] = active.items;
+  const isLoading = active.isLoading;
+  const error = active.error;
 
   return (
     <ShellPage
@@ -92,7 +97,36 @@ export default function SharedPage() {
         </button>
       </div>
 
-      {isLoading && visibleShares.length === 0 && (
+      {/* WARP-1555: a failed shares fetch is not "nothing shared with you".
+          Checked ahead of the loading state because SWR re-raises `isLoading`
+          on every backoff retry, and gated on an empty list so a failed
+          background poll never wipes rows already on screen. */}
+      {error && visibleShares.length === 0 && (
+        <div className="card" role="alert">
+          <div className="empty">
+            <span className="ei"><AlertTriangle size={24} /></span>
+            <span className="eh">
+              {tab === "with-me"
+                ? "We couldn't load what's been shared with you"
+                : "We couldn't load what you've shared"}
+            </span>
+            <span style={{ maxWidth: "44ch" }}>
+              The box didn&apos;t answer when we asked for your shares. Nothing
+              has been unshared — try again in a moment.
+            </span>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => active.refresh()}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!error && isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span>Loading…</span>
@@ -100,7 +134,7 @@ export default function SharedPage() {
         </div>
       )}
 
-      {tab === "with-me" && !isLoading && visibleShares.length === 0 && (
+      {!error && tab === "with-me" && !isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span className="ei"><Share2 size={24} /></span>
@@ -112,7 +146,7 @@ export default function SharedPage() {
         </div>
       )}
 
-      {tab === "by-me" && !isLoading && visibleShares.length === 0 && (
+      {!error && tab === "by-me" && !isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span className="ei"><Share2 size={24} /></span>

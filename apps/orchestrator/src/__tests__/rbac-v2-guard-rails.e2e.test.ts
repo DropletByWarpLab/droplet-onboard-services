@@ -155,8 +155,16 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 
 import { createPeopleRouter } from "../routes/people.js";
 import { createProtectedAuthRouter } from "../routes/auth.js";
-import { assertRankCap } from "../services/role-mutation-guard.service.js";
+import {
+  assertRankCap,
+  SERIALIZABLE_TX,
+} from "../services/role-mutation-guard.service.js";
 import * as nc from "../services/nextcloud.client.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+  gate,
+} from "./helpers/prisma-tx-harness.js";
 import type { Role } from "../services/jwt.service.js";
 
 // ── the shared in-memory directory ─────────────────────────────────
@@ -197,16 +205,30 @@ const FAMILY = row({ id: "warp1534-family-id", username: "warp1534-family", role
 
 /**
  * Minimal Prisma stub. Deliberately NOT a general-purpose fake: it answers
- * exactly the reads the pre-tx rails and their routes make, and `$transaction`
- * runs the callback inline. Anything whose answer depends on real transaction
- * semantics is asserted in the pg lane instead — a stub that pretended to
- * serialize would be the WARP-1570 mistake all over again.
+ * exactly the reads the pre-tx rails and their routes make.
+ *
+ * `$transaction` is the SHARED seam (`helpers/prisma-tx-harness.ts`), never
+ * hand-rolled. The first version of this file rolled its own
+ * `async (fn) => fn(self)` — the exact shape WARP-1570 exists to eliminate.
+ * It discarded the options argument, so this suite could assert every guard
+ * rail correctly and still stay green if a route dropped `SERIALIZABLE_TX`;
+ * it never rolled back, so "the rail refused, therefore nothing was written"
+ * was unprovable; and it ran transactions strictly serially, so the write
+ * skew rails 4/5 exist to stop could not even be expressed. The seam-adoption
+ * gate caught it, correctly.
  */
 function createPrismaMock(seed: Row[]) {
   const users: Row[] = seed.map((u) => ({ ...u }));
   const exceptions: Array<Record<string, unknown>> = [];
   const usagePolicies = new Map<string, Record<string, unknown>>();
   const self: Record<string, unknown> = {};
+
+  // Every store the guarded routes write to is registered, so a throw inside
+  // a transaction restores all three — the atomicity half of the seam.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { users, exceptions, usagePolicies },
+  });
 
   const matches = (u: Row, where: Record<string, any> = {}): boolean => {
     if (where.id !== undefined && typeof where.id === "string" && u.id !== where.id) return false;
@@ -232,9 +254,7 @@ function createPrismaMock(seed: Row[]) {
     return true;
   };
 
-  self.$transaction = vi.fn(async (arg: unknown, _opts?: unknown) =>
-    typeof arg === "function" ? (arg as (tx: unknown) => Promise<unknown>)(self) : arg,
-  );
+  self.$transaction = seam.$transaction;
 
   self.user = {
     findUnique: vi.fn(async ({ where }: any) => users.find((u) => matches(u, where)) ?? null),
@@ -269,6 +289,19 @@ function createPrismaMock(seed: Row[]) {
         throw err;
       }
       return users.splice(idx, 1)[0];
+    }),
+    // WARP-1565: `DELETE /api/auth/users/:username` finishes the removal by
+    // deleting the local row once Nextcloud has confirmed the account is
+    // gone, and it does so with a PREDICATED `deleteMany` (pinned to
+    // directoryStatus=DEACTIVATED) rather than `delete` by id, so a row
+    // re-activated in the window survives. The stub has to honour the
+    // predicate for that refusal to be expressible here at all — a
+    // `deleteMany` that ignored `where` would delete the row unconditionally
+    // and this suite would go green on the wrong behaviour.
+    deleteMany: vi.fn(async ({ where }: any = {}) => {
+      const doomed = users.filter((u) => matches(u, where));
+      for (const u of doomed) users.splice(users.indexOf(u), 1);
+      return { count: doomed.length };
     }),
   };
 
@@ -320,6 +353,7 @@ function createPrismaMock(seed: Row[]) {
 
   (self as any)._users = users;
   (self as any)._exceptions = exceptions;
+  (self as any)._seam = () => seam;
   return self as any;
 }
 
@@ -775,6 +809,151 @@ describe("the built-in-tier path ({accessRoleId: null, tier}) is not a side door
 
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ code: "OWNER_IMMUTABLE" });
+  });
+});
+
+// ── isolation is load-bearing, not decorative (WARP-1570) ──────────
+
+describe("rails 4/5 need SERIALIZABLE to hold — the write-skew canary", () => {
+  /**
+   * Every assertion above proves a rail REFUSES when it should. None of them
+   * can prove the rail still holds when two requests race, because a rail
+   * that counts and then writes is only safe if the transaction is
+   * serializable — and until this suite moved onto the shared seam, the
+   * isolation option was discarded and the two requests ran strictly one
+   * after the other. So a route that dropped `SERIALIZABLE_TX` kept the
+   * whole file green. That is the gap; these two tests close it.
+   *
+   * The scenario is the one role-mutation-guard's own header documents:
+   * "two concurrent requests each removing one of the last two operators
+   * BOTH read 'one other operator remains', BOTH pass, and BOTH commit —
+   * landing exactly the zero-operator state the rails exist to prevent,
+   * unrecoverable from the dashboard."
+   */
+  function lastTwoOperators() {
+    // The owner is DEACTIVATED, so ADMIN and ADMIN2 are the only two people
+    // left who can manage access. Rail 5 counts NON-disabled operators, so
+    // this is what makes each demotion individually legal and the pair fatal.
+    return [
+      row({ ...OWNER, directoryStatus: "DEACTIVATED" }),
+      ADMIN,
+      ADMIN2,
+      FAMILY,
+    ];
+  }
+
+  const activeOperators = (prisma: any) =>
+    (prisma._users as Row[]).filter(
+      (u) => (u.role === "owner" || u.role === "admin") && u.directoryStatus === "ACTIVE",
+    );
+
+  /**
+   * Park both requests inside their transaction at rail 5's COUNT — after
+   * each has read "one other operator remains" and before either writes.
+   * That is the exact check-then-write window SERIALIZABLE_TX is passed for.
+   */
+  function raceTwoDemotions(prisma: any) {
+    const app = buildApp(prisma, OWNER);
+    const bothCounted = gate(2);
+    const realCount = prisma.user.count;
+    prisma.user.count = vi.fn(async (args: any) => {
+      const n = await realCount(args);
+      await bothCounted.arriveAndWait();
+      return n;
+    });
+    return Promise.all([
+      request(app).patch(`/api/people/${ADMIN.id}/role`).send({ role: "family" }),
+      request(app).patch(`/api/people/${ADMIN2.id}/role`).send({ role: "family" }),
+    ]);
+  }
+
+  it("SERIALIZABLE: one demotion commits, the loser aborts, an operator survives", async () => {
+    const prisma = createPrismaMock(lastTwoOperators());
+    const responses = await raceTwoDemotions(prisma);
+
+    // Exactly one transaction hit the SSI read-write dependency rule.
+    expect(prisma._seam().conflicts()).toBe(1);
+    expect(responses.filter((r) => r.status === 200)).toHaveLength(1);
+    // The loser is a 409 CONCURRENT_MUTATION, not a 500: people.ts maps
+    // P2034 through isConcurrencyConflict. "Nothing was applied, retry."
+    const loser = responses.find((r) => r.status !== 200)!;
+    expect(loser.status).toBe(409);
+    expect(loser.body).toMatchObject({ code: "CONCURRENT_MUTATION" });
+
+    // The invariant itself: the box still has someone who can manage access.
+    expect(activeOperators(prisma)).toHaveLength(1);
+    expectAllTransactionsAt(prisma._seam(), SERIALIZABLE_TX);
+  });
+
+  it("REGRESSION CANARY — dropping the isolation option strands the box with zero operators", async () => {
+    // Simulate exactly the regression and nothing else: the call site loses
+    // SERIALIZABLE_TX and inherits Postgres' default, READ COMMITTED. The
+    // rails, the routes and the fixtures are untouched.
+    const prisma = createPrismaMock(lastTwoOperators());
+    const serializable = prisma.$transaction;
+    prisma.$transaction = (fn: any) => serializable(fn);
+
+    const responses = await raceTwoDemotions(prisma);
+
+    expect(prisma._seam().conflicts()).toBe(0);
+    expect(responses.filter((r) => r.status === 200)).toHaveLength(2);
+    // Both demotions committed. Rail 5 passed twice — correctly, on its own
+    // terms, each against a snapshot in which the OTHER admin still existed —
+    // and the box is now unrecoverable from the dashboard. This is the state
+    // LAST_OPERATOR_INVARIANT exists to make impossible, reachable purely by
+    // removing one options argument.
+    expect(activeOperators(prisma)).toHaveLength(0);
+  });
+});
+
+describe("every guarded mutation opens its transaction at SERIALIZABLE", () => {
+  // The cheap, broad companion to the canary above: the canary proves the
+  // isolation is load-bearing on ONE path; this proves every other guarded
+  // path asks for it, so a new route cannot quietly ship at READ COMMITTED.
+  const guarded: Array<[string, (app: express.Express) => request.Test]> = [
+    [
+      "PATCH /api/people/:id/role",
+      (app) => request(app).patch(`/api/people/${FAMILY.id}/role`).send({ role: "admin" }),
+    ],
+    [
+      "PATCH /api/people/:id/scope",
+      (app) => request(app).patch(`/api/people/${FAMILY.id}/scope`).send({ scopes: ["team"] }),
+    ],
+    ["DELETE /api/people/:id", (app) => request(app).delete(`/api/people/${FAMILY.id}`)],
+    [
+      "PATCH /api/people/:id/access",
+      (app) =>
+        request(app)
+          .patch(`/api/people/${FAMILY.id}/access`)
+          .send({ accessRoleId: null, tier: "guest" }),
+    ],
+    [
+      "PUT /api/people/:id/access-exceptions",
+      (app) =>
+        request(app)
+          .put(`/api/people/${FAMILY.id}/access-exceptions`)
+          .send({ exceptions: [{ moduleId: "cameras", effect: "deny" }] }),
+    ],
+    [
+      "POST /api/auth/users/:username/disable",
+      (app) => request(app).post(`/api/auth/users/${FAMILY.nextcloudUsername}/disable`),
+    ],
+    [
+      "DELETE /api/auth/users/:username",
+      (app) => request(app).delete(`/api/auth/users/${FAMILY.nextcloudUsername}`),
+    ],
+  ];
+
+  it.each(guarded)("%s", async (_label, build) => {
+    const prisma = createPrismaMock(DIRECTORY);
+    const res = await build(buildApp(prisma, OWNER));
+
+    // Guard the guard: a 4xx would mean the request never reached the
+    // transaction, and expectAllTransactionsAt would then be asserting
+    // nothing (it throws on zero transactions, but a partial path could
+    // still open one for the wrong reason).
+    expect(res.status).toBe(200);
+    expectAllTransactionsAt(prisma._seam(), SERIALIZABLE_TX);
   });
 });
 

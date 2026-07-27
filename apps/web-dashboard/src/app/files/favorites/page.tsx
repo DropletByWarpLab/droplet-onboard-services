@@ -14,7 +14,7 @@ import { ShellPage } from "@/components/shell/ShellPage";
 
 export default function FavoritesPage() {
   const router = useRouter();
-  const { items, isLoading, refresh } = useFavorites();
+  const { items, isLoading, error, refresh } = useFavorites();
   const { toast } = useToast();
 
   const handleOpen = (file: FileEntryInfo) => {
@@ -64,9 +64,16 @@ export default function FavoritesPage() {
         </Link>
       }
     >
+      {/* WARP-1555: `error` is forwarded so a failed fetch renders as a
+          failure with a retry — never as "No favorites yet", which would
+          tell the user they had un-starred everything. */}
       <FileListSimple
         files={items}
         isLoading={isLoading}
+        error={error}
+        errorTitle="We couldn't load your favorites"
+        errorDescription="The box didn't answer when we asked for your starred files. Your favorites are still saved — try again in a moment."
+        onRetry={() => refresh()}
         emptyIcon={Star}
         emptyTitle="No favorites yet"
         emptyDescription="Click the star icon next to any file to add it here."

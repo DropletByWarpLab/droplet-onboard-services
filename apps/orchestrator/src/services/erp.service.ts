@@ -67,6 +67,20 @@ export interface ErpUser {
    * admin-tier, so this never widens `assertCanWrite`.
    */
   connectorLevel?: "read" | "read_write" | null;
+  /**
+   * WARP-1579 — the RAW role connector grant for this provider, BEFORE the
+   * `min()` against `connection.writeEnabled`. Set by the route's write gate.
+   *
+   * `connectorLevel` cannot stand in for it: `read` there is ambiguous
+   * between a read-only ROLE (a 403) and a write-disabled CONNECTION (today's
+   * honest 409 `WRITE_NOT_ENABLED`).
+   *
+   * `null`/absent = **no role grant narrows this person** — every caller that
+   * predates RBAC v2 and every role-less admin. Absence is NOT a denial; only
+   * an explicit `read` refuses. This never WIDENS `assertCanWrite` either:
+   * the admin-tier floor above it is unchanged.
+   */
+  connectorGrantLevel?: "read" | "read_write" | null;
 }
 
 export interface ScheduleResult {
@@ -176,6 +190,30 @@ export function createErpService(
   }
   function assertCanWrite(user: ErpUser): void {
     if (!WRITE_ROLES.has(user.role)) throw ErpError.forbidden();
+    // WARP-1579 — the tier is necessary, not sufficient. An Admin-based role
+    // may hold a deliberately READ-ONLY connector grant, and a grant level the
+    // enforcement ignores is a false statement in the admin UI.
+    //
+    // SCOPE, honestly: this is a second line under `erpConnectorWriteGate`,
+    // not an independent one. `connectorGrantLevel` is populated BY that gate,
+    // so a future route registered WITHOUT it arrives here with the field
+    // absent and this check cannot fire — the gate is the enforcement point,
+    // and a new write route must register it. What this does catch is the
+    // gate being kept but its refusal weakened, and any future caller that
+    // resolves the grant itself and threads it in. (`assertCanReadPhi` has the
+    // same shape and the same limit — `connectorLevel` likewise comes from the
+    // read gate.) Kept because it costs nothing and pins the level's meaning
+    // at the layer that owns the write.
+    //
+    // Only an EXPLICIT `read` refuses. Absent = nothing narrows (today's
+    // world). Owner is never narrowed (§3's one bypass) — `assertCanReadPhi`
+    // admits owner unconditionally too, and an owner locked out of their own
+    // ERP by a stray grant row would be worse than the bug being fixed.
+    if (user.role !== "owner" && user.connectorGrantLevel === "read") {
+      throw ErpError.forbidden(
+        "forbidden: this role's connector grant for the ERP integration is read-only",
+      );
+    }
   }
 
   /** Append-only audit (§14). `scope` MUST be PHI-free — tokens/ids only. */

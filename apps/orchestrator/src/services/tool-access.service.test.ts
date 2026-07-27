@@ -12,6 +12,7 @@ import { MODULES } from "../modules/module-registry.js";
 import {
   DENY_ALL_TOOL_SCOPE,
   firstForbiddenToolName,
+  firstToolDeniedForPrincipal,
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesToScope,
@@ -338,6 +339,99 @@ describe("firstForbiddenToolName — the whole-list pre-flight", () => {
   });
 });
 
+// ── WARP-1621: the composed A ∧ B pre-flight ───────────────────────
+
+/**
+ * `firstToolDeniedForPrincipal` is the predicate BOTH ToolSpec surfaces (run-now
+ * and the WARP-463 ticker) call, and it is the half `firstForbiddenToolName`
+ * above cannot express: the ADR-004 tier axis, which applies even when there is
+ * no §3 scope at all. Every user on every deployed box is that case.
+ *
+ * Pinned here at the unit level because the two things most likely to be
+ * refactored away — the tier axis under a null scope, and the axis PRECEDENCE
+ * that decides which remediation an operator is told to perform — are otherwise
+ * only observable through a full route round-trip.
+ */
+describe("firstToolDeniedForPrincipal — the composed A ∧ B pre-flight", () => {
+  const FILES_READ = nameOf("files", false);
+  const FILES_WRITE = nameOf("files", true);
+  const CAMERAS_READ = nameOf("cameras", false);
+
+  it("applies the TIER axis with no scope at all — the WARP-1621 hole", () => {
+    // The contrast that IS the bug: the §3-only pre-flight says "fine".
+    expect(firstForbiddenToolName([FILES_WRITE], null)).toBeNull();
+    expect(firstToolDeniedForPrincipal([FILES_WRITE], "family", null)).toEqual({
+      tool: FILES_WRITE,
+      axis: "write_tier",
+    });
+    expect(firstToolDeniedForPrincipal([FILES_WRITE], "family", undefined)).toEqual({
+      tool: FILES_WRITE,
+      axis: "write_tier",
+    });
+  });
+
+  it("leaves privileged tiers at full reach when nothing else narrows", () => {
+    expect(firstToolDeniedForPrincipal([FILES_WRITE], "owner", null)).toBeNull();
+    expect(firstToolDeniedForPrincipal([FILES_WRITE], "admin", null)).toBeNull();
+  });
+
+  it("still applies the §3 axis to a privileged tier — A is not a superset of B", () => {
+    expect(
+      firstToolDeniedForPrincipal([CAMERAS_READ], "admin", scopeOf(["files"], ["files"])),
+    ).toEqual({ tool: CAMERAS_READ, axis: "role_grant" });
+  });
+
+  it("returns null when every name clears both axes", () => {
+    expect(
+      firstToolDeniedForPrincipal([FILES_READ], "family", scopeOf(["files"])),
+    ).toBeNull();
+  });
+
+  it("reports write_tier when a single name fails BOTH axes (A checked first)", () => {
+    // A family tier under a files:view scope fails A (requiresWrite) and B (no
+    // write grant) on the same name. The operator-facing answer must be the
+    // coarse floor — "ask an owner", not "ask for a wider role", which would
+    // send them to a fix that cannot work.
+    expect(
+      firstToolDeniedForPrincipal([FILES_WRITE], "family", scopeOf(["files"])),
+    ).toEqual({ tool: FILES_WRITE, axis: "write_tier" });
+  });
+
+  it("reports the FIRST name in list order, not the first tier failure", () => {
+    // Per-NAME, not per-axis: a role-denied step 0 wins over a tier-denied
+    // step 1, so the refusal always names the step the walk would reach first.
+    expect(
+      firstToolDeniedForPrincipal(
+        [CAMERAS_READ, FILES_WRITE],
+        "family",
+        scopeOf(["files"]),
+      ),
+    ).toEqual({ tool: CAMERAS_READ, axis: "role_grant" });
+  });
+
+  it("honours the WARP-1398 voice exemption through the composed predicate", () => {
+    expect(firstToolDeniedForPrincipal(["control_device"], "service", null)).toEqual({
+      tool: "control_device",
+      axis: "write_tier",
+    });
+    expect(
+      firstToolDeniedForPrincipal(["control_device"], "service", null, true),
+    ).toBeNull();
+  });
+
+  it("fails closed on an unregistered name under a scope", () => {
+    expect(
+      firstToolDeniedForPrincipal(["not_a_tool"], "owner", scopeOf([...TOOL_DOMAINS])),
+    ).toEqual({ tool: "not_a_tool", axis: "role_grant" });
+  });
+
+  it("admits nothing under DENY_ALL_TOOL_SCOPE, at any tier", () => {
+    expect(firstToolDeniedForPrincipal([FILES_READ], "owner", DENY_ALL_TOOL_SCOPE)).toEqual(
+      { tool: FILES_READ, axis: "role_grant" },
+    );
+  });
+});
+
 interface FakeAttributedRow {
   role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
@@ -365,13 +459,21 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     // Here it means "we do not know who is asking", which must never widen.
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(null), null),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "no_principal" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "no_principal",
+    });
   });
 
   it("DENIES a principal whose row no longer exists", async () => {
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(null), "ghost"),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_missing" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "user_missing",
+    });
   });
 
   it("DENIES a deactivated principal even at owner tier", async () => {
@@ -385,13 +487,21 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "user_deactivated" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "user_deactivated",
+    });
   });
 
   it("DENIES when the row read throws", async () => {
     await expect(
       resolveAttributedToolAccess(fakeAttributedPrisma(new Error("db down")), "u1"),
-    ).resolves.toEqual({ scope: DENY_ALL_TOOL_SCOPE, unresolved: "read_failed" });
+    ).resolves.toEqual({
+      scope: DENY_ALL_TOOL_SCOPE,
+      tier: null,
+      unresolved: "read_failed",
+    });
   });
 
   it("bypasses for an ACTIVE owner — row-derived, no §3 resolve", async () => {
@@ -405,11 +515,17 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
-  it("does not narrow a role-less person — today's world, bit-for-bit", async () => {
+  it("applies NO §3 narrowing to a role-less person, but still reports the tier", async () => {
+    // `scope: null` means "axis B does not narrow this person" — NOT "this
+    // person may run anything". WARP-1621: the ADR-004 write tier is a
+    // separate axis the caller applies on top, so the ROW's role travels with
+    // the scope. Without `tier` here a family-owned schedule fired write tools
+    // unattended, because a null scope reads as "unrestricted" to a caller
+    // that has nothing else to go on.
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
@@ -420,7 +536,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 

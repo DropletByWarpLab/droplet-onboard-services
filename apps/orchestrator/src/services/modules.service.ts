@@ -11,7 +11,7 @@
  *                               NOT inferred state — the default is explicit in code)
  * effective = available(config) && enabled.
  */
-import type { ModuleId, BusinessType, PrismaClient } from "@prisma/client";
+import type { ModuleId, BusinessType, Prisma, PrismaClient } from "@prisma/client";
 import {
   MODULES,
   getModuleDef,
@@ -52,8 +52,25 @@ export class ModuleToggleError extends Error {
   }
 }
 
+/**
+ * A client that can read `ModuleSetting` — either the top-level
+ * `PrismaClient` or an interactive transaction's `tx` handle (WARP-1583).
+ *
+ * The union is deliberate, and the OPPOSITE call from `GuardTx`
+ * (role-mutation-guard.service.ts), which narrows to `Prisma.TransactionClient`
+ * precisely so that passing the top-level client is a compile error. There
+ * the invariant is "this must run inside a transaction". Here both are
+ * legitimate and the caller's context decides: the module gate and
+ * `GET /api/capabilities` resolve the workspace's module set on its own, so
+ * a single self-consistent statement is all they need; the §3 effective-access
+ * resolver composes this set WITH per-person grants read in the same
+ * snapshot, so it must pass its `tx`. Naming both arms is what documents that
+ * the parameter is a snapshot choice rather than an incidental type.
+ */
+export type ModuleReadClient = PrismaClient | Prisma.TransactionClient;
+
 async function readEnablement(
-  prisma: PrismaClient
+  prisma: ModuleReadClient
 ): Promise<Map<ModuleId, boolean>> {
   const rows = await prisma.moduleSetting.findMany();
   return new Map(rows.map((r) => [r.moduleId, r.enabled]));
@@ -130,10 +147,18 @@ export async function getModulesView(
   return { businessType: ws?.businessType ?? null, modules: computeModuleStates(overrides, cfg) };
 }
 
-/** Set of module ids that are EFFECTIVE (available && enabled) — the guard +
- *  tool filter read this. */
+/**
+ * Set of module ids that are EFFECTIVE (available && enabled) — the guard +
+ * tool filter read this.
+ *
+ * WARP-1583: takes a `ModuleReadClient`, so a caller that is composing this
+ * set with other reads can hand in its transaction handle and get all of it
+ * from one snapshot. Passing the top-level client from INSIDE a transaction
+ * would silently take a second snapshot — the array form of `$transaction`
+ * has the same problem, and is why it is not a fix either.
+ */
 export async function getEffectiveModuleIds(
-  prisma: PrismaClient,
+  prisma: ModuleReadClient,
   cfg: AvailabilityConfig
 ): Promise<Set<ModuleId>> {
   const overrides = await readEnablement(prisma);

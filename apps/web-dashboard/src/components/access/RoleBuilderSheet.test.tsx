@@ -370,20 +370,74 @@ describe("AI tools & connectors (axis 4)", () => {
     );
   });
 
-  it("caps connector levels at Read on non-Admin starting points (O-2)", () => {
+  // WARP-1578 — §5.2's rule for the connectors axis, which it had never been
+  // given: a floor-blocked option is DISABLED WITH THE REASON, never hidden.
+  // Dropping the option silently taught an operator nothing about the ceiling
+  // and made the two floors invisible.
+  it("caps connector levels at Read on Family-based roles — Read & write shown, disabled, explained", () => {
     renderSheet(); // family base
-    const select = screen.getByLabelText("Eaglesoft access");
-    const labels = Array.from((select as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(labels).toEqual(["None", "Read"]);
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, false, true]);
+    expect(select.disabled).toBe(false);
+    expect(screen.getByText("Read & write is for admins.")).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.connectorsPHI)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.connectorHint)).toBeInTheDocument();
   });
 
-  it("offers Read & write on Admin-based roles", () => {
+  it("offers Read & write on Admin-based roles, with nothing blocked", () => {
     renderSheet({ base: blankRoleDraft("admin") });
-    const select = screen.getByLabelText("Eaglesoft access");
-    const labels = Array.from((select as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(labels).toEqual(["None", "Read", "Read & write"]);
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, false, false]);
+    expect(screen.queryByText("Read & write is for admins.")).not.toBeInTheDocument();
+  });
+
+  it("blocks the whole connectors axis on Guest-based roles, with the honest reason (WARP-1578)", () => {
+    // A guest sits below O-2's family-and-up read floor, so any grant saved
+    // here is inert. Shown-and-disabled, never hidden and never silently
+    // accepted — the two halves of the design-brief doctrine.
+    renderSheet({ base: blankRoleDraft("guest") });
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, true, true]);
+    expect(screen.getByText("Connectors are for staff and admins.")).toBeInTheDocument();
+  });
+
+  it("switching TO Guest clears connector grants and says so — never a silent drop", () => {
+    const base = blankRoleDraft("admin");
+    base.connectors.eaglesoft = "read_write";
+    renderSheet({ mode: "edit", base });
+    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("none");
+    expect(
+      screen.getByText(/Switching to Guest turns off Eaglesoft — guests can't reach connectors\./),
+    ).toBeInTheDocument();
+  });
+
+  it("a Guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
+    // Reachable from rows written before this floor existed. The value stays
+    // visible (hiding it would be the same dishonesty in reverse) and the
+    // consequence of pressing Save is stated up front.
+    const base = roleToDraft(
+      makeRole({
+        startingPoint: "guest",
+        connectorGrants: [{ provider: "eaglesoft", level: "read" }],
+      }),
+    );
+    const { onSave } = renderSheet({ mode: "edit", base });
+    expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
+    expect(
+      screen.getByText("Connectors are for staff and admins — saving removes this."),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "front desk" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    expect(onSave.mock.calls[0][0].connectorGrants).toEqual([]);
   });
 
   it("renders the connectors empty state with the Integrations link", () => {

@@ -4520,10 +4520,42 @@ export async function bulkCopyFiles(
   return data.results;
 }
 
+/** Discriminator carried by `TrashUnsupportedError`. */
+export const TRASH_UNSUPPORTED = "TRASH_UNSUPPORTED";
+
+/**
+ * WARP-1555 — thrown by `fetchTrash` when the box's storage backend has no
+ * trashbin and the orchestrator answers 501.
+ *
+ * This used to resolve to `[]`, which rendered as "Trash is empty" — the one
+ * message you must never show a user whose deleted files are in fact gone
+ * for good. "Unsupported" is a distinct state and gets distinct copy.
+ */
+export class TrashUnsupportedError extends Error {
+  readonly code = TRASH_UNSUPPORTED;
+
+  constructor() {
+    super("This storage backend has no trash bin");
+    this.name = "TrashUnsupportedError";
+  }
+}
+
+/**
+ * Structural check rather than `instanceof`, so the guard still holds across
+ * module boundaries (mocked api modules, bundler duplicates).
+ */
+export function isTrashUnsupportedError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === TRASH_UNSUPPORTED
+  );
+}
+
 export async function fetchTrash(): Promise<TrashItemInfo[]> {
   const res = await authFetch(`${BASE}/api/files/trash`);
   if (!res.ok) {
-    if (res.status === 501) return [];
+    if (res.status === 501) throw new TrashUnsupportedError();
     throw new Error(`Failed to fetch trash: ${res.status}`);
   }
   const data = await res.json();
@@ -6683,7 +6715,18 @@ export async function duplicateAccessRole(
 export async function updateAccessRole(
   id: string,
   patch: Partial<AccessRolePayload> & { state?: "active" | "archived" },
-): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+): Promise<{
+  role: AccessRole;
+  syncState?: AccessSyncState;
+  /** WARP-1576 — present only when this PATCH CLEARED the role's storage
+   *  default: how many members had no person-level quota and therefore keep
+   *  whatever Nextcloud currently enforces until someone edits it. The server
+   *  deliberately pushes nothing in that case (a cleared default means
+   *  "unmanaged", never "unlimited" — WARP-1531's semantics), so this count
+   *  is the operator's only signal that people were left on a retained
+   *  value. */
+  retainedQuotaCount?: number;
+}> {
   const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -6702,6 +6745,17 @@ export async function archiveAccessRole(
   id: string,
 ): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
   return updateAccessRole(id, { state: "archived" });
+}
+
+/** WARP-1560 — archive's symmetric partner. The server treats the
+ *  transition as its own event: it writes an "Access role restored"
+ *  Activity row and, when the role carries a storage default that members
+ *  are back to inheriting, kicks the usage reconciler and answers
+ *  `pending` — so the caller's sync chip has something true to say. */
+export async function restoreAccessRole(
+  id: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  return updateAccessRole(id, { state: "active" });
 }
 
 export async function deleteAccessRole(id: string): Promise<void> {

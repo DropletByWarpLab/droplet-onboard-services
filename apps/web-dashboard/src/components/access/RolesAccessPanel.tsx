@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Archive,
   ChevronRight,
   Cloud,
   Cpu,
@@ -26,6 +27,7 @@ import {
   Plug,
   Plus,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   User,
   UserPlus,
@@ -39,6 +41,7 @@ import {
   createAccessRole,
   updateAccessRole,
   archiveAccessRole,
+  restoreAccessRole,
   deleteAccessRole,
   duplicateAccessRole,
   listAccessRoles,
@@ -91,6 +94,10 @@ type ChipSyncState = AccessSyncState | "applied";
  *  announced, short enough that a roster of roles doesn't accumulate green
  *  confetti. */
 const APPLIED_LINGER_MS = 4000;
+
+/** Ties the disabled Assign-people button to the note that explains it —
+ *  only ever one role detail on screen, so a constant id is safe. */
+const ARCHIVED_REASON_ID = "access-archived-reason";
 
 /** A row that is merely AT REST in `synced` shows nothing — §12 reserves the
  *  chip for work in flight, work that just landed, or work that needs a human;
@@ -164,6 +171,18 @@ export function RolesAccessPanel({
   const [assignBusy, setAssignBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<AccessRole | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<AccessRole | null>(null);
+  // WARP-1576 — what the LAST save of this role left behind. Clearing a
+  // role's storage default is the one usage edit that pushes nothing (a
+  // cleared default means "unmanaged", never "unlimited"), so the members
+  // who had no quota of their own quietly stay on whatever Nextcloud already
+  // enforces. The server counts them; without this the operator gets silence
+  // where a consequence happened. Held rather than toasted because it stays
+  // TRUE until someone edits those people — a 4-second toast would be the
+  // wrong lifetime for a fact about other people's storage.
+  const [retainedQuota, setRetainedQuota] = useState<{ roleId: string; count: number } | null>(
+    null,
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // §8 delete-in-use escape hatch: "Reassign people →" moves focus to the
@@ -211,11 +230,16 @@ export function RolesAccessPanel({
     [clearApplied],
   );
 
+  // WARP-1560: archived rows are KEPT and grouped, not dropped. The server
+  // has always returned them carrying their `state` for exactly this reason
+  // (effective-access.service.ts — archive stops a role being assignable,
+  // it never strips access from the people holding it), and filtering them
+  // out client-side is what made archive a one-way door.
   const reload = useCallback(async (background = false) => {
     if (!background) setListState((s) => (s === "ready" ? s : "loading"));
     try {
       const { roles: rows } = await listAccessRoles();
-      setRoles(rows.filter((r) => r.state !== "archived"));
+      setRoles(rows);
       setListState("ready");
     } catch {
       if (!background) setListState("error");
@@ -264,13 +288,18 @@ export function RolesAccessPanel({
     [syncStates],
   );
 
+  const activeRoles = useMemo(() => roles.filter((r) => r.state !== "archived"), [roles]);
+  const archivedRoles = useMemo(() => roles.filter((r) => r.state === "archived"), [roles]);
+
   // Auto-select the first custom role once loaded so the detail pane isn't
-  // a dead placeholder (Departments precedent).
+  // a dead placeholder (Departments precedent). An ACTIVE role always wins:
+  // landing on an archived one would open the surface on a role nobody can
+  // be assigned to.
   useEffect(() => {
-    if (listState === "ready" && !selectedId && roles.length > 0) {
-      setSelectedId(roles[0]!.id);
-    }
-  }, [listState, roles, selectedId]);
+    if (listState !== "ready" || selectedId) return;
+    const first = activeRoles[0] ?? archivedRoles[0];
+    if (first) setSelectedId(first.id);
+  }, [listState, activeRoles, archivedRoles, selectedId]);
 
   // Close the overflow menu on outside click / Escape.
   useEffect(() => {
@@ -335,11 +364,21 @@ export function RolesAccessPanel({
         touchedId = role.id;
         noteSyncState(role.id, syncState);
       } else if (builder.base.id) {
-        const { syncState } = await updateAccessRole(builder.base.id, payload);
+        const roleId = builder.base.id;
+        const { syncState, retainedQuotaCount } = await updateAccessRole(roleId, payload);
         setBuilder(null);
         await reload();
-        touchedId = builder.base.id;
-        noteSyncState(builder.base.id, syncState);
+        touchedId = roleId;
+        noteSyncState(roleId, syncState);
+        // WARP-1576 — the field only comes back on a CLEAR, and a count of
+        // zero is a real answer ("nobody was left behind"), not something to
+        // announce. Every other save retires whatever the previous one said,
+        // so the line can never outlive the edit it describes.
+        setRetainedQuota(
+          retainedQuotaCount && retainedQuotaCount > 0
+            ? { roleId, count: retainedQuotaCount }
+            : null,
+        );
       }
       toast(`'${payload.name}' saved — applying now.`, "success");
       scheduleSyncRefetch(touchedId);
@@ -371,11 +410,36 @@ export function RolesAccessPanel({
       toast(err?.message || "Failed to archive the role", "error");
       throw err;
     }
-    if (selectedId === archiveTarget.id) setSelectedId(null);
+    // The role stays selected: it is still on screen, now under Archived,
+    // and the operator's next move is often Restore or Delete. Dropping the
+    // selection here would empty the detail pane for no reason.
     await reload();
     toast(`'${archiveTarget.name}' archived.`, "success");
   }
 
+  /** WARP-1560 — archive's way back. The PATCH answers `pending` when the
+   *  role carries a storage default its members are inheriting again, so
+   *  the §10 chip reports a wait that is really happening. */
+  async function performRestore() {
+    if (!restoreTarget) return;
+    const { id, name } = restoreTarget;
+    try {
+      const { syncState } = await restoreAccessRole(id);
+      noteSyncState(id, syncState);
+    } catch (err: any) {
+      toast(err?.message || "Failed to restore the role", "error");
+      throw err;
+    }
+    await reload();
+    toast(`'${name}' restored.`, "success");
+    scheduleSyncRefetch(id);
+  }
+
+  /** WARP-1576 asked whether the delete confirm should carry
+   *  `retainedQuotaCount` too. It cannot: DELETE is refused (409) while ANY
+   *  member or pending invite references the role, so a delete that succeeds
+   *  had nobody to leave on a retained quota. The disclosure belongs to the
+   *  clear-the-default path alone. */
   async function performDelete() {
     if (!deleteTarget) return;
     try {
@@ -444,14 +508,17 @@ export function RolesAccessPanel({
         </div>
       );
     }
-    if (roles.length === 0) {
+    if (activeRoles.length === 0) {
+      // WARP-1560: "No custom roles yet" stops being true the moment a role
+      // exists but is merely filed away — say which of the two it is.
+      const allArchived = archivedRoles.length > 0;
       return (
         <div className="card">
           <div className="empty">
-            <span className="ei">
-              <KeyRound size={24} />
+            <span className="ei">{allArchived ? <Archive size={24} /> : <KeyRound size={24} />}</span>
+            <span style={{ maxWidth: "42ch" }}>
+              {allArchived ? ACCESS_COPY.emptyRolesAllArchived : ACCESS_COPY.emptyRoles}
             </span>
-            <span style={{ maxWidth: "42ch" }}>{ACCESS_COPY.emptyRoles}</span>
             <button type="button" className="btn primary" onClick={openCreate} style={{ marginTop: 8 }}>
               <Plus size={14} /> New role
             </button>
@@ -460,33 +527,52 @@ export function RolesAccessPanel({
       );
     }
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {roles.map((role) => (
-          <button
-            key={role.id}
-            type="button"
-            className={`acc-rolecard${selectedId === role.id ? " on" : ""}`}
-            aria-pressed={selectedId === role.id}
-            onClick={() => setSelectedId(role.id)}
-          >
-            <span className="acc-glyph">
-              <KeyRound size={17} aria-hidden="true" />
-            </span>
-            <span className="body">
-              <span className="nm">{role.name}</span>
-              <span className="meta">
-                <span className="mono">{role.slug}</span>·
-                <span>
-                  {role.peopleCount === 1 ? "1 person" : `${role.peopleCount} people`} · based on{" "}
-                  {tierLabel(role.startingPoint)}
-                </span>
-                <SyncChip state={chipState(syncStateFor(role))} />
-              </span>
-            </span>
-            <ChevronRight size={15} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
-          </button>
-        ))}
+      <div
+        data-testid="access-active-roles"
+        style={{ display: "flex", flexDirection: "column", gap: 10 }}
+      >
+        {activeRoles.map((role) => renderRoleCard(role))}
       </div>
+    );
+  }
+
+  function renderRoleCard(role: AccessRole) {
+    const isArchived = role.state === "archived";
+    return (
+      <button
+        key={role.id}
+        type="button"
+        className={`acc-rolecard${isArchived ? " archived" : ""}${selectedId === role.id ? " on" : ""}`}
+        aria-pressed={selectedId === role.id}
+        onClick={() => setSelectedId(role.id)}
+      >
+        <span className="acc-glyph">
+          {isArchived ? (
+            <Archive size={17} aria-hidden="true" />
+          ) : (
+            <KeyRound size={17} aria-hidden="true" />
+          )}
+        </span>
+        <span className="body">
+          <span className="nm">{role.name}</span>
+          <span className="meta">
+            <span className="mono">{role.slug}</span>·
+            <span>
+              {role.peopleCount === 1 ? "1 person" : `${role.peopleCount} people`} · based on{" "}
+              {tierLabel(role.startingPoint)}
+            </span>
+            {/* State is a word, not a hue — §13 keeps the --role-* ramp out
+                of this surface entirely. Default tone, NOT `muted`: muted
+                resolves to --text-faint (#a6aab5 on --inset ≈ 2.1:1), which
+                is fine for the absence chips it was built for ("No
+                connectors") and not fine for a word carrying state. The
+                card's own glyph supplies the icon half of icon-plus-word. */}
+            {isArchived && <AccessChip>{ACCESS_COPY.archived}</AccessChip>}
+            <SyncChip state={chipState(syncStateFor(role))} />
+          </span>
+        </span>
+        <ChevronRight size={15} aria-hidden="true" style={{ color: "var(--text-faint)", flexShrink: 0 }} />
+      </button>
     );
   }
 
@@ -566,6 +652,22 @@ export function RolesAccessPanel({
             {role.maxUploadSizeMb != null ? `${role.maxUploadSizeMb} MB` : "Box default"} upload
           </AccessChip>
         </div>
+        {/* WARP-1576 — the consequence sits WITH the axis it belongs to, one
+            line under the chips it explains, rather than in a toast whose
+            lifetime is wrong for a fact about other people's storage.
+            The live region is PERMANENTLY MOUNTED and only its content is
+            conditional — the WARP-1528 SyncChip lesson: a screen reader only
+            reliably announces mutations to a region it was already watching,
+            so creating the region together with its text is a coin-flip.
+            `display: contents` keeps it out of the parent's 16px column gap
+            while leaving the element in the accessibility tree. */}
+        <div role="status" aria-live="polite" style={{ display: "contents" }}>
+          {retainedQuota?.roleId === role.id && (
+            <GuardNote icon={<Gauge size={15} aria-hidden="true" />}>
+              {ACCESS_COPY.retainedQuota(retainedQuota.count)}
+            </GuardNote>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
           <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>
             Off the box
@@ -644,11 +746,30 @@ export function RolesAccessPanel({
     }
 
     const inUse = selectedRole.peopleCount > 0;
+    const isArchived = selectedRole.state === "archived";
     return (
       <div className="card" data-testid="access-role-detail" style={{ padding: 0, overflow: "visible" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 18px", borderBottom: "1px solid var(--card-bd)" }}>
-          <span className="acc-glyph" style={{ width: 34, height: 34, borderRadius: 9, background: "var(--brand-subtle)", color: "var(--brand)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <KeyRound size={17} aria-hidden="true" />
+          <span
+            className="acc-glyph"
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 9,
+              // An archived role drops out of the brand tint into the same
+              // neutral inset the built-in rows use: filed away, still legible.
+              background: isArchived ? "var(--inset)" : "var(--brand-subtle)",
+              color: isArchived ? "var(--text-muted)" : "var(--brand)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {isArchived ? (
+              <Archive size={17} aria-hidden="true" />
+            ) : (
+              <KeyRound size={17} aria-hidden="true" />
+            )}
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>{selectedRole.name}</div>
@@ -656,6 +777,7 @@ export function RolesAccessPanel({
               {selectedRole.slug}
             </div>
           </div>
+          {isArchived && <AccessChip>{ACCESS_COPY.archived}</AccessChip>}
           <AccessChip>Based on {tierLabel(selectedRole.startingPoint)}</AccessChip>
           <SyncChip state={chipState(syncStateFor(selectedRole))} />
           <div ref={menuRef} style={{ position: "relative" }}>
@@ -687,18 +809,22 @@ export function RolesAccessPanel({
                 >
                   Duplicate
                 </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="btn ghost sm"
-                  style={{ justifyContent: "flex-start", border: "none" }}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setArchiveTarget(selectedRole);
-                  }}
-                >
-                  Archive…
-                </button>
+                {/* Already archived → the way back is the pane's primary
+                    button, not a second copy of it buried in here. */}
+                {!isArchived && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="btn ghost sm"
+                    style={{ justifyContent: "flex-start", border: "none" }}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setArchiveTarget(selectedRole);
+                    }}
+                  >
+                    Archive…
+                  </button>
+                )}
                 <button
                   type="button"
                   role="menuitem"
@@ -737,14 +863,43 @@ export function RolesAccessPanel({
         <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
           {renderAxisSummary(selectedRole)}
 
+          {/* WARP-1560 — an archived role has exactly one next step, so it
+              takes the filled slot and Edit steps back to ghost. Assign is
+              never removed: an affordance that silently disappears teaches
+              nothing, so it stays, disabled, with its reason spelled out
+              underneath (the `.acc-lvl-reason` pattern one axis over). */}
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="btn primary sm" onClick={() => openEdit(selectedRole)}>
+            {isArchived && (
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={() => setRestoreTarget(selectedRole)}
+              >
+                <RotateCcw size={13} /> Restore
+              </button>
+            )}
+            <button
+              type="button"
+              className={isArchived ? "btn ghost sm" : "btn primary sm"}
+              onClick={() => openEdit(selectedRole)}
+            >
               Edit role
             </button>
-            <button type="button" className="btn ghost sm" onClick={() => { setAssignChecked(new Set()); setAssignOpen(true); }}>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={isArchived}
+              aria-describedby={isArchived ? ARCHIVED_REASON_ID : undefined}
+              onClick={() => { setAssignChecked(new Set()); setAssignOpen(true); }}
+            >
               <UserPlus size={13} /> Assign people
             </button>
           </div>
+          {isArchived && (
+            <GuardNote id={ARCHIVED_REASON_ID} icon={<Archive size={15} aria-hidden="true" />}>
+              {ACCESS_COPY.archivedNotAssignable}
+            </GuardNote>
+          )}
 
           <div
             ref={peopleListRef}
@@ -804,7 +959,7 @@ export function RolesAccessPanel({
           <div>
             <div className="sect" style={{ marginTop: 0, justifyContent: "space-between" }}>
               <h2>{ACCESS_COPY.yourRoles}</h2>
-              {listState === "ready" && roles.length > 0 && (
+              {listState === "ready" && activeRoles.length > 0 && (
                 // §4.1: the primary action of the pane is filled accent —
                 // the Departments ghost sibling is a recorded divergence.
                 <button type="button" className="btn primary sm" onClick={openCreate}>
@@ -814,6 +969,22 @@ export function RolesAccessPanel({
             </div>
             {renderRolesList()}
           </div>
+          {/* WARP-1560 — the section only exists when it has something in
+              it; a permanently-empty "Archived roles" header would be one
+              more thing to read on every visit for nothing. */}
+          {listState === "ready" && archivedRoles.length > 0 && (
+            <div>
+              <div className="sect" style={{ justifyContent: "space-between" }}>
+                <h2>{ACCESS_COPY.archivedRoles}</h2>
+              </div>
+              <div
+                data-testid="access-archived-roles"
+                style={{ display: "flex", flexDirection: "column", gap: 10 }}
+              >
+                {archivedRoles.map((role) => renderRoleCard(role))}
+              </div>
+            </div>
+          )}
           <div>
             <div className="sect" style={{ justifyContent: "space-between" }}>
               <h2>{ACCESS_COPY.builtinRoles}</h2>
@@ -901,11 +1072,20 @@ export function RolesAccessPanel({
         onConfirm={performArchive}
         onCancel={() => setArchiveTarget(null)}
         title={archiveTarget ? `Archive '${archiveTarget.name}'?` : "Archive role?"}
-        // Honesty: no restore affordance ships yet (archived roles are
-        // filtered from the list), so the copy promises none — the restore
-        // surface is a filed follow-up.
-        description="Archived roles can't be assigned but keep their settings."
+        // WARP-1560 — the packet's sentence is whole again: the Archived
+        // section and its Restore button are what make the promise real.
+        description={ACCESS_COPY.archiveRole}
         confirmLabel="Archive"
+        variant="neutral"
+      />
+
+      <ConfirmDialog
+        open={restoreTarget !== null}
+        onConfirm={performRestore}
+        onCancel={() => setRestoreTarget(null)}
+        title={restoreTarget ? `Restore '${restoreTarget.name}'?` : "Restore role?"}
+        description={ACCESS_COPY.restoreRole}
+        confirmLabel="Restore role"
         variant="neutral"
       />
     </div>

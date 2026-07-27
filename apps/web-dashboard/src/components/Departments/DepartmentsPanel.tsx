@@ -48,6 +48,11 @@ import {
 } from "lucide-react";
 import type { Department, DepartmentDetail, DepartmentRight, RosterUser } from "@/lib/types";
 import {
+  formatStorageBytes,
+  storageInputToBytes,
+  type StorageUnit,
+} from "@/lib/storage-units";
+import {
   listDepartments,
   getDepartment,
   createDepartment,
@@ -95,25 +100,14 @@ const COPY = {
   failedRetryNote: "The box retries automatically every few minutes, so this usually clears once the cause is fixed.",
 };
 
-/** Bytes-decimal-string → a short human size ("13.2 GB"). Never fabricates
- *  a value on bad input — falls back to an em dash. */
-function formatBytes(value: string | null | undefined): string {
-  if (value == null) return "—";
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return "—";
-  if (n === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  let size = n;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`;
-}
-
-const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
-type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
+/** Bytes-decimal-string → a short human size ("13.2 GB"). Never fabricates a
+ *  value on bad input — falls back to an em dash. WARP-1561: this and the
+ *  quota encoder below are now the dashboard-wide implementations from
+ *  `@/lib/storage-units`; the local copies disagreed with the roles surface
+ *  on both the display rounding and the byte fidelity of the editor pair.
+ *  Used/consumed bytes are a fact when zero, so 0 renders "0 B" here. */
+const formatBytes = (value: string | null | undefined): string =>
+  formatStorageBytes(value, { zero: "0 B" });
 
 /** Quota band per the design brief: green <80%, orange 80–95%, red >95%. */
 function quotaBand(usedBytes: string | null, quotaBytes: string | null): "" | "ok" | "warn" | "danger" {
@@ -187,12 +181,11 @@ interface QuotaFormState {
   unit: StorageUnit;
 }
 
+/** `undefined` (omit the field) rather than the shared encoder's `null`: the
+ *  create payload has no "clear the quota" case, so an empty field means
+ *  "don't send one" — the server default applies. */
 function quotaToBytes(q: QuotaFormState): string | undefined {
-  const trimmed = q.value.trim();
-  if (!trimmed) return undefined;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || n <= 0) return undefined;
-  return String(Math.round(n * STORAGE_UNIT_BYTES[q.unit]));
+  return storageInputToBytes(q.value, q.unit) ?? undefined;
 }
 
 const fieldStyle: React.CSSProperties = {

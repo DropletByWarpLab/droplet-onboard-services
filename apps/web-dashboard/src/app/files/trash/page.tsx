@@ -14,7 +14,7 @@ import {
 import { translateError } from "@/lib/friendly-errors";
 
 export default function TrashPage() {
-  const { items, isLoading, refresh } = useTrash();
+  const { items, isLoading, error, refresh } = useTrash();
   const { toast } = useToast();
 
   const handleRestore = async (name: string) => {
@@ -57,9 +57,14 @@ export default function TrashPage() {
         </Link>
       }
     >
+      {/* WARP-1555: `error` decides between "we couldn't load your trash"
+          (retryable), "trash isn't available on this Droplet" (backend 501)
+          and the genuine "Trash is empty". */}
       <TrashView
         items={items}
         isLoading={isLoading}
+        error={error}
+        onRetry={() => refresh()}
         onRestore={handleRestore}
         onDeleteForever={handleDeleteForever}
         onEmpty={handleEmpty}
