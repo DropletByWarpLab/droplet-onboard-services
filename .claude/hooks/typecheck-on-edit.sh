@@ -19,7 +19,9 @@ case "$REL" in
   apps/orchestrator/*)   WS="apps/orchestrator" ;;
   apps/web-dashboard/*)  WS="apps/web-dashboard" ;;
   packages/*)            WS="packages/$(echo "$REL" | cut -d/ -f2)" ;;
-  services/mcp-server/*) WS="services/mcp-server" ;;
+  # Covers mcp-server, matter-controller, erp-connector — the three services
+  # with a tsconfig.json. The rest are Python and the guard below drops them.
+  services/*)            WS="services/$(echo "$REL" | cut -d/ -f2)" ;;
   *) exit 0 ;;
 esac
 
