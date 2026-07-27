@@ -98,13 +98,30 @@ const BULK_SHARE_LIMIT = 20;
 const LIBRARY_SHARE_MANAGER_ONLY =
   "Only a manager can share from this library. Ask one to create the link.";
 
+/**
+ * The share posture of the bulk path, stated rather than inherited.
+ *
+ * `createShare` defaults to `{ shareType: 3 }` and the server defaults
+ * `permissions` to 1, so omitting both produced exactly this grant — but by
+ * inheritance, which means a later change to either default would silently
+ * widen every link a Share click mints, with nothing in this file to notice.
+ * Naming it here also keeps the code and the user-facing copy in agreement:
+ * the toolbar and the results panel both say PUBLIC link, so the call site
+ * says it too.
+ *
+ * 3 = public link (anyone with the URL), 1 = read-only.
+ */
+const BULK_SHARE_OPTIONS = { shareType: 3, permissions: 1 } as const;
+
 /** One row of a multi-file share run — the per-target outcome, kept whether it
  *  succeeded or failed. Successes are never rolled back or hidden by a later
- *  failure (decision comment, note 1). */
+ *  failure (decision comment, note 1). `cancelled` is a row the user stopped
+ *  the run before reaching: no link exists for it, which is worth saying
+ *  explicitly rather than leaving it stuck on "Creating link…". */
 type BulkShareRow = {
   path: string;
   name: string;
-  status: "pending" | "ok" | "failed";
+  status: "pending" | "ok" | "failed" | "cancelled";
   url?: string | null;
   error?: string;
 };
@@ -544,6 +561,8 @@ export default function FilesPage() {
     /** Folder names dropped from the run — reported, never silently skipped. */
     skipped: string[];
     done: boolean;
+    /** The run ended because the user stopped it, not because it finished. */
+    stopped: boolean;
   } | null>(null);
   // Generation token: closing the results panel abandons the in-flight run
   // instead of letting it keep POSTing into a surface nobody is watching.
@@ -558,6 +577,38 @@ export default function FilesPage() {
     setCopiedKey(null);
   }, []);
 
+  /**
+   * Stop an in-flight run WITHOUT tearing the panel down.
+   *
+   * Abandoning the loop is cheap — bump the generation ref and it stops. The
+   * links it already minted are not: they are live, public, unauthenticated
+   * and no-expiry. Unmounting the panel at that moment is the worst outcome
+   * in this flow, because the user's mental model is "I cancelled", while N
+   * public links exist that were never displayed to anyone and are reachable
+   * only from Files → Shared → Shared by me — which nothing in the flow
+   * points at.
+   *
+   * So a stop keeps every created link on screen, marks the rows the loop
+   * never reached as not created (rather than leaving them spinning), and the
+   * summary says the created ones stay active and where to find them. The
+   * panel only unmounts from an explicit Done, once `done` is true.
+   */
+  const stopBulkShare = useCallback(() => {
+    bulkShareRunRef.current += 1;
+    setBulkShare((prev) =>
+      prev
+        ? {
+            ...prev,
+            done: true,
+            stopped: true,
+            rows: prev.rows.map((r) =>
+              r.status === "pending" ? { ...r, status: "cancelled" as const } : r
+            ),
+          }
+        : prev
+    );
+  }, []);
+
   const runBulkShare = useCallback(
     async (targets: FileEntryInfo[], run: number) => {
       for (const target of targets) {
@@ -567,7 +618,7 @@ export default function FilesPage() {
           // `toActiveSpaceRelative`. POST /api/files/share takes no `space`
           // (unlike rename/move/delete), so this is the identical argument the
           // single-file ShareDialog sends for the same row.
-          const share = await createShare(target.path);
+          const share = await createShare(target.path, BULK_SHARE_OPTIONS);
           setBulkShare((prev) =>
             prev && bulkShareRunRef.current === run
               ? {
@@ -583,13 +634,22 @@ export default function FilesPage() {
         } catch (err) {
           // Item 3 of 5 failing does not end the run and does not undo items
           // 1–2 — it is reported on its own row and the loop continues.
+          //
+          // Domain is "share", not "files": this is a share CREATE. The
+          // "files" fallback reads "We couldn't load those files right now",
+          // which names an action the user did not perform, a cause that is
+          // not the cause, and offers retry advice for rejections that are
+          // deterministic. The `share` domain exists precisely because of that
+          // regression (WARP-1148, see friendly-errors.ts) and carries the
+          // module-gate and policy-rejection copy this loop can actually hit;
+          // the single-file ShareDialog already routes through it.
           setBulkShare((prev) =>
             prev && bulkShareRunRef.current === run
               ? {
                   ...prev,
                   rows: prev.rows.map((r) =>
                     r.path === target.path
-                      ? { ...r, status: "failed", error: translateError(err, "files") }
+                      ? { ...r, status: "failed", error: translateError(err, "share") }
                       : r
                   ),
                 }
@@ -642,6 +702,7 @@ export default function FilesPage() {
         })),
         skipped,
         done: false,
+        stopped: false,
       });
       void runBulkShare(shareable, run);
     },
@@ -910,7 +971,13 @@ export default function FilesPage() {
         // disabled when the space withholds the share right, or when the
         // selection exceeds the bulk cap — `shareBlockedReason` is the same
         // gate the toolbar button uses.
-        label: `Share link${isSingle ? "" : ` (${selectedCount})`}`,
+        //
+        // The multi label names the posture for the same reason the toolbar
+        // label does: this entry point mints public links with no
+        // intervening choice, while the single one opens the dialog.
+        label: isSingle
+          ? "Share link"
+          : `Share ${selectedCount} publicly`,
         icon: contextMenuIcons.Share,
         disabled: !!shareBlockedReason,
         onClick: () =>
@@ -1422,7 +1489,21 @@ export default function FilesPage() {
       {bulkShare && (
         <Dialog
           open
-          onClose={closeBulkShare}
+          // While the loop is still running the backdrop is INERT and the
+          // close paths do NOT unmount: a stray click just outside a panel
+          // that is minting live public links must not leave the user
+          // believing they cancelled. Escape and the footer route to
+          // `stopBulkShare`, which halts the loop but keeps every link
+          // already created on screen. Once `done`, both close normally.
+          //
+          // Note `closeOnBackdrop={false}` alone would NOT be enough —
+          // Dialog's Escape handler has no opt-out and calls `onClose`
+          // unconditionally, so the guard has to live in `onClose` too. The
+          // panel is never a trap: no fetch here is time-bounded, so a hung
+          // POST must still be escapable, which is why this stops the run
+          // rather than refusing to close.
+          onClose={bulkShare.done ? closeBulkShare : stopBulkShare}
+          closeOnBackdrop={bulkShare.done}
           labelledBy={bulkShareHeadingId}
           describedBy={bulkShareSummaryId}
           maxWidth="lg"
@@ -1432,7 +1513,7 @@ export default function FilesPage() {
             className="type-headline"
             style={{ color: "var(--text)" }}
           >
-            Share links
+            Public share links
           </h2>
           {/* role="status" so the running count and the final tally are
               announced — the loop settles asynchronously. */}
@@ -1449,12 +1530,30 @@ export default function FilesPage() {
                 (r) => r.status === "failed"
               ).length;
               if (!bulkShare.done) {
-                return `Creating links… ${ok + failed} of ${total} done.`;
+                return `Creating public links… ${ok + failed} of ${total} done.`;
+              }
+              // A stopped run must account for what it already minted before
+              // it stopped — those links are live whether or not the user
+              // meant to create them, so say so and say where they live.
+              if (bulkShare.stopped) {
+                if (ok === 0) return "Stopped — no links were created.";
+                return `Stopped. ${ok} public link${ok > 1 ? "s" : ""} of ${total} ${
+                  ok > 1 ? "were" : "was"
+                } already created and stay${ok > 1 ? "" : "s"} active — copy ${
+                  ok > 1 ? "them" : "it"
+                } now, or find ${
+                  ok > 1 ? "them" : "it"
+                } later under Shared → Shared by me.`;
               }
               if (failed === 0) {
-                return `Shared ${total} file${total > 1 ? "s" : ""} — one link each.`;
+                return `Shared ${total} file${total > 1 ? "s" : ""} — one public link each. Anyone with a link can open it.`;
               }
-              return `Shared ${ok} of ${total}. ${failed} couldn't be shared — the links above still work.`;
+              // "the links above still work" is only true if any link exists;
+              // with every target rejected there is nothing above to work.
+              if (ok === 0) {
+                return `None of the ${total} file${total > 1 ? "s" : ""} could be shared. No links were created.`;
+              }
+              return `Shared ${ok} of ${total} — one public link each. ${failed} couldn't be shared — the links above still work.`;
             })()}
           </p>
 
@@ -1500,6 +1599,14 @@ export default function FilesPage() {
                     >
                       <AlertTriangle size={12} />
                       {row.error}
+                    </div>
+                  )}
+                  {row.status === "cancelled" && (
+                    <div
+                      className="type-caption-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      No link — stopped before this file.
                     </div>
                   )}
                 </div>
@@ -1549,11 +1656,21 @@ export default function FilesPage() {
               }
             >
               {copiedKey === "__all__" ? <Check size={14} /> : <CopyIcon size={14} />}
-              {copiedKey === "__all__" ? "Copied" : "Copy all links"}
+              {copiedKey === "__all__" ? "Copied" : "Copy all public links"}
             </button>
-            <button type="button" className="btn primary" onClick={closeBulkShare}>
-              Done
-            </button>
+            {/* Done only exists once the run has settled — while it is in
+                flight the deliberate exit is Stop, which halts the loop and
+                keeps the already-created links visible instead of dropping
+                them out of sight. */}
+            {bulkShare.done ? (
+              <button type="button" className="btn primary" onClick={closeBulkShare}>
+                Done
+              </button>
+            ) : (
+              <button type="button" className="btn" onClick={stopBulkShare}>
+                Stop
+              </button>
+            )}
           </div>
         </Dialog>
       )}

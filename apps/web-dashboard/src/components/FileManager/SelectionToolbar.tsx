@@ -87,10 +87,20 @@ export function SelectionToolbar({
   // manager right, ADR-029). The page passes the precise `canShare`; readOnly
   // keeps the button honest even for a caller that hasn't wired it yet.
   const shareDisabled = readOnly || !canShare;
+  // WARP-1540 review — the posture flips at the 1→2 boundary and must not be
+  // left implied. ONE selected item opens ShareDialog, which starts on
+  // "Person" (a named household member) and lets the user choose; SEVERAL run
+  // the loop, which mints a public, unauthenticated, no-expiry link per file
+  // with no intervening choice. So the label itself changes at exactly the
+  // click where the meaning changes — "Share" keeps the button findable by
+  // scanning, "publicly" states what the extra checkbox just did. The tooltip
+  // spells out the consequence rather than only the count.
+  const isBulkShare = count > 1;
+  const shareLabel = isBulkShare ? "Share publicly" : "Share";
   const shareTitle = shareDisabled
     ? shareDisabledReason ?? READER_TOOLTIP
-    : count > 1
-      ? `Share ${count} files — one link each`
+    : isBulkShare
+      ? `Create ${count} public links — one per file. Anyone with a link can open it.`
       : "Share link";
 
   return (
@@ -157,7 +167,7 @@ export function SelectionToolbar({
               title={shareTitle}
             >
               <LinkIcon size={14} />
-              Share
+              {shareLabel}
             </button>
             <button
               onClick={() => !readOnly && onMove()}

@@ -922,7 +922,11 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     modifiedAt: "2026-04-16T00:00:00.000Z",
   });
 
-  const shareBtn = () => screen.getByRole("button", { name: /^share$/i });
+  // The toolbar label states the posture: "Share" for one item (ShareDialog
+  // lets the user choose a person or a link), "Share publicly" for several
+  // (the loop mints a public link per file with no intervening choice).
+  const shareBtn = () =>
+    screen.getByRole("button", { name: /^share( publicly)?$/i });
 
   it("offers Share as soon as one item is selected", () => {
     mockFiles = [file("a.pdf")];
@@ -954,7 +958,7 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
 
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(
-        /shared 3 files — one link each/i
+        /shared 3 files — one public link each/i
       )
     );
     // N calls, one per selected path — the raw entry path the single-file
@@ -965,6 +969,15 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
       "/b.pdf",
       "/c.pdf",
     ]);
+    // Pin the GRANT, not just the paths. Omitting the options relied on
+    // `createShare`'s `{ shareType: 3 }` default and the server's
+    // `permissions` default of 1 — so widening either default would have
+    // widened every bulk link with nothing here going red. shareType 3 =
+    // public link, permissions 1 = read-only, and no password/expiry is set
+    // by this path (that stays a per-share decision in ShareDialog).
+    for (const call of createShareMock.mock.calls) {
+      expect(call[1]).toEqual({ shareType: 3, permissions: 1 });
+    }
     // Not a raw dump: each link is attached to its filename and copyable alone.
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("a.pdf")).toBeInTheDocument();
@@ -973,7 +986,7 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
       within(dialog).getByRole("button", { name: /copy link for b\.pdf/i })
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByRole("button", { name: /copy all links/i })
+      within(dialog).getByRole("button", { name: /copy all public links/i })
     ).not.toBeDisabled();
     // The single-file dialog is NOT what a multi-selection opens.
     expect(screen.queryByTestId("share-dialog")).toBeNull();
@@ -1005,6 +1018,38 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     ).toBeNull();
   });
 
+  // Review B1 — a failed share CREATE used to render the file-LOADING
+  // fallback ("We couldn't load those files right now. Try again in a
+  // moment."): an action the user never performed, a cause that isn't the
+  // cause, and retry advice for a deterministic policy rejection. That is the
+  // exact WARP-1148 regression the `share` domain was added to end, and
+  // ShareDialog already routes through it — so the same 403 gave two
+  // different messages one click apart.
+  it("renders share-domain copy on a failure, never the file-LOADING fallback", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf"];
+    createShareMock.mockRejectedValue(
+      Object.assign(new Error("Sharing is disabled"), {
+        code: "module_disabled",
+      })
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /none of the 2 files could be shared/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The module gate names itself, with the remedy — not "try again".
+    expect(
+      within(dialog).getAllByText(/file sharing is turned off on this droplet/i)
+    ).toHaveLength(2);
+    expect(within(dialog).queryByText(/couldn't load those files/i)).toBeNull();
+  });
+
   it("keeps folders out of a bulk run and says which ones it skipped", async () => {
     mockFiles = [file("a.pdf"), folder("Trips"), file("c.pdf")];
     mockSelectedPaths = ["/a.pdf", "/Trips", "/c.pdf"];
@@ -1023,6 +1068,89 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     expect(screen.getByRole("dialog")).toHaveTextContent(
       /skipped 1 folder \(trips\)/i
     );
+  });
+
+  // Review B2 — the links this loop mints are live, public, unauthenticated
+  // and no-expiry the instant each POST returns. Dismissing the panel
+  // mid-run used to bump the generation ref and null the state, so a stray
+  // click just outside left N public links in existence that were never
+  // displayed to anyone, while the user believed they had cancelled. The only
+  // way to find them is Files → Shared → Shared by me, which nothing in the
+  // flow points at.
+  //
+  // Helper: a.pdf lands, b.pdf hangs — the panel is then observably in flight.
+  const startStalledRun = () => {
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      path === "/b.pdf"
+        ? new Promise(() => {})
+        : Promise.resolve({
+            id: 1,
+            url: `https://box/s/${path.slice(1)}`,
+            token: "t",
+          })
+    );
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    return waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 1 of 3 done/i
+      )
+    );
+  };
+
+  it("ignores a backdrop click while links are still being created", async () => {
+    await startStalledRun();
+
+    const backdrop = screen.getByRole("dialog").parentElement as HTMLElement;
+    fireEvent.click(backdrop);
+
+    // Still mounted, still showing the link that already exists.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("dialog")).getByText("https://box/s/a.pdf")
+    ).toBeInTheDocument();
+  });
+
+  it("stops on Escape without hiding the public links it already created", async () => {
+    await startStalledRun();
+
+    // Escape is NOT covered by closeOnBackdrop — Dialog's key handler calls
+    // onClose unconditionally — so the guard has to live in onClose too.
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /stopped\. 1 public link of 3 was already created and stays active/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The created link is still on screen and still copyable…
+    expect(within(dialog).getByText("https://box/s/a.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /copy link for a\.pdf/i })
+    ).toBeInTheDocument();
+    // …and it says where to find it afterwards.
+    expect(dialog).toHaveTextContent(/shared by me/i);
+    // The rows never reached say so, rather than spinning forever.
+    expect(
+      within(dialog).getAllByText(/no link — stopped before this file/i)
+    ).toHaveLength(2);
+    // The loop really stopped: c.pdf was queued after the hung b.pdf.
+    expect(createShareMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes normally once the run has settled — never a trap", async () => {
+    await startStalledRun();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/stopped/i)
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("refuses a selection over the bulk cap with an honest count, not an unbounded fan-out", () => {
