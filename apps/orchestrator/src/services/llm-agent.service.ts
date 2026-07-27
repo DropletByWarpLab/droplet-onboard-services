@@ -2235,11 +2235,22 @@ function isRetrievalClassTool(name: string): boolean {
  * WARP-1604: the keys live at the **ROOT** of the payload, not under
  * `data`. mcp-server unwraps the `ToolResult` envelope before it hits the
  * wire (`JSON.stringify(result.data)`), so what arrives here is the
- * handler's own object:
+ * handler's own object — and for one tool it is not an object at all:
+ *   - a bare `[…]`        — list_files. Its handler returns the orchestrator
+ *                           directory route's body verbatim, and that route
+ *                           `res.json(entries)` with a bare `FileEntryInfo[]`
+ *                           on all three of its branches (cache hit, normal,
+ *                           and the `handleFileError(…, [])` degrade).
  *   - `path`              — read_file, write_file, move_file, …
  *   - `results[].path`    — search_content hits
- *   - `files[].path`      — list_files, list_recent_files
- *   - `items[].path`      — older listings
+ *   - `items[].path`      — search_files, list_recent_files
+ *   - `files[].path`      — kept for any handler that wraps a listing
+ *
+ * The bare-array case is why `list_files` — the highest-frequency file tool
+ * in the agent loop — still wrote ZERO rows after the envelope fix: an array
+ * passes the `typeof === "object"` guard, but every key read off it is
+ * `undefined`. The original review of this PR caught it because the test
+ * asserted a `{ files: [...] }` shape `list_files` has never emitted.
  *
  * This function used to walk `data.*`, which is always `undefined` on the
  * real wire — it returned `[]` for every successful call and the whole
@@ -2272,6 +2283,14 @@ export function extractCitedFilePaths(payload: ToolResultPayload): string[] {
       if (out.length >= 20) return;
     }
   };
+
+  // A bare array IS the payload (list_files). Checked first because an array
+  // also satisfies the object guard above, and none of the keyed reads below
+  // can ever hit on one.
+  if (Array.isArray(root)) {
+    pushFrom(root);
+    return Array.from(new Set(out));
+  }
 
   const d = root as { path?: unknown; results?: unknown; files?: unknown; items?: unknown };
   push(d.path);
