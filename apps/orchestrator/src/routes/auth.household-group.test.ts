@@ -113,6 +113,15 @@ describe("WARP-1558 — buildNcGroups (droplet-admins / ADR-029 Tier-1 see-all)"
     // Guards the WARP-1272 conflation: Tier 2 (personal homes) is owner-only,
     // Tier 1 is the broader admin tier. Narrowing this to owner would make an
     // `admin` lose department see-all.
+    //
+    // This assertion is now the enforcement point of a ratified decision, not
+    // just a guard against drift. ADR-032 §7 / O-5 (2026-07-27) resolved the
+    // apparent conflict between ADR-032 §3 ("Admins do not bypass layer 2")
+    // and ADR-029's Tier-1 bullet in favour of ADR-029: `admin` is an
+    // UNCONDITIONAL see-all tier at the byte layer, and no custom role may
+    // narrow it. If someone must not see a department's files, they must not
+    // be admin tier. So this line failing means the product changed, and O-5
+    // has to be revisited before it is "fixed".
     expect(createPathTier).toContain("admin");
   });
 

@@ -186,7 +186,7 @@ Manager-only. Orchestrator verifies `manager` right → mints the OCS share with
 
 #### 2.5 Admin-sees-all — two tiers
 
-- **Tier 1 (ships with GA):** `droplet-admins` membership → every dept library in admins' space list, own-token access, zero special code paths. Entry into a non-member dept emits an ActivityRow — see-all is **loud**. Role promote/demote hooks the same path that already revokes sessions (WARP-116 machinery).
+- **Tier 1 (ships with GA):** `droplet-admins` membership → every dept library in admins' space list, own-token access, zero special code paths. Entry into a non-member dept emits an ActivityRow — see-all is **loud**. Role promote/demote hooks the same path that already revokes sessions (WARP-116 machinery). **This tier is unconditional and not narrowable by a custom role** — ADR-032 §3's "Admins do not bypass layer 2" governs the application plane only, and reads as a contradiction of this bullet until you name the plane. Reconciled in ADR-032 §7 / O-5 (2026-07-27), which resolves in favour of this ADR; WARP-1558 is the sweep that makes membership follow role tier in both directions.
 - **Tier 2 (personal homes) = Decision D-1, founder sign-off required, severable ticket (T19b):** read-only, NC-admin-credential (never raw `NEXTCLOUD_DATA_ROOT` reads), owner-gated, per-access audited. A persistent "every access is logged" banner. One HMAC ActivityRow per listing **and per download**.
 
 #### 2.6 Bypass-path audit
