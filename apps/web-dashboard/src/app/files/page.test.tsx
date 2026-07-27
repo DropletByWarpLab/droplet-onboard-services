@@ -808,7 +808,13 @@ describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
     mockUser = { id: "u1", email: "family@example.com", role: "family" };
   });
 
-  it("lists the library ROOT — space-relative '/', not the personal home", () => {
+  // NOT a pin on the WARP-1623 bug — a regression guard on the page contract
+  // it depends on. `useFiles` is mocked wholesale here and the page has always
+  // passed the real space into it; the drop happened one layer below, inside
+  // `fetchFiles`. The wire-level pin lives in `lib/api.spaces.test.ts`. This
+  // guards the other half: that a space switch still lands on the space ROOT
+  // rather than carrying the previous space's path across.
+  it("lands a space switch on the library root, carrying the space id", () => {
     render(<FilesPage />);
     fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
     expect(mockFilesCalls.at(-1)).toEqual(["/", "dept:finance"]);
@@ -824,6 +830,16 @@ describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
     expect(mockFilesCalls.at(-1)).toEqual(["/Q1", "dept:finance"]);
   });
 
+  // The WARP-1547 funnel writes the URL on every move, so a double-prefixed
+  // path would not merely mislist — it would be baked into the shareable link.
+  // Mirrors the Household assertion the 1547 suite already makes.
+  it("writes a space-relative URL for a folder opened inside a library", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    expect(pushMock).toHaveBeenCalledWith("/files?space=dept%3Afinance&path=%2FQ1");
+  });
+
   it("converts an entry path to space-relative form before a write", async () => {
     const { deleteFile } = await import("@/lib/api");
     render(<FilesPage />);
@@ -833,10 +849,23 @@ describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
     expect(deleteFile).toHaveBeenCalledWith("/budget.xlsx", "dept:finance");
   });
 
-  it("leaves the personal space listing home-relative (root is '/')", () => {
-    mockFiles = FILES;
+  // Must open a FOLDER: `handleRowOpen` only reaches the path translation on a
+  // directory — a file routes to the preview modal instead, so clicking one
+  // would assert nothing but the mount-time listing call.
+  it("leaves the personal space home-relative — no prefix stripped", () => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = [
+      {
+        name: "Docs",
+        path: "/Docs",
+        isDirectory: true,
+        size: 0,
+        modifiedAt: "2026-07-01T00:00:00.000Z",
+        mimeType: "httpd/unix-directory",
+      },
+    ];
     render(<FilesPage />);
-    fireEvent.click(screen.getByRole("button", { name: /^file report\.pdf$/i }));
-    expect(mockFilesCalls.at(-1)).toEqual(["/", "personal"]);
+    fireEvent.click(screen.getByRole("button", { name: /^folder docs$/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/Docs", "personal"]);
   });
 });
