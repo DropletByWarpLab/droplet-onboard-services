@@ -141,10 +141,18 @@ function describeError(error: Error & { status?: number; code?: string }): {
     // The page is normally gated off the /api/capabilities probe before any
     // PM request fires; this branch is defense in depth for a stale probe or
     // a direct URL hit racing a toggle. Never "server error, try again".
+    //
+    // WARP-1528: `module_disabled` now has TWO meanings — the box-wide toggle
+    // and a per-person feature grant (requireFeatureAccess returns the
+    // identical body deliberately, so a denial can't be used to enumerate what
+    // other people can reach). This copy used to name the workspace reason,
+    // which is simply false for a narrowed person — and leaks by contradiction
+    // to anyone who has watched a colleague use Projects. Reason-free, matching
+    // ModuleRouteGuard's formulation verbatim so there is ONE wording.
     return {
       icon: "board",
-      heading: "Projects isn't enabled on this Droplet.",
-      body: "An owner or admin can turn it on.",
+      heading: "Projects isn't available.",
+      body: "This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
       retryable: false,
     };
   }

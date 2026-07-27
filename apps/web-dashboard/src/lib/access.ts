@@ -29,6 +29,8 @@ import type {
   ToolAccessLevel,
 } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
+import { bytesToStorageInput, storageInputToBytes } from "./storage-units";
+import type { StorageUnit } from "./storage-units";
 
 // ── Tier ladder + display labels ──────────────────────────────────────────
 
@@ -107,6 +109,21 @@ export interface AccessFeatureDef {
   locks?: boolean;
   /** Verbatim floor reason for admin-floored features (§12 pattern). */
   floorReason?: string;
+  /**
+   * WARP-1585 — the module this feature cannot function without. Mirrors the
+   * orchestrator registry's `ModuleDef.requires`, which is the authority: the
+   * §3 resolver drops a feature whose parent the person does not hold, and
+   * this copy exists only so the panel can say so BEFORE they save.
+   *
+   * A dependency is not a grouping. The bar is that the child has no reachable
+   * surface without the parent — `docs` clears it (its editor sessions are
+   * minted on Nextcloud paths, and its only entry point is the Files preview
+   * pane); `knowledge` deliberately does NOT (it reads the box's own chunk
+   * store behind the file indexer, and has its own page).
+   */
+  requires?: AccessModuleId;
+  /** The honest reason shown on the blocked row — never a bare "unavailable". */
+  requiresReason?: string;
   levels: AccessLevelDef[];
 }
 
@@ -281,6 +298,8 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     moduleId: "docs",
     label: "Documents",
     description: "Shared documents and editing",
+    requires: "files",
+    requiresReason: ACCESS_COPY.docsNeedsFiles,
     levels: [
       { value: "view", label: "View", grants: "Open and read documents" },
       {
@@ -469,6 +488,28 @@ export interface FeatureDraftEntry {
 
 export type FeatureDraft = Record<string, FeatureDraftEntry>;
 
+/**
+ * WARP-1585 — is `feature` blocked because its declared parent is off in this
+ * draft? Returns the honest reason, or null when nothing blocks it.
+ *
+ * READ-ONLY on the draft, and that is the point. Blocking is a rendering
+ * decision, never an edit: the T8 convention is that a draft never re-emits a
+ * DERIVED value for an axis the operator did not touch, and silently clearing
+ * the Documents grant when Files goes off would revoke a second thing on their
+ * behalf — which is the exact failure this ticket exists to remove. The
+ * operator's Documents intent survives the round-trip, the row explains why it
+ * isn't in effect, and the §3 resolver is the authority that enforces it.
+ */
+export function dependencyBlockedReason(
+  features: FeatureDraft,
+  feature: AccessFeatureDef,
+): string | null {
+  const parent = feature.requires;
+  if (!parent) return null;
+  if (features[parent]?.on) return null;
+  return feature.requiresReason ?? null;
+}
+
 export interface RoleUsageDraft {
   storageValue: string;
   storageUnit: StorageUnit;
@@ -589,55 +630,62 @@ export function slugifyRoleName(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export const STORAGE_UNIT_BYTES = { GB: 1024 ** 3, TB: 1024 ** 4 } as const;
-export type StorageUnit = keyof typeof STORAGE_UNIT_BYTES;
-const MB_BYTES = 1024 ** 2;
+/** Storage sizing is shared with the people + departments surfaces, so the
+ *  bytes ⇄ unit contract lives in one module (WARP-1561). Re-exported here
+ *  because the access components import it from `@/lib/access` — and because
+ *  the three former copies disagreed in ways that cost this panel a quota-
+ *  drift bug (see `storage-units.ts` for the rounding policy). */
+export {
+  STORAGE_UNIT_BYTES,
+  formatStorageBytes,
+  storageInputToBytes,
+  bytesToStorageInput,
+} from "./storage-units";
+export type { StorageUnit };
 
-/** Byte count (decimal string per the wire contract) → short human size.
- *  Unknown/invalid → "—", never a fabricated 0 (§10: unknown renders —). */
-export function formatStorageBytes(value: string | null | undefined): string {
-  if (value == null) return ACCESS_COPY.unknownValue;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return ACCESS_COPY.unknownValue;
-  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
-    return `${n / STORAGE_UNIT_BYTES.TB} TB`;
-  }
-  if (n >= STORAGE_UNIT_BYTES.GB) {
-    const gb = n / STORAGE_UNIT_BYTES.GB;
-    return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
-  }
-  return `${Math.round(n / MB_BYTES)} MB`;
-}
+// ── Connectors (O-2 floors) ────────────────────────────────────────────────
 
-/** Admin-typed "{value} {unit}" → decimal byte string; empty/invalid → null
- *  (= no limit). Round-trips exactly for the whole-GB/TB values admins type. */
-export function storageInputToBytes(value: string, unit: StorageUnit): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return String(Math.round(n * STORAGE_UNIT_BYTES[unit]));
-}
+/** Every connector level, in ladder order. The builder RENDERS all of them —
+ *  §5.2's "shown, never hidden" — and disables the ones the starting point
+ *  cannot hold, exactly like the feature-level pills. */
+export const CONNECTOR_LEVELS: ReadonlyArray<ConnectorAccessLevel | "none"> = [
+  "none",
+  "read",
+  "read_write",
+];
 
-/** Byte string → the {value, unit} pair the numeric+unit control edits. */
-export function bytesToStorageInput(bytes: string | null): { value: string; unit: StorageUnit } {
-  if (bytes == null) return { value: "", unit: "GB" };
-  const n = Number(bytes);
-  if (!Number.isFinite(n) || n <= 0) return { value: "", unit: "GB" };
-  if (n >= STORAGE_UNIT_BYTES.TB && n % STORAGE_UNIT_BYTES.TB === 0) {
-    return { value: String(n / STORAGE_UNIT_BYTES.TB), unit: "TB" };
-  }
-  return { value: String(Math.round((n / STORAGE_UNIT_BYTES.GB) * 10) / 10), unit: "GB" };
-}
-
-// ── Connectors (O-2 floor) ─────────────────────────────────────────────────
-
-/** Selectable connector levels for a starting point — Read & write is only
- *  offered on Admin-based roles (O-2); the server re-clamps regardless. */
+/**
+ * SELECTABLE connector levels for a starting point. Mirrors the server's
+ * `clampConnectorLevel` (access-catalog.ts), which re-clamps regardless.
+ *
+ *   • Admin  — both levels. O-2: Read & write is Admin-only.
+ *   • Family — caps at Read.
+ *   • Guest  — none at all (WARP-1578). O-2's read floor is family-and-UP and
+ *     routes/erp.ts refuses a guest at the tier floor before the resolver is
+ *     even consulted, so a grant here is inert by construction. Offering it
+ *     would let an operator save a setting that silently does nothing.
+ */
 export function connectorLevelsFor(
   sp: AccessStartingPoint,
 ): Array<ConnectorAccessLevel | "none"> {
-  return sp === "admin" ? ["none", "read", "read_write"] : ["none", "read"];
+  if (sp === "admin") return ["none", "read", "read_write"];
+  if (sp === "guest") return ["none"];
+  return ["none", "read"];
+}
+
+/** The honest disabled reason for whatever this starting point cannot hold on
+ *  the connectors axis — the §12 `{Thing} is for {tier}s.` pattern, the same
+ *  shape as `floorBlockedReason`. `null` when nothing is blocked. */
+export function connectorFloorReason(sp: AccessStartingPoint): string | null {
+  if (sp === "guest") return `Connectors are for ${tierPlural("family")} and admins.`;
+  if (sp === "admin") return null;
+  return "Read & write is for admins.";
+}
+
+/** True when this starting point holds NO connector grant at all — the axis,
+ *  not just a level, is floor-blocked. */
+export function connectorAxisBlocked(sp: AccessStartingPoint): boolean {
+  return connectorLevelsFor(sp).every((level) => level === "none");
 }
 
 // ── Draft ⇄ wire ───────────────────────────────────────────────────────────
@@ -680,15 +728,22 @@ export function draftToRolePayload(draft: RoleDraft): AccessRolePayload {
     toolGrants.push({ domain: row.domain, level: row.level });
   }
 
-  const connectorGrants = Object.entries(draft.connectors)
-    .filter(([, level]) => level !== "none")
-    .map(([provider, level]) => ({
-      provider,
-      level:
-        level === "read_write" && draft.startingPoint !== "admin"
-          ? ("read" as ConnectorAccessLevel)
-          : (level as ConnectorAccessLevel),
-    }));
+  // Connectors — the O-2 floors, mirroring the server's clampConnectorLevel.
+  // A Guest-based role emits NO grant (WARP-1578): the server drops these
+  // unconditionally, so emitting them would make the sheet show a value the
+  // very next GET contradicts. The sheet discloses the removal rather than
+  // performing it silently.
+  const connectorAllowed = new Set(connectorLevelsFor(draft.startingPoint));
+  const connectorGrants = connectorAxisBlocked(draft.startingPoint)
+    ? []
+    : Object.entries(draft.connectors)
+        .filter(([, level]) => level !== "none")
+        .map(([provider, level]) => ({
+          provider,
+          level: (connectorAllowed.has(level)
+            ? level
+            : "read") as ConnectorAccessLevel,
+        }));
 
   // Usage — same untouched-verbatim rule as the tool axis (review F2):
   // the GB/TB input is lossy, so its parsed value only becomes the payload

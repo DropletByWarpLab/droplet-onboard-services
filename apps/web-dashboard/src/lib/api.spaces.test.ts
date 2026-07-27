@@ -78,3 +78,36 @@ describe("WARP-883 — Files spaces api", () => {
     await expect(fetchShares("/a.pdf")).resolves.toEqual([]);
   });
 });
+
+// WARP-1623 — the shared-only gate above was a WARP-883-era shape, from when
+// FileSpaceId was a two-member union. WARP-1261 widened it to `dept:<uuid>`
+// server-side and every other helper in api.ts followed (`space !== "personal"`);
+// fetchFiles did not, so a department listing silently resolved through PERSONAL
+// semantics and returned the caller's home root instead of the library.
+describe("WARP-1623 — fetchFiles carries every non-personal space", () => {
+  const DEPT = "dept:2f1c9a84-77d3-4a11-9a2e-6b0f5c1d8e42";
+
+  it("sends ?space=dept:<uuid> for a department space", async () => {
+    authFetchMock.mockResolvedValue(res([]));
+    await fetchFiles("/Q1", DEPT);
+    const url = authFetchMock.mock.calls[0][0] as string;
+    expect(url).toContain(`space=${encodeURIComponent(DEPT)}`);
+    expect(url).toContain("path=%2FQ1");
+  });
+
+  it("sends the space for a library ROOT listing, where the bug was visible", async () => {
+    // The switcher lands every space on "/". Without the param this resolved to
+    // rootForSpace("personal", "/") — the home root, with the library mount
+    // itself filtered out of the response by the personal-root hide filter.
+    authFetchMock.mockResolvedValue(res([]));
+    await fetchFiles("/", DEPT);
+    const url = authFetchMock.mock.calls[0][0] as string;
+    expect(url).toContain(`space=${encodeURIComponent(DEPT)}`);
+  });
+
+  it("still omits the param for personal, keeping that URL byte-identical", async () => {
+    authFetchMock.mockResolvedValue(res([]));
+    await fetchFiles("/Documents", "personal");
+    expect(authFetchMock.mock.calls[0][0]).toBe("/api/files?path=%2FDocuments");
+  });
+});

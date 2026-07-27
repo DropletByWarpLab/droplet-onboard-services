@@ -34,6 +34,27 @@ export interface JwtPayload {
    * access tokens self-expire in ≤15 min, refresh is refused outright.
    */
   sid?: string;
+  /**
+   * WARP-1582 — the holder's assigned custom access role at mint time.
+   *
+   * THREE-STATE, and the distinction is the safety property:
+   *
+   *   `undefined` — claim ABSENT. A legacy token, or a mint site that
+   *                 does not supply it. Means "unknown": every consumer
+   *                 must resolve against the database.
+   *   `null`      — claim PRESENT: this person holds no custom access
+   *                 role. The ONLY value a consumer may act on, and only
+   *                 to skip work (see `resolveToolAccessScope`).
+   *   `string`    — claim PRESENT and names a role. Observability only —
+   *                 the role's grants still have to be read, so nothing
+   *                 is ever authorised from this value.
+   *
+   * `null` and `undefined` collapse under `??`, `?.`, `!x` and JSON
+   * round-trips. Keeping them apart is deliberate: reading an absent
+   * claim as "no custom role" is a fail-OPEN bug that would drop the
+   * WARP-1529 per-role tool narrowing for every pre-deploy token.
+   */
+  accessRoleId?: string | null;
 }
 
 // Single source of truth for token lifetimes. Both the jwt `expiresIn` option
@@ -128,6 +149,11 @@ export function signAccessToken(user: {
   lastMfaAt?: string;
   /** WARP-247 — server-side session record id (sess:rec:{sid}). */
   sid?: string;
+  /** WARP-1582 — assigned custom access role, read from the User row at
+   *  mint time. Pass `null` for "no custom role"; OMIT the property when
+   *  the caller genuinely does not know, which keeps the old token shape
+   *  and makes consumers fall back to the database. */
+  accessRoleId?: string | null;
 }): string {
   return jwt.sign(
     {
@@ -139,6 +165,9 @@ export function signAccessToken(user: {
       // (and every existing caller) keep their current token shape.
       ...(user.lastMfaAt ? { lastMfaAt: user.lastMfaAt } : {}),
       ...(user.sid ? { sid: user.sid } : {}),
+      // WARP-1582 — `!== undefined`, NOT a truthiness test: `null` is a
+      // meaningful value here ("no custom role") and must be emitted.
+      ...(user.accessRoleId !== undefined ? { accessRoleId: user.accessRoleId } : {}),
       type: "access",
     },
     getSecret(),
@@ -204,6 +233,15 @@ export function verifyAccessToken(token: string): JwtPayload | null {
         ? { lastMfaAt: decoded.lastMfaAt }
         : {}),
       ...(typeof decoded.sid === "string" ? { sid: decoded.sid } : {}),
+      // WARP-1582 — surface the claim ONLY when it is well-formed: a
+      // string, or an explicit null. Anything else (a number, an object,
+      // a forged shape that survived signature verification because it
+      // was minted by us before a refactor) degrades to ABSENT, which
+      // routes the consumer back to the database. The fail-safe direction
+      // is "unknown", never the one value that permits skipping a read.
+      ...(typeof decoded.accessRoleId === "string" || decoded.accessRoleId === null
+        ? { accessRoleId: decoded.accessRoleId }
+        : {}),
     };
   } catch {
     return null;

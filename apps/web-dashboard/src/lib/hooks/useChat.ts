@@ -333,11 +333,29 @@ function friendlyErrorMessage(err: unknown): string {
  * 409 `turn_already_completed`). Without handling these, the reader sees a
  * non-stream body and the assistant bubble renders blank. We best-effort parse
  * the `{ error }` body (it mirrors `runSceneConfirmed` in api.ts) and give the
- * two well-known codes their own copy.
+ * well-known codes their own copy.
+ *
+ * The server's own `message` is deliberately NOT surfaced: these bodies are
+ * written for an operator reading logs, and this is a chat bubble. Codes map
+ * to copy here, the same way every other branch below does.
  */
 function friendlyPreStreamError(status: number, code: string | undefined): string {
   if (code === "forbidden_tool_for_role") {
     return "Your account isn't allowed to run that action. Ask an owner or admin to do it.";
+  }
+  if (code === "off_lan_blocked") {
+    // WARP-1578. T6's per-person cloud gate (451, cloud-access.service.ts)
+    // refuses a turn that would reach a cloud provider. Without this the
+    // refusal rendered as "Something went wrong… Try again." — untrue
+    // (a sovereignty control did exactly its job) and unactionable (the
+    // retry produces the identical refusal, forever).
+    //
+    // It names the off-box moment and both remedies, and names NEITHER limb
+    // of the AND-gate: cloud access needs the box's off-LAN channel AND a
+    // role that permits cloud models, the resolver returns one boolean, and
+    // guessing would send half these people to the wrong settings page.
+    // Same voice as the email surface's off-LAN copy (api.ts).
+    return "Cloud models leave your Droplet, and they're turned off for this account. Pick a model that runs on your Droplet, or ask an admin to allow cloud models.";
   }
   if (code === "turn_already_completed") {
     return "This reply already finished. Open the conversation again to see it.";

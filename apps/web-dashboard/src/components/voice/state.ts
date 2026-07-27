@@ -51,11 +51,53 @@ export function isVoiceBusyError(err: unknown): boolean {
   );
 }
 
+/* ── WARP-1599 · the admin kill switch ── */
+
+/**
+ * Is the assistant switched on?
+ *
+ * `enabled` is the AUTHORITATIVE field, never `state`: voice-io only
+ * reports `state: "off"` when the pipeline is absent, so an out-of-band
+ * edit of the on-box flag file can leave a switched-off box reporting
+ * `state: "listening"` until it restarts. Reading `enabled` cannot
+ * disagree with the switch.
+ *
+ * A missing field (an older box that predates the switch) and a missing
+ * payload (the loading flash before the first poll lands) both read as
+ * ON: a box we can't ask must never be rendered as deliberately
+ * silenced, which would tell a household the assistant was turned off
+ * when nobody touched it.
+ */
+export function isVoiceOn(status: VoiceStatusInfo | null | undefined): boolean {
+  return status?.enabled !== false;
+}
+
+/**
+ * WARP-1599 — true when a voice write failed because the orchestrator
+ * couldn't reach voice-io at all (its explicit 503 `voice_unavailable`).
+ *
+ * `throwVoiceError` (lib/api) puts that machine string in the Error's
+ * MESSAGE, so a handler that toasts `err.message` verbatim shows a
+ * household admin the words "voice_unavailable" — and the human copy
+ * written for exactly this case never fires. Callers use this to pick
+ * their own wording instead. Twin of lib/api's `isVoiceUnavailableError`
+ * (which the setup wizard's auto-skip keys on); it lives here for the
+ * same reason `isVoiceBusyError` does — component tests mock `@/lib/api`
+ * at the module boundary and would otherwise exercise a mock.
+ */
+export function isVoiceUnreachableError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "voice_unavailable"
+  );
+}
+
 export type VoiceHeroKind =
   | "calibrated"
   | "attention"
   | "broken"
-  | "uncalibrated";
+  | "uncalibrated"
+  | "off";
 export type VoiceBrokenCause = "no_mic" | "flatlined" | "unavailable";
 export type VoiceDriftCause = "wake" | "noise" | "flags";
 
@@ -71,12 +113,21 @@ export function deriveVoiceSurfaceState(args: {
   status: VoiceStatusInfo | null;
   calibration: VoiceCalibrationInfo | null;
   unavailable: boolean;
+  /** WARP-1599 — the kill switch, via `isVoiceOn`. */
+  enabled: boolean;
   noiseSustained: boolean;
   nowS: number;
 }): VoiceSurfaceState {
-  const { status, calibration, unavailable, noiseSustained, nowS } = args;
+  const { status, calibration, unavailable, enabled, noiseSustained, nowS } =
+    args;
 
   if (unavailable) return { kind: "broken", brokenCause: "unavailable" };
+  // WARP-1599 — the switch outranks everything the pipeline could say
+  // about itself, because while it's off there IS no pipeline: a mic
+  // fault, a wedged processor or drifted calibration are all reports on
+  // something that isn't running. Only `unavailable` beats it — a box
+  // we can't reach hasn't told us the switch state at all.
+  if (!enabled) return { kind: "off" };
   if (!status) return { kind: "uncalibrated" };
   if (status.state === "no_mic") return { kind: "broken", brokenCause: "no_mic" };
   if (status.input_flatlined) return { kind: "broken", brokenCause: "flatlined" };

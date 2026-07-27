@@ -29,11 +29,15 @@ import {
   formatStorageBytes,
   storageInputToBytes,
   connectorLevelsFor,
+  dependencyBlockedReason,
+  CONNECTOR_LEVELS,
+  connectorFloorReason,
   draftToRolePayload,
   roleToDraft,
   blankRoleDraft,
 } from "./access";
 import type { AccessRole } from "./types";
+import { ACCESS_COPY } from "@/components/access/copy";
 
 describe("tier ladder + display labels (§0.1 — family displays as Staff)", () => {
   it("ranks guest < family < admin < owner", () => {
@@ -91,6 +95,50 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
   it("files is the deep-link reference row (per-library rights owned by Departments)", () => {
     const files = GATEABLE_FEATURES.find((f) => f.moduleId === "files")!;
     expect(files.filesReference).toBe(true);
+  });
+
+  // ── WARP-1585 — declared dependencies mirror the orchestrator registry ──
+  //
+  // The server's `ModuleDef.requires` is the authority (the §3 resolver drops
+  // a feature whose parent the person does not hold). This copy exists only so
+  // the builder can say so before they save, so the two MUST agree: docs
+  // requires files, and nothing else declares a parent.
+  it("docs requires files; knowledge stands alone", () => {
+    const docs = GATEABLE_FEATURES.find((f) => f.moduleId === "docs")!;
+    expect(docs.requires).toBe("files");
+    expect(docs.requiresReason).toBe(ACCESS_COPY.docsNeedsFiles);
+    // Knowledge reads the box's own chunk store behind the file indexer and
+    // has its own page — it is NOT downstream of the file library, and its
+    // toggle has to mean exactly what it says.
+    expect(GATEABLE_FEATURES.find((f) => f.moduleId === "knowledge")!.requires).toBeUndefined();
+    expect(
+      ACCESS_FEATURES.filter((f) => f.requires).map((f) => f.moduleId),
+    ).toEqual(["docs"]);
+  });
+
+  it("every declared parent is a real gateable feature, never self-referential", () => {
+    for (const f of ACCESS_FEATURES) {
+      if (!f.requires) continue;
+      expect(f.requires).not.toBe(f.moduleId);
+      expect(GATEABLE_FEATURES.some((g) => g.moduleId === f.requires)).toBe(true);
+      // A dependency without a reason is a hidden block, which is the thing
+      // WARP-1585 exists to remove.
+      expect(f.requiresReason && f.requiresReason.length > 0).toBe(true);
+    }
+  });
+
+  it("dependencyBlockedReason reads the draft and never writes it", () => {
+    const docs = GATEABLE_FEATURES.find((f) => f.moduleId === "docs")!;
+    const knowledge = GATEABLE_FEATURES.find((f) => f.moduleId === "knowledge")!;
+    const off = { files: { on: false, level: "view" as const }, docs: { on: true, level: "manage" as const } };
+    expect(dependencyBlockedReason(off, docs)).toBe(ACCESS_COPY.docsNeedsFiles);
+    // The operator's stored Documents intent is untouched — blocking is a
+    // rendering decision, not an edit (the T8 untouched-axis convention).
+    expect(off.docs).toEqual({ on: true, level: "manage" });
+    const on = { ...off, files: { on: true, level: "view" as const } };
+    expect(dependencyBlockedReason(on, docs)).toBeNull();
+    // A feature with no declared parent is never blocked by this path.
+    expect(dependencyBlockedReason(off, knowledge)).toBeNull();
   });
 
   it("every tools-core domain except erp appears in exactly one on-box group", () => {
@@ -175,10 +223,27 @@ describe("slug + storage formatting (BigInt strings never lossy)", () => {
 });
 
 describe("connector levels (O-2 — Read & write only on Admin-based roles)", () => {
-  it("caps non-admin starting points at Read", () => {
+  it("caps Family-based starting points at Read", () => {
     expect(connectorLevelsFor("family")).toEqual(["none", "read"]);
-    expect(connectorLevelsFor("guest")).toEqual(["none", "read"]);
     expect(connectorLevelsFor("admin")).toEqual(["none", "read", "read_write"]);
+  });
+
+  // WARP-1578 — the Guest floor. O-2's read floor is family-and-UP and
+  // routes/erp.ts refuses a guest at the tier floor BEFORE the resolver is
+  // even read, so a connector grant on a Guest-based role can never take
+  // effect. Offering it lets an operator save a setting that silently does
+  // nothing. Mirrors the server's clampConnectorLevel().
+  it("offers Guest-based roles no connector level at all", () => {
+    expect(connectorLevelsFor("guest")).toEqual(["none"]);
+  });
+
+  it("names the floor honestly — shown disabled, never hidden (§5.2)", () => {
+    // Every level stays RENDERABLE; `connectorLevelsFor` says which are
+    // SELECTABLE, and the builder disables the rest with this reason.
+    expect(CONNECTOR_LEVELS).toEqual(["none", "read", "read_write"]);
+    expect(connectorFloorReason("guest")).toBe("Connectors are for staff and admins.");
+    expect(connectorFloorReason("family")).toBe("Read & write is for admins.");
+    expect(connectorFloorReason("admin")).toBeNull();
   });
 });
 
@@ -221,6 +286,16 @@ describe("draft → API payload (absent row = OFF; always-on rows never sent)", 
     draft.connectors.eaglesoft = "read_write";
     const payload = draftToRolePayload(draft);
     expect(payload.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  it("drops connector grants entirely on a Guest-based draft (WARP-1578)", () => {
+    // Not a client-side policy call: the server's normalizeGrants drops these
+    // unconditionally, so emitting them would make the builder show a value
+    // the very next GET contradicts. The sheet discloses the removal.
+    const draft = blankRoleDraft("guest");
+    draft.connectors.eaglesoft = "read";
+    draft.connectors["eaglesoft-api"] = "read_write";
+    expect(draftToRolePayload(draft).connectorGrants).toEqual([]);
   });
 
   it("string-encodes storage and leaves empty usage fields null", () => {

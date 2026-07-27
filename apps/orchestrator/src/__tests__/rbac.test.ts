@@ -17,7 +17,7 @@
  * header through `authMiddleware` end-to-end to prove the existing
  * service-principal flow still works after the guards are wired in.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
 
@@ -315,8 +315,33 @@ const MATRIX: GuardedRoute[] = [
  * decide whether the guard let the request through (200) or rejected
  * it (403). No real route logic runs — this is a pure middleware
  * matrix harness.
+ *
+ * WARP-1584: memoised per principal. This used to build a fresh app —
+ * ~82 `requireRole` closures and route registrations — inside EVERY one
+ * of the 410 matrix test bodies, so one run churned through >33,000 route
+ * layers. The app depends only on the principal, of which there are six,
+ * and every handler is stateless, so caching is behaviour-preserving.
+ *
+ * Churn reduction only — this is NOT the fix for the worker crash, and
+ * was measured not to be. The crash is a Node 24 artifact on Windows: it
+ * reproduces at the same rate with or without this cache (~2/6 before,
+ * ~5/15 after), it reproduces in a synthetic file that does nothing but
+ * N supertest requests against a trivial Express app, and it does not
+ * reproduce at all under Node 20 — the version CI runs — where this file
+ * passed 10/10. See the census note at the bottom of this file for the
+ * full measurement, and rbac-census.guard.test.ts for the layers that
+ * make a crash loud instead of silent.
  */
+const MATRIX_APPS = new Map<string, express.Express>();
+
+const principalKey = (user: AuthUser | null) =>
+  user ? `${user.role}` : "__no-session__";
+
 function buildMatrixApp(user: AuthUser | null): express.Express {
+  const key = principalKey(user);
+  const cached = MATRIX_APPS.get(key);
+  if (cached) return cached;
+
   const app = express();
   app.use(express.json());
 
@@ -334,6 +359,7 @@ function buildMatrixApp(user: AuthUser | null): express.Express {
     });
   }
   app.use("/api", router);
+  MATRIX_APPS.set(key, app);
   return app;
 }
 
@@ -716,4 +742,97 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
       else process.env.BRIDGE_AUTH_TOKEN = prevToken;
     }
   });
+});
+
+// ── WARP-1584 completion census ────────────────────────────────────
+//
+// This file decides who may call ~82 guarded routes. It worker-crashed
+// non-deterministically, and a crashed run had already reported
+//
+//     Tests  316 passed (496)
+//
+// 316 green, 180 never asked, nothing in the file noticed.
+//
+// What the crash actually is, measured rather than assumed:
+//
+//   * Node 20 (what CI runs): 10/10 clean. Not a CI condition today.
+//   * Node 24 on Windows: ~1 run in 3 dies, at a UNIFORMLY RANDOM point
+//     (test 9 in one run, 160 and 180 and 316 in others), with no error,
+//     no stack, and no Node diagnostic report even under
+//     --report-on-fatalerror. The child simply exits.
+//   * It is not this file's logic. A synthetic file that does nothing but
+//     500 supertest GETs against a trivial Express app dies 4/6; a 60-test
+//     file with no HTTP dies 0/10; a 73-test route suite dies 0/8. It
+//     tracks HTTP request volume in one worker, nothing else.
+//   * Neither memoising the app (above) nor a persistent server plus a
+//     keep-alive agent moved the rate for THIS file, though keep-alive did
+//     fix the synthetic repro 18/18 — so the remaining trigger is upstream
+//     of the test code. Left for a follow-up rather than guessed at here.
+//
+// vitest.config.ts pins the `forks` pool so a worker death is REPORTED
+// instead of a silent exit 127. None of that makes the file itself notice
+// being cut short — this census does.
+//
+// It cannot catch a hard worker death; an afterAll dies with its worker.
+// It catches every truncation the process SURVIVES: a --bail, a describe
+// that failed to register, a collection cut short, a test left unrun.
+// src/__tests__/rbac-census.guard.test.ts holds the layers that must
+// outlive this file's worker, including the static ban on .skip / .only.
+
+/**
+ * Hand-written (non-generated) test count, by block:
+ *   3  RBAC guard — negative cases
+ *   5  service-principal regression
+ *  65  switch router wiring — 13 mutating routes × 5 principals
+ *   8  switch status GETs — 4 paths × 2 roles
+ *   5  system-reset wiring — 3 denied roles + no-session + owner
+ *
+ * Adding an `it()` to any of those blocks must bump this number. That
+ * friction is the point: an untracked test in the RBAC matrix means the
+ * census can no longer tell "the run finished" from "the run stopped".
+ */
+const HAND_WRITTEN_TESTS = 3 + 5 + 65 + 8 + 5;
+
+/** The generated grid plus the hand-written blocks. */
+const EXPECTED_TESTS = MATRIX.length * ALL_ROLES.length + HAND_WRITTEN_TESTS;
+
+interface CensusTask {
+  name: string;
+  type?: string;
+  mode?: string;
+  tasks?: CensusTask[];
+  result?: { state?: string };
+}
+
+function flattenTests(task: CensusTask): CensusTask[] {
+  if (task.tasks && task.tasks.length > 0) return task.tasks.flatMap(flattenTests);
+  return [task];
+}
+
+afterAll((suite) => {
+  const tests = flattenTests(suite as unknown as CensusTask);
+
+  expect(
+    tests.length,
+    `RBAC census: collected ${tests.length} tests, expected ${EXPECTED_TESTS} ` +
+      `(${MATRIX.length} routes × ${ALL_ROLES.length} roles + ${HAND_WRITTEN_TESTS} ` +
+      "hand-written). A LOWER number means part of the matrix never " +
+      "registered — the file is under-enforcing. A HIGHER number means a " +
+      "test was added without updating HAND_WRITTEN_TESTS (WARP-1584).",
+  ).toBe(EXPECTED_TESTS);
+
+  // A test with no result that was not skipped never ran. Skipped is
+  // tolerated because `-t` marks non-matching tests skip and a worker
+  // cannot see that filter; the guard file's static .skip/.only ban is
+  // what keeps that tolerance safe.
+  const unrun = tests
+    .filter((t) => t.mode !== "skip" && t.mode !== "todo" && !t.result?.state)
+    .map((t) => t.name);
+
+  expect(
+    unrun,
+    `RBAC census: ${unrun.length} collected test(s) never ran and were never ` +
+      "skipped — this run was truncated. Every route × role pair listed here " +
+      "is currently UNENFORCED by CI (WARP-1584).",
+  ).toEqual([]);
 });

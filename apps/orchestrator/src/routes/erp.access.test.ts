@@ -110,9 +110,21 @@ function buildApp(
   return app;
 }
 
-/** Resolver output carrying only what the ERP gate reads. */
-function access(tier: string, connectors: Record<string, "read" | "read_write">) {
-  return { tier, connectors, cloud: false, features: [], toolDomains: [] };
+/**
+ * Resolver output carrying only what the ERP gates read.
+ *
+ * `connectors` is the §3 EFFECTIVE level — `min(roleGrant, writeEnabled ?
+ * read_write : read)`. `connectorGrants` is the WARP-1579 addition: the RAW
+ * role grant, before that min(). It defaults to `null` — "no custom role
+ * narrows this axis" — so every pre-existing case below keeps modelling a
+ * role-LESS person and keeps its pre-1579 answer.
+ */
+function access(
+  tier: string,
+  connectors: Record<string, "read" | "read_write">,
+  connectorGrants: Record<string, "read" | "read_write"> | null = null,
+) {
+  return { tier, connectors, connectorGrants, cloud: false, features: [], toolDomains: [] };
 }
 
 const OK_READ = { connected: false, reason: "NOT_CONFIGURED", date: "2026-07-25", items: [] };
@@ -337,7 +349,7 @@ describe("ERP writes — admin-tier only, unchanged above that (WARP-1530)", () 
     expect(svcMock.confirmWriteRequest).toHaveBeenCalledWith("wr-1", expect.anything());
   });
 
-  it("the write path never widens on a connector grant level — writeEnabled stays the service's call", async () => {
+  it("the write path never NARROWS on the EFFECTIVE level — writeEnabled stays the service's call", async () => {
     // `connectors[p]` folds `writeEnabled` into the level via min(), so the
     // route deliberately does NOT gate writes on "read_write": doing so would
     // mask the honest 409 WRITE_NOT_ENABLED with a misleading 403.
@@ -357,5 +369,266 @@ describe("ERP writes — admin-tier only, unchanged above that (WARP-1530)", () 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("WRITE_NOT_ENABLED");
     expect(svcMock.createWriteRequest).toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-1579 — "read-only Admin" becomes expressible, and the write path stops
+ * ignoring the grant.
+ *
+ * T6 shipped the read half of O-2 and left the write path authorising off the
+ * TIER alone, so an Admin-based role holding a deliberately read-only ERP
+ * connector grant could still stage and confirm writes. A grant level the
+ * enforcement ignores is a false statement in the admin UI, so the fix reads
+ * the grant.
+ *
+ * The RAW grant is what it must read, never `connectors[p]`: that field is
+ * `min(grant, connection.writeEnabled ? read_write : read)`, so a `read` there
+ * is ambiguous between "the role is read-only" (a 403, honestly) and "the
+ * CONNECTION has writes off" (today's 409 `WRITE_NOT_ENABLED`, which names the
+ * actual remedy). Collapsing those two into one 403 would trade this bug for a
+ * lie — the two tests directly above pin the 409 and stay green.
+ *
+ * Layer 1 is untouched: `requireRole("owner","admin")`, admin-tier only.
+ */
+describe("ERP writes — the connector grant LEVEL is enforced (WARP-1579)", () => {
+  const WRITE_BODY = { command: "reschedule_appointment", params: {} };
+
+  it("SECURITY FIX: an Admin-based role with a READ-ONLY grant cannot stage a write", async () => {
+    // The connection allows writes (so the honest 409 is NOT the answer) and
+    // the role deliberately says read-only. min() flattens that to "read" in
+    // `connectors`; only `connectorGrants` still carries the operator's intent.
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read" },
+        { [EAGLESOFT_PROVIDER]: "read" },
+      ),
+    );
+    const app = buildApp({ id: "u-readonly-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("FORBIDDEN");
+    expect(svcMock.createWriteRequest).not.toHaveBeenCalled();
+    expect(recordAccessDeniedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "erp-connector-grant-read-only",
+    );
+  });
+
+  it("…and cannot confirm one either — every write verb carries the gate", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read" },
+        { [EAGLESOFT_PROVIDER]: "read" },
+      ),
+    );
+    const app = buildApp({ id: "u-readonly-admin", role: "admin" });
+
+    const confirm = await request(app).post("/api/erp/write-requests/wr-1/confirm");
+    expect(confirm.status).toBe(403);
+    expect(svcMock.confirmWriteRequest).not.toHaveBeenCalled();
+
+    const read = await request(app).get("/api/erp/write-requests/wr-1");
+    expect(read.status).toBe(403);
+    expect(svcMock.getWriteRequest).not.toHaveBeenCalled();
+  });
+
+  it("…and the SAME role still READS — which is what makes 'read-only Admin' a real thing", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read" },
+        { [EAGLESOFT_PROVIDER]: "read" },
+      ),
+    );
+    const app = buildApp({ id: "u-readonly-admin", role: "admin" });
+
+    const res = await request(app).get("/api/erp/schedule");
+
+    expect(res.status).toBe(200);
+    expect(svcMock.getSchedule.mock.calls.at(-1)![1]).toMatchObject({
+      role: "admin",
+      connectorLevel: "read",
+    });
+  });
+
+  it("a read_write grant writes — the level is a level, not a ban", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read_write" },
+        { [EAGLESOFT_PROVIDER]: "read_write" },
+      ),
+    );
+    const app = buildApp({ id: "u-ops-admin", role: "admin" });
+
+    const staged = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+    expect(staged.status).toBe(201);
+
+    const confirmed = await request(app).post("/api/erp/write-requests/wr-1/confirm");
+    expect(confirmed.status).toBe(200);
+  });
+
+  it("a read_write grant on a write-DISABLED connection still gets the honest 409, not a 403", async () => {
+    // The grant permits writes; the connection does not. `connectors` mins to
+    // "read", but the RAW grant is read_write, so the gate must let this
+    // through and leave the diagnosis to the service.
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read" },
+        { [EAGLESOFT_PROVIDER]: "read_write" },
+      ),
+    );
+    svcMock.createWriteRequest.mockRejectedValue(ErpError.writeNotEnabled());
+    const app = buildApp({ id: "u-ops-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("WRITE_NOT_ENABLED");
+  });
+
+  it("an Admin-based role with NO ERP grant cannot write (it cannot read either — §3)", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(access("admin", {}, {}));
+    const app = buildApp({ id: "u-narrowed-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("FORBIDDEN");
+    expect(recordAccessDeniedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "erp-connector-grant-missing",
+    );
+  });
+
+  it("…but NOT when nothing is connected — 'there is nothing to write to' is not an authz answer", async () => {
+    // Mirrors the read gate exactly: with no IntegrationConnection row the
+    // resolver reports {} for everyone, so a grantless role is indistinguishable
+    // from a granted one. The service's honest NOT_CONFIGURED must win.
+    resolveEffectiveAccessMock.mockResolvedValue(access("admin", {}, {}));
+    svcMock.createWriteRequest.mockRejectedValue(ErpError.notConfigured(EAGLESOFT_PROVIDER));
+    const app = buildApp({ id: "u-admin", role: "admin" }, { connectionConfigured: false });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).not.toBe(403);
+    expect(svcMock.createWriteRequest).toHaveBeenCalled();
+  });
+
+  it("an owner bypasses layer 2 — never resolved, never narrowed (§3)", async () => {
+    const app = buildApp({ id: "u-owner", role: "owner" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(201);
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("a role-LESS admin writes exactly as today (connectorGrants: null = nothing narrows)", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("admin", { [EAGLESOFT_PROVIDER]: "read_write" }),
+    );
+    const app = buildApp({ id: "u-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(201);
+  });
+
+  it("falls back to today's floor when the resolver is unavailable — the narrowing half stays SOFT", async () => {
+    // T6's stated rule for this axis: the widening is hard-closed, the
+    // narrowing is deliberately soft, so it is NOT an availability-independent
+    // control. A resolver outage restores today's admin-tier write reach
+    // rather than locking the box out of its own ERP.
+    resolveEffectiveAccessMock.mockRejectedValue(new Error("db down"));
+    const app = buildApp({ id: "u-readonly-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(201);
+  });
+
+  // ── the soft fall-back is a THROW, and only a throw ──────────────
+  //
+  // `resolveEffectiveAccess` returns null for "no such user" — a session that
+  // outlived its User row, which `requireAuth` cannot catch because `req.user`
+  // is built from JWT claims alone. That is a SUCCESSFUL read with a negative
+  // answer, not an outage, and the READ gate already refuses it. Treating it
+  // as a resolver failure would make writes strictly MORE permissive than
+  // reads for the same person.
+
+  it("a session that outlived its User row is refused — writes are never softer than reads", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(null);
+    const app = buildApp({ id: "u-deleted", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(svcMock.createWriteRequest).not.toHaveBeenCalled();
+    expect(recordAccessDeniedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "erp-connector-grant-missing",
+    );
+
+    // …and the READ gate answers identically for the same principal, which is
+    // the property being pinned: one fact, one answer, both directions.
+    const read = await request(app).get("/api/erp/schedule");
+    expect(read.status).toBe(403);
+  });
+
+  it("…but with nothing connected it still falls through — same exception the read gate makes", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(null);
+    svcMock.createWriteRequest.mockRejectedValue(ErpError.notConfigured(EAGLESOFT_PROVIDER));
+    const app = buildApp({ id: "u-deleted", role: "admin" }, { connectionConfigured: false });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).not.toBe(403);
+    expect(svcMock.createWriteRequest).toHaveBeenCalled();
+  });
+
+  it("an absent connectorGrants field does NOT read as 'nothing narrows' — the tri-state fails CLOSED", async () => {
+    // Production cannot produce this today (`connectorGrants` is a required
+    // field on EffectiveAccessResult and both compose branches set it), but
+    // the gate must not be one field-rename or one partial select away from
+    // handing back full write reach. `undefined` is not a statement that this
+    // person is unnarrowed, so it gets the grant-absent denial, not a pass.
+    const { connectorGrants: _omitted, ...withoutGrants } = access(
+      "admin",
+      { [EAGLESOFT_PROVIDER]: "read_write" },
+      { [EAGLESOFT_PROVIDER]: "read_write" },
+    );
+    resolveEffectiveAccessMock.mockResolvedValue(withoutGrants);
+    const app = buildApp({ id: "u-admin", role: "admin" });
+
+    const res = await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(res.status).toBe(403);
+    expect(svcMock.createWriteRequest).not.toHaveBeenCalled();
+  });
+
+  it("the grant level rides down to the service as the RAW grant, beside the effective level", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access(
+        "admin",
+        { [EAGLESOFT_PROVIDER]: "read_write" },
+        { [EAGLESOFT_PROVIDER]: "read_write" },
+      ),
+    );
+    const app = buildApp({ id: "u-ops-admin", role: "admin" });
+
+    await request(app).post("/api/erp/write-requests").send(WRITE_BODY);
+
+    expect(svcMock.createWriteRequest.mock.calls.at(-1)![1]).toMatchObject({
+      id: "u-ops-admin",
+      role: "admin",
+      connectorGrantLevel: "read_write",
+    });
   });
 });

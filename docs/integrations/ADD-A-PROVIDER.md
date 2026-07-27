@@ -1,7 +1,7 @@
 # Adding a new integration provider — developer guide
 
 > **Audience:** an engineer adding a new integration (a second PMS, an accounting system, a generic ODBC ERP).
-> **Prereq reading:** [`README.md`](README.md) (architecture) and the build spec `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md`.
+> **Prereq reading:** [`README.md`](README.md) (architecture) and [`eaglesoft.md`](eaglesoft.md) (provider reference). The `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md` build spec is an unpublished working doc (not in-repo); the two in-repo docs above are the authority.
 > **Reference implementation:** Eaglesoft (`services/erp-connector/`, provider #1). Copy its shape.
 
 The orchestrator service + route layer and the dashboard hub are **provider-agnostic** — you rarely touch them. Adding a provider is mostly: implement the `Connector`, declare its read/write operations, provision its least-privilege accounts, expose tools, and add dashboard metadata.

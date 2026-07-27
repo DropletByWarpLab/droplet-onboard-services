@@ -128,6 +128,11 @@ interface ResolvedUser {
   username: string;
   displayName: string;
   role: Role;
+  /** WARP-1582 — assigned custom access role at sign-in time, `null` for
+   *  none. Every branch below already holds the full User row, so this
+   *  costs no extra read; it rides into the access token so the chat path
+   *  can skip its per-turn lookup. */
+  accessRoleId: string | null;
 }
 
 /**
@@ -190,6 +195,7 @@ async function ensureLinkedUser(
       username: existing.user.username,
       displayName: existing.user.displayName,
       role: existing.user.role as Role,
+      accessRoleId: existing.user.accessRoleId ?? null,
     };
   }
 
@@ -232,6 +238,7 @@ async function ensureLinkedUser(
       username: byEmail.username,
       displayName: byEmail.displayName,
       role: byEmail.role as Role,
+      accessRoleId: byEmail.accessRoleId ?? null,
     };
   }
 
@@ -257,6 +264,7 @@ async function ensureLinkedUser(
     username: created.username,
     displayName: created.displayName,
     role: created.role as Role,
+    accessRoleId: created.accessRoleId ?? null,
   };
 }
 
@@ -457,6 +465,8 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         displayName: user.displayName,
         role: user.role,
         sid,
+        // WARP-1582 — the resolved row's custom access role (null = none).
+        accessRoleId: user.accessRoleId,
       });
       const refreshToken = signRefreshToken({
         id: user.id,
