@@ -13,7 +13,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useSharedWithMe, useSharedByMe } from "@/lib/hooks/useShares";
+import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
+import { LibraryChip } from "@/components/FileManager/FileListSimple";
 import type { ShareDetail } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 
@@ -55,6 +57,12 @@ export default function SharedPage() {
   // WARP-941 — real outbound listing (GET /api/files/shares-by-me) replaces
   // the old "Outbound shares coming soon" placeholder.
   const byMe = useSharedByMe();
+  // WARP-1549 — share rows kept only the basename, so a shared file gave no
+  // hint of where it lives, let alone which library. Both tabs carry
+  // home-relative paths for the CURRENT user (inbound rows are the recipient's
+  // own mount target, outbound rows the owner's own path), so both resolve
+  // against this viewer's space list.
+  const attribution = useSpaceAttribution();
   const { toast } = useToast();
 
   // WARP-1555: read every state off the tab's own hook — including `error`,
@@ -165,6 +173,15 @@ export default function SharedPage() {
             {visibleShares.map((share) => {
               const { label, icon: TypeIcon } = formatShareType(share.shareType);
               const fileName = (share.path || "").split("/").pop() || share.path;
+              // WARP-1549: the parent path used to be thrown away by the
+              // `.split("/").pop()` above — two files with the same name were
+              // indistinguishable. It comes back here, expressed inside its
+              // own library when we can place it.
+              const library = share.path ? attribution.label(share.path) : null;
+              const parent = share.path ? attribution.location(share.path) : null;
+              // A bare "/" adds nothing — it's the root of wherever the row
+              // already says it is.
+              const location = parent && parent !== "/" ? parent : null;
               return (
                 <div key={share.id} className="lrow" style={{ padding: "12px 16px" }}>
                   <span className="ri brand">
@@ -177,8 +194,13 @@ export default function SharedPage() {
                       {" · "}
                       {label}
                       {share.stime ? ` · ${formatStime(share.stime)}` : ""}
+                      {location ? ` · ${location}` : ""}
                     </span>
                   </span>
+                  {/* Its own flex child of `.lrow`, not nested inside `.nm` —
+                      that span owns the filename's ellipsis truncation and
+                      turning it into a flex container would break it. */}
+                  {library && <LibraryChip label={library} />}
                   {share.url && (
                     <a
                       href={share.url}

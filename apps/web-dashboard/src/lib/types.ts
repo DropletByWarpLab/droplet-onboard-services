@@ -305,6 +305,18 @@ export interface DeviceInfo {
 
 // --- File types ---
 
+/**
+ * A file or folder as every listing endpoint returns it. `path` is always
+ * HOME-relative — groupfolders mount inside each member's home, so a library
+ * file's path is "/Finance/Q1/plan.xlsx", not a separate namespace.
+ *
+ * WARP-1549 deliberately did NOT add a `space`/`spaceName` field here. Which
+ * library a path belongs to is derived at render time from the caller's own
+ * space list (`lib/space-attribution.ts`), so it can never keep asserting a
+ * library after the membership behind it is revoked. The rationale, and what
+ * a backend-populated field would still be good for (MCP and mobile, which
+ * have no `useSpaces()`), is written up at the top of that module.
+ */
 export interface FileEntryInfo {
   name: string;
   path: string;
