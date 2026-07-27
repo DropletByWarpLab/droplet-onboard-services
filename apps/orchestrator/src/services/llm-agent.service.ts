@@ -782,7 +782,8 @@ function accumulateToolCall(
  *   `deferContent` (WARP-1602): a turn that advertised tools may resolve to
  *   `tool_calls`, and then its content is analysis, not an answer — so it is
  *   held until the turn's shape is known and quarantined if tool calls landed.
- * - `delta.reasoning_content` (gpt-oss channel) → accumulate; emit as ONE
+ * - the provider reasoning channel (`reasoning` | `reasoning_content` |
+ *   `thinking` — see `providerReasoningOf`) → accumulate; emit as ONE
  *   `reasoning_step` BEFORE the first content_delta (WARP-458 ordering), and
  *   ONLY on a terminal (non-tool-call) turn — a tool-call turn's reasoning is
  *   emitted by the LOOP instead (one site for both transports, WARP-1602).
@@ -792,6 +793,45 @@ function accumulateToolCall(
  *   stream down (the `for await` calls `.return()`), then throw so the loop
  *   returns the aborted terminal.
  */
+/**
+ * The provider-native reasoning text on one stream delta, whatever the
+ * provider calls it.
+ *
+ * WARP-1613. Three spellings are in play and we only read one of them:
+ * - `reasoning` — **Ollama's OpenAI-compat layer** (`ollama/openai/openai.go`
+ *   declares `Reasoning string \`json:"reasoning,omitempty"\`` on the delta
+ *   message and fills it from `r.Message.Thinking`). This is the one we were
+ *   missing, and it is the one gpt-oss uses on our shipped transport.
+ * - `reasoning_content` — LiteLLM / OpenAI o-series / Anthropic extended
+ *   thinking; the only name previously read (WARP-458).
+ * - `thinking` — Ollama's NATIVE `/api/chat` shape. Not on our transport
+ *   today; tolerated so switching later needs no change here.
+ *
+ * Returns "" when none is present, so callers can treat it as falsy.
+ *
+ * SCOPED TO THE STREAMING DELTA ON PURPOSE. The blocking path takes the
+ * provider's message verbatim (`asst = choice.message`), and on `ChatMessage`
+ * the name `reasoning` is already OURS — the parsed trace the route persists —
+ * while `reasoning_content` is the provider's. If Ollama also sets `reasoning`
+ * on a non-streaming message, those two meanings collide on one field, and
+ * whether that is harmless (provider text lands in the field we persist
+ * anyway) or a double-count depends on Ollama's actual blocking shape, which
+ * is not established here. Streaming is the shipped dashboard path (WARP-1442)
+ * and the only one with a live reproduction, so the fix stops there. Resolving
+ * the blocking path needs a capture from a real box.
+ */
+export function providerReasoningOf(delta: {
+  reasoning?: string | null;
+  reasoning_content?: string | null;
+  thinking?: string | null;
+}): string {
+  let out = "";
+  for (const v of [delta.reasoning, delta.reasoning_content, delta.thinking]) {
+    if (typeof v === "string" && v) out += v;
+  }
+  return out;
+}
+
 async function consumeChatStream(
   stream: AsyncIterable<ChatStreamChunk>,
   opts: {
@@ -845,8 +885,16 @@ async function consumeChatStream(
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta ?? {};
-      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
-        reasoningBuf += delta.reasoning_content;
+      // WARP-1613 — read every spelling the provider fleet uses. Ollama's
+      // OpenAI-compat layer emits `reasoning`; LiteLLM/cloud emit
+      // `reasoning_content`; native `/api/chat` emits `thinking`. Only the
+      // middle one was read, so gpt-oss's analysis channel arrived under a
+      // name nothing looked at. At most one is populated per delta in
+      // practice; concatenating in a fixed order is well-defined even if a
+      // provider ever sends two.
+      const deltaReasoning = providerReasoningOf(delta);
+      if (deltaReasoning) {
+        reasoningBuf += deltaReasoning;
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {
