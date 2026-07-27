@@ -26,12 +26,19 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { CitationCard } from "@/components/citations/CitationCard";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
-import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
+import { ThinkingMessage } from "@/components/chat/ThinkingMessage";
+import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
 
 // ReasoningDisclosure ("Thought process") moved to
 // @/components/chat/ReasoningDisclosure (WARP-934) so the in-app chat and the
 // first-run AI setup step render the model's reasoning identically.
+//
+// WARP-1605 — it is no longer rendered from here directly: a turn that
+// produced reasoning emits a separate THINKING message row (<ThinkingMessage>,
+// which owns the disclosure and the tool-call chips) ABOVE the answer bubble,
+// so the answer visibly starts as a new message. Turns with no reasoning are
+// untouched — same single bubble, chips and all.
 
 /**
  * "Droplet is thinking" indicator (design handoff Option B) — the faceted
@@ -134,6 +141,13 @@ export const ChatMessage = memo(function ChatMessage({
   const isUser = message.role === "user";
   const toolCalls = message.toolCalls;
   const hasToolCalls = !isUser && toolCalls && toolCalls.length > 0;
+  // WARP-1605 — per-agent-step view of this turn's thinking. `[]` for a user
+  // turn, for a turn that produced no reasoning, and for every pre-WARP-1602
+  // row whose thinking was fused into `content` (nothing to split; those
+  // render exactly as they were persisted). A non-empty list promotes the
+  // thinking into its own message row above the answer.
+  const reasoningSteps = !isUser ? splitReasoningSteps(message.reasoning) : [];
+  const hasThinking = reasoningSteps.length > 0;
   // failureKind unifies live and loaded failure states. Live errors map
   // to "failed"; live stops map to "aborted". For loaded messages the
   // hook sets failureKind directly.
@@ -176,11 +190,43 @@ export const ChatMessage = memo(function ChatMessage({
     ? toolCalls?.find((c) => c.status === "confirmation_required")
     : undefined;
 
+  // WARP-1605 — the chip row. Rendered inside the thinking message when this
+  // turn has one (tool calls ARE process, not answer), and in the answer
+  // bubble otherwise, which is byte-for-byte the pre-1605 placement for every
+  // turn that produced no reasoning.
+  const toolChipRow = hasToolCalls ? (
+    <div className="flex flex-wrap gap-1.5" data-testid="tool-call-chips">
+      {toolCalls!.map((call) => (
+        <ToolCallChip key={call.id} call={call} />
+      ))}
+    </div>
+  ) : null;
+
+  // WARP-1605 — the thinking message: a distinct row, with its own avatar and
+  // a non-bubble card, carrying the collapsed disclosure + the chips. Sits
+  // above the answer so the answer reads as a NEW message.
+  const thinkingRow = hasThinking ? (
+    <ThinkingMessage trace={message.reasoning!} streaming={Boolean(isStreaming)}>
+      {toolChipRow}
+    </ThinkingMessage>
+  ) : null;
+
   // Pre-first-token "thinking" window: assistant turn is streaming but has
   // no content, no tool chips, no confirmation, and no failure yet. Show the
   // Droplet thinking indicator instead of an empty bubble + blinking cursor.
+  //
+  // WARP-1605 — when the thinking row is present the chips moved OUT of the
+  // bubble, so their presence no longer keeps the bubble from being empty:
+  // the indicator holds the answer's place under the thinking card until the
+  // first answer token turns it into a real bubble. That flip IS the visible
+  // thinking→answer transition.
   const isThinking =
-    !isUser && isStreaming && !message.content && !hasToolCalls && !confirmCall && !hasFailure;
+    !isUser &&
+    isStreaming &&
+    !message.content &&
+    !confirmCall &&
+    !hasFailure &&
+    (hasThinking || !hasToolCalls);
   if (isThinking) {
     // WARP-903 — cold model load. The orchestrator told us (model_loading
     // SSE) the first token is a 30-60 s weights load away; say so instead
@@ -190,16 +236,31 @@ export const ChatMessage = memo(function ChatMessage({
       const { model, sizeGb } = message.modelLoading;
       const size = sizeGb != null ? ` (${sizeGb} GB)` : "";
       return (
-        <ThinkingIndicator
-          label={`Loading ${model}${size}…`}
-          srText={`The AI model ${model} is loading — the first reply can take a little longer than usual.`}
-        />
+        <>
+          {thinkingRow}
+          <ThinkingIndicator
+            label={`Loading ${model}${size}…`}
+            srText={`The AI model ${model} is loading — the first reply can take a little longer than usual.`}
+          />
+        </>
       );
     }
-    return <ThinkingIndicator />;
+    return (
+      <>
+        {thinkingRow}
+        <ThinkingIndicator />
+      </>
+    );
   }
 
   return (
+    // WARP-1605 — the thinking row and the answer row are SIBLINGS in the
+    // thread (`.chat-wrap` is the flex column that spaces them), never nested:
+    // that sibling gap is the message boundary the user sees. The answer row
+    // below is unchanged and deliberately left at its original indentation so
+    // this diff stays reviewable.
+    <>
+    {thinkingRow}
     <div className={`msg ${isUser ? "is-user" : ""}`}>
       {/* Avatar — design handoff: assistant wears the brand Sparkles mark,
           the user a neutral silhouette. */}
@@ -260,13 +321,11 @@ export const ChatMessage = memo(function ChatMessage({
           )
         ) : (
           <div className="chat-markdown">
-            {hasToolCalls && (
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {toolCalls!.map((call) => (
-                  <ToolCallChip key={call.id} call={call} />
-                ))}
-              </div>
-            )}
+            {/* WARP-1605: chips stay here ONLY when there is no thinking row
+                to own them — an untouched render for no-reasoning turns. */}
+            {!hasThinking && toolChipRow ? (
+              <div className="mb-2">{toolChipRow}</div>
+            ) : null}
             {confirmCall && (
               <div
                 className="mb-2 p-2 rounded-lg bg-system-orange/10 text-system-orange type-caption-1"
@@ -319,9 +378,9 @@ export const ChatMessage = memo(function ChatMessage({
                 ) : null}
               </div>
             )}
-            {message.reasoning && !isUser && (
-              <ReasoningDisclosure trace={message.reasoning} />
-            )}
+            {/* WARP-1605: the trace moved to the thinking row above — a
+                collapsed disclosure inside the answer bubble was exactly the
+                "no boundary" this ticket exists to remove. */}
             {message.content && (
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
@@ -551,6 +610,7 @@ export const ChatMessage = memo(function ChatMessage({
       ) : null}
       </div>
     </div>
+    </>
   );
 });
 

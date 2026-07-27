@@ -16,6 +16,7 @@ import type {
   ChatMessage,
   ChatToolCall,
 } from "../types";
+import { appendReasoningStep } from "@/components/chat/reasoning-trace";
 
 /** WARP-304: response header carrying the server-assigned conversation id. */
 const CONVERSATION_ID_HEADER = "x-conversation-id";
@@ -997,6 +998,9 @@ export function useChat(options: UseChatOptions = {}) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        // WARP-1605 — one cursor per stream, carrying the agent-step boundary
+        // across events (see applyEvent).
+        const cursor: StreamCursor = { stepOpen: false };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1015,14 +1019,16 @@ export function useChat(options: UseChatOptions = {}) {
             if (!frame.trim()) continue;
             const evt = parseSseFrame(frame);
             if (!evt) continue;
-            applyEvent(setMessages, assistantMessage.id, evt, content);
+            applyEvent(setMessages, assistantMessage.id, evt, content, cursor);
           }
         }
 
         // Flush trailing frame if the stream ended without a final \n\n.
         if (buffer.trim()) {
           const evt = parseSseFrame(buffer);
-          if (evt) applyEvent(setMessages, assistantMessage.id, evt, content);
+          if (evt) {
+            applyEvent(setMessages, assistantMessage.id, evt, content, cursor);
+          }
         }
       } catch (err) {
         // WARP-295: a user-initiated stop() aborts the underlying
@@ -1740,6 +1746,16 @@ export function useChat(options: UseChatOptions = {}) {
 }
 
 /**
+ * WARP-1605 — per-turn cursor tracking whether the CURRENT agent step is
+ * still open (more `reasoning_step` events belong to it) or was closed by a
+ * `tool_call`, which is what ends an iteration on the wire. One object per
+ * stream; see the `reasoning_step` case for why it exists.
+ */
+interface StreamCursor {
+  stepOpen: boolean;
+}
+
+/**
  * Apply a single SSE event to the streaming assistant message
  * identified by `assistantId`. Pure state mutation — extracted so
  * the reader loop reads cleanly. `retryPrompt` is the user prompt
@@ -1751,7 +1767,15 @@ function applyEvent(
   assistantId: string,
   evt: SSEEvent,
   retryPrompt: string,
+  cursor: StreamCursor,
 ): void {
+  // Read the cursor BEFORE advancing it, and advance it OUTSIDE the state
+  // updater: React may invoke an updater twice (StrictMode) or defer it, so
+  // mutating shared state in there would double-count step boundaries.
+  const stepOpen = cursor.stepOpen;
+  if (evt.type === "reasoning_step") cursor.stepOpen = true;
+  else if (evt.type === "tool_call") cursor.stepOpen = false;
+
   setMessages((prev) => {
     const idx = prev.findIndex((m) => m.id === assistantId);
     if (idx === -1) return prev;
@@ -1784,15 +1808,19 @@ function applyEvent(
         return updated;
       }
       case "reasoning_step": {
-        // WARP-458 — steps arrive before the answer's content_delta;
-        // concatenate with blank lines, mirroring how the orchestrator
-        // persists the trace to ChatMessage.reasoning.
+        // WARP-458 — steps arrive before the answer's content_delta.
+        //
+        // WARP-1605 — and they arrive one AGENT ITERATION at a time. The wire
+        // is finer-grained than the persisted list (one iteration can emit a
+        // provider-native block plus one event per inline `<reasoning>`
+        // segment), so `stepOpen` groups events the same way the orchestrator
+        // does: `\n\n` within an iteration, REASONING_STEP_SEPARATOR between
+        // iterations. The live string therefore matches the one the server
+        // persists byte-for-byte, and a reload renders the same step blocks.
         const updated = [...base];
         updated[idx] = {
           ...last,
-          reasoning: last.reasoning
-            ? `${last.reasoning}\n\n${evt.text}`
-            : evt.text,
+          reasoning: appendReasoningStep(last.reasoning, evt.text, stepOpen),
         };
         return updated;
       }
