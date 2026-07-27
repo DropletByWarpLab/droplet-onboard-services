@@ -87,13 +87,20 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 // at call time; reset in beforeEach below.
 let mockFiles: FileEntryInfo[] = FILES;
 let mockFilesError: unknown = undefined;
+// WARP-1623 — the (path, space) pair the page actually asks for. `currentPath`
+// is space-root-relative, so this is what proves a library listing is requested
+// relative to its own mount rather than double-prefixed. Reset in beforeEach.
+let mockFilesCalls: Array<[string, string]> = [];
 vi.mock("@/lib/hooks/useFiles", () => ({
-  useFiles: () => ({
-    files: mockFilesError ? [] : mockFiles,
-    error: mockFilesError,
-    isLoading: false,
-    refresh: vi.fn(),
-  }),
+  useFiles: (path: string, space: string) => {
+    mockFilesCalls.push([path, space]);
+    return {
+      files: mockFilesError ? [] : mockFiles,
+      error: mockFilesError,
+      isLoading: false,
+      refresh: vi.fn(),
+    };
+  },
 }));
 
 // WARP-1338 (UX review) — the page feeds the breadcrumb the same volume
@@ -171,6 +178,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     fetchShares: vi.fn().mockResolvedValue([]),
     fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+    // WARP-1623 — asserted below: an entry path must be converted to the
+    // active space's relative form before it reaches a space-threaded write.
+    deleteFile: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -184,6 +194,7 @@ beforeEach(() => {
   mockSearchParamsString = "";
   mockFiles = FILES;
   mockFilesError = undefined;
+  mockFilesCalls = [];
   mockDrives = [];
   mockPools = [];
 });
@@ -540,5 +551,84 @@ describe("<FilesPage /> — ?space= deep-link (WARP-1270)", () => {
       "aria-selected",
       "true",
     );
+  });
+});
+
+// WARP-1623 — browsing a department library.
+//
+// `currentPath` is space-root-relative (the page states this at the
+// `homeRelativeCurrentPath` memo and again at the breadcrumb and Move/Copy
+// call sites), and the server prefixes the mount for the declared space. Two
+// helpers in the page still special-cased `shared` when the listing request
+// itself dropped every `dept:` space, so the mismatch was invisible. Once the
+// space reaches the wire, they become the bug.
+describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
+  const FINANCE: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "manager",
+    isMember: true,
+  };
+
+  // Listing entries always carry HOME-relative paths, mount included.
+  const FINANCE_ENTRIES: FileEntryInfo[] = [
+    {
+      name: "Q1",
+      path: "/Finance/Q1",
+      isDirectory: true,
+      size: 0,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType: "httpd/unix-directory",
+    },
+    {
+      name: "budget.xlsx",
+      path: "/Finance/budget.xlsx",
+      isDirectory: false,
+      size: 4096,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+  ];
+
+  beforeEach(() => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = FINANCE_ENTRIES;
+    mockUser = { id: "u1", email: "family@example.com", role: "family" };
+  });
+
+  it("lists the library ROOT — space-relative '/', not the personal home", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/", "dept:finance"]);
+  });
+
+  it("opening a folder asks for it relative to the library, not double-prefixed", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    // "/Finance/Q1" fed back verbatim would be re-prefixed server-side to
+    // "/Finance/Finance/Q1" — the WARP-1140 double-prefix, which renders as a
+    // silently empty folder.
+    expect(mockFilesCalls.at(-1)).toEqual(["/Q1", "dept:finance"]);
+  });
+
+  it("converts an entry path to space-relative form before a write", async () => {
+    const { deleteFile } = await import("@/lib/api");
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete budget\.xlsx/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(deleteFile).toHaveBeenCalledWith("/budget.xlsx", "dept:finance");
+  });
+
+  it("leaves the personal space listing home-relative (root is '/')", () => {
+    mockFiles = FILES;
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^file report\.pdf$/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/", "personal"]);
   });
 });

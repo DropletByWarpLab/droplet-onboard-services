@@ -4210,10 +4210,14 @@ export async function fetchFiles(
   space: FileSpaceId = "personal"
 ): Promise<FileEntryInfo[]> {
   const qs = new URLSearchParams({ path });
-  // Only send the space param for the shared space — keeps the personal
-  // request URL (and its SWR cache key) byte-identical to the pre-WARP-883
-  // shape so nothing else has to change.
-  if (space === "shared") qs.set("space", "shared");
+  // WARP-1623: send the space for EVERY non-personal space, matching every
+  // other space-threaded helper below. The original gate named "shared"
+  // literally, from when FileSpaceId was a two-member union; WARP-1261 widened
+  // it to `dept:<uuid>` server-side and this branch silently dropped those, so
+  // a library listing resolved through personal semantics and returned the
+  // caller's home root. Personal still sends nothing, which keeps that request
+  // URL (and its SWR cache key) byte-identical to the pre-WARP-883 shape.
+  if (space !== "personal") qs.set("space", space);
   const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
   return res.json();

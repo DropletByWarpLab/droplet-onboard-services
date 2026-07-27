@@ -143,9 +143,16 @@ export default function FilesPage() {
   // not the space-relative "/Trips/x.pdf" the write routes expect. Any
   // handler that operates on an entry path (delete/rename/move/copy/
   // favorite) must convert with this helper before calling the API.
+  //
+  // WARP-1623: keyed on the ACTIVE space's root, not on the `shared` id. The
+  // old form only stripped the Household mount, so once a `dept:` listing
+  // reached the wire, a library row's "/Finance/Q1/x.pdf" would have been sent
+  // verbatim to a write route that re-prefixes the mount. The personal root is
+  // "/", for which `toSpaceRelativePath` is the identity — so personal needs no
+  // special case here.
   const toActiveSpaceRelative = useCallback(
-    (p: string) => (space === "shared" ? toSpaceRelativePath(p, sharedRoot) : p),
-    [space, sharedRoot]
+    (p: string) => toSpaceRelativePath(p, activeSpaceRoot),
+    [activeSpaceRoot]
   );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -536,14 +543,16 @@ export default function FilesPage() {
       // entry path back verbatim while the Household tab is active
       // double-prefixed the next listing ("/Household/Household/…"), which
       // rendered as a silently empty folder.
-      setCurrentPath(
-        space === "shared" ? toSpaceRelativePath(file.path, sharedRoot) : file.path
-      );
+      //
+      // WARP-1623: that translation now runs for EVERY space with a mount, not
+      // just Household — otherwise the same double-prefix reappears the moment
+      // a `dept:` space is really listed ("/Finance/Finance/Q1").
+      setCurrentPath(toSpaceRelativePath(file.path, activeSpaceRoot));
       fm.clearSelection();
     } else {
       handlePreview(file);
     }
-  }, [fm, handlePreview, space, sharedRoot]);
+  }, [fm, handlePreview, activeSpaceRoot]);
 
   // ── Context menu ──
   const handleRowContextMenu = useCallback(
