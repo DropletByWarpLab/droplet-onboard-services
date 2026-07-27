@@ -113,18 +113,22 @@ export interface SpaceAttribution {
   /**
    * The value to put in `?path=` when linking to `/files` for this space.
    *
-   * NOT always `spacePath`. The Files page's `?path=` is space-root-relative
-   * for the shared Household space only — `fetchFiles` (`lib/api.ts`) sends
-   * `space=shared` and the orchestrator prefixes the mount server-side. For
-   * every other space, including departments and teams, the dashboard still
-   * lists through personal-space semantics (no `space` param is sent), where
-   * the groupfolder mount is a real directory inside the user's home, so the
-   * HOME-relative path is the one that lists. `app/files/page.tsx` treats its
-   * `currentPath` the same way (`toActiveSpaceRelative` translates for
-   * `shared` and nothing else).
+   * Equals `spacePath` for every matched space: the Files page's `?path=` is
+   * space-root-relative, `fetchFiles` (`lib/api.ts`) sends the space, and the
+   * orchestrator prefixes the mount server-side. `app/files/page.tsx` treats
+   * its `currentPath` the same way via `toActiveSpaceRelative`.
    *
-   * This is the single place that knows that convention. If `fetchFiles` ever
-   * starts sending `space=dept:<uuid>`, this function is the one thing to flip.
+   * WARP-1623 flipped this. It used to be space-relative for `shared` only,
+   * because `fetchFiles` sent `space=` for `shared` and nothing else — so a
+   * department listed through personal semantics, where the groupfolder mount
+   * is a real directory inside the user's home and the HOME-relative path was
+   * the one that listed. WARP-1623 made `fetchFiles` send every non-personal
+   * space, which is the trigger this comment used to name. Keeping the old
+   * form would now double-prefix ("/Finance/Finance/Q1" — the WARP-1140 bug)
+   * and render as a silently empty folder.
+   *
+   * The personal fallback stays the full home-relative path: personal sends no
+   * `space` param and its root is "/", for which the translation is identity.
    */
   urlPath: string;
   confidence: SpaceAttributionConfidence;
@@ -193,7 +197,8 @@ export function resolveFileSpace(path: string, spaces: FileSpace[]): SpaceAttrib
     space: winner,
     spaceId: winner.id,
     spacePath: relative,
-    urlPath: winner.id === "shared" ? relative : path,
+    // WARP-1623 — space-relative for EVERY matched space, not just `shared`.
+    urlPath: relative,
     confidence: "matched",
     ambiguous: ties > 0,
   };

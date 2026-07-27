@@ -111,7 +111,7 @@ describe("<RecentsPage /> — library attribution (WARP-1549)", () => {
 
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith(
-        "/files?space=dept%3Afinance&path=%2FFinance%2FQ1"
+        "/files?space=dept%3Afinance&path=%2FQ1"
       )
     );
   });

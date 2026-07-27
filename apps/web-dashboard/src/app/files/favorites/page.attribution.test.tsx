@@ -143,7 +143,7 @@ describe("<FavoritesPage /> — library attribution (WARP-1549)", () => {
     // the personal space and the library is never opened.
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith(
-        "/files?space=dept%3Afinance&path=%2FFinance%2FQ1"
+        "/files?space=dept%3Afinance&path=%2FQ1"
       )
     );
   });
@@ -169,7 +169,7 @@ describe("<FavoritesPage /> — library attribution (WARP-1549)", () => {
 
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith(
-        "/files?space=dept%3Afinance&path=%2FFinance%2FQ1"
+        "/files?space=dept%3Afinance&path=%2FQ1"
       )
     );
   });

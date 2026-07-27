@@ -297,23 +297,24 @@ describe("buildFilesUrl — same contract as the Files page (WARP-1547)", () => 
 describe("filesUrlForEntry — a row click lands in the file's own library", () => {
   it("opens a library file's folder inside that library", () => {
     expect(filesUrlForEntry({ path: "/Finance/Q1/plan.xlsx", isDirectory: false }, ALL)).toBe(
-      "/files?space=dept%3Afinance&path=%2FFinance%2FQ1"
+      "/files?space=dept%3Afinance&path=%2FQ1"
     );
   });
 
   it("opens a library folder as itself", () => {
     expect(filesUrlForEntry({ path: "/Finance/Q1", isDirectory: true }, ALL)).toBe(
-      "/files?space=dept%3Afinance&path=%2FFinance%2FQ1"
+      "/files?space=dept%3Afinance&path=%2FQ1"
     );
   });
 
-  it("keeps the HOME-relative path for a department, mount name included", () => {
-    // Departments are still listed through personal-space semantics
-    // (`fetchFiles` only ever sends `space=shared`), and the groupfolder mount
-    // is a real directory in the user's home — so "/Finance" is the path that
-    // lists the library, and dropping it would land on the home root instead.
+  it("drops the path entirely at a DEPARTMENT's root", () => {
+    // WARP-1623 — `fetchFiles` now sends `space=dept:<uuid>` and the
+    // orchestrator prefixes the mount server-side, exactly as it always did
+    // for Household. Keeping the old home-relative form ("/Finance") would
+    // double-prefix to "/Finance/Finance" — the WARP-1140 bug, which renders
+    // as a silently empty folder.
     expect(filesUrlForEntry({ path: "/Finance", isDirectory: true }, ALL)).toBe(
-      "/files?space=dept%3Afinance&path=%2FFinance"
+      "/files?space=dept%3Afinance"
     );
   });
 
@@ -329,6 +330,19 @@ describe("filesUrlForEntry — a row click lands in the file's own library", () 
     expect(
       filesUrlForEntry({ path: "/Household/Trips/italy.pdf", isDirectory: false }, ALL)
     ).toBe("/files?space=shared&path=%2FTrips");
+  });
+
+  it("treats departments and Household identically — one convention, not two", () => {
+    // WARP-1623 — the pre-1623 code special-cased `shared`. Pinning the
+    // symmetry here so a future reader can't reintroduce a per-space rule:
+    // both mounts sit one level below the home root, so both drop exactly
+    // their own mount segment.
+    expect(
+      filesUrlForEntry({ path: "/Household/Trips/italy.pdf", isDirectory: false }, ALL)
+    ).toBe("/files?space=shared&path=%2FTrips");
+    expect(
+      filesUrlForEntry({ path: "/Finance/Trips/italy.pdf", isDirectory: false }, ALL)
+    ).toBe("/files?space=dept%3Afinance&path=%2FTrips");
   });
 
   it("keeps the plain personal shape for a home file", () => {
