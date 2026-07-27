@@ -239,7 +239,10 @@ vi.mock("@prisma/client", () => {
   // stores, run the callback, and restore the snapshots if it throws —
   // so a failure anywhere inside the callback rolls back ALL writes, the
   // way Prisma's `$transaction(fn)` does against Postgres.
-  const $transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
+  // The return type is annotated because the callback now receives
+  // `mockPrisma`, which carries this very function — without it TS cannot
+  // break the inference cycle (TS7022/TS7024).
+  const $transaction = vi.fn(async (fn: (tx: any) => Promise<any>): Promise<unknown> => {
     const scheduleSnapshot = new Map(
       Array.from(scheduleStore.entries()).map(([k, v]) => [k, { ...v }]),
     );
@@ -247,7 +250,14 @@ vi.mock("@prisma/client", () => {
       Array.from(windowStore.entries()).map(([k, v]) => [k, { ...v }]),
     );
     try {
-      return await fn({ schedule, scheduleWindow });
+      // WARP-1583: hand the callback the WHOLE client, not a two-model
+      // subset. Prisma's `tx` exposes every model, and the §3
+      // effective-access resolver (which app.ts mounts in front of
+      // /api/network via requireFeatureAccess) reads `user` through it — a
+      // narrow tx made that `undefined.findUnique`, so the gate failed
+      // closed and every route here 404'd. The rollback semantics this
+      // suite exists to prove are unchanged.
+      return await fn(mockPrisma);
     } catch (err) {
       scheduleStore.clear();
       for (const [k, v] of scheduleSnapshot) scheduleStore.set(k, v);

@@ -34,7 +34,8 @@
  *   3. WARP-1526 (rail 6): droplet-admins USER membership — stateless
  *      tier-vs-group drift correction. Expectation derived from
  *      `User.role` alone (owner∪admin with an NC mapping — no sync
- *      columns); ncListGroupMembers is compared and corrected both ways,
+ *      columns); ncListGroupMembersStrict is compared and corrected both
+ *      ways,
  *      revocations first, each member contained on its own. Converges the
  *      best-effort cascade the role-change post-effects push
  *      (role-mutation-guard.service.ts) after an NC outage. WARP-1558
@@ -71,7 +72,7 @@ import {
   gfSetGroupPermissions,
   ncAddUserToGroup,
   ncRemoveUserFromGroup,
-  ncListGroupMembers,
+  ncListGroupMembersStrict,
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
@@ -246,8 +247,16 @@ async function reconcileActiveDepartment(
  * orchestrator policy access — `checkSpaceAccess` only ever reads Prisma
  * — but WOULD still get raw WebDAV/byte access through the groupfolder
  * mount until something removes them NC-side. Prisma (`synced`
- * memberships) is truth; anything `ncListGroupMembers` reports that isn't
- * in the expected set gets removed.
+ * memberships) is truth; anything `ncListGroupMembersStrict` reports that
+ * isn't in the expected set gets removed.
+ *
+ * WARP-1565: the STRICT listing, so a Nextcloud that cannot answer is not
+ * read as "this group is empty". Here the lenient `[]` was fail-SAFE — an
+ * empty actual set removes nobody — but it also meant a real outage looked
+ * identical to a converged group, so drift silently stopped being corrected
+ * for as long as listing was broken. A throw propagates to the per-row
+ * try/catch in the sweep loop above, which logs it and moves to the next
+ * department; the tick retries in ≤5 min.
  *
  * Only `syncState=synced` rows count as "should be a member": `pending`/
  * `failed` rows haven't necessarily landed their NC add yet, so excluding
@@ -297,7 +306,7 @@ async function removeDriftedGroupMembers(
     [ncGroupRo, roExpected],
   ] as const) {
     if (!group) continue;
-    const actual = await ncListGroupMembers(adminToken, group);
+    const actual = await ncListGroupMembersStrict(adminToken, group);
     for (const member of actual) {
       if (expected.has(member.id)) continue;
       await ncRemoveUserFromGroup(adminToken, member.id, group);
@@ -730,7 +739,7 @@ async function sweepMemberships(
  * STATELESS on purpose: the expectation is recomputed from `User.role`
  * every tick (owner∪admin rows that have a Nextcloud mapping — Prisma is
  * truth, no sync-state columns), the actual set comes from
- * `ncListGroupMembers`, and both directions are corrected:
+ * `ncListGroupMembersStrict`, and both directions are corrected:
  *   - missing operator → re-added (heals a failed promotion cascade);
  *   - non-operator member → removed (heals a failed demotion cascade, or
  *     an out-of-band NC admin-UI edit — declared unsupported, ADR-029
@@ -793,9 +802,19 @@ async function sweepAdminGroupMembership(
   // is nothing to compare against, so the whole sweep is skipped this tick
   // and retried on the next one. Per-member failures are contained inside
   // their own loops below, never at this level (pr-reviewer #1229 B4).
+  //
+  // WARP-1565: this catch was UNREACHABLE until now. `ncListGroupMembers`
+  // collapsed every failure to `[]`, so a list-broken/writes-working
+  // Nextcloud did not skip the tick — it reported an empty droplet-admins,
+  // concluded every operator was missing, and re-added all of them. On every
+  // tick. The writes are idempotent so nothing broke; the cost was an
+  // Activity log full of drift that never happened and a sweep that never
+  // converged. `ncListGroupMembersStrict` throws on everything except a 404
+  // (an absent group genuinely has no members), which is what makes the
+  // skip below real.
   let actual: { id: string }[];
   try {
-    actual = await ncListGroupMembers(adminToken, DROPLET_ADMINS_GROUP);
+    actual = await ncListGroupMembersStrict(adminToken, DROPLET_ADMINS_GROUP);
   } catch (err) {
     logger.error(
       { err },

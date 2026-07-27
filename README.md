@@ -25,7 +25,7 @@
 ## Quick setup (on device)
 
 ```bash
-git clone <repo-url> && cd edge-platform
+git clone <repo-url> && cd droplet-onboard-services
 ./scripts/setup.sh
 ```
 
@@ -150,7 +150,7 @@ See [scripts/README.md](scripts/README.md) for more details and troubleshooting.
 ## What's in this repo
 
 ```
-edge-platform/
+droplet-onboard-services/
 ├── apps/
 │   ├── orchestrator/        REST API (Express 4.19 + TypeScript 5.4 + Prisma 5.14)
 │   └── web-dashboard/       Admin UI (Next.js 14.2 + React 18.3 + Tailwind CSS 3.4)
@@ -178,7 +178,7 @@ Browser / Mobile App                     External MCP clients
         │                                (droplet-local-LLM, Claude Desktop, …)
         ▼                                          │
    ┌─────────┐                                     │
-   │  Nginx   │  :80  — reverse proxy (nginx:alpine)
+   │  Nginx   │  :80/:443 — reverse proxy (custom Bookworm build, dormant FIPS provider)
    └────┬─────┘                                    │
         │                                          │
    ┌────┼──────────────────────────────────────────┼─────┐
@@ -258,20 +258,16 @@ Express + TypeScript API. The central coordination point — proxies to the AI g
 | `POST` | `/api/files/mkdir` | Create a directory |
 | `POST` | `/api/files/share` | Create a Nextcloud public share link |
 | `GET` | `/api/files/shares` | List share links for a path |
-| `GET` | `/api/sync/targets` | List all sync targets with file counts |
-| `POST` | `/api/sync/targets` | Add a sync target |
-| `PUT` | `/api/sync/targets/:id` | Update target label / interval / enabled |
-| `DELETE` | `/api/sync/targets/:id` | Remove a sync target |
-| `GET` | `/api/sync/status` | Sync status across all targets |
-| `POST` | `/api/sync/trigger` | Trigger an immediate sync on a target |
+
+The table above is a core sample, not the full surface — the orchestrator has grown to ~75 route modules (`apps/orchestrator/src/routes/`). File operations live in `routes/files.ts` (plus `files-knowledge.ts` / `files-brain.ts` for library and brain surfaces); the old `/api/sync/*` target-sync endpoints no longer exist.
 
 #### Key implementation details
 
-- **Auth middleware** validates Bearer tokens against Nextcloud's OCS API, caches results for 5 minutes in Redis (ioredis 5.4). Controlled by `AUTH_ENABLED`. Public paths: `/api/health`, `/api/auth/setup`, `/api/auth/login`.
+- **Auth middleware** verifies JWT access tokens first and falls back to Nextcloud's OCS API for legacy tokens, caching results for 5 minutes in Redis (ioredis 5.4). Controlled by `AUTH_ENABLED`. Public paths: `/api/health`, `/api/auth/setup`, `/api/auth/login`.
 - **Storage backend** is configurable: `STORAGE_BACKEND=legacy` uses the local filesystem; `STORAGE_BACKEND=nextcloud` routes all file operations to Nextcloud 29 via WebDAV with per-user Redis cache keys.
 - **File sharing** uses Nextcloud's OCS Share API — share links are created and managed through the orchestrator.
-- **Sync operations** publish MQTT messages (`droplet/sync/config/changed`, `droplet/sync/+/trigger`) that the file-sync daemon subscribes to via MQTT.js 5.5.
-- **Chat sessions** are stored and managed in the AI gateway (not in the orchestrator's DB).
+- **File indexing events** flow over MQTT (MQTT.js 5.5) — e.g. `droplet/files/brain/uploaded` tells the file-indexer service to index a chat-attached file.
+- **Chat sessions** are Postgres-backed in the orchestrator (`ChatSession` / `ChatMessage` Prisma models via `services/chat-persistence.service.ts`) — not in the AI gateway.
 
 ---
 
@@ -295,7 +291,7 @@ Next.js 14 App Router admin UI. Requires authentication for all routes; redirect
 #### Auth flow
 
 1. On load, `AuthGate` checks `/api/auth/setup` — redirects to `/setup` if no users exist yet.
-2. After setup, the user logs in at `/login` — token stored in `localStorage`.
+2. After setup, the user logs in at `/login` — in production the token travels in HTTP-only cookies (not `localStorage`).
 3. All API calls inject `Authorization: Bearer <token>` via `getAuthHeaders()`.
 4. On logout, the token is revoked server-side and cleared locally.
 
@@ -333,37 +329,37 @@ For local testing without inference engine hardware, see [`services/ai-gateway/T
 
 ---
 
-### File Sync Daemon (`services/file-sync/`)
+### File Indexer (`services/file-indexer/`)
 
-Python background service that keeps sync targets indexed and watched. Communicates with the orchestrator exclusively over MQTT.
+Python background service (formerly `file-sync`) that watches, chunks, and embeds files for retrieval. Communicates with the orchestrator over MQTT.
 
-**Stack:** watchdog 4.0 · paho-mqtt 2.0 · psycopg2-binary 2.9 · schedule 1.2 · Python 3.12
+**Stack:** watchdog 4.0 · paho-mqtt 2.0 · Python 3.12
 
 | Component | What it does |
 |-----------|-------------|
-| `scheduler.py` | Loads targets from DB; triggers scans on configurable intervals (1–1440 min) |
-| `watcher.py` | Real-time file monitoring via watchdog 4.0; triggers DB updates on add / modify / delete |
-| `scanner.py` | Walks a target directory, hashes all files, records results |
-| `mqtt_client.py` | Subscribes to `droplet/sync/config/changed` and `droplet/sync/+/trigger` |
-| `db.py` | Reads `SyncTarget` table, writes to `SyncEntry` table, updates `lastSync` timestamps |
+| `watcher.py` | Real-time file monitoring via watchdog 4.0 |
+| `scheduler_service.py` | Periodic scan / re-index scheduling |
+| `chunker.py` / `embedder.py` | Splits extracted text and computes embeddings (extractors in `extractors/`) |
+| `mqtt_client.py` | Subscribes to indexing triggers (e.g. `droplet/files/brain/uploaded`, `droplet/transcription/run-one`) |
+| `db.py` | Writes chunks + embeddings to Postgres |
 
 ---
 
 ## Infrastructure
 
-All services run as Docker Compose containers behind an Nginx reverse proxy.
+All services run as Docker Compose containers behind an Nginx reverse proxy. The full stack is 29 top-level compose services in `docker/docker-compose.yml` (13 default-on, the rest profile-gated); the table below is the core subset only.
 
 | Service | Image | Host port | Notes |
 |---------|-------|-----------|-------|
-| **gateway** | `nginx:alpine` | **:80** | Single entry point — routes `/` → dashboard, `/api` → orchestrator, `/ai` → ai-gateway |
+| **gateway** | local build (`docker/nginx/Dockerfile`) | **:80 / :443** | Custom Bookworm-based nginx with the FIPS provider baked dormant (WARP-1021). Single entry point — routes `/` → dashboard, `/api` → orchestrator, `/ai` → ai-gateway |
 | **web-dashboard** | local build | — | Internal only (via Nginx). Next.js 14.2, listens :3001 |
 | **orchestrator** | local build | — | Internal only (via Nginx). Express 4.19, listens :3000 |
 | **ai-gateway** | local build | — | Internal only (via Nginx). FastAPI 0.110, listens :8000 |
 | **nextcloud** | `nextcloud:29-apache` | :8080 | Headless file + user backend |
-| **db** | `postgres:16-alpine` | — | Internal. Shared by orchestrator, nextcloud, file-sync |
+| **db** | `postgres:16-alpine` | — | Internal. Shared by orchestrator, nextcloud, file-indexer |
 | **cache** | `redis:7-alpine` | — | Internal. Token cache + response cache (auth required) |
-| **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-sync |
-| **file-sync** | local build | — | Background daemon |
+| **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-indexer |
+| **file-indexer** | local build | — | Background daemon |
 
 Smart-home control runs through the `matter-controller` host-network sidecar (`services/matter-controller/`, ADR-022), fronted by the orchestrator's `/api/matter/*` routes (`apps/orchestrator/src/services/matter.service.ts` is the HTTP client).
 
@@ -388,7 +384,7 @@ App services (orchestrator, web-dashboard, ai-gateway) are **not exposed to the 
 ### Quick start — full stack via Docker
 
 ```bash
-cd edge-platform
+cd droplet-onboard-services
 npm install          # installs Turbo 2.0 and workspace deps
 npm run dev:docker   # docker compose up --build
 ```
@@ -457,6 +453,10 @@ Two single-page references answer the auditor question "what cryptography does t
 
 The static lint at [`scripts/test-fips.sh`](scripts/test-fips.sh) runs as a required PR check via `.github/workflows/test-fips.yml` on every change to `apps/`, `services/`, `packages/`, `scripts/`, or `docker/`. Adding a new exception requires editing `docs/security/fips-exceptions.md` and gets code-reviewed.
 
+### Internal service-to-service mTLS (WARP-1061)
+
+Every first-party internal HTTP/gRPC hop and the MQTT broker authenticate peers with X.509 client certificates issued by a compose-network-scoped internal CA. Activation is a single knob: `DROPLET_INTERNAL_TLS=1` plus a stack recreate turns mutual TLS on across the internal mesh. Design, per-hop coverage table, and verification commands: [`docs/security/internal-mtls.md`](docs/security/internal-mtls.md).
+
 ## Testing
 
 ```bash
@@ -478,23 +478,27 @@ npm run test:integration       # Full stack integration (Docker Compose)
 
 ---
 
-## What is not yet implemented
+## Previously-listed gaps — now shipped
 
 | Feature | Status |
 |---------|--------|
-| Device inventory (`/api/devices`) | Endpoint exists; service logic is a stub — returns empty list |
-| OTA update automation | Release manifests + delta configs exist; no automated update pipeline yet |
+| Device inventory (`/api/devices`) | Shipped — real Prisma-backed inventory with Redis caching (`apps/orchestrator/src/services/device.service.ts`); device rooms + aliases landed with WARP-1396 |
+| OTA update automation | Shipped — `apps/orchestrator/src/routes/updates.ts` + the update agent (`apps/orchestrator/src/services/update-agent/`), exercised end-to-end by `.github/workflows/ota-e2e.yml` |
 
 ---
 
 ## Related repos
 
-| Repo | Description | Docs |
-|------|-------------|------|
-| [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM) | GPU inference services: Ollama management, model lifecycle, GPU telemetry | [`CLAUDE.md`](https://github.com/DropletByWarpLab/droplet-local-LLM/blob/main/CLAUDE.md) |
-| [`shared-api`](../shared-api/) | OpenAPI 3.0 specs for all services + generated TypeScript/Python clients | [`specs/`](../shared-api/specs/) |
-| [`mobile-app`](../mobile-app/) | React Native 0.74 + Expo 51 iOS/Android client | [`package.json`](../mobile-app/package.json) |
-| [`releases`](../releases/) | Version manifests, factory flash scripts, OTA update configs | [`manifests/`](../releases/manifests/) |
+| Repo | Description |
+|------|-------------|
+| [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM) | GPU inference services: Ollama management, model lifecycle, GPU telemetry ([`CLAUDE.md`](https://github.com/DropletByWarpLab/droplet-local-LLM/blob/main/CLAUDE.md)) |
+| [`droplet-ios`](https://github.com/DropletByWarpLab/droplet-ios) | Native SwiftUI iOS client (ADR-008) |
+| [`droplet-android`](https://github.com/DropletByWarpLab/droplet-android) | Native Kotlin/Compose Android client (ADR-008) |
+| [`droplet-windows`](https://github.com/DropletByWarpLab/droplet-windows) | Windows client |
+| [`droplet-analytics`](https://github.com/DropletByWarpLab/droplet-analytics) | Off-device operator / fleet-monitoring portal |
+| [`droplet-fleet-hq`](https://github.com/DropletByWarpLab/droplet-fleet-hq) | Per-device TLS issuance + addressing (ADR-023 / ADR-025A) |
+| [`design-and-style`](https://github.com/DropletByWarpLab/design-and-style) | Canonical design tokens (WARP-1276) |
+| [`releases`](https://github.com/DropletByWarpLab/releases) | Signed release manifests (`manifest.json`) + OTA update configs |
 
 ---
 

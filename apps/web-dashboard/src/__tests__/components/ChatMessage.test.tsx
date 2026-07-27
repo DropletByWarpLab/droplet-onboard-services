@@ -834,6 +834,69 @@ describe("ChatMessage", () => {
     });
   });
 
+  /**
+   * WARP-1603 — the RENDERED percentage on a citation chip. Nothing
+   * asserted the actual string before, which is how "every chip reads 0%"
+   * survived a full test suite:
+   *   - `relevancePct` only sigmoided scores > 1, so BGE-reranker-base's
+   *     negative logits were read as bounded similarities and clamped to 0;
+   *   - `ChatMessage` coerced a missing score with `?? 0`, defeating
+   *     `FileCitation`'s `typeof hit.score === "number"` no-badge guard and
+   *     printing a literal "0%".
+   * These cases pin all three outcomes end-to-end (ChatCitation →
+   * CitationHit → FileCitation).
+   */
+  describe("citation relevance badge (WARP-1603)", () => {
+    function renderWithScore(score?: number): HTMLElement {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: `asst-score-${String(score)}`,
+            role: "assistant",
+            content: "Answer.",
+            citations: [
+              {
+                source: "nextcloud",
+                path: "/Docs/vpn-setup.md",
+                ...(score === undefined ? {} : { score }),
+                snippet: "wg-quick up wg0",
+              },
+            ],
+          }}
+        />,
+      );
+      return container.querySelector(
+        '[data-testid="file-card"]',
+      ) as HTMLElement;
+    }
+
+    it("renders a high percent for a strong reranker logit", () => {
+      // sigmoid(4.2) ≈ 0.985
+      expect(renderWithScore(4.2).textContent).toContain("99%");
+    });
+
+    it("renders a small-but-nonzero percent for a negative logit", () => {
+      // The bug case: sigmoid(-1) ≈ 0.269. Used to render "0%".
+      const chip = renderWithScore(-1);
+      expect(chip.textContent).toContain("27%");
+      expect(chip.textContent).not.toContain("0%");
+    });
+
+    it("renders a normalized 0–1 relevance verbatim", () => {
+      // What the mcp-server emits post-WARP-1603 (sigmoid applied at the
+      // source), and what the cosine/RRF paths have always emitted.
+      expect(renderWithScore(0.82).textContent).toContain("82%");
+    });
+
+    it("renders NO badge when the citation carries no score", () => {
+      const chip = renderWithScore(undefined);
+      // The chip itself still renders (filename + link); only the
+      // relevance badge is withheld.
+      expect(chip.textContent).toContain("vpn-setup.md");
+      expect(chip.textContent).not.toContain("%");
+    });
+  });
+
   describe("stopped marker (WARP-295)", () => {
     it("renders the aborted FailureChip when message.stopped is set (live abort)", () => {
       render(

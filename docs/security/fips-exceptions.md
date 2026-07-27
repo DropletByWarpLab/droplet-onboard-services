@@ -26,7 +26,7 @@ exceptions:
       requires the camera vendors to publish RFC 7616-conformant firmware
       (SHA-256 digest support), which none has done as of 2026-05-10.
     review: annual
-    owner: edge-platform / camera-discovery
+    owner: droplet-onboard-services / camera-discovery
     remove_by: null
 
   - id: wireguard-x25519
@@ -44,7 +44,7 @@ exceptions:
       exposure is bounded by the operator's WireGuard peer key management,
       which itself sits on top of TPM-sealed material (WARP-230).
     review: annual
-    owner: edge-platform / routing
+    owner: droplet-onboard-services / routing
     remove_by: null
 
   - id: fips-selftest-negative-probe
@@ -63,7 +63,7 @@ exceptions:
       exclusion list as a belt-and-braces — this allowlist entry exists
       so the rationale is part of the auditor-facing registry.
     review: annual
-    owner: edge-platform / fips-selftest
+    owner: droplet-onboard-services / fips-selftest
     remove_by: null
 ---
 
@@ -89,7 +89,7 @@ The static lint (`scripts/test-fips.sh`) parses the YAML front-matter at the top
 **Protocol:** RFC 2617 — HTTP Digest Authentication (legacy form)
 **Status:** active, perpetual (no `remove_by`)
 **Review:** annual (next review: 2027-05-10)
-**Owner:** edge-platform / camera-discovery
+**Owner:** droplet-onboard-services / camera-discovery
 
 RTSP cameras require legacy RFC 2617 Digest auth on the RTSP control connection (port 554). The handshake is:
 
@@ -113,7 +113,7 @@ The MD5 nesting is mandated by the spec; the camera firmware computes the expect
 **Protocol:** RFC 7748 / RFC 8439 (ChaCha20-Poly1305) — WireGuard
 **Status:** active, perpetual (no `remove_by`)
 **Review:** annual (next review: 2027-05-10)
-**Owner:** edge-platform / routing
+**Owner:** droplet-onboard-services / routing
 
 The routing service generates WireGuard keypairs for VPN configuration. WireGuard's wire protocol mandates X25519 for the Noise IK handshake; replacing it would require running a different VPN protocol (IPsec, OpenVPN) — out of scope for the on-device router.
 
@@ -129,7 +129,7 @@ NIST published FIPS 186-5 in 2023 approving Curve25519 (X25519/Ed25519) for fede
 **Protocol:** internal — proof that the FIPS provider is enforcing
 **Status:** active, perpetual (no `remove_by`)
 **Review:** annual (next review: 2027-05-10)
-**Owner:** edge-platform / fips-selftest
+**Owner:** droplet-onboard-services / fips-selftest
 
 The boot self-test helpers (`packages/fips-selftest/`, `services/_shared/fips_selftest.py`) deliberately call MD5 at startup and assert the call raises a FIPS-disabled error. If MD5 succeeds the helper fails closed — the provider is loaded but not actually enforcing.
 

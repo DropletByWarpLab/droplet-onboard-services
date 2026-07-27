@@ -1,5 +1,11 @@
 # ADR-010: Adopt Plane as Droplet's embedded project-management stack
 
+> **Superseded by [ADR-026](ADR-026-native-pm-supersedes-plane.md)** (2026-07-26 note).
+>
+> The embedded Plane PM stack this ADR selected has been removed: project
+> management is now a **native module owned by the orchestrator** (native PM,
+> ADR-026). See also the retired pilot runbook `docs/PM_PILOT.md`.
+
 - **Status:** Accepted
 - **Date:** 2026-05-27 (accepted 2026-05-29)
 - **Authors:** Stefan Cruceru (CEO)

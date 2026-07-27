@@ -33,6 +33,11 @@ interface ShareDialogProps {
    * ("File shares cannot have create or delete permissions"), so for files the
    * dialog masks those bits out of whatever preset the user picks before
    * sending. Folders keep the full bitmask.
+   *
+   * WARP-1601: it also selects which access levels the dialog offers at all —
+   * see FILE_LEVELS / FOLDER_LEVELS below. A file and a folder do not have the
+   * same set of assignable levels, so this prop drives both existing-share
+   * selects and both create forms.
    */
   isDirectory?: boolean;
   existingShares?: ShareDetail[];
@@ -53,47 +58,132 @@ const PERM_CREATE = 4;
 const PERM_DELETE = 8;
 const PERM_SHARE = 16;
 
-const PRESETS = [
-  { label: "View only", bits: PERM_READ },
-  { label: "Can edit", bits: PERM_READ | PERM_UPDATE },
-  { label: "Full access", bits: PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE | PERM_SHARE },
-] as const;
-
-// The bits that distinguish the presets from one another. The SHARE bit (16) is
-// deliberately excluded: Nextcloud attaches it to almost every share regardless
-// of access level, so it must not push a "View only" or "Can edit" share into
-// "Full access".
-const PRESET_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE;
+export interface AccessLevel {
+  label: string;
+  bits: number;
+  /** Plain-language expansion of the label, surfaced as a native tooltip. */
+  hint: string;
+}
 
 /**
- * Snap a raw Nextcloud OCS permission bitmask onto one of the three presets so
- * the access-level <select> always has a matching <option>.
+ * WARP-1601: the assignable access levels are NOT the same for a file and a
+ * folder, so the dialog offers a different list for each instead of one static
+ * set.
+ *
+ * CREATE (4) and DELETE (8) describe what a recipient may do to the *contents*
+ * of a container, and Nextcloud rejects them outright on a single-file share.
+ * "Full access" (31) is therefore unrepresentable on a file: picking it used to
+ * send 19 and then render as "Can edit", making the two options look identical
+ * while silently flipping the recipient's re-share bit.
+ *
+ * The honest third level for a file is re-share (19) — a real, distinct,
+ * storable state — so files get it under its own name. Levels that a file
+ * cannot hold are ABSENT rather than greyed out: a file has no contents to
+ * create or delete, so "Full access" could never become available, and a
+ * permanently-disabled option would be dead UI in every share row. The same
+ * list drives the person select, the link select, and both create forms, so the
+ * treatment is consistent everywhere.
+ */
+const FILE_LEVELS: readonly AccessLevel[] = [
+  { label: "View only", bits: PERM_READ, hint: "Can open and download this file" },
+  {
+    label: "Can edit",
+    bits: PERM_READ | PERM_UPDATE,
+    hint: "Can open and change this file",
+  },
+  {
+    label: "Can edit + reshare",
+    bits: PERM_READ | PERM_UPDATE | PERM_SHARE,
+    hint: "Can open, change, and share this file with other people",
+  },
+];
+
+const FOLDER_LEVELS: readonly AccessLevel[] = [
+  { label: "View only", bits: PERM_READ, hint: "Can open and download the contents" },
+  {
+    label: "Can edit",
+    bits: PERM_READ | PERM_UPDATE,
+    hint: "Can open and change the contents",
+  },
+  {
+    label: "Full access",
+    bits: PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE | PERM_SHARE,
+    hint: "Can edit, add, and delete items, and share this folder with other people",
+  },
+];
+
+export function accessLevelsFor(isDirectory: boolean): readonly AccessLevel[] {
+  return isDirectory ? FOLDER_LEVELS : FILE_LEVELS;
+}
+
+// The bits that distinguish the levels of a FOLDER from one another. The SHARE
+// bit (16) is deliberately excluded: Nextcloud attaches it to almost every
+// share regardless of access level, so it must not push a "View only" or "Can
+// edit" folder share into "Full access".
+const FOLDER_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE;
+
+// On a FILE, SHARE is the only bit separating "Can edit" (3) from "Can edit +
+// reshare" (19) — CREATE/DELETE can never be set — so here it must be matched
+// rather than ignored, or the two levels collapse again (WARP-1601).
+const FILE_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_SHARE;
+
+/**
+ * Snap a raw Nextcloud OCS permission bitmask onto one of the levels offered
+ * for this target kind, so the access-level <select> always has a matching
+ * <option>.
  *
  * WARP-939: the OCS API returns masks like 17 (READ|SHARE) or 19
  * (READ|UPDATE|SHARE) that never equal a bare preset value (1 / 3 / 31). A
  * controlled <select value={rawMask}> then matched no option, fell back to the
  * first ("View only"), and the user could not see or change the real level.
- * We choose the most-capable preset whose editing bits are all granted by the
- * mask, ignoring the ubiquitous SHARE bit.
+ * We choose the most-capable level whose distinguishing bits are all granted by
+ * the mask.
  */
-export function presetBitsFor(rawPermissions: number): number {
-  const editing = rawPermissions & PRESET_MATCH_BITS;
-  // Walk presets from most to least capable; first whose editing bits are a
-  // subset of the mask's editing bits wins.
-  for (let i = PRESETS.length - 1; i >= 0; i--) {
-    const presetEditing = PRESETS[i].bits & PRESET_MATCH_BITS;
-    if ((editing & presetEditing) === presetEditing) {
-      return PRESETS[i].bits;
+export function presetBitsFor(rawPermissions: number, isDirectory = false): number {
+  const levels = accessLevelsFor(isDirectory);
+  const matchBits = isDirectory ? FOLDER_MATCH_BITS : FILE_MATCH_BITS;
+  const granted = rawPermissions & matchBits;
+  // Walk levels from most to least capable; first whose distinguishing bits are
+  // a subset of the mask's wins.
+  for (let i = levels.length - 1; i >= 0; i--) {
+    const required = levels[i].bits & matchBits;
+    if ((granted & required) === required) {
+      return levels[i].bits;
     }
   }
   return PERM_READ;
 }
 
 /**
+ * WARP-1148/1149: Nextcloud's generalCreateChecks rejects any share of a single
+ * FILE whose bitmask carries CREATE or DELETE. The file level list no longer
+ * offers those bits, but this stays as the last line of defence on every
+ * outbound write — a mask can also arrive from a stored share row.
+ */
+export function sendablePermissions(bits: number, isDirectory: boolean): number {
+  return isDirectory ? bits : bits & ~(PERM_CREATE | PERM_DELETE);
+}
+
+/**
+ * WARP-1543: the outcome of one recipient's share attempt within a batch.
+ * A batch settles per target, so three successes and two failures are three
+ * successes and two failures — never one collapsed "it didn't work".
+ */
+interface ShareAttempt {
+  shareWith: string;
+  displayName: string;
+  ok: boolean;
+  /** Translated, user-facing reason — set only when `ok` is false. */
+  message?: string;
+}
+
+/**
  * Full sharing dialog (WARP-879 / WS-1). Two modes:
- *   • Person — share with a named household member (OCS shareType 0). The
- *     member picker is populated from GET /api/files/share-recipients, which
- *     reads the local directory (ADR-013) so every household role can use it.
+ *   • Person — share with one or more named household members (OCS shareType
+ *     0). The member picker is populated from GET /api/files/share-recipients,
+ *     which reads the local directory (ADR-013) so every household role can
+ *     use it. WARP-1543: the picker is multi-select — one Share click creates
+ *     one share per selected member at the dialog's chosen access level.
  *   • Link   — create a public link (OCS shareType 3) with permissions,
  *     expiry, password, and note. Unchanged from the prior behavior.
  *
@@ -124,7 +214,16 @@ export function ShareDialog({
   const [recipients, setRecipients] = useState<ShareRecipient[]>([]);
   const [recipientsLoading, setRecipientsLoading] = useState(true);
   const [recipientsError, setRecipientsError] = useState<string | null>(null);
-  const [selectedRecipient, setSelectedRecipient] = useState<string | null>(null);
+  // WARP-1543: a SET, not a scalar — the picker selects any number of members.
+  const [selectedRecipients, setSelectedRecipients] = useState<Set<string>>(
+    () => new Set()
+  );
+  // Per-target outcome of the last person-mode batch. `error` above stays the
+  // single-message channel for the paths that genuinely have one target: the
+  // link create, a revoke, and an access-level edit.
+  const [recipientResults, setRecipientResults] = useState<ShareAttempt[] | null>(
+    null
+  );
 
   useEffect(() => {
     setShares(existingShares);
@@ -157,43 +256,117 @@ export function ShareDialog({
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
-  // WARP-1148/1149: Nextcloud's generalCreateChecks rejects any share of a
-  // single FILE whose bitmask carries CREATE or DELETE — so the "Full access"
-  // preset (31) could never be created or applied on a file. Mask those bits
-  // for files (leaving READ|UPDATE|SHARE) so the most-capable valid share is
-  // sent instead of a guaranteed 400.
-  const sendablePermissions = (bits: number): number =>
-    isDirectory ? bits : bits & ~(PERM_CREATE | PERM_DELETE);
+  // WARP-1601: files and folders do not offer the same access levels.
+  const levels = accessLevelsFor(isDirectory);
+  const toSendable = (bits: number): number =>
+    sendablePermissions(bits, isDirectory);
 
-  const handleCreate = async () => {
-    if (mode === "person" && !selectedRecipient) return;
+  // WARP-1543: roster order, not click order, so the created shares land in the
+  // list in the same order the user sees the members — and it carries the
+  // display names the result report needs.
+  const selectedTargets = recipients.filter((r) =>
+    selectedRecipients.has(r.shareWith)
+  );
+
+  const toggleRecipient = (shareWith: string) => {
+    setSelectedRecipients((prev) => {
+      const next = new Set(prev);
+      if (next.has(shareWith)) next.delete(shareWith);
+      else next.add(shareWith);
+      return next;
+    });
+  };
+
+  // Single-message failures (revoke, access-level edit, link create) clear any
+  // stale batch report so only one thing is ever being reported at a time.
+  const reportError = (err: unknown) => {
+    setRecipientResults(null);
+    // WARP-1148: share failures translate through the share domain — never
+    // the "files" domain, whose fallback is the file-LOADING copy.
+    setError(translateError(err, "share"));
+  };
+
+  /**
+   * WARP-1543: one Share click, one share per selected member.
+   *
+   * The N POSTs are independent (no backend batch endpoint exists — see
+   * apps/orchestrator/src/routes/files.ts), so they are issued together and
+   * settled individually: a recipient Nextcloud rejects must not cancel the
+   * others, roll back the ones that already landed, or hide them. Every target
+   * gets a recorded outcome, and the failures are named on screen.
+   */
+  const createPersonShares = async () => {
+    const targets = selectedTargets;
+    if (targets.length === 0) return;
     setCreating(true);
     setError(null);
+    setRecipientResults(null);
     try {
-      const created =
-        mode === "person"
-          ? await createShare(filePath, {
-              shareType: SHARE_TYPE_USER,
-              shareWith: selectedRecipient as string,
-              permissions: sendablePermissions(permissions),
-            })
-          : await createShare(filePath, {
-              shareType: SHARE_TYPE_LINK,
-              permissions: sendablePermissions(permissions),
-              expireDate: expireDate || undefined,
-              password: password || undefined,
-              note: note || undefined,
-            });
-      setShares([created, ...shares]);
+      const settled = await Promise.allSettled(
+        targets.map((r) =>
+          createShare(filePath, {
+            shareType: SHARE_TYPE_USER,
+            shareWith: r.shareWith,
+            permissions: toSendable(permissions),
+          })
+        )
+      );
+
+      const created: ShareDetail[] = [];
+      const results: ShareAttempt[] = targets.map((r, i) => {
+        const outcome = settled[i];
+        if (outcome.status === "fulfilled") {
+          created.push(outcome.value);
+          return { shareWith: r.shareWith, displayName: r.displayName, ok: true };
+        }
+        return {
+          shareWith: r.shareWith,
+          displayName: r.displayName,
+          ok: false,
+          message: translateError(outcome.reason, "share"),
+        };
+      });
+
+      if (created.length > 0) setShares((prev) => [...created, ...prev]);
+      setRecipientResults(results);
+      // Clear-on-success, per target. A fully successful batch empties the
+      // picker exactly as the single-recipient flow always did; a partial
+      // failure leaves ONLY the failed members ticked, so "retry the ones that
+      // didn't work" is one click rather than a full re-pick.
+      setSelectedRecipients((prev) => {
+        const next = new Set(prev);
+        for (const r of results) if (r.ok) next.delete(r.shareWith);
+        return next;
+      });
+      if (created.length > 0) onChange?.();
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (mode === "person") {
+      await createPersonShares();
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    setRecipientResults(null);
+    try {
+      const created = await createShare(filePath, {
+        shareType: SHARE_TYPE_LINK,
+        permissions: toSendable(permissions),
+        expireDate: expireDate || undefined,
+        password: password || undefined,
+        note: note || undefined,
+      });
+      setShares((prev) => [created, ...prev]);
       setPassword("");
       setNote("");
       setExpireDate("");
-      setSelectedRecipient(null);
       onChange?.();
     } catch (err) {
-      // WARP-1148: share failures translate through the share domain — never
-      // the "files" domain, whose fallback is the file-LOADING copy.
-      setError(translateError(err, "share"));
+      reportError(err);
     } finally {
       setCreating(false);
     }
@@ -212,7 +385,7 @@ export function ShareDialog({
       setRevokeTargetId(null);
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "share"));
+      reportError(err);
       throw err;
     }
   };
@@ -225,7 +398,7 @@ export function ShareDialog({
   };
 
   const handleUpdatePermissions = async (shareId: number, bits: number) => {
-    const masked = sendablePermissions(bits);
+    const masked = toSendable(bits);
     try {
       await updateShare(shareId, { permissions: masked });
       setShares(
@@ -235,12 +408,19 @@ export function ShareDialog({
       );
       onChange?.();
     } catch (err) {
-      setError(translateError(err, "share"));
+      reportError(err);
     }
   };
 
+  // WARP-1543: enabled as soon as at least one member is ticked. Guarded on
+  // the same list the action iterates, so the button can never be live for a
+  // selection that would produce zero calls.
   const createDisabled =
-    creating || (mode === "person" && !selectedRecipient);
+    creating || (mode === "person" && selectedTargets.length === 0);
+
+  const failedResults = recipientResults?.filter((r) => !r.ok) ?? [];
+  const succeededCount = (recipientResults?.length ?? 0) - failedResults.length;
+  const batchWasMulti = (recipientResults?.length ?? 0) > 1;
 
   return (
     <div
@@ -325,7 +505,8 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={presetBitsFor(share.permissions)}
+                          aria-label="Access level"
+                          value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
@@ -337,9 +518,13 @@ export function ShareDialog({
                             color: "var(--text)",
                           }}
                         >
-                          {PRESETS.map((preset) => (
-                            <option key={preset.label} value={preset.bits}>
-                              {preset.label}
+                          {levels.map((level) => (
+                            <option
+                              key={level.label}
+                              value={level.bits}
+                              title={level.hint}
+                            >
+                              {level.label}
                             </option>
                           ))}
                         </select>
@@ -395,7 +580,8 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={presetBitsFor(share.permissions)}
+                          aria-label="Access level"
+                          value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
@@ -407,9 +593,13 @@ export function ShareDialog({
                             color: "var(--text)",
                           }}
                         >
-                          {PRESETS.map((preset) => (
-                            <option key={preset.label} value={preset.bits}>
-                              {preset.label}
+                          {levels.map((level) => (
+                            <option
+                              key={level.label}
+                              value={level.bits}
+                              title={level.hint}
+                            >
+                              {level.label}
                             </option>
                           ))}
                         </select>
@@ -476,14 +666,24 @@ export function ShareDialog({
           <div>
             {mode === "person" ? (
               <>
-                {/* Member picker */}
+                {/* Member picker — multi-select (WARP-1543) */}
                 <div className="space-y-2 mb-3">
-                  <label
-                    className="type-caption-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    Household member
-                  </label>
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      className="type-caption-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Household members
+                    </label>
+                    {selectedRecipients.size > 0 && (
+                      <span
+                        className="type-caption-2"
+                        style={{ color: "var(--brand)" }}
+                      >
+                        {selectedRecipients.size} selected
+                      </span>
+                    )}
+                  </div>
                   {recipientsLoading ? (
                     <p
                       className="type-footnote py-1"
@@ -508,11 +708,15 @@ export function ShareDialog({
                   ) : (
                     <div className="space-y-1.5 max-h-44 overflow-auto">
                       {recipients.map((r) => {
-                        const active = selectedRecipient === r.shareWith;
+                        const active = selectedRecipients.has(r.shareWith);
                         return (
                           <button
                             key={r.shareWith}
-                            onClick={() => setSelectedRecipient(r.shareWith)}
+                            // WARP-1543: toggles membership — clicking a
+                            // selected member deselects them instead of
+                            // silently replacing the previous pick.
+                            aria-pressed={active}
+                            onClick={() => toggleRecipient(r.shareWith)}
                             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--radius-input)] text-left transition-colors ${
                               active ? "" : "hover:bg-[var(--hover)]"
                             }`}
@@ -580,12 +784,13 @@ export function ShareDialog({
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => {
-                      const active = permissions === preset.bits;
+                    {levels.map((level) => {
+                      const active = permissions === level.bits;
                       return (
                         <button
-                          key={preset.label}
-                          onClick={() => setPermissions(preset.bits)}
+                          key={level.label}
+                          onClick={() => setPermissions(level.bits)}
+                          title={level.hint}
                           className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                             active ? "font-medium" : "hover:bg-[var(--hover)]"
                           }`}
@@ -601,7 +806,7 @@ export function ShareDialog({
                                 }
                           }
                         >
-                          {preset.label}
+                          {level.label}
                         </button>
                       );
                     })}
@@ -619,12 +824,13 @@ export function ShareDialog({
                     Access level
                   </label>
                   <div className="flex gap-2">
-                    {PRESETS.map((preset) => {
-                      const active = permissions === preset.bits;
+                    {levels.map((level) => {
+                      const active = permissions === level.bits;
                       return (
                         <button
-                          key={preset.label}
-                          onClick={() => setPermissions(preset.bits)}
+                          key={level.label}
+                          onClick={() => setPermissions(level.bits)}
+                          title={level.hint}
                           className={`flex-1 px-3 py-2 type-caption-1 rounded-[var(--radius-input)] transition-colors ${
                             active ? "font-medium" : "hover:bg-[var(--hover)]"
                           }`}
@@ -640,7 +846,7 @@ export function ShareDialog({
                                 }
                           }
                         >
-                          {preset.label}
+                          {level.label}
                         </button>
                       );
                     })}
@@ -721,6 +927,65 @@ export function ShareDialog({
               </>
             )}
           </div>
+
+          {/*
+            WARP-1543 — per-target outcome of the last person-mode batch.
+
+            A partial failure has to stay legible: the headline states how many
+            of how many landed, and every failure is named with its own reason.
+            The shares that DID succeed are already in the list above and are
+            never rolled back. With exactly one target the box degrades to the
+            bare message — identical to the pre-batch single-recipient copy.
+          */}
+          {failedResults.length > 0 && (
+            <div
+              role="alert"
+              className="p-2 type-footnote"
+              style={{
+                color: "#ef4444",
+                background: "rgba(239,68,68,0.1)",
+                border: "1px solid rgba(239,68,68,0.2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
+              {batchWasMulti && (
+                <p className="font-medium mb-1">
+                  {succeededCount > 0
+                    ? `Shared with ${succeededCount} of ${recipientResults?.length} people — ${failedResults.length} failed`
+                    : `Couldn't share with any of the ${recipientResults?.length} people you picked`}
+                </p>
+              )}
+              <ul className="space-y-0.5">
+                {failedResults.map((r) => (
+                  <li key={r.shareWith}>
+                    {batchWasMulti ? `${r.displayName}: ${r.message}` : r.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* A whole batch landed — the list above gained several rows at once,
+              so say so rather than leaving the user to count them. */}
+          {batchWasMulti && failedResults.length === 0 && (
+            <div
+              role="status"
+              className="p-2 type-footnote flex items-center gap-2"
+              style={{
+                color: "var(--text)",
+                background: "var(--surface-2)",
+                border: "1px solid var(--card-bd)",
+                borderRadius: "var(--radius-input)",
+              }}
+            >
+              <Check
+                size={14}
+                className="flex-shrink-0"
+                style={{ color: "var(--success)" }}
+              />
+              {`Shared with ${succeededCount} people`}
+            </div>
+          )}
 
           {error && (
             <div

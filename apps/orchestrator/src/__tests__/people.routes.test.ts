@@ -100,6 +100,7 @@ vi.mock("../services/nextcloud.client.js", () => ({
 
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 interface MockUser {
   id: string;
@@ -169,12 +170,18 @@ function createPrismaMock(initialRows: MockUser[] = []) {
   const rows = new Map<string, MockUser>(initialRows.map((u) => [u.id, u]));
   const scopeBindings = new Map<string, Set<string>>();
   const usagePolicies = new Map<string, any>();
-  // $transaction interactive form: just runs the callback with `this`
-  // as the tx handle. WARP-480's last-owner invariant uses this shape
-  // for the count + mutate pair; same mock idiom as
-  // network.schedules.test.ts and calendar-service.test.ts.
+  // WARP-1570: shared seam, not a local `fn(self)` passthrough. people.ts
+  // runs WARP-480's last-owner invariant (the count + mutate pair) inside
+  // SERIALIZABLE_TX; the old stub could not see the option, could not roll
+  // the mutate back when the invariant refused, and could not express the
+  // two concurrent demotions the invariant exists to stop.
   const self: any = {};
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { rows, scopeBindings, usagePolicies },
+  });
+  self.$transaction = seam.$transaction;
+  self._seam = () => seam;
   return Object.assign(self, {
     rows,
     scopeBindings,

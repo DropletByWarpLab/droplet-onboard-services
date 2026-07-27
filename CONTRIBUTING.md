@@ -1,17 +1,18 @@
-# Contributing to Droplet Edge Platform
+# Contributing to droplet-onboard-services
 
 ## Architecture
 
 ```
-edge-platform/                  Turbo monorepo
+droplet-onboard-services/       Turbo monorepo
 ├── apps/
-│   ├── orchestrator/             Express + TypeScript (port 3000)
+│   ├── orchestrator/           Express + TypeScript (port 3000)
 │   └── web-dashboard/          Next.js + React (port 3001)
-├── services/
+├── services/                   18 Python/TypeScript services, e.g.:
 │   └── ai-gateway/             Python FastAPI + LiteLLM (port 8000)
+├── packages/                   4 shared packages (shared-types, tools-core, …)
 ├── docker/
-│   ├── docker-compose.yml      Full orchestration
-│   ├── nginx.conf              Reverse proxy
+│   ├── docker-compose.yml      Full orchestration (29 compose services)
+│   ├── nginx/                  Reverse proxy (Dockerfile + configs)
 │   └── mosquitto.conf          MQTT broker
 ├── tests/                      Integration test suite
 └── turbo.json                  Build pipeline
@@ -28,7 +29,7 @@ edge-platform/                  Turbo monorepo
 
 ```bash
 # Clone and enter the repo
-cd edge-platform
+cd droplet-onboard-services
 
 # Install Node.js dependencies (all workspaces)
 npm install
@@ -65,10 +66,7 @@ pre-commit install
 npm run test
 ```
 
-This runs tests across all 3 services concurrently:
-- **AI Gateway**: 54 pytest tests (schemas, keystore, BYOK, router, endpoints)
-- **API Server**: 18 vitest tests (health, devices, LLM routes)
-- **Web Dashboard**: 25 vitest tests (components, API client, hooks)
+Turbo fans this out across every workspace — `apps/*`, `services/*`, and `packages/*` (2 apps, 18 services, 4 packages). Each workspace owns its own suite (pytest for the Python services, Vitest for the TypeScript ones); see the per-workspace `tests/` / `__tests__/` directories for what's covered.
 
 ### Individual service tests
 
@@ -220,9 +218,14 @@ Located in `tests/api.integration.test.ts`. These run against real services in D
 
 ### What's NOT tested (yet)
 
-- Streaming SSE end-to-end (requires a running Ollama or cloud provider)
 - Web dashboard page rendering (add Playwright for E2E later)
 - Docker image ARM64 builds
+
+(Streaming SSE is no longer on this list — the WARP-1442 agent-loop token streaming ships with its own unit/streaming tests in `apps/orchestrator`.)
+
+## CI cost budget
+
+CI runs under a hard org spending limit — see [`docs/ci-cost-budget.md`](docs/ci-cost-budget.md) for the design and the cost-estimation formula. The one rule to know when touching workflows: PR-time coverage lives in `ci.yml`'s path-aware legs (the required check), and the per-service `*-tests.yml` workflows run on push-to-main only — **do not re-add `pull_request:` triggers to them** (see the "CI cost budget" section in `CLAUDE.md`).
 
 ## Project Structure Details
 
@@ -253,22 +256,18 @@ src/
   index.ts               Entry point (Prisma, Redis, MQTT init)
   app.ts                 Express app factory
   config.ts              Zod-validated environment config
-  routes/
-    health.ts            GET /api/health
-    devices.ts           GET /api/devices
-    llm.ts               GET/POST /api/llm/* (proxy to ai-gateway)
-  services/
-    ai-gateway.client.ts HTTP client for AI Gateway
-    device.service.ts    Prisma device queries
-    cache.service.ts     Redis wrapper
-    mqtt.service.ts      MQTT publish/subscribe
-  middleware/
-    error-handler.ts     Global error handler
-    request-logger.ts    Pino HTTP logging
+  routes/                ~75 route modules — auth, files, llm, cameras,
+                         network-*, devices, departments, updates, voice,
+                         setup, access, … (plus mobile/ and pm/ subtrees)
+  services/              ~175 service modules — ai-gateway client, device,
+                         cache, mqtt, chat-persistence, update-agent/, vpn, …
+  middleware/            auth, RBAC guards, error handler, request logger
 prisma/
   schema.prisma          Database schema
   seed.ts                Development seed data
 ```
+
+Colocated `*.test.ts` files sit next to routes/services; `src/__tests__/` holds the cross-cutting suites.
 
 ### Web Dashboard (`apps/web-dashboard/`)
 
@@ -277,20 +276,11 @@ src/
   app/
     layout.tsx           Root layout with sidebar
     page.tsx             Dashboard (device status, service health)
-    chat/page.tsx        AI chat with streaming
-    settings/page.tsx    Provider key management
-  components/
-    Sidebar.tsx          Navigation sidebar
-    StatusCard.tsx       Status indicator card
-    ChatMessage.tsx      Chat bubble component
-    ChatInput.tsx        Message input with keyboard shortcuts
-    ModelSelector.tsx    Model dropdown with provider badge
-    ProviderKeyForm.tsx  BYOK key entry form
-  lib/
-    api.ts               API client functions
-    types.ts             Shared TypeScript types
-    hooks/
-      useChat.ts         Streaming chat state management
-      useModels.ts       SWR-powered model fetching
-      useDevice.ts       SWR-powered device status
+    <route>/page.tsx     ~30 routes: admin, calendar, cameras, chat, clips,
+                         context, devices, email, events, files, health, help,
+                         integrations, invite, knowledge, login, models,
+                         network, projects, remote-access, settings, setup,
+                         tools, tour, trust, users, voice, …
+  components/            Shared UI (sidebar, chat, network, files, …)
+  lib/                   API client, types, SWR hooks
 ```

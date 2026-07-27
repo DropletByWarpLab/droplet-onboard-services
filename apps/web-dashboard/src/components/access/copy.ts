@@ -39,6 +39,16 @@ export const ACCESS_COPY = {
   cloudConsequence:
     "This is the only setting that sends a person's chat with the assistant off this Droplet — to the cloud AI provider they choose. It's off by default.",
   floorBlockedNetwork: "Network changes are for admins.",
+  // ── WARP-1585: declared feature dependencies ──
+  // Documents has no surface of its own — it opens files that live in Files —
+  // so a Documents grant with no Files grant grants nothing reachable. The
+  // row is shown, disabled, WITH this reason: the same shape as `toolAutoOff`
+  // one level up, and deliberately NOT a padlock (§13 reserves Lock for
+  // floor-blocked-with-reason, which this is not — the operator can clear
+  // this one themselves by turning Files on).
+  // Authored here on the T9 precedent (`inviteRolesDegraded`): no §12 string
+  // exists for a dependency block. Flagged for design-packet ratification.
+  docsNeedsFiles: "Documents open from your file libraries — turn Files on to include them.",
   builderSubline: "What people with this role can see, do, and use.",
   cloudModelsToggle: "Let this role's assistant use cloud models",
   offBoxHeader: "Reaching outside your Droplet",
@@ -64,6 +74,47 @@ export const ACCESS_COPY = {
     `Delete the '${role}' role? People can't be assigned to it afterwards. This doesn't change anyone's access right now.`,
   deleteRoleInUse: (n: number) => `In use by ${n} people — reassign them first.`,
   reassignPeopleLink: "Reassign people →",
+
+  // ── Archive / restore (WARP-1560) ──
+  // The packet's own archive body (prototype access-app.jsx), whole again.
+  // T8 shipped it with the second sentence CUT because no restore surface
+  // existed yet and §12 never promises an affordance you can't reach; the
+  // surface exists now, so the promise is honest and goes back in.
+  archiveRole:
+    "Archived roles can't be assigned but keep their settings. You can restore them any time.",
+  // WARP-1560-authored — the packet has no restore string (same footing as
+  // `docsNeedsFiles` / `inviteRolesDegraded` below; flagged for packet
+  // ratification). Mirrors the archive + delete bodies: consequence, then
+  // reassurance. That last sentence is load-bearing rather than polite —
+  // archive is NOT revoke (effective-access.service.ts deliberately never
+  // reads `state`), so people holding an archived role never lost access
+  // and therefore cannot "regain" it. Departments' restore body says the
+  // opposite, correctly, because archiving a department really does take
+  // its members' access away.
+  restoreRole:
+    "Restored roles can be assigned again, and their usage defaults start applying again. This doesn't change anyone's access right now.",
+  archivedRoles: "Archived roles",
+  archived: "Archived",
+  // The honest reason under the disabled Assign-people button — shown, not
+  // hover-only, and text-first: §13 reserves Lock for floor-blocked levels,
+  // which this is not (the operator can clear it themselves by restoring).
+  archivedNotAssignable:
+    "Archived roles can't be assigned — restore this one to put it back to work.",
+  // `emptyRoles` claims "No custom roles yet", which stops being true the
+  // moment every custom role is merely filed away rather than absent.
+  emptyRolesAllArchived: "Every custom role is archived — restore one, or create a new role.",
+
+  // ── Retained quota (WARP-1576) ──
+  // Clearing a role's storage default deliberately pushes nothing (a cleared
+  // default means "unmanaged", never "unlimited" — WARP-1531's semantics), so
+  // the members who had no quota of their own stay on whatever Nextcloud
+  // already enforces. The server returns the count precisely so this can be
+  // said out loud; without it the operator gets silence where a consequence
+  // happened. WARP-1576-authored on the ticket's own phrasing.
+  retainedQuota: (n: number) =>
+    n === 1
+      ? "1 person keeps their current storage limit until it's changed."
+      : `${n} people keep their current storage limit until it's changed.`,
   removePerson: (name: string) =>
     `Remove ${name}? They lose access to this Droplet immediately and are signed out.`,
 

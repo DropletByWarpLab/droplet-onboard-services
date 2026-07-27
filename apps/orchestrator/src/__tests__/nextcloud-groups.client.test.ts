@@ -21,6 +21,7 @@ import {
   ncAddUserToGroup,
   ncRemoveUserFromGroup,
   ncListGroupMembers,
+  ncListGroupMembersStrict,
   gfListFolders,
   gfGetFolder,
   gfCreateFolder,
@@ -369,6 +370,110 @@ describe("nextcloud-groups.client", () => {
       const members = await ncListGroupMembers("token", "empty-group");
 
       expect(members).toEqual([]);
+    });
+  });
+
+  /**
+   * WARP-1565 residual 3 — the strict variant the reconciler sweeps use.
+   *
+   * `ncListGroupMembers` collapses EVERY failure to `[]`, so a caller cannot
+   * tell "this group has no members" from "I could not find out". For the
+   * lenient callers that is fine. For a sweep it is not: the whole point of
+   * a sweep is to compare an expected set against the actual one, and an
+   * empty actual set is indistinguishable from a total outage — which is
+   * how a list-broken/writes-working Nextcloud makes the admin-group sweep
+   * re-add every operator on every tick, forever.
+   *
+   * 404 stays `[]` on purpose, and that is the whole distinction: a group
+   * that does not exist genuinely has no members, and the reconciler's
+   * group-creation pass owns fixing that. Everything else is UNKNOWN, and
+   * unknown must throw so the sweep can skip the tick instead of acting on
+   * a fiction.
+   *
+   * The lenient function is deliberately left exactly as it was — a strict
+   * variant beside it is a smaller blast radius than re-pointing a shared
+   * client contract, and it puts the choice at the call site where the
+   * consequence lives.
+   */
+  describe("ncListGroupMembersStrict", () => {
+    it("returns the members on a healthy list", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: { statuscode: 100, status: "ok" },
+              data: { users: ["alice", "bob"] },
+            },
+          },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "dept-eng")).resolves.toEqual([
+        { id: "alice", displayName: "alice" },
+        { id: "bob", displayName: "bob" },
+      ]);
+    });
+
+    it("returns [] for a group that exists and is empty", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { statuscode: 100 }, data: { users: [] } } },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "empty")).resolves.toEqual([]);
+    });
+
+    it("returns [] on 404 — an absent group genuinely has no members", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: false,
+          status: 404,
+          json: { ocs: { meta: { statuscode: 404 }, data: null } },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "gone")).resolves.toEqual([]);
+    });
+
+    it("THROWS on a server error instead of reporting an empty group", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({ ok: false, status: 500, text: "Internal server error" })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "g")).rejects.toThrow(
+        NextcloudOcsError
+      );
+    });
+
+    it("THROWS when the transport fails", async () => {
+      global.fetch = vi
+        .fn()
+        .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "g")).rejects.toThrow(
+        /ECONNREFUSED/
+      );
+    });
+
+    it("THROWS on a 200 whose payload has no users array", async () => {
+      // A malformed success is not an empty group — it is a response we do
+      // not understand, and acting on it would remove real members.
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { statuscode: 100 }, data: {} } },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(ncListGroupMembersStrict("token", "g")).rejects.toThrow(
+        NextcloudOcsError
+      );
     });
   });
 

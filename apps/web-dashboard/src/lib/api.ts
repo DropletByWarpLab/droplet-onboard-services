@@ -4210,10 +4210,14 @@ export async function fetchFiles(
   space: FileSpaceId = "personal"
 ): Promise<FileEntryInfo[]> {
   const qs = new URLSearchParams({ path });
-  // Only send the space param for the shared space — keeps the personal
-  // request URL (and its SWR cache key) byte-identical to the pre-WARP-883
-  // shape so nothing else has to change.
-  if (space === "shared") qs.set("space", "shared");
+  // WARP-1623: send the space for EVERY non-personal space, matching every
+  // other space-threaded helper below. The original gate named "shared"
+  // literally, from when FileSpaceId was a two-member union; WARP-1261 widened
+  // it to `dept:<uuid>` server-side and this branch silently dropped those, so
+  // a library listing resolved through personal semantics and returned the
+  // caller's home root. Personal still sends nothing, which keeps that request
+  // URL (and its SWR cache key) byte-identical to the pre-WARP-883 shape.
+  if (space !== "personal") qs.set("space", space);
   const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
   return res.json();
@@ -4516,10 +4520,42 @@ export async function bulkCopyFiles(
   return data.results;
 }
 
+/** Discriminator carried by `TrashUnsupportedError`. */
+export const TRASH_UNSUPPORTED = "TRASH_UNSUPPORTED";
+
+/**
+ * WARP-1555 — thrown by `fetchTrash` when the box's storage backend has no
+ * trashbin and the orchestrator answers 501.
+ *
+ * This used to resolve to `[]`, which rendered as "Trash is empty" — the one
+ * message you must never show a user whose deleted files are in fact gone
+ * for good. "Unsupported" is a distinct state and gets distinct copy.
+ */
+export class TrashUnsupportedError extends Error {
+  readonly code = TRASH_UNSUPPORTED;
+
+  constructor() {
+    super("This storage backend has no trash bin");
+    this.name = "TrashUnsupportedError";
+  }
+}
+
+/**
+ * Structural check rather than `instanceof`, so the guard still holds across
+ * module boundaries (mocked api modules, bundler duplicates).
+ */
+export function isTrashUnsupportedError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === TRASH_UNSUPPORTED
+  );
+}
+
 export async function fetchTrash(): Promise<TrashItemInfo[]> {
   const res = await authFetch(`${BASE}/api/files/trash`);
   if (!res.ok) {
-    if (res.status === 501) return [];
+    if (res.status === 501) throw new TrashUnsupportedError();
     throw new Error(`Failed to fetch trash: ${res.status}`);
   }
   const data = await res.json();
@@ -5623,6 +5659,31 @@ export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
   });
 }
 
+// --- WARP-1599: the voice kill switch ---
+
+/**
+ * Switch the whole wake pipeline on or off, box-wide and persisted.
+ * Owner/admin only — the orchestrator route enforces that; the
+ * dashboard never gates a write it doesn't own.
+ *
+ * Deliberately NOT queued behind `exclusiveCapture`: the toggle holds
+ * no capture window, and an off must never wait on a measurement that
+ * is holding the mic. voice-io serializes concurrent toggles itself and
+ * answers 409, which `throwVoiceError` carries up as `status: 409` for
+ * callers to surface as "already switching" rather than a dead box.
+ */
+export async function setVoiceEnabled(
+  enabled: boolean,
+): Promise<{ enabled: boolean }> {
+  const res = await authFetch(`${BASE}/api/voice/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to switch voice");
+  return res.json();
+}
+
 // --- WARP-1057: mic-processor (XVF3800 DSP) restart ---
 
 /**
@@ -6181,6 +6242,18 @@ export interface AppModuleState {
   available: boolean;
   enabled: boolean;
   effective: boolean;
+  /**
+   * WARP-1585 — a module this one declares it cannot function without (`docs`
+   * requires `files`: documents open from the file libraries). Optional on the
+   * wire so an orchestrator that predates the field reads as "no dependency"
+   * rather than breaking the panel.
+   */
+  requires?: string;
+  /** `requires` is declared and that parent is not effective, so neither is
+   *  this. Reported separately from `available` / `enabled` so a panel can say
+   *  WHY instead of showing a module that silently refuses to switch on —
+   *  `enabled` still carries the operator's stored intent. */
+  requiresUnmet?: boolean;
 }
 
 export interface AppModulesView {
@@ -6642,7 +6715,18 @@ export async function duplicateAccessRole(
 export async function updateAccessRole(
   id: string,
   patch: Partial<AccessRolePayload> & { state?: "active" | "archived" },
-): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+): Promise<{
+  role: AccessRole;
+  syncState?: AccessSyncState;
+  /** WARP-1576 — present only when this PATCH CLEARED the role's storage
+   *  default: how many members had no person-level quota and therefore keep
+   *  whatever Nextcloud currently enforces until someone edits it. The server
+   *  deliberately pushes nothing in that case (a cleared default means
+   *  "unmanaged", never "unlimited" — WARP-1531's semantics), so this count
+   *  is the operator's only signal that people were left on a retained
+   *  value. */
+  retainedQuotaCount?: number;
+}> {
   const res = await authFetch(`${BASE}/api/access/roles/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -6661,6 +6745,17 @@ export async function archiveAccessRole(
   id: string,
 ): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
   return updateAccessRole(id, { state: "archived" });
+}
+
+/** WARP-1560 — archive's symmetric partner. The server treats the
+ *  transition as its own event: it writes an "Access role restored"
+ *  Activity row and, when the role carries a storage default that members
+ *  are back to inheriting, kicks the usage reconciler and answers
+ *  `pending` — so the caller's sync chip has something true to say. */
+export async function restoreAccessRole(
+  id: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  return updateAccessRole(id, { state: "active" });
 }
 
 export async function deleteAccessRole(id: string): Promise<void> {

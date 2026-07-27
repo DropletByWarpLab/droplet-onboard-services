@@ -206,6 +206,48 @@ export function fullCatalogFeatures(
   return out;
 }
 
+// ── Connector axis (§5.4 / O-2 floors) ────────────────────────────
+
+/**
+ * Clamp a requested connector grant to what its starting point can actually
+ * hold. `null` = the tier can hold NO grant on this axis at all, so the row
+ * must not be written.
+ *
+ * The ONE authoritative statement of O-2's two connector floors, so the
+ * builder's disabled options and the server's re-clamp can never drift:
+ *
+ *   • `read_write` is selectable only on **Admin-based** roles. A Family-based
+ *     role caps at `read` — the ADR-032 §8 O-2 sentence, shipped in T6.
+ *   • **Guest-based roles hold no connector grant at all** (WARP-1578). O-2's
+ *     read floor is family-and-UP, and routes/erp.ts enforces the "and-up"
+ *     half at the consumption site, so a grant stored on a Guest-based role is
+ *     inert BY CONSTRUCTION — it can never widen anything. Keeping the row
+ *     would let an operator save a setting that silently does nothing and
+ *     would make the roles list advertise reach that does not exist. The
+ *     builder shows the levels **disabled with the reason** (never hidden);
+ *     this is the server half that makes the client's honesty enforceable.
+ *
+ * This clamp is WRITE-SIDE ONLY and ships with NO BACKFILL: guest connector
+ * rows written before it exist until their role is next edited. It therefore
+ * does NOT make `erpConnectorReadGate`'s family-and-up tier floor redundant —
+ * that floor is what still neutralises those rows, and removing it on the
+ * strength of this function would re-open PHI to them. Read the two together.
+ *
+ * Deliberately NOT a 400: the roles surface's contract is "the dashboard
+ * pre-clamps for honest UI but is never trusted, and the server re-clamps"
+ * (routes/access.ts header). Rejecting would break a contract every other
+ * axis keeps.
+ */
+export function clampConnectorLevel(
+  startingPoint: Role,
+  requested: ConnectorLevel,
+): ConnectorLevel | null {
+  if (startingPoint === "admin" || startingPoint === "owner") return requested;
+  // family (and anything else above guest) caps at read; guest holds none.
+  if (startingPoint === "guest" || startingPoint === "service") return null;
+  return requested === "read_write" ? "read" : requested;
+}
+
 // ── Tool-domain axis ──────────────────────────────────────────────
 
 /** domain → owning module, from the ONE canonical module registry. */
