@@ -93,13 +93,20 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 // at call time; reset in beforeEach below.
 let mockFiles: FileEntryInfo[] = FILES;
 let mockFilesError: unknown = undefined;
+// WARP-1623 — the (path, space) pair the page actually asks for. `currentPath`
+// is space-root-relative, so this is what proves a library listing is requested
+// relative to its own mount rather than double-prefixed. Reset in beforeEach.
+let mockFilesCalls: Array<[string, string]> = [];
 vi.mock("@/lib/hooks/useFiles", () => ({
-  useFiles: () => ({
-    files: mockFilesError ? [] : mockFiles,
-    error: mockFilesError,
-    isLoading: false,
-    refresh: vi.fn(),
-  }),
+  useFiles: (path: string, space: string) => {
+    mockFilesCalls.push([path, space]);
+    return {
+      files: mockFilesError ? [] : mockFiles,
+      error: mockFilesError,
+      isLoading: false,
+      refresh: vi.fn(),
+    };
+  },
 }));
 
 // WARP-1338 (UX review) — the page feeds the breadcrumb the same volume
@@ -190,6 +197,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     fetchShares: vi.fn().mockResolvedValue([]),
     fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+    // WARP-1623 — asserted below: an entry path must be converted to the
+    // active space's relative form before it reaches a space-threaded write.
+    deleteFile: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -206,6 +216,7 @@ beforeEach(() => {
   mockDrives = [];
   mockPools = [];
   mockSearchResult = FILES[0];
+  mockFilesCalls = [];
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -747,5 +758,114 @@ describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547
     fireEvent.click(screen.getByRole("button", { name: /pick search result/i }));
 
     expect(pushMock).toHaveBeenCalledWith("/files?space=shared&path=%2FTrips");
+  });
+});
+
+// WARP-1623 — browsing a department library.
+//
+// `currentPath` is space-root-relative (the page states this at the
+// `homeRelativeCurrentPath` memo and again at the breadcrumb and Move/Copy
+// call sites), and the server prefixes the mount for the declared space. Two
+// helpers in the page still special-cased `shared` when the listing request
+// itself dropped every `dept:` space, so the mismatch was invisible. Once the
+// space reaches the wire, they become the bug — and with the WARP-1547 funnel
+// writing the URL, a double-prefixed path would be baked into the link too.
+describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
+  const FINANCE: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "manager",
+    isMember: true,
+  };
+
+  // Listing entries always carry HOME-relative paths, mount included.
+  const FINANCE_ENTRIES: FileEntryInfo[] = [
+    {
+      name: "Q1",
+      path: "/Finance/Q1",
+      isDirectory: true,
+      size: 0,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType: "httpd/unix-directory",
+    },
+    {
+      name: "budget.xlsx",
+      path: "/Finance/budget.xlsx",
+      isDirectory: false,
+      size: 4096,
+      modifiedAt: "2026-07-01T00:00:00.000Z",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+  ];
+
+  beforeEach(() => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = FINANCE_ENTRIES;
+    mockUser = { id: "u1", email: "family@example.com", role: "family" };
+  });
+
+  // NOT a pin on the WARP-1623 bug — a regression guard on the page contract
+  // it depends on. `useFiles` is mocked wholesale here and the page has always
+  // passed the real space into it; the drop happened one layer below, inside
+  // `fetchFiles`. The wire-level pin lives in `lib/api.spaces.test.ts`. This
+  // guards the other half: that a space switch still lands on the space ROOT
+  // rather than carrying the previous space's path across.
+  it("lands a space switch on the library root, carrying the space id", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/", "dept:finance"]);
+  });
+
+  it("opening a folder asks for it relative to the library, not double-prefixed", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    // "/Finance/Q1" fed back verbatim would be re-prefixed server-side to
+    // "/Finance/Finance/Q1" — the WARP-1140 double-prefix, which renders as a
+    // silently empty folder.
+    expect(mockFilesCalls.at(-1)).toEqual(["/Q1", "dept:finance"]);
+  });
+
+  // The WARP-1547 funnel writes the URL on every move, so a double-prefixed
+  // path would not merely mislist — it would be baked into the shareable link.
+  // Mirrors the Household assertion the 1547 suite already makes.
+  it("writes a space-relative URL for a folder opened inside a library", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^folder q1$/i }));
+    expect(pushMock).toHaveBeenCalledWith("/files?space=dept%3Afinance&path=%2FQ1");
+  });
+
+  it("converts an entry path to space-relative form before a write", async () => {
+    const { deleteFile } = await import("@/lib/api");
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete budget\.xlsx/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(deleteFile).toHaveBeenCalledWith("/budget.xlsx", "dept:finance");
+  });
+
+  // Must open a FOLDER: `handleRowOpen` only reaches the path translation on a
+  // directory — a file routes to the preview modal instead, so clicking one
+  // would assert nothing but the mount-time listing call.
+  it("leaves the personal space home-relative — no prefix stripped", () => {
+    mockSpaces = [PERSONAL, FINANCE];
+    mockFiles = [
+      {
+        name: "Docs",
+        path: "/Docs",
+        isDirectory: true,
+        size: 0,
+        modifiedAt: "2026-07-01T00:00:00.000Z",
+        mimeType: "httpd/unix-directory",
+      },
+    ];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^folder docs$/i }));
+    expect(mockFilesCalls.at(-1)).toEqual(["/Docs", "personal"]);
   });
 });
