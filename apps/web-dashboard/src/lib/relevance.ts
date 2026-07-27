@@ -1,26 +1,71 @@
 /**
- * WARP-859 — citation relevance → display percent.
+ * WARP-859 / WARP-1603 — citation relevance → display percent.
  *
- * Citation scores reach the UI in two different shapes:
- *   - bounded COSINE similarities in [-1, 1] (the file-search content path,
- *     `1 - (embedding <=> vec)`), and
- *   - unbounded cross-encoder RERANKER logits (the hybrid/chat retrieval
- *     path — BGE-reranker-base emits raw logits, commonly ~+10 for a strong
- *     match and negative for a poor one).
+ * Citation scores reach the UI in two different scales:
+ *   - a bounded 0–1 RELEVANCE / similarity (cosine `1 - (embedding <=> vec)`,
+ *     RRF fusion weights, and — since WARP-1603 — the mcp-server's
+ *     sigmoid-normalized reranker score), and
+ *   - an unbounded cross-encoder LOGIT (BGE-reranker-base emits raw
+ *     `outputs.logits`: roughly +10 for a strong match, and NEGATIVE for
+ *     all but a strong match). Retrieval paths that have not yet
+ *     normalized at the source still hand us this shape.
  *
- * The old render sites did `Math.round(score * 100)` unconditionally, so a
- * reranker logit of ~10.2 displayed as "1020%" (the bug Romain reported on
- * the parsed PDF). A negative logit would show a negative percent.
+ * History of this function:
+ *   - Pre-WARP-859 the render sites did `Math.round(score * 100)`
+ *     unconditionally, so a logit of ~10.2 displayed as "1020%".
+ *   - WARP-859 squashed through the logistic only when `score > 1`. That
+ *     cured the overflow but converted it into an UNDERFLOW: BGE's
+ *     negative logits fell into the else-branch, were treated as bounded
+ *     similarities, and clamped to 0% — so every chat citation chip read
+ *     0% (WARP-1603).
  *
- * Heuristic, render-only fix (no backend rebuild, single chokepoint for both
- * the chat citation chips and the /knowledge search viewers):
- *   - score > 1  → treat as a reranker logit; squash through the logistic so
- *                  it lands in (0, 1) while preserving rank order.
- *   - score ≤ 1  → treat as a similarity; clamp the [-1, 1] range into [0, 1].
- * Then scale to a clamped 0–100 integer.
+ * The fix is to stop inferring the scale from "is it bigger than 1":
+ *   - Callers that KNOW the scale pass `kind` explicitly. Producers should
+ *     tag their payload (`scoreKind`) rather than leave the scale to the
+ *     renderer — the mcp-server now normalizes reranker logits at the
+ *     source (`services/mcp-server/src/file-search.service.ts`).
+ *   - Untagged scores fall back to `inferScoreKind`: a value INSIDE [0, 1]
+ *     is a bounded relevance; anything outside — above 1 or below 0 — can
+ *     only be a raw logit. So −1 now reads ~27%, not 0%.
+ *
+ * The inference deliberately reads a negative score as a logit rather than
+ * as a negative cosine: the retrieval SQL filters on `minSimilarity`
+ * (default 0.3), so a negative cosine never reaches a citation chip, while
+ * negative reranker logits are the common case.
  */
-export function relevancePct(score: number): number {
+
+/**
+ * The scale a raw citation score is expressed in.
+ *   - "similarity" — already bounded in [0, 1] (cosine, RRF, or a
+ *     source-normalized reranker relevance). Rendered as-is.
+ *   - "logit"      — unbounded cross-encoder output. Squashed through the
+ *     logistic, which is monotonic and therefore rank-preserving.
+ */
+export type ScoreKind = "logit" | "similarity";
+
+/** Logistic squash. Maps ℝ → (0, 1) preserving order. */
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
+ * Best-effort scale detection for a score that arrived without a
+ * `scoreKind` tag (older mcp-server builds, the `/knowledge` search
+ * route). Prefer passing `kind` explicitly when the call site knows it.
+ */
+export function inferScoreKind(score: number): ScoreKind {
+  return score >= 0 && score <= 1 ? "similarity" : "logit";
+}
+
+/**
+ * Render a citation score as a clamped 0–100 integer percent.
+ *
+ * @param score raw score off the wire
+ * @param kind  the scale `score` is in; omit to infer (see `inferScoreKind`)
+ */
+export function relevancePct(score: number, kind?: ScoreKind): number {
   if (!Number.isFinite(score)) return 0;
-  const p = score > 1 ? 1 / (1 + Math.exp(-score)) : score;
+  const resolved = kind ?? inferScoreKind(score);
+  const p = resolved === "logit" ? sigmoid(score) : score;
   return Math.max(0, Math.min(100, Math.round(p * 100)));
 }

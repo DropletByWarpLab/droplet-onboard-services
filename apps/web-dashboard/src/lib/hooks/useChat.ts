@@ -129,6 +129,44 @@ function extractCitations(toolName: string, data: unknown): ChatCitation[] {
 }
 
 /**
+ * WARP-1603 — rebuild an assistant turn's citation chips from its
+ * PERSISTED tool calls.
+ *
+ * Citations are derived client-side from `search_content` results and are
+ * never persisted as their own column, so `loadConversation` used to
+ * rehydrate `toolCalls` while dropping `citations` entirely — the chip row
+ * vanished on refresh even though the underlying `data` blob was right
+ * there. Replaying the same extractor over the stored results restores the
+ * exact chips the turn showed live.
+ *
+ * Gating mirrors the live `tool_result` path: only successful,
+ * non-`confirmation_required` results contribute, and rows dedupe on
+ * `citationKey` in first-seen order.
+ */
+function citationsFromToolCalls(
+  calls: ReadonlyArray<{
+    name: string;
+    ok?: boolean;
+    status?: string;
+    data?: unknown;
+  }>,
+): ChatCitation[] {
+  const out: ChatCitation[] = [];
+  const seen = new Set<string>();
+  for (const call of calls) {
+    if (call.ok !== true) continue;
+    if (call.status === "confirmation_required") continue;
+    for (const c of extractCitations(call.name, call.data)) {
+      const k = citationKey(c);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
  * Chat hook backed by `POST /api/llm/chat` (the MCP-backed orchestrator
  * agent loop introduced in WARP-101). The route is stateless: the
  * full message thread lives in React state and is replayed on every
@@ -1457,6 +1495,30 @@ export function useChat(options: UseChatOptions = {}) {
                     ? "failed"
                     : undefined
             : undefined;
+        const restoredToolCalls =
+          m.role === "assistant" && m.toolCalls?.length
+            ? m.toolCalls.map((c) => ({
+                id: c.id,
+                name: c.name,
+                args: c.args,
+                ok: c.ok,
+                status: c.status,
+                message: c.message,
+                data: c.data,
+                // WARP-640 — restore the confirmation handle so a chip
+                // reloaded in `confirmation_required` still renders the
+                // "Approve & run" button (mirrors the live tool_result
+                // path above). The amber block guards re-clicks via the
+                // server's 403 on a consumed/expired token. (review #497)
+                ...(c.confirmation ? { confirmation: c.confirmation } : {}),
+              }))
+            : undefined;
+        // WARP-1603 — citations aren't persisted as their own column; they
+        // are re-derived from the retrieval tool results stored on the
+        // turn. Without this the chip row disappeared on every refresh.
+        const restoredCitations = restoredToolCalls
+          ? citationsFromToolCalls(restoredToolCalls)
+          : [];
         rebuilt.push({
           id: m.id,
           role: m.role as "user" | "assistant",
@@ -1473,24 +1535,9 @@ export function useChat(options: UseChatOptions = {}) {
           // and assistant rows going forward; absent on older history).
           ...(m.model ? { model: m.model } : {}),
           ...(m.provider ? { provider: m.provider } : {}),
-          ...(m.role === "assistant" && m.toolCalls?.length
-            ? {
-                toolCalls: m.toolCalls.map((c) => ({
-                  id: c.id,
-                  name: c.name,
-                  args: c.args,
-                  ok: c.ok,
-                  status: c.status,
-                  message: c.message,
-                  data: c.data,
-                  // WARP-640 — restore the confirmation handle so a chip
-                  // reloaded in `confirmation_required` still renders the
-                  // "Approve & run" button (mirrors the live tool_result
-                  // path above). The amber block guards re-clicks via the
-                  // server's 403 on a consumed/expired token. (review #497)
-                  ...(c.confirmation ? { confirmation: c.confirmation } : {}),
-                })),
-              }
+          ...(restoredToolCalls ? { toolCalls: restoredToolCalls } : {}),
+          ...(restoredCitations.length > 0
+            ? { citations: restoredCitations }
             : {}),
           ...(failureKind ? { failureKind } : {}),
         });
