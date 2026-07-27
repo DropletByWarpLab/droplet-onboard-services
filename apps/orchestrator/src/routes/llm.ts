@@ -902,9 +902,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // pre-dispatch re-check (the boundary). `null` for the owner, for
       // service principals, and for everyone with no AccessRole — that path
       // stays byte-for-byte what it was.
+      //
+      // WARP-1582 — the ONE surface allowed to answer that from the session
+      // claim instead of a per-turn `User` read. It applies only when the
+      // claim is present and says "no custom role", every assignment path
+      // revokes the session (so the stale window is one request), and the
+      // coarse ADR-004 filter below plus the replay guard above still run
+      // regardless. The full trust argument, and the reason the ToolSpec
+      // runner deliberately does NOT get this, live in the module doc of
+      // services/tool-access.service.ts. The allowed-surface list is pinned
+      // by __tests__/tool-scope-claim-trust.guard.test.ts.
       const toolAccessScope = await resolveToolAccessScope(
         prisma,
         (req as AuthedRequest).user,
+        "session-claim",
       );
       let allowedForUser = await narrowAllowedToolsForRole(
         role,

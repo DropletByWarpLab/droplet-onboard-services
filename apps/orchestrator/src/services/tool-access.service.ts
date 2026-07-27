@@ -69,6 +69,83 @@
  * turn that is already seconds of inference. T3's "DB-read per request, no
  * cache in v1" decision stands.
  *
+ * ── WARP-1582: eliding that one lookup, and why it is safe ──────────
+ *
+ * The lookup above is on the chat hot path. WARP-1582 lets the chat turn
+ * skip it using the session's `accessRoleId` claim. A claim is a SNAPSHOT,
+ * so this is an authorization input that can go stale — the opposite of
+ * everything else this epic did. It is therefore scoped hard, and the
+ * argument is written down here rather than assumed.
+ *
+ * WHAT IS TRUSTED. Exactly one decision: "the claim is PRESENT and says
+ * `null`, therefore no custom role exists, therefore no narrowing applies."
+ * Nothing else. A claim that NAMES a role buys nothing — the grants still
+ * have to be read — so the database remains the only grant source, and the
+ * claim is never an input to what a role may do.
+ *
+ * WHICH DIRECTION CAN GO WRONG. Only one:
+ *
+ *   claim `null` + row non-null  →  FAIL-OPEN. Someone was narrowed after
+ *       their token was minted, and the narrowing is not yet applied.
+ *   claim non-null + row null    →  safe by construction. We read anyway,
+ *       and the read is authoritative.
+ *   claim absent                 →  safe by construction. Absent means
+ *       unknown; we read.
+ *
+ * WHY THE FAIL-OPEN DIRECTION IS CLOSED. Every transition that sets
+ * `User.accessRoleId` from null to non-null revokes the person's sessions:
+ *
+ *   - POST /api/access/roles/:id/assign  → revokeAllSessions per member,
+ *     on BOTH branches (tier crossing and same-tier swap).
+ *   - PUT  /api/people/:id/role          → same, via runRoleChangePostEffects
+ *     or the explicit else-branch revoke.
+ *   - invite accept                      → the session is minted AFTER the
+ *     assignment, in the same request, so it is born fresh.
+ *   - role delete                        → 409s while any member holds the
+ *     role; it never assigns one.
+ *
+ * And revocation reaches an ACCESS token, not just a refresh: revokeAllSessions
+ * deletes `sess:rec:{sid}`, and middleware/auth.ts 401s the very next request
+ * whose sid has no record. The window is one request, not one token lifetime.
+ * The refresh path additionally re-derives the claim from the User row
+ * (WARP-116's existing "DB role wins" rule), so a claim self-heals every
+ * ≤15 min even if a revoke was missed.
+ *
+ * RESIDUAL WINDOWS, stated honestly. Three, and all three are PRE-EXISTING
+ * and shared with the `role` claim this function already trusts:
+ *   (a) sid-less legacy access tokens skip checkSession entirely (≤15 min);
+ *   (b) checkSession fails OPEN when Redis is unreachable;
+ *   (c) revokeAllSessions swallows a Redis error, so a sweep can be partial.
+ * In every one of those conditions a stale `role: "owner"` claim already
+ * grants the §3 owner bypass — total reach, no narrowing, no read. A stale
+ * `accessRoleId: null` is strictly narrower than a hazard already accepted.
+ * This adds no new trust class; it extends an existing one to a weaker axis.
+ *
+ * WHY NOT SIMPLY EVERYWHERE. Because "closed by a mechanism elsewhere" is a
+ * weaker guarantee than "cannot be stale", and it should not be the default
+ * anyone inherits. Hence {@link ToolScopeTrust}: DEFAULT `"database"`, the
+ * shipped behaviour, and an explicit `"session-claim"` opt-in. Exactly one
+ * production surface opts in — the chat turn — and
+ * __tests__/tool-scope-claim-trust.guard.test.ts pins that list.
+ *
+ * The chat turn is the right place and the ToolSpec runner is not, for a
+ * reason that is NOT "reads vs writes" — a chat turn can absolutely call a
+ * write tool. It is layering and blast radius. On the chat path the elided
+ * T5 narrowing is one gate among several that still run per turn (the coarse
+ * ADR-004 write filter off the request role in narrowAllowedToolsForRole, the
+ * WARP-642 replay guard, tools-core's `requiresWrite`, the layer-1 route
+ * guards). The ToolSpec run-now path executes a whole multi-step sequence
+ * unattended from a single imperative request with no per-turn latency
+ * budget worth trading, and its scheduled twin
+ * ({@link resolveAttributedToolAccess}) has no claim to trust at all — so
+ * letting run-now trust one would make the same spec enforce differently
+ * depending on whether a human pressed Run.
+ *
+ * WHAT THIS BUYS. One indexed primary-key `User` read per chat turn, for the
+ * role-less majority. Small in isolation; the point is that it is the only
+ * DB read the narrowing costs someone who is not narrowed at all, so after
+ * this the T5 machinery is free for everyone it does not apply to.
+ *
  * WHO IS NARROWED. Only people who actually hold an AccessRole:
  *
  *   - `owner`   → null scope. §3 owner bypass, full control.
@@ -446,16 +523,31 @@ export function toolDispatchDenial(
 // ── resolution ─────────────────────────────────────────────────────
 
 /**
+ * WARP-1582 — where a call site is willing to resolve `accessRoleId` from.
+ *
+ *   `"database"`      — always read the User row. The shipped behaviour and
+ *                       the DEFAULT: a consumer that has not reasoned about
+ *                       claim staleness must not inherit it by omission.
+ *   `"session-claim"` — may skip the read when the session claim is PRESENT
+ *                       and `null`. Opt-in, enumerated, and justified in
+ *                       the module doc above. Read it before adding one.
+ */
+export type ToolScopeTrust = "database" | "session-claim";
+
+/**
  * Resolve the caller's tool scope, or `null` when no narrowing applies.
  *
  * Cheap path first: one indexed read of `accessRoleId`. Every user on a box
  * today has none, so the common turn pays a single small query and NEVER
  * touches the §3 resolver — which is also what makes the "role-less behaves
- * exactly as today" claim structural rather than incidental.
+ * exactly as today" claim structural rather than incidental. Under
+ * `"session-claim"` that last read is elided too when the session already
+ * proves there is no role to narrow by.
  */
 export async function resolveToolAccessScope(
   prisma: PrismaClient,
-  user: { id?: string; role?: string } | undefined,
+  user: { id?: string; role?: string; accessRoleId?: string | null } | undefined,
+  trust: ToolScopeTrust = "database",
 ): Promise<ToolAccessScope | null> {
   const role = user?.role;
   // No principal at all (AUTH_ENABLED=false dev shortcut resolves to owner),
@@ -467,6 +559,18 @@ export async function resolveToolAccessScope(
   if (!userId) {
     logger.error({ role }, "tool_access_scope_no_principal_id");
     return DENY_ALL_TOOL_SCOPE;
+  }
+
+  // WARP-1582 — the read elision. Deliberately AFTER the no-principal
+  // fail-closed check above: a claim never rescues an identity we could
+  // not establish.
+  //
+  // `=== null`, never `!user.accessRoleId`. An ABSENT claim is `undefined`
+  // and must fall through to the read; the falsy test would swallow it and
+  // hand every pre-deploy token an un-narrowed scope. That one character is
+  // the difference between this being safe and being a fail-open.
+  if (trust === "session-claim" && user?.accessRoleId === null) {
+    return null;
   }
 
   let row: AccessRoleIdRow | null;
