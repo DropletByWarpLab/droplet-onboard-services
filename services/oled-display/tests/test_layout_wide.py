@@ -255,7 +255,8 @@ def test_long_hostname_stays_inside_its_cell(populated, monkeypatch):
     real_text = ImageDraw.ImageDraw.text
 
     def spy(self, xy, text, *a, **kw):
-        if text == populated._v3["public_host"]:
+        # Prefix, not equality: the hero may legitimately be ellipsised now.
+        if str(text).startswith("a-very-long-named-address"):
             drawn.append(self.textbbox(xy, text, font=kw.get("font"),
                                        anchor=kw.get("anchor")))
         return real_text(self, xy, text, *a, **kw)
@@ -398,3 +399,30 @@ def test_some_cameras_offline_still_reports_the_ratio(populated):
     finally:
         _id.ImageDraw.text = real
     assert any("2/4 online" in t for t in drawn)
+
+
+def test_rail_text_stays_inside_the_rail(populated):
+    """Everything in the action rail is CENTRED, so an over-wide string spills
+    out of both sides of it. A long hostname in the scan-fallback line did
+    exactly that — 238px of text in a 220px rail, overhanging the divider on
+    the left and the safe area on the right."""
+    populated._v3["public_host"] = (
+        "an-absurdly-long-customer-named-address.droplet-us.com")
+    g = lw.geom()
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, t, *a, **k: (
+            drawn.append(self.textbbox(xy, t, font=k.get("font"),
+                                       anchor=k.get("anchor"))),
+            real(self, xy, t, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    # Anything drawn to the right of the divider belongs to the rail.
+    rail_boxes = [b for b in drawn if b[0] >= g.rail_x - 40]
+    assert rail_boxes
+    for b in rail_boxes:
+        assert b[0] >= g.rail_x, f"rail text starts left of the rail: {b}"
+        assert b[2] <= g.rail_x + g.rail_w, f"rail text overflows: {b}"

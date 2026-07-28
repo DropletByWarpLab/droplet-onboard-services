@@ -333,13 +333,21 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                    fill=(0x40, 0x40, 0x48), anchor="mm")
 
     cx = g.rail_x + g.rail_w // 2
+    # Everything in the rail is centred, so an over-wide string spills out
+    # BOTH sides of it. The fallback is a hostname, and hostnames vary in
+    # length by 3x — clip all three to the rail rather than trusting them.
+    inner = g.rail_w - 16
     d._v3_text(draw, caption, cx, 216, font=d._get_font(9, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
-    d._v3_text(draw, headline, cx, 232, font=d._get_font(13, weight="bold"),
-               fill=d.V3_LABEL2, anchor="ma")
+    hl_font, hl_text = _fit_text(draw, headline, inner, 13, floor=10,
+                                 weight="bold")
+    d._v3_text(draw, hl_text, cx, 232, font=hl_font, fill=d.V3_LABEL2,
+               anchor="ma")
     # The typed path must never disappear: glare, bad angle, camera-less phone.
-    d._v3_text(draw, fallback, cx, 250, font=d._get_font(11),
-               fill=d.V3_LABEL4, anchor="ma")
+    fb_font, fb_text = _fit_text(draw, fallback, inner, 11, floor=8,
+                                 weight="regular")
+    d._v3_text(draw, fb_text, cx, 250, font=fb_font, fill=d.V3_LABEL4,
+               anchor="ma")
 
 
 # ---------------------------------------------------------------------------
