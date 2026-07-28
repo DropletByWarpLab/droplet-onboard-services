@@ -24,10 +24,23 @@
 // Installed to /etc/polkit-1/rules.d/ by scripts/install-device-bridge.sh.
 // Requires polkit >= 106 (JS rules) — the shipping box runs Ubuntu 24.04
 // (polkit 124).
+// WARP-1639 adds a SECOND narrow grant: `systemctl start
+// droplet-panel-console.service` — the root oneshot that hands the rack
+// panel's framebuffer back to the kernel console. This is the recovery path
+// behind the panel's on-screen debug button: claiming the panel takes the
+// physical console away, so there must be a way to get it back without
+// already having a shell. The bridge cannot do the work itself (writing
+// /sys/class/vtconsole/*/bind and calling chvt both need root, and this
+// sandbox has NoNewPrivileges), so the privileged half lives in that unit and
+// the bridge only asks PID 1 to start it. Start verb ONLY — the bridge never
+// stops or restarts it, and it has no grant over droplet-panel-claim.service
+// (taking the console AWAY from an operator must not be remotely triggerable
+// by the container).
 polkit.addRule(function (action, subject) {
   if (
     action.id === "org.freedesktop.systemd1.manage-units" &&
-    action.lookup("unit") === "droplet-storage-pool-apply.service" &&
+    (action.lookup("unit") === "droplet-storage-pool-apply.service" ||
+      action.lookup("unit") === "droplet-panel-console.service") &&
     action.lookup("verb") === "start" &&
     subject.user === "droplet"
   ) {

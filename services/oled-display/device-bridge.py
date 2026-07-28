@@ -2823,6 +2823,55 @@ def run_tls_reload():
     return True, {"message": (out or "").strip() or "gateway reloaded"}
 
 
+# --- WARP-1639: rack-panel console handback ---------------------------------
+# THE DEBUG BUTTON'S PRIVILEGED HALF.
+#
+# The rack panel is a plain HDMI monitor on the box's iGPU, so the display
+# service owning it means the kernel console does NOT — i.e. claiming the panel
+# takes the operator's physical console away. That is only acceptable if there
+# is a way back that does not already require a shell. This is it: the panel's
+# own on-screen debug affordance POSTs /panel/console, and we hand the
+# framebuffer back to fbcon and switch to a login VT.
+#
+# The bridge cannot do the work itself — writing /sys/class/vtconsole/*/bind
+# and calling chvt both need root, and this sandbox is User=droplet +
+# ProtectSystem=strict + NoNewPrivileges. So, exactly like the storage-pool
+# split, the privileged half lives in a root oneshot
+# (droplet-panel-console.service) and the bridge only asks PID 1 to start it.
+# 50-droplet-device-bridge.rules grants the droplet user the `start` verb on
+# that unit and nothing else.
+#
+# Note there is deliberately NO reverse route. Handing the console BACK to the
+# display service (`claim`) must not be remotely triggerable — pulling the
+# console out from under someone who is mid-debug is exactly the failure this
+# whole path exists to prevent. Reclaim happens on the host, either from the
+# deadman once the hold expires or explicitly over SSH.
+PANEL_CONSOLE_UNIT = os.environ.get(
+    "DROPLET_PANEL_CONSOLE_UNIT", "droplet-panel-console.service").strip()
+
+
+def run_panel_console():
+    """Hand the rack panel's framebuffer back to the kernel console.
+
+    Returns (ok, info); never raises — mirrors run_tls_reload(). A blocking
+    start of a Type=oneshot unit returns once its ExecStart has exited, so a
+    200 here means the console really is back, not merely requested."""
+    try:
+        rc, out, err = _run(["systemctl", "start", PANEL_CONSOLE_UNIT],
+                            timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("panel console handback failed to start unit: %s", e)
+        return False, "could not start the panel console unit"
+    if rc != 0:
+        # The unit is missing, or polkit denied the start. Say so plainly: the
+        # caller is a person standing at a rack trying to get a prompt.
+        msg = (err.strip() or out.strip() or "panel console unit failed")
+        logger.warning("panel console handback failed (rc=%s): %s", rc, msg)
+        return False, msg
+    logger.info("panel console handed back to the operator")
+    return True, {"message": "console returned to the panel"}
+
+
 # --- ADR-023 PR-1: public-FQDN write-back host executor ---------------------
 # The orchestrator's tls-issuance service LEARNS the box's opaque per-device
 # FQDN from the HQ challenge response and POSTs it to /host/public-fqdn so it can
@@ -3379,6 +3428,23 @@ class Handler(BaseHTTPRequestHandler):
                 # 502: the host script is missing / the reload command failed.
                 # The cert files are already on disk, so the box keeps serving
                 # the OLD cert until a later reload (or a gateway restart) lands.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/panel/console":
+            # WARP-1639: hand the rack panel back to the kernel console. This
+            # is what the panel's on-screen debug affordance calls. Auth-gated
+            # like every other mutating route — it is a physical-access
+            # recovery path, but the bridge can be LAN-reachable with
+            # BRIDGE_BIND=0.0.0.0, and "anyone on the LAN can drop the status
+            # screen to a login prompt" is not a posture we want.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_panel_console()
+            if not ok:
+                # 502: the unit is missing or polkit denied it. The caller is a
+                # person at a rack trying to get a prompt, so the message is
+                # surfaced verbatim rather than flattened to "failed".
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
