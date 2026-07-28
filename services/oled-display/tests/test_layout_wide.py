@@ -59,36 +59,91 @@ def test_is_wide_false_at_pyportal_geometry(monkeypatch, sim_display):
 
 
 # --- grid ------------------------------------------------------------------
+# WARP-1644: these assert RELATIONSHIPS, not magic numbers. The old versions
+# pinned literals derived from a full 1424px canvas, which is exactly the
+# assumption that put content off the edge of the real panel — and pinning
+# them again would just re-freeze the bug at a new inset.
 
-def test_grid_arithmetic():
-    assert lw.col_x(1) == 28
-    assert lw.col_x(12) == 1106
-    assert lw.col_x(12) + lw.COL_W == lw.CONTENT_R == 1180
-    assert lw.span(4) == 368
-    assert lw.span(2) == 172
+def _cells(wide):
+    g = lw.geom()
+    return sorted(g.cells.values())
 
 
-def test_cells_do_not_overlap_and_stay_left_of_the_rail():
-    cells = sorted([lw.CELL_REACH, lw.CELL_HEALTH,
-                    lw.CELL_SERVICES, lw.CELL_NETSTORE])
+def test_grid_spans_the_content_area_exactly(wide):
+    g = lw.geom()
+    assert g.col_x(1) == g.left
+    assert g.col_x(lw.COLUMNS) + g.span(1) == pytest.approx(g.content_r, abs=1)
+    # A 4-wide span is 4 columns plus the 3 gutters between them.
+    assert g.span(4) == pytest.approx(4 * g.span(1) + 3 * lw.GUTTER, abs=2)
+
+
+def test_cells_do_not_overlap_and_stay_left_of_the_rail(wide):
+    g = lw.geom()
+    cells = _cells(wide)
     for (x1, w1), (x2, _) in zip(cells, cells[1:]):
         assert x1 + w1 <= x2, "cells overlap"
     last_x, last_w = cells[-1]
-    assert last_x + last_w <= lw.CONTENT_R
-    assert lw.CONTENT_R < lw.RAIL_X
-    assert lw.RAIL_X + lw.RAIL_W == PANEL_W
+    assert last_x + last_w <= g.content_r
+    assert g.content_r < g.rail_x
 
 
-def test_dividers_sit_in_the_gutters():
-    cells = sorted([lw.CELL_REACH, lw.CELL_HEALTH,
-                    lw.CELL_SERVICES, lw.CELL_NETSTORE])
-    for d, ((x1, w1), (x2, _)) in zip(lw.DIVIDERS, zip(cells, cells[1:])):
-        assert x1 + w1 < d < x2
+def test_dividers_sit_in_the_gutters(wide):
+    g = lw.geom()
+    cells = _cells(wide)
+    for d, ((x1, w1), (x2, _)) in zip(g.dividers, zip(cells, cells[1:])):
+        assert x1 + w1 <= d <= x2
 
 
-def test_bands_are_ordered_and_fit_the_panel():
-    assert lw.BAND_A_RULE < lw.BAND_B_TOP < lw.BAND_B_BOT
-    assert lw.BAND_B_BOT < lw.BAND_C_RULE < lw.BAND_C_Y < PANEL_H
+def test_bands_are_ordered_and_fit_the_panel(wide):
+    g = lw.geom()
+    assert g.band_a_rule < g.band_b_top < g.band_b_bot
+    assert g.band_b_bot < g.band_c_rule < g.band_c_y < PANEL_H
+
+
+# --- the safe area (WARP-1644) ---------------------------------------------
+
+def test_everything_sits_inside_the_safe_area(wide):
+    """The bug: the action rail was pinned to the framebuffer's right edge, so
+    the QR card and caption were the first things the bezel ate."""
+    g = lw.geom()
+    assert g.left >= lw.SAFE_INSET_X
+    assert g.rail_x + g.rail_w <= PANEL_W - lw.SAFE_INSET_X
+    for x, w in g.cells.values():
+        assert x >= lw.SAFE_INSET_X
+        assert x + w <= PANEL_W - lw.SAFE_INSET_X
+
+
+def test_inset_is_tunable_without_a_rebuild(wide, monkeypatch):
+    """The right inset is a property of the panel + bezel, so a second unit
+    must be able to change it from the environment."""
+    monkeypatch.setattr(lw, "SAFE_INSET_X", 60)
+    g = lw.geom()
+    assert g.left >= 60
+    assert g.rail_x + g.rail_w <= PANEL_W - 60
+    for x, w in g.cells.values():
+        assert x >= 60 and x + w <= PANEL_W - 60
+
+
+def test_zero_inset_still_produces_a_sane_grid(wide, monkeypatch):
+    monkeypatch.setattr(lw, "SAFE_INSET_X", 0)
+    g = lw.geom()
+    cells = sorted(g.cells.values())
+    for (x1, w1), (x2, _) in zip(cells, cells[1:]):
+        assert x1 + w1 <= x2
+    assert g.rail_x + g.rail_w <= PANEL_W
+
+
+def test_geometry_follows_the_panel_not_the_import(monkeypatch, sim_display):
+    """Computed per render, so a differently-shaped second panel works and the
+    layout is not frozen to whatever WIDTH happened to be at import."""
+    monkeypatch.setattr(display_module, "WIDTH", 1920)
+    monkeypatch.setattr(display_module, "HEIGHT", 480)
+    wide_g = lw.geom()
+    monkeypatch.setattr(display_module, "WIDTH", PANEL_W)
+    monkeypatch.setattr(display_module, "HEIGHT", PANEL_H)
+    bar_g = lw.geom()
+    assert wide_g.rail_x != bar_g.rail_x
+    assert wide_g.content_r > bar_g.content_r
 
 
 # --- render ----------------------------------------------------------------
@@ -189,8 +244,8 @@ def test_nothing_escapes_its_band(populated, monkeypatch):
         assert y1 <= PANEL_H, f"{text!r} overflows the panel bottom ({y1})"
         assert x1 <= PANEL_W, f"{text!r} overflows the panel right ({x1})"
         # Band B content must not run into the foot rule.
-        if lw.BAND_B_TOP <= y0 < lw.BAND_B_BOT:
-            assert y1 <= lw.BAND_C_RULE - 2, \
+        if lw.geom().band_b_top <= y0 < lw.geom().band_b_bot:
+            assert y1 <= lw.geom().band_c_rule - 2, \
                 f"{text!r} in band B collides with the foot rule"
 
 
@@ -207,7 +262,7 @@ def test_long_hostname_stays_inside_its_cell(populated, monkeypatch):
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
     lw.render_status(populated)
-    x, w = lw.CELL_REACH
+    x, w = lw.geom().cells["reach"]
     assert drawn and drawn[0][2] <= x + w, "hostname auto-fit failed"
 
 

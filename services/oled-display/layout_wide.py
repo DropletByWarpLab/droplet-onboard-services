@@ -22,6 +22,7 @@ colours, no new font face. See the design brief §4 for why.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
@@ -52,36 +53,100 @@ def is_wide() -> bool:
 # ---------------------------------------------------------------------------
 # Grid — design brief §2
 # ---------------------------------------------------------------------------
-MARGIN = 28
-COL_W, GUTTER = 74, 24
-COL_PITCH = COL_W + GUTTER                      # 98
+# WARP-1644 — THE SAFE AREA.
+#
+# The grid used to be literals derived from a 1424px framebuffer (MARGIN=28,
+# RAIL_X=1204, CONTENT_R=1180, COL_PITCH=98, DIVIDERS=(408,800,996)). That
+# quietly assumed every framebuffer pixel reaches the viewer's eye. On this
+# panel it does not — the bezel/driver board eats a strip on each side, and
+# the founder's first look at the real hardware was content running off both
+# edges.
+#
+# Nudging MARGIN would not have fixed it: the action rail was pinned to the
+# right edge (RAIL_X + RAIL_W == WIDTH), so the QR card and its caption were
+# exactly what got clipped, and MARGIN does not move them.
+#
+# So the whole grid now derives from a safe area. Two consequences worth
+# knowing:
+#   * the inset is ENV-TUNABLE, because the right value is a property of this
+#     panel + bezel, not of the software — a second unit with a different
+#     bezel should not need a rebuild.
+#   * geometry is computed PER RENDER, not at import. The layout already
+#     claims to be geometry-keyed so a box with two differently-shaped panels
+#     works; import-time constants silently broke that promise (and stopped
+#     tests being able to monkeypatch WIDTH).
+SAFE_INSET_X = int(os.environ.get("PANEL_SAFE_INSET_X", "30"))
+# Nothing has reported vertical clipping, so this defaults off — but it is
+# plumbed, because the next bezel probably will.
+SAFE_INSET_Y = int(os.environ.get("PANEL_SAFE_INSET_Y", "0"))
 
-RAIL_X, RAIL_W = 1204, 220                      # fixed action rail, full height
-CONTENT_R = RAIL_X - GUTTER                     # 1180
-
-BAND_A_Y, BAND_A_RULE = 14, 46
-BAND_B_TOP, BAND_B_BOT = 62, 228
-BAND_C_RULE, BAND_C_Y = 240, 248
-
-EYEBROW_Y = BAND_B_TOP
+DESIGN_MARGIN = 28          # breathing room INSIDE the safe area
+GUTTER = 24
+RAIL_W = 220                # fixed action rail
+COLUMNS = 12
 
 
-def col_x(n: int) -> int:
-    """Left edge of column n (1-based)."""
-    return MARGIN + (n - 1) * COL_PITCH
+class _Geom:
+    """Resolved layout geometry for the current panel + inset."""
+
+    __slots__ = ("left", "content_r", "rail_x", "rail_w", "right",
+                 "pitch", "band_a_rule", "band_b_top", "band_b_bot",
+                 "band_c_rule", "band_c_y", "eyebrow_y", "top", "bottom",
+                 "cells", "dividers")
+
+    def col_x(self, n: int) -> int:
+        """Left edge of column n (1-based)."""
+        return int(round(self.left + (n - 1) * self.pitch))
+
+    def span(self, cols: int) -> int:
+        """Width of a `cols`-wide span."""
+        return int(round(cols * self.pitch - GUTTER))
 
 
-def span(cols: int) -> int:
-    """Width of a `cols`-wide span."""
-    return COL_PITCH * cols - GUTTER
+_GEOM_CACHE: dict = {}
 
 
-# Cells: (x, w). Order is the design's priority order, left to right.
-CELL_REACH = (col_x(1), span(4))                # 28,  368
-CELL_HEALTH = (col_x(5), span(4))               # 420, 368
-CELL_SERVICES = (col_x(9), span(2))             # 812, 172
-CELL_NETSTORE = (col_x(11), span(2))            # 1008,172
-DIVIDERS = (408, 800, 996)
+def geom() -> "_Geom":
+    d = _d()
+    key = (d.WIDTH, d.HEIGHT, SAFE_INSET_X, SAFE_INSET_Y)
+    hit = _GEOM_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    g = _Geom()
+    g.left = SAFE_INSET_X + DESIGN_MARGIN
+    g.right = d.WIDTH - SAFE_INSET_X - DESIGN_MARGIN
+    g.rail_w = RAIL_W
+    g.rail_x = g.right - g.rail_w
+    g.content_r = g.rail_x - GUTTER
+    # Float pitch over the usable width: the column grid stretches to fit the
+    # safe area instead of overflowing it.
+    g.pitch = (g.content_r - g.left + GUTTER) / COLUMNS
+
+    g.top = SAFE_INSET_Y
+    g.bottom = d.HEIGHT - SAFE_INSET_Y
+    g.band_a_rule = g.top + 46
+    g.band_b_top = g.top + 62
+    g.band_b_bot = g.bottom - 52
+    g.band_c_rule = g.bottom - 40
+    g.band_c_y = g.bottom - 32
+    g.eyebrow_y = g.band_b_top
+
+    # Cells, in the design's priority order, left to right.
+    g.cells = {
+        "reach":    (g.col_x(1), g.span(4)),
+        "health":   (g.col_x(5), g.span(4)),
+        "services": (g.col_x(9), g.span(2)),
+        "netstore": (g.col_x(11), g.span(2)),
+    }
+    # Dividers sit in the gutter between adjacent cells.
+    order = ("reach", "health", "services", "netstore")
+    g.dividers = tuple(
+        (g.cells[a][0] + g.cells[a][1] + g.cells[b][0]) // 2
+        for a, b in zip(order, order[1:])
+    )
+    _GEOM_CACHE[key] = g
+    return g
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +163,11 @@ def _pill_style(state: str) -> Tuple[str, tuple, tuple]:
     }.get(state, ("LIVE", d.V3_ACCENT_SUBTLE, d.V3_ACCENT))
 
 
-def _eyebrow(draw, text: str, x: int, y: int = EYEBROW_Y, fill=None) -> None:
+def _eyebrow(draw, text: str, x: int, y: Optional[int] = None,
+             fill=None) -> None:
     d = _d()
+    if y is None:
+        y = geom().eyebrow_y
     d._v3_text(draw, text, x, y, font=d._get_font(9, weight="bold"),
                fill=fill or d.V3_LABEL3, tracking=1.6)
 
@@ -215,10 +283,11 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                 fallback: str, ecc: str = "M") -> None:
     """The fixed right-hand action rail: QR card + caption + typed fallback."""
     d = _d()
-    draw.rectangle([RAIL_X, 0, d.WIDTH, d.HEIGHT], fill=d.V3_PANEL)
-    draw.rectangle([RAIL_X, 0, RAIL_X, d.HEIGHT], fill=d.V3_SEP)
+    g = geom()
+    draw.rectangle([g.rail_x, 0, d.WIDTH, d.HEIGHT], fill=d.V3_PANEL)
+    draw.rectangle([g.rail_x, 0, g.rail_x, d.HEIGHT], fill=d.V3_SEP)
 
-    card_x = RAIL_X + (RAIL_W - QR_CARD) // 2
+    card_x = g.rail_x + (g.rail_w - QR_CARD) // 2
     card_y = 30
     d._rrect(draw, card_x, card_y, QR_CARD, QR_CARD, 14, fill=d.V3_WHITE)
 
@@ -238,7 +307,7 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                    card_y + QR_CARD // 2, font=d._get_font(11, weight="bold"),
                    fill=(0x40, 0x40, 0x48), anchor="mm")
 
-    cx = RAIL_X + RAIL_W // 2
+    cx = g.rail_x + g.rail_w // 2
     d._v3_text(draw, caption, cx, 216, font=d._get_font(9, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
     d._v3_text(draw, headline, cx, 232, font=d._get_font(13, weight="bold"),
@@ -253,34 +322,35 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
 # ---------------------------------------------------------------------------
 def _render_chrome(disp, draw, now, state: str) -> None:
     d = _d()
-    d.draw_droplet_mark(draw, MARGIN, 12, 22,
+    g = geom()
+    d.draw_droplet_mark(draw, g.left, 12, 22,
                         primary=d.V3_ACCENT, highlight=d.V3_ACCENT_INK)
-    d._v3_text(draw, "DROPLET", 58, 16, font=d._get_font(9, weight="bold"),
+    d._v3_text(draw, "DROPLET", g.left + 30, 16, font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL3, tracking=2)
     # The device label doubles as the way into the DEBUG/recovery screen.
     # Deliberately a small, unlabelled target rather than a visible button:
     # the LIVE screen is what belongs on a rack front, and the people who need
     # the recovery path are the people who have been told where it is.
-    d._v3_text(draw, "WARP LAB · MINI-RACK", 132, 16,
+    d._v3_text(draw, "WARP LAB · MINI-RACK", g.left + 104, 16,
                font=d._get_font(9), fill=d.V3_LABEL4, tracking=1.2)
     with disp._touch_regions_lock:
         disp._touch_regions.append(
-            d.TouchRegion("debug_enter", 124, 0, 160, 46, disp._go_debug))
+            d.TouchRegion("debug_enter", g.left + 96, g.top, 160, 46, disp._go_debug))
 
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
     pw = int(d._v3_text_width(draw, label, pf, 1.2)) + 24
-    d._rrect(draw, 340, 12, pw, 22, 11, fill=fill)
-    d._v3_text(draw, label, 340 + pw // 2, 17, font=pf, fill=ink,
+    d._rrect(draw, g.left + 312, 12, pw, 22, 11, fill=fill)
+    d._v3_text(draw, label, g.left + 312 + pw // 2, 17, font=pf, fill=ink,
                anchor="ma", tracking=1.2)
 
     clk = disp._fmt_clock_parts(now)["str"]
     cf = d._get_font(20, weight="heavy")
-    d._v3_text(draw, clk, CONTENT_R, 10, font=cf, fill=d.V3_LABEL2, anchor="ra")
+    d._v3_text(draw, clk, g.content_r, 10, font=cf, fill=d.V3_LABEL2, anchor="ra")
     clk_w = d._v3_text_width(draw, clk, cf)
 
     date = (now.strftime("%a %d %b") if now else "").upper()
-    date_x = int(CONTENT_R - clk_w - 16)
+    date_x = int(g.content_r - clk_w - 16)
     d._v3_text(draw, date, date_x, 18, font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL4, anchor="ra", tracking=1.4)
 
@@ -296,23 +366,24 @@ def _render_chrome(disp, draw, now, state: str) -> None:
                 "alert_badge", bx - br - 6, by - br - 6, br * 2 + 12,
                 br * 2 + 12, disp._open_drawer))
 
-    draw.rectangle([MARGIN, BAND_A_RULE, CONTENT_R, BAND_A_RULE], fill=d.V3_SEP)
+    draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
 
 
 def _render_foot(disp, draw, v: dict) -> None:
     d = _d()
-    draw.rectangle([MARGIN, BAND_C_RULE, CONTENT_R, BAND_C_RULE], fill=d.V3_SEP)
+    g = geom()
+    draw.rectangle([g.left, g.band_c_rule, g.content_r, g.band_c_rule], fill=d.V3_SEP)
     left = " · ".join(str(p) for p in (
         v.get("hostname", "-"),
         v.get("ip", "-"),
         "up " + str(v.get("uptime", "-")),
         v.get("version", "—"),
     ))
-    d._v3_text(draw, left, MARGIN, BAND_C_Y, font=d._get_font(11),
+    d._v3_text(draw, left, g.left, g.band_c_y, font=d._get_font(11),
                fill=d.V3_LABEL4)
     event = v.get("last_event")
     if event:
-        d._v3_text(draw, str(event), CONTENT_R, BAND_C_Y,
+        d._v3_text(draw, str(event), g.content_r, g.band_c_y,
                    font=d._get_font(11), fill=d.V3_LABEL3, anchor="ra")
 
 
@@ -327,7 +398,8 @@ def _num(v, suffix: str = "") -> str:
 
 def _cell_reach(disp, draw, v: dict) -> None:
     d = _d()
-    x, w = CELL_REACH
+    g = geom()
+    x, w = g.cells["reach"]
     _eyebrow(draw, "REACH", x)
 
     host = str(v.get("public_host") or v.get("hostname") or "-")
@@ -375,7 +447,8 @@ def _chip(draw, x: int, y: int, text: str, ink, fill) -> int:
 
 def _cell_health(disp, draw, v: dict) -> None:
     d = _d()
-    x, w = CELL_HEALTH
+    g = geom()
+    x, w = g.cells["health"]
     _eyebrow(draw, "LOAD", x)
     d._v3_text(draw, _num(v.get("cpu"), "%"), x, 74,
                font=d._get_font(60, weight="heavy"), fill=d.V3_TEXT,
@@ -410,7 +483,8 @@ def _cell_services(disp, draw, v: dict) -> None:
     """The highest-value cell: nothing on the panel today says a container is
     down. Data source lands in build-plan PR-5."""
     d = _d()
-    x, w = CELL_SERVICES
+    g = geom()
+    x, w = g.cells["services"]
     _eyebrow(draw, "SERVICES", x)
 
     svc = v.get("services") or {}
@@ -452,7 +526,8 @@ def _cell_services(disp, draw, v: dict) -> None:
 
 def _cell_netstore(disp, draw, v: dict) -> None:
     d = _d()
-    x, w = CELL_NETSTORE
+    g = geom()
+    x, w = g.cells["netstore"]
     wifi = v.get("wifi") or {}
     cams = v.get("cameras") or {}
     store = v.get("storage") or {}
@@ -500,6 +575,7 @@ def _cell_netstore(disp, draw, v: dict) -> None:
 def render_status(disp, now=None, state: str = "live") -> Image.Image:
     """LIVE state — design brief §2.4. Called from display.render_system()."""
     d = _d()
+    g = geom()
     if now is None:
         now = d._dt_datetime.now(d._TZ) if d._TZ else d._dt_datetime.now()
 
@@ -520,8 +596,8 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
 
     _render_chrome(disp, draw, now, state)
 
-    for dx in DIVIDERS:
-        draw.rectangle([dx, BAND_B_TOP, dx, BAND_B_BOT], fill=d.V3_SEP)
+    for dx in g.dividers:
+        draw.rectangle([dx, g.band_b_top, dx, g.band_b_bot], fill=d.V3_SEP)
 
     _cell_reach(disp, draw, v)
     _cell_health(disp, draw, v)
@@ -547,15 +623,16 @@ def _bind_cell_regions(disp) -> None:
     they no-op so the regions are wired and testable ahead of the screens.
     """
     d = _d()
-    cells = (("cell_reach", CELL_REACH), ("cell_health", CELL_HEALTH),
-             ("cell_services", CELL_SERVICES), ("cell_netstore", CELL_NETSTORE))
+    g = geom()
+    cells = (("cell_reach", g.cells["reach"]), ("cell_health", g.cells["health"]),
+             ("cell_services", g.cells["services"]), ("cell_netstore", g.cells["netstore"]))
     with disp._touch_regions_lock:
         for name, (x, w) in cells:
             disp._touch_regions.append(d.TouchRegion(
-                name, x, BAND_B_TOP, w, BAND_B_BOT - BAND_B_TOP,
+                name, x, g.band_b_top, w, g.band_b_bot - g.band_b_top,
                 lambda: None))
         disp._touch_regions.append(d.TouchRegion(
-            "rail_qr", RAIL_X, 0, RAIL_W, d.HEIGHT, lambda: None))
+            "rail_qr", g.rail_x, 0, g.rail_w, d.HEIGHT, lambda: None))
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +648,7 @@ def _bind_cell_regions(disp) -> None:
 # belongs on a rack front.
 def render_debug(disp, now=None) -> Image.Image:
     d = _d()
+    g = geom()
     if now is None:
         now = d._dt_datetime.now(d._TZ) if d._TZ else d._dt_datetime.now()
 
@@ -583,20 +661,20 @@ def render_debug(disp, now=None) -> Image.Image:
     status = disp.get_status()
 
     # ---- chrome ----
-    d.draw_droplet_mark(draw, MARGIN, 12, 22,
+    d.draw_droplet_mark(draw, g.left, 12, 22,
                         primary=d.V3_ORANGE, highlight=d.V3_ACCENT_INK)
-    d._v3_text(draw, "DEBUG · RECOVERY", 58, 16,
+    d._v3_text(draw, "DEBUG · RECOVERY", g.left + 30, 16,
                font=d._get_font(9, weight="bold"), fill=d.V3_ORANGE, tracking=2)
     _back_button(disp, draw)
     clk = disp._fmt_clock_parts(now)["str"]
-    d._v3_text(draw, clk, CONTENT_R, 10, font=d._get_font(20, weight="heavy"),
+    d._v3_text(draw, clk, g.content_r, 10, font=d._get_font(20, weight="heavy"),
                fill=d.V3_LABEL2, anchor="ra")
-    draw.rectangle([MARGIN, BAND_A_RULE, CONTENT_R, BAND_A_RULE], fill=d.V3_SEP)
-    for dx in DIVIDERS[:2]:
-        draw.rectangle([dx, BAND_B_TOP, dx, BAND_B_BOT], fill=d.V3_SEP)
+    draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
+    for dx in g.dividers[:2]:
+        draw.rectangle([dx, g.band_b_top, dx, g.band_b_bot], fill=d.V3_SEP)
 
     # ---- C1: how to reach this box ----
-    x, w = CELL_REACH
+    x, w = g.cells["reach"]
     _eyebrow(draw, "GET IN", x)
     ip = str(v.get("ip", "-"))
     d._v3_text(draw, f"ssh droplet@{ip}", x, 78,
@@ -615,7 +693,7 @@ def render_debug(disp, now=None) -> Image.Image:
         d._v3_text(draw, val, x, y + 12, font=d._get_font(14), fill=d.V3_LABEL2)
 
     # ---- C2: what the service thinks it is doing ----
-    x2, _ = CELL_HEALTH
+    x2, _ = g.cells["health"]
     _eyebrow(draw, "SERVICE STATE", x2)
     state_rows = (
         ("BACKEND", str(status.get("backend", "?"))),
@@ -633,8 +711,8 @@ def render_debug(disp, now=None) -> Image.Image:
                    fill=d.V3_TEXT)
 
     # ---- C3+C4: the button ----
-    x3, _ = CELL_SERVICES
-    bw = CONTENT_R - x3
+    x3, _ = g.cells["services"]
+    bw = g.content_r - x3
     _eyebrow(draw, "CONSOLE", x3, fill=d.V3_ORANGE)
 
     armed = disp._console_confirm_active()
@@ -678,7 +756,8 @@ def render_debug(disp, now=None) -> Image.Image:
 
 def _back_button(disp, draw) -> None:
     d = _d()
-    x, y, w, h = 200, 12, 74, 22
+    g = geom()
+    x, y, w, h = g.left + 172, 12, 74, 22
     d._rrect(draw, x, y, w, h, 11, fill=d.V3_SURFACE, outline=d.V3_SEP, width=1)
     d._v3_text(draw, "‹ BACK", x + w // 2, y + 5,
                font=d._get_font(10, weight="bold"), fill=d.V3_LABEL2,
