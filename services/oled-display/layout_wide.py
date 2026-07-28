@@ -336,10 +336,16 @@ def _cell_reach(disp, draw, v: dict) -> None:
     d._v3_text(draw, str(v.get("ip", "-")), x, 124,
                font=d._get_font(22, weight="bold"), fill=d.V3_LABEL2)
 
-    # WAN chip. wan_latency_ms is currently never populated (display.py:681 —
-    # defaulted 0, only written by update_wifi, never emitted by _gather_stats),
-    # so `None` is the honest default until PR-5 lands fetch_wan().
-    lat = v.get("wan_latency_ms")
+    # WAN chip. WARP-1643: `wan_latency_ms` is SEEDED as 0 in _v3 and never
+    # emitted by _gather_stats, so `.get()` hands back a 0 that was never
+    # measured — and the panel printed "ONLINE 0 ms" as though it were a
+    # reading. `or None` collapses that seeded zero to "unknown".
+    #
+    # A real sub-millisecond WAN RTT does not exist, so treating 0 as "no
+    # measurement" costs nothing and cannot hide a true value. Fixed here
+    # rather than by re-seeding _v3 to None: the 480x320 render_system does
+    # `v.get("wan_latency_ms", 0)` and would start printing "None".
+    lat = v.get("wan_latency_ms") or None
     online = v.get("wan_online")
     if online is False:
         cw = _chip(draw, x, 164, "NO INTERNET", d.V3_RED, (0x2E, 0x0F, 0x0E))
@@ -476,7 +482,10 @@ def _cell_netstore(disp, draw, v: dict) -> None:
 
     _eyebrow(draw, "CAMERAS", x, 190)
     online, total = cams.get("online"), cams.get("total")
-    if total is None:
+    # WARP-1643: `total == 0` is not None, so this used to render a GREEN
+    # "0/0 online" — which reads as "all cameras up" when it means "there are
+    # no cameras". No cameras configured is an absence, not a healthy state.
+    if not total:
         cam_txt, cam_ink = "—", d.V3_LABEL4
     else:
         cam_txt = f"{online}/{total} online"

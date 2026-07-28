@@ -258,3 +258,61 @@ def test_qr_quiet_zone_is_preserved():
     px = img.load()
     for i in range(4 * module_px):
         assert px[i, i] == (255, 255, 255), "quiet zone was eaten"
+
+
+# --- WARP-1643: no fake zeros ----------------------------------------------
+# Found on the live panel, not in review: the layout stated the rule ("missing
+# data renders as an em dash, NEVER as 0") and then broke it twice, because
+# _v3 SEEDS these fields with 0 rather than leaving them absent. `.get()`
+# happily returns that seeded zero and the renderer treats it as a reading.
+
+def _chips(populated, monkeypatch):
+    seen = []
+    real = lw._chip
+    monkeypatch.setattr(lw, "_chip", lambda draw, x, y, t, ink, fill: (
+        seen.append(t), real(draw, x, y, t, ink, fill))[1])
+    lw.render_status(populated)
+    return seen
+
+
+def test_seeded_zero_latency_is_not_reported_as_a_reading(populated, monkeypatch):
+    populated._v3["wan_latency_ms"] = 0        # the _v3 seed, never measured
+    chips = _chips(populated, monkeypatch)
+    assert "ONLINE" in chips, chips
+    assert not any("0 ms" in c for c in chips), chips
+
+
+def test_a_real_latency_is_still_shown(populated, monkeypatch):
+    populated._v3["wan_latency_ms"] = 14
+    assert any("14 ms" in c for c in _chips(populated, monkeypatch))
+
+
+def test_no_cameras_is_an_absence_not_a_healthy_zero(populated):
+    """Green 0/0 reads as 'all cameras up'. It means 'there are no cameras'."""
+    populated._v3["cameras"] = {"online": 0, "total": 0}
+    assert lw.render_status(populated).size == (PANEL_W, PANEL_H)
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, text, *a, **k: (
+            drawn.append(str(text)), real(self, xy, text, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    assert not any("0/0" in t for t in drawn), "rendered a green 0/0"
+    assert "—" in drawn
+
+
+def test_some_cameras_offline_still_reports_the_ratio(populated):
+    populated._v3["cameras"] = {"online": 2, "total": 4}
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, text, *a, **k: (
+            drawn.append(str(text)), real(self, xy, text, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    assert any("2/4 online" in t for t in drawn)
