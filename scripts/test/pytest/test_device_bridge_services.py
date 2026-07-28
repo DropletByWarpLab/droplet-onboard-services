@@ -199,3 +199,41 @@ def test_does_not_reach_for_the_docker_socket():
 def test_route_is_registered():
     src = _BRIDGE_PATH.read_text(encoding="utf-8")
     assert 'if path == "/services":' in src
+
+
+# --- WARP-1646: the route to the orchestrator -------------------------------
+# The bridge runs on the HOST. `expose: 3000` is not reachable from there, and
+# the gateway on :80 now 301s to HTTPS with a cert for the device FQDN — so
+# every orchestrator read failed silently. These pin the fix so the URL cannot
+# quietly lose its port again.
+
+_UNIT = (_BRIDGE_PATH.parent / "droplet-device-bridge.service")
+_COMPOSE = (_BRIDGE_PATH.parents[2] / "docker" / "docker-compose.yml")
+
+
+def test_unit_orchestrator_url_carries_a_port():
+    lines = [ln for ln in _UNIT.read_text(encoding="utf-8").splitlines()
+             if ln.startswith("Environment=ORCHESTRATOR_URL=")]
+    assert len(lines) == 1, lines
+    url = lines[0].split("=", 2)[2]
+    assert url == "http://127.0.0.1:3000", url
+
+
+def test_orchestrator_is_published_on_loopback_only():
+    """The 127.0.0.1 prefix is the whole safety story — without it this
+    publishes the orchestrator API on every interface."""
+    src = _COMPOSE.read_text(encoding="utf-8")
+    i = src.index("\n  orchestrator:")
+    block = src[i:i + 3000]
+    published = [ln.strip() for ln in block.splitlines()
+                 if ln.strip().startswith('- "') and ":3000" in ln]
+    assert published, "orchestrator must publish 3000 for the host-side bridge"
+    for entry in published:
+        assert entry.startswith('- "127.0.0.1:'), \
+            f"orchestrator port must bind loopback only, got {entry}"
+
+
+def test_bridge_default_matches_the_unit():
+    """device-bridge.py's fallback and the unit must not drift apart."""
+    src = _BRIDGE_PATH.read_text(encoding="utf-8")
+    assert 'os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")' in src

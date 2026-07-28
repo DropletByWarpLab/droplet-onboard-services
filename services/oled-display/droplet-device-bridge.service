@@ -48,7 +48,12 @@ Environment=OPENWRT_IFACE=wlan0
 # goes through the nginx gateway on port 80 (path-based proxy to
 # orchestrator:3000) — its port 3000 is not host-published.
 Environment=FRIGATE_URL=http://127.0.0.1:5000
-Environment=ORCHESTRATOR_URL=http://127.0.0.1
+# WARP-1646 — the port is load-bearing. Without it this is the gateway on :80,
+# which now 301s to HTTPS with a cert issued for the device FQDN rather than
+# 127.0.0.1, so every orchestrator read from the bridge failed — silently, in
+# files_snapshot's case. The orchestrator is published on loopback:3000 by
+# docker-compose for exactly this consumer.
+Environment=ORCHESTRATOR_URL=http://127.0.0.1:3000
 Environment=BRIDGE_PORT=9090
 # Bind all interfaces, NOT loopback. The orchestrator container is on the
 # `droplet_default` bridge network and reaches the bridge via

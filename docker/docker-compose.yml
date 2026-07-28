@@ -176,6 +176,20 @@ services:
       dockerfile: apps/orchestrator/Dockerfile
     expose:
       - "3000"
+    # WARP-1646 — LOOPBACK-ONLY publish so host-side helpers can reach the API.
+    #
+    # device-bridge runs on the HOST, not on the docker network, and its
+    # orchestrator reads (files_snapshot's sync state, and the rack panel's
+    # /services health feed) had no working route: `expose` alone is not
+    # reachable from the host, and going via the gateway on :80 now yields a
+    # 301 to HTTPS whose cert is issued for the device FQDN, not 127.0.0.1.
+    # Those reads were failing silently — files_snapshot swallows the error.
+    #
+    # The 127.0.0.1 prefix is load-bearing: it binds the host side to loopback
+    # only, so this adds NOTHING LAN-reachable. Dropping the prefix would
+    # publish the orchestrator API on every interface.
+    ports:
+      - "127.0.0.1:${ORCHESTRATOR_LOOPBACK_PORT:-3000}:3000"
     depends_on:
       db:
         condition: service_healthy
