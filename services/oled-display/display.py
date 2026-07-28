@@ -97,6 +97,9 @@ WIFI_HELPER_URL = os.environ.get(
 WIFI_REFRESH_SECONDS = int(os.environ.get("WIFI_REFRESH_SECONDS", "20"))
 FILES_REFRESH_SECONDS = int(os.environ.get("FILES_REFRESH_SECONDS", "30"))
 CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
+# WARP-1645 — the orchestrator's health monitor refreshes on its own 15s
+# cadence, so there is nothing to gain by polling faster than it updates.
+SERVICES_REFRESH_SECONDS = int(os.environ.get("SERVICES_REFRESH_SECONDS", "15"))
 
 # ---------------------------------------------------------------------------
 # Design tokens — mirror apps/web-dashboard/src/app/globals.css (dark mode).
@@ -703,6 +706,10 @@ class TFTDisplay:
             "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
                      "band": "", "key_ttl_seconds": 0, "password": ""},
             "cameras": {"online": 0, "total": 0},
+            # WARP-1645 — filled by fetch_services(). All-None so a cold box
+            # renders em dashes; see WARP-1643 on why not zeros.
+            "services": {"up": None, "total": None, "status": None,
+                         "degraded": []},
             "wan_latency_ms": 0, "lan_clients": 0,
         }
         self._v3_spark_len = 48  # handoff: 48-sample CPU history
@@ -855,6 +862,8 @@ class TFTDisplay:
                 self.update_wifi(data)
             elif mode == "cameras":
                 self.update_cameras(data)
+            elif mode == "services":
+                self.update_services(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -1757,6 +1766,13 @@ class TFTDisplay:
     def update_wifi(self, data: dict) -> None:
         for k, v in data.items():
             self._v3["wifi"][k] = v
+
+    def update_services(self, data: dict) -> None:
+        """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
+        list, and merging would leave a service showing as down after it
+        recovered."""
+        if isinstance(data, dict):
+            self._v3["services"] = data
 
     def update_cameras(self, data: dict) -> None:
         self._v3["cameras"] = {"online": data.get("online", 0),
@@ -2962,6 +2978,7 @@ class TFTDisplay:
             ("wifi", self.fetch_wifi),
             ("drives", self.fetch_drives),
             ("cameras", self.fetch_cameras),
+            ("services", self.fetch_services),
             ("files", self.fetch_files),
         ):
             try:
@@ -3049,6 +3066,16 @@ class TFTDisplay:
 
     def fetch_drives(self, timeout: float = 4.0) -> Optional[dict]:
         return self._bridge_get("/drives", timeout)
+
+    def fetch_services(self, timeout: float = 6.0) -> Optional[dict]:
+        """WARP-1645 — component health for the panel's SERVICES cell.
+
+        The bridge normalises the orchestrator's cached health snapshot; see
+        services_snapshot() there for why that source and not the docker
+        socket. A None here (bridge unreachable) leaves the previous value in
+        place rather than blanking the cell — a single dropped poll should not
+        make the panel forget what it knew."""
+        return self._bridge_get("/services", timeout)
 
     def connect_wifi(self, ssid: str, password: str = "",
                      timeout: float = 30.0) -> dict:
@@ -3285,6 +3312,7 @@ class TFTDisplay:
         last_wifi_push = 0.0
         last_files_push = 0.0
         last_cams_push = 0.0
+        last_services_push = 0.0
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
@@ -3324,6 +3352,7 @@ class TFTDisplay:
                 last_wifi_push = now_anchor
                 last_files_push = now_anchor
                 last_cams_push = now_anchor
+                last_services_push = now_anchor
                 self._last_drives_push = now_anchor
             touch = getattr(self, "_touch_source", None)
             if touch is not None:
@@ -3390,6 +3419,14 @@ class TFTDisplay:
                 if cams is not None:
                     self._pyportal_send("cameras", cams)
                 last_cams_push = now
+            # WARP-1645 — service health. The orchestrator refreshes its own
+            # snapshot every 15s, so polling faster than that only costs
+            # requests; slower and a container dying takes too long to show.
+            if self._wants_data() and (now - last_services_push) > SERVICES_REFRESH_SECONDS:
+                svc = self.fetch_services()
+                if svc is not None:
+                    self._pyportal_send("services", svc)
+                last_services_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._wants_data():
                 if not hasattr(self, "_last_drives_push"):

@@ -3040,6 +3040,92 @@ def cameras_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# WARP-1645: service health for the rack panel's SERVICES cell
+# ---------------------------------------------------------------------------
+# The orchestrator ALREADY maintains exactly this: health-monitor.service.ts
+# background-polls 8 components every 15s and caches the result, and
+# /api/orchestrator/health returns that snapshot cheaply (it is what Docker's
+# healthcheck hits). We reuse it rather than forming a second opinion.
+#
+# Deliberately NOT ops-console's /ops/containers: that is backed by
+# /var/run/docker.sock, which is root-equivalent on the host. Nothing on the
+# panel's data path should need it, and the display container must never get it.
+#
+# This lives in the bridge rather than in display.py because every other panel
+# feed already does (/wifi, /files, /cameras, /drives, /openwrt/qr), and the
+# bridge already owns the orchestrator client including the internal-mTLS
+# context. One place to normalise, one place to get the TLS right.
+
+# Mirrors HARD_DEPS in health-monitor.service.ts. PRESENTATION ONLY — it drives
+# row ordering and dot colour. The authority on whether the box is merely
+# degraded or actually down is the orchestrator's own aggregate `status`, which
+# we pass through untouched; do not re-derive that here from this list.
+_CORE_COMPONENTS = ("postgres",)
+
+
+def services_snapshot():
+    """Normalise the orchestrator's health snapshot for the panel.
+
+    Returns {up, total, status, degraded[]}. On ANY failure every field stays
+    None so the panel renders em dashes — never zeros. WARP-1643 shipped two
+    fake zeros already; "0/0 services" on a rack front is worse than an honest
+    gap, because it reads as a measurement.
+    """
+    out = {"up": None, "total": None, "status": None, "degraded": []}
+
+    body = None
+    url = _orchestrator_base_url() + "/api/orchestrator/health"
+    try:
+        with urlrequest.urlopen(url, timeout=4,
+                                context=_orchestrator_tls_context()) as r:
+            body = json.loads(r.read().decode())
+    except Exception as e:                                          # noqa: BLE001
+        # ⚠ The endpoint answers 503 when the aggregate is `down` — and urlopen
+        # raises on 503. Without reading the error body we would show "no data"
+        # at exactly the moment the box is most broken, which is the one time
+        # this cell has to work. HTTPError is a response object; read it.
+        payload = getattr(e, "read", None)
+        if callable(payload):
+            try:
+                body = json.loads(payload().decode())
+            except Exception:                                       # noqa: BLE001
+                body = None
+        if body is None:
+            logger.debug("services snapshot unavailable: %s", e)
+            return out
+
+    comps = body.get("components") or []
+    if not isinstance(comps, list) or not comps:
+        return out
+
+    degraded = []
+    up = 0
+    for c in comps:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "?")
+        if c.get("status") == "ok":
+            up += 1
+        else:
+            degraded.append({
+                "name": name,
+                # Prefer the component's own error text — at a rack, "connection
+                # refused" is worth more than "down".
+                "state": str(c.get("error") or c.get("status") or "down")[:40],
+                "core": name in _CORE_COMPONENTS,
+            })
+    # Core first, then alphabetical, so the row that matters is never the one
+    # pushed off by the 3-row cap.
+    degraded.sort(key=lambda s: (not s["core"], s["name"]))
+
+    out["up"] = up
+    out["total"] = len(comps)
+    out["status"] = body.get("status")
+    out["degraded"] = degraded
+    return out
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -3117,6 +3203,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, files_snapshot())
             if path == "/cameras":
                 return self._send(200, cameras_snapshot())
+            if path == "/services":
+                # WARP-1645: component health for the panel's SERVICES cell.
+                # Ungated like /wifi and /cameras — it carries no credential
+                # material, just component names and up/down, and the panel it
+                # feeds is already visible to anyone standing at the rack.
+                return self._send(200, services_snapshot())
             if path == "/drives":
                 # WARP-659: drive inventory (labels, mount points, usage) is
                 # box-internal; gate it like /openwrt/qr now that the bridge
