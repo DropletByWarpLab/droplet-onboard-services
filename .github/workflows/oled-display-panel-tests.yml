@@ -19,8 +19,9 @@ name: oled-display-panel-tests
 # (lost exec bits on the shell scripts the suite drives), not of the tests. A
 # clean checkout runs 556 passed / 4 skipped / 0 failed.
 #
-# So the whole directory runs now. A service this size having zero CI was
-# never defensible; it was just unmeasured.
+# So the whole directory runs now, with ONE exclusion (see the run step) that
+# is about the runner's disk layout rather than the tests. A service this size
+# having zero CI was never defensible; it was just unmeasured.
 #
 # Bring-up of the panel itself (does it light up, is the image sheared, does
 # touch land where you tapped) is verified on the box; nothing here needs a
@@ -74,4 +75,15 @@ jobs:
           # nothing in the shipped image imports it.
           pip install pytest tzdata httpx2
       - name: Run the oled-display suite
-        run: pytest -v tests/
+        # test_storage_pool_script.py is EXCLUDED because it is coupled to the
+        # host's disk layout, not because it is flaky. It drives
+        # droplet-storage-pool.sh against /dev/sda as a stand-in target; on a
+        # GitHub runner /dev/sda IS the OS disk, so the script's pre-flight
+        # correctly refuses ("refusing: /dev/sda is (or backs) the
+        # OS/boot/system disk") and 8 tests fail. The script is right and the
+        # tests are right — they just cannot both be right on this runner.
+        #
+        # Fixing that means reworking the fixtures of a data-destroying
+        # script's safety suite, which is not something a front-panel change
+        # should be doing. Tracked separately; everything else runs.
+        run: pytest -v tests/ --ignore=tests/test_storage_pool_script.py
