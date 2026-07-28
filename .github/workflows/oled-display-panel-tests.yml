@@ -63,7 +63,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           # tzdata: display.py resolves ZoneInfo("America/Los_Angeles") at
-          # import. pyserial is already in requirements.txt.
-          pip install pytest tzdata
+          # import, and a slim CI image ships no IANA database. pyserial is
+          # already in requirements.txt.
+          #
+          # httpx2: tests/test_main.py drives the app through
+          # starlette.testclient, which refuses to import without it. Easy to
+          # miss locally — a dev box with the older `httpx` present satisfies
+          # starlette and only emits a deprecation warning, so this fails
+          # exclusively in a clean environment. It is a test-only dependency;
+          # nothing in the shipped image imports it.
+          pip install pytest tzdata httpx2
       - name: Run the oled-display suite
         run: pytest -v tests/
