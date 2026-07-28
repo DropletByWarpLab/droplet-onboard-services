@@ -35,8 +35,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, model_validator
 from PIL import Image, UnidentifiedImageError
 
-from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
-from touch import TouchReader
+from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT, BACKEND
+
+# WARP-1640 — touch source depends on the panel. The PyPortal sent
+# `TOUCH:x,y,pressure` back up the serial link (so touch.py is a no-op shim
+# and display.py's cycle loop parses the events), whereas the rack panel's
+# touchscreen is a separate USB HID device we read from /dev/input directly.
+# Both expose the same start/stop/get_state contract, so nothing below cares.
+if BACKEND == "fb":
+    from touch_evdev import TouchReader
+else:
+    from touch import TouchReader
 
 logger = logging.getLogger("droplet.tft")
 logging.basicConfig(level=logging.INFO)
