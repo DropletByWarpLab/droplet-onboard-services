@@ -193,7 +193,10 @@ def _wrap(draw, text: str, font, max_w: int) -> List[str]:
 def _fit_font(draw, text: str, max_w: int, start: int, floor: int = 14,
               weight: str = "heavy", tracking: float = 0.0):
     """Step a face down until `text` fits `max_w`. Same approach render_claim
-    already uses for the claim code — hostnames vary in length by 3x."""
+    already uses for the claim code — hostnames vary in length by 3x.
+
+    ⚠ Returns the FLOOR face when nothing fits, which may still overflow. Use
+    `_fit_text` unless you have separately guaranteed the text fits."""
     d = _d()
     size = start
     while size > floor:
@@ -202,6 +205,28 @@ def _fit_font(draw, text: str, max_w: int, start: int, floor: int = 14,
             return f
         size -= 1
     return d._get_font(floor, weight=weight)
+
+
+def _fit_text(draw, text: str, max_w: int, start: int, floor: int = 14,
+              weight: str = "heavy", tracking: float = 0.0):
+    """Fit `text` into `max_w`, shortening it if even the floor face overflows.
+
+    Returns (font, text). `_fit_font` alone stops shrinking at the floor and
+    hands back a face that STILL overflows — which on this layout means the
+    address running straight through the divider into the next cell. Latent
+    until the safe-area inset narrowed the column; CI caught it immediately.
+
+    Shortening an address is not great, but the IP sits directly underneath and
+    the ellipsis says "there is more" — both better than spilling into HEALTH.
+    """
+    d = _d()
+    font = _fit_font(draw, text, max_w, start, floor, weight, tracking)
+    if d._v3_text_width(draw, text, font, tracking) <= max_w:
+        return font, text
+    shortened = text
+    while len(shortened) > 4 and             d._v3_text_width(draw, shortened + "…", font, tracking) > max_w:
+        shortened = shortened[:-1]
+    return font, shortened + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +428,8 @@ def _cell_reach(disp, draw, v: dict) -> None:
     _eyebrow(draw, "REACH", x)
 
     host = str(v.get("public_host") or v.get("hostname") or "-")
-    d._v3_text(draw, host, x, 80, font=_fit_font(draw, host, w, 30),
-               fill=d.V3_TEXT)
+    host_font, host_text = _fit_text(draw, host, w, 30)
+    d._v3_text(draw, host_text, x, 80, font=host_font, fill=d.V3_TEXT)
     d._v3_text(draw, str(v.get("ip", "-")), x, 124,
                font=d._get_font(22, weight="bold"), fill=d.V3_LABEL2)
 
@@ -677,9 +702,9 @@ def render_debug(disp, now=None) -> Image.Image:
     x, w = g.cells["reach"]
     _eyebrow(draw, "GET IN", x)
     ip = str(v.get("ip", "-"))
-    d._v3_text(draw, f"ssh droplet@{ip}", x, 78,
-               font=_fit_font(draw, f"ssh droplet@{ip}", w, 26, weight="bold"),
-               fill=d.V3_TEXT)
+    ssh_font, ssh_text = _fit_text(draw, f"ssh droplet@{ip}", w, 26,
+                                   weight="bold")
+    d._v3_text(draw, ssh_text, x, 78, font=ssh_font, fill=d.V3_TEXT)
     rows = (
         ("HOST", str(v.get("hostname", "-"))),
         ("PANEL", "{}×{}".format(*(

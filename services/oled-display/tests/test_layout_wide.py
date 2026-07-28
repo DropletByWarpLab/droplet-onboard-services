@@ -266,6 +266,33 @@ def test_long_hostname_stays_inside_its_cell(populated, monkeypatch):
     assert drawn and drawn[0][2] <= x + w, "hostname auto-fit failed"
 
 
+def test_an_unfittable_hostname_is_shortened_not_spilled(populated):
+    """_fit_font stops shrinking at its floor and returns a face that STILL
+    overflows — the address then runs through the divider into HEALTH.
+    _fit_text shortens instead. Latent until the safe-area inset narrowed the
+    column; CI caught it on the first run."""
+    populated._v3["public_host"] = (
+        "an-absurdly-long-customer-named-address.droplet-us.com")
+    g = lw.geom()
+    x, w = g.cells["reach"]
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, t, *a, **k: (
+            drawn.append((self.textbbox(xy, t, font=k.get("font"),
+                                        anchor=k.get("anchor")), str(t))),
+            real(self, xy, t, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    hero = [(b, t) for b, t in drawn if t.startswith("an-absurdly")]
+    assert hero, [t for _, t in drawn][:8]
+    box, text = hero[0]
+    assert box[2] <= x + w, "address spilled out of its cell"
+    assert text.endswith("…")
+
+
 # --- QR --------------------------------------------------------------------
 
 def test_short_payload_renders_above_the_module_floor():
