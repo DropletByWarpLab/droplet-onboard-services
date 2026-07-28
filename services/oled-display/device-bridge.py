@@ -122,22 +122,72 @@ ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
 # bundle paths into /etc/droplet/device-bridge.env. Flag on → https:// +
 # client cert; unset/0 → plain HTTP, byte-identical to before. FRIGATE_URL
 # stays plaintext (documented exemption — third-party loopback listener).
+# WARP-1646 — hosts for which certificate verification is deliberately skipped.
+# ONLY loopback literals. See _orchestrator_tls_context() for the reasoning.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _is_loopback_url(url):
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:                                               # noqa: BLE001
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def _orchestrator_tls_context():
-    if os.environ.get("DROPLET_INTERNAL_TLS", "0") != "1":
-        return None
-    import ssl
-    ctx = ssl.create_default_context(cafile=os.environ.get("DROPLET_TLS_CA", ""))
-    ctx.load_cert_chain(
-        certfile=os.environ.get("DROPLET_TLS_CERT", ""),
-        keyfile=os.environ.get("DROPLET_TLS_KEY", ""),
-    )
-    return ctx
+    if os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1":
+        import ssl
+        ctx = ssl.create_default_context(
+            cafile=os.environ.get("DROPLET_TLS_CA", ""))
+        ctx.load_cert_chain(
+            certfile=os.environ.get("DROPLET_TLS_CERT", ""),
+            keyfile=os.environ.get("DROPLET_TLS_KEY", ""),
+        )
+        return ctx
+
+    # WARP-1646 — reaching the orchestrator over the LOOPBACK gateway.
+    #
+    # The bridge runs on the host; the orchestrator is on the docker network
+    # and is only `expose:`d, so the sole host-side route is the gateway. The
+    # gateway now redirects :80 to HTTPS, and its certificate is issued for the
+    # box's device FQDN — so verifying it against the literal 127.0.0.1 fails,
+    # and every orchestrator read from this process failed with it (silently,
+    # in files_snapshot's case).
+    #
+    # Verification is therefore skipped for LOOPBACK LITERALS ONLY. The
+    # trade is deliberate and narrow: this connection never leaves the box, the
+    # payload is unauthenticated health data with no credential material, and
+    # anyone positioned to MITM the box's own loopback interface already has
+    # code execution on it — so verification is buying nothing here that the
+    # host's own integrity does not already provide.
+    #
+    # What was NOT done, and why:
+    #   * publishing the orchestrator on a host port — a fixed port collides
+    #     (it broke CI immediately: "address already in use" on 3000), and a
+    #     new listener is a bigger change to the box's surface than this;
+    #   * verifying against the device FQDN with a manual SNI override — works
+    #     only while split-horizon DNS and the cert are both healthy, which is
+    #     exactly what you cannot assume when something is already wrong.
+    base = _orchestrator_base_url_raw()
+    if base.startswith("https://") and _is_loopback_url(base):
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
+
+
+def _orchestrator_base_url_raw():
+    if (ORCHESTRATOR_URL.startswith("http://")
+            and os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1"):
+        return "https://" + ORCHESTRATOR_URL[len("http://"):]
+    return ORCHESTRATOR_URL
 
 
 def _orchestrator_base_url():
-    if ORCHESTRATOR_URL.startswith("http://")             and os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1":
-        return "https://" + ORCHESTRATOR_URL[len("http://"):]
-    return ORCHESTRATOR_URL
+    return _orchestrator_base_url_raw()
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
