@@ -1,0 +1,36 @@
+[Unit]
+Description=Droplet rack panel — claim the framebuffer from the kernel console (WARP-1639)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-1639
+# The panel is a plain HDMI monitor on the box's iGPU, so fbcon and the display
+# service cannot both own it. Claim it BEFORE docker starts, so the display
+# service never has to fight a console that is already painting.
+Before=docker.service
+# Best-effort by design: a box with no framebuffer (headless, or a different
+# chassis) must still boot normally. ConditionPathExists keeps this a clean
+# no-op there rather than a failed unit at every boot.
+ConditionPathExists=/sys/class/vtconsole
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/droplet-panel-console.sh claim
+# On the way down, hand the console back — a box being stopped or rebooted
+# should show a console, not the last frame the display service happened to
+# leave behind.
+ExecStop=/usr/local/sbin/droplet-panel-console.sh release 0
+# exit 3 = a live release hold (someone is mid-debug on the panel). That is a
+# deliberate refusal, not a failure, and must not mark the unit failed.
+SuccessExitStatus=0 3
+
+# Needs to write /sys/class/vtconsole/*/bind and call chvt, so it cannot take
+# the full sandbox the other host units use. Everything else is still locked
+# down.
+ProtectHome=yes
+PrivateTmp=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target
