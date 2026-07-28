@@ -172,6 +172,12 @@ def _eyebrow(draw, text: str, x: int, y: Optional[int] = None,
                fill=fill or d.V3_LABEL3, tracking=1.6)
 
 
+def _clip(text: str, n: int) -> str:
+    """Truncate with an ellipsis so a shortened string never masquerades as a
+    complete one."""
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
 def _wrap(draw, text: str, font, max_w: int) -> List[str]:
     """Greedy word wrap. PIL has none, and an unwrapped sentence on this panel
     does not just look bad — it runs straight off the content area and under
@@ -513,8 +519,11 @@ def _cell_health(disp, draw, v: dict) -> None:
 
 
 def _cell_services(disp, draw, v: dict) -> None:
-    """The highest-value cell: nothing on the panel today says a container is
-    down. Data source lands in build-plan PR-5."""
+    """The highest-value cell: it is the only thing on the panel that says a
+    container is down, which is the most common reason to walk to the rack.
+
+    Fed by the bridge's /services (WARP-1645), which normalises the
+    orchestrator's own cached health snapshot."""
     d = _d()
     g = geom()
     x, w = g.cells["services"]
@@ -523,14 +532,21 @@ def _cell_services(disp, draw, v: dict) -> None:
     svc = v.get("services") or {}
     up, total = svc.get("up"), svc.get("total")
     degraded: List[dict] = list(svc.get("degraded") or [])
-    core_down = any(s.get("core") for s in degraded)
+    # The orchestrator's OWN aggregate classification. It knows which
+    # components are hard dependencies; we do not re-derive that here from a
+    # guessed list of "core" services. `core` on a row is presentation only.
+    status = svc.get("status")
 
     if up is None or total is None:
+        # Bridge or orchestrator unreachable. An em dash, never "0/0" — see
+        # WARP-1643; a zero here would read as "no services running", which is
+        # a far more alarming and entirely wrong claim.
         hero, ink, summary = "—", d.V3_LABEL4, "no data"
     else:
         hero = f"{up}/{total}"
-        ink = (d.V3_RED if core_down else
-               d.V3_ORANGE if up < total else d.V3_GREEN)
+        ink = (d.V3_RED if status == "down" else
+               d.V3_ORANGE if (status == "degraded" or up < total)
+               else d.V3_GREEN)
         summary = ("all healthy" if not degraded else
                    f"{len(degraded)} degraded")
     d._v3_text(draw, hero, x, 76, font=d._get_font(40, weight="heavy"), fill=ink)
@@ -548,9 +564,12 @@ def _cell_services(disp, draw, v: dict) -> None:
         y = 146 + i * 26
         dot = d.V3_RED if s.get("core") else d.V3_ORANGE
         draw.ellipse([x, y + 4, x + 6, y + 10], fill=dot)
-        d._v3_text(draw, str(s.get("name", "?"))[:14], x + 14, y,
+        d._v3_text(draw, _clip(str(s.get("name", "?")), 14), x + 14, y,
                    font=d._get_font(13, weight="bold"), fill=d.V3_TEXT)
-        d._v3_text(draw, str(s.get("state", ""))[:16], x + 14, y + 14,
+        # Ellipsis rather than a bare slice: a hard cut at 16 chars turns
+        # "connection refused" into "connection refus", which reads as a
+        # different (and nonsense) error rather than a shortened one.
+        d._v3_text(draw, _clip(str(s.get("state", "")), 18), x + 14, y + 14,
                    font=d._get_font(11), fill=d.V3_LABEL3)
     if overflow:
         d._v3_text(draw, f"+{overflow} more", x, 194, font=d._get_font(11),
@@ -618,13 +637,16 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
         disp._touch_regions = []
 
     v = disp._v3
-    degraded = (v.get("services") or {}).get("degraded") or []
-    # Brief §6: a CORE service being down is an ALERT, not a DEGRADED — the
-    # box is not doing its job. Non-core is DEGRADED.
-    # TODO(PR-5): ALERT should also replace C2+C3 with the incident block.
-    if disp._open_alerts_count() or any(s.get("core") for s in degraded):
+    svc = v.get("services") or {}
+    # WARP-1645: the pill now follows the ORCHESTRATOR's aggregate status
+    # rather than a guess made here. It classifies `down` only when a hard
+    # dependency has failed (postgres) — that is the box not doing its job, so
+    # it earns ALERT; anything else failing is DEGRADED.
+    # TODO: ALERT should also replace C2+C3 with an incident block (brief §6).
+    svc_status = svc.get("status")
+    if disp._open_alerts_count() or svc_status == "down":
         state = "alert"
-    elif degraded:
+    elif svc_status == "degraded" or (svc.get("degraded") or []):
         state = "degraded"
 
     _render_chrome(disp, draw, now, state)

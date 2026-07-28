@@ -185,10 +185,12 @@ def test_touch_targets_clear_the_44px_minimum(populated):
     (lambda v: v["services"].update(
         degraded=[{"name": "frigate", "state": "restarting", "core": False}]),
      "degraded"),
-    # A core service down is an ALERT, not merely DEGRADED — the box is not
-    # doing its job, and the pill is the glance-from-across-the-room signal.
+    # WARP-1645: a HARD dependency down is an ALERT, and it is the
+    # ORCHESTRATOR that classifies that (status="down"), not a guess made on
+    # the panel from a `core` flag.
     (lambda v: v["services"].update(
-        degraded=[{"name": "ai-gateway", "state": "unhealthy", "core": True}]),
+        status="down",
+        degraded=[{"name": "postgres", "state": "P1001", "core": True}]),
      "alert"),
 ])
 def test_state_pill_reflects_health(populated, monkeypatch, mutate, expect):
@@ -426,3 +428,88 @@ def test_rail_text_stays_inside_the_rail(populated):
     for b in rail_boxes:
         assert b[0] >= g.rail_x, f"rail text starts left of the rail: {b}"
         assert b[2] <= g.rail_x + g.rail_w, f"rail text overflows: {b}"
+
+
+# --- WARP-1645: the SERVICES cell, now with a real feed ---------------------
+
+def _texts(populated):
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, t, *a, **k: (
+            drawn.append(str(t)), real(self, xy, t, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    return drawn
+
+
+def test_services_shows_the_real_ratio(populated):
+    populated._v3["services"] = {"up": 8, "total": 8, "status": "ok",
+                                 "degraded": []}
+    t = _texts(populated)
+    assert "8/8" in t and "all healthy" in t
+
+
+def test_services_names_what_is_down(populated):
+    populated._v3["services"] = {
+        "up": 7, "total": 8, "status": "degraded",
+        "degraded": [{"name": "nextcloud", "state": "connection refused",
+                      "core": False}]}
+    t = _texts(populated)
+    assert "7/8" in t
+    assert "1 degraded" in t
+    assert "nextcloud" in t
+    assert "connection refused" in t
+
+
+def test_no_feed_renders_a_dash_never_zero_zero(populated):
+    """'0/0 services' reads as 'nothing is running' — alarming and wrong."""
+    populated._v3["services"] = {"up": None, "total": None, "status": None,
+                                 "degraded": []}
+    t = _texts(populated)
+    assert "no data" in t
+    assert not any("0/0" in s for s in t)
+
+
+def test_pill_follows_the_orchestrator_status_not_a_guess(populated, monkeypatch):
+    """The orchestrator knows which components are hard dependencies. The
+    panel must not re-derive that from a guessed list of 'core' services."""
+    seen = []
+    real = lw._pill_style
+    monkeypatch.setattr(lw, "_pill_style",
+                        lambda s: (seen.append(s), real(s))[1])
+
+    populated._v3["services"] = {
+        "up": 7, "total": 8, "status": "degraded",
+        "degraded": [{"name": "file-indexer", "state": "down", "core": False}]}
+    lw.render_status(populated)
+    assert seen[-1] == "degraded"
+
+    populated._v3["services"] = {
+        "up": 6, "total": 8, "status": "down",
+        "degraded": [{"name": "postgres", "state": "P1001", "core": True}]}
+    lw.render_status(populated)
+    assert seen[-1] == "alert"
+
+
+def test_overflow_is_explicit_never_silent(populated):
+    populated._v3["services"] = {
+        "up": 3, "total": 8, "status": "degraded",
+        "degraded": [{"name": f"svc-{i}", "state": "down", "core": False}
+                     for i in range(5)]}
+    t = _texts(populated)
+    assert "+3 more" in t, "truncating silently would hide failing services"
+
+
+def test_a_long_error_is_ellipsised_not_sliced(populated):
+    """A hard cut turns "ECONNREFUSED 127.0.0.1:6379" into something that reads
+    like a different, complete error. The ellipsis says "there is more"."""
+    populated._v3["services"] = {
+        "up": 7, "total": 8, "status": "degraded",
+        "degraded": [{"name": "redis",
+                      "state": "ECONNREFUSED 127.0.0.1:6379 after 3 retries",
+                      "core": False}]}
+    t = _texts(populated)
+    assert any(s.endswith("…") for s in t), t
