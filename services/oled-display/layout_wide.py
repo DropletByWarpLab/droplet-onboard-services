@@ -319,7 +319,7 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
     draw.rectangle([g.rail_x, 0, g.rail_x, d.HEIGHT], fill=d.V3_SEP)
 
     card_x = g.rail_x + (g.rail_w - QR_CARD) // 2
-    card_y = 30
+    card_y = g.top + 24
     d._rrect(draw, card_x, card_y, QR_CARD, QR_CARD, 14, fill=d.V3_WHITE)
 
     qr_img, module_px = render_qr(payload, ecc=ecc)
@@ -343,16 +343,31 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
     # BOTH sides of it. The fallback is a hostname, and hostnames vary in
     # length by 3x — clip all three to the rail rather than trusting them.
     inner = g.rail_w - 16
-    d._v3_text(draw, caption, cx, 216, font=d._get_font(9, weight="bold"),
+
+    # WARP-1647 — sized up after reading them on the actual panel. The original
+    # 9/13/11 came from the design brief, i.e. from before anyone had stood at
+    # the rack. The block is laid out from the safe area's BOTTOM rather than
+    # from absolute y literals: the rail spans the full framebuffer height and
+    # so did not previously respect PANEL_SAFE_INSET_Y, which would have pushed
+    # the typed address off the panel the moment that inset went non-zero.
+    fb_y = g.bottom - 30
+    hl_y = fb_y - 26
+    cap_y = hl_y - 18
+
+    d._v3_text(draw, caption, cx, cap_y, font=d._get_font(11, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
-    hl_font, hl_text = _fit_text(draw, headline, inner, 13, floor=10,
+    hl_font, hl_text = _fit_text(draw, headline, inner, 17, floor=12,
                                  weight="bold")
-    d._v3_text(draw, hl_text, cx, 232, font=hl_font, fill=d.V3_LABEL2,
+    d._v3_text(draw, hl_text, cx, hl_y, font=hl_font, fill=d.V3_LABEL2,
                anchor="ma")
     # The typed path must never disappear: glare, bad angle, camera-less phone.
-    fb_font, fb_text = _fit_text(draw, fallback, inner, 11, floor=8,
+    # It gets the biggest bump of the three — it is the one you READ AND TYPE,
+    # and an address you cannot make out is the same as no address at all. The
+    # floor rises with it so a long hostname shrinks but never back to
+    # unreadable; past that it ellipsises (see _fit_text).
+    fb_font, fb_text = _fit_text(draw, fallback, inner, 15, floor=10,
                                  weight="regular")
-    d._v3_text(draw, fb_text, cx, 250, font=fb_font, fill=d.V3_LABEL4,
+    d._v3_text(draw, fb_text, cx, fb_y, font=fb_font, fill=d.V3_LABEL2,
                anchor="ma")
 
 
