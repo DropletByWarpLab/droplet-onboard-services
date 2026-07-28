@@ -7,7 +7,7 @@ httpx>=0.28.1
 sse-starlette>=3.4.6
 redis>=8.0.1
 grpcio>=1.83.0
-grpcio-tools>=1.82.1
+grpcio-tools>=1.83.0
 sentence-transformers>=5.6.1
 torch --index-url https://download.pytorch.org/whl/cpu
 
