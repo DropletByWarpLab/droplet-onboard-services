@@ -246,8 +246,19 @@ def test_nothing_escapes_its_band(populated, monkeypatch):
         assert y1 <= PANEL_H, f"{text!r} overflows the panel bottom ({y1})"
         assert x1 <= PANEL_W, f"{text!r} overflows the panel right ({x1})"
         # Band B content must not run into the foot rule.
-        if lw.geom().band_b_top <= y0 < lw.geom().band_b_bot:
-            assert y1 <= lw.geom().band_c_rule - 2, \
+        #
+        # Scoped to the CONTENT AREA on purpose: the bands are a property of
+        # the 12-column grid, and the foot rule is only drawn from g.left to
+        # g.content_r. The action rail is a separate full-height surface with
+        # its own stack, so its text legitimately sits at band-C heights and
+        # collides with nothing. Caught in CI once the rail text grew — font
+        # metrics differ enough between hosts that the headline crossed the
+        # rule on the runner but not locally.
+        g = lw.geom()
+        if x0 >= g.rail_x:
+            continue
+        if g.band_b_top <= y0 < g.band_b_bot:
+            assert y1 <= g.band_c_rule - 2, \
                 f"{text!r} in band B collides with the foot rule"
 
 
