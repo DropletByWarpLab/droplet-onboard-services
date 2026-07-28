@@ -65,7 +65,23 @@ HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 # ---------------------------------------------------------------------------
 # "auto" (default) probes the status display on USB-serial and falls back to "sim".
 # "pyportal" / "sim" force a specific backend (primarily for CI / dev).
+#
+# WARP-1640 adds "fb": the rack panel is a plain HDMI monitor on the box's own
+# iGPU, so the HOST renders and blits (see fb.py) rather than streaming JSON to
+# firmware that draws for us.
+#
+# "fb" is deliberately EXPLICIT-ONLY and is never reached from "auto". The 5s
+# promotion loop below re-probes USB every tick, so an auto-selected fb backend
+# would silently lose the panel to any PyPortal plugged in later.
 BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
+
+# Backends whose screens are driven from `self._v3`, i.e. the ones that need
+# the cycle loop's periodic data pumps running. Getting this wrong is the
+# single most expensive mistake in this file: `_v3` is populated ONLY via
+# `_mirror_to_v3()` <- `_pyportal_send()`, so a backend missing from here
+# renders CPU 0% / MEM 0% / DISK 0% forever while every renderer works
+# perfectly — it is drawing an empty dict.
+_DATA_BACKENDS = ("pyportal", "fb")
 
 # Status display backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
@@ -687,6 +703,9 @@ class TFTDisplay:
         # Live touch feedback: momentary highlight after a tap
         self._last_tap_region: Optional[str] = None
         self._last_tap_at: float = 0.0
+        # WARP-1640 — set by _init_device() when DISPLAY_BACKEND=fb; stays None
+        # on every other backend so _push()'s check is a plain identity test.
+        self._fb = None
 
         self._init_device()
         self._load_logo()
@@ -696,6 +715,26 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
+        # WARP-1640 — the rack panel. Explicit opt-in only: returning here
+        # BEFORE the USB probe is what keeps a later-plugged PyPortal from
+        # stealing the panel via the cycle loop's promotion path.
+        if BACKEND == "fb":
+            from fb import FramebufferBackend
+            self._fb = FramebufferBackend.open()
+            if self._fb is not None:
+                self._backend = "fb"
+                logger.info("TFT initialised on the framebuffer panel "
+                            "(%dx%d stride=%d)", self._fb.width,
+                            self._fb.height, self._fb.stride)
+                return
+            # open() already logged why. Fall through to sim so the service
+            # still serves /display/preview and the orchestrator's pushes
+            # still land — a missing panel must not take the container down.
+            logger.warning("framebuffer backend requested but unavailable — "
+                           "falling back to sim")
+            self._backend = "sim"
+            return
+
         # The status display takes several seconds to finish USB enumeration
         # after the host reboots, so retry a few times before falling through
         # to sim. Otherwise a cold boot leaves the user with a blank screen
@@ -776,6 +815,20 @@ class TFTDisplay:
         except Exception as e:
             logger.debug("status display probe %s failed: %s", path, e)
             return False
+
+    def _wants_data(self) -> bool:
+        """Does this backend need the cycle loop's periodic data pumps?
+
+        WARP-1640. The pumps call `_pyportal_send()`, whose FIRST action is
+        `_mirror_to_v3()` — i.e. they are how `self._v3` gets populated, on
+        every backend, regardless of whether a serial device exists.
+        `_pyportal_send` is safe with no device attached: it returns right
+        after the mirror.
+
+        The name is historical; the behaviour is not PyPortal-specific. Gating
+        these on `== "pyportal"` is what would leave the rack panel rendering
+        CPU 0% / MEM 0% / DISK 0% forever."""
+        return self._backend in _DATA_BACKENDS
 
     def _mirror_to_v3(self, mode: str, data: Optional[dict]) -> None:
         """Feed the host's own py-v3 preview from the SAME frames we send the
@@ -891,10 +944,22 @@ class TFTDisplay:
     # ----- Push to display ---------------------------------------------
 
     def _push(self, image: Image.Image):
-        # Both backends write the preview PNG: the status display renders the
-        # frame itself from the data commands we stream over serial, and the
-        # sim backend has nothing else to do with the image.
+        # Every backend writes the preview PNG: the PyPortal renders the frame
+        # itself from the data commands we stream over serial, the sim backend
+        # has nothing else to do with the image, and on the framebuffer panel
+        # the preview is how we verify remotely (GET /display/preview) without
+        # standing in front of the rack.
         self._current_image = image
+        # WARP-1640 — the rack panel. This is the ONLY place pixels reach the
+        # framebuffer. FramebufferBackend.blit() already swallows its own
+        # errors, but this is the render thread: belt-and-braces here means a
+        # panel problem degrades to "preview still works" instead of killing
+        # every screen update for the rest of the process's life.
+        if self._fb is not None:
+            try:
+                self._fb.blit(image)
+            except Exception as e:                              # noqa: BLE001
+                logger.warning("panel blit failed: %s", e)
         SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         try:
             image.save(str(SIM_OUTPUT))
@@ -2913,7 +2978,17 @@ class TFTDisplay:
             "mode": self._current_mode,
             "backend": self._backend,
             "simulated": self._backend == "sim",
+            # WARP-1640: the panel's REAL geometry when we own a framebuffer.
+            # WIDTH/HEIGHT are what we render at; if a misconfigured
+            # LCD_WIDTH/LCD_HEIGHT disagrees with the hardware, fb.py letterboxes
+            # rather than stretching — and this is where you see that.
             "resolution": f"{WIDTH}x{HEIGHT}",
+            "panel": (None if self._fb is None else {
+                "width": self._fb.width,
+                "height": self._fb.height,
+                "stride": self._fb.stride,
+                "device": self._fb.path,
+            }),
             "brightness": self._brightness,
             "cycling": (self._cycle_running and
                         time.time() >= self._cycle_paused_until),
@@ -3137,7 +3212,7 @@ class TFTDisplay:
             # drives / cameras stay on their initial empty values until
             # each individual periodic-push timer fires below — up to
             # 30s for files, which reads as "the screen never auto-fills".
-            if self._backend == "pyportal" and self._needs_resync:
+            if self._wants_data() and self._needs_resync:
                 self._needs_resync = False
                 logger.info("post-probe resync — pushing full state")
                 self._push_full_state()
@@ -3190,26 +3265,26 @@ class TFTDisplay:
             # every screen has live numbers when the user navigates to it.
             # A longer cadence (8s) keeps perceived flicker low — the
             # firmware re-renders the active screen on each push.
-            if self._backend == "pyportal" and (now - last_stats_push) > 8.0:
+            if self._wants_data() and (now - last_stats_push) > 8.0:
                 self._pyportal_send("stats", self._gather_stats())
                 last_stats_push = now
-            if self._backend == "pyportal" and (now - last_wifi_push) > WIFI_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_wifi_push) > WIFI_REFRESH_SECONDS:
                 snap = self.fetch_wifi()
                 if snap is not None:
                     self._pyportal_send("wifi", snap)
                 last_wifi_push = now
-            if self._backend == "pyportal" and (now - last_files_push) > FILES_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_files_push) > FILES_REFRESH_SECONDS:
                 fs = self.fetch_files()
                 if fs is not None:
                     self._pyportal_send("files", fs)
                 last_files_push = now
-            if self._backend == "pyportal" and (now - last_cams_push) > CAMERAS_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_cams_push) > CAMERAS_REFRESH_SECONDS:
                 cams = self.fetch_cameras()
                 if cams is not None:
                     self._pyportal_send("cameras", cams)
                 last_cams_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
-            if self._backend == "pyportal":
+            if self._wants_data():
                 if not hasattr(self, "_last_drives_push"):
                     self._last_drives_push = 0.0
                 if (now - self._last_drives_push) > 8.0:

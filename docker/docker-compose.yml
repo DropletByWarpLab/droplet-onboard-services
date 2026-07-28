@@ -1999,8 +1999,19 @@ services:
       - BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
-      - LCD_WIDTH=480
-      - LCD_HEIGHT=320
+      # WARP-1640 — parameterised for the rack panel. A box with the 1424x280
+      # HDMI bar sets DISPLAY_BACKEND=fb + LCD_WIDTH=1424 + LCD_HEIGHT=280 in
+      # .env; the defaults keep every PyPortal box byte-identical.
+      - LCD_WIDTH=${LCD_WIDTH:-480}
+      - LCD_HEIGHT=${LCD_HEIGHT:-320}
+      - FB_DEVICE=${FB_DEVICE:-/dev/fb0}
+      # Touch calibration for the USB touchscreen (fb backend only). Left
+      # blank the reader finds the panel by VID:PID and reads the axis ranges
+      # off the device itself.
+      - TOUCH_DEVICE=${TOUCH_DEVICE:-}
+      - TOUCH_SWAP_XY=${TOUCH_SWAP_XY:-0}
+      - TOUCH_INVERT_X=${TOUCH_INVERT_X:-0}
+      - TOUCH_INVERT_Y=${TOUCH_INVERT_Y:-0}
       - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
       - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
       # WARP-1061: internal mTLS. No env_file on this service, so the knob is
@@ -2023,8 +2034,20 @@ services:
     # mode; with it, and only it, nothing else in the container can touch
     # arbitrary host devices. `c 166:* rmw` = character device, major 166,
     # any minor, read/write/mknod.
+    #
+    # WARP-1640 adds two more for the rack panel: major 29 (framebuffer, so
+    # the fb backend can open /dev/fb0) and major 13 (input, so the touch
+    # reader can open /dev/input/event*). Both are still device-class-scoped —
+    # this is NOT `privileged: true`.
+    #
+    # ⚠ Without the rule, open() fails **EPERM**, not EACCES: /dev is already
+    # bind-mounted rw above and the container runs as root, so the denial comes
+    # from the device cgroup, not file permissions. Reading that EPERM as a
+    # perms problem costs an hour; fb.py's error message says so explicitly.
     device_cgroup_rules:
       - "c 166:* rmw"
+      - "c 29:* rmw"
+      - "c 13:* rmw"
     # Don't let the container escalate beyond whatever cap-bag it launched
     # with. Belt-and-braces — device_cgroup_rules above is the actual
     # access control; this just blocks setuid binaries from flipping.
