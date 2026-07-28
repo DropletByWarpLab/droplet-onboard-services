@@ -178,7 +178,30 @@ Membership lookup = one indexed `findUnique` — **no Redis ACL cache**, so rout
 
 - `dept-<slug>` → mask **15**; `dept-<slug>-ro` → mask **1**; box-wide `droplet-admins` → mask **31** on **every** groupfolder incl. Household. Share bit withheld from members **by construction** — the raw OCS share proxy cannot mint dept shares with a member token even if an orchestrator guard regresses (the exact WARP-449 failure class, backstopped).
 - Non-members are simply not in the group: the groupfolder never mounts; WebDAV-direct, MCP-asserted, and WOPI byte fetches all inherit this.
-- The reconciler is the **only writer** of NC group/groupfolder state. NC state is never read back as truth (only `gfListFolders` for id discovery and `oc:size`/quota-used for display).
+- The reconciler is the **only writer** of NC group/groupfolder state. NC state is never read back **as truth** — see the read carve-outs immediately below, which are exhaustive.
+
+##### 2.3.1 What the reconciler may read from Nextcloud (amended 2026-07-27, WARP-1612)
+
+The write-only-projection rule constrains *where desired state comes from*, not whether a byte may ever be read. Prisma is the sole source of desired state; Nextcloud may be read only to **discover an opaque id**, to **compare** actual against desired, or to **display**. It may never be read to *derive* what the desired state is. Every read below satisfies that test, and the list is closed — a new one needs an amendment.
+
+| Read | Purpose | Why it is not "truth" |
+|---|---|---|
+| `gfListFolders` | groupfolder id discovery | The id is NC's opaque handle, not a decision. Never a sentinel key (§2.2). |
+| `oc:size` / quota-used | display | Never feeds a write. |
+| `ncListGroupMembersStrict` | drift comparison | Compared against Prisma memberships; **Prisma wins** and the sweep overwrites NC in both directions. |
+| `gfListFolders` on the **FAILED-row path only** | postcondition verify | **This is the WARP-1612 amendment.** See below. |
+
+**The postcondition carve-out.** WARP-1557 established that a Nextcloud 5xx does not mean the write failed — OCS can return `503` on a call that already landed. Under a strict no-read rule the reconciler cannot tell "rejected" from "succeeded but the response was lost", so it latches the row `failed` and, because it is forbidden to look, can never clear it. That is not a hypothetical: it is what stranded departments on the .87 box, and it is a self-inflicted permanent-failure mode created by the purity rule itself.
+
+The reconciler may therefore re-read groupfolder state **on the failed-row path only**, purely to answer "did my own write land?". This is deliberately the narrowest of the three shapes considered:
+
+- **Rejected — allow read-back to verify any write.** Simplest rule, but it makes NC readable on the hot path and erodes the projection model generally, for a problem that only exists after a failure.
+- **Rejected — keep the strict rule.** Preserves purity by leaving a class of rows permanently, falsely `failed`, needing manual DB surgery. Purity that requires manual repair is not purity.
+- **Accepted — read-back on the failed-row path only.** The read happens only where a write already reported failure, answers only a yes/no about our own prior write, and never supplies desired state. Prisma remains the only source of intent.
+
+Two things this does **not** license: reading NC to decide what a department *should* contain, and reading NC on any success path. Both remain ADR-013 violations.
+
+> ⚠️ **Ratification.** Recorded by Romain, 2026-07-27, to unblock WARP-1557/#1251 (which already implements exactly this shape). ADR-029's deciders are Stefan and Romain jointly — **Stefan has not countersigned this amendment**, and it should be confirmed at the next review pass.
 
 #### 2.4 Shares on department content
 
