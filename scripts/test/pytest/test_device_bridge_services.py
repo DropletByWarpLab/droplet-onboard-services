@@ -199,3 +199,83 @@ def test_does_not_reach_for_the_docker_socket():
 def test_route_is_registered():
     src = _BRIDGE_PATH.read_text(encoding="utf-8")
     assert 'if path == "/services":' in src
+
+
+# --- WARP-1646: the route to the orchestrator -------------------------------
+# The bridge runs on the HOST. The orchestrator is only `expose:`d, so the
+# gateway is the only host-side route to it — and the gateway now redirects :80
+# to HTTPS with a cert issued for the device FQDN, which does not verify
+# against the literal 127.0.0.1. Every orchestrator read failed on that,
+# silently in files_snapshot's case.
+
+_UNIT = (_BRIDGE_PATH.parent / "droplet-device-bridge.service")
+_COMPOSE = (_BRIDGE_PATH.parents[2] / "docker" / "docker-compose.yml")
+
+
+def test_unit_points_at_the_gateway_over_https():
+    lines = [ln for ln in _UNIT.read_text(encoding="utf-8").splitlines()
+             if ln.startswith("Environment=ORCHESTRATOR_URL=")]
+    assert len(lines) == 1, lines
+    assert lines[0].split("=", 2)[2] == "https://127.0.0.1"
+
+
+def test_loopback_https_gets_an_unverified_context(monkeypatch):
+    """The narrow exception: loopback only."""
+    monkeypatch.setenv("ORCHESTRATOR_URL", "https://127.0.0.1")
+    monkeypatch.delenv("DROPLET_INTERNAL_TLS", raising=False)
+    bridge = _load_bridge(monkeypatch)
+    import ssl
+    ctx = bridge._orchestrator_tls_context()
+    assert ctx is not None
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+@pytest.mark.parametrize("url", [
+    "https://orchestrator:3000",
+    "https://192.168.1.250",
+    "https://box.droplet-us.com",
+])
+def test_non_loopback_https_is_still_verified(url, monkeypatch):
+    """A verification-off context must NEVER apply to anything that leaves the
+    box. This is the assertion that keeps the exception narrow."""
+    monkeypatch.setenv("ORCHESTRATOR_URL", url)
+    monkeypatch.delenv("DROPLET_INTERNAL_TLS", raising=False)
+    bridge = _load_bridge(monkeypatch)
+    assert bridge._orchestrator_tls_context() is None
+
+
+def test_plain_http_gets_no_context(monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
+    monkeypatch.delenv("DROPLET_INTERNAL_TLS", raising=False)
+    bridge = _load_bridge(monkeypatch)
+    assert bridge._orchestrator_tls_context() is None
+
+
+def test_internal_mtls_still_wins(monkeypatch, tmp_path):
+    """Flag on must keep presenting the client cert, unchanged."""
+    for n in ("cert", "key", "ca"):
+        (tmp_path / f"{n}.pem").write_text("PEM")
+    monkeypatch.setenv("ORCHESTRATOR_URL", "https://127.0.0.1")
+    monkeypatch.setenv("DROPLET_INTERNAL_TLS", "1")
+    monkeypatch.setenv("DROPLET_TLS_CA", str(tmp_path / "ca.pem"))
+    monkeypatch.setenv("DROPLET_TLS_CERT", str(tmp_path / "cert.pem"))
+    monkeypatch.setenv("DROPLET_TLS_KEY", str(tmp_path / "key.pem"))
+    bridge = _load_bridge(monkeypatch)
+    # It takes the mTLS branch first — that branch raises on our fake PEMs,
+    # which is proof enough that the loopback shortcut did not swallow it.
+    with pytest.raises(Exception):
+        bridge._orchestrator_tls_context()
+
+
+def test_no_new_host_port_is_published():
+    """A fixed host port collides — publishing 3000 broke CI immediately with
+    "address already in use". The gateway route needs no new listener."""
+    src = _COMPOSE.read_text(encoding="utf-8")
+    i = src.index(chr(10) + "  orchestrator:")
+    block = src[i:i + 3000]
+    assert "ORCHESTRATOR_LOOPBACK_PORT" not in block
+    published = [ln.strip() for ln in block.splitlines()
+                 if ln.strip().startswith('- "') and ":3000" in ln
+                 and ln.strip() != '- "3000"']
+    assert not published, published
