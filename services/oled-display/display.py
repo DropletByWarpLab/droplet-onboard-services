@@ -181,6 +181,11 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 # old logo -> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 
+# WARP-1641 — how long the debug screen's "return console" button stays armed
+# after the first tap. Long enough to be a deliberate second press, short
+# enough that walking away disarms it.
+CONSOLE_CONFIRM_SECONDS = float(os.environ.get("CONSOLE_CONFIRM_SECONDS", "4"))
+
 # ---------------------------------------------------------------------------
 # Boot readiness (WARP-624; redirect/TLS fix WARP-638)
 # ---------------------------------------------------------------------------
@@ -595,6 +600,10 @@ class TFTDisplay:
     IDLE = "idle"
     SYSTEM = "system"
     STANDBY = "standby"
+    # WARP-1641 — the rack panel's recovery screen. Reachable only by touch;
+    # the orchestrator never pushes it. Wide layouts only (the 480x320 screens
+    # have their own settings surface).
+    DEBUG = "debug"
 
     def __init__(self):
         self._pyportal = None
@@ -706,6 +715,9 @@ class TFTDisplay:
         # WARP-1640 — set by _init_device() when DISPLAY_BACKEND=fb; stays None
         # on every other backend so _push()'s check is a plain identity test.
         self._fb = None
+        # WARP-1641 — debug screen's two-tap console handback.
+        self._console_confirm_until: float = 0.0
+        self._console_last_result: str = ""
 
         self._init_device()
         self._load_logo()
@@ -1853,8 +1865,31 @@ class TFTDisplay:
             "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
         return img
 
+    def render_debug(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """WARP-1641 — the rack panel's debug / recovery screen.
+
+        Wide layouts only. On a 480x320 panel there is no room for it and the
+        existing settings screen already covers that shape, so we fall back to
+        the combined System screen rather than rendering something cramped."""
+        import layout_wide
+        if not layout_wide.is_wide():
+            return self.render_system(now=now)
+        return layout_wide.render_debug(self, now=now)
+
     def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
-        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats)."""
+        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats).
+
+        WARP-1641: on a wide panel (aspect >= 3) this hands off to
+        layout_wide. The 480x320 body below is authored against hardcoded
+        coordinates — the column divider at x=288, a footer at y=244 and
+        another at HEIGHT-24, which are 52px apart at height 320 and COLLIDE
+        at 280 — so it is not a matter of it looking cramped; it is wrong.
+        Dispatching on geometry rather than a global flag keeps every existing
+        renderer and test byte-identical, and keeps a box with two
+        differently-shaped panels working."""
+        import layout_wide
+        if layout_wide.is_wide():
+            return layout_wide.render_status(self, now=now)
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
         img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
@@ -2687,7 +2722,73 @@ class TFTDisplay:
     # ----- Navigation helpers (bound to touch regions) ------------------
 
     def _go_home(self):
+        self._console_confirm_until = 0.0
+        self._console_last_result = ""
         self._set_mode(self.HOME, pause_cycle=False)
+
+    # --- WARP-1641: the panel's debug / recovery screen ---------------------
+
+    def _go_debug(self):
+        self._console_confirm_until = 0.0
+        self._console_last_result = ""
+        self._set_mode(self.DEBUG)
+
+    def _console_confirm_active(self) -> bool:
+        return time.time() < self._console_confirm_until
+
+    def _tap_return_console(self):
+        """Two-tap confirm on "return console to panel".
+
+        This swaps what is physically on the rack's front panel, so a single
+        stray touch (or a sleeve) must not do it. First tap arms for
+        CONSOLE_CONFIRM_SECONDS; a second tap inside that window commits.
+        """
+        if not self._console_confirm_active():
+            self._console_confirm_until = time.time() + CONSOLE_CONFIRM_SECONDS
+            return
+        self._console_confirm_until = 0.0
+        res = self.return_console()
+        if res.get("ok"):
+            # The console is taking the panel over as we speak; there is
+            # nothing left to render to. Say so anyway — the frame may still
+            # land before fbcon repaints.
+            self._console_last_result = "Console returned. Panel is now a login prompt."
+        else:
+            self._console_last_result = "Could not return the console: {}".format(
+                str(res.get("error", "unknown"))[:60])
+
+    def return_console(self, timeout: float = 30.0) -> dict:
+        """Ask device-bridge to hand the panel back to the kernel console.
+
+        The container cannot do this itself — writing
+        /sys/class/vtconsole/*/bind and calling chvt both need root, and this
+        process has neither. The bridge polkit-starts the root oneshot
+        (WARP-1639). Mirrors rotate_wifi_key()'s auth + error handling; never
+        raises, because the caller is a person at a rack trying to get a
+        prompt and an exception here would just blank the screen.
+        """
+        headers = {"Content-Type": "application/json"}
+        token = (os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("DEVICE_SECRET_KEY")
+                 or "").strip()
+        if token:
+            headers["X-Droplet-Auth"] = token
+        req = urllib.request.Request(
+            WIFI_HELPER_URL + "/panel/console",
+            data=b"", method="POST", headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))
+            except Exception:                                    # noqa: BLE001
+                return {"ok": False, "error": str(e)}
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning("console handback failed: %s", e)
+            return {"ok": False, "error": str(e)}
 
     def _go_stats(self):
         self._set_mode(self.STATS)
@@ -2785,6 +2886,8 @@ class TFTDisplay:
             img = self.render_idle()
         elif mode == self.SYSTEM:
             img = self.render_system()
+        elif mode == self.DEBUG:
+            img = self.render_debug()
         elif mode == self.STANDBY:
             img = self.render_standby()
         elif mode == self.LOGO:
@@ -3253,8 +3356,12 @@ class TFTDisplay:
 
             # Live re-render of time-sensitive screens (incl. the py-v3 idle
             # clock + combined System screen so the preview stays current).
+            # DEBUG is in the list because its confirm button is time-boxed:
+            # without a re-render the "TAP AGAIN TO CONFIRM" state would stay
+            # on screen after it had already expired, and the next tap would
+            # arm rather than commit — which reads as the button not working.
             live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS,
-                                           self.IDLE, self.SYSTEM))
+                                           self.IDLE, self.SYSTEM, self.DEBUG))
             if live and (now - last_full_render) > 1.0:
                 with self._lock:
                     self._render_current_locked()
