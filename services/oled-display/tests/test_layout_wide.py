@@ -513,3 +513,59 @@ def test_a_long_error_is_ellipsised_not_sliced(populated):
                       "core": False}]}
     t = _texts(populated)
     assert any(s.endswith("…") for s in t), t
+
+
+# --- WARP-1647: the rail text block ------------------------------------------
+
+def _rail_boxes(populated):
+    g = lw.geom()
+    drawn = []
+    import PIL.ImageDraw as _id
+    real = _id.ImageDraw.text
+    try:
+        _id.ImageDraw.text = lambda self, xy, t, *a, **k: (
+            drawn.append((self.textbbox(xy, t, font=k.get("font"),
+                                        anchor=k.get("anchor")), str(t))),
+            real(self, xy, t, *a, **k))[1]
+        lw.render_status(populated)
+    finally:
+        _id.ImageDraw.text = real
+    return [(b, t) for b, t in drawn if b[0] >= g.rail_x - 40]
+
+
+def test_rail_text_block_sits_inside_the_vertical_safe_area(populated):
+    """The rail spans the FULL framebuffer height, so it did not previously
+    respect PANEL_SAFE_INSET_Y — a non-zero vertical inset would have pushed
+    the typed address off the panel."""
+    g = lw.geom()
+    for box, text in _rail_boxes(populated):
+        assert box[1] >= g.top, f"{text!r} above the safe area: {box}"
+        assert box[3] <= g.bottom, f"{text!r} below the safe area: {box}"
+
+
+def test_rail_text_respects_a_vertical_inset(populated, monkeypatch):
+    monkeypatch.setattr(lw, "SAFE_INSET_Y", 20)
+    g = lw.geom()
+    boxes = _rail_boxes(populated)
+    assert boxes
+    for box, text in boxes:
+        assert box[1] >= g.top and box[3] <= g.bottom, f"{text!r} {box}"
+
+
+def test_typed_address_is_readable_sized(populated):
+    """The fallback is the camera-less path — glare, bad angle, no scanner.
+    An address you cannot read is the same as no address (design brief §5)."""
+    host = populated._v3["public_host"]
+    hits = [(b, t) for b, t in _rail_boxes(populated) if t == host]
+    assert hits, [t for _, t in _rail_boxes(populated)]
+    box, _ = hits[0]
+    assert (box[3] - box[1]) >= 11, f"typed address rendered too small: {box}"
+
+
+def test_long_host_shrinks_but_never_spills(populated):
+    populated._v3["public_host"] = (
+        "an-absurdly-long-customer-named-address.droplet-us.com")
+    g = lw.geom()
+    for box, text in _rail_boxes(populated):
+        assert box[0] >= g.rail_x, f"{text!r} spills left: {box}"
+        assert box[2] <= g.rail_x + g.rail_w, f"{text!r} spills right: {box}"
