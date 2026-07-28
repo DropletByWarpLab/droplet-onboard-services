@@ -11,11 +11,17 @@ name: oled-display-panel-tests
 # / DISK 0% forever because the periodic data pumps were gated on the PyPortal
 # backend) is invisible in review and only shows up on the hardware.
 #
-# Scoped to an EXPLICIT FILE LIST rather than the whole tests/ directory on
-# purpose: the rest of that suite has never run in CI, so switching it all on
-# in this PR would mean shipping a gate whose green-ness nobody has verified.
-# Widening this to `pytest tests/` is worth doing — as its own change, on
-# evidence, not as a side effect of the panel work.
+# WARP-1641 WIDENS THIS TO THE WHOLE SUITE. WARP-1640 deliberately scoped it
+# to an explicit file list, on the grounds that the rest of tests/ had never
+# run in CI and switching it on blind would ship a gate nobody had verified.
+# That caution was based on a bad measurement: a scratch copy of the working
+# tree reported 153 failures, which turned out to be an artifact of the copy
+# (lost exec bits on the shell scripts the suite drives), not of the tests. A
+# clean checkout runs 556 passed / 4 skipped / 0 failed.
+#
+# So the whole directory runs now, with ONE exclusion (see the run step) that
+# is about the runner's disk layout rather than the tests. A service this size
+# having zero CI was never defensible; it was just unmeasured.
 #
 # Bring-up of the panel itself (does it light up, is the image sheared, does
 # touch land where you tapped) is verified on the box; nothing here needs a
@@ -24,26 +30,14 @@ name: oled-display-panel-tests
 on:
   pull_request:
     paths:
-      - "services/oled-display/fb.py"
-      - "services/oled-display/touch_evdev.py"
-      - "services/oled-display/layout_wide.py"
-      - "services/oled-display/display.py"
-      - "services/oled-display/main.py"
-      - "services/oled-display/tests/test_fb_*.py"
-      - "services/oled-display/tests/test_layout_wide.py"
-      - "services/oled-display/requirements.txt"
+      - "services/oled-display/**"
+      - "!services/oled-display/pyportal/**"
       - ".github/workflows/oled-display-panel-tests.yml"
   push:
     branches: [main]
     paths:
-      - "services/oled-display/fb.py"
-      - "services/oled-display/touch_evdev.py"
-      - "services/oled-display/layout_wide.py"
-      - "services/oled-display/display.py"
-      - "services/oled-display/main.py"
-      - "services/oled-display/tests/test_fb_*.py"
-      - "services/oled-display/tests/test_layout_wide.py"
-      - "services/oled-display/requirements.txt"
+      - "services/oled-display/**"
+      - "!services/oled-display/pyportal/**"
       - ".github/workflows/oled-display-panel-tests.yml"
   workflow_dispatch:
 
@@ -70,10 +64,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           # tzdata: display.py resolves ZoneInfo("America/Los_Angeles") at
-          # import. pyserial is already in requirements.txt.
-          pip install pytest tzdata
-      - name: Run panel tests
-        run: |
-          pytest -v \
-            tests/test_fb_backend.py \
-            tests/test_fb_wiring.py
+          # import, and a slim CI image ships no IANA database. pyserial is
+          # already in requirements.txt.
+          #
+          # httpx2: tests/test_main.py drives the app through
+          # starlette.testclient, which refuses to import without it. Easy to
+          # miss locally — a dev box with the older `httpx` present satisfies
+          # starlette and only emits a deprecation warning, so this fails
+          # exclusively in a clean environment. It is a test-only dependency;
+          # nothing in the shipped image imports it.
+          pip install pytest tzdata httpx2
+      - name: Run the oled-display suite
+        # test_storage_pool_script.py is EXCLUDED because it is coupled to the
+        # host's disk layout, not because it is flaky. It drives
+        # droplet-storage-pool.sh against /dev/sda as a stand-in target; on a
+        # GitHub runner /dev/sda IS the OS disk, so the script's pre-flight
+        # correctly refuses ("refusing: /dev/sda is (or backs) the
+        # OS/boot/system disk") and 8 tests fail. The script is right and the
+        # tests are right — they just cannot both be right on this runner.
+        #
+        # Fixing that means reworking the fixtures of a data-destroying
+        # script's safety suite, which is not something a front-panel change
+        # should be doing. Tracked separately; everything else runs.
+        run: pytest -v tests/ --ignore=tests/test_storage_pool_script.py
