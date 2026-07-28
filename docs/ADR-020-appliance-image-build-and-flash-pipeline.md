@@ -1,6 +1,6 @@
 # ADR-020: Appliance image build + versioned flash pipeline
 
-- **Status:** Proposed
+- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
 - **Date:** 2026-06-04
 - **Authors:** Stefan Cruceru
 - **Related tickets:** WARP-663 (this ticket — Phase 1); ROADMAP **M2.8** (SD card image — this ADR resolves its "architecture call" blocker); ROADMAP **M3.4** (OTA — this ADR defines the manifest/verify substrate it builds on); WARP-244 (cosign release signing — the signing upgrade path); WARP-229 (OpenSSL FIPS provider — why ECDSA-P256 is available host-side).
@@ -85,3 +85,11 @@ The signed `manifest.json` + `verify` (signature + per-asset sha256, fail-closed
 - **Off-the-shelf only (balenaEtcher + GitHub Releases + a runbook).** Rejected: no integrity verification, no one-command flow, no machine-readable version catalog for M3.4 to build on.
 - **A Tauri/Electron GUI flasher.** Deferred: a much larger build/test surface and a second app to maintain; the CLI fully serves the internal "for us" need now. Revisit if non-technical field operators need it.
 - **Baking secrets / a default identity into the image.** Rejected outright (D6): every shortcut ships with the customer; per-device first-boot secret generation is non-negotiable.
+
+## Status audit — 2026-07-27
+
+Flipped `Proposed` → `Accepted`. Evidence on `main`: `scripts/build-image.sh`,
+the `scripts/image/` tree and the `droplet-image` CLI all exist, and
+`docs/IMAGE_PIPELINE.md` documents the pipeline as the supported path. The
+autoinstall seed this ADR specifies is also the reason `/home/droplet/edge-platform`
+is the canonical on-box clone path referenced by the systemd unit and host scripts.
