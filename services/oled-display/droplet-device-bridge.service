@@ -45,10 +45,18 @@ Environment=OPENWRT_IFACE=wlan0
 # Reach docker-hosted services on loopback so we don't bind to Docker
 # bridge IPs that drift every time Docker reshuffles its subnet. Frigate
 # publishes port 5000 on 127.0.0.1 via docker-compose. The orchestrator
-# goes through the nginx gateway on port 80 (path-based proxy to
-# orchestrator:3000) — its port 3000 is not host-published.
+# goes through the nginx gateway (path-based proxy to orchestrator:3000) —
+# its port 3000 is not host-published. WARP-1646: that gateway hop is now
+# HTTPS-only, so the URL below is https, not http on :80.
 Environment=FRIGATE_URL=http://127.0.0.1:5000
-Environment=ORCHESTRATOR_URL=http://127.0.0.1
+# WARP-1646 — the SCHEME is load-bearing. This was http://127.0.0.1, i.e. the
+# gateway on :80, which now 301s to HTTPS; urllib does not carry the request
+# through that redirect with a usable TLS context, so every orchestrator read
+# from the bridge failed — silently, in files_snapshot's case. The orchestrator
+# itself is only `expose:`d, so the gateway is the sole host-side route to it.
+# Verification is skipped for loopback literals only; see
+# _orchestrator_tls_context() in device-bridge.py for the reasoning.
+Environment=ORCHESTRATOR_URL=https://127.0.0.1
 Environment=BRIDGE_PORT=9090
 # Bind all interfaces, NOT loopback. The orchestrator container is on the
 # `droplet_default` bridge network and reaches the bridge via

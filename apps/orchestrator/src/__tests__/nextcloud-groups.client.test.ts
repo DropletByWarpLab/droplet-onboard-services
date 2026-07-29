@@ -30,6 +30,8 @@ import {
   gfRemoveGroup,
   gfSetGroupPermissions,
   gfSetQuota,
+  isAmbiguousWriteFailure,
+  NextcloudGroupfolderError,
   type GroupfolderInfo,
 } from "../services/nextcloud-groups.client.js";
 import {
@@ -936,6 +938,214 @@ describe("nextcloud-groups.client", () => {
       global.fetch = fetchMock as unknown as typeof fetch;
 
       await expect(gfSetQuota("token", 999, 1000000)).rejects.toThrow();
+    });
+  });
+
+  // ── WARP-1557: ambiguity classification + idempotent-safe writes ──
+
+  /**
+   * WARP-1557. A groupfolder write that returns 5xx AFTER the write already
+   * took effect used to be indistinguishable from a write that was rejected,
+   * so the provisioner recorded a terminal failure for an effective write and
+   * the department could never converge. Two mechanisms fix that, and both
+   * are pinned here:
+   *
+   *   1. `isAmbiguousWriteFailure` — 4xx is a definite rejection, 5xx /
+   *      timeout / transport is "may have landed".
+   *   2. `confirmOnFailure` — the write re-checks its own postcondition once
+   *      before reporting failure, so "the group is already attached" reads
+   *      as success rather than as an error.
+   */
+  describe("WARP-1557 — isAmbiguousWriteFailure", () => {
+    /** Drive a real error out of a gf* write at the given HTTP status. */
+    async function errorFromStatus(status: number): Promise<unknown> {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({ ok: false, status, json: {} })
+      ) as unknown as typeof fetch;
+      try {
+        await gfAddGroup("token", 1, "dept-eng");
+        throw new Error("expected gfAddGroup to reject");
+      } catch (err) {
+        return err;
+      }
+    }
+
+    it("classifies a 4xx rejection as UNAMBIGUOUS — the write definitely did not land", async () => {
+      for (const status of [400, 403, 404, 409, 412]) {
+        const err = await errorFromStatus(status);
+        expect(err).toBeInstanceOf(NextcloudGroupfolderError);
+        expect((err as NextcloudGroupfolderError).httpStatus).toBe(status);
+        expect(isAmbiguousWriteFailure(err)).toBe(false);
+      }
+    });
+
+    it("classifies 5xx as AMBIGUOUS — this is the .87 box's 'Groupfolder add group: 500'", async () => {
+      for (const status of [500, 502, 503, 504]) {
+        const err = await errorFromStatus(status);
+        expect(isAmbiguousWriteFailure(err)).toBe(true);
+      }
+    });
+
+    it("classifies 408/429 as AMBIGUOUS — the request may have been processed before the cutoff", async () => {
+      expect(isAmbiguousWriteFailure(await errorFromStatus(408))).toBe(true);
+      expect(isAmbiguousWriteFailure(await errorFromStatus(429))).toBe(true);
+    });
+
+    it("classifies a transport failure as AMBIGUOUS — the request may have landed and only the response been lost", () => {
+      const err = new TypeError("fetch failed");
+      (err as Error & { cause?: unknown }).cause = { code: "ECONNRESET" };
+      expect(isAmbiguousWriteFailure(err)).toBe(true);
+    });
+
+    it("defaults to UNAMBIGUOUS for an unrecognised error — an unclassified bug must still surface as failed", () => {
+      expect(isAmbiguousWriteFailure(new Error("kind=TEAM but no parent row"))).toBe(
+        false
+      );
+      expect(isAmbiguousWriteFailure(new NextcloudGroupNotFoundError())).toBe(false);
+      // OCS body sentinels that merely LOOK like 5xx.
+      expect(isAmbiguousWriteFailure(new NextcloudOcsError("unauthorised", 997))).toBe(
+        false
+      );
+      expect(isAmbiguousWriteFailure(new NextcloudOcsError("not found", 998))).toBe(
+        false
+      );
+    });
+  });
+
+  describe("WARP-1557 — confirmOnFailure makes the groupfolder writes idempotent-safe", () => {
+    /**
+     * Stub a write that 500s, followed by a folder GET showing `folder`.
+     * Mirrors the live .87 evidence: `gfAddGroup` → 500, while
+     * `occ groupfolders:list` shows the group attached at the right mask.
+     */
+    function stub500ThenFolder(folder: Partial<GroupfolderInfo>) {
+      const fetchMock = vi
+        .fn()
+        // 1st call: the write itself, 500.
+        .mockResolvedValueOnce(mockResponse({ ok: false, status: 500, json: {} }))
+        // 2nd call: the confirmation read.
+        .mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            status: 200,
+            json: { ocs: { data: { id: 2, mount_point: "Finance", ...folder } } },
+          })
+        );
+      global.fetch = fetchMock as unknown as typeof fetch;
+      return fetchMock;
+    }
+
+    it("gfAddGroup: a 500 on an already-attached group resolves as success", async () => {
+      const fetchMock = stub500ThenFolder({
+        groups: { "dept-finance": 15, "droplet-admins": 31 },
+      });
+
+      await expect(
+        gfAddGroup("token", 2, "dept-finance", { confirmOnFailure: true })
+      ).resolves.toBeUndefined();
+
+      // Exactly two calls: the write, then ONE bounded confirmation read.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("gfAddGroup: a 500 with the group genuinely NOT attached still throws (ambiguous)", async () => {
+      stub500ThenFolder({ groups: { "droplet-admins": 31 } });
+
+      await expect(
+        gfAddGroup("token", 2, "dept-finance", { confirmOnFailure: true })
+      ).rejects.toBeInstanceOf(NextcloudGroupfolderError);
+    });
+
+    it("gfAddGroup: confirmation is OFF by default — the happy path issues zero extra reads (ADR-029 write-only projection)", async () => {
+      const fetchMock = stub500ThenFolder({
+        groups: { "dept-finance": 15 },
+      });
+
+      await expect(gfAddGroup("token", 2, "dept-finance")).rejects.toThrow();
+      // Only the write. No read-back at all without the opt-in.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("gfSetGroupPermissions: confirms on the EXACT mask, not mere attachment", async () => {
+      // Attached, but at the wrong mask — must NOT be confirmed.
+      stub500ThenFolder({ groups: { "dept-finance": 1 } });
+      await expect(
+        gfSetGroupPermissions("token", 2, "dept-finance", 15, {
+          confirmOnFailure: true,
+        })
+      ).rejects.toThrow();
+
+      // Attached at exactly the requested mask — confirmed.
+      stub500ThenFolder({ groups: { "dept-finance": 15 } });
+      await expect(
+        gfSetGroupPermissions("token", 2, "dept-finance", 15, {
+          confirmOnFailure: true,
+        })
+      ).resolves.toBeUndefined();
+    });
+
+    it("gfSetQuota: a 500 resolves when the quota already equals the requested value", async () => {
+      stub500ThenFolder({ quota: 1_000_000 });
+      await expect(
+        gfSetQuota("token", 2, 1_000_000, { confirmOnFailure: true })
+      ).resolves.toBeUndefined();
+
+      stub500ThenFolder({ quota: 5 });
+      await expect(
+        gfSetQuota("token", 2, 1_000_000, { confirmOnFailure: true })
+      ).rejects.toThrow();
+    });
+
+    it("gfRemoveGroup: a 500 resolves when the group is in fact already detached", async () => {
+      stub500ThenFolder({ groups: { "droplet-admins": 31 } });
+      await expect(
+        gfRemoveGroup("token", 2, "dept-finance", { confirmOnFailure: true })
+      ).resolves.toBeUndefined();
+    });
+
+    it("gfCreateFolder: a 500 resolves to the existing folder id when the mount point turns up in the list", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ ok: false, status: 500, json: {} }))
+        .mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            status: 200,
+            json: {
+              ocs: { data: { "3": { id: 3, mount_point: "Finance", groups: {} } } },
+            },
+          })
+        );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        gfCreateFolder("token", "Finance", { confirmOnFailure: true })
+      ).resolves.toBe(3);
+    });
+
+    it("gfDeleteFolder: a 500 resolves when the folder is in fact already gone", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ ok: false, status: 500, json: {} }))
+        // Confirmation read: 404 → gfGetFolder returns null → folder is gone.
+        .mockResolvedValueOnce(mockResponse({ ok: false, status: 404, json: {} }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        gfDeleteFolder("token", 42, { confirmOnFailure: true })
+      ).resolves.toBeUndefined();
+    });
+
+    it("a confirmation read that itself fails does not swallow the write failure", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(mockResponse({ ok: false, status: 500, json: {} }))
+        .mockRejectedValueOnce(new Error("nc still down"));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        gfAddGroup("token", 2, "dept-finance", { confirmOnFailure: true })
+      ).rejects.toBeInstanceOf(NextcloudGroupfolderError);
     });
   });
 });

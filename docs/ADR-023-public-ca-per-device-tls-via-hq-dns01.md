@@ -83,3 +83,15 @@ Crucially, ADR-009 already *aspires* to "the same DNS name resolves on-LAN and o
 
 - The brain's `jira/WARP-450.md` mirror is **stale** — it indexes "Phase C Tools Shelf (Done)", but droplet-analytics PR #76 cites "WARP-450" for the TPM register and its own body flags that id as a placeholder to swap before merge. The device-identity register work needs its own real ticket id.
 - droplet-analytics #76 fingerprints/signs **RSA-2048** while WARP-230's TPM key is **ECC P-256**. Because issuance here defines its own ECC-P256 TPM proof-of-possession on the HQ side, this ADR does **not** depend on reconciling that seam; flag it for #76's owner regardless.
+
+## Status audit — 2026-07-27
+
+**Deliberately left `Proposed`.** This ADR's status line carries its own
+qualifier — *"pending review — human gate"* — and that gate is a governance
+step for the deciders, not a bookkeeping error an audit may clear. The
+implementation state is not the question: the issuance service was built
+(#608), extracted to the `droplet-fleet-hq` repo on 2026-06-18, and deployed
+to HQ. Flipping this to `Accepted` on implementation evidence alone would
+consume the very review the status is holding open.
+
+Action for the deciders: clear the human gate, or record what it is waiting on.
