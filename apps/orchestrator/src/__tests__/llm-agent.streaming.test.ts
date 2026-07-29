@@ -1019,6 +1019,97 @@ describe("runAgent — teardown on a DEFERRED turn keeps the partial answer", ()
     expect(result.reasoningSteps).toEqual(["Let's list the invoices."]);
     expect(result.message.reasoning).toContain("Let's list the invoices.");
   });
+
+  // -- The teardown flush must release the STABLE view, not the raw buffer ----
+  //
+  // `settle()` calls `flush(final)`, and `final: true` means "the stream
+  // finished, so the whole buffer is stable". A teardown is exactly the case
+  // where it did NOT finish, so passing `true` there released the volatile tail
+  // that `stableStreamedContent` exists to hold back. Both shapes below reached
+  // the wire AND the persisted row; the harmony one is a WARP-1331 contract
+  // violation, since WARP-1331 strips only the COMPLETE token.
+  //
+  // This is teardown-specific: on a completed stream the same buffers are
+  // released whole and correct, which the two "still releases" cases pin.
+  it("does NOT release a half-written harmony citation token on teardown", async () => {
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "Total is 6,240 EUR" } }] };
+      yield { choices: [{ delta: { content: " 【3†source=inv" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: "oice.pdf】" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), {
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("Total is 6,240 EUR");
+    expect(streamed).not.toContain("【");
+    expect(result.message.content).toBe("Total is 6,240 EUR");
+    expect(result.message.content).not.toContain("【");
+    // The WARP-1442 sum invariant still binds the wire to the persisted row.
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("does NOT release a partial <reasoning> open tag on teardown", async () => {
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "The answer is 42" } }] };
+      yield { choices: [{ delta: { content: " <reas" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: "oning>why</reasoning>" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), {
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("The answer is 42");
+    expect(streamed).not.toContain("<reas");
+    expect(result.message.content).toBe("The answer is 42");
+    expect(result.message.content).not.toContain("<reas");
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("still releases a COMPLETE harmony token when the stream finishes normally", async () => {
+    // The other side of the guard: holding the tail back is conditional on the
+    // teardown, so a turn that actually finished is unaffected (WARP-1331
+    // strips the complete token, leaving the clean answer).
+    const { deps, events } = collectingDeps(
+      () =>
+        streamOf([
+          { choices: [{ delta: { content: "Total is 6,240 EUR" } }] },
+          { choices: [{ delta: { content: " 【3†source=invoice.pdf】" } }] },
+        ]),
+      { tools: DEFER_TOOLS },
+    );
+    const result = await runAgent(deps, { ...REQ, captureReasoning: true });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(result.stop_reason).not.toBe("error");
+    expect(result.message.content).toBe("Total is 6,240 EUR");
+    expect(streamed).toBe(result.message.content);
+  });
 });
 
 // -- Byte-identity across EVERY chunk boundary (WARP-1442 invariant #1) -------
