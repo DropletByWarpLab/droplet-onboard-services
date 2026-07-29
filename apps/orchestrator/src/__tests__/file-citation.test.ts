@@ -318,11 +318,22 @@ describe("WARP-1604 — the listing route still answers with a BARE array", () =
   );
 
   it("responds with the entries array itself, not an object wrapper", () => {
-    // Normal branch + the degrade branch (`handleFileError(err, res, next, [])`
-    // sends `[]`), and the cache is typed to the array as well.
-    expect(routeSource).toContain("res.json(entries);");
-    expect(routeSource).toContain("cacheGet<FileEntryInfo[]>(cacheKey)");
-    expect(routeSource).toContain("handleFileError(err,res,next,[]);");
+    // All three branches that can answer this route, each pinned by a probe
+    // that occurs exactly once in the stripped source — so wrapping any one of
+    // them reds this test.
+    //
+    // The cache-hit branch needs the whole `cacheGet → res.json(cached)` block,
+    // not just the generic: `cacheGet<FileEntryInfo[]>(cacheKey)` appears 4x in
+    // this file (:1633, :2825, :2854, :2895) and `res.json(cached);` 2x (:966,
+    // :1635), so neither pins this branch alone. Typing the cache to an object
+    // wrapper while the cold path still sent a bare array left the suite green
+    // — and that shape kills citations ONLY on cache hits: intermittent,
+    // TTL-windowed, no error, and the extractor's backstop is debug-level only.
+    expect(routeSource).toContain("res.json(entries);"); // normal branch
+    expect(routeSource).toContain("handleFileError(err,res,next,[]);"); // degrade branch
+    expect(routeSource).toContain(
+      "constcached=awaitcacheGet<FileEntryInfo[]>(cacheKey);if(cached){res.json(cached);return;}",
+    ); // cache-hit branch
   });
 
   it("the extractor reads that shape", () => {
