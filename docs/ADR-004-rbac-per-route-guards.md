@@ -1,6 +1,6 @@
 # ADR-004: RBAC — per-route role guards + Prisma `Role` enum
 
-**Status:** Proposed
+**Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
 **Date:** 2026-05-25
 **Deciders:** Stefan Cruceru
 **Source:** [WARP-171](https://warp-lab.atlassian.net/browse/WARP-171), `docs/ROADMAP.md` §M2.2, GTM strategy doc (April 2026) §4.2
@@ -512,3 +512,14 @@ Rejected for v1: introduces a dependency the team would need to audit, and the a
 - [WARP-1534](https://warp-lab.atlassian.net/browse/WARP-1534) — RBAC v2 T10, which added the ERP rows + the layer-2 note.
 - [WARP-1579](https://warp-lab.atlassian.net/browse/WARP-1579) — the write rows' connector-grant column: writes stopped authorising off the tier alone, so a read-only Admin-based role is now enforceable.
 - [WARP-1578](https://warp-lab.atlassian.net/browse/WARP-1578) — the Guest connector floor referenced in the read note (a Guest-based role can no longer be saved holding a grant).
+
+## Status audit — 2026-07-27
+
+Flipped `Proposed` → `Accepted`. This ADR had been marked Proposed since
+2026-05-25 while being the live authorization model for the whole orchestrator.
+
+Evidence on `main`: `apps/orchestrator/src/middleware/auth.ts` implements the
+guards, and **69 route files** import and apply `requireRole`. ADR-032 §6
+further *amends* this ADR's per-route guard catalog (the ERP read floor,
+operationalized by WARP-1534) — an ADR cannot be amended by a ratified
+successor while still being a proposal.

@@ -1,6 +1,6 @@
 # ADR-003: RAG Techniques Adoption — Phased Cherry-Pick over Framework Swap
 
-**Status:** Proposed
+**Status:** Accepted — the approach was adopted and is 3/5 executed (status corrected 2026-07-27; see Status audit below)
 **Date:** 2026-05-24
 **Deciders:** Engineering team
 **Source:** Inventory of `NirDiamant/RAG_Techniques` (37 notebooks + 4 eval notebooks, May 2026); audit of `services/file-indexer/`, `services/ai-gateway/`, `apps/orchestrator/src/services/file-search.service.ts`, `services/mcp-server/src/file-search.service.ts`, `docs/RAG_RETRIEVAL.md`, `docs/RAG_TESTING.md`, `docs/ROADMAP.md` M3.3
@@ -327,7 +327,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Scope:** Sentence-aware chunking + contextual chunk headers.
 - **Framework:** semantic-text-splitter v0.30.x + pypdf.outline + python-docx style.name.
 - **Files:** services/file-indexer/chunker.py, services/file-indexer/extractors/*.py
-- **Status:** [ ] Not started
+- **Status:** **Shipped.** `services/file-indexer/chunker.py` is on `main`.
 - **Eval gate:** ndcg@10 ≥ 1.05× current baseline.
 - **Ticket:** WARP-RAG.1
 
@@ -335,7 +335,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Scope:** Faithfulness / context-relevance / answer-correctness metrics.
 - **Framework:** ragas==0.4.x with native Ollama via OpenAI-compat.
 - **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, services/rag-eval/
-- **Status:** [ ] Not started
+- **Status:** **Shipped.** `tests/retrieval-eval/ragas/`, `services/rag-eval/` and `scripts/test-rag.sh` are all on `main` (and `rag-eval` carries its own Dependabot pip target).
 - **Eval gate:** Baselines established; thresholds set for M-RAG.3+.
 - **Ticket:** WARP-RAG.2
 - **Parallel with:** M-RAG.1 (no shared files).
@@ -344,7 +344,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Scope:** HyDE (gated), multi-query, adaptive retrieval.
 - **Framework:** Hand-rolled prompts + MoritzLaurer/deberta-v3-base-zeroshot-v2.0 for classification.
 - **Files:** apps/orchestrator/src/services/query-enhancement.service.ts, file-search.service.ts (+mirror), services/ai-gateway/query_classifier.py
-- **Status:** [ ] Not started
+- **Status:** **Shipped** as the query enhancement work, [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437). `apps/orchestrator/src/services/query-enhancement.service.ts` exports `hydeRewrite` + `MULTI_QUERY_DEFAULT_N`, and `services/ai-gateway/query_classifier.py` is on `main`.
 - **Blockers:** M-RAG.2 (need RAGAS metrics to gate adaptive).
 - **Ticket:** WARP-RAG.3
 
@@ -352,7 +352,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Scope:** Grader-then-rewrite loop; no web-search fallback.
 - **Framework:** cross-encoder/ms-marco-MiniLM-L-6-v2 (80 MB) instead of the paper's T5-Large.
 - **Files:** apps/orchestrator/src/services/retrieval-grader.service.ts, services/ai-gateway/grader.py, orchestrator agent loop
-- **Status:** [ ] Not started
+- **Status:** **Not started.** Neither `apps/orchestrator/src/services/retrieval-grader.service.ts` nor `services/ai-gateway/grader.py` exists on `main`. Tracked as the CRAG-lite retrieval grading work, [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438).
 - **Blockers:** M-RAG.2 (faithfulness metric required), M-RAG.3 (multi-query is the fallback).
 - **Ticket:** WARP-RAG.4
 
@@ -360,7 +360,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Scope:** VLM-caption-first multimodal indexing.
 - **Framework:** moondream2 (~1.5 GB) via Ollama as `moondream`. Reserves Qwen2.5-VL 3B as fallback.
 - **Files:** services/file-indexer/extractors/image.py, services/ai-gateway/captioner.py (new CaptionImage RPC), prisma schema (add modality enum)
-- **Status:** [ ] Not started
+- **Status:** **Partial.** `services/file-indexer/extractors/image.py` exists on `main`; `services/ai-gateway/captioner.py` (the CaptionImage RPC) does not.
 - **Blockers:** droplet-local-LLM Ollama pre-pull PR (cross-repo).
 - **Ticket:** WARP-RAG.5
 ```
@@ -397,3 +397,28 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - `https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2` — CRAG-lite grader.
 - Gao et al. 2022, "Precise Zero-Shot Dense Retrieval without Relevance Labels" (HyDE).
 - Yan et al. 2024, "Corrective Retrieval Augmented Generation" — arxiv 2401.15884.
+
+## Status audit — 2026-07-27
+
+This ADR was stale in **both** directions, which is why the header moved to
+`Accepted` rather than staying `Proposed`.
+
+The *decision* it records — cherry-pick techniques in phases rather than swap
+to a RAG framework — was taken and has been executed for three of five
+phases. An ADR whose approach is running in production is not a proposal; the
+phase list is rollout state, not ADR status.
+
+The phase list itself was the stale part: every one of the five read
+`[ ] Not started`, including three that are on `main`. Corrected against the
+tree:
+
+| Phase | Was | Actually |
+|---|---|---|
+| Ingest enrichment | Not started | **Shipped** — `services/file-indexer/chunker.py` |
+| RAGAS eval harness | Not started | **Shipped** — `tests/retrieval-eval/ragas/`, `services/rag-eval/`, `scripts/test-rag.sh` |
+| Query enhancement (HyDE + multi-query + adaptive routing, WARP-437) | Not started | **Shipped** — `query-enhancement.service.ts`, `query_classifier.py` |
+| CRAG-lite retrieval grading (WARP-438) | Not started | **Not started** — confirmed, both files absent |
+| Multimodal indexing | Not started | **Partial** — `extractors/image.py` yes, `captioner.py` no |
+
+Remaining work is the CRAG-lite retrieval grading (WARP-438) and the
+CaptionImage RPC for multimodal indexing.
