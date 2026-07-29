@@ -53,10 +53,22 @@ Fault states:
 
 Both fault states fail the container healthcheck (503).
 
+Deliberate state:
+
+- `off` — an owner/admin switched the assistant off (WARP-1599). There is no
+  pipeline at all: no detector, no worker thread, no open capture stream, and
+  the persisted flag means the box boots straight back into it.
+  `/voice/status` carries `enabled: false` alongside the state, and `enabled`
+  is the field to key a UI on — `state` only reads `off` while the pipeline is
+  absent. Unlike the fault states this one keeps `/health` at 200: a box doing
+  exactly what it was told must not be restart-looped for it.
+
 Design asks for engineering (missing states, confirmed):
 
-- There is no "muted" or "disabled" state today — no mute exists anywhere in
-  the system (see limitations below).
+- The switch is all-or-nothing. There is no temporary mute (a "be quiet for
+  an hour" window that expires on its own) and no hardware mute button — off
+  is a persistent admin decision that stays until someone reverses it (see
+  limitations below).
 - "Thinking" deserves a first-class state: today the LLM round trip happens
   invisibly inside the reply call, which is the longest silent gap in the
   interaction.
@@ -116,13 +128,27 @@ internet call to ipapi.co to geolocate (city and timezone, used for
 `.env` to make the service fully egress-free. Do not claim "zero network
 egress" without this footnote.
 
-The microphone is electrically on whenever the box is on — there is no mute
-today (see limitations).
+An owner/admin can switch the assistant off from the /voice page
+(WARP-1599). Be precise about what that is: a **software** kill switch, not
+a hardware or electrical mute. The microphone stays powered whenever the box
+is on, and there is no physical switch or indicator LED a customer can check
+it against. What it does do is real and it is enforced on the box, not in the
+dashboard: the flag persists to disk, the wake pipeline is stopped and
+dropped (which closes the exclusive capture stream), the box boots back into
+the off state, and voice-io refuses with 409 every other endpoint that opens
+the mic — the calibration measurements and the voiceprint-enrollment
+captures. So nothing running on this Droplet reads audio while voice is off.
+The supportable claim is "no software on the box is capturing audio", not
+"the microphone is disconnected".
 
 ## Current limitations (all confirmed in code)
 
-1. No mute or disable — no hardware switch integration, no software pause
-   endpoint, no `mute_mic` tool (WARP-627, unbuilt).
+1. Disable is software-only (WARP-1599) — POST `/voice/enabled` persists an
+   on-box flag, drops the pipeline and refuses every mic-opening endpoint,
+   and the /voice page carries the owner/admin switch. Still missing: any
+   hardware mute-switch integration, a self-expiring "be quiet for an hour"
+   pause, and a `mute_mic` tool the assistant could call on request
+   (WARP-627, unbuilt).
 2. Non-streaming replies (WARP-626) — TTS waits for the full agent reply.
 3. Read-only tools — voice cannot control devices in v1.
 4. Almost no user-facing surface: the wizard step (WARP-1036) is the first;

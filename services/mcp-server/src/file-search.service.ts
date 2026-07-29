@@ -112,12 +112,34 @@ function assertFiniteVector(vec: number[], label = "vector"): void {
   }
 }
 
+/**
+ * WARP-1603 — the scale a `SearchHit.score` is expressed in.
+ *
+ *   - "similarity" — bounded in [0, 1]: a cosine similarity, an RRF fusion
+ *     weight, or a reranker score already normalized by `rerankPassages`.
+ *   - "logit"      — an unbounded cross-encoder output. Reserved for
+ *     producers that deliberately emit raw logits; nothing in this file
+ *     does any more.
+ *
+ * The field exists so consumers stop INFERRING the scale from the value.
+ * The dashboard used to guess "> 1 means logit", which silently clamped
+ * BGE-reranker-base's (mostly negative) logits to a 0% relevance chip.
+ */
+export type ScoreKind = "logit" | "similarity";
+
 export interface SearchHit {
   source: FileContentSource;
   path: string;
   chunkIdx: number;
   pageNumber: number | null;
   score: number;
+  /**
+   * WARP-1603 — scale of `score`. OPTIONAL for backward compatibility:
+   * hits produced before this field existed (and any consumer that
+   * predates it) must keep working, so absent means "unknown, fall back
+   * to the consumer's inference".
+   */
+  scoreKind?: ScoreKind;
   snippet: string;
   brainItemId: string | null;
   metadata: Record<string, unknown> | null;
@@ -373,6 +395,37 @@ export const RERANK_DEFAULT_MAX_PASSAGE_CHARS = 512;
 export const RERANK_DEFAULT_CACHE_TTL_SEC = 300;
 export const RERANK_DEFAULT_CANDIDATES = 50;
 
+/**
+ * WARP-1603 — logistic squash applied to raw cross-encoder logits.
+ *
+ * ai-gateway's `reranker.py` returns `outputs.logits` verbatim (no
+ * sigmoid), and BGE-reranker-base emits NEGATIVE logits for all but a
+ * strong match. Handing that raw number to a UI that expects a 0-1
+ * relevance is what made every chat citation chip read 0%.
+ *
+ * Normalizing here rather than in the renderer:
+ *   - the scale is a property of the MODEL, and this is the only place
+ *     that knows which model produced the number;
+ *   - sigmoid is strictly monotonic, so the rerank ORDER is untouched —
+ *     `sort` below produces the identical ranking either way;
+ *   - every downstream consumer (the `search_content` tool payload, the
+ *     chat citation chips, /knowledge) gets one comparable scale instead
+ *     of each guessing independently.
+ */
+export function normalizeRerankScore(logit: number): number {
+  if (!Number.isFinite(logit)) return 0;
+  return 1 / (1 + Math.exp(-logit));
+}
+
+/**
+ * WARP-1603 — stamp `scoreKind: "similarity"` on hits whose score is
+ * already bounded in [0, 1] (cosine hits, RRF fusion output, and the
+ * rerank-failure pass-through). Pure tagging: the numbers are untouched.
+ */
+function tagSimilarity(hits: SearchHit[]): SearchHit[] {
+  return hits.map((h) => ({ ...h, scoreKind: "similarity" as const }));
+}
+
 export async function rerankPassages(
   params: RerankPassagesParams,
 ): Promise<SearchHit[]> {
@@ -404,8 +457,16 @@ export async function rerankPassages(
         parsed.every((n) => typeof n === "number")
       ) {
         const scores = parsed as number[];
+        // WARP-1603: the cache holds RAW logits (that's what the reranker
+        // returned and what `setex` below still writes), so entries
+        // written by a pre-WARP-1603 build stay readable — normalization
+        // happens on the way out, exactly once.
         return hits
-          .map((h, i) => ({ ...h, score: scores[i] ?? 0 }))
+          .map((h, i) => ({
+            ...h,
+            score: normalizeRerankScore(scores[i] ?? 0),
+            scoreKind: "similarity" as const,
+          }))
           .sort((a, b) => b.score - a.score);
       }
     } catch {
@@ -422,11 +483,13 @@ export async function rerankPassages(
       !Array.isArray(resp.scores) ||
       resp.scores.length !== hits.length
     ) {
-      return hits;
+      // Rerank unusable — the incoming RRF scores stand. They are already
+      // bounded small positives, so tag them as such (WARP-1603).
+      return tagSimilarity(hits);
     }
     scores = resp.scores;
   } catch {
-    return hits;
+    return tagSimilarity(hits);
   }
 
   try {
@@ -436,7 +499,13 @@ export async function rerankPassages(
   }
 
   return hits
-    .map((h, i) => ({ ...h, score: scores[i] ?? 0 }))
+    .map((h, i) => ({
+      ...h,
+      // WARP-1603: raw logit → 0-1 relevance. Monotonic, so the sort
+      // below yields the same order the raw logits would have.
+      score: normalizeRerankScore(scores[i] ?? 0),
+      scoreKind: "similarity" as const,
+    }))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -582,5 +651,7 @@ export async function searchHybrid(
     });
     return reranked.slice(0, limit);
   }
-  return fused.slice(0, limit);
+  // WARP-1603 — no rerank arm: RRF weights are already bounded 0-1, so
+  // tag them rather than leaving the consumer to infer the scale.
+  return tagSimilarity(fused.slice(0, limit));
 }

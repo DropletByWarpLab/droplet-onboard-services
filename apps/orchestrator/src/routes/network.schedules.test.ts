@@ -375,8 +375,15 @@ vi.mock("@prisma/client", () => {
     delete: vi.fn(),
   };
 
-  const $transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => {
-    return fn({ schedule, scheduleWindow, scheduleOverride, scheduleEvent });
+  // Return type annotated: the callback now receives `mockPrisma`, which
+  // carries this function, so inference would be circular (TS7022/TS7024).
+  const $transaction = vi.fn(async (fn: (tx: any) => Promise<any>): Promise<unknown> => {
+    // WARP-1583: hand the callback the WHOLE client, not a four-model
+    // subset. Prisma's `tx` exposes every model, and the §3 effective-access
+    // resolver (mounted in front of /api/network by requireFeatureAccess)
+    // reads `user` through it — a narrow tx made that `undefined.findUnique`,
+    // so the gate failed closed and every route here 404'd.
+    return fn(mockPrisma);
   });
 
   const mockPrisma = {

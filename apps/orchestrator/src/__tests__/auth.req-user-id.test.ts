@@ -63,6 +63,7 @@ import {
 } from "../middleware/auth.js";
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 // In-memory User table mock — keyed by nextcloudUsername for the OCS
 // lookup and by id for the people-routes lookups. Production wires
@@ -87,7 +88,14 @@ function buildPrismaMock(rows: MockUserRow[] = []) {
       .map((r) => [r.nextcloudUsername!, r]),
   );
   const self: any = {};
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  // WARP-1570: shared seam — people.ts opens its guard rails with
+  // SERIALIZABLE_TX, which the old stub discarded outright.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { byId, byNcUsername },
+  });
+  self.$transaction = seam.$transaction;
+  self._seam = () => seam;
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       if (where.id !== undefined) return byId.get(where.id) ?? null;

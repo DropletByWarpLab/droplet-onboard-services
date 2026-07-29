@@ -15,6 +15,7 @@ import {
   ALWAYS_ON_FEATURES,
   GRANTABLE_TOOL_DOMAINS,
   maxLevelFor,
+  clampConnectorLevel,
   clampLevel,
   fullCatalogFeatures,
   domainsForFeatures,
@@ -154,5 +155,37 @@ describe("access-catalog — tier write-filter reachability", () => {
     // and the set never exceeds the catalog union
     for (const d of family) expect(TOOL_DOMAINS).toContain(d);
     expect(tierReachableDomains("guest")).toEqual(family);
+  });
+});
+
+/**
+ * WARP-1578 / ADR-032 §8 O-2 — the two connector floors, in one place.
+ *
+ * The dashboard renders these as DISABLED options with the reason (never
+ * hidden, never silently accepted); this is the server half that makes the
+ * client's honesty enforceable.
+ */
+describe("access-catalog — connector floors (O-2)", () => {
+  it("Admin-based roles hold both levels — the cap is a floor, not a ban", () => {
+    expect(clampConnectorLevel("admin", "read")).toBe("read");
+    expect(clampConnectorLevel("admin", "read_write")).toBe("read_write");
+  });
+
+  it("Family-based roles cap at read — Read & write is Admin-only", () => {
+    expect(clampConnectorLevel("family", "read")).toBe("read");
+    expect(clampConnectorLevel("family", "read_write")).toBe("read");
+  });
+
+  it("Guest-based roles hold NO grant — they sit below the family-and-up read floor", () => {
+    // null, not "read": routes/erp.ts refuses a guest at the tier floor
+    // BEFORE the resolver is even read, so a stored row is inert by
+    // construction. Storing it would let an operator save a setting that
+    // silently does nothing.
+    expect(clampConnectorLevel("guest", "read")).toBeNull();
+    expect(clampConnectorLevel("guest", "read_write")).toBeNull();
+  });
+
+  it("service principals hold none either — they never resolve through layer 2 (§3)", () => {
+    expect(clampConnectorLevel("service", "read_write")).toBeNull();
   });
 });

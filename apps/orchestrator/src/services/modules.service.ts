@@ -11,11 +11,12 @@
  *                               NOT inferred state — the default is explicit in code)
  * effective = available(config) && enabled.
  */
-import type { ModuleId, BusinessType, PrismaClient } from "@prisma/client";
+import type { ModuleId, BusinessType, Prisma, PrismaClient } from "@prisma/client";
 import {
   MODULES,
   getModuleDef,
   BUSINESS_TYPE_BY_ID,
+  satisfiedModuleIds,
   type AvailabilityConfig,
 } from "../modules/module-registry.js";
 
@@ -28,6 +29,13 @@ export interface ModuleState {
   available: boolean;
   enabled: boolean;
   effective: boolean;
+  /** WARP-1585 — the module this one declares it cannot function without. */
+  requires?: ModuleId;
+  /** WARP-1585 — `requires` is declared and that parent is NOT effective, so
+   *  this module isn't either. Surfaced as its own field, separate from
+   *  `available` and `enabled`, so an operator-facing view can say WHY rather
+   *  than showing a module that silently refuses to come on. */
+  requiresUnmet: boolean;
 }
 
 export interface ModulesView {
@@ -44,8 +52,25 @@ export class ModuleToggleError extends Error {
   }
 }
 
+/**
+ * A client that can read `ModuleSetting` — either the top-level
+ * `PrismaClient` or an interactive transaction's `tx` handle (WARP-1583).
+ *
+ * The union is deliberate, and the OPPOSITE call from `GuardTx`
+ * (role-mutation-guard.service.ts), which narrows to `Prisma.TransactionClient`
+ * precisely so that passing the top-level client is a compile error. There
+ * the invariant is "this must run inside a transaction". Here both are
+ * legitimate and the caller's context decides: the module gate and
+ * `GET /api/capabilities` resolve the workspace's module set on its own, so
+ * a single self-consistent statement is all they need; the §3 effective-access
+ * resolver composes this set WITH per-person grants read in the same
+ * snapshot, so it must pass its `tx`. Naming both arms is what documents that
+ * the parameter is a snapshot choice rather than an incidental type.
+ */
+export type ModuleReadClient = PrismaClient | Prisma.TransactionClient;
+
 async function readEnablement(
-  prisma: PrismaClient
+  prisma: ModuleReadClient
 ): Promise<Map<ModuleId, boolean>> {
   const rows = await prisma.moduleSetting.findMany();
   return new Map(rows.map((r) => [r.moduleId, r.enabled]));
@@ -58,24 +83,8 @@ function resolveEnabled(id: ModuleId, overrides: Map<ModuleId, boolean>): boolea
   return row !== undefined ? row : def.defaultEnabled;
 }
 
-/** PURE effective-state computation (no DB) — the async readers below just fetch
- *  the overrides + businessType and delegate here. Exported for unit testing. */
-export function computeModuleStates(
-  overrides: Map<ModuleId, boolean>,
-  cfg: AvailabilityConfig
-): ModuleState[] {
-  return MODULES.map((def) => {
-    const available = def.available(cfg);
-    const enabled = resolveEnabled(def.id, overrides);
-    return {
-      id: def.id, label: def.label, description: def.description, category: def.category,
-      core: def.core, available, enabled, effective: available && enabled,
-    };
-  });
-}
-
-/** PURE — effective module ids from overrides + config. */
-export function computeEffectiveIds(
+/** PURE — the two-axis set BEFORE the WARP-1585 dependency closure. */
+function computeSelfEffectiveIds(
   overrides: Map<ModuleId, boolean>,
   cfg: AvailabilityConfig
 ): Set<ModuleId> {
@@ -84,6 +93,48 @@ export function computeEffectiveIds(
     if (def.available(cfg) && resolveEnabled(def.id, overrides)) out.add(def.id);
   }
   return out;
+}
+
+/** PURE effective-state computation (no DB) — the async readers below just fetch
+ *  the overrides + businessType and delegate here. Exported for unit testing. */
+export function computeModuleStates(
+  overrides: Map<ModuleId, boolean>,
+  cfg: AvailabilityConfig
+): ModuleState[] {
+  const effectiveIds = computeEffectiveIds(overrides, cfg);
+  return MODULES.map((def) => {
+    const available = def.available(cfg);
+    const enabled = resolveEnabled(def.id, overrides);
+    return {
+      id: def.id, label: def.label, description: def.description, category: def.category,
+      core: def.core, available, enabled,
+      effective: effectiveIds.has(def.id),
+      // Reported, never folded into `enabled`: the operator's stored intent is
+      // preserved, so re-enabling the parent restores this module exactly as
+      // they left it. Same discipline as `available` — a module can be stored
+      // ON and not be effective (WARP-1585).
+      ...(def.requires ? { requires: def.requires } : {}),
+      requiresUnmet: def.requires !== undefined && !effectiveIds.has(def.requires),
+    };
+  });
+}
+
+/**
+ * PURE — effective module ids from overrides + config, narrowed by the
+ * registry's declared dependencies (WARP-1585).
+ *
+ * The WORKSPACE half of the dependency rule: `docs` requires `files`, so a box
+ * with Files off or unavailable has no document surface either — its editor
+ * sessions are minted on Nextcloud paths. `knowledge` declares no parent and
+ * is untouched by a Files toggle. `satisfiedModuleIds` is the one definition
+ * of the rule; the per-person §9 half applies the same function in
+ * effective-access.service.
+ */
+export function computeEffectiveIds(
+  overrides: Map<ModuleId, boolean>,
+  cfg: AvailabilityConfig
+): Set<ModuleId> {
+  return satisfiedModuleIds(computeSelfEffectiveIds(overrides, cfg));
 }
 
 /** Full view for GET /api/modules and the settings page. */
@@ -96,10 +147,18 @@ export async function getModulesView(
   return { businessType: ws?.businessType ?? null, modules: computeModuleStates(overrides, cfg) };
 }
 
-/** Set of module ids that are EFFECTIVE (available && enabled) — the guard +
- *  tool filter read this. */
+/**
+ * Set of module ids that are EFFECTIVE (available && enabled) — the guard +
+ * tool filter read this.
+ *
+ * WARP-1583: takes a `ModuleReadClient`, so a caller that is composing this
+ * set with other reads can hand in its transaction handle and get all of it
+ * from one snapshot. Passing the top-level client from INSIDE a transaction
+ * would silently take a second snapshot — the array form of `$transaction`
+ * has the same problem, and is why it is not a fix either.
+ */
 export async function getEffectiveModuleIds(
-  prisma: PrismaClient,
+  prisma: ModuleReadClient,
   cfg: AvailabilityConfig
 ): Promise<Set<ModuleId>> {
   const overrides = await readEnablement(prisma);
@@ -147,10 +206,15 @@ export async function setModuleEnabled(
     create: { moduleId: id, enabled, setBy },
   });
 
-  return {
-    id: def.id, label: def.label, description: def.description, category: def.category,
-    core: def.core, available, enabled, effective: available && enabled,
-  };
+  // WARP-1585: re-derive from the stored set rather than answering
+  // `available && enabled` locally. That shortcut was correct while a module's
+  // effectiveness depended only on itself; with declared dependencies it would
+  // report a Documents toggle as effective on a box whose Files module is off.
+  // The extra read is on a rare operator write path, and it means the row the
+  // dashboard renders after a toggle is the same row `GET /api/modules`
+  // returns — one answer, not two that can disagree.
+  const states = computeModuleStates(await readEnablement(prisma), cfg);
+  return states.find((s) => s.id === id)!;
 }
 
 /** Apply a business-type preset: materialize an explicit ModuleSetting row for

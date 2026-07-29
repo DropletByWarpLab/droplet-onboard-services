@@ -19,10 +19,10 @@ lxml_html_clean>=0.1
 pytesseract>=0.3.10
 Pillow>=10.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
-faster-whisper==1.0.3
+faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
 # (both use python-magic for content-based MIME sniffing).
-extract-msg==0.50.0
+extract-msg==0.56.0
 python-magic==0.4.27
 # WARP-198 RAG Phase 2 video extractor (subtitle parsing for embedded SRT/mov_text/etc.)
 srt==3.5.3
@@ -30,14 +30,14 @@ srt==3.5.3
 # fires `transcription_worker.run_pass()` once per day at
 # TRANSCRIPTION_RUN_LOCAL_TIME (default 03:00 local). Pinned because
 # apscheduler 3.x and 4.x have incompatible APIs.
-apscheduler==3.10.4
+apscheduler==3.11.3
 tzlocal>=5.0
 # WARP-208 — frame OCR for video extractor (perceptual hashing for
 # pre-OCR dedup so we don't run Tesseract on every redundant frame).
 # imagehash 4.3.1 is the canonical pure-python perceptual-hashing lib;
 # small (~20KB), MIT licensed, depends only on Pillow (already pulled
 # in by pytesseract).
-imagehash==4.3.1
+imagehash==4.3.2
 # WARP-287 — admin re-index HTTP endpoint. file-indexer was previously
 # MQTT-only; the orchestrator's POST /api/admin/files/:id/reindex needs
 # a request/response surface for atomic single-file chunk replacement,

@@ -818,6 +818,209 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
   });
 });
 
+// -- Teardown on a DEFERRED turn (WARP-1602 review B1/B2/B3) ------------------
+//
+// The two teardown paths — client abort (Stop) and mid-stream transport death —
+// leave `consumeChatStream` by THROWING, which skipped `settle()` and therefore
+// dropped the emitter's buffer. On a NON-deferred turn that cost nothing (the
+// content had already streamed token-by-token), which is exactly why the
+// original tests for both paths — running with the default `tools: []`, i.e.
+// `deferContent === false` — stayed green while the deferred path lost 100% of
+// the answer: nothing had ever reached the wire, so the buffer WAS the answer.
+//
+// Every test below therefore advertises a tool, which is the only thing that
+// turns deferral on.
+const DEFER_TOOLS = [
+  {
+    name: "list_files",
+    description: "...",
+    inputSchema: { type: "object", properties: {} },
+  },
+];
+
+/** A tool-call chunk, the shape that makes a turn a tool-call turn. */
+function toolCallChunk(id: string, name: string): ChatStreamChunk {
+  return {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id,
+              type: "function" as const,
+              function: { name, arguments: "{}" },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+}
+
+describe("runAgent — teardown on a DEFERRED turn keeps the partial answer", () => {
+  it("Stop mid-answer on a tool-advertising turn keeps the partial (B1)", async () => {
+    // The live shape: the user asks, the agent advertises tools, the terminal
+    // turn starts answering, and the user hits Stop 3 chunks in. Because the
+    // turn advertised tools its content is DEFERRED, so at the moment of the
+    // abort not one byte has reached the client. Before the fix this returned
+    // content:"" and emitted zero content_delta — blank screen, empty row.
+    const controller = new AbortController();
+    let tornDown = false;
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      try {
+        yield { choices: [{ delta: { content: "You spent " } }] };
+        yield { choices: [{ delta: { content: "6,240 EUR" } }] };
+        controller.abort(); // ← user hits Stop
+        yield { choices: [{ delta: { content: " in June 2026." } }] };
+      } finally {
+        tornDown = true;
+      }
+    }
+    const { deps, events } = collectingDeps(() => gen(), { tools: DEFER_TOOLS });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    // The abort contract is unchanged: upstream torn down, aborted terminal.
+    expect(tornDown).toBe(true);
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+
+    // THE FIX: the partial survives, on the wire AND on the result. The route
+    // persists the delta accumulator on an error terminal, so the emission is
+    // what actually saves the DB row.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // WARP-1442's sum invariant holds on the teardown path too.
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("mid-stream death on a tool-advertising turn keeps the partial (B2)", async () => {
+    // The REAL gpt-oss shape the PR body got wrong: `captureReasoning` is true
+    // (the dashboard always sends it) and reasoning streams fully BEFORE
+    // content, so the first `delta.content` flushes a reasoning_step and sets
+    // `emittedAny` — meaning the blocking fallback does NOT run, contrary to
+    // the claim that "nothing was emitted". The turn is an error turn; what it
+    // must not also be is a BLANK one.
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          { message: { role: "assistant", content: "FULL BLOCKING ANSWER" } },
+        ],
+      }),
+    });
+    async function* dying(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { reasoning_content: "User asks spend." } }] };
+      yield { choices: [{ delta: { content: "You spent 6,240 EUR" } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    const { deps, events } = collectingDeps(() => dying(), {
+      tools: DEFER_TOOLS,
+    });
+    (deps.aiGateway as unknown as { chat: typeof chat }).chat = chat;
+    const result = await runAgent(deps, { ...REQ, captureReasoning: true });
+
+    // Pins the corrected claim: reasoning on the wire suppresses the fallback.
+    expect(chat).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("stream_interrupted");
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(streamed).not.toContain("FULL BLOCKING");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // The turn still ends with an honest `done` error frame.
+    const done = events.find((e) => e.type === "done");
+    expect(done && done.type === "done" && done.stop_reason).toBe("error");
+  });
+
+  it("does NOT release buffered analysis as the answer when tool calls landed", async () => {
+    // The guarantee this PR exists for must survive teardown: if tool-call
+    // fragments already arrived, the buffered `delta.content` is harmony
+    // analysis, not an answer. Salvaging must not become a back door that puts
+    // it on the wire — it goes to the reasoning trace instead.
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield {
+        choices: [
+          { delta: { content: "We need to answer this. Let's list files." } },
+        ],
+      };
+      yield toolCallChunk("c1", "list_files");
+      controller.abort(); // dies after the tool call, before dispatch
+      yield { choices: [{ delta: { content: "unreachable" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), { tools: DEFER_TOOLS });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    expect(result.error).toBe("client_aborted");
+    // Zero content_delta: analysis never reaches the wire as answer text.
+    expect(events.filter((e) => e.type === "content_delta")).toHaveLength(0);
+    expect(result.message.content).toBe("");
+    // …but it is not discarded either — it is this step's reasoning.
+    expect(result.message.reasoning).toContain("Let's list files.");
+    expect(result.reasoningSteps).toEqual([
+      "We need to answer this. Let's list files.",
+    ]);
+  });
+
+  it("keeps earlier iterations' reasoning when a later turn is torn down", async () => {
+    // `iteration_limit` already kept `reasoningSteps`; the two teardown
+    // terminals dropped them, so a Stop on iteration 2 also erased iteration
+    // 1's thinking. All three terminals now agree.
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "[]" }],
+      isError: false,
+    });
+    const controller = new AbortController();
+    async function* dyingSecond(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "Now the answer: 6,240" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: " EUR" } }] };
+    }
+    const chatStream = vi
+      .fn()
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { content: "Let's list the invoices." } }] },
+          toolCallChunk("c1", "list_files"),
+        ]),
+      )
+      .mockReturnValueOnce(dyingSecond());
+    const { deps } = collectingDeps(chatStream, {
+      callTool,
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    expect(result.error).toBe("client_aborted");
+    expect(result.message.content).toBe("Now the answer: 6,240");
+    // Iteration 1's quarantined analysis is still there.
+    expect(result.reasoningSteps).toEqual(["Let's list the invoices."]);
+    expect(result.message.reasoning).toContain("Let's list the invoices.");
+  });
+});
+
 // -- Byte-identity across EVERY chunk boundary (WARP-1442 invariant #1) -------
 //
 // The core contract: the streamed content_delta events MUST sum byte-for-byte

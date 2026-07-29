@@ -2,16 +2,70 @@
 
 import { Thumbnail } from "./Thumbnail";
 import { StarButton } from "./StarButton";
-import { Download, X, type LucideIcon } from "lucide-react";
+import { Download, X, AlertTriangle, type LucideIcon } from "lucide-react";
 import type { FileEntryInfo } from "@/lib/types";
+
+/**
+ * WARP-1549 — the library chip. Neutral and text-first, like the rights chip
+ * in `SpaceSwitcher` (design brief §1): a library is a fact about the file,
+ * not a status, so it never borrows a status color.
+ *
+ * Exported because the views that hand-roll their own rows — `TrashView` and
+ * `/files/shared` — must render the SAME slot; the chip is the one place its
+ * appearance is defined.
+ *
+ * Rendered only when the caller actually resolved a library. A row with no
+ * chip is an unattributed row, which is the honest output when the space list
+ * hasn't loaded or the file sits in a library the caller can no longer see —
+ * never a silent demotion to "My Files".
+ */
+export function LibraryChip({ label }: { label: string }) {
+  return (
+    <span
+      className="inline-flex items-center h-5 px-2 rounded-full border border-separator bg-surface-tertiary type-caption-1 text-label-secondary flex-none max-w-[10rem] truncate"
+      title={`In ${label}`}
+    >
+      {label}
+    </span>
+  );
+}
 
 interface FileListSimpleProps {
   files: FileEntryInfo[];
   isLoading: boolean;
+  /**
+   * WARP-1555 — the fetch error from the owning hook (`useFavorites`,
+   * `useRecents`, …). When set, the list renders a first-class error
+   * state instead of the empty state: "we failed to load your data" and
+   * "you have nothing here" are different facts and must look different.
+   */
+  error?: unknown;
+  errorTitle?: string;
+  errorDescription?: string;
+  /** Re-runs the fetch. Pass the hook's `refresh` to get a retry button. */
+  onRetry?: () => void;
   emptyIcon?: LucideIcon;
   emptyTitle?: string;
   emptyDescription?: string;
   showLocation?: boolean;
+  /**
+   * WARP-1549 — the library slot. Return the name of the library a row
+   * belongs to (rendered as a chip beside the file name), or null/undefined
+   * to say nothing at all.
+   *
+   * Pass `useSpaceAttribution().label` composed over `file.path`. Returning
+   * null is meaningful: it covers both "this is an ordinary personal file"
+   * and "we can't place this file right now", and in both cases the row must
+   * stay silent rather than imply My Files.
+   */
+  spaceLabel?: (file: FileEntryInfo) => string | null | undefined;
+  /**
+   * WARP-1549 — overrides the location line (which defaults to the raw
+   * home-relative parent folder). Pass `useSpaceAttribution().location` so an
+   * attributed row shows its path INSIDE its library and the mount name isn't
+   * printed twice — "Finance" · "/Q1", not "Finance" · "/Finance/Q1".
+   */
+  locationLabel?: (file: FileEntryInfo) => string;
   showStar?: boolean;
   onOpen: (file: FileEntryInfo) => void;
   onDownload?: (file: FileEntryInfo) => void;
@@ -49,10 +103,16 @@ function formatDate(iso: string): string {
 export function FileListSimple({
   files,
   isLoading,
+  error,
+  errorTitle = "We couldn't load this list",
+  errorDescription = "The box didn't answer when we asked for these files. Nothing has been changed — try again in a moment.",
+  onRetry,
   emptyIcon: EmptyIcon,
   emptyTitle = "Nothing here yet",
   emptyDescription,
   showLocation = true,
+  spaceLabel,
+  locationLabel,
   showStar = false,
   onOpen,
   onDownload,
@@ -60,6 +120,39 @@ export function FileListSimple({
   removeTooltip,
   onStarChanged,
 }: FileListSimpleProps) {
+  /*
+    WARP-1555: the error branch is checked BEFORE `isLoading` on purpose.
+    SWR flips `isLoading` back on for every backoff retry while `data` is
+    still undefined, so a loading-first order would flap the user between
+    "Loading…" and the failure. It is gated on an empty list so a failed
+    background poll never wipes rows we already have on screen.
+    role="alert" because the failure lands asynchronously, after the page
+    has already rendered (same reasoning as the main Files page).
+  */
+  if (error && files.length === 0) {
+    return (
+      <div className="card" role="alert" style={{ padding: 0 }}>
+        <div className="empty">
+          <span className="ei">
+            <AlertTriangle size={24} />
+          </span>
+          <p className="eh">{errorTitle}</p>
+          <p style={{ maxWidth: "22rem", fontSize: "13px" }}>{errorDescription}</p>
+          {onRetry && (
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={onRetry}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading && files.length === 0) {
     return (
       <div
@@ -93,7 +186,12 @@ export function FileListSimple({
     <div className="card overflow-hidden" style={{ padding: 0 }}>
       <div className="rows">
         {files.map((file) => {
-          const parent = file.path.replace(/\/[^/]*$/, "") || "/";
+          // WARP-1549: `locationLabel` re-expresses this inside the file's own
+          // library when one was resolved; without it the raw home-relative
+          // parent is still what shows, exactly as before.
+          const parent =
+            locationLabel?.(file) ?? (file.path.replace(/\/[^/]*$/, "") || "/");
+          const library = spaceLabel?.(file);
           return (
             <div
               key={file.path}
@@ -102,12 +200,17 @@ export function FileListSimple({
             >
               <Thumbnail file={file} size={36} className="flex-shrink-0" />
               <div className="flex-1 min-w-0">
-                <p
-                  className="truncate"
-                  style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
-                >
-                  {file.name}
-                </p>
+                <div className="flex items-center gap-2 min-w-0">
+                  <p
+                    className="truncate min-w-0"
+                    style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
+                  >
+                    {file.name}
+                  </p>
+                  {/* WARP-1549: which library this row lives in. Absent when
+                      the file is personal — or when we genuinely can't tell. */}
+                  {library && <LibraryChip label={library} />}
+                </div>
                 {showLocation && (
                   <p
                     className="truncate"

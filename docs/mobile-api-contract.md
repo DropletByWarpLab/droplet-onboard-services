@@ -25,7 +25,7 @@ mirror the change.
 Native clients store a per-Droplet base URL set during pair flow.
 Format: `https://<host>` where `<host>` is one of:
 - mDNS hostname: `droplet-c4d4df.local` (LAN)
-- named address: `mydroplet.droplet-us.com` (remote, over the Cloudflare Tunnel relay with a per-device publicly-trusted cert — ADR-025 / ADR-023)
+- named address: `mydroplet.droplet-us.com` (remote, over the Cloudflare Tunnel relay with a per-device publicly-trusted cert — ADR-025A (`droplet-fleet-hq`) / ADR-023)
 - raw IP: `192.168.1.5` (manual fallback)
 
 All endpoints below are relative to base URL.
@@ -277,6 +277,16 @@ Saved multi-step "tools"/macros the LLM agent can run (slug-addressed).
 
 `safety` ∈ 1..3; `slug` matches `SLUG_RE` (2..80 chars). Missing spec → `404 Spec not found`.
 
+WARP-1580 — the `requireRole` column above is the coarse ADR-004 floor only. `POST
+/tools/:slug/runs` additionally resolves the caller's ADR-032 §3 tool reach and refuses
+a spec that names a tool their access role does not grant:
+`403 { error: "forbidden_tool_for_role", detail, slug, tool }`. The refusal is
+whole-spec and pre-dispatch — no step runs and no `ToolRun` row is written. Callers with
+no `AccessRole` (every user on a box today), service principals and the owner are
+unaffected. A caller whose scope cannot be resolved is refused the same way (fail-closed).
+Lock-flavoured `control_device` args are additionally refused at dispatch, surfacing as a
+`207` run whose failing step carries `LOCK_OPERATION_NOT_PERMITTED`.
+
 #### Brain memory / indexed attachments (`/api/files/brain`)
 
 The "AI memory" store of files the chat has ingested (BrainMemoryItem). Per-user.
@@ -424,7 +434,7 @@ For phone self-add (writes need an owner/admin session):
 
 > Updated for WARP-974. Remote access no longer uses a dynamic-DNS endpoint. The
 > box is reachable at its provisioned named address `<name>.droplet-us.com` over
-> the outbound Cloudflare Tunnel relay (ADR-025) with a per-device publicly-trusted
+> the outbound Cloudflare Tunnel relay (ADR-025A, `droplet-fleet-hq`) with a per-device publicly-trusted
 > cert (ADR-023). There is **no `/api/ddns/*` surface** for clients to configure —
 > the named address is set at provisioning and drives `VpnStatusInfo.endpointHost`.
 > Clients toggle the relay from the app's "Connect" control (Cloudflare WARP);

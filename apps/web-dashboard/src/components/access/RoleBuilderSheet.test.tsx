@@ -189,6 +189,112 @@ describe("features & what they can do (axis 2)", () => {
   });
 });
 
+// ── WARP-1585 — three toggles, three stories ──
+//
+// Files, Knowledge and Documents were three switches wired to one enforcement
+// (the orchestrator's `/api/files` gate prefix-matched both siblings). The
+// backend now enforces three; this panel has to stop implying that all three
+// are equally independent, because one of them is NOT: Documents has no
+// surface of its own — it opens files that live in Files — so a Documents
+// grant with no Files grant grants nothing reachable.
+//
+// The honest shape, per the packet: blocked WITH the reason, shown, never
+// hidden — and never a padlock (§13 reserves Lock for floor-blocked, which
+// this is not; the operator can clear this one themselves).
+describe("declared feature dependencies (WARP-1585)", () => {
+  it("blocks Documents WITH the reason when Files is off, and never with a padlock", () => {
+    const base = blankRoleDraft("family");
+    base.features.files = { on: false, level: "view" };
+    base.features.docs = { on: true, level: "act" };
+    renderSheet({ base });
+    const docs = screen.getByTestId("access-feature-docs");
+    const toggle = within(docs).getByRole("switch");
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(within(docs).getByText(ACCESS_COPY.docsNeedsFiles)).toBeInTheDocument();
+    // The levels are not editable while the parent is off — offering "Edit" on
+    // a feature the person cannot open is the promise this ticket removes.
+    expect(within(docs).queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  });
+
+  it("Documents becomes editable the moment Files is on", () => {
+    const base = blankRoleDraft("family");
+    base.features.files = { on: true, level: "view" };
+    base.features.docs = { on: true, level: "act" };
+    renderSheet({ base });
+    const docs = screen.getByTestId("access-feature-docs");
+    expect(within(docs).getByRole("switch")).not.toBeDisabled();
+    expect(within(docs).getByRole("switch")).toHaveAttribute("aria-checked", "true");
+    expect(within(docs).queryByText(ACCESS_COPY.docsNeedsFiles)).not.toBeInTheDocument();
+    expect(within(docs).getByRole("button", { name: /Edit/ })).toBeInTheDocument();
+  });
+
+  it("Knowledge is independent of Files — the toggle means what it says", () => {
+    // The half of the bug that looked like the FEATURE working: turning Files
+    // off used to take the knowledge base with it. Knowledge reads the box's
+    // own chunk store behind the file indexer, so it stands alone.
+    const base = blankRoleDraft("family");
+    base.features.files = { on: false, level: "view" };
+    base.features.knowledge = { on: true, level: "view" };
+    renderSheet({ base });
+    const knowledge = screen.getByTestId("access-feature-knowledge");
+    const toggle = within(knowledge).getByRole("switch");
+    expect(toggle).not.toBeDisabled();
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(within(knowledge).queryByText(ACCESS_COPY.docsNeedsFiles)).not.toBeInTheDocument();
+    expect(within(knowledge).getByRole("button", { name: /Contribute/ })).toBeInTheDocument();
+  });
+
+  it("turning Files off does NOT rewrite the stored Documents grant (T8 convention)", async () => {
+    // The T8 rule the tool-grant fan-out bug taught: a draft never re-emits a
+    // DERIVED value for an axis the operator did not touch. Blocking Documents
+    // is a rendering decision, not an edit — so the operator's Documents
+    // intent survives, and restoring Files restores Documents exactly as they
+    // left it. Clearing it here would silently revoke a third thing, which is
+    // the failure mode this whole ticket is about.
+    const role = makeRole({
+      startingPoint: "admin",
+      featureGrants: [
+        { moduleId: "files", level: "view" },
+        { moduleId: "docs", level: "manage" },
+      ],
+    });
+    const { onSave } = renderSheet({ mode: "edit", base: roleToDraft(role) });
+    const files = screen.getByTestId("access-feature-files");
+    fireEvent.click(within(files).getByRole("switch"));
+    // Documents now reads blocked…
+    const docs = screen.getByTestId("access-feature-docs");
+    expect(within(docs).getByRole("switch")).toBeDisabled();
+    expect(within(docs).getByRole("switch")).toHaveAttribute("aria-checked", "false");
+    // …but the payload still carries the operator's Documents grant verbatim.
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const payload = onSave.mock.calls[0]![0];
+    expect(payload.featureGrants).toEqual(
+      expect.arrayContaining([{ moduleId: "docs", level: "manage" }]),
+    );
+    expect(payload.featureGrants).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ moduleId: "files" })]),
+    );
+  });
+
+  it("restoring Files restores the Documents row untouched", () => {
+    const base = blankRoleDraft("family");
+    base.features.files = { on: true, level: "view" };
+    base.features.docs = { on: true, level: "manage" };
+    renderSheet({ base });
+    const files = screen.getByTestId("access-feature-files");
+    fireEvent.click(within(files).getByRole("switch")); // off
+    fireEvent.click(within(files).getByRole("switch")); // back on
+    const docs = screen.getByTestId("access-feature-docs");
+    expect(within(docs).getByRole("switch")).toHaveAttribute("aria-checked", "true");
+    expect(within(docs).getByRole("button", { name: /Manage/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+});
+
 describe("usage limits (axis 3)", () => {
   it("renders the §12 defaults note and the three fields with honest placeholders", () => {
     renderSheet();
@@ -264,20 +370,74 @@ describe("AI tools & connectors (axis 4)", () => {
     );
   });
 
-  it("caps connector levels at Read on non-Admin starting points (O-2)", () => {
+  // WARP-1578 — §5.2's rule for the connectors axis, which it had never been
+  // given: a floor-blocked option is DISABLED WITH THE REASON, never hidden.
+  // Dropping the option silently taught an operator nothing about the ceiling
+  // and made the two floors invisible.
+  it("caps connector levels at Read on Family-based roles — Read & write shown, disabled, explained", () => {
     renderSheet(); // family base
-    const select = screen.getByLabelText("Eaglesoft access");
-    const labels = Array.from((select as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(labels).toEqual(["None", "Read"]);
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, false, true]);
+    expect(select.disabled).toBe(false);
+    expect(screen.getByText("Read & write is for admins.")).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.connectorsPHI)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.connectorHint)).toBeInTheDocument();
   });
 
-  it("offers Read & write on Admin-based roles", () => {
+  it("offers Read & write on Admin-based roles, with nothing blocked", () => {
     renderSheet({ base: blankRoleDraft("admin") });
-    const select = screen.getByLabelText("Eaglesoft access");
-    const labels = Array.from((select as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(labels).toEqual(["None", "Read", "Read & write"]);
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, false, false]);
+    expect(screen.queryByText("Read & write is for admins.")).not.toBeInTheDocument();
+  });
+
+  it("blocks the whole connectors axis on Guest-based roles, with the honest reason (WARP-1578)", () => {
+    // A guest sits below O-2's family-and-up read floor, so any grant saved
+    // here is inert. Shown-and-disabled, never hidden and never silently
+    // accepted — the two halves of the design-brief doctrine.
+    renderSheet({ base: blankRoleDraft("guest") });
+    const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, true, true]);
+    expect(screen.getByText("Connectors are for staff and admins.")).toBeInTheDocument();
+  });
+
+  it("switching TO Guest clears connector grants and says so — never a silent drop", () => {
+    const base = blankRoleDraft("admin");
+    base.connectors.eaglesoft = "read_write";
+    renderSheet({ mode: "edit", base });
+    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("none");
+    expect(
+      screen.getByText(/Switching to Guest turns off Eaglesoft — guests can't reach connectors\./),
+    ).toBeInTheDocument();
+  });
+
+  it("a Guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
+    // Reachable from rows written before this floor existed. The value stays
+    // visible (hiding it would be the same dishonesty in reverse) and the
+    // consequence of pressing Save is stated up front.
+    const base = roleToDraft(
+      makeRole({
+        startingPoint: "guest",
+        connectorGrants: [{ provider: "eaglesoft", level: "read" }],
+      }),
+    );
+    const { onSave } = renderSheet({ mode: "edit", base });
+    expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
+    expect(
+      screen.getByText("Connectors are for staff and admins — saving removes this."),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "front desk" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    expect(onSave.mock.calls[0][0].connectorGrants).toEqual([]);
   });
 
   it("renders the connectors empty state with the Integrations link", () => {

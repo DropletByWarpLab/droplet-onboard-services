@@ -62,6 +62,17 @@ export interface AuthUser {
   /** WARP-247 — session record id from the JWT's sid claim. Undefined for
    *  legacy tokens, service principals, and the OCS fallback path. */
   sid?: string;
+  /**
+   * WARP-1582 — the JWT's `accessRoleId` claim, verbatim and three-state:
+   * `undefined` = the token carries none (legacy token, service principal,
+   * the OCS fallback, or AUTH_ENABLED=false), `null` = "no custom access
+   * role", a string = the assigned role's id.
+   *
+   * `undefined` and `null` are NOT interchangeable here. Consumers must
+   * treat `undefined` as "unknown, go read the database" — see the trust
+   * argument in services/tool-access.service.ts.
+   */
+  accessRoleId?: string | null;
 }
 
 declare global {
@@ -241,6 +252,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       // require-recent-mfa can gate sensitive routes (WARP-230).
       lastMfaAt: jwtPayload.lastMfaAt ?? null,
       sid: jwtPayload.sid,
+      // WARP-1582 — spread-in, NOT `?? null`: coercing an absent claim to
+      // `null` here would make it indistinguishable from "no custom role"
+      // and silently authorise the read elision for every legacy token.
+      ...(jwtPayload.accessRoleId !== undefined
+        ? { accessRoleId: jwtPayload.accessRoleId }
+        : {}),
     };
 
     // The JWT signature is valid; the remaining checks (denylist + session

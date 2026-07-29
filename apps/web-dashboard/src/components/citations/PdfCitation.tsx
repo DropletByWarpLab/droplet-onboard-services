@@ -48,7 +48,9 @@ export function PdfCitation({ hit, anchor }: PdfCitationProps): JSX.Element {
         <span className="type-caption-2 flex-shrink-0 text-[var(--text-muted)]">
           p.{anchor.page}
           {typeof hit.score === "number" && (
-            <span className="ml-2">{relevancePct(hit.score)}%</span>
+            <span className="ml-2">
+              {relevancePct(hit.score, hit.scoreKind)}%
+            </span>
           )}
         </span>
       </div>

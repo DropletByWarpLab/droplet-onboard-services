@@ -18,6 +18,11 @@ import {
   type EffectiveAccessInputs,
 } from "./effective-access.service.js";
 import { GATEABLE_MODULE_IDS } from "./access-catalog.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 
 const ALL_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   "chat",
@@ -56,6 +61,87 @@ function role(overrides: Partial<NonNullable<EffectiveAccessInputs["user"]["acce
 function featureLevel(result: ReturnType<typeof computeEffectiveAccess>, moduleId: string) {
   return result.features.find((f) => f.moduleId === moduleId)?.level;
 }
+
+// ── WARP-1528 (T4 / QA) — the always-on floor is intersection-EXEMPT ──
+//
+// `chat` is a CORE module, and core modules are exempt from workspace
+// enablement everywhere else in the system: app.ts's workspace gate does
+// `if (def.core) continue`, so `/api/llm` is never enablement-gated, and the
+// owner branch above returns before the intersection so owners keep `chat`
+// unconditionally. But `chat`'s registry availability is
+// `isSet(AI_GATEWAY_URL)`, so on a box with that env unset it drops out of the
+// workspace-effective set — and only ROLE-HOLDERS reach the intersection.
+// The resolver was therefore applying a narrowing to the always-on floor that
+// neither the workspace gate nor the owner path applies: an inconsistency, not
+// a design choice. Worse, it made the "a person's feature set can never be
+// empty" invariant — which the dashboard's fail-open guard leans on — false.
+describe("effective-access — always-on floor survives the workspace intersection", () => {
+  it("a role-holder on a box with AI_GATEWAY_URL unset still resolves `chat`", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "family", accessRole: role({ featureGrants: [] }) },
+        // Availability is off for chat → it is absent from the workspace set.
+        workspaceModuleIds: new Set<ModuleId>(GATEABLE_MODULE_IDS as ModuleId[]),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+    // …and the set is therefore never empty, which is the load-bearing part.
+    expect(res.features.length).toBeGreaterThan(0);
+  });
+
+  it("a grantless role on a gateway-less box resolves to the floor, NOT an empty set", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "guest", accessRole: role({ featureGrants: [] }) },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(res.features).toEqual([{ moduleId: "chat", level: "act" }]);
+  });
+
+  it("still intersects every GATEABLE module against the workspace", () => {
+    // The exemption is scoped to the always-on floor — it must not become a
+    // hole that lets workspace-disabled features through.
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-1",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "manage" },
+              { moduleId: "cameras", level: "view" },
+            ],
+          }),
+        },
+        workspaceModuleIds: new Set<ModuleId>(["files"]),
+      }),
+    );
+    expect(featureLevel(res, "files")).toBe("manage");
+    expect(featureLevel(res, "cameras")).toBeUndefined();
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+
+  it("a role-LESS person keeps the floor too when the gateway is unset", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "family", accessRole: null },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+
+  it("owners are unaffected — they never reached the intersection anyway", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "owner", accessRole: null },
+        workspaceModuleIds: new Set<ModuleId>(),
+      }),
+    );
+    expect(featureLevel(res, "chat")).toBe("act");
+  });
+});
 
 describe("effective-access — tier-only floors (null accessRoleId = today's world)", () => {
   it("family: manage on ordinary modules, view on network/switch, chat act, all domains", () => {
@@ -281,6 +367,105 @@ describe("effective-access — workspace-module intersection", () => {
   });
 });
 
+// ── WARP-1585 — declared module dependencies (`ModuleDef.requires`) ──
+//
+// `docs` has no surface of its own (registry `navHrefs: []`): the substantive
+// act is minting an editor session for a Nextcloud path, which lives on
+// `/api/files/:filePath(*)/editor-session` and is gated by `files`. So a
+// Documents grant with no Files grant grants nothing reachable — which is
+// exactly the dishonest direction this ticket exists to close. The resolver
+// applies the registry's dependency closure right after the workspace
+// intersection, so the RESOLVED set never claims a capability the person
+// can't actually use, and `effectiveForUser` stays truthful for the dashboard.
+//
+// `knowledge` deliberately has NO such edge: it reads FileContentChunk rows
+// out of the orchestrator's own Postgres (sources `nextcloud` AND `brain`)
+// behind FILE_INDEXER_URL, so it stands on its own and must survive a
+// files-less grant untouched.
+describe("effective-access — declared module dependencies (WARP-1585)", () => {
+  it("drops docs when the person holds no files grant", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-2",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "docs", level: "manage" },
+              { moduleId: "knowledge", level: "view" },
+            ],
+          }),
+        },
+      }),
+    );
+    expect(featureLevel(res, "docs")).toBeUndefined();
+    // …and knowledge, which declares no parent, is untouched.
+    expect(featureLevel(res, "knowledge")).toBe("view");
+  });
+
+  it("keeps docs when files is held alongside it", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-3",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "view" },
+              { moduleId: "docs", level: "act" },
+            ],
+          }),
+        },
+      }),
+    );
+    expect(featureLevel(res, "files")).toBe("view");
+    expect(featureLevel(res, "docs")).toBe("act");
+  });
+
+  it("an ALLOW exception cannot resurrect docs without files", () => {
+    // Same rule as the workspace intersection: exceptions widen within the
+    // model, they don't suspend it.
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-4",
+          role: "family",
+          accessRole: role({ featureGrants: [{ moduleId: "knowledge", level: "view" }] }),
+        },
+        exceptions: [{ id: "x", moduleId: "docs", effect: "allow", level: "manage" }],
+      }),
+    );
+    expect(featureLevel(res, "docs")).toBeUndefined();
+  });
+
+  it("a DENY exception on files also drops docs", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u-5",
+          role: "family",
+          accessRole: role({
+            featureGrants: [
+              { moduleId: "files", level: "manage" },
+              { moduleId: "docs", level: "manage" },
+            ],
+          }),
+        },
+        exceptions: [{ id: "x", moduleId: "files", effect: "deny", level: null }],
+      }),
+    );
+    expect(featureLevel(res, "files")).toBeUndefined();
+    expect(featureLevel(res, "docs")).toBeUndefined();
+  });
+
+  it("the owner bypass is outside the dependency closure, like every other intersection", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "o", role: "owner", accessRole: null } }),
+    );
+    expect(featureLevel(res, "docs")).toBe("manage");
+  });
+});
+
 describe("effective-access — locks gate", () => {
   it("role.mayOperateLocks AND smart_home effective", () => {
     const withLocks = (grants: Array<{ moduleId: ModuleId; level: "view" | "act" | "manage" }>, may = true) =>
@@ -421,6 +606,97 @@ describe("effective-access — connector min", () => {
   });
 });
 
+/**
+ * WARP-1579 — the RAW grant, reported BESIDE the min().
+ *
+ * `connectors` folds `connection.writeEnabled` into the level, which makes
+ * "the role is read-only" and "the connection has writes off" the same value.
+ * The ERP write gate has to tell those apart — one is a 403 about the role,
+ * the other today's 409 `WRITE_NOT_ENABLED` about the connection — so the
+ * resolver reports the role's own grant untouched as well.
+ *
+ * `null` means "no custom role narrows this axis": role-less people and owners
+ * (§3's one bypass). It is deliberately NOT `{}`, which is the sharply
+ * different "this role holds no connector grants at all".
+ */
+describe("effective-access — raw connector grants (WARP-1579)", () => {
+  const connsRw = [{ provider: "eaglesoft", writeEnabled: true }];
+  const connsRo = [{ provider: "eaglesoft", writeEnabled: false }];
+
+  it("reports the role's own level, unclamped by the connection, beside the min()", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({ eaglesoft: "read" }); // min() unchanged
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" }); // the raw fact
+  });
+
+  it("distinguishes a read-only ROLE from a write-disabled CONNECTION — both min() to 'read'", () => {
+    const readOnlyRole = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRw,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read" }] }),
+        },
+      }),
+    );
+    const readOnlyConnection = computeEffectiveAccess(
+      baseInputs({
+        connections: connsRo,
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(readOnlyRole.connectors).toEqual(readOnlyConnection.connectors);
+    expect(readOnlyRole.connectorGrants).toEqual({ eaglesoft: "read" });
+    expect(readOnlyConnection.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("reports a grant even when NO connection exists — the role's intent is not a connection fact", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: {
+          id: "u",
+          role: "admin",
+          accessRole: role({ connectorGrants: [{ provider: "eaglesoft", level: "read_write" }] }),
+        },
+      }),
+    );
+    expect(res.connectors).toEqual({}); // no connection = no reach
+    expect(res.connectorGrants).toEqual({ eaglesoft: "read_write" });
+  });
+
+  it("{} for a role holding no connector grants — sharply different from null", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: role() } }),
+    );
+    expect(res.connectorGrants).toEqual({});
+  });
+
+  it("null for a role-LESS person and for an owner — nothing narrows this axis", () => {
+    const roleLess = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "admin", accessRole: null } }),
+    );
+    expect(roleLess.connectorGrants).toBeNull();
+    const owner = computeEffectiveAccess(
+      baseInputs({ connections: connsRw, user: { id: "u", role: "owner", accessRole: null } }),
+    );
+    expect(owner.connectorGrants).toBeNull();
+  });
+});
+
 describe("effective-access — usage passthrough (T7)", () => {
   it("person ?? role ?? default, field-by-field, BigInt string-encoded, sources carried", () => {
     const res = computeEffectiveAccess(
@@ -470,11 +746,20 @@ describe("effective-access — deptRights are a read-only reference", () => {
 
 describe("resolveEffectiveAccess — bound fetch wrapper", () => {
   it("returns null for a missing user (route maps to 404)", async () => {
+    // WARP-1583: the wrapper resolves inside a RepeatableRead transaction, so
+    // the missing-user contract is now "return null OUT of the transaction",
+    // not "return null before opening one". The shared seam (WARP-1570) is
+    // what makes that distinction testable — a hand-rolled
+    // `$transaction: (fn) => fn(self)` would drop the options argument and
+    // let a silent downgrade to READ COMMITTED stay green.
     const prisma: any = {
       user: { findUnique: vi.fn().mockResolvedValue(null) },
     };
+    const seam = createTransactionSeam({ client: () => prisma });
+    prisma.$transaction = seam.$transaction;
     _setEffectiveAccessForTests(prisma, {} as any);
     await expect(resolveEffectiveAccess("nope")).resolves.toBeNull();
+    expectAllTransactionsAt(seam, REPEATABLE_READ_TX);
     _setEffectiveAccessForTests(null, null);
   });
 

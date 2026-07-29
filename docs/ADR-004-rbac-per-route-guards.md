@@ -5,9 +5,17 @@
 **Deciders:** Stefan Cruceru
 **Source:** [WARP-171](https://warp-lab.atlassian.net/browse/WARP-171), `docs/ROADMAP.md` §M2.2, GTM strategy doc (April 2026) §4.2
 
+> **Amended by ADR-032 (RBAC v2, 2026-07):** custom access roles do not add
+> `Role` enum values and do not move any floor in this document. A role is a
+> row whose `startingPoint` **is** one of the tiers below, so every guard here
+> keeps enforcing unchanged; the per-role grant rows only narrow *within* a
+> floor via `requireFeatureAccess` (§3). Two catalog changes landed with it,
+> both in §3: the first-ever **ERP connector rows**, and the note on how the
+> layer-2 feature gate composes with these floors.
+
 > **Numbering note:** Originally drafted as ADR-003 but renamed to ADR-004 because `docs/ADR-003-rag-techniques-adoption.md` (RAG techniques) landed on `main` first.
 
-> **Schema-drift correction on first contact with code:** the ADR draft talked about `User.role`, but `apps/orchestrator/prisma/schema.prisma` has **no `model User`** — users live in Nextcloud and are surfaced via OCS. The only persistent role column in the schema is `UserInvite.role` (line 156), which the AC text actually cites by file/line. The implementation migrates `UserInvite.role` to the new `Role` enum; existing invite-accept semantics ("admin invite role" → "owner session role") are preserved by the route's existing transformation rule (`auth.ts:595`).
+> **Schema-drift correction on first contact with code:** the ADR draft talked about `User.role`, but `apps/orchestrator/prisma/schema.prisma` has **no `model User`** — users live in Nextcloud and are surfaced via OCS. The only persistent role column in the schema is `UserInvite.role` (line 156), which the AC text actually cites by file/line. The implementation migrates `UserInvite.role` to the new `Role` enum; existing invite-accept semantics ("admin invite role" → "owner session role") are preserved by the route's existing transformation rule (`auth.ts:595`). [Update 2026-07-26: this "no `model User`" claim is historical — the schema has since grown a `model User` (schema.prisma, with the `Role` enum). The text above is kept as written for the record of the original decision.]
 
 ## Context
 
@@ -169,6 +177,143 @@ unguarded execution bypass even with the create-routes guarded. All ten
 mutations are mirrored in `__tests__/rbac.test.ts` (declarative MATRIX +
 a real-`createSwitchRouter` wiring block) so a future unguarded switch
 route trips a localized test failure.
+
+#### ERP connector surface (WARP-1530 / ADR-032 resolution O-2)
+
+> **Status of this note:** added 2026-07-26 by WARP-1534 (RBAC v2 T10),
+> operationalizing the amendment ADR-032 §6 records. The catalog above
+> predates `src/routes/erp.ts` entirely and carried **no ERP rows at all** —
+> the surface that reaches patient data was the one family the matrix never
+> named. These are its first rows. The code change is T6 (WARP-1530); this
+> section states the shipped floors, read off `routes/erp.ts` and
+> `services/erp.service.ts` on `main`.
+>
+> **Amended 2026-07-26 by WARP-1579:** the write rows gained a connector-grant
+> column. T6 shipped O-2's read half and left writes authorising off the tier
+> alone, so an Admin-based role holding a deliberately read-only grant could
+> still stage and confirm writes — the level was a label the enforcement
+> ignored. See "…and a read-only grant NARROWS them" below.
+
+The floors here are **not** uniform across the surface, which is why they need
+their own rows: reads were deliberately widened, writes were deliberately not —
+though writes are now **narrowable** by the grant's level, which is a different
+thing from being widened by it.
+
+| Endpoint | Allowed roles | Additional gate |
+|---|---|---|
+| `GET /api/erp/schedule` | `owner`, `admin`, `family` | `AccessRoleConnectorGrant` for `eaglesoft` (see below) |
+| `GET /api/erp/patients` | `owner`, `admin`, `family` | same |
+| `GET /api/erp/patient/:id` | `owner`, `admin`, `family` | same |
+| `GET /api/erp/ar-summary` | `owner`, `admin`, `family` | same |
+| `GET /api/erp/recall-due` | `owner`, `admin`, `family` | same |
+| `POST /api/erp/write-requests` | `owner`, `admin` | connector grant not `read` (see below) + `IntegrationConnection.writeEnabled` + staged `ErpWriteRequest` outbox |
+| `GET /api/erp/write-requests/:id` | `owner`, `admin` | connector grant not `read` |
+| `POST /api/erp/write-requests/:id/confirm` | `owner`, `admin` | connector grant not `read` + `writeEnabled` re-checked at apply time + human confirm |
+
+**Reads — family-and-up WITH a grant.** This replaces the flat `owner`/`admin`
+gate the route shipped with, and settles the long-standing
+header-says-family / code-says-owner-admin discrepancy in favour of the
+header, *gated through a grant*. It is what makes a "Reception" role useful.
+Both halves are required and neither is sufficient:
+
+- the **tier floor** is real middleware — `requireRole("owner","admin","family")`
+  runs first, so guests and `service` principals are refused before any DB
+  read. It is load-bearing rather than decorative. When these rows were
+  written, `normalizeGrants` (`routes/access.ts`) clamped a connector grant's
+  *level* on a non-admin starting point but never **dropped** the grant, so a
+  Guest-based role could hold one and the resolver faithfully reported it —
+  reading `connectors[provider]` alone would have handed that role PHI.
+  WARP-1578 closed that at the write end (a Guest starting point now holds no
+  connector grant at all — `clampConnectorLevel`, and the builder shows the
+  levels disabled with the reason instead of offering them), but the floor
+  stays, for two reasons: rows written before that clamp existed are still in
+  the database until their role is edited, and a floor enforced at the
+  CONSUMER survives a change to whatever writes the rows, which one enforced
+  only at the writer does not;
+- the **grant** is `AccessRoleConnectorGrant` for the provider, surfaced by the
+  ADR-032 §3 resolver as `connectors[eaglesoft]`. An `admin` with no grant is
+  refused too — admins do **not** bypass layer 2 (that is the point of
+  Admin-based custom roles). `owner` is the one tier that bypasses the
+  resolver entirely.
+
+Two deliberate fall-backs to the pre-O-2 gate, both answering with today's
+byte-identical 403 body and `recordAccessDenied` row rather than inventing a
+new one: when **no `IntegrationConnection` row exists at all** (the resolver
+returns `{}` for everyone, owner included — "there is nothing to see" is not
+an authorization answer), and when the **resolver read fails** (no reach is
+invented, none is lost). `erp.service.ts` asserts the same floor a second time
+on its own (`assertCanReadPhi`), so a change to the resolver cannot silently
+widen PHI reach.
+
+**Writes — admin-tier, and no wider.** No role grant widens them: a
+`read_write` connector grant is selectable only on an Admin-based role, and it
+still does not by itself authorize a write. `IntegrationConnection.writeEnabled`
+(the per-practice opt-in kill-switch), the staged `ErpWriteRequest` outbox, and
+the human confirm all sit above it, and `writeEnabled` is re-checked at apply
+time as well as at stage time so a request staged before writes were turned off
+cannot slip through.
+
+**…and a read-only grant NARROWS them (WARP-1579).** The tier is necessary,
+not sufficient. An Admin-based role holding a deliberately `read` connector
+grant is refused at `erpConnectorWriteGate` — until WARP-1579 the write path
+authorised off the tier alone, so "read-only Admin" was a label the
+enforcement ignored. The gate reads the **raw** grant
+(`connectorGrants[provider]`, WARP-1579's addition to the ADR-032 §3 resolver),
+never `connectors[provider]`: the latter is `min(grant, writeEnabled ?
+read_write : read)`, so a `read` there cannot distinguish a read-only ROLE
+(403, "ask for a read & write grant") from a write-disabled CONNECTION (409
+`WRITE_NOT_ENABLED`, "turn writes on in Integrations"), and each names a
+different remedy.
+
+The same fall-backs to the pre-narrowing gate apply, for the same reasons:
+`owner` bypasses layer 2, a person with **no custom role** is not narrowed at
+all (today's world for every admin before RBAC v2), and both a resolver
+**throw** and a box with **nothing connected** fall through to the admin-tier
+floor. That last posture is deliberate and stated plainly in ADR-032: on this
+axis the widening is hard-closed and **the narrowing is soft**, so it is not
+an availability-independent control and must not be relied on as one for
+compliance.
+
+A resolver **`null`** is not one of those fall-backs. `req.user` is built from
+JWT claims alone, so a session can outlive its `User` row and still present a
+syntactically valid admin token; the resolver then returns `null`, which is a
+*successful* read with a negative answer rather than an outage. Both gates give
+that principal the same answer — the grant-absent decision, i.e. 403
+`erp-connector-grant-missing` where a connection is configured — so writes are
+never softer than reads for the same person. Likewise the raw-grant field is
+read as an explicit tri-state (`null` = unnarrowed, `{}` = a role holding no
+grants = a denial, absent = fail **closed**), never for truthiness.
+
+`erp.service.ts` asserts the same rule a second time below the route
+(`assertCanWrite` refuses an explicit `read`), with absence never a denial.
+That assertion reads `ErpUser.connectorGrantLevel`, which the route gate
+populates — so it hardens the gate rather than replacing it, and a NEW write
+route must register `erpConnectorWriteGate` to be covered.
+
+#### `requireFeatureAccess` narrows within these floors — it never widens them
+
+> **Status of this note:** added 2026-07-26 by WARP-1534, describing the
+> WARP-1528 layer that now sits beside every row in this document.
+
+`requireFeatureAccess(moduleId, minLevel)` (`middleware/feature-gate.ts`) is
+**layer 2**. Every row in this ADR — the matrix in §3, the switch table, the
+ERP table above — remains the authoritative **floor**, enforced by
+`requireRole` at layer 1 exactly as before. Layer 2 can only take reach away
+from a person *within* a floor they already passed, based on their resolved
+ADR-032 §9 grant level. It has no path to grant reach the enum tier does not
+already carry, so **no row in this document needs re-reading when a custom role
+is created.**
+
+Three passes layer 2 must never narrow, all of them today's-world correctness:
+`service` principals (they keep their `requireRoleOrService` paths), a
+principal with no local `User` row (the `AUTH_ENABLED=false` dev session and
+the Nextcloud OCS fallback — no row means no grants to narrow *by*), and a
+request with no principal at all (`authMiddleware` owns the 401). Denials are
+**404-consistent** with `requireModuleEnabled` — byte-identical body — so a
+feature a person may not open reads as ABSENT rather than FORBIDDEN; a 403
+would leak both that the surface exists and that someone else can reach it. The
+audit trail stays honest server-side regardless: every denial emits its own
+WARP-237 policy-violation row.
 
 ### 4. Expand `roleFromGroups()`
 
@@ -358,3 +503,12 @@ Rejected for v1: introduces a dependency the team would need to audit, and the a
 - [WARP-327](https://warp-lab.atlassian.net/browse/WARP-327) — parent epic, Auth/RBAC/Identity.
 - [WARP-480](https://warp-lab.atlassian.net/browse/WARP-480) — self-action + last-owner invariants on `/api/people` mutations (the consumer that surfaced the OCS-id-shape mismatch).
 - [WARP-485](https://warp-lab.atlassian.net/browse/WARP-485) — `req.user.id` normalization across JWT + OCS auth paths (the §6 amendment above).
+- [`docs/ADR-032-access-roles-custom-rbac.md`](ADR-032-access-roles-custom-rbac.md) — RBAC v2. Decision §6 is the amendment the ERP rows in §3 operationalize; §3 defines the layer-2 resolver those rows depend on.
+- [`apps/orchestrator/src/routes/erp.ts`](../apps/orchestrator/src/routes/erp.ts) — `erpConnectorReadGate` (the O-2 tier floor + connector-grant check) and `erpConnectorWriteGate` (the same admin-tier floor, plus the raw grant's level — WARP-1579).
+- [`apps/orchestrator/src/services/erp.service.ts`](../apps/orchestrator/src/services/erp.service.ts) — `assertCanReadPhi` / `assertCanWrite`, the second assertion of the same floors below the route.
+- [`apps/orchestrator/src/services/access-catalog.ts`](../apps/orchestrator/src/services/access-catalog.ts) — `clampConnectorLevel`, the one authoritative statement of O-2's two connector floors (`read_write` is Admin-only; a Guest starting point holds no grant at all).
+- [`apps/orchestrator/src/middleware/feature-gate.ts`](../apps/orchestrator/src/middleware/feature-gate.ts) — `requireFeatureAccess`, the layer-2 narrowing described in §3.
+- [WARP-1530](https://warp-lab.atlassian.net/browse/WARP-1530) — RBAC v2 T6, the ERP floor code change these rows document.
+- [WARP-1534](https://warp-lab.atlassian.net/browse/WARP-1534) — RBAC v2 T10, which added the ERP rows + the layer-2 note.
+- [WARP-1579](https://warp-lab.atlassian.net/browse/WARP-1579) — the write rows' connector-grant column: writes stopped authorising off the tier alone, so a read-only Admin-based role is now enforceable.
+- [WARP-1578](https://warp-lab.atlassian.net/browse/WARP-1578) — the Guest connector floor referenced in the read note (a Guest-based role can no longer be saved holding a grant).

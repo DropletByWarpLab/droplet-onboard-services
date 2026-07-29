@@ -10,10 +10,13 @@ description: |
 
 # Preflight — PR readiness check
 
-Verify a change is genuinely ready for review. CI has **no eslint/tsc
-gate** and `main` has known reds, so green-looking CI proves less than
-it seems. A PR is finished when it is **ready for Romain's one-click
-approval** — never merged by an agent.
+Verify a change is genuinely ready for review. CI **does** have tsc
+gates now (WARP-1011/WARP-1296) but still **no eslint gate**, and its
+legs are **path-aware** — a diff that maps to no leg is typechecked by
+nothing. `main` also has known reds. Green-looking CI still proves less
+than it seems, just for a different reason than it used to. A PR is
+finished when it is **ready for Romain's one-click approval** — never
+merged by an agent.
 
 ## 1. Scope the change
 
@@ -62,9 +65,29 @@ cd apps/orchestrator && npx prisma generate && npx tsc --noEmit
 
 `prisma generate` FIRST — a stale client produces phantom
 scene-schedule `timezone`/`systemFlag` type errors. Repeat
-`npx tsc --noEmit` in web-dashboard / packages if touched. There is no
-`turbo run typecheck` task; CI will not catch type errors for you —
-local tsc is the only gate.
+`npx tsc --noEmit` in web-dashboard / packages if touched.
+
+CI typechecks too, as steps inside ci.yml's path-aware legs:
+
+| Leg | Compile-time gate |
+|---|---|
+| orchestrator | `npm run -w @droplet/orchestrator typecheck` (WARP-1011) |
+| web-dashboard | `npx tsc --noEmit`, then `next build` (WARP-1296) |
+| matter-controller | `npm run -w @droplet/matter-controller build` — build IS the typecheck |
+| tools-core-mcp-server, erp-connector | workspace `build` (tsc) runs before `test` |
+
+Still absent: any **eslint** gate, and any `turbo run typecheck` task.
+The dashboard's only lint is `scripts/check-dashboard-classes.sh`
+(WARP-288, Tailwind classes); hadolint and the FIPS lint cover
+Dockerfiles and crypto sources, not TS.
+
+**The catch is `detect`.** A leg runs only when the PR touches its
+declared paths (`.github/workflows/ci.yml` → `detect.filters`). Useful
+fan-outs: `package.json`/`package-lock.json` trigger *every* node leg;
+`packages/shared-types/**` and `packages/auth-policy/**` trigger both
+orchestrator and dashboard. But a diff matching **no** filter gets no
+typecheck at all. Run tsc locally when your change doesn't clearly map
+to a leg — or when you'd rather not wait 20 minutes to find out.
 
 ## 3. Run the affected suites
 
@@ -140,4 +163,5 @@ instructs it for this named PR.
 | "The venv won't build, so I'll skip the Python tests" | The ai-gateway venv reuse (§3) exists precisely for this. |
 | "I'll `pip install -r requirements.txt` into the shared venv" | That pulls pydantic-core/cryptography source builds and fails; install only the two pinned wheels above. |
 | "CI is green, I'll merge" | The review gate is deliberate policy. Ready-for-review IS the finish line. |
-| "tsc must pass since CI passed" | CI has no tsc gate. Only local `npx tsc --noEmit` (after `prisma generate`) counts. |
+| "tsc must pass since CI passed" | Only if your diff hit a leg that runs tsc (§2). Path-aware `detect` means an unmapped change is typechecked by nothing. |
+| "CI has no tsc gate, so a type error can't block me" | Stale — WARP-1011/WARP-1296 added real ones (§2). A type error on a mapped leg fails `ci-summary`, the required check. |

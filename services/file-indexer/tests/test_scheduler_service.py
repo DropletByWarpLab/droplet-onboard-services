@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -12,7 +14,8 @@ import pytest
 
 @pytest.fixture
 def event_loop():
-    """AsyncIOScheduler.start() expects a running loop. Create + tear down
+    """apscheduler >= 3.11 binds AsyncIOScheduler to the *running* loop, so
+    build_scheduler() has to be called from inside one. Create + tear down
     one per test rather than relying on pytest-asyncio."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -63,7 +66,14 @@ def test_build_scheduler_registers_run_pass(event_loop):
     one CronTrigger job pointing at transcription_worker.run_pass."""
     import scheduler_service
 
-    sched = scheduler_service.build_scheduler()
+    async def _build():
+        # build_scheduler() must run inside a running loop — apscheduler
+        # >= 3.11 raises RuntimeError("no running event loop") otherwise.
+        # run_scheduler_loop() is what guarantees that in production; this
+        # test covers build_scheduler() alone.
+        return scheduler_service.build_scheduler()
+
+    sched = event_loop.run_until_complete(_build())
     try:
         jobs = sched.get_jobs()
         assert len(jobs) == 1
@@ -71,3 +81,49 @@ def test_build_scheduler_registers_run_pass(event_loop):
         assert "cron" in str(jobs[0].trigger).lower()
     finally:
         sched.shutdown(wait=False)
+
+
+def test_run_scheduler_loop_registers_scheduler_from_inside_the_loop():
+    """Regression guard for the apscheduler 3.11 eager-start bug.
+
+    This drives `run_scheduler_loop` — the body of main()'s daemon thread —
+    rather than calling `build_scheduler()` directly, because the bug was in
+    the *ordering*, not in build_scheduler(). Building before `run_forever()`
+    raises RuntimeError("no running event loop") on apscheduler >= 3.11, and
+    the surrounding except/return swallows it, so the daily transcription
+    pass silently never registers on the box.
+
+    Restore the eager build and this test fails: `holder` stays empty.
+    """
+    import scheduler_service
+
+    holder: dict = {}
+    loop_holder: dict = {}
+    thread = threading.Thread(
+        target=scheduler_service.run_scheduler_loop,
+        args=(holder, loop_holder),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and "scheduler" not in holder:
+            time.sleep(0.01)
+
+        assert "scheduler" in holder, (
+            "run_scheduler_loop never registered the scheduler — "
+            "build_scheduler() was called before the loop was running"
+        )
+        sched = holder["scheduler"]
+        assert sched.running
+        jobs = sched.get_jobs()
+        assert len(jobs) == 1
+        assert "cron" in str(jobs[0].trigger).lower()
+    finally:
+        sched = holder.get("scheduler")
+        if sched is not None:
+            sched.shutdown(wait=False)
+        loop = loop_holder.get("loop")
+        if loop is not None:
+            loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)

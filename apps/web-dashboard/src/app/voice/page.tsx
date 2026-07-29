@@ -80,6 +80,7 @@ function VoicePageInner() {
         status={data.status}
         calibration={data.calibration}
         unavailable={data.unavailable}
+        enabled={data.enabled}
         loading={data.loading}
         noiseSustained={data.noiseSustained}
         profiles={profilesData.profiles}

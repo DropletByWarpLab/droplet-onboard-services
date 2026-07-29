@@ -587,9 +587,31 @@ export function parseReasoningTrace(args: {
 // were already emitted during the stream, so the terminal block skips
 // re-emitting them (guarded by `streamedTurn`).
 
+/**
+ * WARP-1602 (review B1/B2) — what a torn-down turn salvaged before it died.
+ *
+ * Both teardown paths (client abort, mid-stream transport death) leave
+ * `consumeChatStream` by THROWING, which used to skip `settle()` entirely and
+ * drop the emitter's buffer on the floor. On a DEFERRED turn that buffer is the
+ * only copy of the answer — nothing was streamed — so the user lost 100% of a
+ * partial answer that survived before deferral existed. Every throw now settles
+ * first and carries the verdict here.
+ */
+interface StreamTeardownPartial {
+  /** The buffer `settle()` handed back — this turn's raw content so far. */
+  raw: string;
+  /**
+   * True when `settle()` RELEASED that buffer to the wire as answer text (so
+   * `content_delta` events for it have already been emitted and the route's
+   * accumulator has it). False on a tool-call turn, where the buffer is
+   * quarantined analysis and must never surface as the answer.
+   */
+  released: boolean;
+}
+
 /** Thrown by the stream consumer when the client disconnected mid-generation. */
 class AgentStreamAborted extends Error {
-  constructor() {
+  constructor(readonly partial: StreamTeardownPartial) {
     super("client_aborted");
     this.name = "AgentStreamAborted";
   }
@@ -603,11 +625,17 @@ class AgentStreamAborted extends Error {
  * reach if its connection died mid-answer).
  */
 class AgentStreamPartialError extends Error {
-  constructor(readonly cause: unknown) {
+  constructor(
+    readonly cause: unknown,
+    readonly partial: StreamTeardownPartial,
+  ) {
     super("stream_interrupted");
     this.name = "AgentStreamPartialError";
   }
 }
+
+/** The partial an outside-the-consumer abort (no buffer at all) reports. */
+const NO_PARTIAL: StreamTeardownPartial = { raw: "", released: false };
 
 /** Name-based abort check (mirrors routes/llm.ts — robust to error re-wrapping). */
 function isAbortError(err: unknown): boolean {
@@ -825,11 +853,23 @@ export function providerReasoningOf(delta: {
   reasoning_content?: string | null;
   thinking?: string | null;
 }): string {
-  let out = "";
+  // FIRST-WINS, not concatenate (review). These three names are three SPELLINGS
+  // OF ONE CHANNEL, never three channels — no provider emits two of them with
+  // different content for the same delta. So if two are ever present they carry
+  // the same text, and concatenating yields it twice ("XX") on the wire and in
+  // the persisted trace. First-wins degrades to a duplicate being ignored,
+  // which is the safe direction: at worst we drop a copy of what we already
+  // have, where concatenating corrupts a trace the user reads.
+  //
+  // Unreachable on our transport today — ollama 0.30.8's `openai/openai.go`
+  // declares only `Reasoning`, and a live probe of all four turn shapes saw
+  // `reasoning_content` zero times — but the ordering is deliberate anyway:
+  // `reasoning` (what Ollama actually sends) is checked before the LiteLLM
+  // spelling, so the shipped path never depends on the tie-break.
   for (const v of [delta.reasoning, delta.reasoning_content, delta.thinking]) {
-    if (typeof v === "string" && v) out += v;
+    if (typeof v === "string" && v) return v;
   }
-  return out;
+  return "";
 }
 
 async function consumeChatStream(
@@ -876,6 +916,29 @@ async function consumeChatStream(
     }
   };
 
+  /**
+   * WARP-1602 (review B1/B2) — settle the emitter on a TEARDOWN path.
+   *
+   * A turn only leaves the normal exit through `settle()`, which is what
+   * releases a deferred buffer. Both throw paths used to bypass it, so on a
+   * deferred turn the whole partial answer was discarded: pressing Stop 400
+   * tokens into an answer left a blank screen and an empty DB row, and a
+   * mid-stream transport death did the same. Settling here restores the
+   * pre-deferral outcome — the partial reaches the wire (and therefore the
+   * route's `liveAssistantContent` accumulator, which is what the error-turn
+   * persistence path reads) and is handed to the caller.
+   *
+   * The tool-call verdict is taken from the fragments that DID arrive, so the
+   * WARP-1602 guarantee still holds where we have evidence to apply it: if
+   * tool-call fragments landed, this turn's content is analysis and `settle`
+   * quarantines it exactly as a completed tool-call turn would. Only with zero
+   * tool-call fragments is the buffer released as answer text.
+   */
+  const settleTeardown = (): StreamTeardownPartial => {
+    const { raw, contentReleased } = content.settle(toolOrder.length > 0);
+    return { raw, released: contentReleased };
+  };
+
   try {
     for await (const chunk of stream) {
       // WARP-329 — a mid-stream disconnect stops draining; breaking the
@@ -912,14 +975,24 @@ async function consumeChatStream(
       }
     }
   } catch (err) {
-    if (signal?.aborted || isAbortError(err)) throw new AgentStreamAborted();
+    if (signal?.aborted || isAbortError(err)) {
+      throw new AgentStreamAborted(settleTeardown());
+    }
     // Nothing emitted yet → let the loop fall back to blocking chat(). Already
     // emitted → a fallback would double the answer, so make it an error turn.
-    if (emittedAny) throw new AgentStreamPartialError(err);
+    //
+    // NOTE (review B2): `emittedAny` is deliberately left as-is, including the
+    // channel-reasoning flush. Relaxing it so a deferred turn could still fall
+    // back would buy a re-inferred full answer on a transport that just died,
+    // at the cost of re-emitting a reasoning_step the client already has — and
+    // it is mutually exclusive with salvaging the buffer, which is
+    // deterministic, free, and also fixes the abort path above (which never
+    // consults `emittedAny` at all). We salvage.
+    if (emittedAny) throw new AgentStreamPartialError(err, settleTeardown());
     throw err;
   }
 
-  if (signal?.aborted) throw new AgentStreamAborted();
+  if (signal?.aborted) throw new AgentStreamAborted(settleTeardown());
 
   // Flush the channel reasoning for a terminal turn (content, empty, or
   // reasoning-only) BEFORE releasing the content, so reasoning_step still
@@ -1131,13 +1204,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // WARP-329 — the result returned when the client disconnects mid-turn.
   // We don't emit a `done` event (the SSE consumer is gone) and the route
   // labels the persisted row "aborted" via its own `clientAborted` flag.
-  const abortedResult = (iterations: number): AgentResult => ({
-    message: { role: "assistant", content: "" },
-    trace,
-    iterations,
-    stop_reason: "error",
-    error: "client_aborted",
-  });
+  //
+  // WARP-1602 (review B1) — a torn-down STREAMED turn hands over whatever the
+  // emitter salvaged, so the answer the user was already reading survives the
+  // Stop button instead of being replaced by a blank row. `partial` is absent
+  // for the two aborts that happen OUTSIDE the stream consumer (between
+  // iterations, before a tool dispatch), where no buffer exists.
+  const abortedResult = (
+    iterations: number,
+    partial: StreamTeardownPartial = NO_PARTIAL,
+  ): AgentResult => teardownResult("client_aborted", iterations, partial);
 
   // WARP-1442 — SERVER-SIDE token streaming is used when the caller streams
   // (`onEvent` present, i.e. /api/llm/chat stream=true) AND a streaming
@@ -1158,6 +1234,62 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // trace — the polluted-turn diagnostics report it so an eval run can tell a
   // turn that quarantined analysis from one that never produced any.
   let quarantinedChars = 0;
+
+  /**
+   * WARP-1602 (review B1/B2) — the terminal for a turn that was torn down
+   * (client abort, mid-stream transport death) rather than finished.
+   *
+   * Before this, both teardowns returned `content: ""` and dropped
+   * `reasoningSteps`, so a Stop press or a dropped connection erased 100% of
+   * the work — on a DEFERRED turn that included the entire partial answer,
+   * which had never reached the wire and existed only in the emitter's buffer.
+   *
+   * What survives:
+   *   - `partial.released` → the buffer was answer text and `settle()` has
+   *     already emitted it as `content_delta`; it becomes `message.content`.
+   *   - `!partial.released` with a non-empty buffer → this was a tool-call turn
+   *     and the buffer is quarantined analysis, so it joins the reasoning trace
+   *     instead. It must NEVER become `content` (that is the WARP-1602 bug).
+   *   - `reasoningSteps` from earlier iterations, which `iteration_limit`
+   *     already kept and only these two paths discarded.
+   *
+   * Declared after `reasoningSteps` so it closes over the live array; the
+   * arrow bodies only run from inside the loop below.
+   */
+  const teardownResult = (
+    error: "client_aborted" | "stream_interrupted",
+    iterations: number,
+    partial: StreamTeardownPartial,
+  ): AgentResult => {
+    // The SAME parse + sanitize the terminal finalize applies, so a salvaged
+    // partial equals the `content_delta` events `settle()` just emitted — the
+    // WARP-1442 sum invariant holds on the teardown paths too.
+    const parsed = parseReasoningTrace({ content: partial.raw || null });
+    const visible = sanitizeFinalContent(parsed.cleanedContent);
+    const thisStep = [...parsed.reasoningSteps];
+    if (!partial.released && visible) {
+      // Tool-call turn: the buffer is analysis. It joins the trace and must
+      // never become `content` — that IS the WARP-1602 bug.
+      thisStep.push(visible);
+      quarantinedChars += visible.length;
+    }
+    const steps = [...reasoningSteps];
+    if (thisStep.length > 0) steps.push(thisStep.join("\n\n"));
+    const reasoning =
+      steps.length > 0 ? steps.join(REASONING_STEP_SEPARATOR) : null;
+    return {
+      message: {
+        role: "assistant",
+        content: partial.released ? visible : "",
+        ...(reasoning != null ? { reasoning } : {}),
+      },
+      trace,
+      iterations,
+      stop_reason: "error",
+      error,
+      ...(steps.length > 0 ? { reasoningSteps: steps } : {}),
+    };
+  };
 
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
@@ -1254,20 +1386,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         streamWireEmitted = streamed.wireEmitted;
         streamContentReleased = streamed.contentReleased;
       } catch (err) {
-        if (req.signal?.aborted || isAbortError(err)) return abortedResult(iter);
+        if (req.signal?.aborted || isAbortError(err)) {
+          // WARP-1602 (review B1) — carry whatever the emitter salvaged. On a
+          // DEFERRED turn this is the ONLY copy of the partial answer: nothing
+          // reached the wire during the stream, so without it a Stop press
+          // blanked the screen and persisted an empty row.
+          return abortedResult(
+            iter,
+            err instanceof AgentStreamAborted ? err.partial : NO_PARTIAL,
+          );
+        }
         if (err instanceof AgentStreamPartialError) {
           // The stream died AFTER partial content was emitted — falling back to
           // blocking would double the answer. Surface an honest error turn (the
-          // same outcome a blocking connection death would reach).
+          // same outcome a blocking connection death would reach) — but WITH
+          // the partial answer, not blank (review B2).
           const error = "stream_interrupted";
           emit({ type: "done", iterations: iter, stop_reason: "error", error });
-          return {
-            message: { role: "assistant", content: "" },
-            trace,
-            iterations: iter,
-            stop_reason: "error",
-            error,
-          };
+          return teardownResult(error, iter, err.partial);
         }
         // Stream failed BEFORE emitting anything (e.g. gateway non-200 at open)
         // — fall back to the blocking path so the turn still completes.

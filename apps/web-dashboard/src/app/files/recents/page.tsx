@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Clock } from "lucide-react";
 import { FileListSimple } from "@/components/FileManager/FileListSimple";
 import { useRecents } from "@/lib/hooks/useRecents";
+import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
 import { getDownloadUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
@@ -31,7 +32,10 @@ const BUCKET_ORDER = ["Today", "Yesterday", "This week", "Earlier"] as const;
 
 export default function RecentsPage() {
   const router = useRouter();
-  const { items, isLoading } = useRecents(50);
+  const { items, isLoading, error, refresh } = useRecents(50);
+  // WARP-1549 — recents span every library the user can reach; without this
+  // the whole list reads as though it were all personal.
+  const attribution = useSpaceAttribution();
   const { toast } = useToast();
 
   const grouped = useMemo(() => {
@@ -49,13 +53,10 @@ export default function RecentsPage() {
     }));
   }, [items]);
 
+  // WARP-1549: routes with the row's resolved space, so a recently-edited
+  // library file opens in its library instead of the personal space.
   const handleOpen = (file: FileEntryInfo) => {
-    if (file.isDirectory) {
-      router.push(`/files?path=${encodeURIComponent(file.path)}`);
-    } else {
-      const parent = file.path.replace(/\/[^/]*$/, "") || "/";
-      router.push(`/files?path=${encodeURIComponent(parent)}`);
-    }
+    router.push(attribution.href(file));
   };
 
   const handleDownload = (file: FileEntryInfo) => {
@@ -84,10 +85,17 @@ export default function RecentsPage() {
         </Link>
       }
     >
-      {items.length === 0 && !isLoading ? (
+      {/* WARP-1555: with nothing to group, a single FileListSimple owns all
+          three degenerate states — error (with retry), loading, empty — so a
+          failed fetch can never masquerade as "No recent files". */}
+      {items.length === 0 ? (
         <FileListSimple
           files={[]}
-          isLoading={false}
+          isLoading={isLoading}
+          error={error}
+          errorTitle="We couldn't load your recent files"
+          errorDescription="The box didn't answer when we asked what you'd worked on lately. Your files are untouched — try again in a moment."
+          onRetry={() => refresh()}
           emptyIcon={Clock}
           emptyTitle="No recent files"
           emptyDescription="Upload or modify a file and it'll show up here."
@@ -95,9 +103,6 @@ export default function RecentsPage() {
         />
       ) : (
         <div className="space-y-6">
-          {isLoading && items.length === 0 && (
-            <FileListSimple files={[]} isLoading={true} onOpen={handleOpen} />
-          )}
           {grouped.map((group) => (
             <section key={group.label}>
               <h2
@@ -110,6 +115,8 @@ export default function RecentsPage() {
                 files={group.files}
                 isLoading={false}
                 showLocation
+                spaceLabel={(file) => attribution.label(file.path)}
+                locationLabel={(file) => attribution.location(file.path)}
                 onOpen={handleOpen}
                 onDownload={handleDownload}
               />

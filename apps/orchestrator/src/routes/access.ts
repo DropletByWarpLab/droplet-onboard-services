@@ -8,7 +8,7 @@
  *   GET    /api/access/roles             — { roles: AccessRole[] }
  *   POST   /api/access/roles             — create; { sourceRoleId } duplicates
  *   GET    /api/access/roles/:id         — { role }
- *   PATCH  /api/access/roles/:id         — update / archive ({ state })
+ *   PATCH  /api/access/roles/:id         — update / archive + restore ({ state })
  *   DELETE /api/access/roles/:id         — blocked while in use (reassign first)
  *   POST   /api/access/roles/:id/assign  — { userIds: [] } → { syncState }
  *
@@ -19,7 +19,9 @@
  *   - feature-grant levels re-clamp to the §9 catalog ceiling of the
  *     role's startingPoint (access-catalog.service);
  *   - connector read_write grants clamp to read on non-admin starting
- *     points (O-2 floor honesty);
+ *     points, and Guest-based roles hold NO connector grant at all —
+ *     a guest sits below O-2's family-and-up read floor, so the row could
+ *     never take effect (O-2 floor honesty; WARP-1578);
  *   - mayOperateLocks is forced false without a smart_home feature grant;
  *   - startingPoint ∈ {admin, family, guest} via the T2 guard vocabulary —
  *     never owner/service;
@@ -41,7 +43,19 @@
  * "box default = unmanaged" (T7's reviewed semantics — never an implicit
  * push of "none"/unlimited), so the response surfaces
  * `retainedQuotaCount` — how many members keep their current NC quota
- * until edited — for the UI's honest confirm line.
+ * until edited — for the UI's honest confirm line (consumed by the role
+ * editor as of WARP-1576).
+ *
+ * Archive/restore (WARP-1560, WARP-1569). `state` moves both ways through
+ * this same PATCH, and each TRANSITION — not the requested value — gets its
+ * own Activity string ("Access role archived" / "Access role restored"); a
+ * PATCH restating the state a role already holds is an ordinary update.
+ * Archiving stops the role MANAGING anything (unassignable, and the usage
+ * reconciler stands its defaults down) while never stripping access from
+ * the people who hold it (`effective-access.service.ts` deliberately does
+ * not read `state`). Restoring therefore has a usage tail that archiving
+ * does not: the members it stopped managing converge back onto its storage
+ * default, so a restore kicks the reconciler and answers `pending`.
  */
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -49,6 +63,10 @@ import type { ModuleId, PrismaClient, Prisma } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import {
+  AccessPreconditionError,
+  isAccessPreconditionError,
+} from "../lib/access-precondition.js";
 import {
   RoleMutationRefusedError,
   SERIALIZABLE_TX,
@@ -64,6 +82,7 @@ import { kickReconcile } from "../services/department-reconciler.service.js";
 import {
   GATEABLE_MODULE_IDS,
   GRANTABLE_TOOL_DOMAINS,
+  clampConnectorLevel,
   clampLevel,
   type ConnectorLevel,
   type FeatureLevel,
@@ -167,13 +186,15 @@ function normalizeGrants(args: {
     moduleId: g.moduleId as ModuleId,
     level: clampLevel(args.startingPoint, g.moduleId, g.level),
   }));
-  const connectorGrants = args.connectorGrants.map((g) => ({
-    provider: g.provider,
-    level:
-      g.level === "read_write" && args.startingPoint !== "admin"
-        ? ("read" as ConnectorLevel)
-        : g.level,
-  }));
+  // O-2's connector floors, both of them, from the one authoritative helper:
+  // read_write only on Admin-based roles, and (WARP-1578) NO grant at all on
+  // Guest-based roles — a guest sits below O-2's family-and-up read floor, so
+  // the row could never take effect and storing it would let an operator save
+  // a setting that silently does nothing.
+  const connectorGrants = args.connectorGrants.flatMap((g) => {
+    const level = clampConnectorLevel(args.startingPoint, g.level);
+    return level === null ? [] : [{ provider: g.provider, level }];
+  });
   const smartHomeOn = featureGrants.some((g) => g.moduleId === "smart_home");
   return {
     featureGrants,
@@ -305,23 +326,6 @@ async function createRoleTx(
 
 function isForeignKeyError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2003";
-}
-
-/**
- * Route-level precondition failure raised from INSIDE a transaction (404 /
- * 409 outcomes that must be decided against transactionally-consistent
- * reads — review B2). Throwing rolls the transaction back; the route catch
- * maps `status`/`body` exactly like RoleMutationRefusedError. Kept local:
- * these are HTTP shapes, not guard rails.
- */
-class AccessPreconditionError extends Error {
-  constructor(
-    readonly status: number,
-    readonly body: Record<string, unknown>,
-  ) {
-    super(typeof body.error === "string" ? body.error : "Precondition failed");
-    this.name = "AccessPreconditionError";
-  }
 }
 
 const ROLE_IN_USE = {
@@ -593,6 +597,12 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         const storageCleared =
           storageChanged && nextStorage === null && existing.storageQuotaBytes !== null;
 
+        // WARP-1560 — the two state TRANSITIONS, not the requested value: a
+        // PATCH restating the state a role is already in is an ordinary
+        // update and must not claim otherwise in Activity.
+        const archivedNow = body.state === "archived" && existing.state !== "archived";
+        const restoredNow = body.state === "active" && existing.state !== "active";
+
         await prisma.$transaction(async (tx) => {
           await tx.accessRole.update({
             where: { id: existing.id },
@@ -736,12 +746,32 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           }
         }
 
-        const archivedNow = body.state === "archived" && existing.state !== "archived";
+        // WARP-1560 / WARP-1569 — a RESTORE is a usage-convergence event in
+        // its own right: the reconciler stopped pushing this role's storage
+        // default the moment it was archived, so bringing the role back means
+        // every member without a person-level quota converges onto it again.
+        // Kick the same debounced pass a set/changed default kicks, and
+        // report `pending` — `synced` would be a lie for up to a full tick.
+        // Read the POST-patch default (a restore that clears the default in
+        // the same request converges nothing), and never double-kick when the
+        // storage branch above already did. ARCHIVING is deliberately not the
+        // mirror image: it stops managing rather than pushing anything, so
+        // there is nothing to wait for and nothing to report.
+        const storageAfter = nextStorage !== undefined ? nextStorage : existing.storageQuotaBytes;
+        if (restoredNow && storageAfter !== null && memberCount > 0 && !usageConverging) {
+          kickReconcile();
+          usageConverging = true;
+        }
+
         await recordActivity({
           kind: "auth",
           severity: "ok",
           sourceIcon: "shield",
-          what: archivedNow ? "Access role archived" : "Access role updated",
+          what: archivedNow
+            ? "Access role archived"
+            : restoredNow
+              ? "Access role restored"
+              : "Access role updated",
           sub: updated.name,
           refs: {
             actor: req.user?.username ?? null,
@@ -902,15 +932,8 @@ export function createAccessRouter(prisma: PrismaClient): Router {
 
         await prisma.$transaction(async (tx) => {
           const role = await tx.accessRole.findUnique({ where: { id: req.params.id } });
-          if (!role) {
-            throw new AccessPreconditionError(404, { error: "Role not found" });
-          }
-          if (role.state === "archived") {
-            throw new AccessPreconditionError(409, {
-              error: "This role is archived — restore it before assigning people.",
-              code: "ACCESS_ROLE_ARCHIVED",
-            });
-          }
+          if (!role) throw AccessPreconditionError.roleNotFound();
+          if (role.state === "archived") throw AccessPreconditionError.roleArchived();
           startingPoint = role.startingPoint as AssignableRole;
           roleName = role.name;
 
@@ -928,7 +951,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           const foundIds = new Set(targets.map((t) => t.id));
           const missing = parsed.data.userIds.filter((id) => !foundIds.has(id));
           if (missing.length > 0) {
-            throw new AccessPreconditionError(404, { error: "User not found", missing });
+            throw AccessPreconditionError.userNotFound(missing);
           }
 
           changed = targets.filter(
@@ -1010,10 +1033,10 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // follows) — the UI's "Saved. Applying…" line keys off pending.
         res.json({ syncState: "pending" });
       } catch (err) {
-        if (err instanceof AccessPreconditionError) {
-          return res.status(err.status).json(err.body);
-        }
-        if (err instanceof RoleMutationRefusedError) {
+        // One shape for both: a precondition and a rail refusal are the same
+        // story to the caller — the transaction unwound, nothing was applied
+        // (WARP-1583).
+        if (isAccessPreconditionError(err) || err instanceof RoleMutationRefusedError) {
           return res.status(err.status).json(err.toJSON());
         }
         next(err);

@@ -43,6 +43,7 @@ import {
   InvalidSetupStepError,
   SetupNotCompleteError,
 } from "./setup.service.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 // ── In-memory applianceSetup singleton store ──
 //
@@ -117,13 +118,28 @@ function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } 
   // monotonic floor compare AND its write happen inside ONE Serializable
   // transaction. Same callback-against-the-store shape as
   // setup-claim.test.ts / network.schedules.test.ts.
-  const $transaction = vi.fn(
-    async (
-      fn: (tx: typeof prisma) => Promise<unknown>,
-      _opts?: { isolationLevel?: string },
-    ): Promise<unknown> => fn(prisma),
-  );
-  return Object.assign(prisma, { $transaction });
+  // WARP-1570: the shared seam replaces the local stand-in. It records the
+  // options (so the "ONE Serializable transaction" assertion below keeps its
+  // teeth), and additionally rolls the singleton row back when the callback
+  // throws — which the old stand-in did not, so a partial write survived a
+  // refusal unnoticed. `row` is REASSIGNED by the upsert, hence the accessor
+  // form: a bare reference could not see the rebinding.
+  const seam = createTransactionSeam({
+    client: () => out,
+    stores: {
+      row: {
+        get: () => row,
+        set: (next: unknown) => {
+          row = next as typeof row;
+        },
+      },
+    },
+  });
+  const out = Object.assign(prisma, {
+    $transaction: seam.$transaction,
+    _seam: () => seam,
+  });
+  return out;
 }
 
 type PrismaMock = ReturnType<typeof createPrismaMock>;

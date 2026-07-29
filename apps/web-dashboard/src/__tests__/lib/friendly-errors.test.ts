@@ -404,12 +404,21 @@ describe("translateError — projects domain (WARP-1154/1155)", () => {
   // { error: "module_disabled" } and the raw snake_case code reached a toast
   // verbatim. The projects domain must translate it to honest, permanent
   // "not enabled" copy — never "server error, try again".
-  it("maps module_disabled to honest 'not enabled' copy", () => {
+  // WARP-1528: `module_disabled` is now emitted by the per-person feature gate
+  // too (identical body by design — a denial must not reveal what other people
+  // can reach). The copy therefore must NOT name the workspace as the reason.
+  it("maps module_disabled to honest, REASON-FREE 'not available' copy", () => {
     const result = translateError(
       { code: "module_disabled", status: 404, message: "module_disabled" },
       "projects",
     );
-    expect(result).toContain("Projects isn't enabled on this Droplet");
+    expect(result).toContain("Projects isn't available");
+    // It must not assert the box-wide reason it can no longer know.
+    expect(result).not.toContain("isn't enabled on this Droplet");
+    // Both possibilities are named, plus the way out.
+    expect(result.toLowerCase()).toMatch(/switched off/);
+    expect(result.toLowerCase()).toMatch(/part of your access/);
+    expect(result.toLowerCase()).toMatch(/owner or admin/);
     expect(result).not.toContain("module_disabled");
     expect(result.toLowerCase()).not.toMatch(/try again|server error/);
   });

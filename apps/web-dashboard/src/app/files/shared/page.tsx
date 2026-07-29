@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import {
   ArrowLeft,
+  AlertTriangle,
   Share2,
   Globe,
   User,
@@ -12,7 +13,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useSharedWithMe, useSharedByMe } from "@/lib/hooks/useShares";
+import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
+import { LibraryChip } from "@/components/FileManager/FileListSimple";
 import type { ShareDetail } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 
@@ -54,10 +57,20 @@ export default function SharedPage() {
   // WARP-941 — real outbound listing (GET /api/files/shares-by-me) replaces
   // the old "Outbound shares coming soon" placeholder.
   const byMe = useSharedByMe();
+  // WARP-1549 — share rows kept only the basename, so a shared file gave no
+  // hint of where it lives, let alone which library. Both tabs carry
+  // home-relative paths for the CURRENT user (inbound rows are the recipient's
+  // own mount target, outbound rows the owner's own path), so both resolve
+  // against this viewer's space list.
+  const attribution = useSpaceAttribution();
   const { toast } = useToast();
 
-  const visibleShares: ShareDetail[] = tab === "with-me" ? withMe.items : byMe.items;
-  const isLoading = tab === "with-me" ? withMe.isLoading : byMe.isLoading;
+  // WARP-1555: read every state off the tab's own hook — including `error`,
+  // which both hooks always exposed and this page used to drop on the floor.
+  const active = tab === "with-me" ? withMe : byMe;
+  const visibleShares: ShareDetail[] = active.items;
+  const isLoading = active.isLoading;
+  const error = active.error;
 
   return (
     <ShellPage
@@ -92,7 +105,36 @@ export default function SharedPage() {
         </button>
       </div>
 
-      {isLoading && visibleShares.length === 0 && (
+      {/* WARP-1555: a failed shares fetch is not "nothing shared with you".
+          Checked ahead of the loading state because SWR re-raises `isLoading`
+          on every backoff retry, and gated on an empty list so a failed
+          background poll never wipes rows already on screen. */}
+      {error && visibleShares.length === 0 && (
+        <div className="card" role="alert">
+          <div className="empty">
+            <span className="ei"><AlertTriangle size={24} /></span>
+            <span className="eh">
+              {tab === "with-me"
+                ? "We couldn't load what's been shared with you"
+                : "We couldn't load what you've shared"}
+            </span>
+            <span style={{ maxWidth: "44ch" }}>
+              The box didn&apos;t answer when we asked for your shares. Nothing
+              has been unshared — try again in a moment.
+            </span>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => active.refresh()}
+              style={{ marginTop: 10 }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!error && isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span>Loading…</span>
@@ -100,7 +142,7 @@ export default function SharedPage() {
         </div>
       )}
 
-      {tab === "with-me" && !isLoading && visibleShares.length === 0 && (
+      {!error && tab === "with-me" && !isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span className="ei"><Share2 size={24} /></span>
@@ -112,7 +154,7 @@ export default function SharedPage() {
         </div>
       )}
 
-      {tab === "by-me" && !isLoading && visibleShares.length === 0 && (
+      {!error && tab === "by-me" && !isLoading && visibleShares.length === 0 && (
         <div className="card">
           <div className="empty">
             <span className="ei"><Share2 size={24} /></span>
@@ -131,6 +173,15 @@ export default function SharedPage() {
             {visibleShares.map((share) => {
               const { label, icon: TypeIcon } = formatShareType(share.shareType);
               const fileName = (share.path || "").split("/").pop() || share.path;
+              // WARP-1549: the parent path used to be thrown away by the
+              // `.split("/").pop()` above — two files with the same name were
+              // indistinguishable. It comes back here, expressed inside its
+              // own library when we can place it.
+              const library = share.path ? attribution.label(share.path) : null;
+              const parent = share.path ? attribution.location(share.path) : null;
+              // A bare "/" adds nothing — it's the root of wherever the row
+              // already says it is.
+              const location = parent && parent !== "/" ? parent : null;
               return (
                 <div key={share.id} className="lrow" style={{ padding: "12px 16px" }}>
                   <span className="ri brand">
@@ -143,8 +194,13 @@ export default function SharedPage() {
                       {" · "}
                       {label}
                       {share.stime ? ` · ${formatStime(share.stime)}` : ""}
+                      {location ? ` · ${location}` : ""}
                     </span>
                   </span>
+                  {/* Its own flex child of `.lrow`, not nested inside `.nm` —
+                      that span owns the filename's ellipsis truncation and
+                      turning it into a flex container would break it. */}
+                  {library && <LibraryChip label={library} />}
                   {share.url && (
                     <a
                       href={share.url}

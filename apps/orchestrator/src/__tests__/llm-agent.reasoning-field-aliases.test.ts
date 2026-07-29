@@ -40,12 +40,22 @@ describe("providerReasoningOf — every spelling the provider fleet uses", () =>
     expect(providerReasoningOf({ reasoning: "" })).toBe("");
   });
 
-  it("is well-defined if a provider ever populates more than one", () => {
-    // Not expected in practice — documenting the order rather than leaving it
-    // to field-declaration luck, so this can't change silently under a refactor.
+  it("takes the FIRST populated spelling and ignores the rest, never concatenating", () => {
+    // These are three spellings of ONE channel, never three channels. If two
+    // are ever populated they carry the same text, so concatenating would put
+    // it on the wire twice and persist a doubled trace the user reads.
+    // First-wins degrades to ignoring a duplicate, which is the safe direction.
     expect(
       providerReasoningOf({ reasoning: "a", reasoning_content: "b", thinking: "c" })
-    ).toBe("abc");
+    ).toBe("a");
+    // The realistic shape of the hazard: the SAME text under two names.
+    // Concatenating turned this into "weighing itweighing it".
+    expect(
+      providerReasoningOf({ reasoning: "weighing it", reasoning_content: "weighing it" })
+    ).toBe("weighing it");
+    // Order is deliberate: `reasoning` is what Ollama actually sends, so the
+    // shipped path never depends on the tie-break at all.
+    expect(providerReasoningOf({ reasoning_content: "b", thinking: "c" })).toBe("b");
   });
 
   it("ignores non-string values rather than coercing them", () => {
