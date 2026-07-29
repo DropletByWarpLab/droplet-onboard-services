@@ -1,0 +1,29 @@
+[Unit]
+Description=Droplet rack panel — hand the console back to the operator (WARP-1639)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-1639
+# THE DEBUG BUTTON. Started on demand — never enabled — by:
+#   * the device-bridge's POST /panel/console, which is what the panel's own
+#     on-screen debug affordance calls (the container cannot chvt, so the
+#     privileged half lives here); polkit grants the droplet user the `start`
+#     verb on this unit and nothing else (50-droplet-device-bridge.rules).
+#   * an operator over SSH: `systemctl start droplet-panel-console.service`
+#
+# Rebinds fbcon and switches to a login VT, so the rack panel shows a prompt.
+# Sticky for DROPLET_PANEL_CONSOLE_TTL (default 900s) so a healthy display
+# service cannot yank the panel back mid-debug; after that the deadman
+# reclaims it automatically.
+ConditionPathExists=/sys/class/vtconsole
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-panel-console.sh release
+
+ProtectHome=yes
+PrivateTmp=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+
+# Deliberately NO [Install] section: this is an on-demand recovery action, not
+# something that runs at boot.

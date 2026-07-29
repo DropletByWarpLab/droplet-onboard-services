@@ -21,6 +21,36 @@
 # complementary — the bake makes the common path fast + offline-safe, the
 # attach retry covers the rest.
 FROM openwrt/rootfs:x86_64-24.10.2
+
+# WARP-1639 — stop procd opening the HOST's consoles.
+#
+# This container runs `command: /sbin/init` (procd) with `privileged: true`, so
+# it gets the host's real device nodes. Stock openwrt/rootfs ships an
+# /etc/inittab containing:
+#     ttyS0::askfirst:/usr/libexec/login.sh
+#     hvc0::askfirst:/usr/libexec/login.sh
+#     tty1::askfirst:/usr/libexec/login.sh
+# procd therefore spawns BusyBox login shells on the host's real console,
+# racing getty@tty1. Verified live on the mini-rack box: the container held an
+# fd on the host's /dev/tty1, and the physical console showed the Ubuntu
+# `droplet-sys login:` prompt interleaved with OpenWrt preinit spam
+# ("Press the [f] key... failsafe mode", "kmodloader: no module folders").
+#
+# The tell that you are looking at this and not a broken password: at that
+# prompt the PASSWORD ECHOES IN PLAINTEXT, because it is not a getty at all.
+# Also note `fuser -v /dev/tty1` LIES here (PID namespace) — prove it by
+# scanning /proc/*/fd as root instead.
+#
+# This matters beyond the rack panel: the same grab will take the Pi's console
+# when the networking containers move there, so it is fixed in the image rather
+# than papered over at runtime (a `docker exec ... sed` lives in the writable
+# layer and dies on the next recreate).
+#
+# Deliberately NOT fixed by dropping `privileged: true` — the compose has a
+# staged hardening block right below that service marked "do NOT enable until
+# it passes on a real single-box".
+RUN sed -i '/^tty[0-9]*::/d; /^ttyS[0-9]*::/d; /^tts\/[0-9]*::/d; /^hvc[0-9]*::/d; /^console::/d' /etc/inittab
+
 RUN mkdir -p /var/lock \
  && opkg update \
  && opkg install \

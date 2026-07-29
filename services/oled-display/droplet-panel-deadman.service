@@ -1,0 +1,21 @@
+[Unit]
+Description=Droplet rack panel — deadman: return the console if the display service dies (WARP-1639)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-1639
+ConditionPathExists=/sys/class/vtconsole
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-panel-deadman.sh
+# Reads the bearer + internal-mTLS bundle paths, same file the other host
+# units use. "-" => tolerate the file being absent.
+EnvironmentFile=-/etc/droplet/device-bridge.env
+# The whole point is to run when things are broken, so never let a wedged
+# probe pile up runs.
+TimeoutStartSec=30
+
+ProtectHome=yes
+PrivateTmp=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true

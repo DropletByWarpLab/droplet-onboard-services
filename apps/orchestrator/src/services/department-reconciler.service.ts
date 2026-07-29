@@ -10,6 +10,18 @@
  * gets reassigned on NC reinstall; UUID-keyed Department rows survive
  * that, the cached `ncGroupfolderId` doesn't).
  *
+ * WARP-1557 extends that read by exactly one narrow case, on the FAILED-ROW
+ * SWEEP ONLY: a row that has already had an attempt whose outcome could not
+ * be confirmed gets its NC state compared against the Prisma-derived intent
+ * before any write is re-issued (`provisionDepartment({ verifyOnFailure })`).
+ * Without it the reconciler had no way to observe that reality already
+ * matched intent — it could only re-issue the write that was failing, which
+ * is why two departments on the .87 box logged `departmentsConverged: 0,
+ * departmentsStillFailed: 2` every five minutes forever while Nextcloud held
+ * both folders fully provisioned. Intent is still Prisma's alone; the active-
+ * row drift pass below still overwrites unconditionally. The ADR-029
+ * reasoning lives on `folderMatchesIntent` in the provisioner.
+ *
  * Four independent sweeps per tick:
  *   1. Department state machine — pending/provisioning/failed rows are
  *      (re)provisioned; archiving rows are (re)archived; every ACTIVE
@@ -78,6 +90,56 @@ const DEPARTMENT_SWEEP_STATES = [
   "archive_failed",
 ] as const;
 
+/**
+ * WARP-1557 — the states that mean "this row has already had at least one
+ * attempt whose outcome we could not confirm". Rows entering the sweep in one
+ * of these get `verifyOnFailure`: their NC state is checked against intent
+ * before anything is re-written (see department-provisioner.service.ts).
+ *
+ * `pending` is deliberately EXCLUDED — a never-attempted row has no prior
+ * write that could have landed, so there is nothing to verify and no reason
+ * to spend the read. This is what keeps the ADR-029 read-back exception
+ * scoped to the retry path.
+ *
+ * `provisioning` and `archiving` are in here because they are the RE-VERIFY
+ * states: WARP-1557 parks an ambiguous (5xx / timeout / transport) write
+ * outcome there instead of in a terminal failure state, and a row left
+ * mid-flight by a process restart lands there too. Both mean exactly "a write
+ * may or may not have taken effect".
+ */
+const DEPARTMENT_REVERIFY_STATES = new Set<string>([
+  "provisioning",
+  "failed",
+  "archiving",
+  "archive_failed",
+]);
+
+/**
+ * WARP-1557 — how many consecutive non-converged ticks a row may accumulate
+ * before it is escalated. At the 5-minute cron interval this is 30 minutes,
+ * comfortably past any transient NC restart but far short of the "hours"
+ * the .87 box spent silently looping.
+ *
+ * Two things happen at the threshold: the log line escalates from warn to
+ * error and the row is counted in `departmentsStuck`, AND a row still parked
+ * in a non-terminal RE-VERIFY state is demoted to its terminal failure state.
+ * That demotion is what makes the re-verify state *bounded* — an operator
+ * looking at the dashboard must not see "Setting up…" forever when the truth
+ * is "this has been failing for half an hour".
+ */
+const STUCK_TICK_THRESHOLD = 6;
+
+/**
+ * WARP-1557 — consecutive non-converged tick counts, keyed by department id.
+ *
+ * Deliberately in-memory: this is an alerting/escalation aid, not truth, and
+ * it must not cost a schema column or a write per row per tick. A process
+ * restart resets the counters, which at worst delays an escalation by
+ * `STUCK_TICK_THRESHOLD` ticks — it can never lose a row, because the row's
+ * own `state` (Prisma, durable) is what actually drives the retry.
+ */
+const consecutiveNonConvergedTicks = new Map<string, number>();
+
 // WARP-1257: `failed` and `remove_failed` are BOTH swept — `failed` retries
 // down the sync path, `remove_failed` down the removal path.
 const MEMBERSHIP_SWEEP_STATES = [
@@ -91,6 +153,16 @@ export interface ReconcileResult {
   departmentsSwept: number;
   departmentsConverged: number;
   departmentsStillFailed: number;
+  // WARP-1557: rows parked in a non-terminal RE-VERIFY state this tick
+  // (`provisioning`/`archiving`) because their write outcome was ambiguous —
+  // a 5xx/timeout that may or may not have landed. Distinct from
+  // `departmentsStillFailed`, which counts unambiguous rejections.
+  departmentsReverifying: number;
+  // WARP-1557: rows that have failed to converge for STUCK_TICK_THRESHOLD
+  // consecutive ticks. THE loud signal for the .87 failure mode — a
+  // department stuck for hours previously produced only a debug-level tick
+  // line and a dashboard chip that plain members cannot see.
+  departmentsStuck: number;
   membershipsSwept: number;
   membershipsSynced: number;
   membershipsFailed: number;
@@ -271,10 +343,89 @@ interface DepartmentSweepRow {
   ncGroupfolderId: number | null;
 }
 
+/**
+ * WARP-1557 — terminal failure state matching a row's original intent, used
+ * when a bounded re-verify has gone on long enough that "unconfirmed" stops
+ * being an honest description.
+ */
+function terminalFailureStateFor(state: string): "failed" | "archive_failed" {
+  return state === "archiving" || state === "archive_failed"
+    ? "archive_failed"
+    : "failed";
+}
+
+/**
+ * WARP-1557 — the louder signal the ticket asks for (item 5).
+ *
+ * Before this, a department failing every 5-minute tick for hours produced
+ * exactly one debug-level line (`departmentsStillFailed: 2`) plus an
+ * ActivityRow rendered as an owner/admin-only "Needs attention" chip. Plain
+ * members — the people who lost access — saw nothing at all, and neither did
+ * anything watching logs at the default level.
+ *
+ * Now each non-converged row carries a consecutive-tick count that escalates
+ * warn → error at the threshold, is reported out of the tick as
+ * `departmentsStuck`, and bounds the re-verify state by demoting a row that
+ * has been "unconfirmed" for too long to its terminal failure state.
+ *
+ * Returns true if the row is stuck (at or past the threshold).
+ */
+async function trackNonConvergedRow(
+  prisma: PrismaClient,
+  row: DepartmentSweepRow,
+  currentState: string,
+): Promise<boolean> {
+  const ticks = (consecutiveNonConvergedTicks.get(row.id) ?? 0) + 1;
+  consecutiveNonConvergedTicks.set(row.id, ticks);
+  const stuck = ticks >= STUCK_TICK_THRESHOLD;
+
+  const detail = {
+    departmentId: row.id,
+    name: row.name,
+    fromState: row.state,
+    currentState,
+    consecutiveTicks: ticks,
+    approxMinutesStuck: ticks * 5,
+  };
+
+  if (stuck) {
+    logger.error(
+      detail,
+      "WARP-1557: department has failed to converge for many consecutive ticks — manual intervention likely required",
+    );
+  } else {
+    logger.warn(detail, "department did not converge this tick; will retry");
+  }
+
+  // Bound the RE-VERIFY state: an ambiguous outcome is allowed to stay
+  // "unconfirmed" for a while, but not indefinitely. Past the threshold the
+  // row is demoted to the terminal failure state matching its intent, so the
+  // operator-facing surface stops implying work is in progress.
+  if (stuck && !currentState.endsWith("failed")) {
+    const terminal = terminalFailureStateFor(currentState);
+    await prisma.department.update({
+      where: { id: row.id },
+      data: { state: terminal },
+    });
+    logger.error(
+      { ...detail, demotedTo: terminal },
+      "WARP-1557: re-verify budget exhausted; parking row in its terminal failure state",
+    );
+  }
+
+  return stuck;
+}
+
 async function sweepDepartments(
   prisma: PrismaClient,
   adminToken: string,
-): Promise<{ swept: number; converged: number; stillFailed: number }> {
+): Promise<{
+  swept: number;
+  converged: number;
+  stillFailed: number;
+  reverifying: number;
+  stuck: number;
+}> {
   const rows = (await prisma.department.findMany({
     where: { state: { in: [...DEPARTMENT_SWEEP_STATES] } },
     select: { id: true, name: true, kind: true, state: true, ncGroupfolderId: true },
@@ -291,17 +442,27 @@ async function sweepDepartments(
 
   let converged = 0;
   let stillFailed = 0;
+  let reverifying = 0;
+  let stuck = 0;
 
   for (const row of rows) {
+    // WARP-1557: rows that have already had an unconfirmed attempt get the
+    // bounded verify step — their NC state is compared against the
+    // Prisma-derived intent before any write is re-issued, and every write
+    // they do make confirms its own postcondition on failure. `pending` rows
+    // (never attempted) do not, which is what keeps this scoped to the retry
+    // path. See ProvisionOptions.verifyOnFailure.
+    const verifyOnFailure = DEPARTMENT_REVERIFY_STATES.has(row.state);
+
     // WARP-1257: route on ORIGINAL intent. `archiving` and its failure state
     // `archive_failed` retry down the archive path; `pending`/`provisioning`/
     // `failed` funnel through the idempotent provision path. Never re-provision
     // a row whose operator intent was archival just because a transient NC error
     // parked it in a failure state — that silently un-archives the department.
     if (row.state === "archiving" || row.state === "archive_failed") {
-      await archiveDepartment(prisma, row.id);
+      await archiveDepartment(prisma, row.id, { verifyOnFailure });
     } else {
-      await provisionDepartment(prisma, row.id);
+      await provisionDepartment(prisma, row.id, { verifyOnFailure });
     }
 
     const after = await prisma.department.findUnique({
@@ -311,6 +472,8 @@ async function sweepDepartments(
 
     if (after?.state === "active" || after?.state === "archived") {
       converged += 1;
+      // WARP-1557: converged — drop any stuck-tracking for this row.
+      consecutiveNonConvergedTicks.delete(row.id);
       await recordActivity({
         kind: "system",
         severity: "ok",
@@ -320,20 +483,41 @@ async function sweepDepartments(
         refs: { departmentId: row.id, fromState: row.state, toState: after.state },
         actor: { type: "system" },
       });
-    } else if (after?.state === "failed" || after?.state === "archive_failed") {
-      stillFailed += 1;
+    } else if (after?.state) {
+      // WARP-1557: split the two non-converged outcomes. `provisioning` /
+      // `archiving` mean "the write may have landed, re-verify next tick";
+      // `failed` / `archive_failed` mean "the write was rejected".
+      const isTerminalFailure =
+        after.state === "failed" || after.state === "archive_failed";
+      if (isTerminalFailure) {
+        stillFailed += 1;
+      } else {
+        reverifying += 1;
+      }
+
+      const wasStuck = await trackNonConvergedRow(prisma, row, after.state);
+      if (wasStuck) stuck += 1;
+
       // A row that entered this sweep already in a failure state (provision
       // `failed` or archive `archive_failed`) and is STILL failed after a retry
       // attempt is "stuck" — surface an alert ActivityRow distinct from the
       // per-attempt failure row provisionDepartment/archiveDepartment emitted.
-      if (row.state === "failed" || row.state === "archive_failed") {
+      if (
+        isTerminalFailure &&
+        (row.state === "failed" || row.state === "archive_failed")
+      ) {
         await recordActivity({
           kind: "system",
           severity: "err",
           sourceIcon: "alert-triangle",
           what: "Department stuck in failed state",
           sub: row.name,
-          refs: { departmentId: row.id },
+          refs: {
+            departmentId: row.id,
+            // WARP-1557: how long this has been going on, so the activity
+            // row itself carries the escalation and not just the log.
+            consecutiveTicks: consecutiveNonConvergedTicks.get(row.id) ?? 1,
+          },
           actor: { type: "system" },
         });
       }
@@ -367,6 +551,8 @@ async function sweepDepartments(
     swept: rows.length + activeRows.length,
     converged,
     stillFailed,
+    reverifying,
+    stuck,
   };
 }
 
@@ -754,6 +940,8 @@ export async function reconcileDepartments(
     departmentsSwept: deptResult.swept,
     departmentsConverged: deptResult.converged,
     departmentsStillFailed: deptResult.stillFailed,
+    departmentsReverifying: deptResult.reverifying,
+    departmentsStuck: deptResult.stuck,
     membershipsSwept: memberResult.swept,
     membershipsSynced: memberResult.synced,
     membershipsFailed: memberResult.failed,
@@ -771,7 +959,28 @@ export async function reconcileDepartments(
     ncDisableMirrorFailed: statusMirrorResult.failed,
   };
 
-  logger.debug(result, "department-reconciler tick complete");
+  // WARP-1557: the tick summary used to be debug-only, which is why the .87
+  // box looped `departmentsSwept: 3, departmentsConverged: 0,
+  // departmentsStillFailed: 2` for hours without anyone noticing — at the
+  // default log level the whole thing was invisible. A tick that leaves rows
+  // non-converged is now visible at warn, and one with rows stuck past the
+  // threshold at error. A clean tick stays at debug.
+  if (result.departmentsStuck > 0) {
+    logger.error(
+      result,
+      "department-reconciler tick complete — departments STUCK, manual intervention likely required",
+    );
+  } else if (
+    result.departmentsStillFailed > 0 ||
+    result.departmentsReverifying > 0
+  ) {
+    logger.warn(
+      result,
+      "department-reconciler tick complete — departments did not converge",
+    );
+  } else {
+    logger.debug(result, "department-reconciler tick complete");
+  }
   return result;
 }
 
@@ -810,9 +1019,14 @@ export function kickReconcile(): void {
   debounceTimer.unref?.();
 }
 
-/** Exposed only for tests — clears any pending debounced kick. */
+/**
+ * Exposed only for tests — clears any pending debounced kick, and (WARP-1557)
+ * the in-memory stuck-row tick counters, so one spec's non-converged rows
+ * cannot leak an escalation into the next.
+ */
 export function _resetReconcileKickForTests(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = null;
   boundPrisma = null;
+  consecutiveNonConvergedTicks.clear();
 }

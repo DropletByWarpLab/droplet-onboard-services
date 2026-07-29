@@ -43,7 +43,11 @@ for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
-            droplet-storage-pool-apply.service; do
+            droplet-storage-pool-apply.service \
+            droplet-panel-claim.service \
+            droplet-panel-console.service \
+            droplet-panel-deadman.service \
+            droplet-panel-deadman.timer; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -74,6 +78,24 @@ if [[ ! -f "$SHUTDOWN_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$SHUTDOWN_SCRIPT_SRC" "$SHUTDOWN_SCRIPT_DST"
 log "installed $SHUTDOWN_SCRIPT_DST"
+
+# --- 1b-bis) Install the rack-panel console host scripts (WARP-1639) ---------
+# droplet-panel-console.sh is the ONLY place framebuffer ownership is switched
+# between fbcon (a login prompt) and the display service (the status screen).
+# droplet-panel-deadman.sh is the safety net that hands the console back on its
+# own when the display service stops answering — without it, claiming the panel
+# would remove the operator's physical way in with no automatic recovery.
+# Both run as root from their units; /usr/local/sbin per the host-script
+# convention, installed here (never hand-placed) so factory-reset removes them.
+for panel_script in droplet-panel-console.sh droplet-panel-deadman.sh; do
+  panel_src="$REPO_ROOT/scripts/host/$panel_script"
+  if [[ ! -f "$panel_src" ]]; then
+    log "missing source: $panel_src"
+    exit 1
+  fi
+  install -m 0755 "$panel_src" "/usr/local/sbin/$panel_script"
+  log "installed /usr/local/sbin/$panel_script"
+done
 
 # --- 1c) Install the storage-pool host script (BUG-3 / ADR-019) ---
 # Runs mdadm/mkfs — the ONLY place those run. It lives on the host (root +
@@ -505,6 +527,29 @@ fi
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
 # ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
+
+# --- 4a-bis) Rack-panel console ownership + deadman (WARP-1639) --------------
+# Only wire these up on a box that actually HAS a framebuffer. A headless box
+# (or a chassis with no front panel) must not gain a permanently-failing unit
+# and a timer that probes a display service it will never have.
+#
+# The deadman timer is the reason claiming the panel is safe: it hands the
+# console back automatically when the display service stops answering. Enable
+# it BEFORE the claim unit so there is never a window where the panel has been
+# taken away with no watchdog running.
+#
+# droplet-panel-console.service is deliberately NOT enabled — it is an
+# on-demand recovery action, started by the panel's debug button (via the
+# bridge's polkit grant) or by an operator over SSH.
+if [[ -d /sys/class/vtconsole ]] && compgen -G "/dev/fb[0-9]*" >/dev/null 2>&1; then
+  systemctl enable --now droplet-panel-deadman.timer
+  # `|| true`: exit 3 means a live release hold (someone is mid-debug on the
+  # panel), which is a deliberate refusal and must not fail the install.
+  systemctl enable --now droplet-panel-claim.service || true
+  log "rack panel: deadman timer + claim unit enabled"
+else
+  log "rack panel: no framebuffer on this box — panel units installed but not enabled"
+fi
 
 # --- 4b) WARP-1002 migration: standalone Wi-Fi watchdog timer superseded ---
 # The WARP-869 helper is now scheduled by the unified droplet-watchdog.timer

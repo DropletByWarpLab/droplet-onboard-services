@@ -218,13 +218,13 @@ jobs:
 
       - name: Set up Docker Buildx
         if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Read-only: import the BuildKit layer cache docker-build.yml refreshes
       # on every push to main. Best-effort — a cold cache only slows the run.
       - name: Log in to GHCR (layer cache, read-only)
         if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

@@ -93,7 +93,7 @@ jobs:
         run: npm run -w @droplet/orchestrator db:generate
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # The integration suite needs a `.env` for compose to satisfy its
       # secret references. Use the same generator setup.sh uses but

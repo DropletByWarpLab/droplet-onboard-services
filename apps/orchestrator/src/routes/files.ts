@@ -212,6 +212,73 @@ function resolveSpace(raw: unknown): Space {
 }
 
 /**
+ * WARP-1610 — one directory listing, named the way the cache must name it:
+ * the SPACE the caller declared plus the home-relative path that space
+ * resolved to.
+ *
+ * The resolved path alone is not an identity. `space=personal` resolves
+ * `?path=/Alpha` verbatim, and a department named `Alpha` mounts at `/Alpha`
+ * inside that same home — so a personal folder and a department library
+ * collapse onto ONE cache key and can serve each other's contents for the
+ * whole `CACHE_TTL`. The caller may legitimately see both (this is
+ * content-mixing, not disclosure — the disclosure half was WARP-1556), but
+ * being shown the wrong folder's contents under the right folder's breadcrumb
+ * is still wrong.
+ *
+ * Every listing read and every listing `cacheDel` names a `SpacedPath`, and
+ * write routes carry it PER PATH: a cross-space move hands `from` and `to` to
+ * `invalidateParents` in different spaces, so one space per request could only
+ * ever be right for one of the two sides.
+ *
+ * Accepted consequence: a groupfolder is reachable BOTH as `dept:<uuid>` and
+ * (ungated) as the personal path it mounts at, and those are now two entries.
+ * A write in one no longer drops the other, so the alias view can lag by up to
+ * `CACHE_TTL` (10s) — the same freshness bound every uncached listing already
+ * has. That is strictly better than the alternative it replaces, which was the
+ * two views overwriting each other's CONTENTS.
+ */
+interface SpacedPath {
+  space: Space;
+  path: string;
+}
+
+/**
+ * WARP-1610 — the space half of a listing cache key.
+ *
+ * `personal` / `shared` are the literal space tokens. A department is
+ * identified by its UUID: the only name it has that a rename can't move (a
+ * rename relocates the mount point, which changes the resolved path but must
+ * not change which space a listing belongs to). `dept:<uuid>` becomes
+ * `dept_<uuid>` so the tag contributes no `:` of its own and the joined key
+ * stays unambiguously delimited.
+ *
+ * Returns `null` for anything that is not one of those shapes — FAIL CLOSED,
+ * the same posture as `aclCacheTag` and deliberately NOT
+ * `activeDeptMountNames`' fail-open one: a key we cannot name correctly is a
+ * key we must neither read from nor write to, because the fallback would be
+ * exactly the space-less key this ticket is removing. Serving a fresh upstream
+ * listing is always safe; serving a cached one we can't attribute to a space
+ * is not.
+ *
+ * No Prisma read of its own: the space token reaching here has already been
+ * canonicalized by `resolveSpace` and, for `dept:`, proved to name an ACTIVE
+ * department by `rootForSpace` (which throws otherwise, before any key is
+ * built). Department membership/visibility still comes from Postgres via
+ * `aclCacheTag`, never from Nextcloud state (ADR-029:47/:181).
+ */
+function spaceCacheTag(space: Space): string | null {
+  if (space === "personal" || space === "shared") return space;
+  if (space.startsWith("dept:")) {
+    const departmentId = space.slice("dept:".length);
+    if (!departmentId || departmentId.includes(":") || departmentId.includes("/")) {
+      return null;
+    }
+    return `dept_${departmentId}`;
+  }
+  return null;
+}
+
+/**
  * WARP-1262 (T10): raw `?space=` / body `space` extraction, query taking
  * precedence over body when a caller supplies both (mirrors the space
  * middleware's own `defaultSpaceResolver` precedence). Write routes with a
@@ -827,34 +894,51 @@ export function createFilesRouter(
    * WARP-1556 — the ONE builder for the directory-listing cache key, shared by
    * the `GET /api/files` read and every write route's invalidation, so a key
    * written by the read is always the key a later `cacheDel` names. Never
-   * inline `CACHE_PREFIX + user + ":" + path` again: that shape has no ACL
-   * dimension, and a read/del pair built from two different shapes silently
-   * stops invalidating.
+   * inline `CACHE_PREFIX + user + ":" + path` again: that shape has neither
+   * dimension below, and a read/del pair built from two different shapes
+   * silently stops invalidating.
    *
-   * `null` (unresolved visibility) → skip the cache; see `aclScopedKey`.
+   * Shape: `files:list:<user>:<aclTag>:<spaceTag>:<resolvedPath>` — TWO
+   * orthogonal dimensions, both load-bearing and neither a substitute for the
+   * other:
+   *
+   *   • `<aclTag>` (WARP-1556) is WHAT THE CALLER MAY SEE — max(aclVersion)
+   *     plus a digest of the sorted `deptId:aclVersion` pairs. It stops a
+   *     just-revoked member from reading a gated library's listing out of
+   *     Redis for the rest of the TTL. That is a disclosure boundary.
+   *   • `<spaceTag>` (WARP-1610) is WHICH LISTING THIS IS. The caller may see
+   *     both a personal `/Alpha` and department Alpha's `/Alpha`; the ACL tag
+   *     is identical for the two (same caller, same memberships) and so
+   *     cannot separate them. Only the space can.
+   *
+   * `null` from EITHER (unresolved visibility, or an unnameable space) → skip
+   * the cache in both directions; see `aclScopedKey` and `spaceCacheTag`.
    */
-  function listCacheKey(
+  async function listCacheKey(
     req: Request,
     user: string,
-    resolvedPath: string,
+    target: SpacedPath,
   ): Promise<string | null> {
-    return aclScopedKey(req, CACHE_PREFIX, user, resolvedPath);
+    const spaceTag = spaceCacheTag(target.space);
+    if (!spaceTag) return null;
+    return aclScopedKey(req, CACHE_PREFIX, user, spaceTag, target.path);
   }
 
   /**
-   * Invalidate the listing cache for one already-resolved path.
+   * Invalidate the listing cache for one already-resolved (space, path).
    *
    * WARP-1556: goes through `listCacheKey` so the del names exactly the key
-   * the read wrote. A null key means the caller's ACL tag couldn't be
-   * resolved — there is nothing to name, and nothing readable either (the
-   * read path bypasses the cache in that state), so skipping is correct.
+   * the read wrote. A null key means the caller's ACL tag or the space
+   * couldn't be resolved — there is nothing to name, and nothing readable
+   * either (the read path bypasses the cache in that state), so skipping is
+   * correct.
    */
   async function invalidateListing(
     req: Request,
     user: string,
-    resolvedPath: string,
+    target: SpacedPath,
   ): Promise<void> {
-    const key = await listCacheKey(req, user, resolvedPath);
+    const key = await listCacheKey(req, user, target);
     if (key) await cacheDel(key);
   }
 
@@ -1614,21 +1698,26 @@ export function createFilesRouter(
         const user = getUser(req);
         const isPersonalRoot = space === "personal" && filePath === "/";
 
-      // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"),
-      // not the (space, requestedPath) pair — the shared prefix already makes
-      // the path distinct from any personal path, and every write route
-      // invalidates through the SAME `listCacheKey` builder, so a mutation in
-      // a shared/dept space still lands on the entry this read wrote.
+      // The cache identity is the (space, resolvedPath) PAIR, built by the one
+      // `listCacheKey` builder every write route also invalidates through, so
+      // a mutation always lands on the entry this read wrote.
       //
-      // WARP-1556 adds the caller's ACL tag to that key. This route IS gated
-      // per-request by requireSpaceAccess, but the gate only authorizes the
-      // DECLARED `?space=`, and `space=personal` resolves the path verbatim —
-      // so `?path=/Alpha` (no space) lands on the very same resolved path the
-      // gated `?space=dept:<alpha>` read cached, with no membership check at
-      // all. Without the ACL dimension a just-revoked member could keep
-      // pulling that library's listing out of Redis for the whole CACHE_TTL
-      // window.
-      const cacheKey = await listCacheKey(req, user, filePath);
+      // Neither half alone is enough, and the reason is the same seam seen
+      // from two sides. This route IS gated per-request by
+      // requireSpaceAccess, but the gate only authorizes the DECLARED
+      // `?space=`, and `space=personal` resolves the path verbatim — so
+      // `?path=/Alpha` (no space) produces the very same resolved path the
+      // gated `?space=dept:<alpha>` read produced, with no membership check
+      // at all. Therefore:
+      //
+      //   • WARP-1556's ACL tag: without it a just-revoked member keeps
+      //     pulling that library's listing out of Redis through the ungated
+      //     personal path for the whole CACHE_TTL window (disclosure).
+      //   • WARP-1610's space tag: a caller who may legitimately see BOTH a
+      //     personal folder named `Alpha` and department Alpha still gets one
+      //     served in place of the other, because their ACL tag is identical
+      //     for the two reads (content-mixing).
+      const cacheKey = await listCacheKey(req, user, { space, path: filePath });
       if (cacheKey) {
         const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
         if (cached) {
@@ -1999,7 +2088,7 @@ export function createFilesRouter(
         }
       }
 
-      await invalidateListing(req, user, targetPath);
+      await invalidateListing(req, user, { space, path: targetPath });
       safePublish(`droplet/files/${user}/uploaded`, {
         path: targetPath,
         files: results.map((r) => r.name),
@@ -2033,7 +2122,7 @@ export function createFilesRouter(
       await ncDeleteFile(await getToken(req), user, filePath);
 
       const parentPath = path.posix.dirname(filePath) || "/";
-      await invalidateListing(req, user, parentPath);
+      await invalidateListing(req, user, { space, path: parentPath });
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
@@ -2077,7 +2166,7 @@ export function createFilesRouter(
       await ncCreateDirectory(await getToken(req), user, targetPath);
 
       const parentPath = path.posix.dirname(targetPath) || "/";
-      await invalidateListing(req, user, parentPath);
+      await invalidateListing(req, user, { space, path: parentPath });
 
       res.json({ created: targetPath });
     } catch (err) {
@@ -2263,17 +2352,35 @@ export function createFilesRouter(
     return { ok: true, departmentId: check.departmentId };
   }
 
-  /** Invalidate listing caches for the given parent paths (source + destination). */
+  /**
+   * Invalidate listing caches for the parents of the given targets (source +
+   * destination).
+   *
+   * WARP-1610: each target carries its OWN space, so the space is resolved PER
+   * PATH rather than once per request. That is what a cross-space move needs —
+   * `POST /files/move` is the one call site that passes `from` and `to` in
+   * different spaces, and a single per-request space could only ever name one
+   * of the two sides correctly, silently leaving the other side's entry live
+   * for the rest of the TTL.
+   *
+   * Dedupe is on the (space, parent) PAIR, never on the parent string alone: a
+   * cross-space move between a personal `/Alpha` and department Alpha's
+   * `/Alpha` has one parent string and two distinct cache entries, and a
+   * `Set<string>` of parents would collapse them and drop only one.
+   */
   async function invalidateParents(
     req: Request,
     user: string,
-    ...paths: string[]
+    ...targets: SpacedPath[]
   ): Promise<void> {
-    const parents = new Set<string>();
-    for (const p of paths) {
-      parents.add(path.posix.dirname(p) || "/");
+    const parents = new Map<string, SpacedPath>();
+    for (const target of targets) {
+      const parent = path.posix.dirname(target.path) || "/";
+      // NUL separator: no space token or path segment can contain it, so the
+      // composite key can't alias two different (space, parent) pairs.
+      parents.set(`${target.space}\u0000${parent}`, { space: target.space, path: parent });
     }
-    for (const parent of parents) {
+    for (const parent of parents.values()) {
       await invalidateListing(req, user, parent);
     }
   }
@@ -2339,7 +2446,7 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
-      await invalidateParents(req, user, filePath);
+      await invalidateParents(req, user, { space, path: filePath });
       safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
       res.json({ renamed: { from: filePath, to: newPath } });
     } catch (err) {
@@ -2398,7 +2505,16 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
-      await invalidateParents(req, user, from, to);
+      // WARP-1610: the cross-space case. `from` and `to` can be in
+      // DIFFERENT spaces, and their resolved paths can even be the same
+      // string (personal `/Alpha` ↔ department Alpha's `/Alpha`) — each
+      // side must name its own key, so each carries its own space.
+      await invalidateParents(
+        req,
+        user,
+        { space: fromSpaceValue, path: from },
+        { space: toSpaceValue, path: to },
+      );
       safePublish(`droplet/files/${user}/moved`, { from, to });
       res.json({ moved: { from, to } });
     } catch (err) {
@@ -2454,7 +2570,7 @@ export function createFilesRouter(
       const user = getUser(req);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
-      await invalidateParents(req, user, to);
+      await invalidateParents(req, user, { space: toSpaceValue, path: to });
       safePublish(`droplet/files/${user}/copied`, { from, to });
       res.json({ copied: { from, to } });
     } catch (err) {
@@ -2494,7 +2610,7 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(req, user, ...paths);
+      await invalidateParents(req, user, ...paths.map((p) => ({ space, path: p })));
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-deleted`, {
         count: okCount,
@@ -2547,7 +2663,12 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(req, user, ...paths, normalizedDir + "/_");
+      await invalidateParents(
+        req,
+        user,
+        ...paths.map((p) => ({ space, path: p })),
+        { space, path: normalizedDir + "/_" },
+      );
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-moved`, {
         toDir: normalizedDir,
@@ -2601,7 +2722,7 @@ export function createFilesRouter(
         }
       });
 
-      await invalidateParents(req, user, normalizedDir + "/_");
+      await invalidateParents(req, user, { space, path: normalizedDir + "/_" });
       const okCount = results.filter((r) => r.ok).length;
       safePublish(`droplet/files/${user}/bulk-copied`, {
         toDir: normalizedDir,
@@ -2754,7 +2875,7 @@ export function createFilesRouter(
       }
       await ncRestoreVersion(token, user, fileId, versionId);
 
-      await invalidateParents(req, user, filePath);
+      await invalidateParents(req, user, { space, path: filePath });
       safePublish(`droplet/files/${user}/version-restored`, { path: filePath, versionId });
       res.json({ restored: { path: filePath, versionId } });
     } catch (err) {
