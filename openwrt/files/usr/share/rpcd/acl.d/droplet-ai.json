@@ -17,7 +17,10 @@
         "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices", "getDHCPLeases", "getHostHints"],
         "umdns": ["browse", "update"]
       },
-      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
+      "uci": ["network", "wireless", "dhcp", "firewall", "system"],
+      "file": {
+        "/usr/share/rpcd/acl.d/droplet-ai.json": ["read"]
+      }
     },
     "write": {
       "ubus": {

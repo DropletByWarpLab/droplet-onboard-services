@@ -500,6 +500,10 @@ export const ChatMessage = memo(function ChatMessage({
                   // "0%" (a relevance claim the pipeline never made)
                   // instead of no badge at all.
                   score: c.score,
+                  // WARP-1611 — forward the producer's scale tag when it
+                  // reached us. Absent means "infer" (`inferScoreKind`), so
+                  // an untagged payload renders exactly as it did before.
+                  scoreKind: c.scoreKind,
                   anchor: null,
                   href,
                 }}

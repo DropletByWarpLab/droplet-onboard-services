@@ -10,6 +10,7 @@ import {
   truncateConversation,
   setMessageFeedback,
 } from "../api";
+import type { ScoreKind } from "../relevance";
 import type {
   ChatAttachment,
   ChatCitation,
@@ -96,12 +97,24 @@ interface RawCitationRow {
   pageNumber?: number | null;
   page_number?: number | null;
   score?: number;
+  scoreKind?: unknown;
   text?: string;
   snippet?: string;
   brainItemId?: string | null;
   brain_item_id?: string | null;
   mimeType?: string;
   mime_type?: string;
+}
+
+/**
+ * WARP-1611 — accept only the two kinds the renderer understands. Anything
+ * else is dropped so it falls back to `inferScoreKind`: `relevancePct` treats
+ * every non-"logit" kind as already-bounded, so forwarding an unrecognised
+ * tag would clamp a negative logit to 0% while looking authoritative — the
+ * WARP-859/1603 bug this tag exists to prevent.
+ */
+function scoreKindOf(raw: unknown): ScoreKind | undefined {
+  return raw === "logit" || raw === "similarity" ? raw : undefined;
 }
 
 /** Extract `ChatCitation[]` from a tool_result event, or return [] if shape doesn't match. */
@@ -121,6 +134,7 @@ function extractCitations(toolName: string, data: unknown): ChatCitation[] {
       path: r.path,
       pageNumber: r.pageNumber ?? r.page_number ?? null,
       score: typeof r.score === "number" ? r.score : undefined,
+      scoreKind: scoreKindOf(r.scoreKind),
       brainItemId: r.brainItemId ?? r.brain_item_id ?? null,
       snippet: r.snippet ?? r.text ?? undefined,
       mimeType: r.mimeType ?? r.mime_type ?? undefined,

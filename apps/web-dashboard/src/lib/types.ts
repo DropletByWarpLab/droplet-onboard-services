@@ -1,3 +1,5 @@
+import type { ScoreKind } from "./relevance";
+
 /**
  * One LLM tool dispatch surfaced inline on an assistant message. Built
  * from the `tool_call` + `tool_result` SSE events emitted by the
@@ -133,6 +135,12 @@ export interface ChatCitation {
   path: string;
   pageNumber?: number | null;
   score?: number;
+  /**
+   * WARP-1611 — the scale `score` is in, as reported by the producer.
+   * Optional at every layer: absent means "infer" (`inferScoreKind`), so an
+   * older payload renders exactly as it did before the tag existed.
+   */
+  scoreKind?: ScoreKind;
   brainItemId?: string | null;
   snippet?: string;
   mimeType?: string;
