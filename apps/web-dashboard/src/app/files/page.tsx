@@ -115,13 +115,23 @@ const BULK_SHARE_OPTIONS = { shareType: 3, permissions: 1 } as const;
 
 /** One row of a multi-file share run — the per-target outcome, kept whether it
  *  succeeded or failed. Successes are never rolled back or hidden by a later
- *  failure (decision comment, note 1). `cancelled` is a row the user stopped
- *  the run before reaching: no link exists for it, which is worth saying
- *  explicitly rather than leaving it stuck on "Creating link…". */
+ *  failure (decision comment, note 1).
+ *
+ *  `cancelled` is a row the run never REACHED: it was never dispatched, so no
+ *  link exists for it, which is worth saying explicitly rather than leaving it
+ *  stuck on "Creating link…".
+ *
+ *  `unknown` is the row that was ON THE WIRE when the user stopped. We do not
+ *  know its outcome and must not claim one: the POST was already sent, so a
+ *  live public link may well exist. It stays `unknown` only if the result never
+ *  lands — otherwise it resolves to `ok`/`failed` like any other row. Keeping
+ *  it distinct from `cancelled` is the whole point: telling the user no link
+ *  was created is worse than telling them we are not sure, because it says
+ *  there is nothing to go clean up. */
 type BulkShareRow = {
   path: string;
   name: string;
-  status: "pending" | "ok" | "failed" | "cancelled";
+  status: "pending" | "ok" | "failed" | "cancelled" | "unknown";
   url?: string | null;
   error?: string;
 };
@@ -567,12 +577,27 @@ export default function FilesPage() {
   // Generation token: closing the results panel abandons the in-flight run
   // instead of letting it keep POSTing into a surface nobody is watching.
   const bulkShareRunRef = useRef(0);
+  /**
+   * PANEL identity, bumped ONLY by `closeBulkShare` — deliberately not by
+   * `stopBulkShare`, which is the difference between the two.
+   *
+   * Stopping must halt the loop's ADVANCE (that is `bulkShareRunRef`) without
+   * discarding the one POST already on the wire. Gating the row writes on the
+   * run token too meant a Stop threw away the in-flight request's result, so a
+   * link that really was created rendered as "stopped before this file" — an
+   * affirmative denial of a live public link. The panel is still mounted and
+   * still showing that row, so it can and must accept the late result.
+   *
+   * A close is the one case where nothing may be written: the rows are gone.
+   */
+  const bulkSharePanelRef = useRef(0);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const bulkShareHeadingId = useId();
   const bulkShareSummaryId = useId();
 
   const closeBulkShare = useCallback(() => {
     bulkShareRunRef.current += 1;
+    bulkSharePanelRef.current += 1;
     setBulkShare(null);
     setCopiedKey(null);
   }, []);
@@ -592,35 +617,53 @@ export default function FilesPage() {
    * never reached as not created (rather than leaving them spinning), and the
    * summary says the created ones stay active and where to find them. The
    * panel only unmounts from an explicit Done, once `done` is true.
+   *
+   * The row currently ON THE WIRE is not one of those. The loop is sequential,
+   * so the FIRST still-pending row is the request in flight and every later
+   * pending row was never dispatched. Calling the in-flight one `cancelled`
+   * ("no link exists for it") states something we do not know and that is
+   * usually false — the POST typically succeeds, and Stop is the only in-flight
+   * exit, so by construction there is always exactly one such row. It gets
+   * `unknown` instead, and if its result lands while the panel is open it
+   * resolves to the real `ok`/`failed` outcome (see `bulkSharePanelRef`).
    */
   const stopBulkShare = useCallback(() => {
     bulkShareRunRef.current += 1;
-    setBulkShare((prev) =>
-      prev
-        ? {
-            ...prev,
-            done: true,
-            stopped: true,
-            rows: prev.rows.map((r) =>
-              r.status === "pending" ? { ...r, status: "cancelled" as const } : r
-            ),
-          }
-        : prev
-    );
+    setBulkShare((prev) => {
+      if (!prev) return prev;
+      const inFlight = prev.rows.findIndex((r) => r.status === "pending");
+      return {
+        ...prev,
+        done: true,
+        stopped: true,
+        rows: prev.rows.map((r, i) =>
+          r.status === "pending"
+            ? {
+                ...r,
+                status: (i === inFlight ? "unknown" : "cancelled") as const,
+              }
+            : r
+        ),
+      };
+    });
   }, []);
 
   const runBulkShare = useCallback(
-    async (targets: FileEntryInfo[], run: number) => {
+    async (targets: FileEntryInfo[], run: number, panel: number) => {
       for (const target of targets) {
-        if (bulkShareRunRef.current !== run) return; // panel closed — stop.
+        // Loop ADVANCE is gated on the run token, so Stop dispatches nothing
+        // further. The row writes below are gated on the panel token instead.
+        if (bulkShareRunRef.current !== run) return;
         try {
           // NOTE: the raw, HOME-relative entry path — NOT
           // `toActiveSpaceRelative`. POST /api/files/share takes no `space`
           // (unlike rename/move/delete), so this is the identical argument the
           // single-file ShareDialog sends for the same row.
           const share = await createShare(target.path, BULK_SHARE_OPTIONS);
+          // Gated on the PANEL, not the run: a Stop must not discard the
+          // result of the request it could not recall (see bulkSharePanelRef).
           setBulkShare((prev) =>
-            prev && bulkShareRunRef.current === run
+            prev && bulkSharePanelRef.current === panel
               ? {
                   ...prev,
                   rows: prev.rows.map((r) =>
@@ -644,7 +687,7 @@ export default function FilesPage() {
           // module-gate and policy-rejection copy this loop can actually hit;
           // the single-file ShareDialog already routes through it.
           setBulkShare((prev) =>
-            prev && bulkShareRunRef.current === run
+            prev && bulkSharePanelRef.current === panel
               ? {
                   ...prev,
                   rows: prev.rows.map((r) =>
@@ -693,6 +736,9 @@ export default function FilesPage() {
         return;
       }
       const run = ++bulkShareRunRef.current;
+      // A new run is also a new panel — a previous panel's late result must not
+      // write into the rows this one is about to mount.
+      const panel = ++bulkSharePanelRef.current;
       setCopiedKey(null);
       setBulkShare({
         rows: shareable.map((f) => ({
@@ -704,7 +750,7 @@ export default function FilesPage() {
         done: false,
         stopped: false,
       });
-      void runBulkShare(shareable, run);
+      void runBulkShare(shareable, run, panel);
     },
     [files, handleShare, runBulkShare, toast]
   );
@@ -1536,14 +1582,41 @@ export default function FilesPage() {
               // it stopped — those links are live whether or not the user
               // meant to create them, so say so and say where they live.
               if (bulkShare.stopped) {
-                if (ok === 0) return "Stopped — no links were created.";
+                const unknown = bulkShare.rows.filter(
+                  (r) => r.status === "unknown"
+                ).length;
+                // The request that was on the wire when Stop landed may well
+                // have succeeded. Claiming "no links were created" tells the
+                // user there is nothing to go clean up, which is exactly the
+                // wrong thing to say when a live public link may exist — so
+                // the Shared-by-me pointer has to appear on THIS branch too,
+                // not only when a link is already on screen.
+                if (ok === 0) {
+                  const failedTail =
+                    failed > 0
+                      ? ` ${failed} couldn't be shared.`
+                      : "";
+                  return unknown > 0
+                    ? `Stopped. No links finished being created, but ${unknown} was still in progress and may have one — check Shared → Shared by me.${failedTail}`
+                    : `Stopped — no links were created.${failedTail}`;
+                }
+                const unknownTail =
+                  unknown > 0
+                    ? ` ${unknown} more was still in progress and may also have a link.`
+                    : "";
+                // Non-blocking review note: the stopped summary used to omit
+                // `failed` entirely, so a run stopped at [1 ok, 1 failed]
+                // never announced the failure in the live region — the only
+                // thing a screen-reader user hears.
+                const failedTail =
+                  failed > 0 ? ` ${failed} couldn't be shared.` : "";
                 return `Stopped. ${ok} public link${ok > 1 ? "s" : ""} of ${total} ${
                   ok > 1 ? "were" : "was"
                 } already created and stay${ok > 1 ? "" : "s"} active — copy ${
                   ok > 1 ? "them" : "it"
                 } now, or find ${
                   ok > 1 ? "them" : "it"
-                } later under Shared → Shared by me.`;
+                } later under Shared → Shared by me.${unknownTail}${failedTail}`;
               }
               if (failed === 0) {
                 return `Shared ${total} file${total > 1 ? "s" : ""} — one public link each. Anyone with a link can open it.`;
@@ -1607,6 +1680,16 @@ export default function FilesPage() {
                       style={{ color: "var(--text-muted)" }}
                     >
                       No link — stopped before this file.
+                    </div>
+                  )}
+                  {row.status === "unknown" && (
+                    <div
+                      className="type-caption-1 flex items-center gap-1"
+                      style={{ color: "var(--warning, var(--text-muted))" }}
+                    >
+                      <AlertTriangle size={12} />
+                      Stopped while this one was still being created — it may
+                      have a link. Check Shared → Shared by me.
                     </div>
                   )}
                 </div>

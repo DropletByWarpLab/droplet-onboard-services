@@ -1133,12 +1133,99 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     ).toBeInTheDocument();
     // …and it says where to find it afterwards.
     expect(dialog).toHaveTextContent(/shared by me/i);
-    // The rows never reached say so, rather than spinning forever.
+    // ONLY c.pdf was never dispatched. b.pdf's POST was already on the wire
+    // when Escape landed, so calling it "stopped before this file" would deny
+    // a link that may well exist — this used to assert 2 and pinned that bug.
     expect(
       within(dialog).getAllByText(/no link — stopped before this file/i)
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      within(dialog).getByText(
+        /stopped while this one was still being created — it may have a link/i
+      )
+    ).toBeInTheDocument();
     // The loop really stopped: c.pdf was queued after the hung b.pdf.
     expect(createShareMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the link when the in-flight share lands AFTER the user stopped", async () => {
+    // The harm this fixes, end to end: b.pdf's POST is already on the wire when
+    // Stop is pressed, and it succeeds. The link is live, public, no-expiry.
+    // Discarding that result (the old run-token gate) left the panel stating
+    // no link existed for b.pdf — an affirmative denial, which is worse than
+    // silence because it says there is nothing to go clean up.
+    let resolveB: (v: unknown) => void = () => {};
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      path === "/b.pdf"
+        ? new Promise((res) => {
+            resolveB = res;
+          })
+        : Promise.resolve({
+            id: 1,
+            url: `https://box/s/${path.slice(1)}`,
+            token: "t",
+          })
+    );
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 1 of 3 done/i
+      )
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/stopped\./i)
+    );
+
+    // The hung request now settles — successfully.
+    resolveB({ id: 2, url: "https://box/s/b.pdf", token: "t2" });
+
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByText("https://box/s/b.pdf")).toBeInTheDocument()
+    );
+    // It is no longer described as "may have a link" — we now know it does.
+    expect(
+      within(dialog).queryByText(
+        /stopped while this one was still being created/i
+      )
+    ).not.toBeInTheDocument();
+    // And it is copyable, like any other created link.
+    expect(
+      within(dialog).getByRole("button", { name: /copy link for b\.pdf/i })
+    ).toBeInTheDocument();
+    // c.pdf was still never dispatched — stopping really did stop the loop.
+    expect(createShareMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("points at Shared by me when the ONLY in-flight share is left unknown", async () => {
+    // ok === 0 with an unknown row: the old copy said "Stopped — no links were
+    // created." and offered no recovery path at all.
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation(() => new Promise(() => {}));
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 0 of 3 done/i
+      )
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /no links finished being created, but 1 was still in progress and may have one — check shared → shared by me/i
+      )
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      /no links were created\./i
+    );
   });
 
   it("closes normally once the run has settled — never a trap", async () => {
