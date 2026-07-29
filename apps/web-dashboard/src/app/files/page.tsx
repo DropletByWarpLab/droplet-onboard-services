@@ -636,13 +636,11 @@ export default function FilesPage() {
         ...prev,
         done: true,
         stopped: true,
-        rows: prev.rows.map((r, i) =>
-          r.status === "pending"
-            ? {
-                ...r,
-                status: (i === inFlight ? "unknown" : "cancelled") as const,
-              }
-            : r
+        rows: prev.rows.map(
+          (r, i): BulkShareRow =>
+            r.status === "pending"
+              ? { ...r, status: i === inFlight ? "unknown" : "cancelled" }
+              : r
         ),
       };
     });
