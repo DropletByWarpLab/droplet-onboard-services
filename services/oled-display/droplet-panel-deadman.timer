@@ -1,0 +1,14 @@
+[Unit]
+Description=Droplet rack panel — deadman check every 15s (WARP-1639)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-1639
+
+[Timer]
+# Start checking shortly after boot, but not so early that a normal cold start
+# (docker + the display container coming up) trips the failure counter.
+OnBootSec=90s
+OnUnitInactiveSec=15s
+AccuracySec=5s
+Unit=droplet-panel-deadman.service
+
+[Install]
+WantedBy=timers.target

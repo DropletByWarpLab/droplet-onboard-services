@@ -1089,7 +1089,17 @@ class DHCPApi:
             # other ubus error from luci-rpc is treated as non-fatal so
             # the native path still has a chance.
             logger.debug("luci-rpc getDHCPLeases unavailable: %s", exc)
-        result = self._r._call("dhcp", "ipv4leases")
+        try:
+            result = self._r._call("dhcp", "ipv4leases")
+        except UbusError as exc:
+            # The `dhcp` object is provided by odhcpd. A router that serves
+            # DHCPv4 from dnsmasq alone — the Pi edge router does — has no
+            # `ipv4leases` method at all, so this raises METHOD_NOT_FOUND.
+            # Reaching here means luci-rpc already answered with an empty
+            # list, which is the correct answer: no leases. Raising instead
+            # would 500 the whole device list the moment it went quiet.
+            logger.debug("dhcp ipv4leases unavailable: %s", exc)
+            return []
         return result.get("dhcp_leases", [])
 
     def active_leases_v6(self) -> list[dict]:
@@ -1105,7 +1115,12 @@ class DHCPApi:
                 return leases
         except UbusError as exc:
             logger.debug("luci-rpc getDHCPLeases unavailable: %s", exc)
-        result = self._r._call("dhcp", "ipv6leases")
+        try:
+            result = self._r._call("dhcp", "ipv6leases")
+        except UbusError as exc:
+            # See active_leases: no odhcpd means no `dhcp` methods at all.
+            logger.debug("dhcp ipv6leases unavailable: %s", exc)
+            return []
         return result.get("dhcp_leases", [])
 
     def find_device_by_hostname(self, hostname_fragment: str) -> Optional[dict]:
@@ -1125,7 +1140,13 @@ class DHCPApi:
         section is the LAN-pool config the camera-subnet route already proves the
         write side of (`uci.set("dhcp", ...)`).
         """
-        section = self._r.uci.get("dhcp", "lan")
+        res = self._r.uci.get("dhcp", "lan")
+        # `uci get` returns the section wrapped in a `values` envelope. Reading
+        # the top level instead yields None for every field, so the dashboard's
+        # DHCP pool card rendered blank even on a router with an explicit pool.
+        # Same unwrap idiom as the wifi-iface / firewall-rule readers below;
+        # falls back to `res` so a pre-unwrapped dict (mock router) still works.
+        section = res.get("values", res) if isinstance(res, dict) else {}
         if not isinstance(section, dict):
             section = {}
         return {

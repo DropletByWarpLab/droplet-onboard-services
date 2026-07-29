@@ -792,6 +792,36 @@ if [ -f /etc/systemd/system/droplet-shutdown-screen.service ] || \
   log_success "Removed shutdown-screen unit and host script"
 fi
 
+# Rack-panel console units + host scripts (WARP-1639). Disable + remove so a
+# factory reset truly returns to out-of-box; install-device-bridge.sh
+# reinstalls them on re-provision. Silent if not installed.
+#
+# ORDER MATTERS: release the console BEFORE removing the scripts. Stopping
+# droplet-panel-claim.service runs its ExecStop, which hands the framebuffer
+# back to fbcon — do it the other way round and the box is left with the panel
+# claimed by a display service that is about to be wiped, i.e. a dark front
+# panel and no console, which is exactly the state this whole path exists to
+# prevent.
+if [ -f /etc/systemd/system/droplet-panel-claim.service ] || \
+   [ -f /usr/local/sbin/droplet-panel-console.sh ]; then
+  sudo systemctl disable --now droplet-panel-deadman.timer 2>/dev/null || true
+  sudo systemctl disable --now droplet-panel-claim.service 2>/dev/null || true
+  # Belt-and-braces: ExecStop above should already have done this, but a
+  # never-started or failed unit would not have run it.
+  if [ -x /usr/local/sbin/droplet-panel-console.sh ]; then
+    sudo /usr/local/sbin/droplet-panel-console.sh release 0 2>/dev/null || true
+  fi
+  sudo rm -f /etc/systemd/system/droplet-panel-claim.service \
+             /etc/systemd/system/droplet-panel-console.service \
+             /etc/systemd/system/droplet-panel-deadman.service \
+             /etc/systemd/system/droplet-panel-deadman.timer 2>/dev/null || true
+  sudo rm -f /usr/local/sbin/droplet-panel-console.sh \
+             /usr/local/sbin/droplet-panel-deadman.sh 2>/dev/null || true
+  sudo rm -f /run/droplet/panel-released /run/droplet/panel-deadman.fails 2>/dev/null || true
+  sudo systemctl daemon-reload 2>/dev/null || true
+  log_success "Removed rack-panel console units and host scripts"
+fi
+
 # Storage-pool host script (BUG-3 / ADR-019). Remove so a factory reset truly
 # returns to out-of-box; install-device-bridge.sh reinstalls it on
 # re-provision. NOTE: this removes the executor only — it never touches any

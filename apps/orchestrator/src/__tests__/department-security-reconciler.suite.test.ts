@@ -150,6 +150,12 @@ vi.mock("../services/nextcloud-groups.client.js", () => ({
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
   ncListGroupMembers: ncListGroupMembersMock,
   ncListGroupMembersStrict: ncListGroupMembersStrictMock,
+  // WARP-1557: "did this write land?" classifier. Always false here — every
+  // fixture in this suite either succeeds or fails unambiguously, so the
+  // pinned drift-overwrite / id-reassignment invariants below behave exactly
+  // as they did before that ticket. The classifier's own truth table lives in
+  // nextcloud-groups.client.test.ts.
+  isAmbiguousWriteFailure: vi.fn(() => false),
 }));
 
 import { reconcileDepartments, _resetReconcileKickForTests } from "../services/department-reconciler.service.js";
