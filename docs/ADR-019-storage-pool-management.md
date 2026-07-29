@@ -1,6 +1,6 @@
 # ADR-019: Storage pool (software-RAID) management
 
-- **Status:** Proposed
+- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
 - **Date:** 2026-06-04
 - **Authors:** Stefan Cruceru
 - **Related tickets:** BUG-3 (drives page + RAID/drive-pool management)
@@ -210,3 +210,10 @@ honestly when md reports no arrays.
 - **No ZFS/btrfs pooling.** md only, for cross-shape uniformity.
 - **No per-host hardcoded device list or default RAID level** (rule 12) — the
   owner picks the level and the member disks every time.
+
+## Status audit — 2026-07-27
+
+Flipped `Proposed` → `Accepted`. Evidence on `main`:
+`apps/orchestrator/src/routes/storage.ts` serves the storage surface, with
+`src/__tests__/storage-pools.routes.test.ts` and `src/__tests__/storage.test.ts`
+covering it.

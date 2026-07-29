@@ -124,3 +124,21 @@ WS-1/WS-2/WS-3 add **0 containers and 0 MB** to every profile. WS-4's doc server
 - `scripts/test-security.sh:497-532` — Test 14/WARP-569 `mem_limit` guard (iterates all `services:` regardless of profile)
 - `docs/ADR-021-container-resource-limits.md` — RAM budget (default ~5.0 GB :79, ollama 4 GB :104, openwrt 512 MB :105, pm rows :97-103)
 - `docs/ADR-004-rbac-per-route-guards.md`, `docs/ADR-013-builtin-directory-vs-nextcloud.md`, `docs/ADR-002`, `docs/ADR-011-hardware-agnostic-codebase.md`, `docs/ENVIRONMENT.md`, `CLAUDE.md`, `.env.example`
+
+## Status audit — 2026-07-27
+
+**Deliberately left `proposed`** (its own lowercase spelling preserved), and
+flagged as an open question rather than resolved unilaterally.
+
+ADR-029 lists this ADR in its combined **"Supersedes / relates"** header
+field, which does not say which of the two it means — and the distinction
+matters. ADR-029 clearly *replaces* this ADR's department/library model, but
+the SharePoint-parity goals themselves are still live and only partly
+delivered (the ADR-029 epic is 23/30, and the eight disconnected Files routes
+that the unified-Files work targets are exactly parity gaps).
+
+So the honest options are `Superseded by ADR-029`, or `Accepted` with the
+still-open parity scope carved out — and picking between them is a call for
+the deciders, not an audit. Splitting the ambiguous "Supersedes / relates"
+field in ADR-029's header into two explicit fields would prevent the next
+reader hitting this same question.

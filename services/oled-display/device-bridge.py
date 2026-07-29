@@ -122,22 +122,72 @@ ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
 # bundle paths into /etc/droplet/device-bridge.env. Flag on → https:// +
 # client cert; unset/0 → plain HTTP, byte-identical to before. FRIGATE_URL
 # stays plaintext (documented exemption — third-party loopback listener).
+# WARP-1646 — hosts for which certificate verification is deliberately skipped.
+# ONLY loopback literals. See _orchestrator_tls_context() for the reasoning.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _is_loopback_url(url):
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:                                               # noqa: BLE001
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def _orchestrator_tls_context():
-    if os.environ.get("DROPLET_INTERNAL_TLS", "0") != "1":
-        return None
-    import ssl
-    ctx = ssl.create_default_context(cafile=os.environ.get("DROPLET_TLS_CA", ""))
-    ctx.load_cert_chain(
-        certfile=os.environ.get("DROPLET_TLS_CERT", ""),
-        keyfile=os.environ.get("DROPLET_TLS_KEY", ""),
-    )
-    return ctx
+    if os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1":
+        import ssl
+        ctx = ssl.create_default_context(
+            cafile=os.environ.get("DROPLET_TLS_CA", ""))
+        ctx.load_cert_chain(
+            certfile=os.environ.get("DROPLET_TLS_CERT", ""),
+            keyfile=os.environ.get("DROPLET_TLS_KEY", ""),
+        )
+        return ctx
+
+    # WARP-1646 — reaching the orchestrator over the LOOPBACK gateway.
+    #
+    # The bridge runs on the host; the orchestrator is on the docker network
+    # and is only `expose:`d, so the sole host-side route is the gateway. The
+    # gateway now redirects :80 to HTTPS, and its certificate is issued for the
+    # box's device FQDN — so verifying it against the literal 127.0.0.1 fails,
+    # and every orchestrator read from this process failed with it (silently,
+    # in files_snapshot's case).
+    #
+    # Verification is therefore skipped for LOOPBACK LITERALS ONLY. The
+    # trade is deliberate and narrow: this connection never leaves the box, the
+    # payload is unauthenticated health data with no credential material, and
+    # anyone positioned to MITM the box's own loopback interface already has
+    # code execution on it — so verification is buying nothing here that the
+    # host's own integrity does not already provide.
+    #
+    # What was NOT done, and why:
+    #   * publishing the orchestrator on a host port — a fixed port collides
+    #     (it broke CI immediately: "address already in use" on 3000), and a
+    #     new listener is a bigger change to the box's surface than this;
+    #   * verifying against the device FQDN with a manual SNI override — works
+    #     only while split-horizon DNS and the cert are both healthy, which is
+    #     exactly what you cannot assume when something is already wrong.
+    base = _orchestrator_base_url_raw()
+    if base.startswith("https://") and _is_loopback_url(base):
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
+
+
+def _orchestrator_base_url_raw():
+    if (ORCHESTRATOR_URL.startswith("http://")
+            and os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1"):
+        return "https://" + ORCHESTRATOR_URL[len("http://"):]
+    return ORCHESTRATOR_URL
 
 
 def _orchestrator_base_url():
-    if ORCHESTRATOR_URL.startswith("http://")             and os.environ.get("DROPLET_INTERNAL_TLS", "0") == "1":
-        return "https://" + ORCHESTRATOR_URL[len("http://"):]
-    return ORCHESTRATOR_URL
+    return _orchestrator_base_url_raw()
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
@@ -2823,6 +2873,55 @@ def run_tls_reload():
     return True, {"message": (out or "").strip() or "gateway reloaded"}
 
 
+# --- WARP-1639: rack-panel console handback ---------------------------------
+# THE DEBUG BUTTON'S PRIVILEGED HALF.
+#
+# The rack panel is a plain HDMI monitor on the box's iGPU, so the display
+# service owning it means the kernel console does NOT — i.e. claiming the panel
+# takes the operator's physical console away. That is only acceptable if there
+# is a way back that does not already require a shell. This is it: the panel's
+# own on-screen debug affordance POSTs /panel/console, and we hand the
+# framebuffer back to fbcon and switch to a login VT.
+#
+# The bridge cannot do the work itself — writing /sys/class/vtconsole/*/bind
+# and calling chvt both need root, and this sandbox is User=droplet +
+# ProtectSystem=strict + NoNewPrivileges. So, exactly like the storage-pool
+# split, the privileged half lives in a root oneshot
+# (droplet-panel-console.service) and the bridge only asks PID 1 to start it.
+# 50-droplet-device-bridge.rules grants the droplet user the `start` verb on
+# that unit and nothing else.
+#
+# Note there is deliberately NO reverse route. Handing the console BACK to the
+# display service (`claim`) must not be remotely triggerable — pulling the
+# console out from under someone who is mid-debug is exactly the failure this
+# whole path exists to prevent. Reclaim happens on the host, either from the
+# deadman once the hold expires or explicitly over SSH.
+PANEL_CONSOLE_UNIT = os.environ.get(
+    "DROPLET_PANEL_CONSOLE_UNIT", "droplet-panel-console.service").strip()
+
+
+def run_panel_console():
+    """Hand the rack panel's framebuffer back to the kernel console.
+
+    Returns (ok, info); never raises — mirrors run_tls_reload(). A blocking
+    start of a Type=oneshot unit returns once its ExecStart has exited, so a
+    200 here means the console really is back, not merely requested."""
+    try:
+        rc, out, err = _run(["systemctl", "start", PANEL_CONSOLE_UNIT],
+                            timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("panel console handback failed to start unit: %s", e)
+        return False, "could not start the panel console unit"
+    if rc != 0:
+        # The unit is missing, or polkit denied the start. Say so plainly: the
+        # caller is a person standing at a rack trying to get a prompt.
+        msg = (err.strip() or out.strip() or "panel console unit failed")
+        logger.warning("panel console handback failed (rc=%s): %s", rc, msg)
+        return False, msg
+    logger.info("panel console handed back to the operator")
+    return True, {"message": "console returned to the panel"}
+
+
 # --- ADR-023 PR-1: public-FQDN write-back host executor ---------------------
 # The orchestrator's tls-issuance service LEARNS the box's opaque per-device
 # FQDN from the HQ challenge response and POSTs it to /host/public-fqdn so it can
@@ -2991,6 +3090,92 @@ def cameras_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# WARP-1645: service health for the rack panel's SERVICES cell
+# ---------------------------------------------------------------------------
+# The orchestrator ALREADY maintains exactly this: health-monitor.service.ts
+# background-polls 8 components every 15s and caches the result, and
+# /api/orchestrator/health returns that snapshot cheaply (it is what Docker's
+# healthcheck hits). We reuse it rather than forming a second opinion.
+#
+# Deliberately NOT ops-console's /ops/containers: that is backed by
+# /var/run/docker.sock, which is root-equivalent on the host. Nothing on the
+# panel's data path should need it, and the display container must never get it.
+#
+# This lives in the bridge rather than in display.py because every other panel
+# feed already does (/wifi, /files, /cameras, /drives, /openwrt/qr), and the
+# bridge already owns the orchestrator client including the internal-mTLS
+# context. One place to normalise, one place to get the TLS right.
+
+# Mirrors HARD_DEPS in health-monitor.service.ts. PRESENTATION ONLY — it drives
+# row ordering and dot colour. The authority on whether the box is merely
+# degraded or actually down is the orchestrator's own aggregate `status`, which
+# we pass through untouched; do not re-derive that here from this list.
+_CORE_COMPONENTS = ("postgres",)
+
+
+def services_snapshot():
+    """Normalise the orchestrator's health snapshot for the panel.
+
+    Returns {up, total, status, degraded[]}. On ANY failure every field stays
+    None so the panel renders em dashes — never zeros. WARP-1643 shipped two
+    fake zeros already; "0/0 services" on a rack front is worse than an honest
+    gap, because it reads as a measurement.
+    """
+    out = {"up": None, "total": None, "status": None, "degraded": []}
+
+    body = None
+    url = _orchestrator_base_url() + "/api/orchestrator/health"
+    try:
+        with urlrequest.urlopen(url, timeout=4,
+                                context=_orchestrator_tls_context()) as r:
+            body = json.loads(r.read().decode())
+    except Exception as e:                                          # noqa: BLE001
+        # ⚠ The endpoint answers 503 when the aggregate is `down` — and urlopen
+        # raises on 503. Without reading the error body we would show "no data"
+        # at exactly the moment the box is most broken, which is the one time
+        # this cell has to work. HTTPError is a response object; read it.
+        payload = getattr(e, "read", None)
+        if callable(payload):
+            try:
+                body = json.loads(payload().decode())
+            except Exception:                                       # noqa: BLE001
+                body = None
+        if body is None:
+            logger.debug("services snapshot unavailable: %s", e)
+            return out
+
+    comps = body.get("components") or []
+    if not isinstance(comps, list) or not comps:
+        return out
+
+    degraded = []
+    up = 0
+    for c in comps:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "?")
+        if c.get("status") == "ok":
+            up += 1
+        else:
+            degraded.append({
+                "name": name,
+                # Prefer the component's own error text — at a rack, "connection
+                # refused" is worth more than "down".
+                "state": str(c.get("error") or c.get("status") or "down")[:40],
+                "core": name in _CORE_COMPONENTS,
+            })
+    # Core first, then alphabetical, so the row that matters is never the one
+    # pushed off by the 3-row cap.
+    degraded.sort(key=lambda s: (not s["core"], s["name"]))
+
+    out["up"] = up
+    out["total"] = len(comps)
+    out["status"] = body.get("status")
+    out["degraded"] = degraded
+    return out
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -3068,6 +3253,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, files_snapshot())
             if path == "/cameras":
                 return self._send(200, cameras_snapshot())
+            if path == "/services":
+                # WARP-1645: component health for the panel's SERVICES cell.
+                # Ungated like /wifi and /cameras — it carries no credential
+                # material, just component names and up/down, and the panel it
+                # feeds is already visible to anyone standing at the rack.
+                return self._send(200, services_snapshot())
             if path == "/drives":
                 # WARP-659: drive inventory (labels, mount points, usage) is
                 # box-internal; gate it like /openwrt/qr now that the bridge
@@ -3379,6 +3570,23 @@ class Handler(BaseHTTPRequestHandler):
                 # 502: the host script is missing / the reload command failed.
                 # The cert files are already on disk, so the box keeps serving
                 # the OLD cert until a later reload (or a gateway restart) lands.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/panel/console":
+            # WARP-1639: hand the rack panel back to the kernel console. This
+            # is what the panel's on-screen debug affordance calls. Auth-gated
+            # like every other mutating route — it is a physical-access
+            # recovery path, but the bridge can be LAN-reachable with
+            # BRIDGE_BIND=0.0.0.0, and "anyone on the LAN can drop the status
+            # screen to a login prompt" is not a posture we want.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_panel_console()
+            if not ok:
+                # 502: the unit is missing or polkit denied it. The caller is a
+                # person at a rack trying to get a prompt, so the message is
+                # surfaced verbatim rather than flattened to "failed".
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})

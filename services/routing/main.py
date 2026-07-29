@@ -1823,6 +1823,15 @@ _AI_ACL_FALLBACK = {
                 ],
                 "umdns": ["browse", "update"],
             },
+            # The `ubus` grant above only opens the `file` OBJECT. rpcd applies
+            # a SECOND, path-level check for file.read/list/stat, so without
+            # this scope `/ai-access` silently falls back to the bundled ACL
+            # instead of reflecting on-box truth. Pinned to the ACL itself —
+            # the only path the routing service ever reads. Verified on the Pi
+            # edge router: without it, file.read returns ubus status 6.
+            "file": {
+                _AI_ACL_PATH: ["read"],
+            },
         },
         "write": {
             "ubus": {

@@ -1,6 +1,6 @@
 # ADR-012: Phone-home egress control for IoT, camera & smart-home devices
 
-- **Status:** Proposed
+- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
 - **Date:** 2026-05-31
 - **Authors:** Stefan Cruceru
 - **Related tickets:** WARP-613
@@ -202,3 +202,11 @@ mirroring `block-network-device.ts`: `requiresWrite: true`,
 - **Matter linkage.** Smart-home devices controlled via Matter aren't yet linked
   to their `NetworkDevice` MAC; until they are, the user tags them into a group
   by hand.
+
+## Status audit — 2026-07-27
+
+Flipped `Proposed` → `Accepted`. Evidence on `main`: the allowlist checker
+`scripts/check-egress-allowlist.py` and the CI gate
+`.github/workflows/egress-gate.yml` both exist, and `egress-gate` runs and
+passes as a required check on every PR. A decision enforced by a blocking CI
+gate is in force, not proposed.
