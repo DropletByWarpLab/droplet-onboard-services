@@ -1163,19 +1163,33 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
 /**
  * WARP-1558 — the sweep above IS the backfill, once it can create the group.
  *
- * ADR-029 §2.5 Tier-1 admin see-all is exactly `droplet-admins` membership.
- * On the .87 box that group was attached at MASK_ADMIN to every groupfolder
- * and had ZERO members, so the capability was inert on an otherwise correctly
- * provisioned appliance. The create-path fix (routes/auth-groups.ts) stops NEW
- * admin-tier accounts from landing in that state; these specs cover the other
- * half — the installs that are already in it.
+ * ADR-029 §2.5 Tier-1 admin see-all is exactly `droplet-admins` membership,
+ * and ADR-032 §7 / O-5 (2026-07-27) confirms that tier is unconditional and
+ * not narrowable by a custom role.
+ *
+ * THE DEFECT IS A FRESH-INSTALL ONE. `droplet-admins` is created LAZILY by
+ * provisionDepartment, so an install with **no departments** has no group at
+ * all — and every add against a non-existent group dies on OCS 102, forever.
+ * The create-path fix (routes/auth-groups.ts) stops NEW admin-tier accounts
+ * from landing in that state; these specs cover the sweep that has to create
+ * the group before it can converge membership into it.
+ *
+ * A NOTE ON PROVENANCE, because the original framing was different. This work
+ * was motivated by the .87 box, where the group was attached at MASK_ADMIN to
+ * every groupfolder with ZERO members. **That state no longer reproduces**:
+ * re-probed 2026-07-28 on the box at 192.168.1.250, `droplet-admins` holds
+ * exactly the three admin-tier users and the reconciler reports
+ * adminGroupAdded/Removed/Failed = 0 every tick. Why it differs is NOT
+ * established — the box changed address and hostname, and re-provisioned vs
+ * rebuilt vs different appliance cannot be distinguished from here, so no
+ * causal claim is made. The already-broken-install justification is therefore
+ * withdrawn; the zero-department case above is the one these specs defend, and
+ * it is unaffected by whatever happened to that box.
  *
  * The answer is deliberately not a migration or a one-shot script: the sweep
  * is stateless, so "an install that never had a member" and "an install whose
  * members an outage dropped" are the same input to it, and the boot tick plus
- * the 5-minute cron converge both. What it needed was the ability to create
- * the group: `droplet-admins` is created LAZILY by provisionDepartment, so an
- * install with no departments has none, and every add died on OCS 102 forever.
+ * the 5-minute cron converge both.
  *
  * That diagnosis originally rested on `ncListGroupMembers` returning `[]` for
  * "no such group" exactly as it does for "empty", leaving the sweep unable to
@@ -1194,7 +1208,7 @@ describe("WARP-1558 — droplet-admins membership backfill", () => {
   ];
 
   it("backfills every admin-tier user into an EMPTY group, creating the group first", async () => {
-    // The .87 box, reproduced: three admin-tier users, zero members.
+    // A fresh install: three admin-tier users, and no group for them to be in.
     const prisma = buildPrisma([], [], [...OPERATORS, {
       id: "u-4",
       nextcloudUsername: "kid",
