@@ -9,6 +9,28 @@
 #
 # NOTE: Dependabot ALERTS + SECURITY updates are separate one-time repo
 # settings — see docs/SECURITY.md#dependabot for the enable commands.
+#
+# TRIAGE RULES (2026-07-27). Two problems were costing a re-review every
+# cycle; both are fixed declaratively here rather than by re-closing PRs.
+#
+#   1. `ignore` entries below suppress MAJOR bumps that were reviewed and
+#      rejected (#1164 @prisma/client 5→7, #1165 express, #1167 zod 3→4,
+#      #1171 huggingface-hub, #1172 transformers). None of these is a
+#      dependency refresh — each is a migration that needs to be scheduled.
+#      Suppressing only the major keeps minor/patch and, importantly, keeps
+#      SECURITY updates flowing: `ignore` does not apply to Dependabot
+#      security PRs. When a migration is scheduled, delete its entry and
+#      Dependabot re-raises on the next run.
+#
+#   2. `@matter/*` is excluded from the npm minor/patch GROUP. Those
+#      packages are 0.x, where Dependabot classifies 0.16 → 0.17 as a
+#      "minor" but semver makes it breaking — and it was. In #1261 that one
+#      family broke `build orchestrator`, `build matter-controller`,
+#      `build mcp-server` and both node legs, which held SEVEN unrelated,
+#      innocent bumps hostage (including a `sanitize-html` patch) because a
+#      group PR is all-or-nothing. Excluding it lets the innocents merge and
+#      gives matter.js its own PR that can be rejected or scheduled on its
+#      own evidence. This is NOT an ignore: matter still gets updates.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -21,6 +43,23 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
+        # 0.x: Dependabot's "minor" is semver-breaking here. See #1261.
+        exclude-patterns:
+          - "@matter/*"
+          - "@project-chip/matter.js"
+    ignore:
+      # Reviewed and rejected as migrations, not refreshes. Majors only —
+      # minor/patch and security updates still flow.
+      - dependency-name: "@prisma/client"          # #1164 (5.22 → 7.x)
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prisma"                  # keep the pair in lockstep
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "express"                 # #1165
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/express"          # ships with express
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zod"                     # #1167 (3.25 → 4.x)
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: npm
@@ -58,6 +97,13 @@ updates:
     groups:
       pip-minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # Reviewed and rejected as migrations, not refreshes (ai-gateway).
+      # Majors only — minor/patch and security updates still flow.
+      - dependency-name: "huggingface-hub"         # #1171 (<1.0 → >=1.24)
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "transformers"            # #1172 (<5 → >=5.14)
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions

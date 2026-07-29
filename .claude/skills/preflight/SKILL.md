@@ -31,7 +31,14 @@ under `.claude/worktrees/` — check before paying that cost.)
 **Worktree with NO `node_modules` of its own** (resolution falls
 through to the root checkout's install): do **not** full-`npm install`
 inside the worktree — the competing local tree shadows the root one and
-breaks Vite/vitest resolution. If the root checkout's install predates
+breaks Vite/vitest resolution. Equally, do **not** symlink the root's
+`node_modules` wholesale: a workspace package that exists only on your
+branch line then resolves into the **root checkout**, which is often on
+a long-stale branch — silently testing the wrong code. Not theoretical:
+it took one orchestrator run from 1 failed file to **31**, all
+`@droplet/erp-connector` collection failures. The sparse tree below
+avoids it because every link points at the *worktree's own* packages.
+If the root checkout's install predates
 deps your branch needs (symptoms: `TS2307 Cannot find module
 '@droplet/erp-connector'` — the package is real, its types resolve from
 `dist/` — and/or phantom Prisma-drift errors such as `VpnPeer.kind`
@@ -94,7 +101,7 @@ to a leg — or when you'd rather not wait 20 minutes to find out.
 | Touched | Command (from repo root) | Known local baseline (don't chase) |
 |---|---|---|
 | apps/orchestrator | `npm run test:orchestrator` | 1 env failure: `mcp-client.service.test.ts` (spawns stdio subprocess; green in CI) |
-| apps/web-dashboard | `npm run test:dashboard` | ~26 env failures in 9 files locally (`localStorage` undefined, auth re-probe classes; all green in CI) — compare via stash/replay; single-file runs are reliable |
+| apps/web-dashboard | `npm run test:dashboard` | ~26-37 env failures in 9-10 files locally (`localStorage` undefined, auth re-probe, `tour.*`, `setup.finish-persist`, `WizardThemeToggle`; all green in CI) — compare via patch/replay (§4); single-file runs are reliable. Use the script, not a bare root `vitest` — see §4 on the `@` alias |
 | services/ai-gateway | `cd services/ai-gateway && .venv/bin/python3 -m pytest` | if `test_chat_endpoint_has_rate_limit_headers` hangs, the branch predates the #770 fix — deselect it and rebase |
 | services/routing | `cd services/routing && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
 | services/voice-io | `cd services/voice-io && ../ai-gateway/.venv/bin/python3 -m pytest` | clean run = all pass |
@@ -117,10 +124,41 @@ One more 3.14 quirk: litellm releases currently cap
 needs `--ignore-requires-python` (CI and the Docker images run 3.12
 and resolve normally).
 
-## 4. Unexpected failure? Stash/replay before chasing
+## 4. Unexpected failure? Patch/replay before chasing
 
-`git stash` → rerun the suite → note the failure set → `git stash pop`
-→ rerun. Only failures absent from the baseline run are yours.
+> ⚠ **Never use `git stash` for this.** The stash stack is **shared
+> across every worktree of the repo**, not per-worktree. If any other
+> agent or session is working in a sibling worktree, `git stash pop`
+> takes whatever is on top of the shared stack — **which may be their
+> work, not yours.** This has happened: during a 9-agent run one
+> agent's pop pulled another agent's files into its tree and dropped
+> the entry from the stack. It was recoverable only because stash
+> commits stay reachable by SHA.
+
+Use a patch file — worktree-local, and safe under concurrency:
+
+```bash
+git diff > /tmp/my-work-<ticket>.patch
+git apply -R /tmp/my-work-<ticket>.patch   # clean tree
+# rerun the suite FROM THE SAME cwd as the real run → baseline set
+git apply /tmp/my-work-<ticket>.patch      # restore
+# rerun → only failures absent from the baseline are yours
+```
+
+**Run the baseline from the same directory as the real run.** The
+dashboard's `@` alias is defined in `apps/web-dashboard/vitest.config.ts`
+(`alias: { "@": path.resolve(__dirname, "./src") }`), so it resolves
+only when that config loads. A root-level `npx vitest` yields ~355 bogus
+collect failures. `npm run test:dashboard` does `cd apps/web-dashboard`
+first, which is why the scripts in §3 are the safe entry points.
+
+Compare the **failing file set**, not the counts — a rotating flake can
+swap one red for another while the total stays equal.
+
+Already stashed and the stack looks wrong? Do **not** pop blind. Find
+your entry with `git stash list` / `git log -g refs/stash`, recover it
+by SHA, then put back anything that wasn't yours with
+`git stash store <sha>`.
 
 Known pre-existing reds in **CI on main** (as of 2026-07-08 — verify
 with the `ci-triage` agent before trusting this list; the previous
@@ -134,9 +172,35 @@ ai-gateway hang and routing reds were fixed by #770/#768):
 - osv-nightly: never been green (standing dependency-vuln debt plus
   intermittent OSV resolver errors).
 
-A red not on this list: check whether main's latest run of the same
+Known **local-only** reds — environment artifacts, not repo reds.
+Confirm by patch/replay rather than re-diagnosing each time:
+
+- **`TeamStep.tsx(17,10) TS2305: '@droplet/auth-policy' has no exported
+  member 'generateTempPassword'`** — stale `packages/auth-policy` build.
+  The export is real (`packages/auth-policy/src/generate.ts:86`);
+  rebuild that package.
+- **`Failed to resolve entry for package "@droplet/erp-connector"`**
+  across ~26-31 orchestrator files at collection — the §1 build list was
+  skipped, or a worktree resolved `@droplet/*` into the root checkout.
+- **`TS7031` in `tools-core`'s `list-network-devices.ts`** — `prisma
+  generate` didn't run before the package builds (§2).
+- **~355 dashboard collect failures** — run from the repo root instead
+  of `apps/web-dashboard`; the `@` alias never loaded (§4).
+- **`apps/orchestrator/src/__tests__/files.test.ts` en masse** —
+  order-dependent (WARP-1600); fails when any file is added to that
+  directory.
+- **`*.schema.test.ts`** (20+ files) resolve `prisma/schema.prisma`
+  relative to cwd — they need cwd=`apps/orchestrator`.
+
+Rotating flakes that pass in isolation and swap between runs:
+`mcp-client.service.test.ts`, `rbac.test.ts`,
+`admin-retrieval-eval.test.ts`, `voice-profiles.test.ts`,
+`activity-verify.test.ts`, `setup.cameras.test.tsx`. Their *presence* is
+not signal; a change in the failing **file set** is.
+
+A red not on either list: check whether main's latest run of the same
 workflow fails the same way (the `ci-triage` agent does exactly this),
-then stash/replay locally.
+then patch/replay locally.
 
 ## 5. Diff hygiene
 
@@ -159,7 +223,10 @@ instructs it for this named PR.
 
 | Thought | Reality |
 |---|---|
-| "These failures look unrelated but I should fix them" | Stash/replay first (§4). The baseline reds above are documented; chasing them burns hours. |
+| "These failures look unrelated but I should fix them" | Patch/replay first (§4). The baseline reds above are documented; chasing them burns hours. |
+| "I'll just `git stash` to get a clean tree for the baseline" | The stash stack is **repo-global, not per-worktree**. Under parallel agents your `pop` can take someone else's work. Use the patch file in §4 — always. |
+| "`tools-core` won't build, so `main` must be broken" | Run `npx prisma generate` in `apps/orchestrator` first (§2). This exact misdiagnosis was reported upstream as a repo red and wasn't one. |
+| "I'll read the source from the checkout I'm sitting in" | That checkout may be on a long-stale branch — this repo's working tree routinely is. Read from `origin/main` (`git show origin/main:<path>`) before trusting any file:line, and never symlink its `node_modules` into a worktree (§1). |
 | "The venv won't build, so I'll skip the Python tests" | The ai-gateway venv reuse (§3) exists precisely for this. |
 | "I'll `pip install -r requirements.txt` into the shared venv" | That pulls pydantic-core/cryptography source builds and fails; install only the two pinned wheels above. |
 | "CI is green, I'll merge" | The review gate is deliberate policy. Ready-for-review IS the finish line. |

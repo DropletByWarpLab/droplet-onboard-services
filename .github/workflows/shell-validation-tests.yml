@@ -19,6 +19,13 @@ on:
       - "scripts/host/**"
       - "scripts/lib/**"
       - "scripts/test/pytest/**"
+      # WARP-1639: the panel-console suite here also covers device-bridge's
+      # POST /panel/console and the polkit grant behind it. Both live under
+      # services/oled-display, which is ci-coverage-exempt and runs in no
+      # workflow — so without these two paths a bridge-only change would sail
+      # past the tests that guard it.
+      - "services/oled-display/device-bridge.py"
+      - "services/oled-display/50-droplet-device-bridge.rules"
       - ".github/workflows/shell-validation-tests.yml"
   push:
     branches: [main]
@@ -26,6 +33,13 @@ on:
       - "scripts/host/**"
       - "scripts/lib/**"
       - "scripts/test/pytest/**"
+      # WARP-1639: the panel-console suite here also covers device-bridge's
+      # POST /panel/console and the polkit grant behind it. Both live under
+      # services/oled-display, which is ci-coverage-exempt and runs in no
+      # workflow — so without these two paths a bridge-only change would sail
+      # past the tests that guard it.
+      - "services/oled-display/device-bridge.py"
+      - "services/oled-display/50-droplet-device-bridge.rules"
       - ".github/workflows/shell-validation-tests.yml"
   workflow_dispatch:
 

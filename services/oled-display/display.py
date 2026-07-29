@@ -65,7 +65,23 @@ HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 # ---------------------------------------------------------------------------
 # "auto" (default) probes the status display on USB-serial and falls back to "sim".
 # "pyportal" / "sim" force a specific backend (primarily for CI / dev).
+#
+# WARP-1640 adds "fb": the rack panel is a plain HDMI monitor on the box's own
+# iGPU, so the HOST renders and blits (see fb.py) rather than streaming JSON to
+# firmware that draws for us.
+#
+# "fb" is deliberately EXPLICIT-ONLY and is never reached from "auto". The 5s
+# promotion loop below re-probes USB every tick, so an auto-selected fb backend
+# would silently lose the panel to any PyPortal plugged in later.
 BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
+
+# Backends whose screens are driven from `self._v3`, i.e. the ones that need
+# the cycle loop's periodic data pumps running. Getting this wrong is the
+# single most expensive mistake in this file: `_v3` is populated ONLY via
+# `_mirror_to_v3()` <- `_pyportal_send()`, so a backend missing from here
+# renders CPU 0% / MEM 0% / DISK 0% forever while every renderer works
+# perfectly — it is drawing an empty dict.
+_DATA_BACKENDS = ("pyportal", "fb")
 
 # Status display backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
@@ -81,6 +97,9 @@ WIFI_HELPER_URL = os.environ.get(
 WIFI_REFRESH_SECONDS = int(os.environ.get("WIFI_REFRESH_SECONDS", "20"))
 FILES_REFRESH_SECONDS = int(os.environ.get("FILES_REFRESH_SECONDS", "30"))
 CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
+# WARP-1645 — the orchestrator's health monitor refreshes on its own 15s
+# cadence, so there is nothing to gain by polling faster than it updates.
+SERVICES_REFRESH_SECONDS = int(os.environ.get("SERVICES_REFRESH_SECONDS", "15"))
 
 # ---------------------------------------------------------------------------
 # Design tokens — mirror apps/web-dashboard/src/app/globals.css (dark mode).
@@ -164,6 +183,11 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 # for interaction, not a billboard. Setting AUTO_CYCLE=1 restores the
 # old logo -> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
+
+# WARP-1641 — how long the debug screen's "return console" button stays armed
+# after the first tap. Long enough to be a deliberate second press, short
+# enough that walking away disarms it.
+CONSOLE_CONFIRM_SECONDS = float(os.environ.get("CONSOLE_CONFIRM_SECONDS", "4"))
 
 # ---------------------------------------------------------------------------
 # Boot readiness (WARP-624; redirect/TLS fix WARP-638)
@@ -579,6 +603,10 @@ class TFTDisplay:
     IDLE = "idle"
     SYSTEM = "system"
     STANDBY = "standby"
+    # WARP-1641 — the rack panel's recovery screen. Reachable only by touch;
+    # the orchestrator never pushes it. Wide layouts only (the 480x320 screens
+    # have their own settings surface).
+    DEBUG = "debug"
 
     def __init__(self):
         self._pyportal = None
@@ -678,6 +706,10 @@ class TFTDisplay:
             "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
                      "band": "", "key_ttl_seconds": 0, "password": ""},
             "cameras": {"online": 0, "total": 0},
+            # WARP-1645 — filled by fetch_services(). All-None so a cold box
+            # renders em dashes; see WARP-1643 on why not zeros.
+            "services": {"up": None, "total": None, "status": None,
+                         "degraded": []},
             "wan_latency_ms": 0, "lan_clients": 0,
         }
         self._v3_spark_len = 48  # handoff: 48-sample CPU history
@@ -687,6 +719,12 @@ class TFTDisplay:
         # Live touch feedback: momentary highlight after a tap
         self._last_tap_region: Optional[str] = None
         self._last_tap_at: float = 0.0
+        # WARP-1640 — set by _init_device() when DISPLAY_BACKEND=fb; stays None
+        # on every other backend so _push()'s check is a plain identity test.
+        self._fb = None
+        # WARP-1641 — debug screen's two-tap console handback.
+        self._console_confirm_until: float = 0.0
+        self._console_last_result: str = ""
 
         self._init_device()
         self._load_logo()
@@ -696,6 +734,26 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
+        # WARP-1640 — the rack panel. Explicit opt-in only: returning here
+        # BEFORE the USB probe is what keeps a later-plugged PyPortal from
+        # stealing the panel via the cycle loop's promotion path.
+        if BACKEND == "fb":
+            from fb import FramebufferBackend
+            self._fb = FramebufferBackend.open()
+            if self._fb is not None:
+                self._backend = "fb"
+                logger.info("TFT initialised on the framebuffer panel "
+                            "(%dx%d stride=%d)", self._fb.width,
+                            self._fb.height, self._fb.stride)
+                return
+            # open() already logged why. Fall through to sim so the service
+            # still serves /display/preview and the orchestrator's pushes
+            # still land — a missing panel must not take the container down.
+            logger.warning("framebuffer backend requested but unavailable — "
+                           "falling back to sim")
+            self._backend = "sim"
+            return
+
         # The status display takes several seconds to finish USB enumeration
         # after the host reboots, so retry a few times before falling through
         # to sim. Otherwise a cold boot leaves the user with a blank screen
@@ -777,6 +835,20 @@ class TFTDisplay:
             logger.debug("status display probe %s failed: %s", path, e)
             return False
 
+    def _wants_data(self) -> bool:
+        """Does this backend need the cycle loop's periodic data pumps?
+
+        WARP-1640. The pumps call `_pyportal_send()`, whose FIRST action is
+        `_mirror_to_v3()` — i.e. they are how `self._v3` gets populated, on
+        every backend, regardless of whether a serial device exists.
+        `_pyportal_send` is safe with no device attached: it returns right
+        after the mirror.
+
+        The name is historical; the behaviour is not PyPortal-specific. Gating
+        these on `== "pyportal"` is what would leave the rack panel rendering
+        CPU 0% / MEM 0% / DISK 0% forever."""
+        return self._backend in _DATA_BACKENDS
+
     def _mirror_to_v3(self, mode: str, data: Optional[dict]) -> None:
         """Feed the host's own py-v3 preview from the SAME frames we send the
         device, so the rendered PNG matches what the panel shows. Best-effort;
@@ -790,6 +862,8 @@ class TFTDisplay:
                 self.update_wifi(data)
             elif mode == "cameras":
                 self.update_cameras(data)
+            elif mode == "services":
+                self.update_services(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -891,10 +965,22 @@ class TFTDisplay:
     # ----- Push to display ---------------------------------------------
 
     def _push(self, image: Image.Image):
-        # Both backends write the preview PNG: the status display renders the
-        # frame itself from the data commands we stream over serial, and the
-        # sim backend has nothing else to do with the image.
+        # Every backend writes the preview PNG: the PyPortal renders the frame
+        # itself from the data commands we stream over serial, the sim backend
+        # has nothing else to do with the image, and on the framebuffer panel
+        # the preview is how we verify remotely (GET /display/preview) without
+        # standing in front of the rack.
         self._current_image = image
+        # WARP-1640 — the rack panel. This is the ONLY place pixels reach the
+        # framebuffer. FramebufferBackend.blit() already swallows its own
+        # errors, but this is the render thread: belt-and-braces here means a
+        # panel problem degrades to "preview still works" instead of killing
+        # every screen update for the rest of the process's life.
+        if self._fb is not None:
+            try:
+                self._fb.blit(image)
+            except Exception as e:                              # noqa: BLE001
+                logger.warning("panel blit failed: %s", e)
         SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         try:
             image.save(str(SIM_OUTPUT))
@@ -1681,6 +1767,13 @@ class TFTDisplay:
         for k, v in data.items():
             self._v3["wifi"][k] = v
 
+    def update_services(self, data: dict) -> None:
+        """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
+        list, and merging would leave a service showing as down after it
+        recovered."""
+        if isinstance(data, dict):
+            self._v3["services"] = data
+
     def update_cameras(self, data: dict) -> None:
         self._v3["cameras"] = {"online": data.get("online", 0),
                                "total": data.get("total", 0)}
@@ -1788,8 +1881,31 @@ class TFTDisplay:
             "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
         return img
 
+    def render_debug(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """WARP-1641 — the rack panel's debug / recovery screen.
+
+        Wide layouts only. On a 480x320 panel there is no room for it and the
+        existing settings screen already covers that shape, so we fall back to
+        the combined System screen rather than rendering something cramped."""
+        import layout_wide
+        if not layout_wide.is_wide():
+            return self.render_system(now=now)
+        return layout_wide.render_debug(self, now=now)
+
     def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
-        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats)."""
+        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats).
+
+        WARP-1641: on a wide panel (aspect >= 3) this hands off to
+        layout_wide. The 480x320 body below is authored against hardcoded
+        coordinates — the column divider at x=288, a footer at y=244 and
+        another at HEIGHT-24, which are 52px apart at height 320 and COLLIDE
+        at 280 — so it is not a matter of it looking cramped; it is wrong.
+        Dispatching on geometry rather than a global flag keeps every existing
+        renderer and test byte-identical, and keeps a box with two
+        differently-shaped panels working."""
+        import layout_wide
+        if layout_wide.is_wide():
+            return layout_wide.render_status(self, now=now)
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
         img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
@@ -2622,7 +2738,73 @@ class TFTDisplay:
     # ----- Navigation helpers (bound to touch regions) ------------------
 
     def _go_home(self):
+        self._console_confirm_until = 0.0
+        self._console_last_result = ""
         self._set_mode(self.HOME, pause_cycle=False)
+
+    # --- WARP-1641: the panel's debug / recovery screen ---------------------
+
+    def _go_debug(self):
+        self._console_confirm_until = 0.0
+        self._console_last_result = ""
+        self._set_mode(self.DEBUG)
+
+    def _console_confirm_active(self) -> bool:
+        return time.time() < self._console_confirm_until
+
+    def _tap_return_console(self):
+        """Two-tap confirm on "return console to panel".
+
+        This swaps what is physically on the rack's front panel, so a single
+        stray touch (or a sleeve) must not do it. First tap arms for
+        CONSOLE_CONFIRM_SECONDS; a second tap inside that window commits.
+        """
+        if not self._console_confirm_active():
+            self._console_confirm_until = time.time() + CONSOLE_CONFIRM_SECONDS
+            return
+        self._console_confirm_until = 0.0
+        res = self.return_console()
+        if res.get("ok"):
+            # The console is taking the panel over as we speak; there is
+            # nothing left to render to. Say so anyway — the frame may still
+            # land before fbcon repaints.
+            self._console_last_result = "Console returned. Panel is now a login prompt."
+        else:
+            self._console_last_result = "Could not return the console: {}".format(
+                str(res.get("error", "unknown"))[:60])
+
+    def return_console(self, timeout: float = 30.0) -> dict:
+        """Ask device-bridge to hand the panel back to the kernel console.
+
+        The container cannot do this itself — writing
+        /sys/class/vtconsole/*/bind and calling chvt both need root, and this
+        process has neither. The bridge polkit-starts the root oneshot
+        (WARP-1639). Mirrors rotate_wifi_key()'s auth + error handling; never
+        raises, because the caller is a person at a rack trying to get a
+        prompt and an exception here would just blank the screen.
+        """
+        headers = {"Content-Type": "application/json"}
+        token = (os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("DEVICE_SECRET_KEY")
+                 or "").strip()
+        if token:
+            headers["X-Droplet-Auth"] = token
+        req = urllib.request.Request(
+            WIFI_HELPER_URL + "/panel/console",
+            data=b"", method="POST", headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))
+            except Exception:                                    # noqa: BLE001
+                return {"ok": False, "error": str(e)}
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning("console handback failed: %s", e)
+            return {"ok": False, "error": str(e)}
 
     def _go_stats(self):
         self._set_mode(self.STATS)
@@ -2720,6 +2902,8 @@ class TFTDisplay:
             img = self.render_idle()
         elif mode == self.SYSTEM:
             img = self.render_system()
+        elif mode == self.DEBUG:
+            img = self.render_debug()
         elif mode == self.STANDBY:
             img = self.render_standby()
         elif mode == self.LOGO:
@@ -2794,6 +2978,7 @@ class TFTDisplay:
             ("wifi", self.fetch_wifi),
             ("drives", self.fetch_drives),
             ("cameras", self.fetch_cameras),
+            ("services", self.fetch_services),
             ("files", self.fetch_files),
         ):
             try:
@@ -2882,6 +3067,16 @@ class TFTDisplay:
     def fetch_drives(self, timeout: float = 4.0) -> Optional[dict]:
         return self._bridge_get("/drives", timeout)
 
+    def fetch_services(self, timeout: float = 6.0) -> Optional[dict]:
+        """WARP-1645 — component health for the panel's SERVICES cell.
+
+        The bridge normalises the orchestrator's cached health snapshot; see
+        services_snapshot() there for why that source and not the docker
+        socket. A None here (bridge unreachable) leaves the previous value in
+        place rather than blanking the cell — a single dropped poll should not
+        make the panel forget what it knew."""
+        return self._bridge_get("/services", timeout)
+
     def connect_wifi(self, ssid: str, password: str = "",
                      timeout: float = 30.0) -> dict:
         body = json.dumps({"ssid": ssid, "password": password}).encode()
@@ -2913,7 +3108,17 @@ class TFTDisplay:
             "mode": self._current_mode,
             "backend": self._backend,
             "simulated": self._backend == "sim",
+            # WARP-1640: the panel's REAL geometry when we own a framebuffer.
+            # WIDTH/HEIGHT are what we render at; if a misconfigured
+            # LCD_WIDTH/LCD_HEIGHT disagrees with the hardware, fb.py letterboxes
+            # rather than stretching — and this is where you see that.
             "resolution": f"{WIDTH}x{HEIGHT}",
+            "panel": (None if self._fb is None else {
+                "width": self._fb.width,
+                "height": self._fb.height,
+                "stride": self._fb.stride,
+                "device": self._fb.path,
+            }),
             "brightness": self._brightness,
             "cycling": (self._cycle_running and
                         time.time() >= self._cycle_paused_until),
@@ -3107,6 +3312,7 @@ class TFTDisplay:
         last_wifi_push = 0.0
         last_files_push = 0.0
         last_cams_push = 0.0
+        last_services_push = 0.0
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
@@ -3137,7 +3343,7 @@ class TFTDisplay:
             # drives / cameras stay on their initial empty values until
             # each individual periodic-push timer fires below — up to
             # 30s for files, which reads as "the screen never auto-fills".
-            if self._backend == "pyportal" and self._needs_resync:
+            if self._wants_data() and self._needs_resync:
                 self._needs_resync = False
                 logger.info("post-probe resync — pushing full state")
                 self._push_full_state()
@@ -3146,6 +3352,7 @@ class TFTDisplay:
                 last_wifi_push = now_anchor
                 last_files_push = now_anchor
                 last_cams_push = now_anchor
+                last_services_push = now_anchor
                 self._last_drives_push = now_anchor
             touch = getattr(self, "_touch_source", None)
             if touch is not None:
@@ -3178,8 +3385,12 @@ class TFTDisplay:
 
             # Live re-render of time-sensitive screens (incl. the py-v3 idle
             # clock + combined System screen so the preview stays current).
+            # DEBUG is in the list because its confirm button is time-boxed:
+            # without a re-render the "TAP AGAIN TO CONFIRM" state would stay
+            # on screen after it had already expired, and the next tap would
+            # arm rather than commit — which reads as the button not working.
             live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS,
-                                           self.IDLE, self.SYSTEM))
+                                           self.IDLE, self.SYSTEM, self.DEBUG))
             if live and (now - last_full_render) > 1.0:
                 with self._lock:
                     self._render_current_locked()
@@ -3190,26 +3401,34 @@ class TFTDisplay:
             # every screen has live numbers when the user navigates to it.
             # A longer cadence (8s) keeps perceived flicker low — the
             # firmware re-renders the active screen on each push.
-            if self._backend == "pyportal" and (now - last_stats_push) > 8.0:
+            if self._wants_data() and (now - last_stats_push) > 8.0:
                 self._pyportal_send("stats", self._gather_stats())
                 last_stats_push = now
-            if self._backend == "pyportal" and (now - last_wifi_push) > WIFI_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_wifi_push) > WIFI_REFRESH_SECONDS:
                 snap = self.fetch_wifi()
                 if snap is not None:
                     self._pyportal_send("wifi", snap)
                 last_wifi_push = now
-            if self._backend == "pyportal" and (now - last_files_push) > FILES_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_files_push) > FILES_REFRESH_SECONDS:
                 fs = self.fetch_files()
                 if fs is not None:
                     self._pyportal_send("files", fs)
                 last_files_push = now
-            if self._backend == "pyportal" and (now - last_cams_push) > CAMERAS_REFRESH_SECONDS:
+            if self._wants_data() and (now - last_cams_push) > CAMERAS_REFRESH_SECONDS:
                 cams = self.fetch_cameras()
                 if cams is not None:
                     self._pyportal_send("cameras", cams)
                 last_cams_push = now
+            # WARP-1645 — service health. The orchestrator refreshes its own
+            # snapshot every 15s, so polling faster than that only costs
+            # requests; slower and a container dying takes too long to show.
+            if self._wants_data() and (now - last_services_push) > SERVICES_REFRESH_SECONDS:
+                svc = self.fetch_services()
+                if svc is not None:
+                    self._pyportal_send("services", svc)
+                last_services_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
-            if self._backend == "pyportal":
+            if self._wants_data():
                 if not hasattr(self, "_last_drives_push"):
                     self._last_drives_push = 0.0
                 if (now - self._last_drives_push) > 8.0:
