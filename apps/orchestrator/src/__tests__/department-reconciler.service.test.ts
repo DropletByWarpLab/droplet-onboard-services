@@ -20,6 +20,7 @@ const {
   ncRemoveUserFromGroupMock,
   ncListGroupMembersMock,
   ncListGroupMembersStrictMock,
+  isAmbiguousWriteFailureMock,
   recordActivityMock,
 } = vi.hoisted(() => ({
   ncEnsureGroupMock: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +49,11 @@ const {
         "variant reports an outage as an empty group (WARP-1565)",
     );
   }),
+  // WARP-1557: "did this write land?" classifier. Default false = every
+  // failure is an unambiguous rejection, i.e. exactly the pre-WARP-1557
+  // behaviour every spec written before this ticket assumes. Its own truth
+  // table is pinned in nextcloud-groups.client.test.ts.
+  isAmbiguousWriteFailureMock: vi.fn().mockReturnValue(false),
   recordActivityMock: vi.fn().mockResolvedValue(null),
 }));
 
@@ -67,6 +73,7 @@ vi.mock("../services/nextcloud-groups.client.js", () => ({
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
   ncListGroupMembers: ncListGroupMembersMock,
   ncListGroupMembersStrict: ncListGroupMembersStrictMock,
+  isAmbiguousWriteFailure: isAmbiguousWriteFailureMock,
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({
@@ -77,7 +84,12 @@ import {
   reconcileDepartments,
   _resetReconcileKickForTests,
 } from "../services/department-reconciler.service.js";
-import { DROPLET_ADMINS_GROUP, MASK_ADMIN } from "../services/department-provisioner.service.js";
+import {
+  DROPLET_ADMINS_GROUP,
+  MASK_ADMIN,
+  MASK_RW,
+  MASK_RO,
+} from "../services/department-provisioner.service.js";
 import { createReconcilerSeam } from "./helpers/prisma-tx-harness.js";
 
 interface FakeDepartment {
@@ -347,6 +359,7 @@ beforeEach(() => {
   ncAddUserToGroupMock.mockResolvedValue(undefined);
   ncRemoveUserFromGroupMock.mockResolvedValue(undefined);
   ncListGroupMembersStrictMock.mockResolvedValue([]);
+  isAmbiguousWriteFailureMock.mockReturnValue(false);
 });
 
 describe("reconcileDepartments — membership convergence", () => {
@@ -455,7 +468,13 @@ describe("reconcileDepartments — never-delete-outside-archiving", () => {
     await reconcileDepartments(prisma as any);
 
     expect(gfDeleteFolderMock).toHaveBeenCalledTimes(1);
-    expect(gfDeleteFolderMock).toHaveBeenCalledWith(expect.any(String), 7);
+    // WARP-1557: `archiving` is a RE-VERIFY state (a prior attempt may have
+    // landed), so the archive retry carries confirmOnFailure.
+    expect(gfDeleteFolderMock).toHaveBeenCalledWith(
+      expect.any(String),
+      7,
+      expect.objectContaining({ confirmOnFailure: true }),
+    );
     expect(prisma.deptRows.get("d-archiving")!.state).toBe("archived");
   });
 });
@@ -476,12 +495,22 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
 
     await reconcileDepartments(prisma as any);
 
-    expect(gfAddGroupMock).toHaveBeenCalledWith(expect.any(String), 7, DROPLET_ADMINS_GROUP);
+    // WARP-1557: an ACTIVE DEPARTMENT row is re-converged through
+    // provisionDepartment, whose writes carry a trailing GfWriteOptions.
+    // `confirmOnFailure: false` — the steady-state drift pass keeps
+    // overwriting unconditionally, no read-back.
+    expect(gfAddGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      7,
+      DROPLET_ADMINS_GROUP,
+      expect.objectContaining({ confirmOnFailure: false }),
+    );
     expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
       expect.any(String),
       7,
       DROPLET_ADMINS_GROUP,
       MASK_ADMIN,
+      expect.objectContaining({ confirmOnFailure: false }),
     );
   });
 
@@ -570,6 +599,161 @@ describe("reconcileDepartments — flat team mount name", () => {
   });
 });
 
+// ── WARP-1557 ────────────────────────────────────────────────────────────
+//
+// THE regression this ticket exists for. On the .87 box, 2026-07-24:
+//
+//   Department      | State  | provisionError
+//   Dental Hygenist | failed | Groupfolder add group: 500
+//   Finance         | failed | Groupfolder add group: 500
+//
+// …while `occ groupfolders:list` showed BOTH folders fully provisioned with
+// the correct masks and real group members, and all 7 DepartmentMembership
+// rows were `synced`. The reconciler logged
+// `departmentsSwept: 3, departmentsConverged: 0, departmentsStillFailed: 2`
+// every five minutes, indefinitely: it could only re-issue the write that
+// was failing, never observe that reality already matched intent.
+
+describe("WARP-1557 — a 5xx on a write that SUCCEEDED upstream must not latch the row", () => {
+  /** The .87 box's NC state for a department Prisma had marked `failed`. */
+  function provisionedFolder() {
+    return {
+      id: 2,
+      mountPoint: "Engineering",
+      groups: {
+        "dept-engineering": MASK_RW,
+        "dept-engineering-ro": MASK_RO,
+        [DROPLET_ADMINS_GROUP]: MASK_ADMIN,
+      },
+      quota: -3,
+      size: 0,
+      acl: false,
+      manage: [],
+    };
+  }
+
+  it("REGRESSION: converges the row to active on the next tick instead of retrying forever", async () => {
+    // The write keeps returning 500 — exactly as it did on the box, and as it
+    // would keep doing until WARP-1537 (the Redis/session bug) is fixed.
+    gfAddGroupMock.mockRejectedValue(new Error("Groupfolder add group: 500"));
+    gfListFoldersMock.mockResolvedValue([provisionedFolder()]);
+
+    const d = dept({
+      state: "failed",
+      provisionError: "Groupfolder add group: 500",
+    });
+    const prisma = buildPrisma([d]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    const row = prisma.deptRows.get(d.id)!;
+    expect(row.state).toBe("active");
+    expect(row.provisionError).toBeNull();
+    expect(row.ncGroupfolderId).toBe(2);
+
+    // The tick reports progress instead of the box's eternal
+    // `departmentsConverged: 0, departmentsStillFailed: 2`.
+    expect(result.departmentsConverged).toBe(1);
+    expect(result.departmentsStillFailed).toBe(0);
+    expect(result.departmentsStuck).toBe(0);
+  });
+
+  it("a `pending` row is NOT verified — the read-back exception stays scoped to the retry path", async () => {
+    gfListFoldersMock.mockResolvedValue([provisionedFolder()]);
+    const d = dept({ state: "pending" });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    // A never-attempted row has no prior write that could have landed, so it
+    // takes the normal unconditional write path.
+    expect(gfAddGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      2,
+      "dept-engineering",
+      expect.objectContaining({ confirmOnFailure: false }),
+    );
+  });
+
+  it("an ambiguous failure is reported as re-verifying, not as a terminal failure", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const d = dept({ state: "pending" });
+    const prisma = buildPrisma([d]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+    expect(result.departmentsReverifying).toBe(1);
+    expect(result.departmentsStillFailed).toBe(0);
+  });
+});
+
+describe("WARP-1557 — stuck rows get a louder signal than a debug log line", () => {
+  it("counts a row as stuck only after it has failed every tick for the threshold, then demotes the re-verify state", async () => {
+    // Ambiguous failures forever: NC is genuinely down, nothing converges.
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const d = dept({ state: "pending" });
+    const prisma = buildPrisma([d]);
+
+    // Ticks 1-5: unconfirmed, parked in the non-terminal re-verify state.
+    for (let i = 0; i < 5; i += 1) {
+      const r = await reconcileDepartments(prisma as any);
+      expect(r.departmentsStuck).toBe(0);
+      expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+    }
+
+    // Tick 6 crosses STUCK_TICK_THRESHOLD: the row is reported stuck AND the
+    // re-verify budget is spent, so it is demoted to its terminal failure
+    // state rather than implying work is still in progress forever.
+    const sixth = await reconcileDepartments(prisma as any);
+    expect(sixth.departmentsStuck).toBe(1);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
+  });
+
+  it("a row that converges clears its stuck counter", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const d = dept({ state: "pending" });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+    await reconcileDepartments(prisma as any);
+
+    // NC recovers.
+    gfCreateFolderMock.mockResolvedValue(42);
+    const recovered = await reconcileDepartments(prisma as any);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("active");
+    expect(recovered.departmentsStuck).toBe(0);
+
+    // Break it again — the counter restarted from zero, so one bad tick is
+    // not immediately "stuck".
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    prisma.deptRows.get(d.id)!.state = "pending";
+    prisma.deptRows.get(d.id)!.ncGroupfolderId = null;
+    const again = await reconcileDepartments(prisma as any);
+    expect(again.departmentsStuck).toBe(0);
+  });
+
+  it("the stuck ActivityRow carries how many consecutive ticks the row has failed", async () => {
+    gfCreateFolderMock.mockRejectedValue(new Error("nc unreachable"));
+    const d = dept({ state: "failed", provisionError: "previous failure" });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+    await reconcileDepartments(prisma as any);
+
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Department stuck in failed state",
+        severity: "err",
+        refs: expect.objectContaining({ consecutiveTicks: 2 }),
+      }),
+    );
+  });
+});
+
 describe("reconcileDepartments — stuck-failed alert", () => {
   it("emits an alert ActivityRow when a row entering the sweep already failed is still failed after retry", async () => {
     gfCreateFolderMock.mockRejectedValue(new Error("nc unreachable"));
@@ -636,7 +820,11 @@ describe("reconcileDepartments — intent-preserving archive retry (WARP-1257 CR
 
     await reconcileDepartments(prisma as any);
 
-    expect(gfDeleteFolderMock).toHaveBeenCalledWith(expect.any(String), 42);
+    expect(gfDeleteFolderMock).toHaveBeenCalledWith(
+      expect.any(String),
+      42,
+      expect.objectContaining({ confirmOnFailure: true }),
+    );
     expect(ncEnsureGroupMock).not.toHaveBeenCalled();
     expect(prisma.deptRows.get(d.id)!.state).toBe("archived");
   });

@@ -12,6 +12,14 @@
  * authorization truth — `gfListFolders` is consulted only for id
  * discovery / mount-point dedupe.
  *
+ * WARP-1557 adds ONE narrow extra use of that same `gfListFolders` read:
+ * on the reconciler's failed-row retry sweep only (`{ verifyOnFailure }`),
+ * the already-fetched folder record is compared against the Prisma-derived
+ * intent, so a row whose Nextcloud state already matches can converge
+ * instead of re-issuing a write that keeps failing. Intent still comes
+ * exclusively from Prisma; NC is only ever asked "is what I decided already
+ * here?". See the ADR-029 boundary note on `folderMatchesIntent` below.
+ *
  * `kind` behavior:
  *   - DEPARTMENT — top-level: groups `dept-<slug>` / `dept-<slug>-ro`,
  *     mount point = `Department.name`.
@@ -41,6 +49,9 @@ import {
   gfRemoveGroup,
   gfSetGroupPermissions,
   gfSetQuota,
+  isAmbiguousWriteFailure,
+  type GroupfolderInfo,
+  type GfWriteOptions,
 } from "./nextcloud-groups.client.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
@@ -119,13 +130,103 @@ function computeMountPoint(dept: DepartmentRow, parent: DepartmentRow | null): s
   return dept.name;
 }
 
+async function findExistingFolder(
+  adminToken: string,
+  mountPoint: string,
+): Promise<GroupfolderInfo | null> {
+  const folders = await gfListFolders(adminToken);
+  return folders.find((f) => f.mountPoint === mountPoint) ?? null;
+}
+
 async function findExistingFolderId(
   adminToken: string,
   mountPoint: string,
 ): Promise<number | null> {
-  const folders = await gfListFolders(adminToken);
-  const match = folders.find((f) => f.mountPoint === mountPoint);
+  const match = await findExistingFolder(adminToken, mountPoint);
   return match ? match.id : null;
+}
+
+/**
+ * WARP-1557 — the desired NC shape of a DEPARTMENT/TEAM row, derived
+ * ENTIRELY from Prisma. Nothing in here is read from Nextcloud; this is the
+ * intent the writes below push, expressed as data so it can also be compared
+ * against reality on the retry path.
+ */
+interface DepartmentIntent {
+  rw: string;
+  ro: string;
+  mountPoint: string;
+  /** null = unlimited / not managed by us; skipped in the comparison. */
+  quotaBytes: number | null;
+}
+
+/**
+ * WARP-1557 — does the folder ALREADY satisfy the Prisma-derived intent?
+ *
+ * ADR-029 BOUNDARY NOTE (read before widening this).
+ *
+ * ADR-029:47 and :181 make Nextcloud a write-only projection: "NC state is
+ * never read back as truth (only `gfListFolders` for id discovery and
+ * `oc:size`/quota-used for display)." This comparison sits right next to that
+ * line, so the reasoning is spelled out rather than assumed:
+ *
+ *  1. Intent is NOT read from NC. Every field compared here — group names,
+ *     masks, mount point, quota — is computed from the Prisma row by
+ *     `computeGroupNames` / `computeMountPoint` / `Department.quotaBytes`.
+ *     Nextcloud is never asked what the department should look like; it is
+ *     only asked whether what Prisma already decided is present.
+ *  2. The answer can only ever turn "not yet converged" into "converged". A
+ *     mismatch falls straight through to the normal write path, so NC can
+ *     never *prevent* a write, only make a redundant one unnecessary.
+ *  3. It reuses `gfListFolders` — the exact call ADR-029 already carves out
+ *     for id discovery, and one the provisioner makes on this code path
+ *     anyway. The check therefore costs zero additional NC round-trips.
+ *  4. It runs ONLY on the reconciler's failed-row retry sweep (see
+ *     `provisionDepartment({ verifyOnFailure })`), never on first provision
+ *     and never on the steady-state active-row drift pass. Those keep
+ *     overwriting unconditionally, so the drift-overwrite guarantee in
+ *     ADR-029 §3.6 is untouched.
+ *
+ * Without this, a row whose NC state already matches intent has no way to
+ * observe that fact: the reconciler can only re-issue the write that is
+ * failing, which is precisely why two departments on the .87 box logged
+ * `departmentsSwept: 3, departmentsConverged: 0, departmentsStillFailed: 2`
+ * every five minutes indefinitely while `occ groupfolders:list` showed both
+ * folders fully and correctly provisioned.
+ */
+function folderMatchesIntent(
+  folder: GroupfolderInfo,
+  intent: DepartmentIntent,
+): boolean {
+  if (folder.groups[intent.rw] !== MASK_RW) return false;
+  if (folder.groups[intent.ro] !== MASK_RO) return false;
+  if (folder.groups[DROPLET_ADMINS_GROUP] !== MASK_ADMIN) return false;
+  // Quota is only compared when the row actually declares one — an
+  // unmanaged quota must not make an otherwise-converged folder look broken.
+  if (intent.quotaBytes !== null && folder.quota !== intent.quotaBytes) {
+    return false;
+  }
+  return true;
+}
+
+/** Options accepted by `provisionDepartment` / `archiveDepartment`. */
+export interface ProvisionOptions {
+  /**
+   * WARP-1557 — retry-path-only convergence verification. Set by the
+   * reconciler for rows that entered the sweep in a non-converged state
+   * (`failed` / `provisioning`, and `archive_failed` / `archiving` on the
+   * archive side). Two things switch on:
+   *
+   *   1. a pre-write check that skips the writes entirely when Nextcloud
+   *      already matches the Prisma-derived intent (see
+   *      `folderMatchesIntent` for the ADR-029 reasoning), and
+   *   2. `confirmOnFailure` on every NC write, so a write that reports 5xx
+   *      but actually landed is not treated as a failure.
+   *
+   * Deliberately OFF by default: first-provision and steady-state drift
+   * passes keep the pre-WARP-1557 write-only behaviour.
+   */
+  verifyOnFailure?: boolean;
 }
 
 /**
@@ -133,13 +234,23 @@ async function findExistingFolderId(
  * active. HOUSEHOLD rows skip every NC mutation and go straight to
  * active (the reconciler still attaches droplet-admins to them).
  *
- * Any NC failure flips the row to `failed` with a truncated
+ * Any NC failure parks the row in a failure state with a truncated
  * `provisionError` and returns — it never throws, so callers (the
  * reconciler's sweep loop) can process the rest of the batch.
+ *
+ * WARP-1557: WHICH failure state depends on whether the write outcome is
+ * knowable. A 4xx rejection is unambiguous and lands in terminal `failed`. A
+ * 5xx / timeout / transport error is ambiguous — the write may already have
+ * taken effect — and lands in `provisioning`, which is the RE-VERIFY state:
+ * non-terminal, swept down the same provision path next tick, and re-checked
+ * against Nextcloud before anything is re-written. Parking an ambiguous
+ * outcome in terminal `failed` is what made two departments on the .87 box
+ * permanently invisible to their members.
  */
 export async function provisionDepartment(
   prisma: PrismaClient,
   id: string,
+  opts: ProvisionOptions = {},
 ): Promise<void> {
   const dept = (await prisma.department.findUnique({
     where: { id },
@@ -164,6 +275,11 @@ export async function provisionDepartment(
   }
 
   const adminToken = adminBasicToken();
+  // WARP-1557: retry path only — see ProvisionOptions.verifyOnFailure and
+  // the ADR-029 boundary note on folderMatchesIntent.
+  const writeOpts: GfWriteOptions = {
+    confirmOnFailure: opts.verifyOnFailure === true,
+  };
 
   try {
     const parent = dept.parentId
@@ -174,6 +290,57 @@ export async function provisionDepartment(
 
     const { rw, ro } = computeGroupNames(dept, parent);
     const mountPoint = computeMountPoint(dept, parent);
+    const intent: DepartmentIntent = {
+      rw,
+      ro,
+      mountPoint,
+      quotaBytes:
+        dept.quotaBytes !== null && dept.quotaBytes !== undefined
+          ? Number(dept.quotaBytes)
+          : null,
+    };
+
+    // 0. WARP-1557 — bounded convergence verification, RETRY PATH ONLY.
+    //    Runs BEFORE any write (including ncEnsureGroup) on purpose: when
+    //    Nextcloud is failing every write — the .87 box's WARP-1537 state —
+    //    a check placed after the writes could never be reached, and the row
+    //    could never converge no matter how correct Nextcloud actually was.
+    //    Costs one gfListFolders, the same call step 2 makes anyway.
+    if (opts.verifyOnFailure) {
+      const existing = await findExistingFolder(adminToken, mountPoint);
+      if (existing && folderMatchesIntent(existing, intent)) {
+        await prisma.department.update({
+          where: { id },
+          data: {
+            state: "active",
+            provisionError: null,
+            ncGroupRw: rw,
+            ncGroupRo: ro,
+            ncGroupfolderId: existing.id,
+          },
+        });
+        logger.warn(
+          { id, folderId: existing.id, mountPoint },
+          "WARP-1557: department already matched intent in Nextcloud; converged without re-issuing writes",
+        );
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "folder-check",
+          what: "Department converged (already provisioned)",
+          sub: dept.name,
+          refs: {
+            departmentId: dept.id,
+            kind: dept.kind,
+            mountPoint,
+            folderId: existing.id,
+            verified: true,
+          },
+          actor: { type: "system" },
+        });
+        return;
+      }
+    }
 
     // 1. Ensure the three NC groups exist (idempotent).
     await ncEnsureGroup(rw);
@@ -186,25 +353,26 @@ export async function provisionDepartment(
     //    hand-created folder with a colliding name is still possible).
     let folderId = await findExistingFolderId(adminToken, mountPoint);
     if (folderId === null) {
-      folderId = await gfCreateFolder(adminToken, mountPoint);
+      folderId = await gfCreateFolder(adminToken, mountPoint, writeOpts);
     }
 
     // 3. Groups + masks on the folder.
-    await gfAddGroup(adminToken, folderId, rw);
-    await gfSetGroupPermissions(adminToken, folderId, rw, MASK_RW);
-    await gfAddGroup(adminToken, folderId, ro);
-    await gfSetGroupPermissions(adminToken, folderId, ro, MASK_RO);
-    await gfAddGroup(adminToken, folderId, DROPLET_ADMINS_GROUP);
+    await gfAddGroup(adminToken, folderId, rw, writeOpts);
+    await gfSetGroupPermissions(adminToken, folderId, rw, MASK_RW, writeOpts);
+    await gfAddGroup(adminToken, folderId, ro, writeOpts);
+    await gfSetGroupPermissions(adminToken, folderId, ro, MASK_RO, writeOpts);
+    await gfAddGroup(adminToken, folderId, DROPLET_ADMINS_GROUP, writeOpts);
     await gfSetGroupPermissions(
       adminToken,
       folderId,
       DROPLET_ADMINS_GROUP,
       MASK_ADMIN,
+      writeOpts,
     );
 
     // 4. Quota, when set.
-    if (dept.quotaBytes !== null && dept.quotaBytes !== undefined) {
-      await gfSetQuota(adminToken, folderId, Number(dept.quotaBytes));
+    if (intent.quotaBytes !== null) {
+      await gfSetQuota(adminToken, folderId, intent.quotaBytes, writeOpts);
     }
 
     await prisma.department.update({
@@ -229,18 +397,31 @@ export async function provisionDepartment(
     });
   } catch (err) {
     const message = truncateError(err);
-    logger.error({ err, id }, "provisionDepartment failed");
+    // WARP-1557: "write rejected" vs "write may have landed".
+    const ambiguous = isAmbiguousWriteFailure(err);
+    const nextState = ambiguous ? "provisioning" : "failed";
+    logger.error(
+      { err, id, ambiguous, nextState },
+      "provisionDepartment failed",
+    );
     await prisma.department.update({
       where: { id },
-      data: { state: "failed", provisionError: message },
+      data: { state: nextState, provisionError: message },
     });
     await recordActivity({
       kind: "system",
       severity: "err",
       sourceIcon: "folder-x",
-      what: "Department provisioning failed",
+      what: ambiguous
+        ? "Department provisioning unconfirmed (will re-verify)"
+        : "Department provisioning failed",
       sub: dept.name,
-      refs: { departmentId: dept.id, kind: dept.kind, error: message },
+      refs: {
+        departmentId: dept.id,
+        kind: dept.kind,
+        error: message,
+        ambiguous,
+      },
       actor: { type: "system" },
     });
   }
@@ -261,6 +442,7 @@ export async function provisionDepartment(
 export async function archiveDepartment(
   prisma: PrismaClient,
   id: string,
+  opts: ProvisionOptions = {},
 ): Promise<void> {
   const dept = (await prisma.department.findUnique({
     where: { id },
@@ -284,17 +466,31 @@ export async function archiveDepartment(
   }
 
   const adminToken = adminBasicToken();
+  // WARP-1557: retry path only, same gating as provisionDepartment.
+  const writeOpts: GfWriteOptions = {
+    confirmOnFailure: opts.verifyOnFailure === true,
+  };
 
   try {
     if (dept.ncGroupfolderId !== null) {
       if (dept.ncGroupRw) {
-        await gfRemoveGroup(adminToken, dept.ncGroupfolderId, dept.ncGroupRw);
+        await gfRemoveGroup(
+          adminToken,
+          dept.ncGroupfolderId,
+          dept.ncGroupRw,
+          writeOpts,
+        );
       }
       if (dept.ncGroupRo) {
-        await gfRemoveGroup(adminToken, dept.ncGroupfolderId, dept.ncGroupRo);
+        await gfRemoveGroup(
+          adminToken,
+          dept.ncGroupfolderId,
+          dept.ncGroupRo,
+          writeOpts,
+        );
       }
       // droplet-admins is intentionally left attached — retrieval window.
-      await gfDeleteFolder(adminToken, dept.ncGroupfolderId);
+      await gfDeleteFolder(adminToken, dept.ncGroupfolderId, writeOpts);
     }
 
     await prisma.department.update({
@@ -317,23 +513,40 @@ export async function archiveDepartment(
     });
   } catch (err) {
     const message = truncateError(err);
-    logger.error({ err, id }, "archiveDepartment failed");
+    // WARP-1557: same "rejected vs may-have-landed" split as the provision
+    // path. Both target states stay on the ARCHIVE side of the routing —
+    // `archiving` is the archive path's re-verify state, `archive_failed` its
+    // terminal one — so an ambiguous outcome can never leak into the
+    // provision path and silently un-archive the department.
+    const ambiguous = isAmbiguousWriteFailure(err);
     // WARP-1257: `archive_failed` (NOT the generic `failed`) so the reconciler
     // retries this row down the ARCHIVE path on its next sweep. A transient NC
     // error partway through an archive must never be re-provisioned back to
     // active — that would silently un-archive the department and restore its
     // rw/ro group access. Intent is carried in the state, never re-derived.
+    const nextState = ambiguous ? "archiving" : "archive_failed";
+    logger.error(
+      { err, id, ambiguous, nextState },
+      "archiveDepartment failed",
+    );
     await prisma.department.update({
       where: { id },
-      data: { state: "archive_failed", provisionError: message },
+      data: { state: nextState, provisionError: message },
     });
     await recordActivity({
       kind: "system",
       severity: "err",
       sourceIcon: "archive",
-      what: "Department archival failed",
+      what: ambiguous
+        ? "Department archival unconfirmed (will re-verify)"
+        : "Department archival failed",
       sub: dept.name,
-      refs: { departmentId: dept.id, kind: dept.kind, error: message },
+      refs: {
+        departmentId: dept.id,
+        kind: dept.kind,
+        error: message,
+        ambiguous,
+      },
       actor: { type: "system" },
     });
   }
@@ -342,6 +555,8 @@ export async function archiveDepartment(
 export const _internal = {
   computeGroupNames,
   computeMountPoint,
+  findExistingFolder,
   findExistingFolderId,
+  folderMatchesIntent,
   truncateError,
 };
