@@ -258,7 +258,7 @@ export function AccountStep({
             cohesive form; the caption tells the user where to read the code. */}
         {mode === "create" && claimGateOn && (
           <div>
-            <label htmlFor={claimCodeId} className="type-subheadline text-label-secondary block mb-1">
+            <label htmlFor={claimCodeId} className="type-footnote font-semibold text-label-secondary block mb-1">
               Claim code
             </label>
             <p
@@ -290,7 +290,7 @@ export function AccountStep({
         )}
 
         <div>
-          <label htmlFor={emailId} className="type-subheadline text-label-secondary block mb-1.5">
+          <label htmlFor={emailId} className="type-footnote font-semibold text-label-secondary block mb-1.5">
             Work email
           </label>
           <div className="relative">
@@ -314,7 +314,7 @@ export function AccountStep({
 
         {mode === "create" && (
           <div>
-            <label htmlFor={displayNameId} className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={displayNameId} className="type-footnote font-semibold text-label-secondary block mb-1.5">
               Display name (optional)
             </label>
             <input
@@ -329,7 +329,7 @@ export function AccountStep({
         )}
 
         <div>
-          <label htmlFor={passwordId} className="type-subheadline text-label-secondary block mb-1">
+          <label htmlFor={passwordId} className="type-footnote font-semibold text-label-secondary block mb-1">
             Password
           </label>
           {/* WARP-668 — state the requirement up front, before the user types,
@@ -383,7 +383,7 @@ export function AccountStep({
 
         {mode === "create" && (
           <div>
-            <label htmlFor={confirmPasswordId} className="type-subheadline text-label-secondary block mb-1.5">
+            <label htmlFor={confirmPasswordId} className="type-footnote font-semibold text-label-secondary block mb-1.5">
               Confirm password
             </label>
             <div className="relative">

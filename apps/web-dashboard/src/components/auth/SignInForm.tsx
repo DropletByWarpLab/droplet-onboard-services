@@ -64,7 +64,9 @@ function SsoProviderButton({
   return (
     <form action="/api/sso/oidc/authorize" method="POST" className="contents">
       <input type="hidden" name="provider" value={providerId} />
-      {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
+      {returnTo ? (
+        <input type="hidden" name="returnTo" value={returnTo} />
+      ) : null}
       <button
         type="submit"
         className="dp-btn-secondary w-full justify-center gap-2.5 !bg-surface-secondary !text-label-primary border border-separator hover:!bg-fill-secondary hover:border-label-tertiary/40"
@@ -361,16 +363,11 @@ export function SignInForm({
           >
             Password
           </label>
-          {!ONB_AUTH_FLAGS.forgotPassword && (
-            <button
-              type="button"
-              disabled
-              title="Coming soon"
-              className="type-caption-1 font-semibold text-label-tertiary cursor-not-allowed select-none"
-            >
-              Forgot?
-            </button>
-          )}
+          {/* Password reset isn't wired yet (see flags.ts). Until it is we
+              render NOTHING rather than a permanently-disabled "Forgot?" —
+              a greyed-out control that never becomes usable reads as a
+              broken screen, not as a promise. The affordance comes back
+              with the backend that makes it work. */}
         </div>
         <div className="relative">
           <Lock
@@ -419,12 +416,30 @@ export function SignInForm({
         {!submitting && <ArrowRight size={15} aria-hidden="true" />}
       </button>
 
-      {/* Passkey. Three states:
+      {/* Passkey — an ALTERNATIVE to the primary action, not a second equal
+          one. Before this it rendered at the same width, height, type size
+          and weight as "Sign in", so the screen ended in two identically
+          weighted stacked blocks with no hierarchy. The "or" rule separates
+          the paths and the smaller label sets the alternative below the
+          primary, while the 44px target is preserved for touch (we do NOT
+          drop to the canon's 40px — that's below the tap-target floor the
+          rest of the dashboard holds).
+
+          Three states:
           - flag on + onPasskey wired (browser supports WebAuthn) → live button
           - flag on but no handler (browser can't do WebAuthn) → render nothing
           - flag off (backend not shipped) → disabled "Soon" placeholder */}
+      {ONB_AUTH_FLAGS.passkey && !onPasskey ? null : (
+        <div className="flex items-center gap-3 mt-1 mb-0.5">
+          <span className="flex-1 h-px bg-separator" />
+          <span className="type-caption-2 text-label-tertiary font-medium">
+            OR
+          </span>
+          <span className="flex-1 h-px bg-separator" />
+        </div>
+      )}
       {!ONB_AUTH_FLAGS.passkey ? (
-        <ComingSoon className="!min-h-[40px]">
+        <ComingSoon className="type-footnote">
           <KeyRound size={14} aria-hidden="true" />
           Use a security key or passkey
         </ComingSoon>
@@ -432,7 +447,7 @@ export function SignInForm({
         <button
           type="button"
           onClick={onPasskey}
-          className="dp-btn-secondary w-full justify-center gap-2.5"
+          className="dp-btn-secondary type-footnote w-full justify-center gap-2.5"
         >
           <KeyRound size={14} aria-hidden="true" />
           Sign in with a passkey

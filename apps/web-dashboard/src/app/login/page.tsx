@@ -4,9 +4,8 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Check } from "lucide-react";
-import { DropletMark } from "@/components/DropletMark";
 import { translateError } from "@/lib/friendly-errors";
-import { AuroraPanel } from "@/components/auth/AuroraPanel";
+import { AuthLayout } from "@/components/auth/AuthLayout";
 import { SignInForm } from "@/components/auth/SignInForm";
 // WARP-1054: the passkey button now navigates to a dedicated approval page
 // (/login/passkey) that owns the whole ceremony; the login page only needs the
@@ -96,7 +95,8 @@ function LoginPageInner() {
     // Two-factor challenge in progress: validate the code, not the credentials
     // (the orchestrator already accepted the password on the first call).
     if (mfaRequired) {
-      const code = mfaMode === "recovery" ? recoveryCode.trim() : totpCode.trim();
+      const code =
+        mfaMode === "recovery" ? recoveryCode.trim() : totpCode.trim();
       if (!code) {
         // Distinct from the panel's standing help subtext (which already says
         // where the code comes from) — a short prompt to act, not a repeat.
@@ -210,75 +210,60 @@ function LoginPageInner() {
   }
 
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-      <AuroraPanel className="hidden lg:flex" />
-
-      <div className="flex items-center justify-center p-6 sm:p-10">
-        <div className="w-full max-w-[380px]">
-          {/* Compact wordmark — stands in for the brand panel on small screens */}
-          <div className="lg:hidden flex items-center gap-2 mb-8">
-            <DropletMark size={24} className="text-accent" />
-            <span className="type-headline text-label-primary">Droplet</span>
-          </div>
-
-          <h1 className="type-title-1 text-label-primary">Welcome back</h1>
-          <p className="type-subheadline text-label-secondary mt-1.5 mb-6">
-            Sign in to your Droplet workspace.
-          </p>
-
-          {fromSetup && (
-            <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
-              <Check size={16} className="flex-shrink-0" aria-hidden="true" />
-              <p className="type-subheadline">
-                Setup already completed. Sign in to access your dashboard.
-              </p>
-            </div>
-          )}
-
-          {/* PR #377: the passkey affordance lives inside SignInForm (one
-              button, no duplication). Pass the handler only when the browser
-              supports WebAuthn — otherwise the form omits the action entirely. */}
-          <SignInForm
-            email={email}
-            password={password}
-            showPassword={showPassword}
-            onEmailChange={setEmail}
-            onPasswordChange={setPassword}
-            onTogglePassword={() => setShowPassword((s) => !s)}
-            onSubmit={handleLogin}
-            error={error}
-            submitting={isSubmitting}
-            // WARP-629: only the providers this appliance has configured,
-            // discovered at runtime. Empty → password-only login.
-            ssoProviders={ssoProviders}
-            // ADR-013 (PR #378): SSO sign-in lands back on the originally
-            // requested page. Reuse the same same-origin guard as the
-            // password path so a crafted `?next=` can't redirect off-origin.
-            returnTo={safeNext(searchParams.get("next"))}
-            onPasskey={passkeyReady ? handlePasskeySignIn : undefined}
-            // PR #375 — two-factor challenge. When mfaRequired the form swaps
-            // the credential block for the code-entry panel.
-            mfaRequired={mfaRequired}
-            mfaMode={mfaMode}
-            totpCode={totpCode}
-            onTotpCodeChange={setTotpCode}
-            recoveryCode={recoveryCode}
-            onRecoveryCodeChange={setRecoveryCode}
-            onToggleMfaMode={handleToggleMfaMode}
-            onCancelMfa={handleCancelMfa}
-          />
-
-          {/* WARP-629: the local-first promise is true for the password path,
-              but an SSO sign-in federates to an external IdP — so the copy is
-              caveated whenever an SSO button is shown to stay accurate. */}
-          <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
-            {ssoProviders.length > 0
-              ? "Password sign-in happens on your local network. Single sign-on redirects to your provider."
-              : "Sign-in happens on your local network — nothing leaves the box."}
+    <AuthLayout
+      title="Welcome back"
+      subtitle="Sign in to your Droplet workspace."
+      /* WARP-629: the local-first promise is true for the password path,
+         but an SSO sign-in federates to an external IdP — so the copy is
+         caveated whenever an SSO button is shown to stay accurate. */
+      footer={
+        ssoProviders.length > 0
+          ? "Password sign-in happens on your local network. Single sign-on redirects to your provider."
+          : "Sign-in happens on your local network — nothing leaves the box."
+      }
+    >
+      {fromSetup && (
+        <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
+          <Check size={16} className="flex-shrink-0" aria-hidden="true" />
+          <p className="type-subheadline">
+            Setup already completed. Sign in to access your dashboard.
           </p>
         </div>
-      </div>
-    </div>
+      )}
+
+      {/* PR #377: the passkey affordance lives inside SignInForm (one
+          button, no duplication). Pass the handler only when the browser
+          supports WebAuthn — otherwise the form omits the action entirely. */}
+      <SignInForm
+        email={email}
+        password={password}
+        showPassword={showPassword}
+        onEmailChange={setEmail}
+        onPasswordChange={setPassword}
+        onTogglePassword={() => setShowPassword((s) => !s)}
+        onSubmit={handleLogin}
+        error={error}
+        submitting={isSubmitting}
+        // WARP-629: only the providers this appliance has configured,
+        // discovered at runtime. Empty → password-only login.
+        ssoProviders={ssoProviders}
+        // ADR-013 (PR #378): SSO sign-in lands back on the originally
+        // requested page. Reuse the same same-origin guard as the
+        // password path so a crafted `?next=` can't redirect off-origin.
+        returnTo={safeNext(searchParams.get("next"))}
+        onPasskey={passkeyReady ? handlePasskeySignIn : undefined}
+        // PR #375 — two-factor challenge. When mfaRequired the form swaps
+        // the credential block for the code-entry panel.
+        mfaRequired={mfaRequired}
+        mfaMode={mfaMode}
+        totpCode={totpCode}
+        onTotpCodeChange={setTotpCode}
+        recoveryCode={recoveryCode}
+        onRecoveryCodeChange={setRecoveryCode}
+        onToggleMfaMode={handleToggleMfaMode}
+        onCancelMfa={handleCancelMfa}
+      />
+    </AuthLayout>
   );
 }
 
@@ -296,21 +281,12 @@ export default function LoginPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-          <AuroraPanel className="hidden lg:flex" />
-          <div className="flex items-center justify-center p-6 sm:p-10">
-            <div className="w-full max-w-[380px]">
-              <div className="lg:hidden flex items-center gap-2 mb-8">
-                <DropletMark size={24} className="text-accent" />
-                <span className="type-headline text-label-primary">Droplet</span>
-              </div>
-              <h1 className="type-title-1 text-label-primary">Welcome back</h1>
-              <p className="type-subheadline text-label-secondary mt-1.5 mb-6">
-                Sign in to your Droplet workspace.
-              </p>
-            </div>
-          </div>
-        </div>
+        <AuthLayout
+          title="Welcome back"
+          subtitle="Sign in to your Droplet workspace."
+        >
+          {null}
+        </AuthLayout>
       }
     >
       <LoginPageInner />
