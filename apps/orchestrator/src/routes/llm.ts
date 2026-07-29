@@ -17,8 +17,11 @@ import {
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 import {
+  isPrivilegedRole,
+  narrowToolNamesForPrincipal,
   resolveToolAccessScope,
-  toolAllowedInScope,
+  VOICE_WRITE_TOOLS,
+  WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
@@ -320,28 +323,14 @@ const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
  *  edit-and-resend can truncate the persisted thread by a real row id. */
 const USER_MESSAGE_ID_HEADER = "X-User-Message-Id";
 
-// Which tool names require the caller to have owner/admin role. Read-only
-// tools (list_*, get_*, search_*) are fine for any authenticated user; write
-// tools (block/unblock/accept/scan, file mutations) must be gated because
-// the LLM is driven by user-controlled prompt text and will happily call
-// them on request.
-//
-// As of WARP-104 the set is derived directly from each tool's
-// `requiresWrite` boolean in `@droplet/tools-core` so role-gate behaviour
-// can never drift from per-tool intent. Adding a write tool to the
-// registry automatically includes it here. Legacy aliases
-// `block_device` / `unblock_device` are not registered in tools-core —
-// callers must use the canonical `block_network_device` /
-// `unblock_network_device` names.
-const WRITE_TOOLS = new Set(
-  Array.from(TOOLS.values())
-    .filter((t) => t.requiresWrite)
-    .map((t) => t.name),
-);
-
-// RBAC helpers for /api/llm/chat. Threat model: the LLM is steered by
-// user-controlled prompt text; only owner/admin sessions are allowed to
-// touch write tools.
+// RBAC helpers for /api/llm/chat. The ADR-004 tier gate itself —
+// `WRITE_TOOLS`, `VOICE_WRITE_TOOLS`, `isPrivilegedRole` — moved to
+// services/tool-access.service.ts in WARP-1621 so the ToolSpec run path can
+// ask the SAME question this route asks. It was unreachable from there while
+// it lived in a route module, and the ToolSpec surfaces consequently enforced
+// only the §3 axis: a `family` user could fire `control_device` by pressing
+// Run on a spec. Re-exported below so existing importers of this module are
+// unaffected.
 // WARP-485: `id` is the canonical User.id UUID set by authMiddleware
 // when the OCS or invite paths resolve a Nextcloud username to the
 // local User row. `username` is kept for back-compat (pre-WARP-485 rows
@@ -349,27 +338,7 @@ const WRITE_TOOLS = new Set(
 // fields populate the `candidates` array in `loadOwnedSession`.
 type AuthedRequest = { user?: { id?: string; username?: string; role?: string } };
 
-function isPrivilegedRole(role: string | undefined): boolean {
-  return role === "owner" || role === "admin";
-}
-
-/**
- * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
- * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
- * the one documented, scoped exception (ADR-004 amendment, approved 2026-07-18):
- * voice may drive the smart-home CONTROL tools so "hey Droplet, turn off the
- * kitchen lights" works. Every OTHER service principal (email-indexer, etc.)
- * stays read-only — this gates on the exact principal id, not the coarse
- * `service` role. Locks are NOT in this set at the tool level, but a
- * `control_device` lock command is Tier-2 (confirmation_required) and the voice
- * flow can't complete a confirmation, so locks stay refused via voice until
- * per-speaker enrollment (WARP-1056) provides an identity to gate on.
- *
- * Deliberately just `control_device` — NOT `run_scene`: a routine can contain a
- * lock command, which would bypass the per-command Tier-2 lock refusal, so
- * voice-run scenes wait on scene-level lock analysis (follow-up).
- */
-export const VOICE_WRITE_TOOLS = new Set(["control_device"]);
+export { VOICE_WRITE_TOOLS };
 
 export function isVoicePrincipal(user: AuthedRequest["user"]): boolean {
   return user?.id === "_service:voice" && user?.role === "service";
@@ -423,6 +392,13 @@ export function resolveReasoningEffort(
  * EXCLUDED_FROM_CHAT_TOOLS in the agent loop and blow the WARP-1118 context
  * budget. The loop applies the same scope to its own advertised pool
  * (llm-agent.service.ts), so that path is narrowed there instead.
+ *
+ * WARP-1621 — this is now a thin wrapper. Both axes live in
+ * `narrowToolNamesForPrincipal` (tool-access.service.ts) so the ToolSpec run
+ * path can ask the identical question; all this function still owns is the
+ * chat-specific `undefined` handling (privileged ⇒ stay undefined; otherwise
+ * materialise the live registry). The per-name verdict is not reimplemented
+ * anywhere.
  */
 export async function narrowAllowedToolsForRole(
   role: string | undefined,
@@ -430,32 +406,26 @@ export async function narrowAllowedToolsForRole(
   isVoice = false,
   scope: ToolAccessScope | null = null,
 ): Promise<string[] | undefined> {
-  const scopeAllowed = (name: string): boolean =>
-    scope === null || toolAllowedInScope(name, scope);
-  if (isPrivilegedRole(role)) {
-    if (requestedAllowed === undefined) return undefined;
-    return requestedAllowed.filter(scopeAllowed);
-  }
-  // WARP-1398: the voice principal keeps its read tools AND the scoped
-  // smart-home control tools (VOICE_WRITE_TOOLS); every other write tool is
-  // still stripped. All other non-privileged callers lose every write tool.
-  const writeAllowed = (name: string): boolean =>
-    !WRITE_TOOLS.has(name) || (isVoice && VOICE_WRITE_TOOLS.has(name));
-  const allowed = (name: string): boolean => writeAllowed(name) && scopeAllowed(name);
   // Distinguish `undefined` (no list supplied → fall through to the
   // role default) from an explicit empty array (caller asked for ZERO
   // tools). `.length` truthiness would conflate the two and grant the
   // full non-write registry for an intentional `allowed_tools: []`.
   if (requestedAllowed !== undefined) {
-    return requestedAllowed.filter(allowed);
+    return narrowToolNamesForPrincipal(requestedAllowed, role, scope, isVoice);
   }
+  if (isPrivilegedRole(role)) return undefined;
   // Default for unprivileged users: every tool the live MCP server
   // advertises, minus write tools (minus all but VOICE_WRITE_TOOLS for
   // voice). listTools() throws if the child crashed mid-runtime — fall back
   // to an empty allowed set in that case so the model sees zero tools rather
   // than something privileged.
   const tools = await mcpClient.listTools().catch(() => []);
-  return tools.map((t) => t.name).filter(allowed);
+  return narrowToolNamesForPrincipal(
+    tools.map((t) => t.name),
+    role,
+    scope,
+    isVoice,
+  );
 }
 
 // D-7: enforcement deferred — UserUsagePolicy.llmDailyMessageCap (WARP-1271)
@@ -494,7 +464,7 @@ async function stripWriteToolsForInterview(
 // — so reading from parsed.data would always be empty.
 export function replayedWriteToolAttempt(
   rawMessages: unknown,
-  exempt?: Set<string>,
+  exempt?: ReadonlySet<string>,
 ): boolean {
   if (!Array.isArray(rawMessages)) return false;
   return rawMessages
@@ -963,9 +933,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // pre-dispatch re-check (the boundary). `null` for the owner, for
       // service principals, and for everyone with no AccessRole — that path
       // stays byte-for-byte what it was.
+      //
+      // WARP-1582 — the ONE surface allowed to answer that from the session
+      // claim instead of a per-turn `User` read. It applies only when the
+      // claim is present and says "no custom role", every assignment path
+      // revokes the session (so the stale window is one request), and the
+      // coarse ADR-004 filter below plus the replay guard above still run
+      // regardless. The full trust argument, and the reason the ToolSpec
+      // runner deliberately does NOT get this, live in the module doc of
+      // services/tool-access.service.ts. The allowed-surface list is pinned
+      // by __tests__/tool-scope-claim-trust.guard.test.ts.
       const toolAccessScope = await resolveToolAccessScope(
         prisma,
         (req as AuthedRequest).user,
+        "session-claim",
       );
       let allowedForUser = await narrowAllowedToolsForRole(
         role,
@@ -1842,9 +1823,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // loop's own contract rather than on nothing having been mis-emitted
           // upstream, which is what let the divergence go unnoticed.
           //
-          // Only on a real terminal: an `error` stop_reason (client abort,
-          // mid-stream death) carries an EMPTY message, and overwriting there
-          // would erase the partial answer the debounced flush already wrote.
+          // Only on a real terminal. An `error` stop_reason (client abort,
+          // mid-stream death) keeps the ACCUMULATOR instead: the agent loop
+          // now settles its emitter on both teardown paths (WARP-1602 review
+          // B1/B2), so the salvaged partial has already arrived here as
+          // `content_delta` — and on a turn that mixed deferred and
+          // non-deferred iterations the accumulator is the SUPERSET, while
+          // `streamResult.message.content` carries only the torn-down
+          // iteration's share. Overwriting would truncate the answer.
           if (streamResult.stop_reason !== "error") {
             liveAssistantContent = contentToText(streamResult.message.content);
           }

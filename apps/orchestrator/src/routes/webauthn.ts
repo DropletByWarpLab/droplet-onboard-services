@@ -111,7 +111,16 @@ function serializeTransports(transports: AuthenticatorTransportFuture[] | undefi
 async function issueSession(
   req: Request,
   res: import("express").Response,
-  user: { id: string; username: string; displayName: string; role: Role },
+  user: {
+    id: string;
+    username: string;
+    displayName: string;
+    role: Role;
+    /** WARP-1582 — assigned custom access role, `null` for none. Spread
+     *  straight into signAccessToken below, so a caller that omits it
+     *  mints a claim-less token and consumers fall back to the database. */
+    accessRoleId?: string | null;
+  },
 ): Promise<void> {
   // WARP-247 — record first so the sid rides inside both tokens; also
   // index the refresh token (WARP-116) — the passkey path previously
@@ -483,6 +492,10 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         username: dbUser.username,
         displayName: dbUser.displayName,
         role: dbUser.role as Role,
+        // WARP-1582 — a passkey session is a session like any other; it
+        // must carry the same claim or every passkey user silently keeps
+        // paying the per-turn read.
+        accessRoleId: dbUser.accessRoleId ?? null,
       });
     } catch (err) {
       next(err);

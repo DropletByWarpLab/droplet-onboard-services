@@ -87,6 +87,17 @@
   color: var(--text-muted);
   margin-top: 2px;
 }
+/* WARP-1560 — an ARCHIVED role keeps the full card (it is still a real
+   role you can read, restore, or delete) and gives up only the brand tint
+   on its glyph, landing on the same neutral inset the built-in rows use.
+   Deliberately NOT dimmed with opacity: the "Archived" chip already carries
+   the state in a word, and dimming the whole card would push its metadata
+   under the contrast floor to say the same thing twice. */
+.acc-rolecard.archived .acc-glyph {
+  background: var(--inset);
+  color: var(--text-muted);
+}
+
 .acc-rolecard.builtin {
   padding: 9px 12px;
   border-radius: 10px;
@@ -259,6 +270,20 @@
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 1px;
+}
+/* WARP-1585 — a feature blocked by its declared parent. Same 12px muted
+   register as `.acc-lvl-reason` and `.acc-tooldomain .tx small`, so a
+   dependency block reads as the same KIND of thing as the floor reason and
+   the tool auto-off note rather than announcing itself as a new state.
+   The row is NOT dimmed: the reason is the payload here, and `.acc-tooldomain
+   .off`'s 0.55 opacity would push it under the contrast floor just as the
+   ModuleRouteGuard's `label-tertiary` glyph did. Sits inside `.acc-feat`'s
+   10px column gap; `margin: 0` because the sheet has no `p` reset. */
+.acc-feat-reason {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
 }
 
 /* level pills */
@@ -484,6 +509,23 @@
 .acc-hairline {
   height: 1px;
   background: var(--card-bd);
+}
+/* WARP-1578 — the caution block's floor-blocked reason. Same idea as
+   .acc-lvl-reason (Lock + one muted sentence), at THIS block's type metrics
+   so the constraint and the explanations beside it read as one column.
+   Top-aligned, not centre: these sentences wrap in a 520px sheet and a
+   centred Lock would float against the middle of a two-line paragraph. */
+.acc-floor-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.acc-floor-note svg {
+  flex-shrink: 0;
+  margin-top: 3px;
 }
 
 /* ── effective-access drawer (§6.3) ── */

@@ -22,7 +22,7 @@ from typing import Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from voice.audio_io import (
     AudioUnavailable,
@@ -65,6 +65,7 @@ from voice.devices import (
     resolve_devices,
 )
 from voice.dsp import DspRestartError, restart_dsp
+from voice.enabled import VoiceEnabledStore
 from voice.pipeline import (
     DEFAULT_CALIBRATION_MODE_TTL_S,
     DEFAULT_DEBOUNCE_S,
@@ -375,8 +376,25 @@ def _warm_up_stt(stt: Optional[StreamingSTT]) -> None:
         logger.info("voice STT warm-up skipped: %s", exc)
 
 
-@app.on_event("startup")
-async def startup() -> None:
+def _build_and_start_pipeline() -> None:
+    """Construct the wake pipeline and start its worker thread.
+
+    The ONE place that opens the mic. Shared by the boot path
+    (`startup()`, which runs it on a worker thread) and the WARP-1599
+    enable path (`POST /voice/enabled`, already on a threadpool thread):
+    a second construction site would be a second way to start listening,
+    and the kill switch's whole guarantee is that nothing else can.
+
+    Blocking throughout — device enumeration, a geo lookup, and three
+    upstream socket probes — so callers must keep it off the event loop.
+
+    Every failure is logged and swallowed, and a partial build is torn
+    back down before returning, so a failed start always leaves the same
+    clean state a never-started box has: `_pipeline` None and no orphaned
+    clients. The box then behaves like a mic-less boot — exactly what the
+    enable path wants when there's no working hardware to listen with —
+    and the NEXT enable can retry from scratch.
+    """
     # Resolve audio devices on boot so the first /health hit is cheap.
     # Doesn't fail the boot if PortAudio is missing — we want the
     # service running so operators can still hit /audio/devices and
@@ -392,14 +410,6 @@ async def startup() -> None:
     # is what actually opens the mic stream + ONNX runtime. STT + TTS
     # clients are also lazy — `available` is probed by pipeline.start()
     # once, not on every transcript / synthesize.
-    #
-    # `build_llm_from_env()` does a synchronous httpx.get to ipapi.co
-    # for the geo lookup; `_pipeline.start()` does three sync
-    # socket.create_connection probes of STT / TTS / orchestrator. Both
-    # can each block the event loop for up to ~5 s each in the worst
-    # case (DNS failures, dropped packets). Run them in a worker thread
-    # so the FastAPI `/health` endpoint stays responsive within the
-    # Dockerfile `HEALTHCHECK --start-period=10s` window.
     global _pipeline, _persona_fetcher, _activity_reporter, _llm
     try:
         detector = build_detector_from_env()
@@ -418,8 +428,8 @@ async def startup() -> None:
         # A failed prime is fine — greeting turns fall back and retry.
         _persona_fetcher = build_persona_fetcher_from_env()
         if _persona_fetcher is not None:
-            await asyncio.to_thread(_persona_fetcher.get_block)
-        llm = await asyncio.to_thread(build_llm_from_env, _persona_fetcher)
+            _persona_fetcher.get_block()
+        llm = build_llm_from_env(_persona_fetcher)
         # WARP-1433 — keep a module ref so shutdown() can close its pooled
         # httpx.Client (the pipeline holds the same instance).
         _llm = llm
@@ -470,44 +480,121 @@ async def startup() -> None:
         # over the env-derived gain/threshold. Applied before start()
         # so the very first captured frame runs at the tuned gain.
         apply_stored_calibration(_pipeline)
-        await asyncio.to_thread(_pipeline.start)
-        # WARP-1433 — prime STT + TTS off the critical path so the first
-        # real utterance isn't cold. Fire-and-forget on a daemon thread:
-        # best-effort, runs once, never blocks startup or /health.
+        _pipeline.start()
+    except Exception as exc:
+        logger.error("wake pipeline failed to start: %s", exc)
+        # Unwind the partial build. The reporter and the two pooled
+        # clients are assigned BEFORE `_pipeline` is, so a raise anywhere
+        # in between leaves them live behind a None `_pipeline` — and the
+        # enable path's idempotence guard keys on `_pipeline`, so the next
+        # enable would re-enter here and overwrite them, stranding a
+        # thread and two socket pools per attempt. A raise AFTER the
+        # assignment is worse: a never-started pipeline has no worker, yet
+        # that same guard would make every later enable a no-op until
+        # someone restarted the container. Tearing down settles both.
+        _teardown_voice_runtime()
+        return
+    # WARP-1433 — prime STT + TTS off the critical path so the first real
+    # utterance isn't cold. Fire-and-forget on a daemon thread:
+    # best-effort, runs once, never blocks startup or /health.
+    #
+    # WARP-1599 — spawned BELOW the try, with its own guard. Inside it,
+    # a `Thread.start()` that raised (thread/memory exhaustion) would
+    # reach the `except` above and tear down a pipeline that is ALREADY
+    # LISTENING: the box would go silent because a warm-up couldn't
+    # start, where before it would simply have answered the first
+    # utterance cold. A best-effort optimisation must never unwind a
+    # successful build.
+    try:
         threading.Thread(
             target=_warm_up_upstreams,
             args=(stt, tts),
             name="voice-warmup",
             daemon=True,
         ).start()
-    except Exception as exc:
-        logger.error("wake pipeline failed to start: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice warm-up thread not started: %s", exc)
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
+@app.on_event("startup")
+async def startup() -> None:
+    # WARP-1599 — the admin kill switch is consulted BEFORE anything can
+    # open the mic. A box whose owner switched voice off boots silent and
+    # stays silent: no detector, no capture stream, no worker thread.
+    # Only POST /voice/enabled brings it back.
+    if not VoiceEnabledStore().load():
+        logger.info(
+            "voice assistant is switched off — wake pipeline not started "
+            '(POST /voice/enabled {"enabled": true} to turn it back on)',
+        )
+        return
+    # `build_llm_from_env()` does a synchronous httpx.get to ipapi.co
+    # for the geo lookup; `_pipeline.start()` does three sync
+    # socket.create_connection probes of STT / TTS / orchestrator. Both
+    # can each block for up to ~5 s in the worst case (DNS failures,
+    # dropped packets), so the whole build runs on a worker thread and
+    # the FastAPI `/health` endpoint stays responsive within the
+    # Dockerfile `HEALTHCHECK --start-period=10s` window.
+    await asyncio.to_thread(_build_and_start_pipeline)
+
+
+def _teardown_voice_runtime() -> None:
+    """Stop the pipeline and release everything built alongside it.
+
+    The mirror image of `_build_and_start_pipeline()`: every module
+    global that one assigns, this one closes and clears. Shared by the
+    shutdown hook and the WARP-1599 disable path — which is what keeps a
+    disable→enable cycle from stacking duplicates: each enable rebuilds
+    from clean state, so an admin flipping the switch can't strand a
+    pooled httpx client or a parked reporter thread per toggle.
+
+    Ordering matters. The pipeline worker holds the same LLM client and
+    persona fetcher, so those are only closed once `stop()` has joined
+    it and no reply()/persona fetch can still be in flight.
+    """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
-    if _pipeline is not None:
-        _pipeline.stop()
-        _pipeline = None
+    # Drop the module reference BEFORE stopping: stop() joins the worker
+    # (up to 5 s) and a join timeout or a raise must never leave
+    # /voice/status handing out a pipeline that is on its way out.
+    pipeline = _pipeline
+    _pipeline = None
+    if pipeline is not None:
+        # Best-effort like the closes below — this runs from a request
+        # path too (the disable toggle), where a raise would escape as a
+        # 500 with the flag already persisted off and the three
+        # singletons below never freed. stop() signals `_shutdown` before
+        # anything that can fail, so the worker is on its way out either
+        # way; giving up on the join is better than skipping the rest.
+        try:
+            pipeline.stop()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            logger.warning("pipeline stop raised", exc_info=True)
     if _activity_reporter is not None:
-        _activity_reporter.stop()
+        try:
+            _activity_reporter.stop()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            logger.warning("activity reporter stop raised", exc_info=True)
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
     # has joined (no reply()/persona fetch is in flight). Both are
-    # best-effort: shutdown must never raise.
+    # best-effort: teardown must never raise.
     if _llm is not None:
         try:
             _llm.close()
-        except Exception:  # noqa: BLE001 — shutdown is best-effort
+        except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.debug("llm client close raised", exc_info=True)
         _llm = None
     if _persona_fetcher is not None:
         try:
             _persona_fetcher.close()
-        except Exception:  # noqa: BLE001 — shutdown is best-effort
+        except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.debug("persona fetcher close raised", exc_info=True)
         _persona_fetcher = None
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    _teardown_voice_runtime()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -560,6 +647,11 @@ class HealthResponse(BaseModel):
 
 
 class VoiceStatusResponse(BaseModel):
+    # WARP-1599 — the persisted admin kill switch. False means an admin
+    # switched the assistant off: no pipeline exists, nothing reads PCM,
+    # and `state` reads "off" — a deliberate silence, distinct from
+    # "no_mic", which is a hardware fault the box keeps retrying.
+    enabled: bool
     state: str
     listening: bool
     wake_loaded: bool
@@ -715,6 +807,27 @@ class CalibrationApplyRequest(BaseModel):
     flags: list[str] = []
 
 
+# WARP-1599 — admin kill-switch schemas. One boolean in, the persisted
+# boolean back out: there is no third state and nothing is "pending" —
+# the response is what a subsequent GET /voice/status reports as
+# `enabled`.
+#
+# StrictBool, not bool: pydantic's default lax mode reads "false", "off"
+# and 0 as real booleans, so a caller sending a string could silently
+# silence the box. VoiceEnabledStore deliberately refuses to read a
+# string "false" out of the flag file as an admin's intent, and the wire
+# has to agree with the file — otherwise the same value means two
+# different things depending on which layer sees it. Only a JSON
+# `true`/`false` flips the switch; anything else is a 422, never a guess.
+
+class VoiceEnabledRequest(BaseModel):
+    enabled: StrictBool
+
+
+class VoiceEnabledResponse(BaseModel):
+    enabled: bool
+
+
 # ────────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────────
@@ -799,17 +912,28 @@ def voice_status() -> VoiceStatusResponse:
     the voice settings page to render the "listening" pulse + show
     the last wake event for debugging.
     """
+    # WARP-1599 — read the persisted switch on every poll instead of
+    # caching it: POST /voice/enabled is its only writer, and a read off
+    # the page cache is cheaper than reasoning about a stale cache when a
+    # toggle and a poll race.
+    enabled = VoiceEnabledStore().load()
     if _pipeline is None:
-        # Pipeline never started (no mic, or startup() bailed). Surface
-        # a stable shape so the dashboard doesn't need a special case.
+        # No pipeline, for one of two reasons the dashboard must be able
+        # to tell apart: an admin switched voice off (state "off" — a
+        # deliberate, persisted silence) or the pipeline never started
+        # (no mic / startup bailed — state "no_mic", a fault the box
+        # keeps retrying). Same stable shape either way, so the
+        # dashboard still needs no special case.
         return VoiceStatusResponse(
-            state="no_mic",
+            enabled=enabled,
+            state="no_mic" if enabled else "off",
             listening=False,
             wake_loaded=False,
             threshold=WAKE_THRESHOLD,
         )
     s = _pipeline.status()
     return VoiceStatusResponse(
+        enabled=enabled,
         state=s.state,
         listening=s.listening,
         wake_loaded=s.wake_loaded,
@@ -933,6 +1057,35 @@ _CAPTURE_BUSY_DETAIL = (
     "Another microphone measurement is already running — try again in a few seconds."
 )
 
+# WARP-1599 — the kill switch's guarantee, enforced here rather than in
+# the dashboard. The /voice off hero promises, verbatim, that "the wake
+# word does nothing and no audio is captured", and dropping the wake
+# pipeline only makes the first half true: every endpoint below opens
+# the mic on its own and works perfectly well on a switched-off box. UI
+# gating cannot be the enforcement — a second admin session, a stale tab
+# mid-wizard, or any direct caller of the proxy reaches them anyway.
+#
+# Deliberate product decision: while voice is off the box captures
+# NOTHING, not even a diagnostic. An admin who wants to test the mic
+# turns voice back on first. No override flag — an override is just a
+# second way to make the sentence false.
+_VOICE_OFF_CAPTURE_DETAIL = (
+    "The voice assistant is switched off — this Droplet captures no audio "
+    "while it's off. Turn voice back on to use the microphone."
+)
+
+
+def _require_voice_on() -> None:
+    """409 unless the admin switch is on — for every path that opens the mic.
+
+    409 (not 403) for the same reason `_CAPTURE_BUSY_DETAIL` uses it: the
+    request is well-formed and the caller is allowed, the box is just in a
+    state where it won't capture — and flipping the switch makes the very
+    same request work.
+    """
+    if not VoiceEnabledStore().load():
+        raise HTTPException(status_code=409, detail=_VOICE_OFF_CAPTURE_DETAIL)
+
 
 @app.post("/audio/test-record", response_model=TestRecordResponse)
 def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
@@ -943,6 +1096,7 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
     healthy mic shows roughly -40 to -20 dBFS RMS; silence is below
     -60 dBFS.
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -999,6 +1153,7 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     either. The sounddevice fallback below only runs when there is NO
     pipeline holding the device (no mic at boot / startup bailed).
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -1052,6 +1207,7 @@ def audio_echo_check() -> EchoCheckResponse:
     in the same window (full-duplex playrec), then judge whether the
     tone arrived (voice.audio_io.detect_tone). Fully automatic — the
     user does nothing."""
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(
@@ -1221,6 +1377,70 @@ def voice_restart_processor() -> RestartProcessorResponse:
     return RestartProcessorResponse(**result)
 
 
+# WARP-1599 — one kill-switch toggle at a time. A second concurrent
+# POST answers 409 rather than queueing: overlapping toggles would race
+# the persist against the stop/start and could leave a live pipeline
+# behind a flag that says "off". Deliberately its OWN lock, never
+# `_capture_lock`: a measure or an enrollment capture holds that one for
+# seconds at a time, and an admin killing the mic must not have to wait
+# on the very capture they're trying to stop. Same sync-def threadpool +
+# non-blocking-lock pattern as _capture_lock / _restart_lock above.
+_enabled_lock = threading.Lock()
+
+
+@app.post("/voice/enabled", response_model=VoiceEnabledResponse)
+def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
+    """Switch the voice assistant on or off, persistently (WARP-1599).
+
+    Off is a real kill switch, not a mute: the wake pipeline is stopped
+    and dropped — closing the exclusive mic stream, so no PCM is read by
+    the wake path afterwards — along with the LLM client, persona fetcher
+    and activity reporter built alongside it. The flag is written BEFORE
+    any of that is touched, so a process death mid-toggle brings the box
+    back in the state the admin asked for, never the one they were
+    leaving.
+
+    Idempotent both directions: switching on a box that is already
+    listening re-persists the flag and leaves the running pipeline alone
+    (rebuilding it would open a second stream on an exclusive device);
+    switching off a box with no pipeline just persists the flag.
+
+    Enabling never requires working hardware or the speaker model. When
+    the pipeline can't start (no mic, missing wake model) this still
+    answers 200 `enabled: true` and the box behaves exactly like a
+    mic-less boot — /voice/status reports `no_mic` and the pipeline's own
+    self-heal picks the mic up if it appears later. Failing here instead
+    would make the switch un-flippable on precisely the boxes that need
+    it most.
+    """
+    if not _enabled_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The voice assistant is already being switched on or off "
+                "— give it a moment, then check the status again."
+            ),
+        )
+    try:
+        VoiceEnabledStore().save(req.enabled)
+        if req.enabled:
+            # A pipeline that is already listening is left exactly as it
+            # is — rebuilding one would open a second stream on a device
+            # that only allows one.
+            if _pipeline is None:
+                _build_and_start_pipeline()
+        else:
+            # "Stop and free", not just "stop": the shared teardown also
+            # closes the LLM client, the persona fetcher and the activity
+            # reporter that were built alongside the pipeline, so the
+            # next enable rebuilds from clean state rather than stranding
+            # a set of them per toggle. Tolerates an already-off box.
+            _teardown_voice_runtime()
+    finally:
+        _enabled_lock.release()
+    return VoiceEnabledResponse(enabled=req.enabled)
+
+
 # ────────────────────────────────────────────────────────────────────
 # WARP-1056 — per-person voiceprints (Flow B enrollment + matching)
 # ────────────────────────────────────────────────────────────────────
@@ -1275,7 +1495,13 @@ def _capture_speaker_pcm(seconds: float) -> np.ndarray:
     the shared _capture_lock (never two overlapping captures on the hw
     device), AudioUnavailable/PortAudio faults → operational 503s. The
     returned PCM lives only for the embed call — never persisted.
+
+    WARP-1599 — the kill-switch guard sits HERE rather than on each of
+    /speaker/enroll/capture, /speaker/enroll/verify and /speaker/match:
+    this is the one place the speaker surface opens the mic, so a switch
+    that is off cannot be routed around by a fourth caller later.
     """
+    _require_voice_on()
     r = _resolve()
     if r.input_device is None:
         raise HTTPException(

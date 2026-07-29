@@ -561,6 +561,126 @@ else
 fi
 
 # =============================================================================
+# Test 21: WARP-1607 — Nextcloud PHP sessions use the SAME Redis endpoint
+#                      as config.php (TLS :6380, `nextcloud` ACL user)
+# =============================================================================
+# Nextcloud reaches Redis from TWO surfaces and WARP-234 only migrated one:
+#
+#   1. config.php   — docker/nextcloud/zz-redis-tls.config.php (distributed
+#      cache + file locking). Migrated: tls://cache:6380, user `nextcloud`.
+#   2. PHP sessions — /usr/local/etc/php/conf.d/redis-session.ini, which the
+#      upstream nextcloud image entrypoint REGENERATES on every boot from
+#      REDIS_HOST/REDIS_HOST_PORT/REDIS_HOST_USER/REDIS_HOST_PASSWORD with a
+#      hardcoded `tcp://` scheme and no stream context. It cannot express TLS
+#      or a CA bundle at all, so it kept dialling the retired plaintext :6379
+#      listener with the retired shared password. Every session write then
+#      failed ("Redis connection not available"), which surfaced downstream as
+#      an opaque `Groupfolder add group: 500` and stalled department/team
+#      provisioning (ADR-029) on every reconciler tick.
+#
+# The fix mounts docker/nextcloud/zz-redis-session.ini into conf.d. PHP scans
+# that directory with php_alphasort and later files override earlier ones
+# (php-src main/php_ini.c), so a `zz-` name deterministically beats the
+# entrypoint's redis-session.ini.
+#
+# ANTI-DRIFT: both artifacts must read the SAME compose-defined env contract.
+# That is what this test pins — not just "the ini looks right today".
+
+NC_SESSION_INI="$REPO_ROOT/docker/nextcloud/zz-redis-session.ini"
+NC_REDIS_PHP="$REPO_ROOT/docker/nextcloud/zz-redis-tls.config.php"
+
+if [ -f "$NC_SESSION_INI" ] &&
+   grep -q 'zz-redis-session.ini:/usr/local/etc/php/conf.d/zz-redis-session.ini:ro' "$COMPOSE_FILE"; then
+  pass "Nextcloud session handler config is mounted into php conf.d (WARP-1607)"
+else
+  fail "docker/nextcloud/zz-redis-session.ini missing or not mounted into php conf.d (WARP-1607)"
+  printf "    Without it the image entrypoint's plaintext redis-session.ini wins and every PHP session write fails.\n\n" >&2
+fi
+
+# The override only works because conf.d is scanned alphabetically — pin it.
+_ini_base="$(basename "$NC_SESSION_INI")"
+if [ "$(printf 'redis-session.ini\n%s\n' "$_ini_base" | LC_ALL=C sort | tail -n 1)" = "$_ini_base" ]; then
+  pass "session ini filename sorts after the entrypoint's redis-session.ini (WARP-1607)"
+else
+  fail "$_ini_base sorts BEFORE redis-session.ini — the entrypoint's plaintext file would win (WARP-1607)"
+fi
+
+# The compose env contract is the single source of truth for BOTH surfaces.
+if grep -q 'REDIS_HOST=cache$' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_HOST_PORT=6380$' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_HOST_USER=nextcloud$' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_TLS_SCHEME=tls$' "$COMPOSE_FILE" &&
+   grep -q 'REDIS_TLS_CAFILE=/data/service-tls/ca.pem$' "$COMPOSE_FILE"; then
+  pass "compose defines the Nextcloud→Redis endpoint contract once (WARP-1607)"
+else
+  fail "the nextcloud service lost part of its Redis endpoint env contract (WARP-1607)"
+  printf "    REDIS_HOST/REDIS_HOST_PORT/REDIS_HOST_USER/REDIS_TLS_SCHEME/REDIS_TLS_CAFILE must all be set on the nextcloud service.\n\n" >&2
+fi
+
+# phpredis 6.2.0 (pecl redis-6.2.0 in the pinned nextcloud:29 image) takes the
+# transport straight from the save_path scheme, supports auth[user]/auth[pass]
+# (redis_extract_auth_info) and maps stream[...] onto the "ssl" stream context
+# (redis_sock_set_stream_context). All four must be present.
+if [ -f "$NC_SESSION_INI" ] &&
+   grep -qE '^session\.save_handler[[:space:]]*=[[:space:]]*redis$' "$NC_SESSION_INI" &&
+   grep -q '${REDIS_TLS_SCHEME}://${REDIS_HOST}:${REDIS_HOST_PORT}' "$NC_SESSION_INI" &&
+   grep -q 'auth\[user\]=${REDIS_HOST_USER}' "$NC_SESSION_INI" &&
+   grep -q 'auth\[pass\]=${REDIS_HOST_PASSWORD}' "$NC_SESSION_INI" &&
+   grep -q 'stream\[cafile\]=${REDIS_TLS_CAFILE}' "$NC_SESSION_INI" &&
+   grep -q 'stream\[verify_peer\]=1' "$NC_SESSION_INI" &&
+   grep -q 'stream\[verify_peer_name\]=1' "$NC_SESSION_INI"; then
+  pass "session save_path is TLS + verified CA + the nextcloud ACL user (WARP-1607)"
+else
+  fail "session save_path lost its TLS scheme, ACL user or peer verification (WARP-1607)"
+  printf "    Required shape: \"\${REDIS_TLS_SCHEME}://\${REDIS_HOST}:\${REDIS_HOST_PORT}?auth[user]=...&auth[pass]=...&stream[cafile]=...&stream[verify_peer]=1&stream[verify_peer_name]=1\"\n\n" >&2
+fi
+
+# No generated/mounted Nextcloud Redis artifact may name the retired plaintext
+# listener or the retired shared identity. Comment lines are stripped first:
+# these files legitimately DOCUMENT the retired pattern they replaced, and a
+# lint that punishes explaining yourself just gets the comments deleted.
+_strip_comments() { grep -vE '^[[:space:]]*(;|#|\*|//|/\*)' "$1" || true; }
+_nc_redis_regression=0
+for _f in "$NC_SESSION_INI" "$NC_REDIS_PHP"; do
+  [ -f "$_f" ] || { _nc_redis_regression=1; continue; }
+  _code="$(_strip_comments "$_f")"
+  if printf '%s\n' "$_code" | grep -qE '6379|tcp://'; then
+    _nc_redis_regression=1
+    printf "    %s references the retired plaintext Redis listener\n" "$(basename "$_f")" >&2
+  fi
+  # REDIS_PASSWORD is the ping-only `default` ACL user — never Nextcloud's.
+  if printf '%s\n' "$_code" | grep -qE '(^|[^_])REDIS_PASSWORD\b'; then
+    _nc_redis_regression=1
+    printf "    %s uses the retired shared secret instead of REDIS_HOST_PASSWORD\n" "$(basename "$_f")" >&2
+  fi
+done
+if [ "$_nc_redis_regression" -eq 0 ]; then
+  pass "no Nextcloud Redis config references :6379 or the retired shared secret (WARP-1607)"
+else
+  fail "a Nextcloud Redis config regressed to plaintext :6379 / the shared password (WARP-1607)"
+fi
+
+# THE anti-drift assertion: the session ini and config.php must resolve their
+# endpoint from the identical set of environment variables. If someone edits
+# one surface's port/user/CA without the other, these sets diverge and this
+# fails — which is exactly the WARP-1607 bug class.
+if [ -f "$NC_SESSION_INI" ] && [ -f "$NC_REDIS_PHP" ]; then
+  _ini_vars="$(_strip_comments "$NC_SESSION_INI" | grep -oE '\$\{[A-Z_]+\}' \
+                | tr -d '${}' | LC_ALL=C sort -u)"
+  _php_vars="$(_strip_comments "$NC_REDIS_PHP" | grep -oE "getenv\('[A-Z_]+'\)" \
+                | sed -E "s/getenv\('([A-Z_]+)'\)/\1/" | LC_ALL=C sort -u)"
+  if [ -n "$_ini_vars" ] && [ "$_ini_vars" = "$_php_vars" ]; then
+    pass "session ini and config.php derive Redis from one env contract (WARP-1607)"
+  else
+    fail "Nextcloud's two Redis surfaces read DIFFERENT env vars — they can drift (WARP-1607)"
+    printf "    zz-redis-session.ini: %s\n" "$(printf '%s' "$_ini_vars" | tr '\n' ' ')" >&2
+    printf "    zz-redis-tls.config.php: %s\n\n" "$(printf '%s' "$_php_vars" | tr '\n' ' ')" >&2
+  fi
+else
+  fail "Nextcloud Redis config files missing — cannot verify the shared env contract (WARP-1607)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

@@ -15,6 +15,17 @@
  *     1. Owner untouchable — 403 OWNER_IMMUTABLE (new). Any mutation targeting
  *        a User.role="owner" row is refused: role change, disable, remove,
  *        usage-policy write, scope rewrite. Design copy verbatim.
+ *     1b. Owner untouchable BY ANOTHER ACTOR — 403 OWNER_IMMUTABLE
+ *        (WARP-1564). Rail 1 with a self carve-out, for the one surface that
+ *        rewrites CREDENTIALS (PUT /auth/users/:username: password, email,
+ *        displayName, quota). Blanket rail 1 there would refuse the owner's
+ *        own account maintenance, which is why the residual vector survived
+ *        the T2 sweep: the role-relevant branch was railed, the credential
+ *        branch was not, and an admin could rotate the owner's password
+ *        (local hash + Nextcloud mirror) and sign in as them. Same code and
+ *        copy as rail 1 — the owner's row looks identical to every actor who
+ *        is not the owner. Fails CLOSED on a missing actor id (it uses
+ *        identity to PERMIT, unlike rail 2 which uses it to REFUSE).
  *     3. Rank cap        — 403 ROLE_RANK_EXCEEDED (WARP-623 / WARP-1042 /
  *        WARP-1523). ROLE_RANK[requested] <= ROLE_RANK[actor]; fail closed on
  *        a missing actor role claim. Runs BEFORE the assignable-enum rail so
@@ -126,14 +137,15 @@ export type RoleMutationRefusalCode =
  * routes map to CONCURRENT_MUTATION rather than a 500.
  *
  * Same finding class and same remedy as reset.service.ts (pr-reviewer #549
- * finding 1). The string literal (rather than
- * `Prisma.TransactionIsolationLevel.Serializable`) keeps this module free of
- * a RUNTIME `@prisma/client` import — the standalone-compile discipline the
- * Role / DirectoryUserStatus mirrors exist for — while the `$transaction`
- * options type still checks it against the generated union, so a typo is a
- * compile error, not a silent downgrade.
+ * finding 1).
+ *
+ * WARP-1583 moved the DEFINITION to `lib/prisma-tx.ts`, next to
+ * `REPEATABLE_READ_TX`, so the two isolation levels this app uses are
+ * chosen from one place rather than discovered separately. Re-exported here
+ * because this module is where the contract that requires it is documented,
+ * and where every call site already imports it from.
  */
-export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
+export { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 /**
  * Prisma error codes that mean "another writer touched this row while we
@@ -347,6 +359,43 @@ export function assertTargetNotOwner(targetRole: Role): void {
 }
 
 /**
+ * Rail 1b (WARP-1564) — owner untouchable BY SOMEONE ELSE. Rail 1 with a
+ * self carve-out, for the identity/credential-edit surface.
+ *
+ * Rail 1 proper is actor-blind, which is exactly right for role / disable /
+ * remove / scope: nobody, including the owner, performs those on the owner's
+ * row through these routes. It is too broad for PUT /auth/users/:username,
+ * which is also how the OWNER edits their own display name, email and
+ * password — a blanket rail 1 there would lock the owner out of their own
+ * account maintenance. That is precisely why the residual vector could not be
+ * closed inline with the shipped rail.
+ *
+ * Refuses with the SAME 403 OWNER_IMMUTABLE code and copy as rail 1: to every
+ * caller who is not the owner, the owner's row behaves identically on every
+ * surface. There is no new refusal vocabulary to learn, and no way to tell
+ * "owner row, wrong actor" apart from "owner row" — the response is the same.
+ *
+ * FAIL-CLOSED on a missing actor id, which is the INVERSE of rail 2's
+ * fail-open and the subtle part of this rail:
+ *   • rail 2 uses identity to REFUSE, so an absent id must not self-match —
+ *     it fails open (presence is the auth middleware's job).
+ *   • rail 1b uses identity to PERMIT, so an absent id cannot prove "I am the
+ *     owner" — it must fail closed, or a route that lost its actor claim
+ *     would hand out the owner's credentials.
+ * The empty string is treated as absent for the same reason: it is not a
+ * User.id any row can hold, so it can only arrive from a broken claim.
+ */
+export function assertTargetNotOtherOwner(
+  actorId: string | null | undefined,
+  target: GuardTarget,
+): void {
+  if (target.role !== "owner") return;
+  if (!actorId || actorId !== target.id) {
+    throw RoleMutationRefusedError.ownerImmutable();
+  }
+}
+
+/**
  * Rail 3 — rank cap: ROLE_RANK[requested] <= ROLE_RANK[actor] (equal rank is
  * allowed — admin→admin last-admin recovery, WARP-1523 semantics). Fails
  * CLOSED when the actor's role claim is absent.
@@ -429,6 +478,60 @@ export function assertScopeChangeAllowed(args: {
  */
 export function assertUsageWriteAllowed(args: { target: GuardTarget }): void {
   assertTargetNotOwner(args.target.role);
+}
+
+/**
+ * Identity / credential edit (PUT /auth/users/:username) — rail 1b only.
+ * WARP-1564.
+ *
+ * This is the one surface in the product that can rewrite a person's
+ * CREDENTIALS: the local argon2id `passwordHash` that /auth/login verifies,
+ * and the Nextcloud mirror behind it. Before this rail the route ran the
+ * guard only on its role-relevant branch, so every owner-takeover door was
+ * shut except the decisive one — an admin could POST the owner's username a
+ * new password and then sign in as the owner.
+ *
+ * DELIBERATELY NOT FIELD-SCOPED. The obvious alternative is an allowlist —
+ * rail only `password` and `email` — and it is the wrong shape twice over:
+ *
+ *   • Every field the route accepts already belongs to the owner alone.
+ *     `password` is the credential. `email` IS the login key (/auth/login
+ *     resolves the row by email blind-index, then verifies that row's hash),
+ *     so rewriting it re-keys who can sign into the owner's account and locks
+ *     the real owner out. `quota` is the same mutation class that
+ *     `assertUsageWriteAllowed` already refuses on owner rows via
+ *     PUT /api/people/:id/usage — leaving it open here would re-create the
+ *     two-surface drift this whole service exists to prevent (WARP-1523).
+ *     `displayName` is the owner's attributed identity across the dashboard,
+ *     the activity log and Nextcloud.
+ *   • An allowlist defaults any field ADDED to updateUserSchema later to
+ *     UN-railed. That is "derive state from absence" in guard form: the
+ *     safety of the owner's row would silently depend on a future author
+ *     remembering to extend a list somewhere else. Rail-the-route-unless-self
+ *     is fail-closed by construction — a new field inherits the rail.
+ *
+ * SCOPE, stated precisely: the rail decides from the target ROW, so it covers
+ * every request that resolves one. A username with no local row cannot BE the
+ * owner (role lives only on that row), so there is nothing to protect there —
+ * but see the call site for the one residual it leaves (a displayName/quota-
+ * only body against a rowless username still reaches Nextcloud).
+ *
+ * The caller must ALSO pin `role` in the write's `where` — this rail decides
+ * on a non-transactional read, and pinning is what makes a promotion that
+ * lands in that window a 0-row no-op rather than a credential write on a
+ * stale decision. See the header's in-transaction contract; the call site
+ * documents the concrete concurrent writer (SCIM group→role mapping).
+ *
+ * Rail 2 (self-action) is deliberately NOT applied, matching the shipped
+ * reasoning in `assertUsageWriteAllowed`: changing your own display name or
+ * your own password grants you nothing you did not already have, so the
+ * self-action rail would only break legitimate self-service.
+ */
+export function assertDirectoryEditAllowed(args: {
+  actor: GuardActor;
+  target: GuardTarget;
+}): void {
+  assertTargetNotOtherOwner(args.actor.id, args.target);
 }
 
 /**
@@ -613,6 +716,14 @@ export async function runRoleChangePostEffects(args: {
  * `targetUserId: null` is the legacy NC-only path (no local row): nothing
  * to revoke or denylist, but the mandatory-emit audit row still lands —
  * previously DELETE /auth/users/:username emitted nothing at all.
+ *
+ * WARP-1565 removed the `what` headline override. It existed for exactly one
+ * caller: DELETE /api/auth/users/:username, which deleted the Nextcloud
+ * account but left the local row, so "User removed" would have been a false
+ * statement in an append-only, signature-chained audit log (pr-reviewer
+ * #1229 B3). That route now deletes the row, so both removal surfaces
+ * describe the same event — and an override with no caller is a seam for the
+ * two audit vocabularies to diverge through again.
  */
 export async function runRemovalPostEffects(args: {
   targetUserId: string | null;
@@ -620,15 +731,6 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
-  /**
-   * Audit headline override (pr-reviewer #1229 B3). Defaults to the
-   * shipped "User removed" used by DELETE /api/people/:id, which really
-   * does delete the row. DELETE /api/auth/users/:username removes the
-   * Nextcloud account and revokes local access WITHOUT deleting the local
-   * row (WARP-1565 owns that), so it passes its own honest wording rather
-   * than claiming a removal that did not happen.
-   */
-  what?: string;
 }): Promise<void> {
   if (args.targetUserId) {
     await revokeAllSessions(args.targetUserId);
@@ -638,7 +740,7 @@ export async function runRemovalPostEffects(args: {
     kind: "auth",
     severity: "warn",
     sourceIcon: "user-x",
-    what: args.what ?? "User removed",
+    what: "User removed",
     sub: args.targetUsername,
     refs: {
       actor: args.actorUsername,

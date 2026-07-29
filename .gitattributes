@@ -46,6 +46,11 @@ scripts/image/grub-autoinstall.cfg text eol=lf
 # byte-level assertions hold on every platform.
 apps/orchestrator/prisma/migrations/**/migration.sql text eol=lf
 
+# WARP-1542 — the documented schema-drift baseline is line-compared against
+# freshly-generated `prisma migrate diff` output (which is always LF). Same
+# CRLF hazard as the migration SQL above; same pin.
+apps/orchestrator/prisma/schema-drift-baseline.sql text eol=lf
+
 # Anchor codegen artifacts. schemas/__tests__/codegen-drift.test.ts re-runs
 # scripts/gen-anchor-schema.mjs and byte-compares its output against the
 # checked-in TS + Python mirrors. The generator always emits LF (Node
@@ -57,3 +62,21 @@ apps/orchestrator/prisma/migrations/**/migration.sql text eol=lf
 schemas/anchor.schema.json text eol=lf
 scripts/gen-anchor-schema.mjs text eol=lf
 packages/shared-types/src/anchor.ts text eol=lf
+
+# WARP-1607 — Nextcloud config fragments bind-mounted into the container and
+# parsed by PHP *inside* it (config/*.config.php and php conf.d/*.ini). Same
+# Linux-runtime hazard as the scripts above, and the session ini's save_path is
+# byte-sensitive, so pin them rather than rely on the host's autocrlf setting.
+docker/nextcloud/* text eol=lf
+
+# Vitest snapshots. The snapshot serializer builds its output in JS and
+# always emits `\n`; vitest then byte-compares that against the `.snap` on
+# disk. A Windows checkout (core.autocrlf=true) with no pin materializes
+# every committed snapshot as CRLF, so the comparison is CRLF-on-disk vs
+# LF-in-memory: the suite fails on snapshots nothing changed, and a `-u`
+# run rewrites the whole file — which the clean filter converts straight
+# back to LF on commit. Permanent phantom churn plus snapshot assertions
+# that don't mean anything on Windows. Same class of bug as the migration
+# SQL and anchor-codegen pins above; same fix (WARP-1567). Guarded by
+# apps/orchestrator/src/__tests__/snapshot-eol.test.ts.
+*.snap text eol=lf

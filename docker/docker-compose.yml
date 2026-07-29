@@ -671,12 +671,29 @@ services:
       # matches those services; the internal CA is NOT mounted into this
       # container so verify-full is not available here.
       - PGSSLMODE=${PG_SSLMODE:-require}
-      # WARP-234: the entrypoint-written redis.config.php (from REDIS_HOST)
-      # still points at plaintext :6379; the zz-redis-tls.config.php mount
-      # below overrides the whole `redis` config key with the TLS listener +
-      # the `nextcloud` ACL user. REDIS_HOST stays so a pre-WARP-234 config
-      # volume keeps its baseline keys (memcache.* etc.).
+      # WARP-234 / WARP-1607 — the Nextcloud→Redis endpoint, defined ONCE.
+      #
+      # Nextcloud reaches Redis from two independent surfaces and both read
+      # this contract, so neither can be re-pointed without the other:
+      #   * config.php  — ./nextcloud/zz-redis-tls.config.php (getenv)
+      #   * PHP sessions — ./nextcloud/zz-redis-session.ini   (ini ${...})
+      # Both files are mounted below; scripts/test-security.sh (Test 21)
+      # fails if they ever stop resolving from the same variables.
+      #
+      # The image's own artifacts (the baked redis.config.php and the
+      # entrypoint-generated redis-session.ini) are built from these same
+      # names, so they land as close to correct as the image allows — but
+      # both hardcode a plaintext scheme with no CA-bundle knob, so the two
+      # mounts below are what actually carry TLS. REDIS_HOST also stays for
+      # a pre-WARP-234 config volume's baseline keys (memcache.* etc.).
       - REDIS_HOST=cache
+      - REDIS_HOST_PORT=6380
+      - REDIS_HOST_USER=nextcloud
+      # The scheme is a variable, not a literal, because it is precisely
+      # what differs between the retired plaintext hop and the TLS one —
+      # it belongs in the contract both surfaces read, not in each of them.
+      - REDIS_TLS_SCHEME=tls
+      - REDIS_TLS_CAFILE=/data/service-tls/ca.pem
       # Nextcloud rejects requests whose Host header isn't in this list with
       # "Access through untrusted domain". droplet-ai.local (mDNS) and
       # droplet-ai.lan (OpenWrt dnsmasq) are the primary names registered by
@@ -703,6 +720,13 @@ services:
       # entrypoint's redis.config.php, so its `redis` key wins) + the
       # internal-CA bundle phpredis verifies the cache cert against.
       - ./nextcloud/zz-redis-tls.config.php:/var/www/html/config/zz-redis-tls.config.php:ro
+      # WARP-1607: the SECOND Redis surface — PHP's session handler. The
+      # entrypoint rewrites conf.d/redis-session.ini on every boot with a
+      # hardcoded plaintext scheme it has no knob to change, so this file
+      # overrides it by sorting later in PHP's alphabetical conf.d scan.
+      # Without it every session write fails against the retired listener
+      # and department provisioning never converges (ADR-029).
+      - ./nextcloud/zz-redis-session.ini:/usr/local/etc/php/conf.d/zz-redis-session.ini:ro
       - ../data/secrets/service-tls/nextcloud:/data/service-tls:ro
       # USB drives auto-mounted on the host (services/automount/) show up
       # under /mnt/droplet/<name>. Bind-mounting with rshared propagation
@@ -1666,7 +1690,14 @@ services:
     # wipes it, which is exactly the §6.4 "reset ⇒ Not calibrated yet"
     # behaviour. WARP-1056 — per-person voiceprints live on the same
     # volume (/data/voiceprints, voice/speaker_id.py), so the sweep also
-    # deletes every voiceprint on reset.
+    # deletes every voiceprint on reset. WARP-1599 — the admin kill
+    # switch is the third resident (/data/voice-enabled.json,
+    # voice/enabled.py), which means a factory reset turns voice back ON:
+    # the flag is gone, an absent file reads as enabled, and the box
+    # comes back listening. Intended — reset returns the appliance to
+    # out-of-the-box behaviour, and out of the box it listens — but it is
+    # the one item on this volume whose loss ADDS a capability rather
+    # than removing one, so it belongs in any reset-facing copy.
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data

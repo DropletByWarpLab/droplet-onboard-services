@@ -61,6 +61,25 @@ const ECHO_CHECK_TIMEOUT_MS = 30_000;
  */
 const RESTART_TIMEOUT_MS = 20_000;
 
+/**
+ * WARP-1599 — `/voice/enabled` is not a read, so it does not get the
+ * read budget. On ENABLE voice-io runs `_build_and_start_pipeline()`
+ * inline — the very function its own `startup()` hands to a worker
+ * thread precisely because it blocks. Worst case, summed: persona
+ * `get_block()` 2 s + the ipapi.co geo lookup 5 s + `pipeline.start()`'s
+ * three synchronous upstream probes (STT 5 s, TTS 5 s, LLM 2 s) ≈ 19 s.
+ * Disable is bounded too — `stop(timeout=5.0)` joins two threads.
+ *
+ * Typical is sub-second, but a WAN hiccup or a wedged worker walks past
+ * 10 s, and an abort there is not a cosmetic 503: the box has already
+ * flipped, the non-2xx skips `recordActivity`, and the audit chain ends
+ * up with no record of the single most consequential thing an admin can
+ * do to this surface. Sized the same way RESTART_TIMEOUT_MS above is —
+ * double the real upstream budget — so only a genuinely stuck box times
+ * out.
+ */
+const ENABLED_TIMEOUT_MS = 40_000;
+
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
 
@@ -396,6 +415,54 @@ export function createVoiceRouter(): Router {
       refs: { surface: "voice-restart-processor", upstreamStatus: status },
       actor: actorFromRequest(req),
     });
+  });
+
+  // ── WARP-1599: the voice kill switch ──
+
+  router.post("/voice/enabled", guard, async (req: Request, res) => {
+    // Strict boolean, no coercion. voice-io's own model is StrictBool
+    // precisely so a string "false" can never silence the box by
+    // accident; the proxy has to agree with it, or the same request
+    // would mean two different things depending on which layer read it.
+    // Rejecting here also means a malformed body never reaches the box.
+    const enabled: unknown = req.body?.enabled;
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: "invalid_enabled" });
+      return;
+    }
+    // ENABLED_TIMEOUT_MS, not the read budget: enabling builds and
+    // starts the whole pipeline inline (see the constant). A concurrent
+    // toggle's 409 (voice-io's non-blocking lock) relays verbatim like
+    // any other upstream status.
+    const status = await proxy(
+      res,
+      "POST",
+      "/voice/enabled",
+      { enabled },
+      ENABLED_TIMEOUT_MS,
+    );
+    // Silencing the household assistant is the single most consequential
+    // thing an admin can do to this surface — it leaves a row so nobody
+    // is left wondering why Droplet stopped answering. Only on success:
+    // a 409/422/503 changed nothing on the box, so a row would be a lie.
+    // Fire-and-forget AFTER the response is committed — an audit hiccup
+    // must never turn a committed toggle into an error (recordActivity
+    // swallows recorder failures).
+    if (status >= 200 && status < 300) {
+      void recordActivity({
+        // kind `voice`, not `system`, on WARP-1058's precedent: the row
+        // belongs in the /voice feed, keyed to `/api/activity?kind=voice`.
+        kind: "voice",
+        severity: "info",
+        sourceIcon: "mic",
+        what: enabled ? "Voice turned on" : "Voice turned off",
+        sub: enabled
+          ? "Droplet is listening for the wake word again"
+          : "Droplet stopped listening — the wake word is off until voice is turned back on",
+        refs: { surface: "voice-enabled", upstreamStatus: status },
+        actor: actorFromRequest(req),
+      });
+    }
   });
 
   // ── WARP-1058: voice-io → activity-chain event bridge ──

@@ -55,6 +55,11 @@ vi.mock("../services/effective-access.service.js", () => ({
 
 import { createPeopleRouter } from "./people.js";
 import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
+import { AccessPreconditionError } from "../lib/access-precondition.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
 import type { ScopeName } from "../middleware/scope.js";
 
 interface UserSeed {
@@ -96,36 +101,33 @@ function createPrismaMock(seed: {
   for (const r of seed.roles ?? []) roles.set(r.id, { state: "active", ...r });
   for (const x of seed.exceptions ?? []) exceptions.push({ createdAt: new Date(), ...x });
 
-  // Options argument of every $transaction call, in order (review T1: the
-  // old stub dropped it, so a bare READ COMMITTED transaction shipped green
-  // — and RC transactions are invisible to Postgres SSI, defeating the
-  // isolation on the serializable paths they race). Snapshot/restore gives
-  // the stub real rollback so atomicity is provable.
-  const txOpts: Array<unknown> = [];
-  const snapshot = () => ({
-    users: new Map([...users].map(([k, v]) => [k, structuredClone(v)])),
-    roles: new Map([...roles].map(([k, v]) => [k, structuredClone(v)])),
-    exceptions: exceptions.map((x) => structuredClone(x)),
+  // WARP-1570: the transaction seam is SHARED (__tests__/helpers/
+  // prisma-tx-harness.ts), not hand-rolled here. It records the options
+  // argument of every call (review T1: the old stub dropped it, so a bare
+  // READ COMMITTED transaction shipped green — and RC transactions are
+  // invisible to Postgres SSI, defeating the isolation on the serializable
+  // paths they race) and snapshots/restores the stores so atomicity is
+  // provable. `exceptions` is REASSIGNED by deleteMany, so it registers via
+  // the accessor form — a bare reference could not see the rebinding.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: {
+      users,
+      roles,
+      exceptions: {
+        get: () => exceptions,
+        set: (next: unknown) => {
+          exceptions = next as any[];
+        },
+      },
+    },
   });
 
   const self: any = {
     _users: () => users,
     _exceptions: () => exceptions,
-    _txOpts: () => txOpts,
-    $transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>, opts?: unknown) => {
-      txOpts.push(opts);
-      const snap = snapshot();
-      try {
-        return await fn(self);
-      } catch (err) {
-        users.clear();
-        for (const [k, v] of snap.users) users.set(k, v);
-        roles.clear();
-        for (const [k, v] of snap.roles) roles.set(k, v);
-        exceptions = snap.exceptions;
-        throw err;
-      }
-    }),
+    _seam: () => seam,
+    $transaction: seam.$transaction,
     user: {
       findUnique: vi.fn(async ({ where: { id } }: any) => {
         const row = users.get(id);
@@ -207,9 +209,7 @@ beforeEach(() => {
 // ── transaction isolation (review B1/T1) ───────────────────────────
 
 function expectAllSerializable(prisma: any) {
-  const opts = prisma._txOpts();
-  expect(opts.length).toBeGreaterThan(0);
-  for (const o of opts) expect(o).toEqual(SERIALIZABLE_TX);
+  expectAllTransactionsAt(prisma._seam(), SERIALIZABLE_TX);
 }
 
 describe("every mutating people-access route opens its transaction at SERIALIZABLE", () => {
@@ -328,6 +328,28 @@ describe("PATCH /api/people/:id/access", () => {
     const archived = await request(app).patch("/api/people/u1/access").send({ accessRoleId: "r-arch" });
     expect(archived.status).toBe(409);
     expect(archived.body.code).toBe("ACCESS_ROLE_ARCHIVED");
+  });
+
+  // WARP-1583: BYTE-identical to the bodies routes/access.ts answers on the
+  // sibling assign path, because both now come from the one definition. Two
+  // surfaces can reach the same row here, and hand-copied refusal copy
+  // drifting apart is exactly what WARP-1523 cost.
+  it("sources its precondition bodies from the shared definition", async () => {
+    const app = buildApp(createPrismaMock(seed));
+    const unknownRole = await request(app)
+      .patch("/api/people/u1/access")
+      .send({ accessRoleId: "nope" });
+    expect(unknownRole.body).toEqual(AccessPreconditionError.roleNotFound().toJSON());
+
+    const unknownUser = await request(app)
+      .patch("/api/people/ghost/access")
+      .send({ accessRoleId: "r1" });
+    expect(unknownUser.body).toEqual(AccessPreconditionError.userNotFound().toJSON());
+
+    const archived = await request(app)
+      .patch("/api/people/u1/access")
+      .send({ accessRoleId: "r-arch" });
+    expect(archived.body).toEqual(AccessPreconditionError.roleArchived().toJSON());
   });
 
   it("runs the T2 rails: self-action 409, owner target 403", async () => {

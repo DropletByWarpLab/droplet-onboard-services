@@ -11,6 +11,7 @@ import { vi } from "vitest";
 // all hash the email before touching prisma). Install a deterministic key via
 // the module's own test seam — NOT process.env, which would silently satisfy
 // encryption.test.ts's "no key configured" path through config.ts.
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.js";
 __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
 
@@ -177,7 +178,54 @@ vi.mock("@prisma/client", () => {
       upsert: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
     },
+    // WARP-1528 (T4): app.ts mounts requireFeatureAccess on the files /
+    // cameras / network / matter prefixes, and it consults the T3
+    // effective-access resolver. That resolver reads these four models
+    // whenever `user.findUnique` DOES return a row (a suite that stubs a
+    // directory user) — a mock without them throws, the gate fails closed to
+    // 404, and every gated route in that suite disappears. The defaults are a
+    // fresh box: no exceptions, no cloud escape, no connectors. Suites needing
+    // narrowing stub them per-test.
+    //
+    // NOTE the common path costs nothing: `user.findUnique` defaults to null
+    // above, the resolver returns null ("no local row"), and the gate passes
+    // through untouched — today's world, bit-for-bit.
+    userAccessException: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn().mockResolvedValue({}),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    offLanAllowlistChannel: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    integrationConnection: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    accessRole: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
+
+  // WARP-1583: the T3 resolver composes its whole read set inside ONE
+  // RepeatableRead transaction, so a stub without `$transaction` throws where
+  // it used to read — and the failure lands in the feature gate, which fails
+  // closed. Same lesson, same place, as the WARP-1528 note above: every gated
+  // route in a suite disappears because of a model the mock never grew.
+  //
+  // The SHARED seam (WARP-1570), not `(fn) => fn(self)`: the hand-rolled shape
+  // discards the options argument, so a regression that dropped the isolation
+  // level would stay green in every suite that builds the real app. Here it
+  // also gives rollback for free, which is what a route test asserting "the
+  // guard refused, so nothing was written" actually needs.
+  (mockPrisma as { $transaction?: unknown }).$transaction = createTransactionSeam({
+    client: () => mockPrisma,
+  }).$transaction;
+
   return {
     PrismaClient: vi.fn(() => mockPrisma),
     // Mirrors the generated client's top-level enum exports (const objects

@@ -493,7 +493,13 @@ export const ChatMessage = memo(function ChatMessage({
                   filename: c.path.split("/").pop() || c.path,
                   mimeType: c.mimeType ?? mimeFromPath(c.path),
                   chunkText: c.snippet ?? "",
-                  score: c.score ?? 0,
+                  // WARP-1603 — pass the score through verbatim. The old
+                  // `c.score ?? 0` defeated FileCitation's deliberate
+                  // `typeof hit.score === "number"` guard: a citation whose
+                  // score didn't survive extraction rendered a literal
+                  // "0%" (a relevance claim the pipeline never made)
+                  // instead of no badge at all.
+                  score: c.score,
                   anchor: null,
                   href,
                 }}

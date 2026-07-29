@@ -73,7 +73,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
-import { MODULES } from "./modules/module-registry.js";
+import { mountModuleGates } from "./modules/module-mounts.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -107,6 +107,7 @@ import {
   seedWorkspaceSettings,
   seedOffLanChannels,
 } from "./services/workspace-settings.service.js";
+import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
 import { createLogger } from "./lib/logger.js";
 
 export function createApp(
@@ -250,20 +251,26 @@ export function createApp(
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
 
-  // Module toggles (runtime enablement, per business type). Data-driven from the
-  // registry: 404 a DISABLED module's `/api/*` routes before they reach the
-  // module's router (a disabled module reads as absent, not forbidden). Core
-  // modules (chat) are never gated. Registered here — after auth, before the
-  // module routers below — so the gate precedes what it guards. The `/api/modules`
-  // + `/api/business-types` control-plane mounts alongside.
-  // Spec: docs/superpowers/specs/2026-07-07-module-toggles-design.md.
+  // Module gates — both layers, data-driven from the registry:
+  //   layer 1  requireModuleEnabled  — the WORKSPACE capability gate: 404 a
+  //            DISABLED module's `/api/*` routes before they reach the
+  //            module's router (a disabled module reads as absent, not
+  //            forbidden). Core modules (chat) are never gated.
+  //   layer 2  requireFeatureAccess  — ADR-032 §3(a): whether THIS PERSON may
+  //            open it. Same 404, so a narrowed person sees a smaller Droplet
+  //            rather than a wall of locked doors.
+  // Registered here — after auth, before the module routers below — so the
+  // gates precede what they guard. The `/api/modules` + `/api/business-types`
+  // control-plane mounts alongside.
+  //
+  // WARP-1585 moved the composition into `mountModuleGates` so it can be
+  // tested: the bug it fixes was in the COMPOSITION (a gate at `/api/files`
+  // prefix-matching `/api/files/knowledge` and `/api/files/docs`, collapsing
+  // three independent toggles onto one enforcement), not in either gate.
+  // Specs: docs/superpowers/specs/2026-07-07-module-toggles-design.md, ADR-032.
   const moduleGate = createModuleGate(prisma, config);
-  for (const def of MODULES) {
-    if (def.core) continue;
-    for (const prefix of def.routePrefixes) {
-      app.use(prefix, moduleGate.requireModuleEnabled(def.id));
-    }
-  }
+  mountModuleGates(app, moduleGate);
+
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 
   // PR #377 — passkey REGISTRATION. You enrol a passkey for the signed-in
@@ -533,6 +540,22 @@ export function createApp(
     seedLogger.warn(
       { err },
       "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
+    );
+  });
+
+  // WARP-1565: revoke any pending `role="owner"` invite. Rail 7 stopped new
+  // ones being minted; rows written before that narrowing are still pending,
+  // and the accept path honours an invite's canonical role by design
+  // (WARP-1051), so the input is what has to go. On every boot rather than
+  // once in a migration: this box is reflashed and restored from backup, and
+  // a pre-narrowing dump would otherwise put such a row back. Idempotent and
+  // a no-op on a converged box; same fire-and-forget posture as the seeders
+  // above — a DB hiccup here must not block app construction, and the next
+  // boot sweeps again.
+  revokePendingOwnerInvites(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "pending owner-invite sweep failed (invites table may be unbootstrapped)",
     );
   });
 
