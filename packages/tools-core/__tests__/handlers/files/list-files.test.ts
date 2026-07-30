@@ -64,6 +64,34 @@ describe("list_files", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  // WARP-1373: gpt-oss writes directory paths with a trailing slash
+  // routinely; that form used to fail with INVALID_PATH "empty path
+  // segment" and cost a wasted agent-loop iteration.
+  it("accepts a trailing-slash directory path and lists the same dir", async () => {
+    const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const r = await listFiles.handler({ path: "/Home/Maintenance/" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    expect(get).toHaveBeenCalledWith(
+      `/?path=${encodeURIComponent("/Home/Maintenance")}`,
+      expect.anything(),
+    );
+  });
+
+  it("collapses duplicate separators", async () => {
+    const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    await listFiles.handler({ path: "//Home//Maintenance//" }, ctxWith(get));
+    expect(get).toHaveBeenCalledWith(
+      `/?path=${encodeURIComponent("/Home/Maintenance")}`,
+      expect.anything(),
+    );
+  });
+
+  it("still lists root for a bare '/'", async () => {
+    const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    await listFiles.handler({ path: "/" }, ctxWith(get));
+    expect(get).toHaveBeenCalledWith(`/?path=${encodeURIComponent("/")}`, expect.anything());
+  });
+
   // TOOLS-03: traversal rejection at the tool boundary. `..`/absolute
   // segments could resolve outside the WebDAV prefix via new URL(path).
   for (const bad of [
@@ -74,6 +102,9 @@ describe("list_files", () => {
     "/Notes/%252e%252e/admin",
     "/Notes/..\\admin",
     "/Notes/%zz",
+    // WARP-1373: the trailing-slash strip must not weaken the guard.
+    "/Notes/../",
+    "/Notes/%2e%2e/",
   ]) {
     it(`rejects malformed path ${JSON.stringify(bad)} with INVALID_PATH`, async () => {
       const get = vi.fn();
