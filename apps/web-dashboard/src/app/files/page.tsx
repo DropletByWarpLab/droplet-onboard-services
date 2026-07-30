@@ -1065,6 +1065,7 @@ export default function FilesPage() {
                       isRenaming={fm.renamingPath === file.path}
                       favoritedPaths={favoritedPaths}
                       onSelect={(e) => handleRowSelect(file, e)}
+                      onToggleSelect={() => fm.toggleSelection(file.path, "toggle", files)}
                       onOpen={() => handleRowOpen(file)}
                       onDownload={() => handleDownload(file.path)}
                       onDelete={() => handleDelete(file.path)}

@@ -46,6 +46,7 @@ function rowProps(file: FileEntryInfo, h: Handlers) {
     isSelected: false,
     isRenaming: false,
     onSelect: h.onSelect as never,
+    onToggleSelect: vi.fn() as never,
     onOpen: h.onOpen as never,
     onDownload: vi.fn() as never,
     onDelete: vi.fn() as never,
