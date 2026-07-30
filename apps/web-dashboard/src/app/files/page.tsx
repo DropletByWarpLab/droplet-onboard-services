@@ -849,8 +849,16 @@ export default function FilesPage() {
 
       {/* Space switcher (My Files / Household / N department+team spaces,
           WARP-1267). The switcher itself renders nothing when there's only
-          one space to be in — no lone control. */}
-      <div className="mb-4">
+          one space to be in — no lone control.
+
+          WARP-1667: `relative z-30` for the same reason the search bar above
+          carries `relative z-40` — ds-rise's `fill-mode: both` makes every
+          `.page-inner` child a permanent stacking context, so the Spaces
+          menu's own z-index is trapped in this wrapper and the later
+          siblings (breadcrumbs, banner, volumes, file rows) painted over it.
+          z-30 and NOT z-40: a tie would go to this wrapper on DOM order and
+          put the search results back underneath the pills (WARP-1139). */}
+      <div className="mb-4 relative z-30">
         <SpaceSwitcher
           spaces={spaces}
           active={space}
