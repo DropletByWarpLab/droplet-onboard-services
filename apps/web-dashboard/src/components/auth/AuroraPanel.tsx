@@ -25,12 +25,17 @@ export function AuroraPanel({ className = "" }: { className?: string }) {
       </div>
 
       <div className="max-w-[460px]">
-        <h1 className="text-[40px] xl:text-[42px] leading-[1.08] font-bold tracking-[-0.025em]">
+        {/* Brand copy, NOT the page heading — the real <h1> is the form
+            column's "Welcome back" / "You've been invited". This used to be
+            an <h1> too, which gave every auth page two competing top-level
+            headings; screen-reader users landed on the marketing line
+            instead of the thing they came to do. */}
+        <p className="text-[40px] xl:text-[42px] leading-[1.08] font-bold tracking-[-0.025em]">
           Your company&rsquo;s brain.
           <br />
           On your premises.
-        </h1>
-        <p className="mt-[18px] text-[16px] leading-[1.55] text-white/80 max-w-[400px]">
+        </p>
+        <p className="mt-[18px] text-[16px] leading-[1.55] text-white/85 max-w-[400px]">
           One box runs your AI, files, cameras, and network — and nothing leaves
           the building unless you say so.
         </p>
