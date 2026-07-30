@@ -25,7 +25,9 @@ same tile / status-chip layout.
 """
 
 import os
+import re
 import ssl
+import glob
 import time
 import json
 import socket
@@ -82,6 +84,30 @@ BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
 # renders CPU 0% / MEM 0% / DISK 0% forever while every renderer works
 # perfectly — it is drawing an empty dict.
 _DATA_BACKENDS = ("pyportal", "fb")
+
+# --- Host sensor discovery (see _get_cpu_temp / _get_gpu) -------------------
+# hwmon drivers that report *CPU die/package* temperature. Deliberately a
+# whitelist: sweeping every hwmon node would pick up the chipset, an NVMe or
+# the GPU and print it under "TEMP".
+#   k10temp  — AMD Zen (the mini-rack box)      coretemp — Intel core/package
+#   zenpower — 3rd-party AMD Zen driver         cpu_thermal / soc_thermal — ARM
+_CPU_HWMON_DRIVERS = frozenset({
+    "k10temp", "zenpower", "coretemp", "cpu_thermal", "soc_thermal",
+})
+# Per-input labels worth reading on those drivers. Tctl is AMD's control
+# temperature (the one every tool quotes); Tdie is the physical die reading;
+# "package id 0" is Intel's whole-package sensor. Tccd1..N are per-CCD and
+# excluded — they run cooler than Tctl and would understate the box.
+_CPU_HWMON_LABELS = frozenset({"tctl", "tdie", "package id 0"})
+# `card0` / `card1` are GPUs; `card1-HDMI-A-3` is a connector hanging off one.
+_DRM_CARD_RE = re.compile(r"card\d+")
+# sysfs roots, named so tests can point them at a fixture tree. Docker mounts
+# /sys read-only into the container by default, which is all these reads need.
+_SYS_THERMAL = "/sys/class/thermal"
+_SYS_HWMON = "/sys/class/hwmon"
+_SYS_DRM = "/sys/class/drm"
+_SYS_GPU_LOAD_GLOBS = ("/sys/devices/platform/*.gpu/load",
+                       "/sys/devices/platform/gpu.0/load")
 
 # Status display backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
@@ -699,7 +725,11 @@ class TFTDisplay:
         # Live data snapshot the redesigned screens render from, seeded with the
         # handoff sample shape so a cold sim renders something sensible.
         self._v3 = {
-            "cpu": 0, "mem": 0, "disk": 0, "temp": 0,
+            "cpu": 0, "mem": 0, "disk": 0,
+            # None, not 0 — a cold panel must render `—` for a sensor it has
+            # not read yet (WARP-1643). `gpu` is often None permanently: most
+            # boxes have no GPU to report.
+            "temp": None, "gpu": None,
             "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
             "date": "",
             "sparks_cpu": [],
@@ -1199,7 +1229,10 @@ class TFTDisplay:
             disk_pct = psutil.disk_usage("/").percent
         except Exception:
             disk_pct = 0
-        temp = self._get_cpu_temp()
+        # Legacy 480×320 PyPortal frame: formats with `:.0f`, so it needs a
+        # float. `or 0.0` preserves the exact pre-WARP-1643 rendering here —
+        # only the wide rack panel learns to say "—".
+        temp = self._get_cpu_temp() or 0.0
         try:
             up = time.time() - psutil.boot_time()
             hrs = int(up // 3600)
@@ -1249,7 +1282,8 @@ class TFTDisplay:
             disk = psutil.disk_usage("/")
         except Exception:
             disk = None
-        temp = self._get_cpu_temp()
+        # Legacy frame — see the note in render_stats(); needs a float.
+        temp = self._get_cpu_temp() or 0.0
 
         pad = 10
         gap = 10
@@ -1752,9 +1786,17 @@ class TFTDisplay:
         # readiness short-circuit (WARP-638).
         self._got_live_data = True
         for k in ("cpu", "mem", "disk", "temp", "ip", "hostname", "uptime",
-                  "now", "date"):
+                  "now", "date", "gpu"):
             if k in data and data[k] is not None:
                 self._v3[k] = data[k]
+        # `temp` and `gpu` are the only keys allowed to go back to None. They
+        # are read straight off host sysfs, so "sensor disappeared" is a real
+        # state (a card unbinding, /sys going away) — and the None-skip above
+        # would otherwise pin the last good reading on the glass forever. A
+        # frozen 61° is the same species of lie as a fake 0°.
+        for k in ("temp", "gpu"):
+            if k in data and data[k] is None:
+                self._v3[k] = None
         try:
             self._v3["sparks_cpu"].append(float(self._v3.get("cpu") or 0))
             if len(self._v3["sparks_cpu"]) > self._v3_spark_len:
@@ -2501,35 +2543,149 @@ class TFTDisplay:
     # ----- Sensor helpers ----------------------------------------------
 
     @staticmethod
-    def _get_cpu_temp() -> float:
-        # psutil.sensors_temperatures() can fail on some inference hosts
-        # because certain thermal zones (soc0-thermal, BCPU-therm,
-        # PLL-therm) return blank strings from /sys — psutil can't parse
-        # them. Read the thermal zones directly instead and pick the
-        # hottest valid one.
-        best = 0.0
+    def _read_sysfs(path: str) -> Optional[str]:
+        """One tolerant sysfs read. Every sensor probe below funnels through
+        here so a missing node, an EPERM, or the blank-string reads some
+        thermal drivers emit all degrade the same way: to None, never to a
+        number we made up."""
         try:
-            for zone in sorted(os.listdir("/sys/class/thermal")):
+            with open(path) as f:
+                raw = f.read().strip()
+        except Exception:
+            return None
+        return raw or None
+
+    @staticmethod
+    def _get_cpu_temp() -> Optional[float]:
+        """Hottest plausible CPU temperature in °C, or **None** when the host
+        exposes no CPU thermal sensor at all.
+
+        ⚠ Returns None, not 0.0 (WARP-1643). A 0 here reaches the panel as a
+        confident `0°`, which is a lie a rack panel must never tell; `—` is
+        the honest render and `layout_wide._num()` already draws it.
+
+        Two sources, in order:
+
+        1. `/sys/class/thermal` — the ARM path (Jetson, Pi). psutil's
+           `sensors_temperatures()` can't be used here: some inference hosts
+           expose zones (soc0-thermal, BCPU-therm, PLL-therm) that return
+           blank strings, which psutil fails to parse.
+        2. `/sys/class/hwmon` — the **x86 path**, and the reason the rack
+           panel showed `0°`. On the AMD Raphael mini-rack box there is no
+           CPU `thermal_zone` at all: Zen CPU temperature lives behind the
+           `k10temp` driver as hwmon `Tctl`/`Tdie`, so step 1 alone finds
+           nothing and the old code fell through to its 0.0 floor.
+        """
+        best: Optional[float] = None
+
+        def _consider(raw: Optional[str]) -> None:
+            nonlocal best
+            try:
+                t = int(raw) / 1000.0            # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return
+            # Sanity window: rules out the 0 / -273 / 2^31 placeholders that
+            # unpopulated sensors report.
+            if 10.0 <= t <= 120.0 and (best is None or t > best):
+                best = t
+
+        try:
+            for zone in sorted(os.listdir(_SYS_THERMAL)):
                 if not zone.startswith("thermal_zone"):
                     continue
-                try:
-                    with open(f"/sys/class/thermal/{zone}/type") as f:
-                        zone_type = f.read().strip().lower()
-                    # Skip obviously-not-CPU zones
-                    if any(bad in zone_type for bad in ("gpu", "pll", "aux")):
-                        continue
-                    with open(f"/sys/class/thermal/{zone}/temp") as f:
-                        raw = f.read().strip()
-                    if not raw:
-                        continue
-                    t = int(raw) / 1000.0
-                    if 10.0 <= t <= 120.0 and t > best:
-                        best = t
-                except Exception:
+                base = f"{_SYS_THERMAL}/{zone}"
+                zone_type = (TFTDisplay._read_sysfs(f"{base}/type") or "").lower()
+                # Skip obviously-not-CPU zones.
+                if any(bad in zone_type for bad in ("gpu", "pll", "aux")):
                     continue
+                _consider(TFTDisplay._read_sysfs(f"{base}/temp"))
         except Exception:
             pass
+
+        if best is not None:
+            return best
+
+        # hwmon fallback. Only drivers that actually report CPU die/package
+        # temperature — an unfiltered sweep would happily return the
+        # motherboard, NVMe or GPU sensor and label it CPU.
+        try:
+            for node in sorted(os.listdir(_SYS_HWMON)):
+                base = f"{_SYS_HWMON}/{node}"
+                name = (TFTDisplay._read_sysfs(f"{base}/name") or "").lower()
+                if name not in _CPU_HWMON_DRIVERS:
+                    continue
+                for entry in sorted(os.listdir(base)):
+                    if not (entry.startswith("temp") and entry.endswith("_input")):
+                        continue
+                    label = (TFTDisplay._read_sysfs(
+                        f"{base}/{entry[:-6]}_label") or "").lower()
+                    # k10temp also exposes Tccd1..N (per-CCD) — Tctl/Tdie is
+                    # the control temperature the rest of the world quotes.
+                    # An unlabelled input (temp1_input on coretemp-less
+                    # boards) is still worth taking.
+                    if label and label not in _CPU_HWMON_LABELS:
+                        continue
+                    _consider(TFTDisplay._read_sysfs(f"{base}/{entry}"))
+        except Exception:
+            pass
+
         return best
+
+    @staticmethod
+    def _get_gpu() -> Optional[int]:
+        """Primary-GPU utilisation as a whole percent, or **None** on a host
+        with no discoverable GPU — which is every PyPortal box, and is why the
+        cell renders `—` there rather than an invented 0.
+
+        The amdgpu/i915 DRM path is the verified one (the mini-rack box drives
+        the panel itself from an AMD iGPU, with a discrete Radeon alongside).
+        `PANEL_GPU_CARD` pins a specific card; otherwise the lowest-numbered
+        card exposing `gpu_busy_percent` wins. Lowest-index is deliberate and
+        stable: picking "whichever is busiest" would silently swap which GPU
+        the cell describes from one render to the next.
+
+        These are plain sysfs attribute reads, not device opens, so they need
+        no `device_cgroup_rules` entry; Docker's default read-only /sys mount
+        is enough.
+        """
+        pinned = os.environ.get("PANEL_GPU_CARD", "").strip()
+        try:
+            cards = sorted(
+                # `card1` yes; `card1-HDMI-A-3` (a connector) no.
+                (c for c in os.listdir(_SYS_DRM) if _DRM_CARD_RE.fullmatch(c)),
+                # Numeric, so card10 sorts after card2 rather than before it.
+                key=lambda c: int(c[4:]),
+            )
+        except Exception:
+            cards = []
+        if pinned:
+            cards = [pinned] if pinned in cards else []
+
+        for card in cards:
+            dev = f"{_SYS_DRM}/{card}/device"
+            raw = TFTDisplay._read_sysfs(f"{dev}/gpu_busy_percent")
+            if raw is None:
+                continue
+            try:
+                busy = int(raw)
+            except ValueError:
+                continue
+            if 0 <= busy <= 100:
+                return busy
+
+        # Jetson: the integrated GPU has no DRM `gpu_busy_percent`; its load
+        # lives on a devfreq node in **per-mille** (0–1000). Unverified on
+        # hardware — the DRM path above is what the rack panel exercises.
+        for path in sorted(q for g in _SYS_GPU_LOAD_GLOBS for q in glob.glob(g)):
+            raw = TFTDisplay._read_sysfs(path)
+            try:
+                permille = int(raw)                 # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if 0 <= permille <= 1000:
+                return round(permille / 10.0)
+
+        return None
 
     @staticmethod
     def _get_ip() -> str:
@@ -2939,6 +3095,7 @@ class TFTDisplay:
         except Exception:
             disk_pct = None
         temp = self._get_cpu_temp()
+        gpu = self._get_gpu()
         try:
             up = time.time() - psutil.boot_time()
             days = int(up // 86400)
@@ -2952,6 +3109,9 @@ class TFTDisplay:
             "mem": round(mem_pct) if mem_pct is not None else None,
             "disk": round(disk_pct) if disk_pct is not None else None,
             "temp": round(temp) if isinstance(temp, (int, float)) else temp,
+            # GPU utilisation %. None on a box with no discoverable GPU, which
+            # the wide panel renders as an em dash.
+            "gpu": gpu,
             "ip": self._get_ip(),
             "hostname": socket.gethostname(),
             "uptime": uptime,
