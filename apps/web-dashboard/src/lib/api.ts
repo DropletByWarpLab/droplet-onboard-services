@@ -1,3 +1,4 @@
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -4286,21 +4287,39 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
 // contract at `fetchFiles` above). Kept out of the request entirely for
 // "personal" so the URL/body shape — and any test/cache assertions pinned
 // to it — stays byte-identical to before WARP-883 introduced spaces.
-export async function uploadFiles(
-  path: string,
-  files: FileList | File[],
-  onProgress?: (percent: number) => void,
-  space: FileSpaceId = "personal"
+/**
+ * Thrown when an upload stops partway through a multi-batch selection.
+ *
+ * WARP-1666: selections past `MAX_FILES_PER_UPLOAD` go out as several requests,
+ * so "the upload failed" stopped being the whole truth — some files are already
+ * on the box. `uploaded` is how many actually landed. Successful batches are
+ * deliberately NOT rolled back: the caller surfaces the count and the user
+ * retries to pick up the remainder.
+ */
+export class UploadBatchError extends Error {
+  readonly name = "UploadBatchError";
+
+  constructor(
+    readonly uploaded: number,
+    readonly total: number,
+    readonly cause: unknown
+  ) {
+    super(`Uploaded ${uploaded} of ${total} files`);
+  }
+}
+
+/** POST a single batch — never more files than the server accepts at once. */
+async function uploadBatch(
+  url: string,
+  batch: File[],
+  onFraction?: (fraction: number) => void
 ): Promise<void> {
   const formData = new FormData();
-  for (const file of files) {
+  for (const file of batch) {
     formData.append("files", file);
   }
-  const qs = new URLSearchParams({ path });
-  if (space !== "personal") qs.set("space", space);
-  const url = `${BASE}/api/files/upload?${qs.toString()}`;
 
-  if (onProgress) {
+  if (onFraction) {
     // Use XMLHttpRequest for progress events
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -4308,8 +4327,8 @@ export async function uploadFiles(
       xhr.withCredentials = true;
 
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable && e.total > 0) {
+          onFraction(e.loaded / e.total);
         }
       };
 
@@ -4330,6 +4349,63 @@ export async function uploadFiles(
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Upload failed: ${body}`);
+  }
+}
+
+/**
+ * Upload a selection to `path`, in batches the server will actually accept.
+ *
+ * WARP-1666: a folder-sized selection exceeds the per-request cap, and the
+ * server rejects an over-cap request WHOLESALE — so posting everything at once
+ * meant zero files landed. Batching is what makes large selections work at all.
+ *
+ * Batches run sequentially, not concurrently: each is buffered in the
+ * orchestrator's memory before it reaches Nextcloud, so parallel batches would
+ * multiply peak memory on the box for no user-visible gain.
+ *
+ * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
+ * advances monotonically to 100% instead of resetting once per batch.
+ *
+ * Throws {@link UploadBatchError} if a batch fails; earlier batches stay
+ * uploaded.
+ */
+export async function uploadFiles(
+  path: string,
+  files: FileList | File[],
+  onProgress?: (percent: number) => void,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const url = `${BASE}/api/files/upload?${qs.toString()}`;
+
+  const all = Array.from(files);
+  const totalBytes = all.reduce((sum, f) => sum + f.size, 0);
+  let uploaded = 0;
+  let sentBytes = 0;
+
+  for (let i = 0; i < all.length; i += MAX_FILES_PER_UPLOAD) {
+    const batch = all.slice(i, i + MAX_FILES_PER_UPLOAD);
+    const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
+
+    try {
+      await uploadBatch(
+        url,
+        batch,
+        onProgress &&
+          ((fraction) => {
+            const done = sentBytes + fraction * batchBytes;
+            onProgress(
+              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100
+            );
+          })
+      );
+    } catch (err) {
+      throw new UploadBatchError(uploaded, all.length, err);
+    }
+
+    uploaded += batch.length;
+    sentBytes += batchBytes;
   }
 }
 

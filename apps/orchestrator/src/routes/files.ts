@@ -38,6 +38,7 @@ import {
   NextcloudOcsError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 import {
   sendShareNotificationEmail,
   type SendOptions as EmailSendOptions,
@@ -1631,14 +1632,26 @@ export function createFilesRouter(
   // per-request multer(), not a shared module-level one. LIMIT_FILE_SIZE
   // gets an honest 413 (was 400) naming the ACTUAL limit that applied,
   // which may be tighter than config.MAX_UPLOAD_SIZE_MB.
+  //
+  // WARP-1666: `limits.files` is set as well as the `.array()` maxCount, and
+  // the two MUST stay equal. multer's own maxCount bookkeeping reports an
+  // over-count as LIMIT_UNEXPECTED_FILE — the same code a genuinely misnamed
+  // field raises (multer/index.js: `filesLeft[fieldname]` hits 0) — so without
+  // a busboy-level `files` limit a 36-file upload was rejected with "unexpected
+  // field name", pointing every reader at the wrong problem. With `limits.files`
+  // set, busboy raises LIMIT_FILE_COUNT first and each code again means one
+  // thing only.
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
     const userId = (req as { user?: { id?: string } }).user?.id;
     const limitMb = await resolveUploadLimitMb(prisma, userId);
     const scopedUpload = multer({
       storage: MEMORY_STORAGE,
-      limits: { fileSize: limitMb * 1024 * 1024 },
+      limits: {
+        fileSize: limitMb * 1024 * 1024,
+        files: MAX_FILES_PER_UPLOAD,
+      },
     });
-    scopedUpload.array("files", 20)(req, res, (err) => {
+    scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           res.status(413).json({
@@ -1647,7 +1660,7 @@ export function createFilesRouter(
           return;
         }
         const messages: Record<string, string> = {
-          LIMIT_FILE_COUNT: "Too many files (max 20)",
+          LIMIT_FILE_COUNT: `Too many files (max ${MAX_FILES_PER_UPLOAD} per upload)`,
           LIMIT_UNEXPECTED_FILE: 'Unexpected field name (use "files")',
         };
         res
