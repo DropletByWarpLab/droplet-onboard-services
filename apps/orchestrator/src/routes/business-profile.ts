@@ -122,6 +122,32 @@ export function createBusinessProfileRouter(prisma: PrismaClient): Router {
             /* keep BUSINESS */
           }
           (view as Record<string, unknown>).workspaceType = workspaceType;
+          // WARP-1668 — can THIS user actually open the parked interview?
+          // `interviewChatId` alone cannot answer that: the session row is
+          // owner-scoped (getConversationForUser is `where: {id, userId}`)
+          // and the FK is `onDelete: SetNull`, so the link can be null or
+          // point at another admin's session while the singleton state still
+          // reads in_progress. The dashboard gates the resume banner on this
+          // — a banner that renders must be a banner that works. Fail CLOSED:
+          // any doubt (no link, missing row, other owner, read error) is
+          // `false`, which hides the banner rather than dead-ending it.
+          let interviewResumable = false;
+          if (profile.interviewChatId) {
+            try {
+              const session = await prisma.chatSession.findFirst({
+                where: {
+                  id: profile.interviewChatId,
+                  userId: (req as AuthedRequest).user?.username ?? "",
+                },
+                select: { id: true },
+              });
+              interviewResumable = Boolean(session);
+            } catch {
+              /* keep false — never advertise a resume we cannot honour */
+            }
+          }
+          (view as Record<string, unknown>).interviewResumable =
+            interviewResumable;
         }
         res.json(view);
       } catch (err) {

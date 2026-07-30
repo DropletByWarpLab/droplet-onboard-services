@@ -4056,6 +4056,12 @@ export type BusinessOnboardingState =
 export interface BusinessProfileView {
   onboardingState?: BusinessOnboardingState;
   interviewChatId?: string | null;
+  /** WARP-1668 — owner/admin only: is the parked interview session one THIS
+   *  user can actually open? `interviewChatId` cannot answer that (sessions
+   *  are owner-scoped and the FK is `onDelete: SetNull`), so the server
+   *  resolves it. Absent ⇒ treat as false: an orchestrator that predates the
+   *  field must not paint a resume banner that cannot act. */
+  interviewResumable?: boolean;
   summary?: string;
   whatWeDo?: string;
   customers?: string;
