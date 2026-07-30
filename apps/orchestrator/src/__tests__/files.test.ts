@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 
 // Mock the ai-gateway client.
 vi.mock("../services/ai-gateway.client.js", () => ({
@@ -393,6 +394,49 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     it("returns 400 when no files are attached", async () => {
       const res = await request(app).post("/api/files/upload?path=/");
       expect(res.status).toBe(400);
+    });
+
+    // WARP-1666 — multer raises LIMIT_UNEXPECTED_FILE for BOTH a misnamed field
+    // and an over-cap file count (index.js: `filesLeft` hits 0 → same code), so
+    // a 36-file upload used to be reported as a field-name error. Setting
+    // `limits.files` makes busboy raise the honest LIMIT_FILE_COUNT first; these
+    // two tests pin the pair apart so they can never collapse again.
+    it("rejects more than MAX_FILES_PER_UPLOAD files with an honest count message", async () => {
+      let req = request(app).post("/api/files/upload?path=/");
+      for (let i = 0; i <= MAX_FILES_PER_UPLOAD; i++) {
+        req = req.attach("files", Buffer.from(`f${i}`), `f${i}.txt`);
+      }
+      const res = await req;
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        `Too many files (max ${MAX_FILES_PER_UPLOAD} per upload)`,
+      );
+      expect(res.body.error).not.toMatch(/field name/i);
+      expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+    });
+
+    it("still reports a genuinely misnamed field as a field-name error", async () => {
+      const res = await request(app)
+        .post("/api/files/upload?path=/")
+        // singular "file" — not the field the route accepts
+        .attach("file", Buffer.from("hello"), "hello.txt");
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Unexpected field name (use "files")');
+      expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+    });
+
+    it("accepts a full batch of exactly MAX_FILES_PER_UPLOAD files", async () => {
+      let req = request(app).post("/api/files/upload?path=/");
+      for (let i = 0; i < MAX_FILES_PER_UPLOAD; i++) {
+        req = req.attach("files", Buffer.from(`f${i}`), `f${i}.txt`);
+      }
+      const res = await req;
+
+      expect(res.status).toBe(200);
+      expect(res.body.uploaded).toHaveLength(MAX_FILES_PER_UPLOAD);
+      expect(ncMock.ncUploadFile).toHaveBeenCalledTimes(MAX_FILES_PER_UPLOAD);
     });
 
     // WARP-1271 (T19a) — per-user upload cap (UserUsagePolicy.maxUploadSizeMb).

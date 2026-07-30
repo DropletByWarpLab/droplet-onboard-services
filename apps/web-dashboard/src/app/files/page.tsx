@@ -49,6 +49,7 @@ import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
   uploadFiles,
+  UploadBatchError,
   deleteFile,
   createDirectory,
   getDownloadUrl,
@@ -378,7 +379,26 @@ export default function FilesPage() {
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        toast(translateError(err, "files"));
+        // WARP-1666: a large selection is uploaded in batches, so a failure
+        // partway through still leaves earlier batches on the box. Refresh so
+        // those files actually appear, and say how many landed rather than
+        // implying the whole upload was lost. `translateError` deliberately
+        // never echoes a raw message, so the count is composed here from the
+        // typed error instead of read out of `err.message`.
+        if (err instanceof UploadBatchError && err.uploaded > 0) {
+          console.error("partial upload", err.cause);
+          await refresh();
+          toast(
+            `Uploaded ${err.uploaded} of ${err.total} files. The rest didn't upload — try again to finish.`
+          );
+        } else {
+          toast(
+            translateError(
+              err instanceof UploadBatchError ? err.cause : err,
+              "files"
+            )
+          );
+        }
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
