@@ -304,6 +304,58 @@ describe("DepartmentsPanel — select focus visibility (WCAG 2.4.7)", () => {
       expect(el.className).not.toContain("focus:border-[var(--brand)]");
     }
   });
+
+  // WARP-1353: the create-dialog fields carried a bare `outline-none` with NO
+  // replacement affordance at all — keyboard users got zero focus indicator.
+  // They wear the same inline-border `fieldStyle`, so the fix is the same ring,
+  // and `focus:border-*` would be a silent no-op here for the same reason.
+  it("every create-dialog field carries a focus ring instead of a bare outline-none", async () => {
+    listDepartmentsMock.mockResolvedValue({ departments: [] });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("No departments yet")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /new department/i }));
+    const dialog = await screen.findByRole("dialog");
+
+    const nameInput = within(dialog).getByPlaceholderText("Finance");
+    const quotaAmount = within(dialog).getByLabelText(/^quota amount$/i);
+    const quotaUnit = within(dialog).getByLabelText(/^quota unit$/i);
+    // The description field has no placeholder and its <label> is not wired via
+    // htmlFor, so reach it positionally: the second text input in the dialog.
+    const textInputs = Array.from(
+      dialog.querySelectorAll<HTMLInputElement>('input:not([type="number"])'),
+    );
+    expect(textInputs).toHaveLength(2);
+    const descriptionInput = textInputs[1];
+    expect(descriptionInput).not.toBe(nameInput);
+
+    for (const el of [nameInput, descriptionInput, quotaAmount, quotaUnit]) {
+      expect(el.className).toContain("outline-none");
+      expect(el.className).toContain("focus:ring-2");
+      expect(el.className).toContain("focus:ring-[var(--brand)]");
+      // An inline `border` from fieldStyle would defeat a focus:border rule.
+      expect(el.className).not.toContain("focus:border-[var(--brand)]");
+      expect((el as HTMLElement).style.border).toBe("1px solid var(--border)");
+    }
+  });
+
+  // WARP-1353: `dslug` was defined in no stylesheet anywhere in the repo.
+  it("the slug preview carries no dead dslug class", async () => {
+    listDepartmentsMock.mockResolvedValue({ departments: [] });
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("No departments yet")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /new department/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByPlaceholderText("Finance"), {
+      target: { value: "Legal Team" },
+    });
+
+    expect(within(dialog).getByText("legal-team")).toBeInTheDocument();
+    expect(dialog.querySelector(".dslug")).toBeNull();
+  });
 });
 
 describe("DepartmentsPanel — create department", () => {
