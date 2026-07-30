@@ -1,22 +1,4 @@
-# ============================================================================
-# PLACEHOLDER — NOT A REAL KEY. OTA verification FAILS CLOSED on this file.
-# ============================================================================
-# This file is the baked-in trust anchor the orchestrator's update agent
-# uses to verify cosign-signed OTA release manifests (WARP-534/535/537).
-#
-# It MUST be replaced with the REAL cosign public key via the human key
-# ceremony documented in scripts/README.md ("OTA release signing — key
-# ceremony"). In short:
-#
-#   cosign generate-key-pair                      # run locally, NOT in CI
-#   gh secret set COSIGN_PRIVATE_KEY < cosign.key
-#   gh secret set COSIGN_PASSWORD                 # the key-encryption pass
-#   cp cosign.pub apps/orchestrator/src/services/update-agent/cosign.pub
-#   rm cosign.key                                 # never commit, never keep
-#
-# The update agent's verify path (update-agent/verify.ts) detects the
-# DROPLET-OTA-PLACEHOLDER marker below — and the absence of a PEM PUBLIC
-# KEY block — and refuses to verify ANY manifest until the real key lands.
-# Do not remove the marker without completing the ceremony.
-# ============================================================================
-DROPLET-OTA-PLACEHOLDER-NOT-A-KEY
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXznP7jba1Xw1eTR7NyzRCPazpB/u
+VMdsX/rFF1jGckazfxynRjRAuQM6Ds7QuNjspXV4ZBglZLy6GsWeWKQ9hg==
+-----END PUBLIC KEY-----
