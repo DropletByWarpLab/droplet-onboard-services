@@ -55,7 +55,7 @@ uvicorn>=0.51.0
 # all-MiniLM-L6-v2 tokenizer (the embedder's tokenizer) for capacity
 # accounting.
 semantic-text-splitter>=0.32.0,<0.33
-tokenizers>=0.20,<1.0
+tokenizers>=0.23.1,<1.0
 # WARP-435 (ADR-003 Phase 1) — PPTX extraction with section-aware
 # hierarchical paths (section_name → slide_title). python-pptx is the
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,
