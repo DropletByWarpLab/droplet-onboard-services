@@ -74,6 +74,18 @@ assignable). `POST /scim/v2/Groups` RAISES each member's role to at least the
 group's mapped role (highest-privilege-wins floor; no demotion). The gated
 Team-membership UI is **NOT** built here (AC).
 
+> **Ceiling: `admin` (WARP-1568).** `owner` is **not** an Okta-assignable
+> role. A group whose name says "owner" is clamped to `SCIM_ROLE_CEILING`
+> (`admin`) — there is exactly one owner by design, ownership is the box's
+> root of trust, and transferring it is a dedicated flow, not a group name.
+> Every SCIM role write also runs through `role-mutation-guard.service.ts`
+> (the same rails as `/api/people/*` and `/api/auth/users*`: rank cap,
+> assignable-enum, owner-immutability, last-owner / last-operator, inside one
+> `SERIALIZABLE` transaction) and emits the same `Role changed` audit row,
+> attributed to the SCIM principal (`actor.type = system`, `refs.actor =
+> scim:okta`). A refusal is per-member: it is logged, that member's role is
+> left unchanged, and the rest of the group still converges.
+
 > **Documented simplification:** without a persisted SCIM membership table,
 > removing a user from a group does not auto-lower their role — elevation is
 > sticky until an explicit People-surface change. In scope per the AC.
