@@ -113,6 +113,21 @@ const LIBRARY_SHARE_MANAGER_ONLY =
  */
 const BULK_SHARE_OPTIONS = { shareType: 3, permissions: 1 } as const;
 
+/**
+ * The one sentence that reports folders dropped from a share selection.
+ *
+ * WARP-1661 — a mixed selection can now end on either surface: the results
+ * panel (2+ files) renders it inline, and a selection with exactly ONE
+ * shareable file opens the ShareDialog, which names only that file, so the
+ * drop has to be said in a toast instead. Same wording either way — the two
+ * surfaces must not describe the same fact differently.
+ */
+function skippedFoldersNote(names: string[]): string {
+  return `Skipped ${names.length} folder${names.length > 1 ? "s" : ""} (${names.join(
+    ", "
+  )}) — folders are shared one at a time.`;
+}
+
 /** One row of a multi-file share run — the per-target outcome, kept whether it
  *  succeeded or failed. Successes are never rolled back or hidden by a later
  *  failure (decision comment, note 1).
@@ -715,22 +730,44 @@ export default function FilesPage() {
         toast("Couldn't find those items to share — refresh and try again.");
         return;
       }
+      // ONE selected item is the deliberate, solo share the dialog exists for —
+      // folder included. This branch must stay ahead of the folder filter: a
+      // lone folder has nothing to skip and no bulk run to be kept out of, and
+      // routing it to the folders-only toast would tell a user who selected a
+      // folder on its own to select a folder on its own.
       if (entries.length === 1) {
         handleShare(entries[0]);
         return;
       }
       // Defense in depth: the toolbar already disables Share over the cap, but
-      // the context menu and any future caller route through here too.
+      // the context menu and any future caller route through here too. Counted
+      // on the SELECTION, matching the toolbar's disabled tooltip.
       if (entries.length > BULK_SHARE_LIMIT) {
         toast(
           `You can share up to ${BULK_SHARE_LIMIT} files at once — ${entries.length} are selected.`
         );
         return;
       }
+      // WARP-1661 — split folders out BEFORE choosing between the fan-out and
+      // the dialog. That choice used to be made on the raw selection count, so
+      // "one folder + one file" (2 entries) went down the bulk path, which then
+      // filtered the folder and rendered a ONE-row fan-out panel — hardcoded
+      // public link, no permission preset, no expiry, no password — for what is
+      // a single-file share, with a summary that could read "None of the 1 file
+      // could be shared." The count that picks the surface is the count of
+      // things the run will actually share.
       const shareable = entries.filter((f) => !f.isDirectory);
       const skipped = entries.filter((f) => f.isDirectory).map((f) => f.name);
       if (shareable.length === 0) {
         toast("Folders are shared one at a time — select a folder on its own.");
+        return;
+      }
+      if (shareable.length === 1) {
+        // The dropped folders are still reported — the dialog that opens names
+        // only the file, so without this they would vanish silently. Same
+        // sentence the results panel uses, so the two surfaces agree.
+        toast(skippedFoldersNote(skipped), "info");
+        handleShare(shareable[0]);
         return;
       }
       const run = ++bulkShareRunRef.current;
@@ -1715,9 +1752,7 @@ export default function FilesPage() {
               className="type-caption-1 mt-3"
               style={{ color: "var(--text-muted)" }}
             >
-              Skipped {bulkShare.skipped.length} folder
-              {bulkShare.skipped.length > 1 ? "s" : ""} (
-              {bulkShare.skipped.join(", ")}) — folders are shared one at a time.
+              {skippedFoldersNote(bulkShare.skipped)}
             </p>
           )}
 

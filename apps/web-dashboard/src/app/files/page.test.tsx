@@ -33,6 +33,17 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/files",
 }));
 
+// WARP-1661 — the share-routing decisions that do NOT open a surface report
+// themselves through a toast (folders-only, a skipped folder alongside a single
+// shareable file). Nothing here mounts a ToastProvider, so without this spy
+// those calls land on the context default and vanish. `importOriginal` keeps
+// the module's other exports (ToastProvider) real for anything that needs them.
+const toastSpy = vi.fn();
+vi.mock("@/components/Toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/Toast")>()),
+  useToast: () => ({ toast: toastSpy }),
+}));
+
 // ── Data hooks ──
 const PERSONAL: FileSpace = { id: "personal", name: "My Files", root: "/" };
 const SHARED: FileSpace = {
@@ -1048,6 +1059,77 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
       within(dialog).getAllByText(/file sharing is turned off on this droplet/i)
     ).toHaveLength(2);
     expect(within(dialog).queryByText(/couldn't load those files/i)).toBeNull();
+  });
+
+  // WARP-1661 — routing used to be decided on the RAW selection count, before
+  // folders were filtered out. One folder + one file is 2 entries, so the
+  // single-file shortcut missed, the fan-out ran, the folder was dropped inside
+  // it, and the user got the bulk panel with ONE row — hardcoded public link,
+  // no permission preset, no expiry, no password — for what is a single-file
+  // share. Its summary could even read "None of the 1 file could be shared."
+  //
+  // The count that decides the surface is the SHAREABLE count, so all three
+  // routes are pinned here against the reorder.
+  it("opens the ShareDialog when a selection holds exactly one shareable file, and names the skipped folder", () => {
+    mockFiles = [folder("Trips"), file("a.pdf")];
+    mockSelectedPaths = ["/Trips", "/a.pdf"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    // The single-file surface — with the controls the fan-out does not have.
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("a.pdf");
+    // Not the fan-out: no loop, no one-row panel.
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The folder is dropped, never silently — same sentence the panel uses.
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Skipped 1 folder (Trips) — folders are shared one at a time.",
+      "info"
+    );
+  });
+
+  it("opens the ShareDialog for a lone file with nothing to skip and no note", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("a.pdf");
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  // The trap in the WARP-1661 reorder: routing purely on `shareable.length`
+  // sends a folder selected ON ITS OWN to the folders-only toast — telling a
+  // user who did exactly what the toast asks to go do it. A solo selection is
+  // the deliberate single share the dialog exists for, folder included.
+  it("opens the ShareDialog for a folder selected on its own", () => {
+    mockFiles = [folder("Trips")];
+    mockSelectedPaths = ["/Trips"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("Trips");
+    expect(toastSpy).not.toHaveBeenCalled();
+    expect(createShareMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a folders-only selection without opening either share surface", () => {
+    mockFiles = [folder("Trips"), folder("Photos")];
+    mockSelectedPaths = ["/Trips", "/Photos"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Folders are shared one at a time — select a folder on its own."
+    );
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
   });
 
   it("keeps folders out of a bulk run and says which ones it skipped", async () => {
