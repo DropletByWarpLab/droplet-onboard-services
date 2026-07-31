@@ -3139,12 +3139,12 @@ export function createProtectedAuthRouter(
             // was still a `family`.
             //
             // That window has a REAL concurrent writer, not a theoretical one:
-            // scim-role-mapping.service.ts maps any SCIM group whose
-            // normalized name CONTAINS "owner" to role "owner", and
-            // effectiveRoleForGroupNames raises a member to their highest
-            // match — so an Okta push of a customer group called e.g.
-            // "Business Owners" mints owners asynchronously, with no
-            // coordination with this route.
+            // an Okta push (scim.service.ts `provisionGroup`) raises a
+            // member's role from its group mapping asynchronously, with no
+            // coordination with this route. WARP-1568 capped that writer at
+            // `admin` and routed it through the guard, so it can no longer
+            // mint OWNERS — but it still writes `role` out-of-band, which is
+            // exactly what the pin below defends against.
             //
             // Pinning makes a raced promotion a 0-row no-op instead of a
             // credential rotation. `target` is null only where there is no
