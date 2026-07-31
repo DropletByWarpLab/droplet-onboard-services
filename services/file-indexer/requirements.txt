@@ -15,7 +15,7 @@ pypdf>=4.0
 # rebuilds words from glyph geometry. MIT-licensed.
 # pdfminer.six is pulled in transitively by pdfplumber — no explicit pin needed.
 readability-lxml>=0.8
-lxml_html_clean>=0.1
+lxml_html_clean>=0.4.5
 pytesseract>=0.3.10
 Pillow>=10.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
