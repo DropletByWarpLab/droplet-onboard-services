@@ -31,7 +31,7 @@ srt==3.5.3
 # TRANSCRIPTION_RUN_LOCAL_TIME (default 03:00 local). Pinned because
 # apscheduler 3.x and 4.x have incompatible APIs.
 apscheduler==3.11.3
-tzlocal>=5.0
+tzlocal>=5.4.4
 # WARP-208 — frame OCR for video extractor (perceptual hashing for
 # pre-OCR dedup so we don't run Tesseract on every redundant frame).
 # imagehash 4.3.1 is the canonical pure-python perceptual-hashing lib;
