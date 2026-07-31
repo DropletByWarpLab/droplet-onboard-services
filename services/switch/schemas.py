@@ -69,7 +69,7 @@ class SwitchSystemInfo(BaseModel):
     hostname: str = ""
     port_count: int = 10
     poe_budget_mw: Optional[float] = None
-    driver: str = "lantronix"
+    driver: str = "openwrt"
 
 
 # --- Request models ---

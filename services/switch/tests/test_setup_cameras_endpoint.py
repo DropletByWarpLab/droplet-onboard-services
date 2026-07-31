@@ -8,7 +8,7 @@ plan, mirroring the honest dry-run pattern the other switch write endpoints use
 "planned" status paired with a "configured" message.
 
 The route reaches the driver via ``main.driver_instance``; these tests install
-a fake driver directly (no socket, no real Lantronix at 192.168.1.77) and open
+a fake driver directly (no socket, never real hardware) and open
 the auth gate with ``SWITCH_ALLOW_NO_AUTH`` so the middleware lets the POST
 through, exactly as local dev would.
 """

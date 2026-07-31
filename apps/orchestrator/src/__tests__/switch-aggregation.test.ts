@@ -5,7 +5,7 @@
  * reads into the dashboard §7 shapes: role (camera/ap/client/uplink/unknown),
  * status (online/warn/offline/blocked), vlan_profile, PoE mW→W, and the
  * status-level budget derivation. Fixtures mirror the recorded device payloads
- * (services/switch/tests/fixtures_webstax.py) — no live switch, no service.
+ * (services/switch test fakes) — no live switch, no service.
  */
 
 import { describe, it, expect } from "vitest";
@@ -21,16 +21,16 @@ import type {
   SwitchRawPoe,
 } from "../types/switch.js";
 
-// --- Fixtures (mirror fixtures_webstax.py) ---------------------------------
+// --- Fixtures (mirror the switch service's read shapes) --------------------
 
 const SYSINFO = {
-  model: "SM8TAT2SA",
+  model: "Zyxel GS1900-10HP A1",
   firmware_version: "v1.04.0079",
   mac_address: "00-C0-F2-A3-E6-3D",
   hostname: "Droplet Switch",
   port_count: 10,
   poe_budget_mw: null,
-  driver: "lantronix",
+  driver: "openwrt",
 };
 
 // Two PoE rows: port 1 delivering 12.5 W; port 7 a fault (class negotiated but
@@ -100,7 +100,7 @@ describe("aggregateStatus", () => {
     const s = aggregateStatus({ connected: true, systemInfo: SYSINFO, poe: POE, config: makeConfig() });
 
     expect(s.connected).toBe(true);
-    expect(s.model).toBe("SM8TAT2SA");
+    expect(s.model).toBe("Zyxel GS1900-10HP A1");
     expect(s.firmware).toBe("v1.04.0079");
     expect(s.auto_managed).toBe(true);
     expect(s.vlan_profile).toBe("flat-lan");

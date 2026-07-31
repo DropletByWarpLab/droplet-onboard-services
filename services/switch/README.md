@@ -14,10 +14,10 @@ Managed switch control service for the Droplet edge platform. Provides a REST AP
 │              drivers/base.py                     │
 │  23 methods: ports, VLANs, PoE, system, WAN     │
 ├──────────────────┬──────────────────────────────┤
-│  LantronixDriver │  ASICDriver (future)          │
-│  drivers/        │  drivers/asic.py              │
-│  lantronix.py    │  Custom PCB via SPI/I2C       │
-│  HTTPS JSON API  │                               │
+│ OpenWrtSwitch-   │  ASICDriver (future)          │
+│ Driver drivers/  │  drivers/asic.py              │
+│ openwrt.py       │  Custom PCB via SPI/I2C       │
+│ ubus-over-HTTP   │                               │
 └──────────────────┴──────────────────────────────┘
 ```
 
@@ -27,10 +27,14 @@ Managed switch control service for the Droplet edge platform. Provides a REST AP
 
 | Driver | Model | Protocol | Status |
 |--------|-------|----------|--------|
-| `lantronix` | SM8TAT2SA (10-port PoE+) | HTTPS JSON API | Prototype |
+| `openwrt` | Zyxel GS1900-10HP (Droplet OpenWrt image) | ubus-over-HTTP (rpcd, `droplet-ai`) | Shipping (edge-router shape) |
 | `asic` | Custom PCB | SPI/I2C registers | Future |
 
-### SM8TAT2SA Port Layout
+Managed switches are Zyxel units **reflashed to the Droplet OpenWrt image**
+(see `DropletByWarpLab/droplet-edge-router` `switch/`). The retired Lantronix
+SM8TAT2SA WebStaX driver was removed in WARP-1674.
+
+### GS1900-10HP Port Layout
 
 | Ports | Type | PoE | Description |
 |-------|------|-----|-------------|
@@ -94,14 +98,14 @@ This creates VLAN 100, assigns ports 1-8 as untagged access ports (cameras), and
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SWITCH_HOST` | `192.168.1.77` | Switch management IP |
-| `SWITCH_PORT` | `443` | Switch HTTPS port |
+| `SWITCH_HOST` | `192.168.9.2` | Switch management IP (the image's static mgmt address) |
+| `SWITCH_PORT` | `80` | Switch rpcd/ubus HTTP port (LAN-side only) |
 | `SWITCH_USERNAME` | `admin` | Switch admin username |
 | `SWITCH_PASSWORD_FILE` | `/run/secrets/switch_password` | Path to the Docker secret file holding the switch admin password. Resolved first. See "Switch password" below. |
 | `SWITCH_PASSWORD` | (empty) | **Deprecated** — env fallback kept for local dev and upgrades. Prefer the secret file. Empty → the switch reports `disconnected` (non-fatal). |
 | `SWITCH_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the switch. When set, the HTTPS session to the switch is verified against it. When unset, verification is disabled (the embedded switch ships a self-signed cert) and a warning is logged. A configured-but-missing path fails closed (the driver refuses to start) rather than silently downgrading to unverified TLS. |
-| `SWITCH_DRIVER` | `lantronix` | Driver implementation (`lantronix` or `asic`) |
-| `SWITCH_LIVE_WRITES` | `0` (off) | ADR-018 item 10: the WebStaX write shape (`POST /config/<name>`) is pattern-inferred and not yet confirmed on firmware v1.04.0079. The Lantronix driver runs **plan-only** by default — writes compute the intended change and log it without POSTing. Set truthy (`1`/`true`/`yes`/`on`) ONLY after a one-time supervised confirmation of the write shape per firmware; live writes are then read-back-verified and raise on mismatch. |
+| `SWITCH_DRIVER` | `openwrt` | Driver implementation (`openwrt`; `asic` future) |
+| `SWITCH_LIVE_WRITES` | `0` (off) | ADR-018 item 10 discipline: the uci write shapes are built from the committed image config and not yet confirmed on flashed hardware. The driver runs **plan-only** by default — writes compute the intended change and log it without applying. Set truthy (`1`/`true`/`yes`/`on`) ONLY after a one-time supervised post-flash confirmation; live writes are then read-back-verified and raise on mismatch. |
 | `PORT` | `8081` | Service listen port |
 
 ## Switch password
@@ -149,7 +153,7 @@ never generates a switch password.
 cd services/switch
 pip install -r requirements.txt
 
-SWITCH_HOST=192.168.1.77 \
+SWITCH_HOST=192.168.9.2 \
 SWITCH_PASSWORD=yourpassword \
 uvicorn main:app --host 0.0.0.0 --port 8081
 ```

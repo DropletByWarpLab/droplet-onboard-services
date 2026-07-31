@@ -5,7 +5,8 @@ The FastAPI service (main.py) only calls methods on this interface —
 it never imports a concrete driver directly.
 
 Implementations:
-- LantronixDriver: SM8TAT2SA via HTTPS JSON API (prototype)
+- OpenWrtSwitchDriver: Droplet-OpenWrt-imaged switch (Zyxel GS1900 family)
+  via ubus-over-HTTP as `droplet-ai`
 - ASICDriver: Custom PCB via SPI/I2C registers (production — future)
 
 To swap drivers: set SWITCH_DRIVER=asic in the environment.
@@ -84,7 +85,7 @@ class SwitchDriver(ABC):
 
         Returns:
             {
-                "model": "SM8TAT2SA",
+                "model": "Zyxel GS1900-10HP A1",
                 "firmware_version": "1.2.3",
                 "mac_address": "aa:bb:cc:dd:ee:ff",
                 "uptime": 123456,
@@ -129,8 +130,7 @@ class SwitchDriver(ABC):
             {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
 
         ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down). A driver
-        whose primary port read (``get_ports``) cannot report link state (e.g.
-        the Lantronix WebStaX ``vlan_port_stat`` carries only PVID/tagging)
+        whose primary port read (``get_ports``) cannot report link state
         overrides this with a dedicated read. The default derives from
         ``get_ports`` so every driver — and the test fakes — answer this without
         bespoke code. The orchestrator §7 aggregation joins this read in.
