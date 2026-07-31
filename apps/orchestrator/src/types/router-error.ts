@@ -117,6 +117,17 @@ export function routerErrorFromResponse(res: Response, label: string): RouterErr
   if (res.status === 401 || res.status === 403) {
     return RouterError.auth(base, { label, status: res.status });
   }
+  // WARP-1673: the routing service reserves 502 for "the ROUTER rejected the
+  // routing service's own rpcd credentials" (e.g. an edge-router reflash
+  // rotated droplet-ai-password; body carries code ROUTER_AUTH). Nothing sits
+  // between the orchestrator and routing to mint a 502, so the status alone is
+  // unambiguous — same status-only classification discipline as the 409
+  // SCAN_UNSUPPORTED contract. Checked before the X-Operation-Id rollback
+  // branch: an auth-refused write never changed anything, so AUTH is the
+  // truthful classification even on a write path.
+  if (res.status === 502) {
+    return RouterError.auth(base, { label, status: res.status });
+  }
   // WARP-40 introduced X-Operation-Id on every write; if a 5xx carries one we
   // assume it's a safe-apply rollback. Not all 5xx are rollbacks, but this
   // classification is only used on write paths.
