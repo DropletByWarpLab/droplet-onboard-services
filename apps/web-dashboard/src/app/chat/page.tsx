@@ -161,6 +161,11 @@ export default function ChatPage() {
     interviewConversation &&
     (bizProfile?.onboardingState === "in_progress" ||
       bizProfile?.onboardingState === "re_running");
+  // WARP-1668 — server-resolved: the parked interview session exists AND
+  // belongs to this user, so opening it will succeed. Fails CLOSED on an
+  // orchestrator that predates the field (`undefined` → false) — hiding the
+  // banner is strictly better than showing one whose buttons do nothing.
+  const interviewResumable = bizProfile?.interviewResumable === true;
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
   // sync, both directions. The history panel calls router.push("/chat?c=X")
@@ -192,6 +197,12 @@ export default function ChatPage() {
           const next = new URL(window.location.href);
           next.searchParams.delete("c");
           window.history.replaceState(null, "", next.toString());
+          // WARP-1668 — replaceState does NOT notify useSearchParams, so
+          // nothing else here re-renders off this failure. Re-read the
+          // profile: if the id we just failed to load was the interview
+          // session, `interviewResumable` flips false and the resume banner
+          // retires instead of offering the same dead trip again.
+          refreshBizProfile();
         }
       });
     } else if (conversationId !== null) {
@@ -412,14 +423,28 @@ export default function ChatPage() {
     handleSend(INTERVIEW_COPY.wrapUpTurn);
   }, [handleSend]);
 
-  // Resume-banner "Skip the rest": open the interview session, then send
-  // the wrap-up once its messages have loaded.
-  const handleResumeWrapUp = useCallback(() => {
-    pendingWrapUpRef.current = true;
-    if (bizProfile?.interviewChatId) {
-      router.push(`/chat?c=${encodeURIComponent(bizProfile.interviewChatId)}`);
+  // WARP-1668 — the single navigation both resume-banner buttons depend on.
+  // Returns whether it actually navigated, so callers never arm follow-up
+  // work for a trip that did not happen. The banner is already gated on
+  // `interviewResumable`, so a falsy id here is a profile that went stale
+  // between paint and click: re-sync and let the banner retire itself.
+  const handleResumeOpen = useCallback((): boolean => {
+    const target = bizProfile?.interviewChatId;
+    if (!target) {
+      refreshBizProfile();
+      return false;
     }
-  }, [bizProfile, router]);
+    router.push(`/chat?c=${encodeURIComponent(target)}`);
+    return true;
+  }, [bizProfile, refreshBizProfile, router]);
+
+  // Resume-banner "Skip the rest": open the interview session, then send
+  // the wrap-up once its messages have loaded. Arm the pending wrap-up ONLY
+  // when the navigation happens — a ref armed without a trip stays armed and
+  // would fire the wrap-up turn into whatever interview thread loads next.
+  const handleResumeWrapUp = useCallback(() => {
+    if (handleResumeOpen()) pendingWrapUpRef.current = true;
+  }, [handleResumeOpen]);
   useEffect(() => {
     if (
       pendingWrapUpRef.current &&
@@ -735,21 +760,25 @@ export default function ChatPage() {
               </div>
             )}
           {/* Resume banner on the empty new-chat view while an interview is
-              parked mid-flight elsewhere. */}
+              parked mid-flight elsewhere.
+
+              WARP-1668 — `interviewResumable` is load-bearing, not belt-and-
+              braces. The other three conditions are box-wide singleton state;
+              only the server can say whether the parked session is one THIS
+              user can open (sessions are owner-scoped, and the FK is
+              `onDelete: SetNull` so the link can be null while the state
+              still reads in_progress). Without it the banner rendered in
+              states where both its buttons were no-ops — a permanent dead
+              end. If it is not accessible, it is not shown. */}
           {messages.length === 0 &&
             isPrivileged &&
             !interviewActive &&
+            interviewResumable &&
             (bizProfile?.onboardingState === "in_progress" ||
               bizProfile?.onboardingState === "re_running") && (
               <div className="max-w-[640px] mx-auto px-4 pt-4">
                 <InterviewResumeBanner
-                  onResume={() => {
-                    if (bizProfile?.interviewChatId) {
-                      router.push(
-                        `/chat?c=${encodeURIComponent(bizProfile.interviewChatId)}`,
-                      );
-                    }
-                  }}
+                  onResume={handleResumeOpen}
                   onSkipTheRest={handleResumeWrapUp}
                 />
               </div>
