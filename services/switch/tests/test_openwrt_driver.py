@@ -369,9 +369,8 @@ class TestFactory:
         secret.write_text("per-unit-pw\n", encoding="utf-8")
         monkeypatch.setenv("SWITCH_DRIVER", "openwrt")
         monkeypatch.setenv("SWITCH_PASSWORD_FILE", str(secret))
-        # conftest seeds Lantronix-shaped env defaults (host/port/username) so
-        # `main` imports cleanly — drop them to prove the openwrt branch's own
-        # edge-router defaults.
+        # conftest seeds loopback-safe env defaults so `main` imports cleanly —
+        # drop them to prove the factory's own edge-router defaults.
         monkeypatch.delenv("SWITCH_HOST", raising=False)
         monkeypatch.delenv("SWITCH_PORT", raising=False)
         monkeypatch.delenv("SWITCH_USERNAME", raising=False)

@@ -4,10 +4,10 @@ Droplet Switch Service
 FastAPI wrapper around the abstract SwitchDriver, exposing managed switch
 control as a REST API for the orchestrator and AI gateway to consume.
 
-The driver implementation is selected at startup via SWITCH_DRIVER env var.
 The managed switch driver is selected at startup via SWITCH_DRIVER env var.
-Lantronix SM8TAT2SA is the prototype backend. When the custom PCB ASIC is
-ready, set SWITCH_DRIVER=asic and nothing else changes.
+The default `openwrt` backend drives a switch reflashed to the Droplet
+OpenWrt image (Zyxel GS1900 family) over ubus/rpcd as `droplet-ai`. When the
+custom PCB ASIC is ready, set SWITCH_DRIVER=asic and nothing else changes.
 """
 
 import sys as _sys
@@ -63,16 +63,11 @@ from schemas import (
 # ---------------------------------------------------------------------------
 # Model constants (no firmware read exposes these)
 # ---------------------------------------------------------------------------
-# Per-driver PoE power budget. The Lantronix firmware's poe_status read
-# reports per-port draw but no total budget, so it is a documented model
-# constant (130 W for the 8-port PoE+ SM8TAT2SA; 77 W for the GS1900-10HP —
-# its `poe info` DOES report the budget live, but /provision/config must
-# answer without a connected switch, so the constant stays the header source).
+# PoE power budget, a documented model constant (77 W for the GS1900-10HP).
+# The live `poe info` read DOES report the budget, but /provision/config must
+# answer without a connected switch, so the constant stays the header source.
 # Surfaced in watts on the §7 status contract as poe_budget_w.
-_POE_BUDGET_W_BY_DRIVER = {"lantronix": 130, "openwrt": 77}
-POE_BUDGET_W = _POE_BUDGET_W_BY_DRIVER.get(
-    os.environ.get("SWITCH_DRIVER", "lantronix").lower(), 130
-)
+POE_BUDGET_W = 77
 
 logger = logging.getLogger("droplet.switch")
 logging.basicConfig(level=logging.INFO)
@@ -155,9 +150,9 @@ class ServiceAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-SWITCH_HOST = os.environ.get("SWITCH_HOST", "192.168.1.77")
-SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "443"))
-SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "lantronix")
+SWITCH_HOST = os.environ.get("SWITCH_HOST", "192.168.9.2")
+SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "80"))
+SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "openwrt")
 
 # ---------------------------------------------------------------------------
 # Bring-up provisioning config (ADR-018 item 9)
@@ -463,7 +458,7 @@ async def list_ports():
 @app.get("/ports/status")
 async def list_port_status():
     """Live link/speed per port (the real link source the §7 aggregation joins
-    in — `/ports` carries only PVID/tagging on the Lantronix WebStaX firmware).
+    in — a driver's `/ports` read may carry only PVID/tagging).
     """
     try:
         rows = await get_driver().get_port_status()

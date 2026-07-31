@@ -15,11 +15,11 @@ Data sources (all granted by the switch's droplet-ai ACL):
 
 Writes go through uci (`uci set/add/delete/commit`) + a runtime reload
 (`poe reload` / `network reload`). The GS1900 image has NO `file exec` grant
-at all, so nothing here shells out. Like the Lantronix driver, writes are
-gated by ``plan_only`` (default ON): the uci write shapes are built from the
-committed image config and have not yet been confirmed against flashed
-hardware (the lab unit still runs stock firmware — see
-droplet-edge-router/switch/docs/STATUS.md). Reads are exact.
+at all, so nothing here shells out. Writes are gated by ``plan_only``
+(default ON): the uci write shapes are built from the committed image config
+and have not yet been confirmed against flashed hardware (the lab unit still
+runs stock firmware — see droplet-edge-router/switch/docs/STATUS.md). Reads
+are exact.
 
 Port layout (GS1900-10HP): 8x GbE copper PoE (lan1-lan8, 77 W budget) +
 2x SFP (lan9-lan10, no PoE). uci names ports "lanN"; the REST/§7 contract
@@ -47,8 +47,7 @@ from .base import (
 
 logger = logging.getLogger("droplet.switch.openwrt")
 
-# GS1900-10HP port configuration (mirrors the Lantronix constants — the two
-# models happen to share the 8 copper PoE + 2 SFP layout).
+# GS1900-10HP port configuration.
 PORT_MIN = 1
 PORT_MAX = 10
 POE_PORT_MIN = 1
@@ -133,11 +132,10 @@ def _parse_bridge_vlan_ports(entries: Any) -> list[dict]:
 class OpenWrtSwitchDriver(SwitchDriver):
     """Droplet-image OpenWrt switch over ubus-over-HTTP as `droplet-ai`.
 
-    Concurrency model mirrors the Lantronix driver where it matters:
-    `_auth_lock` serializes rpcd logins so parallel callers can't stomp each
-    other's session token; every ubus call refreshes the session lazily
-    (rpcd extends expiry on use, so no keepalive scheduler is needed — the
-    WebStaX 30 s idle quirk does not exist here).
+    Concurrency model: `_auth_lock` serializes rpcd logins so parallel
+    callers can't stomp each other's session token; every ubus call
+    refreshes the session lazily (rpcd extends expiry on use, so no
+    keepalive scheduler is needed).
     """
 
     def __init__(

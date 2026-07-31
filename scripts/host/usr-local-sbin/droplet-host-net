@@ -3,14 +3,14 @@
 # every boot via droplet-host-net.service.
 #
 # What it does:
-#   1. Adds a /32 host route to the Lantronix mgmt IP (192.168.1.77)
+#   1. Adds a /32 host route to the managed switch's mgmt IP (SWITCH_IP)
 #      via br-lan, so the orchestrator's switch service can reach the
 #      switch even though br-lan itself is on 192.168.20.0/24.
 #      Goes away once the smart-port rework re-IPs the switch into
 #      192.168.20.x natively (see docs/SMART_PORT_AUTOVLAN.md).
 #   2. Validates + runs a dedicated dnsmasq instance bound to br-lan,
 #      serving 192.168.20.100-200. Without this, the camera plugged
-#      into the Lantronix never gets an IP and the camera-discovery
+#      into the switch never gets an IP and the camera-discovery
 #      service has nothing to scan.
 #
 # Why a separate dnsmasq instance instead of the system dnsmasq.service:

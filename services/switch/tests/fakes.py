@@ -1,16 +1,15 @@
 """In-memory fake SwitchDriver for unit tests.
 
-CRITICAL: the real Lantronix SM8TAT2SA at 192.168.1.77 rate-limits and locks
-the admin account on repeated logins. EVERY switch test runs against this fake
-— no test, fixture, or provisioner path may ever open a socket to the device.
+CRITICAL: EVERY switch test runs against this fake — no test, fixture, or
+provisioner path may ever open a socket to real hardware.
 
 The fake models the one thing the provisioner reasons about: per-port VLAN
 membership. It records writes so a test can assert idempotence (no writes when
 already at desired state) and that the protected/uplink port is never moved.
 
-It also models the v1.04 firmware fault the driver-fix note describes: set
-`raise_on_vlan_read` / `raise_on_membership_read` to a SwitchAPIError(404) to
-prove the provisioner is tolerant (logs + no-op) rather than crashing.
+It also models a switch whose VLAN reads fail: set `raise_on_vlan_read` /
+`raise_on_membership_read` to a SwitchAPIError(404) to prove the provisioner
+is tolerant (logs + no-op) rather than crashing.
 """
 
 from __future__ import annotations
@@ -74,8 +73,8 @@ class FakeSwitchDriver(SwitchDriver):
 
     async def get_system_info(self) -> dict:
         return {
-            "model": "SM8TAT2SA",
-            "firmware_version": "1.04.0079",
+            "model": "Fake 10-Port PoE Switch",
+            "firmware_version": "0.0.0-fake",
             "mac_address": "aa:bb:cc:dd:ee:ff",
             "uptime": "1d",
             "hostname": "fake-switch",
@@ -110,7 +109,7 @@ class FakeSwitchDriver(SwitchDriver):
         raise SwitchAPIError(404, f"Port {port} not found")
 
     async def get_port_status(self) -> list[dict]:
-        # Mirror the real Lantronix get_port_status shape (the §7 link/speed
+        # Mirror the real drivers' get_port_status shape (the §7 link/speed
         # source): every port up at "1 Gb", SFP flag by position.
         return [
             {"port": p, "link_up": True, "speed": "1 Gb", "is_sfp": p >= 9}

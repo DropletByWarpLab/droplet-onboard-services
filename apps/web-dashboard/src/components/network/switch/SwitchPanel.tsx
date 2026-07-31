@@ -122,9 +122,9 @@ export function SwitchPanel() {
         </span>
         <div className="min-w-0">
           <div className="type-subheadline font-semibold text-label-primary flex items-center gap-2.5">
-            {/* WARP-1674: the driver owns vendor branding — the Lantronix
-                driver reports "Lantronix SM8TAT2SA", the openwrt driver the
-                board model ("Zyxel GS1900-10HP A1"). */}
+            {/* WARP-1674: the driver owns vendor branding — the openwrt
+                driver reports the board model verbatim (e.g. "Zyxel
+                GS1900-10HP A1"). */}
             {status.model || "Managed switch"}
             {status.auto_managed && (
               <span className="inline-flex items-center gap-1.5 type-caption-2 font-medium text-system-green bg-system-green/10 px-2.5 py-0.5 rounded-full">
