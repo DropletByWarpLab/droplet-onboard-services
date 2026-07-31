@@ -63,11 +63,16 @@ from schemas import (
 # ---------------------------------------------------------------------------
 # Model constants (no firmware read exposes these)
 # ---------------------------------------------------------------------------
-# The SM8TAT2SA's PoE power budget. The firmware's poe_status read reports
-# per-port draw but no total budget, so it is a documented model constant
-# (130 W for the 8-port PoE+ SM8TAT2SA). Surfaced in watts on the §7 status
-# contract as poe_budget_w.
-POE_BUDGET_W = 130
+# Per-driver PoE power budget. The Lantronix firmware's poe_status read
+# reports per-port draw but no total budget, so it is a documented model
+# constant (130 W for the 8-port PoE+ SM8TAT2SA; 77 W for the GS1900-10HP —
+# its `poe info` DOES report the budget live, but /provision/config must
+# answer without a connected switch, so the constant stays the header source).
+# Surfaced in watts on the §7 status contract as poe_budget_w.
+_POE_BUDGET_W_BY_DRIVER = {"lantronix": 130, "openwrt": 77}
+POE_BUDGET_W = _POE_BUDGET_W_BY_DRIVER.get(
+    os.environ.get("SWITCH_DRIVER", "lantronix").lower(), 130
+)
 
 logger = logging.getLogger("droplet.switch")
 logging.basicConfig(level=logging.INFO)

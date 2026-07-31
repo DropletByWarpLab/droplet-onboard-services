@@ -588,8 +588,13 @@ class LantronixDriver(SwitchDriver):
         # "Firmware Version": ..., "MAC Address": ..., "System Name": ...}}.
         data = await self._request("GET", "/stat/sysinfo")
         raw = data.get("data", data)
+        # WARP-1674: the driver owns vendor branding (the dashboard renders
+        # `model` verbatim now that "Lantronix" is no longer hardcoded there).
+        model = str(raw.get("Model Name", raw.get("Model", "SM8TAT2SA")))
+        if not model.lower().startswith("lantronix"):
+            model = f"Lantronix {model}"
         return {
-            "model": raw.get("Model Name", raw.get("Model", "SM8TAT2SA")),
+            "model": model,
             "firmware_version": raw.get("Firmware Version", raw.get("Software Version", "")),
             "mac_address": raw.get("MAC Address", raw.get("System MAC", "")),
             "uptime": raw.get("System Uptime", raw.get("Uptime", "")),

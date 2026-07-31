@@ -137,7 +137,9 @@ async def test_get_system_info_parses_model_fw_mac():
 
     info = await driver.get_system_info()
 
-    assert info["model"] == "SM8TAT2SA"
+    # WARP-1674: the driver owns vendor branding now that the SwitchPanel no
+    # longer hardcodes "Lantronix" in front of the model.
+    assert info["model"] == "Lantronix SM8TAT2SA"
     assert info["firmware_version"] == "v1.04.0079"
     assert info["mac_address"] == "00-C0-F2-A3-E6-3D"
     assert info["hostname"] == "Droplet Switch"
