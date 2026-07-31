@@ -12,7 +12,11 @@ export const MAX_PATH_LEN = 4096;
 export const MAX_WRITE_BYTES = 10 * 1024 * 1024; // 10 MB cap on LLM-driven writes
 
 export type ValidatedPath =
-  | { ok: true; path: string }
+  // `trailingSlash` records that the caller spelled the path as a directory
+  // ("/Notes/"). The separator is normalized away from `path`; tools that
+  // need a filename (write_file) use the flag to refuse rather than invent
+  // one. Root is never reported as trailing.
+  | { ok: true; path: string; trailingSlash: boolean }
   | { ok: false; error: string };
 
 export function validateNcPath(input: unknown): ValidatedPath {
@@ -43,10 +47,19 @@ export function validateNcPath(input: unknown): ValidatedPath {
     }
   }
 
+  // `path.posix.normalize` already collapses duplicate separators
+  // ("/A//B" -> "/A/B") but preserves a trailing one ("/A/B/" stays
+  // "/A/B/"), which then reads as an empty final segment. WARP-1373: the
+  // model writes directory paths with a trailing slash constantly, so
+  // strip it here — after the traversal guard above, which runs on the raw
+  // and decoded input and is unaffected by this.
   const normalized = path.posix.normalize(decoded.startsWith("/") ? decoded : "/" + decoded);
-  if (normalized === "/") return { ok: true, path: "/" };
-  if (normalized.split("/").slice(1).some((seg) => seg === "")) {
+  const trimmed = normalized.length > 1 && normalized.endsWith("/")
+    ? normalized.slice(0, -1)
+    : normalized;
+  if (trimmed === "/") return { ok: true, path: "/", trailingSlash: false };
+  if (trimmed.split("/").slice(1).some((seg) => seg === "")) {
     return { ok: false, error: "empty path segment" };
   }
-  return { ok: true, path: normalized };
+  return { ok: true, path: trimmed, trailingSlash: trimmed !== normalized };
 }

@@ -27,6 +27,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!ctx.userId || !ctx.ncToken) return err("AUTH_REQUIRED", "auth_required");
   const v = validateNcPath(args.path);
   if (!v.ok) return err("INVALID_PATH", v.error);
+  // WARP-1373: a trailing separator is normalized away for the tools that
+  // address directories, but this one needs a filename. Without this,
+  // write_file("/Notes/") would silently create a file named "Notes" at
+  // root instead of erroring the way it used to.
+  if (v.trailingSlash) {
+    return err("INVALID_PATH", "path must include a filename, not a trailing '/'");
+  }
 
   let buffer: Buffer;
   if (typeof args.content === "string") {
