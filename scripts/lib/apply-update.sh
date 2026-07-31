@@ -127,8 +127,9 @@ run_capture() {
 }
 
 # ── WARP-244: pull-time image signature verification ─────────────────────────
-# Only images keyless-signed by THIS repo's publish-release workflow on main
-# may be pulled. cosign fetches the signature bundle from ghcr.io (the same
+# Only images keyless-signed by THIS repo's publish-release workflow, running
+# on a RELEASE BRANCH, may be pulled. cosign fetches the signature bundle from
+# ghcr.io (the same
 # registry the pull itself needs) and verifies it OFFLINE against the trust
 # root embedded in the vendored, checksum-pinned binary (orchestrator
 # Dockerfile, WARP-537) — no Rekor/TUF egress at verify time.
@@ -139,7 +140,13 @@ run_capture() {
 # access pulling manually (docs/SECURITY.md). The canonical "image-verify:"
 # stderr prefix is load-bearing: apply.ts classifies it as
 # rejected/image_signature_failed instead of retrying.
-COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/main$'
+# WARP-1670 — main (stable) and stage (stage channel) are BOTH legitimate
+# publishers, so the identity accepts either. Written as an explicit
+# two-branch alternation, never `refs/heads/.*`: this regexp is the whole
+# supply-chain gate in front of `docker pull`, and a wildcard would let any
+# pushed branch mint images the box will trust. Adding a channel means
+# adding its branch here, on purpose, in a reviewed diff.
+COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/(main|stage)$'
 COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
 # Ephemeral registry auth for BOTH cosign (in-process HTTPS to ghcr.io) and

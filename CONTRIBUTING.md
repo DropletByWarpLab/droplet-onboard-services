@@ -1,5 +1,32 @@
 # Contributing to droplet-onboard-services
 
+## Branching model
+
+Work flows through **`stage`** before it reaches **`main`**. Open your PR
+against `stage` — `main` only ever receives merges from `stage`.
+
+```
+your branch ──PR──▶ stage ──PR──▶ main
+                      │             │
+                 channel: stage  channel: stable
+```
+
+Both branches publish OTA releases, and a device subscribes to exactly
+one channel. So `stage` is not a staging *server* — it is the build a
+subset of real boxes will install, ahead of everyone else. What lands on
+`stage` should be releasable; what lands on `main` should have soaked.
+
+Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
+Hotfixes take the same route: skipping `stage` means shipping every box a
+build that has never run on one.
+
+Releases are published by dispatching `publish-release.yml` from the
+branch you want to ship — the workflow derives the channel from the ref
+and refuses to run from anywhere else. See the "Branching and releases"
+section of [`CLAUDE.md`](CLAUDE.md) for the full contract, and
+[`docs/SECURITY.md`](docs/SECURITY.md) for how a device decides to trust
+a release.
+
 ## Architecture
 
 ```
