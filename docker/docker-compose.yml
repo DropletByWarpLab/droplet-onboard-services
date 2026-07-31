@@ -1186,6 +1186,12 @@ services:
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
       # No longer exposed via `docker inspect`.
+      # WARP-1675 (ADR-033 edge-router shape): rpcd account for addressing an
+      # EXTERNAL OpenWrt AP directly at its discovered address. The password is
+      # read from /run/secrets/ap_openwrt_password (empty → AP-direct
+      # configuration is skipped and approvals stay router-side only).
+      - AP_USERNAME=${AP_USERNAME:-droplet-ai}
+      - AP_PORT=${AP_PORT:-80}
       # ROUTING_SERVICE_TOKEN (WARP-36) replaces PR#5's SERVICE_SECRET for this service.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       # WARP-44: `real` (default) = connect to OpenWrt. `mock` = serve fixtures
@@ -1212,6 +1218,8 @@ services:
       - ../data/secrets/service-tls/routing:/data/service-tls:ro
     secrets:
       - openwrt_password
+      # WARP-1675: external-AP droplet-ai password (see the `secrets:` block).
+      - ap_openwrt_password
     restart: always
     <<: *default-logging
     mem_limit: ${ROUTING_MEM_LIMIT:-256m}
@@ -2503,6 +2511,15 @@ secrets:
   # boxes without a managed switch; an empty file → driver "disconnected".
   switch_password:
     file: ../docker/secrets/switch_password
+  # WARP-1675 (ADR-033): external OpenWrt AP droplet-ai password mounted
+  # read-only at /run/secrets/ap_openwrt_password in the routing container.
+  # OPERATOR-SUPPLIED (the AP mints its own per-unit password at first boot —
+  # copy /etc/droplet/droplet-ai-password off the AP) — setup.sh's
+  # sync_ap_password_secret() writes it from $AP_OPENWRT_PASSWORD in .env,
+  # never generated, empty placeholder when unset so `docker compose up`
+  # works on boxes without an external AP.
+  ap_openwrt_password:
+    file: ../docker/secrets/ap_openwrt_password
 
 volumes:
   pgdata:
