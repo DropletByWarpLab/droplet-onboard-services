@@ -656,6 +656,29 @@ const NO_PARTIAL: StreamTeardownPartial = {
   releasedContent: "",
 };
 
+/**
+ * WARP-1660 — the salvaged partial off EITHER teardown carrier.
+ *
+ * `consumeChatStream` picks the carrier from the signal it sees at the instant
+ * it fails; `runAgent` picks the terminal from the signal it sees one async
+ * hop later. Those two reads can disagree: a disconnect landing inside that
+ * window sends an `AgentStreamPartialError` down the abort branch. Both types
+ * carry `.partial` for exactly the same reason, so which one arrives must not
+ * decide whether the answer survives — reading it off only `AgentStreamAborted`
+ * replaced a recovered answer with `NO_PARTIAL`, i.e. the blank row this whole
+ * salvage path exists to prevent.
+ *
+ * An EMPTY partial needs no special case: `teardownResult` already renders
+ * `{ released: true, releasedContent: "" }` as `content: ""` — the same
+ * outcome as `NO_PARTIAL`.
+ */
+function teardownPartialOf(err: unknown): StreamTeardownPartial {
+  return err instanceof AgentStreamAborted ||
+    err instanceof AgentStreamPartialError
+    ? err.partial
+    : NO_PARTIAL;
+}
+
 /** Name-based abort check (mirrors routes/llm.ts — robust to error re-wrapping). */
 function isAbortError(err: unknown): boolean {
   return (
@@ -1385,10 +1408,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // DEFERRED turn this is the ONLY copy of the partial answer: nothing
           // reached the wire during the stream, so without it a Stop press
           // blanked the screen and persisted an empty row.
-          return abortedResult(
-            iter,
-            err instanceof AgentStreamAborted ? err.partial : NO_PARTIAL,
-          );
+          //
+          // WARP-1660 — off EITHER carrier: `req.signal` can flip after the
+          // consumer already classified the failure as a transport death, so
+          // an `AgentStreamPartialError` reaches this branch with a perfectly
+          // good partial in it.
+          return abortedResult(iter, teardownPartialOf(err));
         }
         if (err instanceof AgentStreamPartialError) {
           // The stream died AFTER partial content was emitted — falling back to

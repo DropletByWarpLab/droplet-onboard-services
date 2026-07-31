@@ -946,6 +946,63 @@ describe("runAgent — teardown on a DEFERRED turn keeps the partial answer", ()
     expect(done && done.type === "done" && done.stop_reason).toBe("error");
   });
 
+  it("keeps the partial when the signal flips between the throw and the catch (WARP-1660)", async () => {
+    // The narrow race between the two carriers. `consumeChatStream` classifies
+    // the failure with the signal it sees AT THAT MOMENT — not aborted, so it
+    // throws AgentStreamPartialError. The disconnect lands in the async gap
+    // before `runAgent`'s catch re-reads `req.signal`, which now says aborted
+    // and takes the abort branch — with an AgentStreamPartialError in hand.
+    // Reading `.partial` off only one carrier there threw away an answer the
+    // salvage machinery had ALREADY recovered: blank row, empty persist, the
+    // exact outcome WARP-1602 exists to prevent.
+    //
+    // The abort is fired from `onEvent`, which is the real window: `settle()`
+    // releases the salvaged partial as content_delta from INSIDE the
+    // AgentStreamPartialError constructor argument — i.e. strictly after the
+    // consumer's `signal?.aborted` check and strictly before runAgent's.
+    const controller = new AbortController();
+    const chat = vi.fn();
+    async function* dying(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { reasoning_content: "User asks spend." } }] };
+      yield { choices: [{ delta: { content: "You spent 6,240 EUR" } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue(DEFER_TOOLS),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat, chatStream: () => dying() } as never,
+      onEvent: (e: SSEEvent) => {
+        events.push(e);
+        // The client goes away exactly as the salvaged partial hits the wire.
+        if (e.type === "content_delta") controller.abort();
+      },
+    };
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    // The signal won the race, so this is reported as the abort terminal…
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+    // …and the partial that AgentStreamPartialError was carrying survives it.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // WARP-1442's sum invariant: the wire and the persisted row agree.
+    expect(streamed).toBe(result.message.content);
+    // Salvage never re-infers — the blocking path stays untouched.
+    expect(chat).not.toHaveBeenCalled();
+  });
+
   it("does NOT release buffered analysis as the answer when tool calls landed", async () => {
     // The guarantee this PR exists for must survive teardown: if tool-call
     // fragments already arrived, the buffered `delta.content` is harmony
