@@ -242,16 +242,25 @@ def test_parse_does_not_gate_min_orchestrator_schema():
 # ---------------------------------------------------------------------------
 
 
-def test_shipped_anchor_exists_and_is_still_the_placeholder():
-    """The committed services/fleet-agent/cosign.pub is the WARP-535
-    placeholder (byte-identical to the orchestrator's), so production
-    verify fails closed until the human key ceremony stamps the real key
-    over BOTH copies. When that happens, flip this test to assert the
-    marker is ABSENT (as verify.test.ts documents for the TS side)."""
+def test_shipped_anchor_is_the_real_key_and_matches_the_orchestrator():
+    """The committed services/fleet-agent/cosign.pub carries the REAL OTA
+    signing key: the human key ceremony (scripts/README.md, "OTA release
+    signing") stamped it over the WARP-535 placeholder on both copies.
+    This test was inverted at that moment — the placeholder tripwire it
+    used to be is what forced the edit.
+
+    It stays as a REVERSE tripwire. A merge, a bad revert or a rebase that
+    restores the placeholder would make every release fail closed on the
+    box with no other signal; this catches that in CI. The byte-identical
+    check is the other half: the two copies MUST stay in lockstep, because
+    the fleet-agent poll and the orchestrator applier have to agree on
+    what a valid release is. The placeholder-detection code path itself is
+    still covered by the placeholder-cosign.pub fixture cases above."""
     anchor = default_trust_anchor_path()
     assert anchor.exists()
     content = anchor.read_text(encoding="utf-8")
-    assert TRUST_ANCHOR_PLACEHOLDER_MARKER in content
+    assert TRUST_ANCHOR_PLACEHOLDER_MARKER not in content
+    assert "-----BEGIN PUBLIC KEY-----" in content
     orchestrator_anchor = (
         _FIXTURES.parent / "cosign.pub"
     )  # apps/orchestrator/src/services/update-agent/cosign.pub

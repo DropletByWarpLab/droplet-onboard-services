@@ -157,14 +157,20 @@ describe("defaultTrustAnchorPath", () => {
     expect(p).toMatch(/update-agent[\\/]cosign\.pub$/);
   });
 
-  it("the shipped anchor is still the placeholder until the key ceremony (documented fail-closed)", async () => {
-    // This assertion is about the CURRENT repo state: the committed
-    // cosign.pub is the placeholder, so production verify fails closed.
-    // When the human key ceremony installs the real key, flip this test
-    // to assert the marker is ABSENT.
+  it("the shipped anchor is a real key, not the placeholder (key ceremony ran)", async () => {
+    // This assertion is about the CURRENT repo state. It was inverted when
+    // the human key ceremony (scripts/README.md, "OTA release signing")
+    // stamped the real cosign public key over the WARP-535 placeholder —
+    // the tripwire that forced this edit is exactly what it was for.
+    //
+    // It stays as a REVERSE tripwire: if a merge, a bad revert, or a
+    // rebase ever restores the placeholder, production verify silently
+    // starts failing closed on every release and this test says so.
+    // The placeholder-detection code path itself is still covered — see
+    // the placeholder-cosign.pub fixture cases above.
     const { readFileSync } = await import("node:fs");
-    expect(readFileSync(defaultTrustAnchorPath(), "utf8")).toContain(
-      TRUST_ANCHOR_PLACEHOLDER_MARKER,
-    );
+    const anchor = readFileSync(defaultTrustAnchorPath(), "utf8");
+    expect(anchor).not.toContain(TRUST_ANCHOR_PLACEHOLDER_MARKER);
+    expect(anchor).toContain("-----BEGIN PUBLIC KEY-----");
   });
 });
