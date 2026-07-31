@@ -2,9 +2,11 @@
  * WARP-538 — update-agent settings persistence.
  *
  * Three operator knobs (surfaced by the WARP-540 dashboard page later):
- *   - `channel`         — release channel the poller accepts. Single
- *                         `stable` channel today (WARP-534); persisted so
- *                         history stays honest if channels ever grow.
+ *   - `channel`         — release channel the poller accepts, and (since
+ *                         WARP-1670) the one it DISCOVERS from: `stable`
+ *                         boxes read GitHub's `latest` release, `stage`
+ *                         boxes read the newest `ota-stage-*` prerelease.
+ *                         Which branch a box tracks is this one value.
  *   - `applyWindowCron` — cron spec of the maintenance window
  *                         (`0 3 * * *` = 03:00 daily, per the design).
  *   - `autoApply`       — whether the window handler applies a pending
@@ -29,6 +31,22 @@ import { createLogger } from "../../lib/logger.js";
 const defaultLog = createLogger("update-agent");
 
 export const UPDATE_AGENT_SETTINGS_KEY = "update-agent.settings";
+
+/**
+ * WARP-1670 — the release channels a box may subscribe to, one per
+ * release branch. Must stay in lockstep with `ALLOWED_CHANNELS` in
+ * scripts/release/gen-release-manifest.py and the branch alternation in
+ * scripts/lib/apply-update.sh's cosign identity regexp.
+ *
+ *   stable — refs/heads/main; GitHub's `latest` release
+ *   stage  — refs/heads/stage; newest `ota-stage-*` prerelease
+ */
+export const RELEASE_CHANNELS = ["stable", "stage"] as const;
+export type ReleaseChannel = (typeof RELEASE_CHANNELS)[number];
+
+export function isReleaseChannel(value: string): value is ReleaseChannel {
+  return (RELEASE_CHANNELS as readonly string[]).includes(value);
+}
 
 export interface UpdateAgentSettings {
   channel: string;
@@ -86,6 +104,15 @@ export async function saveUpdateAgentSettings(
   if (patch.channel !== undefined) {
     if (typeof patch.channel !== "string" || patch.channel.trim() === "") {
       throw new Error("update-agent settings: channel must be a non-empty string");
+    }
+    // WARP-1670: writes are strict about the channel set even though reads
+    // stay tolerant. A typo'd channel is not a harmless setting — it decides
+    // which branch's builds this box installs, so it fails at the write,
+    // where an operator is present to read the error.
+    if (!isReleaseChannel(patch.channel)) {
+      throw new Error(
+        `update-agent settings: unknown channel ${patch.channel}; known channels: ${RELEASE_CHANNELS.join(", ")}`,
+      );
     }
   }
   if (patch.applyWindowCron !== undefined) {

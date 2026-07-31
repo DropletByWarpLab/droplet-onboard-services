@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "gitSha": "cccccccccccccccccccccccccccccccccccccccc",
+    "builtAt": "2026-05-28T03:00:00Z",
+    "channel": "stage",
+    "minOrchestratorSchema": 1
+  },
+  "services": [
+    {
+      "name": "orchestrator",
+      "image": "ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "healthcheck": {
+        "type": "http",
+        "port": 3000,
+        "path": "/api/orchestrator/health"
+      }
+    },
+    {
+      "name": "web-dashboard",
+      "image": "ghcr.io/dropletbywarplab/droplet-web-dashboard@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "healthcheck": {
+        "type": "http",
+        "port": 3001,
+        "path": "/healthz"
+      }
+    },
+    {
+      "name": "device-identity-svc",
+      "image": "ghcr.io/dropletbywarplab/droplet-device-identity-svc@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "healthcheck": {
+        "type": "none"
+      }
+    }
+  ],
+  "configs": {
+    "file": "configs.tar.gz",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}
