@@ -329,12 +329,27 @@ services:
       - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
       # WARP-539 — OTA apply over the host compose socket. APPLY_SCRIPT points
       # at the helper bind-mounted below; empty DISABLES the apply window (the
-      # box still polls + tracks pending releases). COMPOSE_FILE is the on-host
-      # path to THIS compose file as the host daemon sees it (the runner passes
-      # it to the socket, so it must resolve on the HOST, not in-container).
+      # box still polls + tracks pending releases).
       # UPDATES_DIR is the in-container mount of the ota-updates volume.
+      #
+      # WARP-1669 — COMPOSE_FILE must resolve to the SAME absolute path on the
+      # host AND inside this container, which is why it derives from
+      # DROPLET_HOST_ROOT (setup.sh writes the repo's absolute host path into
+      # docker/.env) instead of being hardcoded. Both halves need it:
+      #   * the compose CLI runs INSIDE this container and reads the file
+      #     locally, so the path has to exist here;
+      #   * the relative bind mounts in that file (./certs,
+      #     ../data/secrets/…) are resolved by the CLI against the compose
+      #     file's directory and then handed to the HOST daemon, which
+      #     resolves them on the host.
+      # Mount the tree anywhere else and compose asks the daemon for host
+      # paths that don't exist — Docker creates them as empty directories and
+      # the stack comes back up with no certs and no secrets.
+      # CONFIG_ROOT is the repo root because CI packs configs as `docker/…`
+      # (publish-release.yml: `git archive HEAD docker`).
       - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
-      - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-/opt/droplet/docker/docker-compose.yml}
+      - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-${DROPLET_HOST_ROOT:-/opt/droplet}/docker/docker-compose.yml}
+      - DROPLET_OTA_CONFIG_ROOT=${DROPLET_OTA_CONFIG_ROOT:-${DROPLET_HOST_ROOT:-/opt/droplet}}
       - DROPLET_OTA_UPDATES_DIR=/data/updates
       # WARP-234: per-service Redis ACL identity over TLS. Overrides the
       # .env default-user URL (which is ping-only); cache.service.ts pins
@@ -345,7 +360,22 @@ services:
       # orchestrator can exec it against the docker socket below. Its container
       # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
       # orchestrator only ever execs it, never rewrites it.
-      - ../scripts/lib/apply-update.sh:/opt/droplet/scripts/lib/apply-update.sh:ro
+      - ../scripts/lib/apply-update.sh:${DROPLET_HOST_ROOT:-/opt/droplet}/scripts/lib/apply-update.sh:ro
+      # WARP-1669: the config tree the helper drives — THIS compose file plus
+      # everything a release's configs.tar.gz replaces — mounted at its own
+      # host path (see DROPLET_OTA_COMPOSE_FILE above for why the paths must
+      # be identical). Without it, `docker compose -f "$COMPOSE_FILE"` and
+      # every `tar -C "$(config_root)"` inside the helper fail on a path that
+      # exists only on the host: snapshot, stage-configs and restore-configs
+      # were all unrunnable on a real box.
+      #
+      # Read-WRITE, and deliberately scoped to `docker/` alone: stage-configs
+      # untars a release's configs over it and restore-configs rolls it back,
+      # so it cannot be :ro — but mounting the repo ROOT would hand this
+      # container data/secrets/internal-ca/ca.key and let it mint any
+      # service's TLS identity, which the single-file audit.key / doc-kek.key
+      # binds below exist specifically to avoid.
+      - ../docker:${DROPLET_HOST_ROOT:-/opt/droplet}/docker:rw
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
