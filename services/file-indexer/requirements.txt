@@ -60,7 +60,7 @@ tokenizers>=0.23.1,<1.0
 # hierarchical paths (section_name → slide_title). python-pptx is the
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,
 # both of which are already pulled in transitively.
-python-pptx>=0.6.23,<1.0
+python-pptx>=1.0.2,<2.0
 # WARP-1018 — FIPS boot self-test. services/_shared/fips_selftest.py is
 # COPY'd into this image and its is_fips_enabled() probe reads
 # cryptography's backend `_fips_enabled` flag. The dep was previously
