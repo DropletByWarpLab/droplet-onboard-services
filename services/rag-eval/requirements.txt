@@ -33,7 +33,7 @@ PyYAML>=6.0
 # Scheduler (CLAUDE.md "no while True for scheduling" rule)
 # Same primitive used by services/file-indexer/scheduler_service.py.
 apscheduler>=3.10.4
-tzlocal>=5.2
+tzlocal>=5.4.4
 
 # HTTP to the orchestrator (used by ragas_runner.py's call_search).
 # Already a stdlib option (urllib) but explicit requests is friendlier
