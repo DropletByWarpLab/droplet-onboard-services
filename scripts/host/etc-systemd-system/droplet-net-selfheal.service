@@ -1,0 +1,23 @@
+[Unit]
+# WARP-1680 — backstop for NIC renames leaving the box with no IPv4.
+# The primary fix is MAC-matched netplan (scripts/host/etc-netplan/); this unit
+# only ever acts when the box has NO usable address after networkd has had its
+# chance, so on a healthy boot it is a sub-second no-op.
+Description=Droplet network self-heal (recover from a NIC rename / dead uplink)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-1680
+After=network-online.target systemd-networkd-wait-online.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+EnvironmentFile=-/etc/default/droplet-net-selfheal
+# Give netplan/networkd every chance to finish first. DHCP on a cold link can
+# take well over ten seconds; acting sooner would race a healthy boot.
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/local/sbin/droplet-net-selfheal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
