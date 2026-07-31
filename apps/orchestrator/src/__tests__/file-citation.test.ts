@@ -29,6 +29,7 @@ import { extractCitedFilePaths } from "../services/llm-agent.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { createFilesRouter } from "../routes/files.js";
 import type { AuthUser } from "../middleware/auth.js";
+import type { FileEntryInfo } from "../types/index.js";
 
 // ── 1. Extractor ──────────────────────────────────────────────────
 describe("WARP-473 — extractCitedFilePaths", () => {
@@ -89,6 +90,112 @@ describe("WARP-473 — extractCitedFilePaths", () => {
   it("ignores non-string path values", () => {
     const parsed = { ok: true, data: { results: [{ path: 123 }, { path: "/real.txt" }] } };
     expect(extractCitedFilePaths(parsed)).toEqual(["/real.txt"]);
+  });
+});
+
+// ── 1b. Directories are not file citations (WARP-1656) ────────────
+//
+// A listing entry is a `FileEntryInfo`, and directories are elements of that
+// array exactly like files. The extractor is deliberately shape-driven — it
+// harvests `path` without interpreting the payload — so folders became
+// `FileCitation` rows, and worse, they consumed the 20-path budget that real
+// files needed.
+//
+// The rule under test is still a SHAPE rule: an entry that explicitly carries
+// a truthy `isDirectory` is skipped. Payloads that never carry the field
+// (read_file, search_content hits, …) are untouched, which the last two cases
+// in this block pin.
+describe("WARP-1656 — directory entries are never cited", () => {
+  /**
+   * The real listing element type. Typing the fixture as `FileEntryInfo`
+   * rather than an ad-hoc object is what stops a future edit from inventing a
+   * shape the route never emits.
+   */
+  const listing: FileEntryInfo[] = [
+    {
+      name: "Q2.csv",
+      path: "/Invoices/Q2.csv",
+      isDirectory: false,
+      size: 4096,
+      mimeType: "text/csv",
+      modifiedAt: "2026-06-01T09:00:00.000Z",
+    },
+    {
+      name: "Archive",
+      path: "/Invoices/Archive",
+      isDirectory: true,
+      size: 0,
+      mimeType: null,
+      modifiedAt: "2026-05-02T11:30:00.000Z",
+    },
+  ];
+
+  it("drops a directory entry from a listing (search_files / list_recent_files `items` shape)", () => {
+    const parsed = { ok: true, data: { items: listing } };
+    expect(extractCitedFilePaths(parsed)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  it("drops a directory entry under `files` and under `results` too", () => {
+    expect(extractCitedFilePaths({ ok: true, data: { files: listing } })).toEqual([
+      "/Invoices/Q2.csv",
+    ]);
+    expect(extractCitedFilePaths({ ok: true, data: { results: listing } })).toEqual([
+      "/Invoices/Q2.csv",
+    ]);
+  });
+
+  it("keeps entries that declare isDirectory: false", () => {
+    const parsed = { ok: true, data: { items: [listing[0]] } };
+    expect(extractCitedFilePaths(parsed)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  // The harm with teeth. Filtering has to happen BEFORE the cap is charged,
+  // otherwise five leading folders still evict five real files and the loss
+  // is silent — it presents as "Related chats is missing entries" with
+  // nothing in the logs.
+  it("directories do not consume the 20-path cap", () => {
+    const dirs: FileEntryInfo[] = Array.from({ length: 5 }, (_, i) => ({
+      name: `Folder${i}`,
+      path: `/Invoices/Folder${i}`,
+      isDirectory: true,
+      size: 0,
+      mimeType: null,
+      modifiedAt: "2026-05-02T11:30:00.000Z",
+    }));
+    const files: FileEntryInfo[] = Array.from({ length: 25 }, (_, i) => ({
+      name: `f${i}.csv`,
+      path: `/Invoices/f${i}.csv`,
+      isDirectory: false,
+      size: 10,
+      mimeType: "text/csv",
+      modifiedAt: "2026-06-01T09:00:00.000Z",
+    }));
+    const paths = extractCitedFilePaths({
+      ok: true,
+      data: { items: [...dirs, ...files] },
+    });
+    expect(paths).toHaveLength(20);
+    // Twenty REAL files, starting at the first one — not 15 files behind 5
+    // folders that ate the budget.
+    expect(paths).toEqual(files.slice(0, 20).map((f) => f.path));
+    expect(paths.some((p) => p.startsWith("/Invoices/Folder"))).toBe(false);
+  });
+
+  it("skips a root `path` that declares itself a directory", () => {
+    const parsed = { ok: true, data: { path: "/Invoices/Archive", isDirectory: true } };
+    expect(extractCitedFilePaths(parsed)).toEqual([]);
+  });
+
+  // The shape-driven premise survives: no `isDirectory` field, no change.
+  it("leaves payloads that never carry isDirectory untouched", () => {
+    const searchHits = {
+      ok: true,
+      data: { results: [{ path: "/a.txt", text: "…" }, { path: "/b.txt", text: "…" }] },
+    };
+    expect(extractCitedFilePaths(searchHits)).toEqual(["/a.txt", "/b.txt"]);
+    expect(
+      extractCitedFilePaths({ ok: true, data: { path: "/Documents/foo.pdf", content: "…" } }),
+    ).toEqual(["/Documents/foo.pdf"]);
   });
 });
 
