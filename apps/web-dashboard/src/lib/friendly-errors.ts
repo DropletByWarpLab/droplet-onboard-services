@@ -37,6 +37,10 @@ export type ErrorDomain =
   | "auth"
   | "files"
   | "share"
+  // WARP-1659 — the multi-select share fan-out. Same wire calls as "share",
+  // but the surface has no password field and no expiry picker, so the two
+  // inferences that name those controls must not speak for it.
+  | "share-bulk"
   | "chat"
   | "invite"
   | "calendar"
@@ -59,6 +63,12 @@ const FALLBACK: Record<ErrorDomain, string> = {
   auth: "We couldn't sign you in. Check your username and password, then try again.",
   files: "We couldn't load those files right now. Try again in a moment.",
   share:
+    "We couldn't create that share link right now. Try again in a moment.",
+  // Per ROW of a bulk run, so the singular "that share link" still reads
+  // correctly — deliberately the same sentence as `share`, because an unknown
+  // failure is not something the fan-out is any more responsible for than the
+  // dialog is.
+  "share-bulk":
     "We couldn't create that share link right now. Try again in a moment.",
   chat:
     "Something went wrong on this turn. Try again, or simplify the request.",
@@ -192,6 +202,41 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That password doesn't meet this Droplet's rules for share links. Try a longer, less common one.",
     EXPIRATION_REJECTED:
       "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
+    PERMISSIONS_REJECTED:
+      "That access level isn't available for this item. Pick a different access level and try again.",
+    NOT_FOUND:
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    "404":
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  // WARP-1659 — the multi-select share fan-out (`BULK_SHARE_OPTIONS` in
+  // files/page.tsx), one row per file. Identical to `share` apart from the two
+  // codes below, because a row that fails for a reason the fan-out really is
+  // responsible for must read exactly as it does in the dialog — "same 403,
+  // two messages one click apart" is the WARP-1148 defect.
+  //
+  // PASSWORD_REJECTED / EXPIRATION_REJECTED are the exception. They are
+  // INFERRED from OCS prose (see inferCodeFromMessage), and this flow hardcodes
+  // its grant: no password field, no expiry picker, nothing the user chose. The
+  // dialog's "that password doesn't meet the rules" is then a claim about input
+  // the user never gave — on an enforce-password-on-public-links box it would
+  // fire on EVERY row of the run and point away from the real cause.
+  //
+  // They are re-answered rather than dropped: dropping them would fall through
+  // to the retry fallback, and "try again in a moment" for a deterministic
+  // policy rejection is exactly what the share domain was created to stop. What
+  // is true of this flow is that the rule needs a control the fan-out doesn't
+  // have — and the single-file dialog does.
+  "share-bulk": {
+    module_disabled:
+      "File sharing is turned off on this Droplet. An owner or admin can turn the Files module back on in Settings.",
+    PASSWORD_REJECTED:
+      "This Droplet's rules require a password on share links, and sharing several files at once can't set one. Share this file on its own to add a password.",
+    EXPIRATION_REJECTED:
+      "This Droplet's rules limit when share links expire, and sharing several files at once can't set an expiry date. Share this file on its own to pick one.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
     NOT_FOUND:
@@ -465,7 +510,9 @@ function inferCodeFromMessage(
   // disabled by the administrator"). Match the stable keywords so the dialog
   // renders the actionable copy instead of the retry fallback — these are
   // deterministic policy rejections where retrying can never help.
-  if (domain === "share") {
+  // WARP-1659: `share-bulk` reads the same wire, so it infers the same codes —
+  // the divergence lives in the copy each domain maps them to, not here.
+  if (domain === "share" || domain === "share-bulk") {
     if (/password/.test(m)) return "PASSWORD_REJECTED";
     if (/expir/.test(m)) return "EXPIRATION_REJECTED";
     if (/permission|public upload/.test(m)) return "PERMISSIONS_REJECTED";

@@ -1061,6 +1061,48 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     expect(within(dialog).queryByText(/couldn't load those files/i)).toBeNull();
   });
 
+  // WARP-1659 — the run hardcodes `BULK_SHARE_OPTIONS` and the panel renders
+  // no password field and no expiry picker. The `share` domain infers
+  // PASSWORD_REJECTED from any OCS message containing "password", so on a box
+  // with enforce-password-on-public-links turned on, EVERY row used to tell the
+  // user their password didn't meet the rules — for a password they were never
+  // asked for and cannot supply, which reads as "the app is broken" and points
+  // away from the instance policy that is the actual cause.
+  it("never blames the user's password for a rejection in a flow that has no password field", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf"];
+    createShareMock.mockRejectedValue(
+      Object.assign(
+        new Error("OCS share create: Passwords are enforced for link shares (403)"),
+        { status: 403 }
+      )
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /none of the 2 files could be shared/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The ShareDialog's sentence, about a control this surface never showed.
+    expect(
+      within(dialog).queryByText(/that password doesn't meet/i)
+    ).toBeNull();
+    expect(within(dialog).queryByText(/longer, less common/i)).toBeNull();
+    // …replaced by copy that is true here AND names a remedy that exists
+    // without an admin — not the "try again in a moment" fallback, which is
+    // wrong advice for a deterministic policy rejection.
+    expect(
+      within(dialog).getAllByText(/share this file on its own to add a password/i)
+    ).toHaveLength(2);
+    expect(within(dialog).queryByText(/try again in a moment/i)).toBeNull();
+    // Raw OCS prose never reaches the panel.
+    expect(within(dialog).queryByText(/OCS/)).toBeNull();
+  });
+
   // WARP-1661 — routing used to be decided on the RAW selection count, before
   // folders were filtered out. One folder + one file is 2 entries, so the
   // single-file shortcut missed, the fan-out ran, the folder was dropped inside

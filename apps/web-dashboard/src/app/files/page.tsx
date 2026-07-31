@@ -691,21 +691,33 @@ export default function FilesPage() {
           // Item 3 of 5 failing does not end the run and does not undo items
           // 1–2 — it is reported on its own row and the loop continues.
           //
-          // Domain is "share", not "files": this is a share CREATE. The
+          // Domain is a share domain, not "files": this is a share CREATE. The
           // "files" fallback reads "We couldn't load those files right now",
           // which names an action the user did not perform, a cause that is
           // not the cause, and offers retry advice for rejections that are
           // deterministic. The `share` domain exists precisely because of that
           // regression (WARP-1148, see friendly-errors.ts) and carries the
-          // module-gate and policy-rejection copy this loop can actually hit;
-          // the single-file ShareDialog already routes through it.
+          // module-gate and policy-rejection copy this loop can actually hit.
+          //
+          // "share-bulk" rather than the dialog's "share" (WARP-1659): the two
+          // agree on everything except the password/expiry rejections, which
+          // that domain INFERS from OCS prose and answers with copy about the
+          // user's chosen password or date. This run chose neither — the grant
+          // is `BULK_SHARE_OPTIONS` and the panel renders no such control — so
+          // on a box enforcing passwords on public links every row here would
+          // have told the user their password failed the rules, for a password
+          // they were never asked for.
           setBulkShare((prev) =>
             prev && bulkSharePanelRef.current === panel
               ? {
                   ...prev,
                   rows: prev.rows.map((r) =>
                     r.path === target.path
-                      ? { ...r, status: "failed", error: translateError(err, "share") }
+                      ? {
+                          ...r,
+                          status: "failed",
+                          error: translateError(err, "share-bulk"),
+                        }
                       : r
                   ),
                 }
