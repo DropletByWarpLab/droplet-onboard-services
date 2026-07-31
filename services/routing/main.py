@@ -31,6 +31,7 @@ import operations
 from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
+    LoginDenied,
     UbusError,
     ScanUnsupportedError,
     UBUS_STATUS_NOT_FOUND,
@@ -210,19 +211,56 @@ def require_bearer(request: Request) -> None:
 
 router_instance: Optional[DropletRouter] = None
 
+# WARP-1673: WHY the last connect attempt failed — "auth" (router reachable but
+# it rejected the droplet-ai credentials) or "unreachable" (everything else).
+# Written by `_connect_to_openwrt` (whichever thread runs it — startup,
+# on-demand, or background retry; plain assignment is atomic under the GIL,
+# same discipline as the `router_instance` global itself) and read by
+# `get_router()` / `/health` so a stale router secret renders as the actionable
+# AUTH state instead of the generic "Router offline" one.
+_last_connect_failure: Optional[str] = None
+
 
 def _connect_to_openwrt() -> DropletRouter:
     """Construct a fresh, authenticated DropletRouter. Raises `ConnectionLost`
     / `UbusError` on failure — the caller (lifespan's startup attempt, or
     `reconnect_coordinator`'s on-demand / background retry, WARP-1510)
-    decides what to do."""
-    return DropletRouter(
-        host=OPENWRT_HOST,
-        port=OPENWRT_PORT,
-        username=OPENWRT_USERNAME,
-        password=OPENWRT_PASSWORD,
-        auto_login=True,
-    )
+    decides what to do. Records the failure *kind* (WARP-1673) as it passes."""
+    global _last_connect_failure
+    try:
+        router = DropletRouter(
+            host=OPENWRT_HOST,
+            port=OPENWRT_PORT,
+            username=OPENWRT_USERNAME,
+            password=OPENWRT_PASSWORD,
+            auto_login=True,
+        )
+    except LoginDenied:
+        _last_connect_failure = "auth"
+        raise
+    except (ConnectionLost, UbusError):
+        _last_connect_failure = "unreachable"
+        raise
+    _last_connect_failure = None
+    return router
+
+
+#: Wire detail for the typed router-credential failure (WARP-1673). HTTP 502:
+#: routing (the gateway) reached the router (the upstream) and the upstream
+#: refused our credentials. Nothing sits between the orchestrator and this
+#: service to mint a 502, so the status alone is an unambiguous classifier —
+#: same status-only discipline as the 409 SCAN_UNSUPPORTED contract. The
+#: orchestrator maps it to RouterError code AUTH (types/router-error.ts) and
+#: the dashboard renders the existing "Credentials rejected" copy.
+_ROUTER_AUTH_DETAIL = {
+    "code": "ROUTER_AUTH",
+    "message": (
+        "The router rejected the routing service's credentials — the router's "
+        "droplet-ai password has likely rotated (e.g. a reflash regenerated "
+        "it). Re-sync docker/secrets/openwrt_password and restart the routing "
+        "container."
+    ),
+}
 
 
 def _set_router_instance(router: DropletRouter) -> None:
@@ -256,12 +294,23 @@ def get_router() -> DropletRouter:
     if router_instance is None:
         reconnect_coordinator.maybe_reconnect_on_demand()
     if router_instance is None:
+        # WARP-1673: a router that is UP but refusing our credentials is a
+        # different operator problem than a router that is down — surface the
+        # typed 502 so the dashboard shows "Credentials rejected", not
+        # "Router offline".
+        if _last_connect_failure == "auth":
+            raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
 
 
 def handle_router_error(exc: Exception):
     """Convert SDK exceptions to HTTPException raises."""
+    if isinstance(exc, LoginDenied):
+        # WARP-1673: mid-session credential rejection (the password rotated
+        # while we held a session and the re-login was refused) — same typed
+        # 502 as the connect-time path in `get_router()`.
+        raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
     if isinstance(exc, ConnectionLost):
         raise HTTPException(status_code=503, detail=f"Router unreachable: {exc}")
     if isinstance(exc, UbusError):
@@ -508,11 +557,19 @@ def _best_effort_topology() -> Optional[str]:
 @app.get("/health", response_model=HealthResponse)
 def health():
     if router_instance is None:
+        # WARP-1673: name the reason when we know it — an operator reading
+        # /health should see "bad credentials" (fix the secret), not go
+        # checking cables for a router that is answering fine.
+        error = (
+            _ROUTER_AUTH_DETAIL["message"]
+            if _last_connect_failure == "auth"
+            else "Router not connected at startup"
+        )
         return HealthResponse(
             status="disconnected",
             connected=False,
             router_host=OPENWRT_HOST,
-            error="Router not connected at startup",
+            error=error,
         )
     try:
         board = router_instance.system.board_info()
