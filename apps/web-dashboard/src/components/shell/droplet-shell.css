@@ -90,8 +90,16 @@ body:has(.droplet-shell) { background: #f5f6fb; }
   transition: background 180ms var(--ease), border-color 180ms var(--ease), transform 120ms var(--ease); }
 .droplet-shell .btn:hover { background: var(--surface-2); }
 .droplet-shell .btn:active { transform: scale(0.97); }
-.droplet-shell .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.droplet-shell .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .droplet-shell .btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+/* Dark hover steps UP the ramp, not down. --brand-hover is indigo-500 — a
+   light-theme idiom (darken on hover) that the dark block inherits, and it is
+   the one fill where NEITHER ink clears 4.5:1 for this 13.5px/500 label
+   (#1d1d1f 3.77:1, #fff 4.47:1). Brightening to --brand-soft (indigo-300)
+   instead keeps --on-brand valid through the whole interaction: 8.44:1.
+   Scoped to the primary button so the shared --brand-hover token is untouched
+   for its other consumers (chat-send, breadcrumb links). WARP-1358. */
+.dark .droplet-shell .btn.primary:hover { background: var(--brand-soft); border-color: var(--brand-soft); }
 .droplet-shell .btn.ghost { background: transparent; }
 .droplet-shell .btn.ghost:hover { background: var(--surface); }
 .droplet-shell .btn.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
@@ -224,7 +232,10 @@ body:has(.droplet-shell) { background: #f5f6fb; }
   display: flex; align-items: center; padding: 0 2px; flex-shrink: 0; cursor: pointer; transition: background 200ms var(--ease), border-color 200ms var(--ease); }
 .droplet-shell .sw .ball { width: 16px; height: 16px; border-radius: 50%; background: var(--text-muted); transition: transform 200ms var(--ease), background 200ms var(--ease); }
 .droplet-shell .sw.on { background: var(--brand); border-color: var(--brand); }
-.droplet-shell .sw.on .ball { background: #fff; transform: translateX(16px); }
+/* The knob is the only thing distinguishing on from off, so it owes 3:1
+   against the track under WCAG 1.4.11 — white on the dark --brand is 2.98:1.
+   --on-brand carries it: 4.47:1 light, 5.64:1 dark. WARP-1358. */
+.droplet-shell .sw.on .ball { background: var(--on-brand); transform: translateX(16px); }
 
 /* ── Camera feed tile (dark imagery placeholder) ───────── */
 .droplet-shell .feed { position: relative; border-radius: 12px; overflow: hidden; background:
