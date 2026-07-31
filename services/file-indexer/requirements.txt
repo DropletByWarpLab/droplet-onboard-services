@@ -1,5 +1,5 @@
 watchdog>=6.0.0
-psycopg2-binary>=2.9.9
+psycopg2-binary>=2.9.12
 paho-mqtt>=2.1.0
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
