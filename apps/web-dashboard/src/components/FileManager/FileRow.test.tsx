@@ -34,6 +34,7 @@ function renderRow(overrides: Partial<React.ComponentProps<typeof FileRow>> = {}
       isSelected={false}
       isRenaming={false}
       onSelect={() => {}}
+      onToggleSelect={() => {}}
       onOpen={() => {}}
       onDownload={onDownload}
       onDelete={onDelete}
