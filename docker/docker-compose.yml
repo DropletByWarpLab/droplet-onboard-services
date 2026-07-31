@@ -1216,6 +1216,12 @@ services:
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
       # No longer exposed via `docker inspect`.
+      # WARP-1675 (ADR-033 edge-router shape): rpcd account for addressing an
+      # EXTERNAL OpenWrt AP directly at its discovered address. The password is
+      # read from /run/secrets/ap_openwrt_password (empty → AP-direct
+      # configuration is skipped and approvals stay router-side only).
+      - AP_USERNAME=${AP_USERNAME:-droplet-ai}
+      - AP_PORT=${AP_PORT:-80}
       # ROUTING_SERVICE_TOKEN (WARP-36) replaces PR#5's SERVICE_SECRET for this service.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       # WARP-44: `real` (default) = connect to OpenWrt. `mock` = serve fixtures
@@ -1242,6 +1248,8 @@ services:
       - ../data/secrets/service-tls/routing:/data/service-tls:ro
     secrets:
       - openwrt_password
+      # WARP-1675: external-AP droplet-ai password (see the `secrets:` block).
+      - ap_openwrt_password
     restart: always
     <<: *default-logging
     mem_limit: ${ROUTING_MEM_LIMIT:-256m}
@@ -1430,9 +1438,12 @@ services:
       dockerfile: services/switch/Dockerfile
     network_mode: host
     environment:
-      - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
-      - SWITCH_PORT=${SWITCH_PORT:-443}
-      - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
+      # WARP-1674: defaults mirror the Droplet OpenWrt switch image
+      # (droplet-edge-router switch/): static mgmt 192.168.9.2, LAN-side rpcd
+      # on :80, per-unit droplet-ai account.
+      - SWITCH_HOST=${SWITCH_HOST:-192.168.9.2}
+      - SWITCH_PORT=${SWITCH_PORT:-80}
+      - SWITCH_USERNAME=${SWITCH_USERNAME:-droplet-ai}
       # ADR-018 T1: the managed-switch credential is read from the Docker secret
       # file at /run/secrets/switch_password (mounted via the `secrets:` block
       # below, written by scripts/setup.sh from the operator-supplied
@@ -1442,13 +1453,7 @@ services:
       # Deprecated — env fallback kept for local dev / upgrades. Prefer the secret
       # file above. Empty default → driver degrades to "disconnected" (non-fatal).
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
-      - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      # WARP-583: optional CA bundle / cert path enabling TLS verification of
-      # the switch admin session. The path must be visible INSIDE the
-      # container (bind-mount it via a compose override). Unset -> the driver
-      # keeps the historical unverified session (self-signed embedded cert)
-      # with a loud warning; a set-but-missing path fails closed at connect.
-      - SWITCH_CA_CERT=${SWITCH_CA_CERT:-}
+      - SWITCH_DRIVER=${SWITCH_DRIVER:-openwrt}
       # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
       # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
       # FIPS-sealed master encryption key on the wire for every switch
@@ -2528,7 +2533,7 @@ secrets:
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
   openwrt_password:
     file: ../docker/secrets/openwrt_password
-  # ADR-018 T1: managed-switch (Lantronix) password mounted read-only at
+  # ADR-018 T1: managed-switch password mounted read-only at
   # /run/secrets/switch_password in the switch container. The value is
   # OPERATOR-SUPPLIED (the switch is not a device we mint secrets for) — setup.sh
   # writes it from $SWITCH_PASSWORD in .env, never generated. The file is created
@@ -2536,6 +2541,15 @@ secrets:
   # boxes without a managed switch; an empty file → driver "disconnected".
   switch_password:
     file: ../docker/secrets/switch_password
+  # WARP-1675 (ADR-033): external OpenWrt AP droplet-ai password mounted
+  # read-only at /run/secrets/ap_openwrt_password in the routing container.
+  # OPERATOR-SUPPLIED (the AP mints its own per-unit password at first boot —
+  # copy /etc/droplet/droplet-ai-password off the AP) — setup.sh's
+  # sync_ap_password_secret() writes it from $AP_OPENWRT_PASSWORD in .env,
+  # never generated, empty placeholder when unset so `docker compose up`
+  # works on boxes without an external AP.
+  ap_openwrt_password:
+    file: ../docker/secrets/ap_openwrt_password
 
 volumes:
   pgdata:

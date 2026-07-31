@@ -251,7 +251,18 @@ EOF
   sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
     /etc/droplet-host-net/lan-dhcp.conf
 
+  # --- network self-heal (WARP-1680) --------------------------------------
+  # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
+  # no remote path in. Acts ONLY when nothing holds a usable address, so it is
+  # a no-op on every healthy boot. The primary defence is MAC-matched netplan
+  # (scripts/host/etc-netplan/70-eth.yaml.example) — this is what saves the box
+  # when that is not enough.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-net-selfheal" \
+    /usr/local/sbin/droplet-net-selfheal
+
   # --- systemd units -----------------------------------------------------
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-net-selfheal.service" \
+    /etc/systemd/system/droplet-net-selfheal.service
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-openwrt-attach.service" \
     /etc/systemd/system/droplet-openwrt-attach.service
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-net.service" \
@@ -392,6 +403,9 @@ EOF
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
+  # WARP-1680: enabled (not --now) — it is a boot-time recovery path, and
+  # running it mid-setup on a healthy box would only log a no-op.
+  sudo systemctl enable droplet-net-selfheal.service >/dev/null 2>&1
   sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
   # WARP-843: --now so the watcher is live immediately (not only after the
   # next reboot) — the wizard's first Wi-Fi save can happen minutes after
@@ -726,7 +740,10 @@ configure_single_box_env() {
 #                        box. Override the threshold with SINGLE_BOX_DOCS_MIN_GIB.
 #   DOCS_ENABLED         OnlyOffice doc-server master switch (RAM-gated above).
 #   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator health-probes.
-#   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
+#   FRIGATE_RENDER_NODE  DETECTED from /dev/dri (WARP-1680): the second render
+#                        node when the host has two (leaving the dGPU for
+#                        Ollama), otherwise the only one. Never assumed —
+#                        a hardcoded renderD129 broke every single-GPU box.
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
 #   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
@@ -776,7 +793,27 @@ EOF
   # makes /files/docs/status report "unavailable" and the editor degrade cleanly.
   upsert_env DOCS_ENABLED        "$docs_enabled_val"
   upsert_env DOCS_INTERNAL_URL   http://docserver
-  upsert_env FRIGATE_RENDER_NODE /dev/dri/renderD129
+  # WARP-1680: DETECT the render node — never assume a two-GPU layout.
+  # This was hardcoded to renderD129 on the theory that the dGPU (renderD128)
+  # is reserved for Ollama. On a box whose GPU is a single AMD Raphael iGPU
+  # only renderD128 exists, so Frigate's device map pointed at a node that was
+  # not there. Docker refuses to create a container with a missing device, and
+  # because that failure aborts the whole `docker compose up` run it stranded
+  # gateway/ai-gateway/file-indexer/rag-eval/docserver in `Created` — the
+  # dashboard went dark (gateway owns 80/443) while 21 other containers ran
+  # fine. Prefer the SECOND render node when the host really has two (keeping
+  # the dGPU free for Ollama); fall back to the only one that exists.
+  local render_node
+  render_node="$(ls -1 /dev/dri/renderD* 2>/dev/null | sort | sed -n '2p')"
+  [ -n "$render_node" ] || render_node="$(ls -1 /dev/dri/renderD* 2>/dev/null | sort | head -n1)"
+  if [ -n "$render_node" ]; then
+    upsert_env FRIGATE_RENDER_NODE "$render_node"
+    log_info "FRIGATE_RENDER_NODE detected: $render_node"
+  else
+    # No DRM render node at all (headless VM / passthrough-less host). Leave
+    # the compose default; Frigate falls back to CPU decode.
+    log_warn "no /dev/dri/renderD* found — leaving FRIGATE_RENDER_NODE at the compose default"
+  fi
   # CAMERA_SUBNET: the compose default (192.168.100.0/24) is the multi-box
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
   # single-box shape has no separate camera VLAN today — cameras attach to

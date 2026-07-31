@@ -1,0 +1,58 @@
+# Reference netplan for the Droplet box's uplink (WARP-1680, ADR-033).
+#
+# ⚠ MATCH BY MAC, NEVER BY INTERFACE NAME.
+#
+# Interface names on this hardware have changed TWICE across motherboard /
+# enumeration changes:
+#
+#     enp11s0  ->  enp8s0        (uplink)
+#     wlp10s0  ->  wlp7s0        (out-of-band radio)
+#
+# Each time, netplan went on configuring a device that no longer existed, the
+# box booted with no IPv4 at all, and recovery required physical console
+# access. A MAC is burned into the silicon and survives every rename, so the
+# uplink is matched on it. `set-name` is deliberately NOT used: nothing here
+# needs a stable name, and renaming can collide with an existing device.
+#
+# Substitute the box's own uplink MAC below (`ip -o link show` reveals it) and
+# install to /etc/netplan/70-eth.yaml.
+#
+# The 192.168.9.250/24 static is a deliberate FALLBACK alongside DHCP: it keeps
+# the box reachable from the edge router even when the router's DHCP server is
+# not answering. droplet-net-selfheal pins this same address as its last
+# resort — keep the two in sync.
+#
+# ⚠ networkd does NOT support `match:` for `wifis:` — only for `ethernets:`.
+# The out-of-band radio therefore stays keyed on its interface name and WILL
+# need updating if it renames again. See 60-wifi.yaml.example.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    droplet-uplink:
+      match:
+        macaddress: "aa:bb:cc:dd:ee:ff"   # <-- the box's uplink NIC MAC
+      dhcp4: true
+      dhcp6: false
+      accept-ra: true
+      addresses:
+        - 192.168.9.250/24
+      nameservers:
+        addresses: [1.1.1.1]
+  bridges:
+    br-lan:
+      interfaces: []
+      addresses:
+        - 192.168.20.1/24
+      dhcp4: false
+      parameters:
+        stp: false
+        forward-delay: 0
+    br-mgmt:
+      interfaces: []
+      addresses:
+        - 192.168.10.1/24
+      dhcp4: false
+      parameters:
+        stp: false
+        forward-delay: 0

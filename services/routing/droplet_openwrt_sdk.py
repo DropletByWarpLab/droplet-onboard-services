@@ -197,6 +197,30 @@ class ConnectionLost(Exception):
     pass
 
 
+class LoginDenied(ConnectionLost):
+    """Raised when the OpenWrt device is REACHABLE but rejects our rpcd
+    credentials (`session login` → PERMISSION_DENIED).
+
+    Subclasses :class:`ConnectionLost` so every existing "couldn't establish a
+    session" catch (lifespan startup, ReconnectCoordinator, best-effort
+    logout) keeps working unchanged — callers that care about the *reason*
+    check for this subclass first.
+
+    WARP-1673: on the edge-router shape a router reflash regenerates the
+    per-unit `droplet-ai` password, stranding the copy in
+    `docker/secrets/openwrt_password`. Before this class, that surfaced as the
+    same 503 as a powered-off router and the dashboard said "Router offline"
+    instead of the actionable "Credentials rejected" copy. `session login` is
+    the ONLY call site where PERMISSION_DENIED unambiguously means bad
+    credentials — on any other object it can equally mean an ACL gap, so this
+    classification never happens in the generic call path.
+    """
+
+    #: Stable, wire-facing classification — mirrored by the routing service's
+    #: HTTP 502 detail and the orchestrator's RouterError AUTH mapping.
+    code = "ROUTER_AUTH"
+
+
 # WARP-816: radio operating modes (from `iwinfo info` → `mode`) in which a
 # single-radio card is broadcasting an AP and therefore CANNOT station-scan.
 # On the single-box `wlp14s0` is `mode == "Master"` (hostapd AP for the Droplet
@@ -435,11 +459,27 @@ class SessionManager:
         self.expires_at: float = 0
 
     def login(self) -> str:
-        """Authenticate and store the session token."""
-        result = self.client.call(NULL_SESSION, "session", "login", {
-            "username": self.username,
-            "password": self.password,
-        })
+        """Authenticate and store the session token.
+
+        Raises :class:`LoginDenied` when the device answers but refuses the
+        credentials (PERMISSION_DENIED) — distinct from :class:`ConnectionLost`
+        (device unreachable) and from every other :class:`UbusError`.
+        """
+        try:
+            result = self.client.call(NULL_SESSION, "session", "login", {
+                "username": self.username,
+                "password": self.password,
+            })
+        except UbusError as exc:
+            # ubus status 6 = PERMISSION_DENIED. On `session login` that means
+            # exactly one thing: the router rejected this username/password.
+            if exc.code == 6:
+                raise LoginDenied(
+                    f"OpenWrt rejected the rpcd credentials for user "
+                    f"'{self.username}' — the router password has likely "
+                    f"rotated (e.g. a reflash regenerated it)."
+                ) from exc
+            raise
         self.token = result["ubus_rpc_session"]
         timeout = result.get("timeout", 300)
         self.expires_at = time.time() + timeout

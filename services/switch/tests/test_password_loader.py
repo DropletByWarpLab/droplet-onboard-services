@@ -105,10 +105,10 @@ def test_factory_threads_secret_file_password(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """End-to-end: create_driver() resolves the password via the secret file and
-    threads it into the Lantronix driver (not the raw SWITCH_PASSWORD env)."""
+    threads it into the driver (not the raw SWITCH_PASSWORD env)."""
     secret = tmp_path / "switch_password"
     secret.write_text("file-password")
-    monkeypatch.setenv("SWITCH_DRIVER", "lantronix")
+    monkeypatch.setenv("SWITCH_DRIVER", "openwrt")
     monkeypatch.setenv("SWITCH_PASSWORD_FILE", str(secret))
     monkeypatch.setenv("SWITCH_PASSWORD", "env-should-not-win")
 

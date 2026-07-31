@@ -36,10 +36,19 @@ def test_create_driver_rejects_unknown_type(monkeypatch):
         create_driver()
 
 
-def test_keepalive_loop_removed():
-    """WARP-221: the banned `while True` keepalive loop is gone, replaced
-    by the apscheduler-fired tick wrapper."""
-    from drivers.lantronix import LantronixDriver
+def test_lantronix_driver_is_gone():
+    """WARP-1674: managed switches are Zyxel units reflashed to the Droplet
+    OpenWrt image — the retired Lantronix WebStaX driver (and its keepalive
+    machinery) must not resurface."""
+    with pytest.raises(ModuleNotFoundError):
+        import drivers.lantronix  # noqa: F401
 
-    assert not hasattr(LantronixDriver, "_keepalive_loop")
-    assert hasattr(LantronixDriver, "_keepalive_tick")
+
+def test_default_driver_is_openwrt(monkeypatch):
+    monkeypatch.delenv("SWITCH_DRIVER", raising=False)
+    monkeypatch.setenv("SWITCH_PASSWORD_FILE", "/nonexistent/for-this-test")
+    monkeypatch.setenv("SWITCH_PASSWORD", "x")
+    from drivers import create_driver
+    from drivers.openwrt import OpenWrtSwitchDriver
+
+    assert isinstance(create_driver(), OpenWrtSwitchDriver)
