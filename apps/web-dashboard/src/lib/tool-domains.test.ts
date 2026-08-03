@@ -25,3 +25,10 @@ describe("tool-domains — data domain (WARP-899/WARP-900/WARP-901)", () => {
     expect(iconForDomain("never-heard-of-it")).toBe(Wrench);
   });
 });
+
+describe("tool-domains — team_chat domain (WARP-1685)", () => {
+  it("labels the team_chat domain 'Messages' with a dedicated icon", () => {
+    expect(labelForDomain("team_chat")).toBe("Messages");
+    expect(iconForDomain("team_chat")).not.toBe(Wrench);
+  });
+});

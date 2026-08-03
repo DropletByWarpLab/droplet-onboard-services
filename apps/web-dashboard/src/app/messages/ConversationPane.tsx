@@ -16,15 +16,19 @@ import Link from "next/link";
 import {
   ArrowLeft,
   ArrowUp,
+  CalendarPlus,
   FileText,
   MessagesSquare,
   Paperclip,
   Sparkles,
 } from "lucide-react";
 import {
+  cancelTeamChatMeeting,
   markTeamChatThreadRead,
+  rsvpTeamChatMeeting,
   sendTeamChatMessage,
   type TeamChatMessage,
+  type TeamChatRsvpResponse,
   type TeamChatSendBody,
   type TeamChatThreadSummary,
 } from "@/lib/api";
@@ -32,6 +36,8 @@ import { useTeamChatMessages } from "@/lib/hooks/useTeamChat";
 import { threadDisplayName } from "./ThreadList";
 import { ForwardFileDialog, ForwardChatDialog } from "./ForwardDialogs";
 import { TranscriptModal } from "./TranscriptModal";
+import { MeetingCard, MeetingReminderCard } from "./MeetingCard";
+import { MeetingDialog } from "./MeetingDialog";
 
 function formatMessageTime(iso: string): string {
   const d = new Date(iso);
@@ -59,6 +65,10 @@ export function ConversationPane({
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [chatPickerOpen, setChatPickerOpen] = useState(false);
   const [transcriptFor, setTranscriptFor] = useState<TeamChatMessage | null>(null);
+  // WARP-1685 — meetings.
+  const [meetingDialogOpen, setMeetingDialogOpen] = useState(false);
+  const [meetingBusy, setMeetingBusy] = useState(false);
+  const [meetingError, setMeetingError] = useState<string | null>(null);
 
   // Mark read on open + whenever a new newest message lands while open.
   const lastMarkedRef = useRef<string | null>(null);
@@ -80,6 +90,7 @@ export function ConversationPane({
   useEffect(() => {
     setDraft("");
     setSendError(null);
+    setMeetingError(null);
   }, [threadId]);
 
   async function send(body: TeamChatSendBody) {
@@ -103,6 +114,66 @@ export function ConversationPane({
     const body = draft.trim();
     if (body.length === 0) return;
     void send({ kind: "text", body });
+  }
+
+  /**
+   * WARP-1685 — RSVP with an optimistic chip flip: the local cache is
+   * updated immediately (no revalidate), then the POST runs, and the
+   * awaited revalidate in `finally` re-reads server truth — which is also
+   * the rollback path when the POST failed (plus honest error copy).
+   */
+  async function rsvp(meetingId: string, response: TeamChatRsvpResponse) {
+    if (!threadId || meetingBusy) return;
+    setMeetingBusy(true);
+    setMeetingError(null);
+    await mutate(
+      (current) =>
+        current && {
+          ...current,
+          messages: current.messages.map((m) => {
+            if (!m.meeting || m.meeting.id !== meetingId) return m;
+            return {
+              ...m,
+              meeting: {
+                ...m.meeting,
+                rsvps: [
+                  ...m.meeting.rsvps.filter((r) => r.userId !== meId),
+                  { userId: meId, response, respondedAt: new Date().toISOString() },
+                ],
+              },
+            };
+          }),
+        },
+      { revalidate: false },
+    );
+    try {
+      await rsvpTeamChatMeeting(meetingId, response);
+    } catch (err) {
+      setMeetingError(
+        err instanceof Error ? err.message : "Couldn't send your answer. Try again.",
+      );
+    } finally {
+      await mutate();
+      setMeetingBusy(false);
+    }
+  }
+
+  /** Organizer cancel — the two-step confirm lives in the card itself. */
+  async function cancelMeeting(meetingId: string) {
+    if (!threadId || meetingBusy) return;
+    setMeetingBusy(true);
+    setMeetingError(null);
+    try {
+      await cancelTeamChatMeeting(meetingId);
+      onActivity(threadId);
+    } catch (err) {
+      setMeetingError(
+        err instanceof Error ? err.message : "Couldn't cancel the meeting. Try again.",
+      );
+    } finally {
+      await mutate();
+      setMeetingBusy(false);
+    }
   }
 
   /** The composer text rides along as the forward's caption. */
@@ -184,6 +255,11 @@ export function ConversationPane({
             mine={m.senderId === meId}
             showSender={thread.kind === "group"}
             onOpenTranscript={() => setTranscriptFor(m)}
+            meId={meId}
+            participants={thread.participants}
+            onRsvp={(meetingId, response) => void rsvp(meetingId, response)}
+            onCancelMeeting={(meetingId) => void cancelMeeting(meetingId)}
+            meetingBusy={meetingBusy}
           />
         ))}
       </div>
@@ -193,6 +269,11 @@ export function ConversationPane({
         {sendError && (
           <p role="alert" className="type-caption-1 text-system-red px-1 pb-1.5">
             {sendError}
+          </p>
+        )}
+        {meetingError && (
+          <p role="alert" className="type-caption-1 text-system-red px-1 pb-1.5">
+            {meetingError}
           </p>
         )}
         <div className="flex items-end gap-1.5">
@@ -210,6 +291,21 @@ export function ConversationPane({
             aria-label="Forward a file"
           >
             <Paperclip size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setMeetingDialogOpen(true)}
+            disabled={sending}
+            className="
+              p-2 rounded-md text-label-secondary
+              hover:text-accent hover:bg-accent-subtle
+              transition-colors duration-200 ease-smooth disabled:opacity-50
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+            "
+            title="Schedule a meeting"
+            aria-label="Schedule a meeting"
+          >
+            <CalendarPlus size={16} />
           </button>
           <button
             type="button"
@@ -291,6 +387,15 @@ export function ConversationPane({
         message={transcriptFor}
         onClose={() => setTranscriptFor(null)}
       />
+      <MeetingDialog
+        open={meetingDialogOpen}
+        onClose={() => setMeetingDialogOpen(false)}
+        threadId={thread.id}
+        onCreated={() => {
+          setMeetingDialogOpen(false);
+          void mutate().then(() => onActivity(thread.id));
+        }}
+      />
     </>
   );
 }
@@ -307,11 +412,21 @@ function MessageBubble({
   mine,
   showSender,
   onOpenTranscript,
+  meId,
+  participants,
+  onRsvp,
+  onCancelMeeting,
+  meetingBusy,
 }: {
   message: TeamChatMessage;
   mine: boolean;
   showSender: boolean;
   onOpenTranscript: () => void;
+  meId: string;
+  participants: TeamChatThreadSummary["participants"];
+  onRsvp: (meetingId: string, response: TeamChatRsvpResponse) => void;
+  onCancelMeeting: (meetingId: string) => void;
+  meetingBusy: boolean;
 }) {
   const align = mine ? "items-end" : "items-start";
   const bubble = mine
@@ -362,6 +477,29 @@ function MessageBubble({
               )}
             </span>
           </Link>
+        )}
+
+        {message.kind === "meeting_invite" &&
+          (message.meeting ? (
+            <MeetingCard
+              meeting={message.meeting}
+              mine={mine}
+              meId={meId}
+              participants={participants}
+              onRsvp={onRsvp}
+              onCancel={onCancelMeeting}
+              busy={meetingBusy}
+            />
+          ) : (
+            // The meeting row is gone (FK SetNull) — say so honestly
+            // instead of rendering a dead card.
+            <p className={`type-caption-2 mb-1 ${subtle}`}>
+              Meeting no longer available
+            </p>
+          ))}
+
+        {message.kind === "meeting_reminder" && (
+          <MeetingReminderCard meeting={message.meeting} mine={mine} />
         )}
 
         {message.kind === "ai_chat_share" && (

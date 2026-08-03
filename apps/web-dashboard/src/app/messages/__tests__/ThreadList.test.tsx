@@ -37,6 +37,8 @@ function thread(over: Partial<TeamChatThreadSummary> = {}): TeamChatThreadSummar
       sharedFileName: null,
       sharedFilePath: null,
       sharedChatSessionId: null,
+      meetingId: null,
+      meeting: null,
       createdAt: "2026-08-01T10:00:00.000Z",
     },
     unreadCount: 0,
