@@ -10,6 +10,7 @@ import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
+import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
 // The nav definition + its pure gate predicates live beside this component
 // (WARP-1528) so the route guard and the tests can read them without pulling
 // in the chrome. This file owns rendering; nav-config owns what there is to
@@ -47,6 +48,13 @@ export function Sidebar() {
   const { user, logout } = useAuth();
   const capabilities = useCapabilities();
   const isModuleOn = useModuleGate();
+  // WARP-1683: resolves nav-config's `badgeKey` names to live counts. The
+  // Sidebar owns the polling hook (nav-config stays pure data); the badge
+  // reads 0 — and renders nothing — while the module is off or unresolved.
+  const teamChatUnread = useTeamChatUnread();
+  const badgeCounts: Record<NonNullable<NavItem["badgeKey"]>, number> = {
+    teamChatUnread,
+  };
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -213,6 +221,7 @@ export function Sidebar() {
                     active={isItemActive(item)}
                     showChildren={isSectionOpen(item)}
                     pathname={pathname}
+                    badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                   />
                 ))}
               </div>
@@ -411,6 +420,11 @@ export function Sidebar() {
                           item={entry.item}
                           active={isActive(entry.item.href)}
                           onNavigate={closeDrawer}
+                          badge={
+                            entry.item.badgeKey
+                              ? badgeCounts[entry.item.badgeKey]
+                              : 0
+                          }
                         />
                         {entry.children.map((child) => (
                           <DrawerLink
@@ -488,6 +502,7 @@ function DrawerLink({
   active,
   onNavigate,
   nested,
+  badge = 0,
 }: {
   item: NavItem;
   active: boolean;
@@ -495,6 +510,8 @@ function DrawerLink({
   /** Rendered under a section caption — indent to mirror the desktop
    *  sub-nav's nesting so the row never reads as a top-level destination. */
   nested?: boolean;
+  /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
+  badge?: number;
 }) {
   const Icon = item.icon;
   return (
@@ -516,7 +533,31 @@ function DrawerLink({
     >
       <Icon size={18} strokeWidth={active ? 2 : 1.5} />
       {item.label}
+      <NavBadge count={badge} />
     </Link>
+  );
+}
+
+/**
+ * WARP-1683 — unread-count pill for badge-carrying nav items. Deliberately
+ * static (no pulse/entrance motion): a persistent count is ambient status,
+ * not an event — the number simply updates when the poll does. Hidden at 0
+ * so the nav stays quiet by default; capped at 99+ so the row never
+ * stretches. `aria-label` carries the meaning a bare number lacks.
+ */
+function NavBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="
+        ml-auto min-w-[20px] px-1.5 py-0.5 rounded-full text-center
+        type-caption-2 font-semibold tabular-nums
+        bg-accent-subtle text-accent
+      "
+      aria-label={`${count} unread`}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
   );
 }
 
@@ -527,12 +568,15 @@ function NavLink({
   active,
   showChildren,
   pathname,
+  badge = 0,
 }: {
   item: NavItem;
   active: boolean;
   /** Reveal the nested `item.children` sub-nav (we're inside this section). */
   showChildren?: boolean;
   pathname: string;
+  /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
+  badge?: number;
 }) {
   const Icon = item.icon;
   return (
@@ -552,6 +596,7 @@ function NavLink({
       >
         <Icon size={17} strokeWidth={active ? 2 : 1.5} />
         {item.label}
+        <NavBadge count={badge} />
       </Link>
 
       {showChildren && item.children && (

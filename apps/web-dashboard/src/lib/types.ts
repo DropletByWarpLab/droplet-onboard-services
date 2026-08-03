@@ -332,6 +332,14 @@ export interface FileEntryInfo {
   size: number;
   mimeType: string | null;
   modifiedAt: string;
+  /**
+   * WARP-1683 — Nextcloud numeric fileId (oc:fileid), surfaced by the
+   * orchestrator's listing/search parsers so the Messages forward picker
+   * can address a file by the stable id the server-side space gate keys
+   * on. Optional: older orchestrators (and entries whose PROPFIND
+   * response omitted the prop) don't carry it.
+   */
+  ncFileId?: number;
 }
 
 /** WARP-882 — document-server availability for the gated "Edit" affordance. */
@@ -1132,7 +1140,8 @@ export type AccessModuleId =
   | "cameras"
   | "smart_home"
   | "network"
-  | "managed_switch";
+  | "managed_switch"
+  | "team_chat";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;

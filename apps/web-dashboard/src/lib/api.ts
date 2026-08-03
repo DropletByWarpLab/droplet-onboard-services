@@ -6921,3 +6921,163 @@ export async function putAccessExceptions(
   }
   return res.json();
 }
+
+// --- Team chat (WARP-1683, /messages) ---
+
+export interface TeamChatContact {
+  id: string;
+  displayName: string;
+  username: string;
+  role: string;
+}
+
+export type TeamChatMessageKind = "text" | "file_share" | "ai_chat_share";
+
+export interface TeamChatMessage {
+  id: string;
+  threadId: string;
+  senderId: string;
+  senderDisplayName: string | null;
+  kind: TeamChatMessageKind;
+  /** Text body, or the forward's optional caption. */
+  body: string | null;
+  sharedNcFileId: number | null;
+  sharedFileName: string | null;
+  sharedFilePath: string | null;
+  sharedChatSessionId: string | null;
+  createdAt: string;
+}
+
+export interface TeamChatThreadSummary {
+  id: string;
+  kind: "direct" | "group";
+  title: string | null;
+  createdById: string;
+  createdAt: string;
+  lastMessageAt: string;
+  participants: Array<{
+    userId: string;
+    displayName: string | null;
+    username: string | null;
+  }>;
+  lastMessage: TeamChatMessage | null;
+  unreadCount: number;
+}
+
+export interface TeamChatTranscript {
+  title: string | null;
+  messages: Array<{ role: string; content: string; createdAt: string }>;
+}
+
+export type TeamChatSendBody =
+  | { kind: "text"; body: string }
+  | {
+      kind: "file_share";
+      ncFileId: number;
+      fileName: string;
+      filePath: string;
+      caption?: string;
+    }
+  | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };
+
+export async function fetchTeamChatContacts(): Promise<TeamChatContact[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/contacts`);
+  if (!res.ok) throw new Error(`Failed to load contacts: ${res.status}`);
+  const body = (await res.json()) as { contacts: TeamChatContact[] };
+  return body.contacts;
+}
+
+export async function fetchTeamChatThreads(): Promise<TeamChatThreadSummary[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`);
+  if (!res.ok) throw new Error(`Failed to load conversations: ${res.status}`);
+  const body = (await res.json()) as { threads: TeamChatThreadSummary[] };
+  return body.threads;
+}
+
+/** Create a DM/group. The server dedupes direct pairs — a repeat create
+ *  returns the existing thread (200) instead of a new row (201). */
+export async function createTeamChatThread(args: {
+  kind: "direct" | "group";
+  participantIds: string[];
+  title?: string;
+}): Promise<{ id: string }> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      (body as { error?: string }).error || `Failed to start conversation: ${res.status}`,
+    );
+  }
+  const body = (await res.json()) as { thread: { id: string } };
+  return body.thread;
+}
+
+export async function fetchTeamChatMessages(
+  threadId: string,
+  opts: { cursor?: string; limit?: number } = {},
+): Promise<{ messages: TeamChatMessage[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const qsStr = qs.toString();
+  const suffix = qsStr.length > 0 ? `?${qsStr}` : "";
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages${suffix}`,
+  );
+  if (!res.ok) throw new Error(`Failed to load messages: ${res.status}`);
+  return res.json() as Promise<{
+    messages: TeamChatMessage[];
+    nextCursor: string | null;
+  }>;
+}
+
+export async function sendTeamChatMessage(
+  threadId: string,
+  body: TeamChatSendBody,
+): Promise<TeamChatMessage> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(
+      (errBody as { error?: string }).error || `Failed to send: ${res.status}`,
+    );
+  }
+  const out = (await res.json()) as { message: TeamChatMessage };
+  return out.message;
+}
+
+export async function markTeamChatThreadRead(threadId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/read`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`Failed to mark read: ${res.status}`);
+}
+
+export async function fetchTeamChatTranscript(
+  messageId: string,
+): Promise<TeamChatTranscript> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/messages/${encodeURIComponent(messageId)}/transcript`,
+  );
+  if (!res.ok) throw new Error(`Failed to load transcript: ${res.status}`);
+  return res.json() as Promise<TeamChatTranscript>;
+}
+
+export async function fetchTeamChatUnreadCount(): Promise<number> {
+  const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
+  if (!res.ok) throw new Error(`Failed to load unread count: ${res.status}`);
+  const body = (await res.json()) as { total: number };
+  return body.total;
+}
