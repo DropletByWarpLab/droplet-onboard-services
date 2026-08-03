@@ -330,6 +330,12 @@ function createTeamChatPrisma(seed: {
         async (args: { where: { id: string } }) =>
           messages.find((m) => m.id === args.where.id) ?? null,
       ),
+      findFirst: vi.fn(
+        async (args: { where: { id: string; threadId: string } }) =>
+          messages.find(
+            (m) => m.id === args.where.id && m.threadId === args.where.threadId,
+          ) ?? null,
+      ),
       count: vi.fn(
         async (args: { where: Parameters<typeof matchesMessageWhere>[1] }) =>
           messages.filter((m) => matchesMessageWhere(m, args.where)).length,
@@ -681,6 +687,17 @@ describe("participant-only access", () => {
       "/api/team-chat/threads/thread-ab/messages?limit=0",
     );
     expect(res.status).toBe(400);
+    expect(prisma.teamChatMessage.findMany).not.toHaveBeenCalled();
+  });
+
+  it("400s a cursor that isn't a message of THIS thread (no cross-thread anchor, no 500)", async () => {
+    const prisma = abWorld();
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app).get(
+      "/api/team-chat/threads/thread-ab/messages?cursor=msg-from-elsewhere",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_cursor");
     expect(prisma.teamChatMessage.findMany).not.toHaveBeenCalled();
   });
 });

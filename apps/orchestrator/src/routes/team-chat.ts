@@ -387,6 +387,19 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         return;
       }
       const { cursor, limit } = query.data;
+      // The cursor must anchor to a message of THIS thread — a garbage or
+      // cross-thread id is a caller error (400), never a Prisma cursor
+      // failure surfacing as a 500.
+      if (cursor) {
+        const anchor = await prisma.teamChatMessage.findFirst({
+          where: { id: cursor, threadId: req.params.id },
+          select: { id: true },
+        });
+        if (!anchor) {
+          res.status(400).json({ error: "invalid_cursor" });
+          return;
+        }
+      }
       const rows = await prisma.teamChatMessage.findMany({
         where: { threadId: req.params.id },
         orderBy: { createdAt: "desc" },
