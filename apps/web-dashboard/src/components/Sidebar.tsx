@@ -543,21 +543,26 @@ function DrawerLink({
  * static (no pulse/entrance motion): a persistent count is ambient status,
  * not an event — the number simply updates when the poll does. Hidden at 0
  * so the nav stays quiet by default; capped at 99+ so the row never
- * stretches. `aria-label` carries the meaning a bare number lacks.
+ * stretches. The numeral is aria-hidden (an aria-label on a generic span is
+ * ignored by SRs); the adjacent sr-only text carries the meaning.
+ * Exported for the a11y-markup pin (Sidebar.nav-badge.test.tsx).
  */
-function NavBadge({ count }: { count: number }) {
+export function NavBadge({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
-    <span
-      className="
-        ml-auto min-w-[20px] px-1.5 py-0.5 rounded-full text-center
-        type-caption-2 font-semibold tabular-nums
-        bg-accent-subtle text-accent
-      "
-      aria-label={`${count} unread`}
-    >
-      {count > 99 ? "99+" : count}
-    </span>
+    <>
+      <span
+        aria-hidden="true"
+        className="
+          ml-auto min-w-[20px] px-1.5 py-0.5 rounded-full text-center
+          type-caption-2 font-semibold tabular-nums
+          bg-accent-subtle text-accent
+        "
+      >
+        {count > 99 ? "99+" : count}
+      </span>
+      <span className="sr-only">{`${count} unread`}</span>
+    </>
   );
 }
 

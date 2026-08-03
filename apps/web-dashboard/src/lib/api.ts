@@ -6924,6 +6924,22 @@ export async function putAccessExceptions(
 
 // --- Team chat (WARP-1683, /messages) ---
 
+/**
+ * UX review (WARP-1683): the Messages surface renders `err.message`
+ * verbatim, so raw status codes / server error tokens must never ride on
+ * the thrown Error. Every team-chat helper funnels failures here — the
+ * diagnostic detail goes to the console, the user gets plain copy.
+ */
+async function teamChatFail(
+  op: string,
+  userMessage: string,
+  res: Response,
+): Promise<never> {
+  const detail = await res.text().catch(() => "");
+  console.error(`[team-chat] ${op} failed: ${res.status} ${detail}`);
+  throw new Error(userMessage);
+}
+
 export interface TeamChatContact {
   id: string;
   displayName: string;
@@ -6982,14 +6998,18 @@ export type TeamChatSendBody =
 
 export async function fetchTeamChatContacts(): Promise<TeamChatContact[]> {
   const res = await authFetch(`${BASE}/api/team-chat/contacts`);
-  if (!res.ok) throw new Error(`Failed to load contacts: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail("contacts", "Couldn't load people. Try again.", res);
+  }
   const body = (await res.json()) as { contacts: TeamChatContact[] };
   return body.contacts;
 }
 
 export async function fetchTeamChatThreads(): Promise<TeamChatThreadSummary[]> {
   const res = await authFetch(`${BASE}/api/team-chat/threads`);
-  if (!res.ok) throw new Error(`Failed to load conversations: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail("threads", "Couldn't load conversations. Try again.", res);
+  }
   const body = (await res.json()) as { threads: TeamChatThreadSummary[] };
   return body.threads;
 }
@@ -7007,9 +7027,10 @@ export async function createTeamChatThread(args: {
     body: JSON.stringify(args),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(
-      (body as { error?: string }).error || `Failed to start conversation: ${res.status}`,
+    return teamChatFail(
+      "create-thread",
+      "Couldn't start the conversation. Try again.",
+      res,
     );
   }
   const body = (await res.json()) as { thread: { id: string } };
@@ -7028,7 +7049,9 @@ export async function fetchTeamChatMessages(
   const res = await authFetch(
     `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages${suffix}`,
   );
-  if (!res.ok) throw new Error(`Failed to load messages: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail("messages", "Couldn't load messages. Try again.", res);
+  }
   return res.json() as Promise<{
     messages: TeamChatMessage[];
     nextCursor: string | null;
@@ -7048,10 +7071,7 @@ export async function sendTeamChatMessage(
     },
   );
   if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    throw new Error(
-      (errBody as { error?: string }).error || `Failed to send: ${res.status}`,
-    );
+    return teamChatFail("send", "Couldn't send. Try again.", res);
   }
   const out = (await res.json()) as { message: TeamChatMessage };
   return out.message;
@@ -7062,7 +7082,9 @@ export async function markTeamChatThreadRead(threadId: string): Promise<void> {
     `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/read`,
     { method: "POST" },
   );
-  if (!res.ok) throw new Error(`Failed to mark read: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail("mark-read", "Couldn't update read status.", res);
+  }
 }
 
 export async function fetchTeamChatTranscript(
@@ -7071,13 +7093,21 @@ export async function fetchTeamChatTranscript(
   const res = await authFetch(
     `${BASE}/api/team-chat/messages/${encodeURIComponent(messageId)}/transcript`,
   );
-  if (!res.ok) throw new Error(`Failed to load transcript: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail(
+      "transcript",
+      "Couldn't open the transcript. Try again.",
+      res,
+    );
+  }
   return res.json() as Promise<TeamChatTranscript>;
 }
 
 export async function fetchTeamChatUnreadCount(): Promise<number> {
   const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
-  if (!res.ok) throw new Error(`Failed to load unread count: ${res.status}`);
+  if (!res.ok) {
+    return teamChatFail("unread-count", "Couldn't load unread count.", res);
+  }
   const body = (await res.json()) as { total: number };
   return body.total;
 }

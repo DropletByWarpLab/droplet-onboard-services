@@ -33,14 +33,41 @@ export interface PickedFile {
   path: string;
 }
 
+/**
+ * UX review (WARP-1683): the composer's typed draft rides along as the
+ * forward's caption — that used to be silent. Both pickers disclose it
+ * right above the actions, so nothing sends that the user didn't see.
+ */
+function NoteFooter({ note }: { note?: string }) {
+  if (!note || note.length === 0) return null;
+  return (
+    <p className="mt-3 type-caption-1 text-label-secondary truncate">
+      Sends with your note: &ldquo;{note}&rdquo;
+    </p>
+  );
+}
+
+/** Both list fetches cap at 50 — say so instead of implying completeness. */
+function CapNotice({ shown }: { shown: boolean }) {
+  if (!shown) return null;
+  return (
+    <p className="px-3 py-2 type-caption-2 text-label-tertiary border-t border-separator">
+      Showing first 50 — refine your search.
+    </p>
+  );
+}
+
 export function ForwardFileDialog({
   open,
   onClose,
   onPick,
+  note,
 }: {
   open: boolean;
   onClose: () => void;
   onPick: (file: PickedFile) => void;
+  /** The composer draft that will send as this forward's caption. */
+  note?: string;
 }) {
   const [space, setSpace] = useState<string>("personal");
   const [path, setPath] = useState<string>("/");
@@ -180,11 +207,14 @@ export function ForwardFileDialog({
               );
             }
             const pickable = typeof entry.ncFileId === "number";
+            // UX review: an un-pickable row stays FOCUSABLE with
+            // aria-disabled + a visible reason line — `disabled` + a title
+            // tooltip is unreachable by keyboard and invisible to SRs.
             return (
               <button
                 key={entry.path}
                 type="button"
-                disabled={!pickable}
+                aria-disabled={!pickable}
                 onClick={() =>
                   pickable &&
                   onPick({
@@ -193,28 +223,35 @@ export function ForwardFileDialog({
                     path: entry.path,
                   })
                 }
-                title={pickable ? undefined : "This file can't be forwarded yet"}
-                className="
+                className={`
                   w-full flex items-center gap-2.5 px-3 py-2 text-left
-                  hover:bg-surface-secondary transition-colors duration-200 ease-smooth
-                  disabled:opacity-50 disabled:hover:bg-transparent
+                  transition-colors duration-200 ease-smooth
                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                "
+                  ${pickable ? "hover:bg-surface-secondary" : "opacity-60 cursor-default"}
+                `}
               >
                 <FileText size={16} className="text-label-tertiary flex-shrink-0" aria-hidden="true" />
                 <span className="flex-1 min-w-0">
                   <span className="block type-subheadline text-label-primary truncate">
                     {entry.name}
                   </span>
-                  <span className="block type-caption-2 text-label-tertiary truncate">
-                    {entry.path}
-                  </span>
+                  {pickable ? (
+                    <span className="block type-caption-2 text-label-tertiary truncate">
+                      {entry.path}
+                    </span>
+                  ) : (
+                    <span className="block type-caption-2 text-label-tertiary">
+                      Can&apos;t be forwarded yet
+                    </span>
+                  )}
                 </span>
               </button>
             );
           })}
+          <CapNotice shown={searching && (entries?.length ?? 0) === 50} />
         </div>
 
+        <NoteFooter note={note} />
         <div className="mt-4 flex justify-end">
           <button type="button" onClick={onClose} className="dp-btn-secondary">
             Cancel
@@ -229,10 +266,13 @@ export function ForwardChatDialog({
   open,
   onClose,
   onPick,
+  note,
 }: {
   open: boolean;
   onClose: () => void;
   onPick: (conversation: ConversationSummary) => void;
+  /** The composer draft that will send as this forward's caption. */
+  note?: string;
 }) {
   const [query, setQuery] = useState("");
 
@@ -318,8 +358,10 @@ export function ForwardChatDialog({
               </span>
             </button>
           ))}
+          <CapNotice shown={(conversations?.length ?? 0) === 50} />
         </div>
 
+        <NoteFooter note={note} />
         <div className="mt-4 flex justify-end">
           <button type="button" onClick={onClose} className="dp-btn-secondary">
             Cancel

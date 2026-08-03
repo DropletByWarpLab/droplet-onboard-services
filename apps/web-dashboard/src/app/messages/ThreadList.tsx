@@ -52,6 +52,7 @@ function previewText(thread: TeamChatThreadSummary): string {
 export function ThreadList({
   threads,
   isLoading,
+  loadFailed,
   meId,
   selectedThreadId,
   onSelect,
@@ -59,6 +60,8 @@ export function ThreadList({
 }: {
   threads: TeamChatThreadSummary[] | undefined;
   isLoading: boolean;
+  /** First load failed with nothing cached — SWR keeps retrying/polling. */
+  loadFailed?: boolean;
   meId: string;
   selectedThreadId: string | null;
   onSelect: (id: string) => void;
@@ -87,7 +90,13 @@ export function ThreadList({
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto py-1">
-        {isLoading && !threads && (
+        {loadFailed && (
+          <p role="alert" className="px-4 py-3 type-footnote text-label-tertiary">
+            Couldn&apos;t load conversations — retrying.
+          </p>
+        )}
+
+        {!loadFailed && isLoading && !threads && (
           <p className="px-4 py-3 type-footnote text-label-tertiary">
             Loading conversations…
           </p>
@@ -169,16 +178,22 @@ export function ThreadList({
                     {previewText(thread)}
                   </span>
                   {thread.unreadCount > 0 && (
-                    <span
-                      className="
-                        flex-shrink-0 min-w-[18px] px-1.5 py-px rounded-full
-                        text-center type-caption-2 font-semibold tabular-nums
-                        bg-accent text-white
-                      "
-                      aria-label={`${thread.unreadCount} unread`}
-                    >
-                      {thread.unreadCount > 99 ? "99+" : thread.unreadCount}
-                    </span>
+                    <>
+                      {/* The numeral is decorative for SRs (aria-label on a
+                          generic span is ignored); the sr-only text carries
+                          the meaning. */}
+                      <span
+                        aria-hidden="true"
+                        className="
+                          flex-shrink-0 min-w-[18px] px-1.5 py-px rounded-full
+                          text-center type-caption-2 font-semibold tabular-nums
+                          bg-accent text-white
+                        "
+                      >
+                        {thread.unreadCount > 99 ? "99+" : thread.unreadCount}
+                      </span>
+                      <span className="sr-only">{`${thread.unreadCount} unread`}</span>
+                    </>
                   )}
                 </span>
               </span>

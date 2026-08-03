@@ -51,7 +51,8 @@ export function ConversationPane({
   onActivity: (threadId: string) => void;
 }) {
   const threadId = thread?.id ?? null;
-  const { messages, isLoading, mutate } = useTeamChatMessages(threadId);
+  const { messages, isLoading, mutate, error: messagesError } =
+    useTeamChatMessages(threadId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -91,7 +92,8 @@ export function ConversationPane({
       await mutate();
       onActivity(threadId);
     } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to send");
+      // api.ts throws plain user copy (detail already console-logged there).
+      setSendError(err instanceof Error ? err.message : "Couldn't send. Try again.");
     } finally {
       setSending(false);
     }
@@ -162,7 +164,12 @@ export function ConversationPane({
 
       {/* Messages — column-reverse renders the newest-first array bottom-up. */}
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col-reverse gap-2 px-4 py-3">
-        {isLoading && !messages && (
+        {messagesError !== undefined && messages === undefined && (
+          <p role="alert" className="type-footnote text-label-tertiary">
+            Couldn&apos;t load messages — retrying.
+          </p>
+        )}
+        {messagesError === undefined && isLoading && !messages && (
           <p className="type-footnote text-label-tertiary">Loading messages…</p>
         )}
         {messages && messages.length === 0 && (
@@ -255,6 +262,7 @@ export function ConversationPane({
       <ForwardFileDialog
         open={filePickerOpen}
         onClose={() => setFilePickerOpen(false)}
+        note={draft.trim()}
         onPick={(file) => {
           setFilePickerOpen(false);
           void send({
@@ -269,6 +277,7 @@ export function ConversationPane({
       <ForwardChatDialog
         open={chatPickerOpen}
         onClose={() => setChatPickerOpen(false)}
+        note={draft.trim()}
         onPick={(conversation) => {
           setChatPickerOpen(false);
           void send({
@@ -312,7 +321,9 @@ function MessageBubble({
   const cardTone = mine
     ? "bg-white/10 border-white/20"
     : "bg-surface-primary border-separator";
-  const subtle = mine ? "text-white/70" : "text-label-tertiary";
+  // UX review: /70 on the accent bubble fell under 4.5:1 for the caption
+  // text — /80 clears it while still reading as secondary.
+  const subtle = mine ? "text-white/80" : "text-label-tertiary";
 
   return (
     <div className={`flex flex-col ${align}`}>
@@ -369,7 +380,7 @@ function MessageBubble({
                 AI conversation
               </span>
               <span className={`block type-caption-2 truncate ${subtle}`}>
-                Tap to read the transcript
+                Open the transcript
               </span>
             </span>
           </button>

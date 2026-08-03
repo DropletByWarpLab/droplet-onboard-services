@@ -35,7 +35,7 @@ const SUB =
 
 export default function MessagesPage() {
   const { user } = useAuth();
-  const { threads, isLoading } = useTeamChatThreads();
+  const { threads, isLoading, error: threadsError } = useTeamChatThreads();
   const { mutate } = useSWRConfig();
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
@@ -88,6 +88,7 @@ export default function MessagesPage() {
           <ThreadList
             threads={threads}
             isLoading={isLoading}
+            loadFailed={threadsError !== undefined && threads === undefined}
             meId={user?.id ?? ""}
             selectedThreadId={selectedThreadId}
             onSelect={setSelectedThreadId}

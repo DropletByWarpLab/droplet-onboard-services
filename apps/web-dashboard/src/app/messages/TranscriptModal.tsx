@@ -65,13 +65,17 @@ export function TranscriptModal({
           )}
           {data?.messages.map((m, i) => {
             const isUser = m.role === "user";
+            // The transcript's "user" turns belong to whoever OWNED the AI
+            // chat — the message's sender. Naming them (not "Them") stays
+            // correct when the sharer reopens their own forward.
+            const userLabel = message?.senderDisplayName ?? "Member";
             return (
               <div
                 key={`${m.createdAt}-${i}`}
                 className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
               >
                 <span className="type-caption-2 text-label-tertiary px-1 pb-0.5">
-                  {isUser ? "Them" : "Assistant"}
+                  {isUser ? userLabel : "Assistant"}
                 </span>
                 <div
                   className={`
