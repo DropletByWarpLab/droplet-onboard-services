@@ -445,6 +445,14 @@ export default function FilesPage() {
     setPendingDeletePath(filePath);
   }, []);
 
+  // WARP-1682 — `refresh()` runs on BOTH paths. A delete that reports an error
+  // may still have removed the file (see the trashbin race the orchestrator's
+  // bulk-delete documents), and re-listing is the only way to find out. Before
+  // this, the error path returned without refreshing, so the row stayed on
+  // screen until the user reloaded the page — the "it's still there, then it's
+  // gone after a reload" half of the reported bug. The re-list costs one
+  // request and is harmless when the delete genuinely failed: the row simply
+  // comes back.
   const performDelete = useCallback(async () => {
     const filePath = pendingDeletePath;
     if (!filePath) return;
@@ -453,10 +461,11 @@ export default function FilesPage() {
       if (selectedFile?.path === filePath) setSelectedFile(null);
       fm.clearSelection();
       setPendingDeletePath(null);
-      await refresh();
     } catch (err) {
       toast(translateError(err, "files"));
       throw err;
+    } finally {
+      await refresh();
     }
   }, [pendingDeletePath, selectedFile, refresh, toast, fm, toActiveSpaceRelative, space]);
 
@@ -478,10 +487,15 @@ export default function FilesPage() {
       fm.clearSelection();
       setSelectedFile(null);
       setPendingBulkDelete(false);
-      await refresh();
     } catch (err) {
       toast(translateError(err, "files"));
       throw err;
+    } finally {
+      // WARP-1682 — same contract as performDelete: re-list either way. A
+      // bulk delete can be PARTIALLY applied (the route answers 207 with
+      // per-item results), so the listing is the only honest account of what
+      // survived.
+      await refresh();
     }
   }, [fm, refresh, toast, toActiveSpaceRelative, space]);
 
