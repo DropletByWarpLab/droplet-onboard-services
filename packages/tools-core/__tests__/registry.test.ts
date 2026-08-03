@@ -107,6 +107,9 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // WARP-1685 — Messages sends (Tier-2: write + two-phase confirmation)
+  "team_chat_send_message",
+  "team_chat_send_meeting_invite",
   // WARP-899/WARP-900 — data-utility domain (all Tier-1 read/pure-computation)
   "encode_text",
   "decode_text",

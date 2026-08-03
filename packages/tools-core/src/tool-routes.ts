@@ -289,6 +289,28 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
 
+  // ── team chat (WARP-1685) ───────────────────────────────────────────────
+  // Both tools act as the forwarded X-Droplet-User human; the routes admit
+  // the mcp principal via requireRoleOrMcpService (routes/team-chat.ts).
+  {
+    tool: "team_chat_send_message",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/team-chat/contacts"),
+      admit("post", "/api/team-chat/threads"),
+      admit("post", "/api/team-chat/threads/:id/messages"),
+    ],
+  },
+  {
+    tool: "team_chat_send_meeting_invite",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/team-chat/contacts"),
+      admit("post", "/api/team-chat/threads"),
+      admit("post", "/api/team-chat/threads/:id/meetings"),
+    ],
+  },
+
   // ── data ────────────────────────────────────────────────────────────────
   none("encode_text"),
   none("decode_text"),
