@@ -307,17 +307,34 @@ function createTeamChatPrisma(seed: {
       findMany: vi.fn(
         async (args: {
           where: Parameters<typeof matchesMessageWhere>[1];
-          orderBy?: { createdAt: "desc" | "asc" };
+          orderBy?:
+            | { createdAt?: "desc" | "asc"; id?: "desc" | "asc" }
+            | Array<{ createdAt?: "desc" | "asc"; id?: "desc" | "asc" }>;
           take?: number;
           cursor?: { id: string };
           skip?: number;
         }) => {
           let rows = messages.filter((m) => matchesMessageWhere(m, args.where));
-          rows = [...rows].sort((a, b) =>
-            args.orderBy?.createdAt === "desc"
-              ? b.createdAt.getTime() - a.createdAt.getTime()
-              : a.createdAt.getTime() - b.createdAt.getTime(),
-          );
+          // Honor single-object AND array orderBy like real Prisma — the
+          // route's total sort is [{createdAt desc}, {id desc}].
+          const orderings = Array.isArray(args.orderBy)
+            ? args.orderBy
+            : args.orderBy
+              ? [args.orderBy]
+              : [];
+          rows = [...rows].sort((a, b) => {
+            for (const o of orderings) {
+              if (o.createdAt) {
+                const d = a.createdAt.getTime() - b.createdAt.getTime();
+                if (d !== 0) return o.createdAt === "desc" ? -d : d;
+              }
+              if (o.id) {
+                const d = a.id.localeCompare(b.id);
+                if (d !== 0) return o.id === "desc" ? -d : d;
+              }
+            }
+            return 0;
+          });
           if (args.cursor) {
             const at = rows.findIndex((m) => m.id === args.cursor!.id);
             rows = at === -1 ? [] : rows.slice(at + (args.skip ?? 0));
@@ -574,6 +591,30 @@ describe("POST /api/team-chat/threads", () => {
     expect(uids).toEqual([alice.id, bob.id].sort());
   });
 
+  it("creates a group thread — title persisted, one participant row per member", async () => {
+    const prisma = createTeamChatPrisma({ users: [alice, bob, carol] });
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads")
+      .send({
+        kind: "group",
+        participantIds: [bob.id, carol.id],
+        title: "Ops crew",
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.thread.kind).toBe("group");
+    expect(res.body.thread.title).toBe("Ops crew");
+    const uids = res.body.thread.participants
+      .map((p: { userId: string }) => p.userId)
+      .sort();
+    expect(uids).toEqual([alice.id, bob.id, carol.id].sort());
+    // The rows really landed — caller + both others, exactly once each.
+    const stored = prisma.participants.filter(
+      (p) => p.threadId === res.body.thread.id,
+    );
+    expect(stored).toHaveLength(3);
+  });
+
   it("dedupes an existing direct pair — returns the existing thread, creates nothing", async () => {
     const t = seedThread();
     const prisma = createTeamChatPrisma({
@@ -678,6 +719,45 @@ describe("participant-only access", () => {
       "msg-existing",
     ]);
     expect(page2.body.nextCursor).toBeNull();
+  });
+
+  it("same-millisecond messages page without skips or duplicates (id tiebreak)", async () => {
+    const prisma = abWorld();
+    const app = buildApp(prisma, asAlice);
+    // Three messages sharing ONE timestamp — only a total order pages them.
+    const at = new Date("2026-08-01T12:00:00.000Z");
+    for (const id of ["msg-tie-a", "msg-tie-b", "msg-tie-c"]) {
+      prisma.messages.push({
+        id,
+        threadId: "thread-ab",
+        senderId: bob.id,
+        kind: "text",
+        body: id,
+        sharedNcFileId: null,
+        sharedFileName: null,
+        sharedFilePath: null,
+        sharedChatSessionId: null,
+        sharedChatSnapshot: null,
+        createdAt: at,
+      });
+    }
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const url: string = `/api/team-chat/threads/thread-ab/messages?limit=2${
+        cursor ? `&cursor=${cursor}` : ""
+      }`;
+      const page = await request(app).get(url);
+      expect(page.status).toBe(200);
+      seen.push(...page.body.messages.map((m: { id: string }) => m.id));
+      cursor = page.body.nextCursor;
+    } while (cursor !== null);
+    // Every message exactly once — the tied trio included.
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toEqual(
+      expect.arrayContaining(["msg-tie-a", "msg-tie-b", "msg-tie-c", "msg-existing"]),
+    );
+    expect(seen).toHaveLength(4);
   });
 
   it("rejects a bad limit before touching prisma", async () => {
@@ -822,7 +902,7 @@ describe("POST /api/team-chat/threads/:id/messages", () => {
     expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
   });
 
-  it("ai_chat_share snapshots the session (skipping tool-call internals + empty rows)", async () => {
+  it("ai_chat_share 404s an unknown session id (no existence leak)", async () => {
     const prisma = abWorld();
     const app = buildApp(prisma, asAlice);
     const res = await request(app)
@@ -831,8 +911,8 @@ describe("POST /api/team-chat/threads/:id/messages", () => {
         kind: "ai_chat_share",
         chatSessionId: "11111111-1111-4111-8111-111111111111",
       });
-    // sess-alice is keyed by a plain id in the stub; use a uuid body but remap:
-    expect(res.status).toBe(404); // unknown uuid → not found (no leak)
+    expect(res.status).toBe(404);
+    expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
   });
 
   it("ai_chat_share succeeds for the owner and stores an immutable snapshot", async () => {

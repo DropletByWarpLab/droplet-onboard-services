@@ -7105,6 +7105,11 @@ export async function fetchTeamChatTranscript(
 
 export async function fetchTeamChatUnreadCount(): Promise<number> {
   const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
+  // Review: the sidebar polls this on EVERY page every ~20s. With the
+  // team_chat module off, the gate 404s the whole surface — that's an
+  // expected steady state, not an error: a quiet zero, no console spam.
+  // (The poll keeps running, so re-enabling the module recovers alone.)
+  if (res.status === 404) return 0;
   if (!res.ok) {
     return teamChatFail("unread-count", "Couldn't load unread count.", res);
   }

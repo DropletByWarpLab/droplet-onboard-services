@@ -400,9 +400,12 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           return;
         }
       }
+      // Total order (review): createdAt alone is non-unique — two messages
+      // in the same millisecond could skip/duplicate across a page
+      // boundary. The id tiebreak makes the sort stable for the cursor.
       const rows = await prisma.teamChatMessage.findMany({
         where: { threadId: req.params.id },
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: limit + 1,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
