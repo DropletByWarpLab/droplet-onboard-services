@@ -216,6 +216,14 @@ export interface FileEntryInfo {
   size: number;
   mimeType: string | null;
   modifiedAt: string;
+  /**
+   * WARP-1683 — Nextcloud numeric fileId (oc:fileid). The listing PROPFIND
+   * has always requested it; it is now surfaced so pickers (team-chat file
+   * forwarding) can address a file by the same stable id the registry gate
+   * (`resolveFileDepartment`) keys on. Optional: absent when the PROPFIND
+   * response omits the prop.
+   */
+  ncFileId?: number;
 }
 
 export interface TrashItemInfo {

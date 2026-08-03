@@ -30,6 +30,7 @@ import {
   LayoutDashboard,
   Mail,
   MessageSquare,
+  MessagesSquare,
   Mic,
   Network,
   ScrollText,
@@ -88,7 +89,16 @@ export type NavItem = {
     | "network"
     | "smart_home"
     | "managed_switch"
-    | "voice";
+    | "voice"
+    | "team_chat";
+  /**
+   * WARP-1683 — named live-count badge rendered on the item (desktop
+   * sidebar + mobile More drawer). The KEY lives here so nav-config stays
+   * the one source of truth for what the nav shows; the VALUE is resolved
+   * by the Sidebar (which owns the polling hooks) — pure data, no hook in
+   * this module. Rendered only when the resolved count is > 0.
+   */
+  badgeKey?: "teamChatUnread";
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -129,6 +139,16 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
+      // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
+      // are conversation surfaces); gated by the team_chat module and
+      // carrying the unread-count badge the Sidebar resolves.
+      {
+        href: "/messages",
+        label: "Messages",
+        icon: MessagesSquare,
+        requiresModule: "team_chat",
+        badgeKey: "teamChatUnread",
+      },
       {
         href: "/files",
         label: "Files",
