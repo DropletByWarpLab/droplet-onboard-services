@@ -95,6 +95,7 @@ import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
+import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -968,6 +969,25 @@ async function main() {
       }
     },
     { lockKey: "droplet:pattern-miner-hourly" },
+  );
+
+  // WARP-1685 — team-chat meeting reminders. Every 60s, posts the
+  // meeting_reminder card for meetings whose window (startsAt −
+  // reminderMinutesBefore) has opened; exactly-once via the pending→sent
+  // claim inside the sweep's own transaction, so a tick racing a restart
+  // (or a second replica after an advisory-lock handoff) never
+  // double-posts. Errors propagate naked to cron-runtime's `safeRun` —
+  // same posture as every other handler here; only the per-participant
+  // notification fan-out is absorbed inside the service (leaf effect).
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      const result = await runTeamChatMeetingReminderSweep(prisma);
+      if (result.remindersSent > 0 || result.markedNotNeeded > 0) {
+        logger.info(result, "team-chat meeting reminder sweep");
+      }
+    },
+    { lockKey: "droplet:team-chat-meeting-reminders" },
   );
 
   // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
