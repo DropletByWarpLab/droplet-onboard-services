@@ -857,6 +857,10 @@ class WirelessApi:
 
     def __init__(self, router: "DropletRouter"):
         self._r = router
+        # WARP-1681: warn-once latch for the strict-netifd fallback below.
+        # Monotonic boolean — a threadpool race here costs at most a duplicate
+        # log line, never a wrong value (contrast the WARP-816 side-channel).
+        self._strict_netifd_warned = False
 
     def status(self) -> dict:
         """Get status of all wireless radios and interfaces.
@@ -869,13 +873,62 @@ class WirelessApi:
         same wireless section (ADR-011, shape-agnostic — a missing optional
         surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
         transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+
+        WARP-1681 (edge-router): OpenWrt 25.12's netifd strict-validates
+        message attributes, and the uhttpd ``/ubus`` session bridge injects
+        ``ubus_rpc_session`` into every authenticated call — so a sessioned
+        ``network.wireless status`` fails ``INVALID_ARGUMENT`` even though the
+        object exists and the ACL grants it (verified live on ``droplet-edge``:
+        the same call succeeds over the local socket, and even a valid
+        ``{"device": "radio0"}`` fails remotely). ``status()`` sends no caller
+        arguments, so ``INVALID_ARGUMENT`` here can only be that strict-reject
+        — fall back to rpcd's ``luci-rpc getWirelessDevices``, which rpcd
+        serves session-natively and which returns the identical netifd status
+        shape (plus an ``iwinfo`` block that is stripped for shape parity).
         """
         try:
             return self._r._call("network.wireless", "status")
         except UbusError as exc:
             if _ubus_object_absent(exc):
                 return {}
+            if exc.code == UBUS_STATUS_INVALID_ARGUMENT:
+                return self._status_via_luci_rpc()
             raise
+
+    def _status_via_luci_rpc(self) -> dict:
+        """Wireless status via ``luci-rpc getWirelessDevices`` (WARP-1681).
+
+        Same payload netifd's ``network.wireless status`` returns, enriched by
+        rpcd with a per-radio ``iwinfo`` block — stripped here so both paths
+        hand callers one shape. When ``luci-rpc`` itself isn't on this build
+        (no rpcd-mod-luci), a radio-less report is the honest answer (ADR-011)
+        — with ``status()`` argless, no genuine caller bug can be masked by
+        degrading. Any other ``luci-rpc`` fault (auth, unrelated codes) still
+        propagates.
+        """
+        if not self._strict_netifd_warned:
+            self._strict_netifd_warned = True
+            logger.warning(
+                "network.wireless rejects sessioned calls on this build "
+                "(strict netifd + injected ubus_rpc_session, WARP-1681); "
+                "serving wireless status via luci-rpc getWirelessDevices"
+            )
+        try:
+            devices = self._r._call("luci-rpc", "getWirelessDevices")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
+        if not isinstance(devices, dict):
+            return {}
+        return {
+            name: (
+                {k: v for k, v in radio.items() if k != "iwinfo"}
+                if isinstance(radio, dict)
+                else radio
+            )
+            for name, radio in devices.items()
+        }
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""
