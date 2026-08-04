@@ -15,6 +15,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
@@ -280,6 +281,10 @@ export function createApp(
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
+  // WARP-1683 — team chat (member-to-member Messages). Humans only; the
+  // `team_chat` module gate is mounted by mountModuleGates above off the
+  // registry's /api/team-chat prefix.
+  app.use("/api", createTeamChatRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
   app.use("/api", createPersonaRouter(prisma));
