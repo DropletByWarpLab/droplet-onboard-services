@@ -148,6 +148,18 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
 
   # Rotation.
   grep -qE 'BACKUP_KEEP' "$BACKUP_SCRIPT" && pass "backup honours BACKUP_KEEP rotation" || fail "backup has no rotation knob"
+
+  # REGRESSION GUARD (WARP-570): the archive filename must NOT be the
+  # second-resolution timestamp alone. Two runs that start in the same second
+  # would resolve to the same path and the second would silently overwrite the
+  # first — one backup where the operator believes they have two. Extract the
+  # ARCHIVE= expression and require a per-run component beyond $TS.
+  archive_expr="$(grep -m1 '^ARCHIVE=' "$BACKUP_SCRIPT" || true)"
+  if grep -q 'RUN_ID' <<< "$archive_expr"; then
+    pass "archive filename carries a per-run suffix (no same-second collision)"
+  else
+    fail "archive filename is timestamp-only ($archive_expr) — two runs in the same second overwrite each other"
+  fi
 fi
 
 # --- factory-reset safeguard (static) ---
@@ -178,6 +190,38 @@ if [ -f "$FACTORY_RESET" ]; then
     && pass "factory-reset aborts on failed backup" || fail "factory-reset does not abort on failed backup"
 else
   fail "scripts/factory-reset.sh missing"
+fi
+
+# =============================================================================
+# Same-second filename collision (WARP-570) — static, no Docker.
+#
+# Runs the script's OWN filename-derivation lines in a tight loop (same wall
+# second) and asserts every run yields a distinct archive path. Against the
+# timestamp-only version this loop produces ONE unique name out of N and fails.
+# =============================================================================
+echo ""
+echo "--- Same-second archive-name uniqueness (WARP-570) ---"
+
+if [ -f "$BACKUP_SCRIPT" ]; then
+  # Pull the real derivation out of the script so the test can never drift from
+  # it: the TS= assignment, the RUN_ID block, and the ARCHIVE= line.
+  name_logic="$(sed -n '/^TS=/p;/^RUN_ID=/p;/^\[ -n "\$RUN_ID" \]/p;/^ARCHIVE=/p' "$BACKUP_SCRIPT")"
+  names="$(
+    OUTPUT_DIR=/tmp
+    for _ in 1 2 3 4 5 6 7 8; do
+      eval "$name_logic"
+      printf '%s\n' "$ARCHIVE"
+    done
+  )"
+  total="$(printf '%s\n' "$names" | wc -l | tr -d '[:space:]')"
+  uniq_n="$(printf '%s\n' "$names" | sort -u | wc -l | tr -d '[:space:]')"
+  if [ "$total" = "$uniq_n" ] && [ "$uniq_n" -gt 1 ]; then
+    pass "8 same-second runs yield 8 distinct archive names"
+  else
+    fail "same-second runs collide: $uniq_n distinct name(s) out of $total (backups would overwrite each other)"
+  fi
+else
+  fail "backup script missing — cannot check archive-name uniqueness"
 fi
 
 # =============================================================================

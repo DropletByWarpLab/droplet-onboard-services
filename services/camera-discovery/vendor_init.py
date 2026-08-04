@@ -45,8 +45,7 @@ logger = logging.getLogger(__name__)
 # WARP-583 (launch-readiness audit): TLS verification for the vendor-init
 # HTTPS clients. Cameras ship per-device self-signed certs on first run, so
 # pinning is only possible where the operator has captured the device cert /
-# vendor CA up-front — hence opt-in via CAMERA_INIT_CA_CERT, mirroring the
-# switch service's SWITCH_CA_CERT (services/switch/drivers/lantronix.py).
+# vendor CA up-front — hence opt-in via CAMERA_INIT_CA_CERT.
 # Residual risk when unpinned: an on-LAN MITM between this service and the
 # camera VLAN can intercept the first-run admin-password set. We keep that
 # historical unverified fallback because it is the only workable default for

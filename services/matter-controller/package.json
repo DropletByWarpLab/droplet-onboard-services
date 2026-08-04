@@ -16,7 +16,7 @@
     "@matter/main": "0.16.10",
     "@matter/nodejs-ble": "0.16.10",
     "@project-chip/matter.js": "0.16.10",
-    "express": "^4.19.2",
+    "express": "^4.22.2",
     "pino": "^10.0.0",
     "zod": "^3.23.8"
   },

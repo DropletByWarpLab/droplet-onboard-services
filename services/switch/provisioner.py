@@ -16,7 +16,7 @@ Design rules honoured (droplet-architecture-guard):
   * Rule 9  — this is a one-shot reconcile, invoked by an event (bring-up or
     ``POST /provision``); there is NO polling loop here.
   * ASIC seam — only the abstract ``SwitchDriver`` contract is used; no
-    Lantronix specifics leak above ``drivers/base.py``.
+    driver specifics leak above ``drivers/base.py``.
 
 The routine is idempotent: it reads live membership, computes the delta against
 the desired state, and writes ONLY the ports that differ. A second run against
@@ -109,8 +109,7 @@ async def _read_access_pvids(driver: SwitchDriver) -> Optional[dict[int, int]]:
     except SwitchError as exc:
         logger.warning(
             "provisioner: could not read VLAN state (%s) — skipping reconcile. "
-            "On SM8TAT2SA v1.04 the VLAN read endpoints 404; see the driver "
-            "TODO. No writes attempted.",
+            "No writes attempted.",
             exc,
         )
         return None

@@ -61,7 +61,7 @@ export function ScheduleActivityFeed() {
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex items-center gap-2 text-label-primary"
+        className="flex items-center gap-2 text-[color:var(--text)]"
       >
         <ChevronRight
           className={`w-4 h-4 transition-transform ${expanded ? "rotate-90" : ""}`}
@@ -73,11 +73,13 @@ export function ScheduleActivityFeed() {
       </button>
 
       {expanded && (
-        <div className="dp-card p-4 space-y-2">
+        <div className="card space-y-2">
           {eventsSwr.isLoading ? (
-            <p className="type-footnote text-label-tertiary">Loading…</p>
+            <p className="type-footnote text-[color:var(--text-muted)]">
+              Loading…
+            </p>
           ) : sorted.length === 0 ? (
-            <p className="type-subheadline text-label-tertiary">
+            <p className="type-subheadline text-[color:var(--text-muted)]">
               No activity in the last 7 days
             </p>
           ) : (
@@ -85,9 +87,9 @@ export function ScheduleActivityFeed() {
               {sorted.map((ev) => (
                 <li
                   key={ev.id}
-                  className="type-subheadline text-label-secondary"
+                  className="type-subheadline text-[color:var(--text-muted)]"
                 >
-                  <span className="text-label-tertiary">
+                  <span className="text-[color:var(--text-muted)]">
                     {formatClock(ev.occurredAt)}
                   </span>{" "}
                   · {labelFor(ev)} ·{" "}
@@ -105,7 +107,7 @@ export function ScheduleActivityFeed() {
               ))}
             </ul>
           )}
-          <p className="type-caption-2 text-label-tertiary pt-2 border-t border-separator">
+          <p className="type-caption-2 text-[color:var(--text-muted)] pt-2 border-t border-[var(--card-bd)]">
             Showing activity from the last 7 days
           </p>
         </div>

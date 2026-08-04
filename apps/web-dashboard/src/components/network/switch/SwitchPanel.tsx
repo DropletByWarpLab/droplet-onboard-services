@@ -33,8 +33,8 @@ function lastAppliedLabel(iso: string | null): string {
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="space-y-2">
-      <h4 className="type-footnote font-semibold text-label-secondary">Switch</h4>
-      <div className="dp-card relative">{children}</div>
+      <h4 className="type-footnote font-semibold text-[color:var(--text-muted)]">Switch</h4>
+      <div className="card relative">{children}</div>
     </div>
   );
 }
@@ -61,7 +61,7 @@ export function SwitchPanel() {
   if (isLoading && !status) {
     return (
       <Shell>
-        <div data-testid="switch-skeleton" className="h-40 animate-pulse bg-surface-secondary rounded-[10px]" />
+        <div data-testid="switch-skeleton" className="h-40 animate-pulse bg-[var(--inset)] rounded-[10px]" />
       </Shell>
     );
   }
@@ -71,9 +71,9 @@ export function SwitchPanel() {
     return (
       <Shell>
         <div className="text-center py-10" role="alert">
-          <WifiOff size={28} className="mx-auto text-label-quaternary mb-2" aria-hidden="true" />
-          <p className="type-subheadline text-label-primary mb-1">We can&apos;t reach the switch</p>
-          <p className="type-footnote text-label-tertiary max-w-sm mx-auto">
+          <WifiOff size={28} className="mx-auto text-[color:var(--text-faint)] mb-2" aria-hidden="true" />
+          <p className="type-subheadline text-[color:var(--text)] mb-1">We can&apos;t reach the switch</p>
+          <p className="type-footnote text-[color:var(--text-muted)] max-w-sm mx-auto">
             The managed switch isn&apos;t responding. We&apos;ll keep retrying — check the switch service and its LAN
             connection.
           </p>
@@ -86,7 +86,7 @@ export function SwitchPanel() {
   if (!connected || !status) {
     return (
       <Shell>
-        <p className="text-center py-7 type-footnote text-label-tertiary">
+        <p className="text-center py-7 type-footnote text-[color:var(--text-muted)]">
           No managed switch detected. Ports appear here when a Droplet-managed switch is connected.
         </p>
       </Shell>
@@ -117,12 +117,15 @@ export function SwitchPanel() {
     <Shell>
       {/* Header */}
       <div className="flex items-center gap-3.5 flex-wrap">
-        <span className="w-[38px] h-[38px] rounded-[10px] bg-accent-subtle text-accent flex items-center justify-center flex-none">
+        <span className="w-[38px] h-[38px] rounded-[10px] bg-[var(--brand-subtle)] text-[color:var(--brand)] flex items-center justify-center flex-none">
           <Network size={18} aria-hidden="true" />
         </span>
         <div className="min-w-0">
-          <div className="type-subheadline font-semibold text-label-primary flex items-center gap-2.5">
-            Lantronix {status.model}
+          <div className="type-subheadline font-semibold text-[color:var(--text)] flex items-center gap-2.5">
+            {/* WARP-1674: the driver owns vendor branding — the openwrt
+                driver reports the board model verbatim (e.g. "Zyxel
+                GS1900-10HP A1"). */}
+            {status.model || "Managed switch"}
             {status.auto_managed && (
               <span className="inline-flex items-center gap-1.5 type-caption-2 font-medium text-system-green bg-system-green/10 px-2.5 py-0.5 rounded-full">
                 <span className="w-1.5 h-1.5 rounded-full bg-system-green" aria-hidden="true" />
@@ -130,7 +133,7 @@ export function SwitchPanel() {
               </span>
             )}
           </div>
-          <div className="type-caption-1 text-label-tertiary mt-0.5 font-mono">
+          <div className="type-caption-1 text-[color:var(--text-muted)] mt-0.5 font-mono">
             PoE switch · 8-port + 2 SFP · firmware {status.firmware} · applied{" "}
             {lastAppliedLabel(status.last_provisioned_at)}
           </div>
@@ -146,7 +149,7 @@ export function SwitchPanel() {
                 blast: "Hand-edited ports snap back to the auto-managed layout. Devices on changed ports briefly drop.",
               })
             }
-            className="dp-btn-secondary text-sm flex items-center gap-2 ml-auto"
+            className="btn sm ml-auto"
           >
             <RefreshCw size={13} aria-hidden="true" />
             Re-apply config
@@ -156,19 +159,14 @@ export function SwitchPanel() {
 
       {/* Controls — interactive layout toggle + READ-ONLY profile reflection */}
       <div className="flex items-center gap-3 my-4 flex-wrap">
-        <div className="inline-flex bg-surface-secondary rounded-[9px] p-0.5 gap-0.5" role="group" aria-label="Port map layout">
+        <div className="pills" role="group" aria-label="Port map layout">
           {(["face", "table"] as const).map((id) => (
             <button
               key={id}
               type="button"
               onClick={() => setLayout(id)}
               aria-pressed={layout === id}
-              className={[
-                "type-caption-2 font-medium px-3.5 py-1.5 rounded-[7px] transition-colors",
-                layout === id
-                  ? "bg-surface-primary text-label-primary shadow-sm"
-                  : "text-label-secondary hover:text-label-primary",
-              ].join(" ")}
+              className={layout === id ? "active" : ""}
             >
               {id === "face" ? "Faceplate" : "Port table"}
             </button>
@@ -176,9 +174,12 @@ export function SwitchPanel() {
         </div>
         <div className="grow" />
         {/* Read-only reflection of status.vlan_profile — NOT a user toggle. */}
-        <span className="type-caption-2 text-label-tertiary">LAN profile</span>
+        <span className="type-caption-2 text-[color:var(--text-muted)]">LAN profile</span>
+        {/* `.pills` styles its own <button> children; these are inert <span>s
+            (read-only reflection, not a control), so the active/idle ink is
+            spelled out here against the same shell tokens. */}
         <div
-          className="inline-flex bg-surface-secondary rounded-[9px] p-0.5 gap-0.5"
+          className="pills"
           role="status"
           aria-label={`LAN profile: ${profile === "segmented" ? "Segmented" : "Flat LAN"}`}
         >
@@ -189,8 +190,8 @@ export function SwitchPanel() {
               className={[
                 "type-caption-2 font-medium px-2.5 py-1.5 rounded-[7px]",
                 profile === id
-                  ? "bg-surface-primary text-label-primary shadow-sm"
-                  : "text-label-quaternary",
+                  ? "bg-[var(--brand-subtle)] text-[color:var(--brand)]"
+                  : "text-[color:var(--text-faint)]",
               ].join(" ")}
             >
               {id === "flat-lan" ? "Flat LAN" : "Segmented"}
@@ -216,8 +217,8 @@ export function SwitchPanel() {
 
       {/* VLAN view */}
       <div className="flex items-baseline gap-2.5 mt-5 mb-2.5">
-        <h5 className="type-footnote font-semibold text-label-primary m-0">VLANs</h5>
-        <span className="type-caption-2 text-label-tertiary">
+        <h5 className="type-footnote font-semibold text-[color:var(--text)] m-0">VLANs</h5>
+        <span className="type-caption-2 text-[color:var(--text-muted)]">
           reflects switch <span className="font-mono">vlan_profile: {profile}</span>
         </span>
       </div>
@@ -252,7 +253,7 @@ export function SwitchPanel() {
                 <ShieldCheck size={10} aria-hidden="true" />
                 Write · confirm to apply
               </span>
-              <span className="type-caption-2 text-label-tertiary">Owner / admin only · logged to Activity</span>
+              <span className="type-caption-2 text-[color:var(--text-muted)]">Owner / admin only · logged to Activity</span>
             </div>
           }
           onConfirm={applyAction}

@@ -101,24 +101,36 @@ export function DevicesTab() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search devices…"
           aria-label="Search devices"
-          className="dp-input flex-1 min-w-[200px]"
+          className="flex-1 min-w-[200px] px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
         />
-        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+        <label className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           <input
             type="checkbox"
             checked={onlineOnly}
             onChange={(e) => setOnlineOnly(e.target.checked)}
-            className="accent-accent"
+            className="accent-[var(--brand)]"
           />
           Online only
         </label>
-        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+        <label className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           Sort by
           <select
             value={sort}
             onChange={(e) => setSort(e.target.value as DeviceSort)}
             aria-label="Sort devices"
-            className="dp-input"
+            className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
           >
             <option value="name">Name</option>
             <option value="lastSeen">Last seen</option>
@@ -128,14 +140,14 @@ export function DevicesTab() {
         <button
           type="button"
           onClick={() => setGroupManagerOpen(true)}
-          className="dp-btn-secondary text-sm"
+          className="btn sm"
         >
           Manage groups
         </button>
       </div>
 
       {isLoading && (
-        <div className="flex items-center justify-center py-12 text-label-tertiary">
+        <div className="flex items-center justify-center py-12 text-[color:var(--text-muted)]">
           <Loader2 size={20} className="animate-spin mr-2" />
           <span className="type-subheadline">Loading devices…</span>
         </div>
@@ -143,11 +155,11 @@ export function DevicesTab() {
 
       {!isLoading && devices.length === 0 && (
         <div className="card text-center" style={{ padding: "48px 20px" }}>
-          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h3 className="type-title-3 text-label-primary mb-1">
+          <Monitor size={32} className="mx-auto text-[color:var(--text-faint)] mb-3" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
             Your router hasn&apos;t seen any devices yet
           </h3>
-          <p className="type-subheadline text-label-tertiary mb-4">
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
             Devices will appear as soon as the router reports them.
           </p>
           <button
@@ -162,11 +174,11 @@ export function DevicesTab() {
 
       {!isLoading && devices.length > 0 && !hasMatches && search.trim() !== "" && (
         <div className="card text-center" style={{ padding: "48px 20px" }}>
-          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h3 className="type-title-3 text-label-primary mb-1">
+          <Monitor size={32} className="mx-auto text-[color:var(--text-faint)] mb-3" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
             No devices match &ldquo;{search}&rdquo;
           </h3>
-          <p className="type-subheadline text-label-tertiary mb-4">
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
             Try a different name, IP, or vendor.
           </p>
           <button

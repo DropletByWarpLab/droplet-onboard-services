@@ -103,12 +103,12 @@ export function InterfaceWriteControls({
   if (!canEdit) return null;
 
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-separator/60 pt-4">
+    <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[var(--card-bd)] pt-4">
       <button
         ref={addBtnRef}
         type="button"
         onClick={() => setEditor({ kind: "add" })}
-        className="dp-btn-secondary flex items-center gap-1.5"
+        className="btn ghost"
       >
         <Plus size={16} aria-hidden="true" />
         Add interface
@@ -127,7 +127,7 @@ export function InterfaceWriteControls({
                 editTriggerRef.current = e.currentTarget;
                 setEditor({ kind: "edit", row });
               }}
-              className="type-caption-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-label-secondary hover:bg-surface-secondary transition-colors"
+              className="type-caption-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[color:var(--text-muted)] hover:bg-[var(--hover)] transition-colors"
             >
               <Pencil size={13} aria-hidden="true" />
               Edit {row.name}
@@ -264,10 +264,10 @@ function InterfaceEditorDialog({
         {/* Body padding comes from the <Dialog> primitive (WARP-1153). */}
         <div className="space-y-4">
           <div>
-            <h2 id={titleId} className="type-headline text-label-primary">
+            <h2 id={titleId} className="type-headline text-[color:var(--text)]">
               {isEdit ? `Edit ${name}` : "Add interface"}
             </h2>
-            <p className="type-subheadline text-label-tertiary mt-1.5">
+            <p className="type-subheadline text-[color:var(--text-muted)] mt-1.5">
               {isEdit
                 ? "Change how this interface connects. We'll ask you to confirm before applying."
                 : "Set up a new network interface. We'll ask you to confirm before applying."}
@@ -277,7 +277,7 @@ function InterfaceEditorDialog({
           <div className="space-y-4">
             {!isEdit && (
               <div>
-                <label htmlFor="iface-name" className="type-subheadline text-label-secondary block mb-1.5">
+                <label htmlFor="iface-name" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
                   Name
                 </label>
                 <input
@@ -286,7 +286,13 @@ function InterfaceEditorDialog({
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
                   placeholder="e.g. guest"
-                  className="dp-input font-mono"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   disabled={saving}
                   autoComplete="off"
                 />
@@ -294,14 +300,20 @@ function InterfaceEditorDialog({
             )}
 
             <div>
-              <label htmlFor="iface-proto" className="type-subheadline text-label-secondary block mb-1.5">
+              <label htmlFor="iface-proto" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
                 Connection type
               </label>
               <select
                 id="iface-proto"
                 value={proto}
                 onChange={(e) => setProto(e.target.value)}
-                className="dp-input"
+                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 disabled={saving}
               >
                 {PROTO_OPTIONS.map((o) => (
@@ -314,7 +326,7 @@ function InterfaceEditorDialog({
 
             {isStatic && (
               <div>
-                <label htmlFor="iface-ip" className="type-subheadline text-label-secondary block mb-1.5">
+                <label htmlFor="iface-ip" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
                   IP address
                 </label>
                 <input
@@ -323,7 +335,13 @@ function InterfaceEditorDialog({
                   value={ipaddr}
                   onChange={(e) => setIpaddr(e.target.value)}
                   placeholder="192.168.40.1"
-                  className="dp-input font-mono"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   disabled={saving}
                   inputMode="numeric"
                   autoComplete="off"
@@ -332,8 +350,8 @@ function InterfaceEditorDialog({
             )}
 
             <div>
-              <label htmlFor="iface-device" className="type-subheadline text-label-secondary block mb-1.5">
-                Device <span className="text-label-tertiary">(optional)</span>
+              <label htmlFor="iface-device" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
+                Device <span className="text-[color:var(--text-muted)]">(optional)</span>
               </label>
               <input
                 id="iface-device"
@@ -341,7 +359,13 @@ function InterfaceEditorDialog({
                 value={device}
                 onChange={(e) => setDevice(e.target.value)}
                 placeholder="e.g. br-lan.20"
-                className="dp-input font-mono"
+                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 disabled={saving}
                 autoComplete="off"
               />
@@ -351,7 +375,7 @@ function InterfaceEditorDialog({
           {targetName && isManagement(targetName) && (
             <div
               role="note"
-              className="flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+              className="flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
             >
               <Info size={14} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
               <span>
@@ -376,7 +400,7 @@ function InterfaceEditorDialog({
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors disabled:opacity-60"
+              className="btn ghost"
             >
               Cancel
             </button>
@@ -384,7 +408,7 @@ function InterfaceEditorDialog({
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 flex items-center gap-1.5"
+              className="btn primary"
             >
               {saving && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
               {saving ? "Saving…" : isEdit ? "Save changes" : "Add"}
@@ -441,7 +465,10 @@ function RestartNetworkButton({ onApplied }: { onApplied?: () => void }) {
         type="button"
         onClick={() => setConfirmOpen(true)}
         disabled={restarting}
-        className="dp-btn-secondary flex items-center gap-1.5 text-system-red"
+        className="btn ghost"
+        /* `.droplet-shell .btn` pins `color` at (0,2,0) — the danger ink has to
+           come from the style attribute to win. */
+        style={{ color: "var(--danger)" }}
       >
         {restarting ? (
           <Loader2 size={16} className="animate-spin" aria-hidden="true" />

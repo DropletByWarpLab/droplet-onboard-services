@@ -197,6 +197,30 @@ class ConnectionLost(Exception):
     pass
 
 
+class LoginDenied(ConnectionLost):
+    """Raised when the OpenWrt device is REACHABLE but rejects our rpcd
+    credentials (`session login` → PERMISSION_DENIED).
+
+    Subclasses :class:`ConnectionLost` so every existing "couldn't establish a
+    session" catch (lifespan startup, ReconnectCoordinator, best-effort
+    logout) keeps working unchanged — callers that care about the *reason*
+    check for this subclass first.
+
+    WARP-1673: on the edge-router shape a router reflash regenerates the
+    per-unit `droplet-ai` password, stranding the copy in
+    `docker/secrets/openwrt_password`. Before this class, that surfaced as the
+    same 503 as a powered-off router and the dashboard said "Router offline"
+    instead of the actionable "Credentials rejected" copy. `session login` is
+    the ONLY call site where PERMISSION_DENIED unambiguously means bad
+    credentials — on any other object it can equally mean an ACL gap, so this
+    classification never happens in the generic call path.
+    """
+
+    #: Stable, wire-facing classification — mirrored by the routing service's
+    #: HTTP 502 detail and the orchestrator's RouterError AUTH mapping.
+    code = "ROUTER_AUTH"
+
+
 # WARP-816: radio operating modes (from `iwinfo info` → `mode`) in which a
 # single-radio card is broadcasting an AP and therefore CANNOT station-scan.
 # On the single-box `wlp14s0` is `mode == "Master"` (hostapd AP for the Droplet
@@ -435,11 +459,27 @@ class SessionManager:
         self.expires_at: float = 0
 
     def login(self) -> str:
-        """Authenticate and store the session token."""
-        result = self.client.call(NULL_SESSION, "session", "login", {
-            "username": self.username,
-            "password": self.password,
-        })
+        """Authenticate and store the session token.
+
+        Raises :class:`LoginDenied` when the device answers but refuses the
+        credentials (PERMISSION_DENIED) — distinct from :class:`ConnectionLost`
+        (device unreachable) and from every other :class:`UbusError`.
+        """
+        try:
+            result = self.client.call(NULL_SESSION, "session", "login", {
+                "username": self.username,
+                "password": self.password,
+            })
+        except UbusError as exc:
+            # ubus status 6 = PERMISSION_DENIED. On `session login` that means
+            # exactly one thing: the router rejected this username/password.
+            if exc.code == 6:
+                raise LoginDenied(
+                    f"OpenWrt rejected the rpcd credentials for user "
+                    f"'{self.username}' — the router password has likely "
+                    f"rotated (e.g. a reflash regenerated it)."
+                ) from exc
+            raise
         self.token = result["ubus_rpc_session"]
         timeout = result.get("timeout", 300)
         self.expires_at = time.time() + timeout
@@ -817,6 +857,10 @@ class WirelessApi:
 
     def __init__(self, router: "DropletRouter"):
         self._r = router
+        # WARP-1681: warn-once latch for the strict-netifd fallback below.
+        # Monotonic boolean — a threadpool race here costs at most a duplicate
+        # log line, never a wrong value (contrast the WARP-816 side-channel).
+        self._strict_netifd_warned = False
 
     def status(self) -> dict:
         """Get status of all wireless radios and interfaces.
@@ -829,13 +873,62 @@ class WirelessApi:
         same wireless section (ADR-011, shape-agnostic — a missing optional
         surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
         transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+
+        WARP-1681 (edge-router): OpenWrt 25.12's netifd strict-validates
+        message attributes, and the uhttpd ``/ubus`` session bridge injects
+        ``ubus_rpc_session`` into every authenticated call — so a sessioned
+        ``network.wireless status`` fails ``INVALID_ARGUMENT`` even though the
+        object exists and the ACL grants it (verified live on ``droplet-edge``:
+        the same call succeeds over the local socket, and even a valid
+        ``{"device": "radio0"}`` fails remotely). ``status()`` sends no caller
+        arguments, so ``INVALID_ARGUMENT`` here can only be that strict-reject
+        — fall back to rpcd's ``luci-rpc getWirelessDevices``, which rpcd
+        serves session-natively and which returns the identical netifd status
+        shape (plus an ``iwinfo`` block that is stripped for shape parity).
         """
         try:
             return self._r._call("network.wireless", "status")
         except UbusError as exc:
             if _ubus_object_absent(exc):
                 return {}
+            if exc.code == UBUS_STATUS_INVALID_ARGUMENT:
+                return self._status_via_luci_rpc()
             raise
+
+    def _status_via_luci_rpc(self) -> dict:
+        """Wireless status via ``luci-rpc getWirelessDevices`` (WARP-1681).
+
+        Same payload netifd's ``network.wireless status`` returns, enriched by
+        rpcd with a per-radio ``iwinfo`` block — stripped here so both paths
+        hand callers one shape. When ``luci-rpc`` itself isn't on this build
+        (no rpcd-mod-luci), a radio-less report is the honest answer (ADR-011)
+        — with ``status()`` argless, no genuine caller bug can be masked by
+        degrading. Any other ``luci-rpc`` fault (auth, unrelated codes) still
+        propagates.
+        """
+        if not self._strict_netifd_warned:
+            self._strict_netifd_warned = True
+            logger.warning(
+                "network.wireless rejects sessioned calls on this build "
+                "(strict netifd + injected ubus_rpc_session, WARP-1681); "
+                "serving wireless status via luci-rpc getWirelessDevices"
+            )
+        try:
+            devices = self._r._call("luci-rpc", "getWirelessDevices")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
+        if not isinstance(devices, dict):
+            return {}
+        return {
+            name: (
+                {k: v for k, v in radio.items() if k != "iwinfo"}
+                if isinstance(radio, dict)
+                else radio
+            )
+            for name, radio in devices.items()
+        }
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""

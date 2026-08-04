@@ -1,6 +1,6 @@
 # ADR-024: Multi-backend coverage-AP onboarding (Droplet-image + EasyMesh + UniFi)
 
-**Status:** Proposed
+**Status:** Proposed (implementation merged on main — #670; `DROPLET_IMAGE` live, `EASYMESH`/`UNIFI` disabled-by-default scaffolds. Reconciliation with ADR-018 §5 recorded in [ADR-033 §6](ADR-033-edge-router-shape.md).)
 **Date:** 2026-06-19
 **Deciders:** Stefan + Romain (Romain sign-off pending)
 **Source:** Extends ADR-005 (AP auto-onboarding). Product requirement: a household can buy a *third-party* coverage AP, plug it in, have it auto-discovered, and add it through the LLM — without it being a Droplet-flashed unit. Threads through ADR-002 (network supervision), ADR-004 (RBAC), ADR-011 (hardware-agnostic), ADR-014 (LLM client-dispatched actions), ADR-018 (single-box network unification), ADR-022 (host-sidecar container pattern).

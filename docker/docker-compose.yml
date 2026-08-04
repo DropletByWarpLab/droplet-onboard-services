@@ -102,6 +102,11 @@ services:
       # DHCP/DNS (the split-horizon FQDN is unresolvable otherwise). Written
       # 1 by scripts/lib/single-box.sh, absent/0 on every other shape.
       - DROPLET_LAN_DNS_AUTHORITY=${DROPLET_LAN_DNS_AUTHORITY:-0}
+      # WARP-1686: /docker-entrypoint.d/03-docs-engine.sh keys the /docs/
+      # proxy variant on the document engine — collabora (default) keeps the
+      # /docs prefix → docserver:9980 (coolwsd net.service_root); onlyoffice
+      # strips it → docserver:80. Same selector pattern as the knobs above.
+      - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
@@ -746,29 +751,39 @@ services:
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
 
   # ==========================================================================
-  # WARP-882 / WS-4 — OnlyOffice Document Server (in-browser editing + co-author)
+  # WARP-882 / WARP-1686 — Document engine (in-browser viewing/editing + co-author)
   # ==========================================================================
-  # The editing ENGINE behind the Nextcloud `onlyoffice` connector (WOPI-style
-  # handshake). Mirrors the `nextcloud` block: default network, NO `ports:`
-  # (reached only via the gateway's `location /docs/` + sibling containers),
-  # env_file, restart: always, shared logging.
+  # The engine behind the Nextcloud connector app (WOPI-style handshake).
+  # Mirrors the `nextcloud` block: default network, NO `ports:` (reached only
+  # via the gateway's `location /docs/` + sibling containers), env_file,
+  # restart: always, shared logging.
+  #
+  # ENGINE-SELECTABLE (WARP-1686 / ADR-034): `DOCS_ENGINE` picks the engine;
+  # every seam is WOPI (connector app, gateway leg, orchestrator probe), so
+  # the engine stays a CONFIG choice, not a code dependency (ADR-027):
+  #   * collabora (DEFAULT) — Collabora CODE, LibreOffice technology. NO
+  #     licensing fee (MPLv2 core, free-of-charge binaries) — ADR-034 flips
+  #     the default off OnlyOffice because its OEM license was the one
+  #     remaining GA gate. Listens on :9980 under `net.service_root=/docs`,
+  #     so the gateway forwards the ORIGINAL /docs/-prefixed URI (no strip)
+  #     — see docker/nginx/docs-engine.collabora.conf.
+  #   * onlyoffice — OnlyOffice DS Community Edition (AGPLv3; an OEM license
+  #     is required to ship it at GA). Kept selectable for a future
+  #     OEM-licensed SKU. Listens on :80 at its root — the gateway variant
+  #     strips /docs/ (the original WARP-882 shape).
+  # DOCS_ENGINE_IMAGE must track DOCS_ENGINE — scripts/lib/single-box.sh
+  # writes both together; compose cannot branch an image on another var.
   #
   # PROFILE: `["docs"]`. The 32 GB box runs this DEFAULT-ON — scripts/setup.sh
   # appends `docs` to COMPOSE_PROFILES (see .env.example). A ≤8 GB box drops
   # `docs` (and sets DOCS_ENABLED=0) to reclaim the ~2 GB engine; the dashboard
   # then renders the "Edit" affordance as unavailable rather than dead.
   #
-  # LICENSE: this is OnlyOffice Document Server **Community Edition** (AGPLv3),
-  # which we build/test against. Shipping the engine at GA requires an OnlyOffice
-  # OEM/commercial license — see docs/ADR-021 (`docs` profile) + ENVIRONMENT.md.
-  # The integration stays engine-agnostic (WOPI), so the engine is a config
-  # choice, not a code dependency.
-  #
   # Resource limits are top-level (mem_limit/cpus/pids_limit), NEVER
   # deploy.resources (silently ignored outside Swarm; scripts/test-security.sh
   # Test 14 / WARP-569 fails it).
   docserver:
-    image: onlyoffice/documentserver:8.2
+    image: ${DOCS_ENGINE_IMAGE:-collabora/code:26.04.2.4.1}
     profiles: ["docs"]
     depends_on:
       nextcloud:
@@ -777,6 +792,24 @@ services:
       - path: ../.env
         required: false
     environment:
+      # ── Collabora CODE knobs (DOCS_ENGINE=collabora; OnlyOffice ignores) ──
+      # aliasgroup1 is coolwsd's WOPI-host ALLOWLIST: the only WOPI host this
+      # engine serves is the compose-internal Nextcloud — exactly where the
+      # connector pins its callback (`wopi_callback_url` in
+      # docker/nextcloud-init.sh). No wildcard, no browser-origin coupling;
+      # the browser only reaches the engine through the gateway's /docs/ leg.
+      - aliasgroup1=http://nextcloud:80
+      # ssl.enable=false + ssl.termination=true: the gateway owns edge TLS
+      # (ADR-023); the engine speaks plain HTTP on the compose network but
+      # emits https URLs. net.service_root=/docs keeps every engine endpoint
+      # under the public /docs prefix. security.capabilities=false runs the
+      # per-document jails without added Linux capabilities — the documented
+      # alternative (granting MKNOD) is a capability a security-first
+      # appliance does not hand out; the cost is a slower per-document open.
+      - extra_params=--o:ssl.enable=false --o:ssl.termination=true --o:net.service_root=/docs --o:security.capabilities=false
+      # The gateway terminates TLS — never generate a self-signed cert inside.
+      - DONT_GEN_SSL_CERT=1
+      # ── OnlyOffice DS knobs (DOCS_ENGINE=onlyoffice; Collabora ignores) ──
       # JWT-protected handshake between the connector, the engine, and the
       # orchestrator. The connector + orchestrator sign with the SAME secret.
       - JWT_ENABLED=${ONLYOFFICE_JWT_ENABLED:-true}
@@ -1186,6 +1219,12 @@ services:
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
       # No longer exposed via `docker inspect`.
+      # WARP-1675 (ADR-033 edge-router shape): rpcd account for addressing an
+      # EXTERNAL OpenWrt AP directly at its discovered address. The password is
+      # read from /run/secrets/ap_openwrt_password (empty → AP-direct
+      # configuration is skipped and approvals stay router-side only).
+      - AP_USERNAME=${AP_USERNAME:-droplet-ai}
+      - AP_PORT=${AP_PORT:-80}
       # ROUTING_SERVICE_TOKEN (WARP-36) replaces PR#5's SERVICE_SECRET for this service.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       # WARP-44: `real` (default) = connect to OpenWrt. `mock` = serve fixtures
@@ -1212,6 +1251,8 @@ services:
       - ../data/secrets/service-tls/routing:/data/service-tls:ro
     secrets:
       - openwrt_password
+      # WARP-1675: external-AP droplet-ai password (see the `secrets:` block).
+      - ap_openwrt_password
     restart: always
     <<: *default-logging
     mem_limit: ${ROUTING_MEM_LIMIT:-256m}
@@ -1400,9 +1441,12 @@ services:
       dockerfile: services/switch/Dockerfile
     network_mode: host
     environment:
-      - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
-      - SWITCH_PORT=${SWITCH_PORT:-443}
-      - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
+      # WARP-1674: defaults mirror the Droplet OpenWrt switch image
+      # (droplet-edge-router switch/): static mgmt 192.168.9.2, LAN-side rpcd
+      # on :80, per-unit droplet-ai account.
+      - SWITCH_HOST=${SWITCH_HOST:-192.168.9.2}
+      - SWITCH_PORT=${SWITCH_PORT:-80}
+      - SWITCH_USERNAME=${SWITCH_USERNAME:-droplet-ai}
       # ADR-018 T1: the managed-switch credential is read from the Docker secret
       # file at /run/secrets/switch_password (mounted via the `secrets:` block
       # below, written by scripts/setup.sh from the operator-supplied
@@ -1412,13 +1456,7 @@ services:
       # Deprecated — env fallback kept for local dev / upgrades. Prefer the secret
       # file above. Empty default → driver degrades to "disconnected" (non-fatal).
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
-      - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      # WARP-583: optional CA bundle / cert path enabling TLS verification of
-      # the switch admin session. The path must be visible INSIDE the
-      # container (bind-mount it via a compose override). Unset -> the driver
-      # keeps the historical unverified session (self-signed embedded cert)
-      # with a loud warning; a set-but-missing path fails closed at connect.
-      - SWITCH_CA_CERT=${SWITCH_CA_CERT:-}
+      - SWITCH_DRIVER=${SWITCH_DRIVER:-openwrt}
       # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
       # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
       # FIPS-sealed master encryption key on the wire for every switch
@@ -2498,7 +2536,7 @@ secrets:
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
   openwrt_password:
     file: ../docker/secrets/openwrt_password
-  # ADR-018 T1: managed-switch (Lantronix) password mounted read-only at
+  # ADR-018 T1: managed-switch password mounted read-only at
   # /run/secrets/switch_password in the switch container. The value is
   # OPERATOR-SUPPLIED (the switch is not a device we mint secrets for) — setup.sh
   # writes it from $SWITCH_PASSWORD in .env, never generated. The file is created
@@ -2506,6 +2544,15 @@ secrets:
   # boxes without a managed switch; an empty file → driver "disconnected".
   switch_password:
     file: ../docker/secrets/switch_password
+  # WARP-1675 (ADR-033): external OpenWrt AP droplet-ai password mounted
+  # read-only at /run/secrets/ap_openwrt_password in the routing container.
+  # OPERATOR-SUPPLIED (the AP mints its own per-unit password at first boot —
+  # copy /etc/droplet/droplet-ai-password off the AP) — setup.sh's
+  # sync_ap_password_secret() writes it from $AP_OPENWRT_PASSWORD in .env,
+  # never generated, empty placeholder when unset so `docker compose up`
+  # works on boxes without an external AP.
+  ap_openwrt_password:
+    file: ../docker/secrets/ap_openwrt_password
 
 volumes:
   pgdata:
