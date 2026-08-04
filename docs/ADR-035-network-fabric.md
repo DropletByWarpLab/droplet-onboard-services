@@ -3,7 +3,7 @@
 **Status:** Proposed (pending review — human gate)
 **Date:** 2026-08-04
 **Deciders:** Stefan (founder directive 2026-08-04) + Engineering to execute
-**Source:** Founder directive, verbatim: *"i dont want this built the easy way i want the networking to be seamless and all interconnected, this ap, router and switch all needs to be integrated with droplet and for the devices to natively recognize each other"* and *"the AP should fall into the extender part of the devices tab and be controllable, not just another device on the network it should be a part of the network."* Successor to ADR-033 (edge-router shape): closes its open items 7 and 8 and adds the layer no ADR owns — device-to-device awareness. Builds on ADR-005 (AP onboarding), ADR-018 (network unification, as amended), ADR-023 (public-CA device certs — explicitly **not** reused here, see §4), ADR-024 (multi-backend AP onboarding), WARP-1276 foundation split (Vault ‖ WAN-Edge).
+**Source:** Founder directive, verbatim: *"i dont want this built the easy way i want the networking to be seamless and all interconnected, this ap, router and switch all needs to be integrated with droplet and for the devices to natively recognize each other"* and *"the AP should fall into the extender part of the devices tab and be controllable, not just another device on the network it should be a part of the network."* Successor to ADR-033 (edge-router shape): closes its open items 7 and 8 and adds the layer no ADR owns — device-to-device awareness. Builds on ADR-005 (AP onboarding), ADR-018 (network unification, as amended), ADR-023 (public-CA device certs — explicitly **not** reused here, see §4), ADR-024 (multi-backend AP onboarding), FOUNDATION.md (Vault ‖ WAN-Edge two-subsystem split).
 
 Grounded in a four-angle research pass executed live against the lab fabric on 2026-08-04 (current control surface, identity/trust, topology, convergence). Everything cited as "verified live" below was probed on the running devices, not inferred from code.
 
@@ -13,7 +13,7 @@ The fabric is ~70% built and the missing 30% was blockers, not architecture:
 
 - **Discovery never worked, and the reason was one decode call.** `umdns browse` serialises TXT records as *repeated* `"txt"` JSON keys (legal blobmsg, hostile JSON); Python's default decoder keeps only the last, destroying the `mac=` record before any parser ran. The `ApDevice` table had zero rows against a healthy announcing AP. Fixed and deployed as **WARP-1720** (2026-08-04); the lab AP entered the ADR-005 state machine — `AWAITING_APPROVAL` — for the first time on real hardware. Every conclusion below post-dates that fix.
 - **The AP credential had a 100% manual-miss rate.** `docker/secrets/ap_openwrt_password` was 0 bytes on the live box; the router and switch credentials were enrolled by hand and work. The transport is sound; the *enrollment step* is the weak link, exactly as ADR-033 §5 predicted.
-- **Approval is currently unsafe.** `_router_has_ap_radios` fails open on the real Pi (`network.wireless status` returns a non-empty envelope with zero interfaces), so approving the AP would stage a router-side `wifi-iface` and put an on-box AP on the air — violating the codified founder rule. **WARP-1721**, open; approval is administratively frozen until it lands.
+- **Approval was unsafe until the gate landed.** `_router_has_ap_radios` (renamed `_router_side_staging_allowed` by the fix) failed open on the real Pi (`network.wireless status` returns a non-empty envelope with zero interfaces), so approving the AP would have staged a router-side `wifi-iface` and put an on-box AP on the air — violating the codified founder rule. **WARP-1721** landed 2026-08-04 (#1407, merge `ce5667bc`): the gate fails closed on the edge-router shape and the administrative approval freeze is lifted.
 - **The control plane is plaintext.** All three devices speak ubus over HTTP :80; nothing listens on 443 (uhttpd's https listener is configured but silently dropped for want of a cert package). The per-unit `droplet-ai` password crosses the LAN in clear on every login — and the AP bridges Wi-Fi clients onto that same L2 (its own overlay comment says a management VLAN is the only real fix).
 - **Nothing sees the topology.** The switch's FDB already maps every port correctly (verified live: lan1=Pi uplink, lan2=AP drawing 6 W PoE, lan6=laptop, lan8=box) but no ubus object exposes it and the ACL grants no `file exec`. LLDP runs on zero devices (installed-but-dead on the AP only). The Pi's own FDB collapses everything to one port. There is no Switch model, no port entity, no edge table anywhere in Prisma.
 - **Identity is genuinely hard on this hardware.** The AP presents four MACs; the 2.4 GHz radio reports a *different* MAC from hostapd (`80:ea:0b:39:ae:23`, = eth0) than from the kernel netdev (`00:03:7f:12:a4:a4`, the raw PHY address, plausibly fleet-constant); `/etc/board.json`'s macaddr fields are corrupted with kernel-cmdline text (a `_aladdin`-unlock side effect); dnsmasq held two leases for the AP's one MAC under two DUIDs; the serial is empty (MRD erased). Anything keyed on BSSID, client-ID, IP, hostname, or serial mis-identifies this device today.
@@ -35,7 +35,7 @@ These are not in tension: observation answers "what is", intent answers "what sh
 
 ### 2. Identity: anchor MAC + identity ledger
 
-- **Primary key** for every fabric node is its **anchor MAC**: the wired management interface's MAC (eth0/br-lan). Verified live as the one value every observer agrees on (mDNS TXT, DHCP, both FDBs, ARP, and the 2.4 GHz beacon).
+- **Primary identity anchor** for every fabric node is its **anchor MAC**: the wired management interface's MAC (eth0/br-lan). Verified live as the one value every observer agrees on (mDNS TXT, DHCP, both FDBs, ARP, and the 2.4 GHz beacon).
 - Three new Prisma entities, following the ApOnboardBackend explicit-discriminator discipline:
   - `NetworkNode` — the union of router | switch | ap | box | client, keyed by node id (not MAC).
   - `NodeIdentity` — one row per observed identifier (MAC/BSSID/PHY/DUID), with `kind` and `source` enums, pointing at a node. Every MAC the device presents becomes a ledger row, not a guess.
@@ -59,7 +59,7 @@ These are not in tension: observation answers "what is", intent answers "what sh
 - **Phase 0 (stop the bleeding, config-only):** give uhttpd a cert (px5g or equivalent per image), move the three services to `https:443`, and pin each device's self-signed **SPKI fingerprint** box-side, recorded at enrollment. One-line SDK change (`UbusClient` scheme); removes the cleartext-credential-on-the-LAN finding without waiting for anything.
 - **Phase 2 (end state):** per-device **client certificates issued by the box's own internal CA** (`scripts/lib/internal-ca.sh`, WARP-236 — EC P-256, 90-day leaves, rotation already built), terminated by a TLS proxy in front of ubus on each device — because uhttpd on these builds has **no client-cert verification at all** (verified live: only `-C/-K/-P`). Revocation = stop renewing + terminator CRL; escrow = the box holds what it minted; the signing root stays pluggable for the TPM RealBackend when it lands.
 - **ADR-023 certs are explicitly the wrong tool here** — they are internet-dependent, HQ-mediated, browser-facing serving certs. Fabric identity is issued by the box's own CA, offline. Conflating the two PKIs is a category error this ADR exists partly to prevent.
-- **The management VLAN is the real fix** for the Wi-Fi-clients-on-the-management-L2 exposure (WARP-1709's unfixable-at-the-firewall finding). It rides the same VLAN capability §7 makes fabric-owned; until it lands, phase 0 is mitigation, not remedy.
+- **Phase 1 (the real boundary, delivered through §7): the management VLAN** is the real fix for the Wi-Fi-clients-on-the-management-L2 exposure (WARP-1709's unfixable-at-the-firewall finding). It is deliberately not transport work — it rides the same VLAN capability §7 makes fabric-owned; until it lands, phase 0 is mitigation, not remedy.
 
 ### 5. Discovery: symmetric, consumed, and demoted to second place behind enrollment
 
@@ -70,7 +70,7 @@ These are not in tension: observation answers "what is", intent answers "what sh
 
 ### 6. Topology: close the port↔device edge, then make recognition mutual
 
-- **The one unblock:** the switch gains a read-only **`bridge.fdb` rpcd ucode plugin** + ACL grant — *not* a `file exec` grant, preserving the switch's tested zero-exec posture. Deliverable remotely (overlay file + rpcd restart over the existing management plane; no reflash). `SwitchDriver` gains an abstract `get_fdb()` — the contract gap WARP-1717's ACL framing missed. This single edge closes four of the six missing graph edges (AP-on-port, box-on-port, wired-client-on-port, PoE-port→named-device).
+- **The one unblock:** the switch gains a read-only **`bridge.fdb` rpcd ucode plugin** + ACL grant — *not* a `file exec` grant, preserving the switch's tested zero-exec posture. Deliverable remotely (overlay file + rpcd restart over the existing management plane; no reflash). `SwitchDriver` gains an abstract `get_fdb()` — the contract gap WARP-1717's ACL framing missed. This single edge closes four missing graph edges in one move (AP-on-port, box-on-port, wired-client-on-port, PoE-port→named-device).
 - **LLDP everywhere, second:** lldpd on Pi + switch package lists, fix the AP's dead daemon, advertise role + anchor MAC in the system description, expose neighbours over ubus. This is peer-*asserted* adjacency — the literal "devices natively recognize each other" — and LLDP-MED gives the PoE relationship a protocol-native second source. Switch package additions ride the next planned reflash; the fabric must not *depend* on LLDP before then (FDB is the load-bearing source).
 - **Power dependency is a first-class edge:** `poe-feed` edges join FDB→NodeIdentity. `set_port_poe(off)` against a port feeding an enrolled member becomes a **hard refusal** when combined with any switch network change in the same transaction — that specific combination is the one with no remote recovery.
 - **Radio-layer recognition (last):** grant `dawn` + `hostapd.*.rrm_nr_*` in the AP ACL and reconcile every approved AP's `rrm_nr_get_own` into every other AP via `rrm_nr_set`. With a second AP this is 802.11k neighbour awareness — devices recognizing each other on the air, not just in a database.
@@ -103,7 +103,7 @@ These are not in tension: observation answers "what is", intent answers "what sh
 
 ## Sequencing (each stage remote, independently valuable, revertible)
 
-1. **Fix-first (landed / open):** WARP-1720 discovery decode ✅ deployed; AP credential enrolled + `.env` source-of-truth ✅; **WARP-1721 approval gate — blocks all approvals**; switch `safe_apply` parity; AP identity source-fixes (macaddr_base, board.json, client-ID); Pi keep.d `/etc/droplet`.
+1. **Fix-first (landed / open):** WARP-1720 discovery decode ✅ deployed; AP credential enrolled + `.env` source-of-truth ✅; WARP-1721 approval gate ✅ merged (`ce5667bc`, fails closed on this shape — freeze lifted); switch `safe_apply` parity; AP identity source-fixes (macaddr_base, board.json, client-ID); Pi keep.d `/etc/droplet`.
 2. **Pin identity:** DHCP reservations + `_droplet-router._tcp` + consume the switch advertisement into the node registry.
 3. **Topology:** `bridge.fdb` rpcd plugin + `get_fdb()` contract + PoE dependency edges + hard PoE refusal.
 4. **Intent for one fact:** NetworkIntent for SSID+passphrase, converger, delete the router-side write path, repoint the MCP tool. Prove offline-write and drift-repush on one fact before generalising.
@@ -115,7 +115,7 @@ These are not in tension: observation answers "what is", intent answers "what sh
 
 - [x] WARP-1720 — umdns duplicate-key decode fix (merged `149500ba`, deployed to lab box, AP discovered)
 - [x] AP credential enrolled on lab box + `AP_OPENWRT_PASSWORD` in both `.env` files (deploy fix, 2026-08-04)
-- [ ] WARP-1721 — approval gate fails open (**approval frozen until landed**)
+- [x] WARP-1721 — approval gate fails closed on the edge-router shape (merged `ce5667bc`, #1407; `_router_has_ap_radios` → `_router_side_staging_allowed`; approval freeze lifted)
 - [ ] Switch driver `safe_apply` parity + staged-revert (ticket needed)
 - [ ] AP image identity fixes: macaddr_base derivation, board.json bypass, DHCP client-ID pin (ticket needed, droplet-edge-router)
 - [ ] Pi keep.d `/etc/droplet` (ticket needed, droplet-edge-router)
