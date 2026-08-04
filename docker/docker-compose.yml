@@ -102,6 +102,11 @@ services:
       # DHCP/DNS (the split-horizon FQDN is unresolvable otherwise). Written
       # 1 by scripts/lib/single-box.sh, absent/0 on every other shape.
       - DROPLET_LAN_DNS_AUTHORITY=${DROPLET_LAN_DNS_AUTHORITY:-0}
+      # WARP-1686: /docker-entrypoint.d/03-docs-engine.sh keys the /docs/
+      # proxy variant on the document engine — collabora (default) keeps the
+      # /docs prefix → docserver:9980 (coolwsd net.service_root); onlyoffice
+      # strips it → docserver:80. Same selector pattern as the knobs above.
+      - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
@@ -746,29 +751,39 @@ services:
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
 
   # ==========================================================================
-  # WARP-882 / WS-4 — OnlyOffice Document Server (in-browser editing + co-author)
+  # WARP-882 / WARP-1686 — Document engine (in-browser viewing/editing + co-author)
   # ==========================================================================
-  # The editing ENGINE behind the Nextcloud `onlyoffice` connector (WOPI-style
-  # handshake). Mirrors the `nextcloud` block: default network, NO `ports:`
-  # (reached only via the gateway's `location /docs/` + sibling containers),
-  # env_file, restart: always, shared logging.
+  # The engine behind the Nextcloud connector app (WOPI-style handshake).
+  # Mirrors the `nextcloud` block: default network, NO `ports:` (reached only
+  # via the gateway's `location /docs/` + sibling containers), env_file,
+  # restart: always, shared logging.
+  #
+  # ENGINE-SELECTABLE (WARP-1686 / ADR-034): `DOCS_ENGINE` picks the engine;
+  # every seam is WOPI (connector app, gateway leg, orchestrator probe), so
+  # the engine stays a CONFIG choice, not a code dependency (ADR-027):
+  #   * collabora (DEFAULT) — Collabora CODE, LibreOffice technology. NO
+  #     licensing fee (MPLv2 core, free-of-charge binaries) — ADR-034 flips
+  #     the default off OnlyOffice because its OEM license was the one
+  #     remaining GA gate. Listens on :9980 under `net.service_root=/docs`,
+  #     so the gateway forwards the ORIGINAL /docs/-prefixed URI (no strip)
+  #     — see docker/nginx/docs-engine.collabora.conf.
+  #   * onlyoffice — OnlyOffice DS Community Edition (AGPLv3; an OEM license
+  #     is required to ship it at GA). Kept selectable for a future
+  #     OEM-licensed SKU. Listens on :80 at its root — the gateway variant
+  #     strips /docs/ (the original WARP-882 shape).
+  # DOCS_ENGINE_IMAGE must track DOCS_ENGINE — scripts/lib/single-box.sh
+  # writes both together; compose cannot branch an image on another var.
   #
   # PROFILE: `["docs"]`. The 32 GB box runs this DEFAULT-ON — scripts/setup.sh
   # appends `docs` to COMPOSE_PROFILES (see .env.example). A ≤8 GB box drops
   # `docs` (and sets DOCS_ENABLED=0) to reclaim the ~2 GB engine; the dashboard
   # then renders the "Edit" affordance as unavailable rather than dead.
   #
-  # LICENSE: this is OnlyOffice Document Server **Community Edition** (AGPLv3),
-  # which we build/test against. Shipping the engine at GA requires an OnlyOffice
-  # OEM/commercial license — see docs/ADR-021 (`docs` profile) + ENVIRONMENT.md.
-  # The integration stays engine-agnostic (WOPI), so the engine is a config
-  # choice, not a code dependency.
-  #
   # Resource limits are top-level (mem_limit/cpus/pids_limit), NEVER
   # deploy.resources (silently ignored outside Swarm; scripts/test-security.sh
   # Test 14 / WARP-569 fails it).
   docserver:
-    image: onlyoffice/documentserver:8.2
+    image: ${DOCS_ENGINE_IMAGE:-collabora/code:26.04.2.4.1}
     profiles: ["docs"]
     depends_on:
       nextcloud:
@@ -777,6 +792,24 @@ services:
       - path: ../.env
         required: false
     environment:
+      # ── Collabora CODE knobs (DOCS_ENGINE=collabora; OnlyOffice ignores) ──
+      # aliasgroup1 is coolwsd's WOPI-host ALLOWLIST: the only WOPI host this
+      # engine serves is the compose-internal Nextcloud — exactly where the
+      # connector pins its callback (`wopi_callback_url` in
+      # docker/nextcloud-init.sh). No wildcard, no browser-origin coupling;
+      # the browser only reaches the engine through the gateway's /docs/ leg.
+      - aliasgroup1=http://nextcloud:80
+      # ssl.enable=false + ssl.termination=true: the gateway owns edge TLS
+      # (ADR-023); the engine speaks plain HTTP on the compose network but
+      # emits https URLs. net.service_root=/docs keeps every engine endpoint
+      # under the public /docs prefix. security.capabilities=false runs the
+      # per-document jails without added Linux capabilities — the documented
+      # alternative (granting MKNOD) is a capability a security-first
+      # appliance does not hand out; the cost is a slower per-document open.
+      - extra_params=--o:ssl.enable=false --o:ssl.termination=true --o:net.service_root=/docs --o:security.capabilities=false
+      # The gateway terminates TLS — never generate a self-signed cert inside.
+      - DONT_GEN_SSL_CERT=1
+      # ── OnlyOffice DS knobs (DOCS_ENGINE=onlyoffice; Collabora ignores) ──
       # JWT-protected handshake between the connector, the engine, and the
       # orchestrator. The connector + orchestrator sign with the SAME secret.
       - JWT_ENABLED=${ONLYOFFICE_JWT_ENABLED:-true}
