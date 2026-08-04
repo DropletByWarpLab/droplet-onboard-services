@@ -26,7 +26,7 @@ import { InterfaceWriteControls } from "./InterfaceWriteControls";
 function StatusChip({ up, present }: { up: boolean; present: boolean }) {
   if (!present) {
     return (
-      <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-surface-secondary text-label-tertiary">
+      <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-[var(--card-inner)] text-[color:var(--text-muted)]">
         Not on this box
       </span>
     );
@@ -34,12 +34,12 @@ function StatusChip({ up, present }: { up: boolean; present: boolean }) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 type-caption-1 ${
-        up ? "text-system-green" : "text-label-tertiary"
+        up ? "text-system-green" : "text-[color:var(--text-muted)]"
       }`}
     >
       <span
         className={`inline-block w-1.5 h-1.5 rounded-full ${
-          up ? "bg-system-green" : "bg-label-quaternary"
+          up ? "bg-system-green" : "bg-[var(--text-faint)]"
         }`}
         aria-hidden="true"
       />
@@ -68,10 +68,10 @@ export function InterfacesTable({
   return (
     <div className="card">
       <div className="flex items-center gap-2 mb-1">
-        <Cable size={18} className="text-label-tertiary" aria-hidden="true" />
-        <h3 className="type-headline text-label-primary">Interfaces</h3>
+        <Cable size={18} className="text-[color:var(--text-muted)]" aria-hidden="true" />
+        <h3 className="type-headline text-[color:var(--text)]">Interfaces</h3>
       </div>
-      <p className="type-caption-1 text-label-tertiary mb-4">
+      <p className="type-caption-1 text-[color:var(--text-muted)] mb-4">
         {canEdit
           ? "Every network interface this appliance is configured with. Changes here can affect connectivity, so we confirm before applying."
           : "Every network interface this appliance is configured with."}
@@ -81,7 +81,7 @@ export function InterfacesTable({
         <div className="overflow-x-auto">
           <table className="w-full type-caption-1">
             <thead>
-              <tr className="text-label-tertiary text-left">
+              <tr className="text-[color:var(--text-muted)] text-left">
                 <th className="font-medium pb-2 pr-4">Name</th>
                 <th className="font-medium pb-2 pr-4">Device</th>
                 <th className="font-medium pb-2 pr-4">Protocol</th>
@@ -94,23 +94,23 @@ export function InterfacesTable({
               {rows.map((iface) => (
                 <tr
                   key={iface.name}
-                  className={`border-t border-separator/60 ${
+                  className={`border-t border-[var(--card-bd)] ${
                     iface.present ? "" : "opacity-60"
                   }`}
                 >
                   <td className="py-2 pr-4">
-                    <span className="type-subheadline text-label-primary font-medium">
+                    <span className="type-subheadline text-[color:var(--text)] font-medium">
                       {iface.name}
                     </span>
                   </td>
-                  <td className="py-2 pr-4 text-label-tertiary font-mono">
+                  <td className="py-2 pr-4 text-[color:var(--text-muted)] font-mono">
                     {iface.device ?? "—"}
                   </td>
-                  <td className="py-2 pr-4 text-label-tertiary">{iface.proto ?? "—"}</td>
-                  <td className="py-2 pr-4 text-label-tertiary font-mono">
+                  <td className="py-2 pr-4 text-[color:var(--text-muted)]">{iface.proto ?? "—"}</td>
+                  <td className="py-2 pr-4 text-[color:var(--text-muted)] font-mono">
                     {iface.address ?? "—"}
                   </td>
-                  <td className="py-2 pr-4 text-label-tertiary">{iface.zone ?? "—"}</td>
+                  <td className="py-2 pr-4 text-[color:var(--text-muted)]">{iface.zone ?? "—"}</td>
                   <td className="py-2">
                     <StatusChip up={iface.up} present={iface.present} />
                   </td>
@@ -120,7 +120,7 @@ export function InterfacesTable({
           </table>
         </div>
       ) : (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline text-[color:var(--text-muted)]">
           {isLoading ? "Loading interfaces…" : "No interfaces reported."}
         </p>
       )}

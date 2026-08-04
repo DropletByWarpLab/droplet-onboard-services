@@ -26,7 +26,7 @@ const TX_CAP_DBM = 5;
 
 function Chip({ label }: { label: string }) {
   return (
-    <span className="type-caption-1 font-mono px-2 py-0.5 rounded-sm bg-surface-secondary text-label-secondary">
+    <span className="type-caption-1 font-mono px-2 py-0.5 rounded-sm bg-[var(--card-inner)] text-[color:var(--text-muted)]">
       {label}
     </span>
   );
@@ -43,27 +43,27 @@ export function RadioDetailCard() {
   const txCapped = data?.txpower != null && data.txpower <= TX_CAP_DBM;
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-secondary text-label-tertiary">
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-[var(--card-inner)] text-[color:var(--text-muted)]">
           <Radio size={18} aria-hidden="true" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="type-headline text-label-primary">Wireless radio</h3>
+            <h3 className="type-headline text-[color:var(--text)]">Wireless radio</h3>
             {!isLoading && (
               <span
                 className={`type-caption-2 font-medium px-2 py-0.5 rounded-full ${
                   broadcasting
                     ? "bg-system-green/10 text-system-green"
-                    : "bg-surface-secondary text-label-tertiary"
+                    : "bg-[var(--card-inner)] text-[color:var(--text-muted)]"
                 }`}
               >
                 {broadcasting ? "Broadcasting" : "Not broadcasting"}
               </span>
             )}
           </div>
-          <p className="type-caption-1 text-label-tertiary mt-0.5">
+          <p className="type-caption-1 text-[color:var(--text-muted)] mt-0.5">
             This Droplet uses one combined Wi-Fi radio; it can&apos;t be turned
             off separately.
           </p>
@@ -79,7 +79,7 @@ export function RadioDetailCard() {
           </dl>
 
           {txCapped && (
-            <p className="type-caption-1 text-label-tertiary mt-3">
+            <p className="type-caption-1 text-[color:var(--text-muted)] mt-3">
               Transmit power is capped low by the wireless driver&apos;s
               regulatory limits on this hardware, which can reduce range.
             </p>
@@ -93,12 +93,12 @@ export function RadioDetailCard() {
 function RadioRow({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="flex items-center justify-between gap-2">
-      <dt className="type-caption-1 text-label-tertiary">{label}</dt>
+      <dt className="type-caption-1 text-[color:var(--text-muted)]">{label}</dt>
       <dd>
         {value != null ? (
           <Chip label={value} />
         ) : (
-          <span className="type-caption-1 text-label-quaternary">Not reported</span>
+          <span className="type-caption-1 text-[color:var(--text-faint)]">Not reported</span>
         )}
       </dd>
     </div>

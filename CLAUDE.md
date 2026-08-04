@@ -192,9 +192,11 @@ always-relevant gotchas:
   auto-merges `single-box`, which makes ollama, openwrt, switch, and
   camera-discovery default-on. On other shapes, switch/camera-discovery
   stay opt-in via `full` (real hardware + operator credentials). The
-  `docs` profile (OnlyOffice `docserver`, in-browser editing/co-authoring,
-  WARP-882) is **default-on** on the 32 GB box (~2 GB additive); a ≤8 GB
-  box drops `docs` AND sets `DOCS_ENABLED=0`.
+  `docs` profile (`docserver` document engine, in-browser viewing/editing,
+  WARP-882/WARP-1686) is **default-on** on the 32 GB box (~2 GB additive);
+  a ≤8 GB box drops `docs` AND sets `DOCS_ENABLED=0`. The engine is
+  selectable via `DOCS_ENGINE` — Collabora CODE by default (LibreOffice,
+  no licensing fee, ADR-034), OnlyOffice retained for an OEM-licensed SKU.
 - `docker restart` does **not** re-read the env_file — after editing
   `.env` (including `*_MEM_LIMIT` resource limits, ADR-021), recreate:
   `docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate <service>`.
@@ -216,11 +218,15 @@ Full per-variable reference (defaults, ports, resource limits):
   `http://orchestrator:3000/api/files`). Raw Nextcloud cannot serve
   these tools — see WARP-861.
 - `DOCS_ENABLED` is an EXPLICIT boolean (never derived from
-  `DOCS_INTERNAL_URL` emptiness); `ONLYOFFICE_JWT_SECRET` is the shared
-  secret the engine, the Nextcloud `onlyoffice` connector, AND the
-  orchestrator all verify (per-device, never tracked). **License:**
-  OnlyOffice CE (AGPLv3) is what we build/test; an OnlyOffice
-  OEM/commercial license is required before GA (WARP-882). Full row set:
+  `DOCS_INTERNAL_URL` emptiness); `DOCS_ENGINE` selects the engine
+  (`collabora` default / `onlyoffice`) and `DOCS_ENGINE_IMAGE` +
+  `DOCS_INTERNAL_URL` must track it (single-box.sh writes the trio
+  together). `ONLYOFFICE_JWT_SECRET` stays required under BOTH engines —
+  the orchestrator signs editor-session tokens with it (per-device, never
+  tracked). **License (ADR-034):** default engine Collabora CODE has NO
+  licensing fee (MPLv2 core); OnlyOffice CE (AGPLv3) needs an OnlyOffice
+  OEM/commercial license before GA and is kept only as the
+  `DOCS_ENGINE=onlyoffice` option (WARP-882/WARP-1686). Full row set:
   `docs/ENVIRONMENT.md`.
 - `DROPLET_FIPS_MODE` is the SINGLE FIPS 140-3 knob (per-customer,
   default OFF; flipped only via `setup.sh --fips` / `--no-fips`, which

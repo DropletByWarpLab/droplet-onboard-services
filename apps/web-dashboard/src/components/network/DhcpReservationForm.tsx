@@ -141,9 +141,9 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">Add IP reservation</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline text-[color:var(--text)] mb-1">Add IP reservation</h3>
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Pin a device to a fixed address so it always gets the same IP — handy for
         a NAS, printer, or camera you connect to by address. Find the device's
         MAC address on the Devices tab.
@@ -153,7 +153,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
         <div>
           <label
             htmlFor="lease-name"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
           >
             Device name
           </label>
@@ -163,7 +163,13 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Office NAS"
-            className="dp-input"
+            className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             autoComplete="off"
             spellCheck={false}
             disabled={saving}
@@ -174,7 +180,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="lease-mac"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               MAC address
             </label>
@@ -184,7 +190,13 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
               value={mac}
               onChange={(e) => setMac(e.target.value)}
               placeholder="AA:BB:CC:DD:EE:FF"
-              className="dp-input font-mono"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -193,7 +205,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="lease-ip"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Reserved IP
             </label>
@@ -204,7 +216,13 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
               value={ip}
               onChange={(e) => setIp(e.target.value)}
               placeholder="192.168.50.20"
-              className="dp-input font-mono"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -216,7 +234,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
           type="button"
           onClick={handleAdd}
           disabled={saving}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving ? (
             <Loader2 size={16} className="animate-spin" />
@@ -230,7 +248,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2
             size={14}
@@ -245,7 +263,7 @@ export function DhcpReservationForm({ onApplied }: { onApplied?: () => void }) {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
         >
           <AlertCircle
             size={14}

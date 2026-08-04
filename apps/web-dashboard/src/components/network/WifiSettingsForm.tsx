@@ -168,9 +168,9 @@ export function WifiSettingsForm() {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">WiFi Settings</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline text-[color:var(--text)] mb-1">WiFi Settings</h3>
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Name the Wi-Fi network your Droplet broadcasts and set its password.
         Saving restarts the radio, which briefly disconnects every device —
         including this one. Rejoin with the new name and password.
@@ -180,14 +180,14 @@ export function WifiSettingsForm() {
         <div>
           <label
             htmlFor="wifi-ssid"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
           >
             Network name (SSID)
           </label>
           <div className="relative">
             <Wifi
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]"
               aria-hidden="true"
             />
             <input
@@ -196,7 +196,13 @@ export function WifiSettingsForm() {
               value={ssid}
               onChange={(e) => setSsid(e.target.value)}
               placeholder="Studio Fotonia"
-              className="dp-input pl-10"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={SSID_MAX}
               autoComplete="off"
               spellCheck={false}
@@ -208,14 +214,14 @@ export function WifiSettingsForm() {
         <div>
           <label
             htmlFor="wifi-password"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
           >
             Wi-Fi password
           </label>
           <div className="relative">
             <Lock
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]"
               aria-hidden="true"
             />
             <input
@@ -224,7 +230,13 @@ export function WifiSettingsForm() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Wi-Fi password"
-              className="dp-input pl-10 pr-10"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10 pr-10"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={PSK_MAX}
               autoComplete="off"
               disabled={saving}
@@ -233,7 +245,7 @@ export function WifiSettingsForm() {
               type="button"
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
@@ -244,7 +256,7 @@ export function WifiSettingsForm() {
           type="button"
           onClick={handleSave}
           disabled={saving}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving && <Loader2 size={16} className="animate-spin" />}
           {saving ? "Saving…" : "Save Wi-Fi settings"}
@@ -254,7 +266,7 @@ export function WifiSettingsForm() {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2
             size={14}
@@ -269,7 +281,7 @@ export function WifiSettingsForm() {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
         >
           <AlertCircle
             size={14}

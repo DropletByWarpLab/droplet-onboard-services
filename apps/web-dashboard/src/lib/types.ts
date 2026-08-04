@@ -41,8 +41,21 @@ export interface ChatMessage {
   /**
    * WARP-458 — concatenated deep-reasoning trace for this assistant
    * turn. Accumulated live from `reasoning_step` SSE events and carried
-   * through loadConversation from the persisted row. Rendered as the
-   * collapsed "Thought process" disclosure above the bubble.
+   * through loadConversation from the persisted row.
+   *
+   * WARP-1602/WARP-1605 — this is a FLATTENED LIST, not free text: one entry
+   * per agent iteration that produced thinking, joined with the orchestrator's
+   * `REASONING_STEP_SEPARATOR` (mirrored in
+   * `@/components/chat/reasoning-trace`). Use `splitReasoningSteps()` to read
+   * it; never render the raw string. Both sources agree on the shape, so a
+   * live turn and the same turn after reload split identically. A trace with
+   * no separator — every pre-WARP-1602 row and every single-iteration turn —
+   * is simply a one-entry list.
+   *
+   * A non-empty trace promotes the turn's thinking into its own message row
+   * (`<ThinkingMessage>`) above the answer bubble; the trace itself stays
+   * collapsed behind the "Thought process" disclosure (harmony analysis text
+   * must not be shown to users unbidden).
    */
   reasoning?: string;
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
@@ -332,6 +345,14 @@ export interface FileEntryInfo {
   size: number;
   mimeType: string | null;
   modifiedAt: string;
+  /**
+   * WARP-1683 — Nextcloud numeric fileId (oc:fileid), surfaced by the
+   * orchestrator's listing/search parsers so the Messages forward picker
+   * can address a file by the stable id the server-side space gate keys
+   * on. Optional: older orchestrators (and entries whose PROPFIND
+   * response omitted the prop) don't carry it.
+   */
+  ncFileId?: number;
 }
 
 /** WARP-882 — document-server availability for the gated "Edit" affordance. */
@@ -1132,7 +1153,8 @@ export type AccessModuleId =
   | "cameras"
   | "smart_home"
   | "network"
-  | "managed_switch";
+  | "managed_switch"
+  | "team_chat";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;

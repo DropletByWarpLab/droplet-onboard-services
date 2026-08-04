@@ -30,7 +30,7 @@
 #
 # OUTPUT_DIR defaults to /var/lib/droplet/backups. One tarball per run:
 #
-#   <OUTPUT_DIR>/device-backup-<YYYYMMDDTHHMMSSZ>.tar.gz   (mode 600)
+#   <OUTPUT_DIR>/device-backup-<YYYYMMDDTHHMMSSZ>-<rand>.tar.gz   (mode 600)
 #
 # Layout inside:
 #   postgres/main.sql.gz          pg_dump of the orchestrator DB | gzip
@@ -60,7 +60,9 @@
 #   DB_NAME       main DB name (falls back to in-container $POSTGRES_DB)
 #   BACKUP_KEEP   rotations to retain (7)
 #
-# Idempotent — concurrent invocations write to distinct timestamped files.
+# Idempotent — concurrent invocations write to distinct files (the filename
+# carries a per-run random suffix as well as the timestamp, so two runs in the
+# same second cannot overwrite each other).
 # Restore via the companion `device-restore.sh`.
 # =============================================================================
 set -euo pipefail
@@ -70,6 +72,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUTPUT_DIR="${1:-/var/lib/droplet/backups}"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Per-run random suffix for the ARCHIVE FILENAME only (TS stays the pure
+# timestamp the manifest records as `taken_at`). A second-resolution timestamp
+# is NOT unique: two runs that start in the same second resolve to the same
+# path and the second one silently OVERWRITES the first — the operator ends up
+# with one backup where they believe they have two, and rotation counts one
+# fewer restore point than it reports. Real collisions: the rotation drill
+# fires four backups back to back, and at boot the systemd timer can coincide
+# with an operator-triggered or pre-factory-reset safety backup.
+# `|| true` keeps `set -o pipefail` from killing the script on a host without
+# /dev/urandom; the PID/RANDOM fallback below covers that case.
+RUN_ID="$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+[ -n "$RUN_ID" ] || RUN_ID="$(printf '%04x' "$(( (RANDOM ^ $$) & 0xffff ))")"
 
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker/docker-compose.yml}"
 
@@ -147,7 +162,7 @@ chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
 WORK_DIR="$(mktemp -d -t device-backup-XXXXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-ARCHIVE="$OUTPUT_DIR/device-backup-$TS.tar.gz"
+ARCHIVE="$OUTPUT_DIR/device-backup-$TS-$RUN_ID.tar.gz"
 
 dc() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 
