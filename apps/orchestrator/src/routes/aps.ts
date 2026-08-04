@@ -119,8 +119,8 @@ export function createApsRouter(prisma: PrismaClient): Router {
   //
   // owner/admin (unlike the plain row reads above): the body carries the
   // live Wi-Fi passphrase, same posture as GET /network/wifi/ap and the
-  // guest-network PSK read. Registered BEFORE `/aps/:mac` so the literal
-  // suffix isn't swallowed by the MAC param.
+  // guest-network PSK read. Kept next to `/aps/:mac` for readability — a
+  // path param never spans a `/`, so the two patterns can't collide.
   router.get(
     "/aps/:mac/wireless",
     requireRole("owner", "admin"),
