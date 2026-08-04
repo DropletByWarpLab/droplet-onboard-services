@@ -198,9 +198,16 @@ if [ -f "$ENV_EXAMPLE" ]; then
   #   * ONLYOFFICE_JWT_SECRET — empty ⇒ the orchestrator treats the doc-server
   #     as unavailable and no document-access JWT is ever signed (WARP-882).
   #   * AP_OPENWRT_PASSWORD — blank ⇒ "no external AP" (WARP-1675/WARP-1676);
-  #     a `change-me` literal here would read as a real operator-supplied AP
-  #     password and break the blank-means-off contract in
-  #     scripts/lib/secrets.sh::sync_ap_password_secret + services/routing.
+  #     AP-direct config is skipped, never failed (services/routing/main.py).
+  #     A `change-me` literal here would be WRONG, not merely untidy: it is
+  #     truthy, so it reads as a real operator-supplied AP password, breaking
+  #     the blank-means-off contract in
+  #     scripts/lib/secrets.sh::sync_ap_password_secret + services/routing —
+  #     which would then authenticate against a nonexistent AP with the
+  #     literal written into /run/secrets/ap_openwrt_password.
+  # The list is deliberately explicit rather than a blanket "empty is fine" —
+  # a NEW secret that ships empty by accident must fail this check and be added
+  # here on purpose, with a reason.
   # All other secrets must use `change-me` as their placeholder.
   PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" \
     | grep -v 'change-me' \
