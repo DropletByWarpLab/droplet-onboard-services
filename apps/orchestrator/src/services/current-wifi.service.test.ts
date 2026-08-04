@@ -9,10 +9,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("./openwrt.client.js", () => ({ fetchApWireless: vi.fn() }));
+vi.mock("./openwrt.client.js", () => ({ getApWireless: vi.fn() }));
 
 import { getCurrentWifi, findRouterWifi } from "./current-wifi.service.js";
-import { fetchApWireless } from "./openwrt.client.js";
+import { getApWireless } from "./openwrt.client.js";
 
 const ROUTER_HOSTING = {
   radio0: {
@@ -96,13 +96,16 @@ describe("getCurrentWifi", () => {
   it("uses the router when it hosts the AP, without asking any AP", async () => {
     const res = await getCurrentWifi(prismaWith([]), ROUTER_HOSTING);
     expect(res).toMatchObject({ ssid: "Droplet", key: "droplethome2026", source: "router" });
-    expect(fetchApWireless).not.toHaveBeenCalled();
+    expect(getApWireless).not.toHaveBeenCalled();
   });
 
   it("falls back to the AP on the edge-router shape", async () => {
-    vi.mocked(fetchApWireless).mockResolvedValue({
+    vi.mocked(getApWireless).mockResolvedValue({
       supported: true,
-      wireless: { ssid: "Studio Fotonia", key: "apside12345", encryption: "psk2", section: "wifinet1" },
+      ssid: "Studio Fotonia",
+      key: "apside12345",
+      primary_section: "wifinet1",
+      radios: [],
     });
     const res = await getCurrentWifi(
       prismaWith([{ mac: "B8:27:EB:AA:BB:CC", displayName: "Living-room AP" }]),
@@ -115,7 +118,7 @@ describe("getCurrentWifi", () => {
   it("names the credential gap when the AP can't be read — the lab box's state", async () => {
     // docker/secrets/ap_openwrt_password is 0 bytes on the box, so routing
     // answers supported:false. Blank fields alone would read as "no Wi-Fi set".
-    vi.mocked(fetchApWireless).mockResolvedValue({ supported: false, wireless: null });
+    vi.mocked(getApWireless).mockResolvedValue({ supported: false, radios: [] });
     const res = await getCurrentWifi(
       prismaWith([{ mac: "B8:27:EB:AA:BB:CC", displayName: "Living-room AP" }]),
       EDGE_ROUTER_NO_AP,
@@ -127,7 +130,7 @@ describe("getCurrentWifi", () => {
   });
 
   it("distinguishes an unreachable AP from a missing credential", async () => {
-    vi.mocked(fetchApWireless).mockResolvedValue({ supported: true, wireless: null });
+    vi.mocked(getApWireless).mockResolvedValue({ supported: true, ssid: null, radios: [] });
     const res = await getCurrentWifi(
       prismaWith([{ mac: "B8:27:EB:AA:BB:CC", displayName: "AP" }]),
       EDGE_ROUTER_NO_AP,
@@ -141,15 +144,18 @@ describe("getCurrentWifi", () => {
     const res = await getCurrentWifi(prismaWith([]), EDGE_ROUTER_NO_AP);
     expect(res.source).toBeNull();
     expect(res.detail).toMatch(/no access point has been approved/i);
-    expect(fetchApWireless).not.toHaveBeenCalled();
+    expect(getApWireless).not.toHaveBeenCalled();
   });
 
   it("keeps going past an AP that throws rather than failing the card", async () => {
-    vi.mocked(fetchApWireless)
+    vi.mocked(getApWireless)
       .mockRejectedValueOnce(new Error("unreachable"))
       .mockResolvedValueOnce({
         supported: true,
-        wireless: { ssid: "Second AP", key: "pw12345678", encryption: "psk2", section: "w" },
+        ssid: "Second AP",
+        key: "pw12345678",
+        primary_section: "w",
+        radios: [],
       });
     const res = await getCurrentWifi(
       prismaWith([
@@ -168,9 +174,12 @@ describe("getCurrentWifi", () => {
   });
 
   it("reports an open AP network with a null key rather than an empty string", async () => {
-    vi.mocked(fetchApWireless).mockResolvedValue({
+    vi.mocked(getApWireless).mockResolvedValue({
       supported: true,
-      wireless: { ssid: "OpenNet", key: "", encryption: "none", section: "w" },
+      ssid: "OpenNet",
+      key: "",
+      primary_section: "w",
+      radios: [],
     });
     const res = await getCurrentWifi(prismaWith([{ mac: "AA", displayName: null }]), EDGE_ROUTER_NO_AP);
     expect(res).toMatchObject({ ssid: "OpenNet", key: null, source: "ap" });

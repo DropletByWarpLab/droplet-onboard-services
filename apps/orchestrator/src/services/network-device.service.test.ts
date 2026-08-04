@@ -238,7 +238,7 @@ describe("network-device.service", () => {
   let svc: ReturnType<typeof createNetworkDeviceService>;
   let snapshot: {
     leases: Array<{ mac: string; ip: string; hostname?: string }>;
-    wirelessClients: Array<{ mac: string; signal?: number }>;
+    wirelessClients: Array<{ mac: string; signal?: number; viaApMac?: string }>;
   };
 
   beforeEach(() => {
@@ -347,23 +347,65 @@ describe("network-device.service", () => {
     });
 
     /**
-     * WARP-1712 — our own flashed APs are infrastructure, not clients. They
-     * take a DHCP lease like anything else so the reconciler creates a
-     * NetworkDevice row for them, but the Coverage Extenders panel owns them;
-     * showing the same hardware in both places lets an operator rename it in
-     * one and be confused by the other.
+     * WARP-1712 flagged our own flashed APs so they could be HIDDEN from the
+     * devices grid — the same hardware in two places invites renaming it in
+     * one and being confused by the other.
+     *
+     * WARP-1715 keeps the concern but not the remedy (founder call,
+     * 2026-08-04): an AP IS part of the household network and belongs in this
+     * list, so the row is kept and FLAGGED, and the dashboard renders it in a
+     * separate "Network infrastructure" section instead of between two phones.
      */
-    describe("Droplet AP dedupe", () => {
-      it("hides a DROPLET_IMAGE access point from the devices list", async () => {
+    describe("access points as network infrastructure", () => {
+      it("keeps a DROPLET_IMAGE access point in the list, flagged", async () => {
         devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
         devices.set("AA:BB:CC:DD:EE:A0", makeDevice({ mac: "AA:BB:CC:DD:EE:A0" }));
         apDevices.set("AA:BB:CC:DD:EE:A0", {
           mac: "AA:BB:CC:DD:EE:A0",
           backend: "DROPLET_IMAGE",
+          displayName: "Living-room AP",
+          model: "NWA50BE",
         });
 
         const list = await svc.listDevices();
-        expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:01"]);
+        const by = new Map(list.map((d: any) => [d.mac, d]));
+        expect(by.size).toBe(2);
+        expect(by.get("AA:BB:CC:DD:EE:A0")!.isAccessPoint).toBe(true);
+        expect(by.get("AA:BB:CC:DD:EE:A0")!.displayName).toBe("Living-room AP");
+        expect(by.get("AA:BB:CC:DD:EE:A0")!.apModel).toBe("NWA50BE");
+        expect(by.get("AA:BB:CC:DD:EE:01")!.isAccessPoint).toBe(false);
+      });
+
+      it("never overwrites a name the operator set on the AP", async () => {
+        devices.set("AA:BB:CC:DD:EE:A0", makeDevice({
+          mac: "AA:BB:CC:DD:EE:A0",
+          displayName: "Upstairs",
+        }));
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+          displayName: "Living-room AP",
+        });
+
+        const [ap] = await svc.listDevices();
+        expect(ap.displayName).toBe("Upstairs");
+        expect((ap as any).isAccessPoint).toBe(true);
+      });
+
+      it("falls back to the model, then a generic label, for an unnamed AP", async () => {
+        devices.set("AA:BB:CC:DD:EE:A0", makeDevice({ mac: "AA:BB:CC:DD:EE:A0" }));
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+          model: "NWA50BE",
+        });
+        expect((await svc.listDevices())[0].displayName).toBe("NWA50BE");
+
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+        });
+        expect((await svc.listDevices())[0].displayName).toBe("Access point");
       });
 
       it("normalises case and separators before matching", async () => {
@@ -374,24 +416,24 @@ describe("network-device.service", () => {
           backend: "DROPLET_IMAGE",
         });
 
-        const list = await svc.listDevices();
-        expect(list).toHaveLength(0);
+        const [row] = await svc.listDevices();
+        expect((row as any).isAccessPoint).toBe(true);
       });
 
-      it("keeps third-party (UniFi / EasyMesh) APs visible as devices", async () => {
-        // Not ours to fully control, so the operator may legitimately want to
-        // see, block or group them — the explicit backend filter is the gate.
+      it("leaves third-party (UniFi / EasyMesh) APs as ordinary devices", async () => {
+        // Not ours to fully control, so they stay client devices the operator
+        // can see, block and group — the explicit backend filter is the gate.
         devices.set("AA:BB:CC:DD:EE:C1", makeDevice({ mac: "AA:BB:CC:DD:EE:C1" }));
         apDevices.set("AA:BB:CC:DD:EE:C1", {
           mac: "AA:BB:CC:DD:EE:C1",
           backend: "UNIFI",
         });
 
-        const list = await svc.listDevices();
-        expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:C1"]);
+        const [row] = await svc.listDevices();
+        expect((row as any).isAccessPoint).toBe(false);
       });
 
-      it("hides the AP under onlineOnly and groupId filters too", async () => {
+      it("keeps the AP under onlineOnly and groupId filters", async () => {
         devices.set("AA:BB:CC:DD:EE:A0", makeDevice({
           mac: "AA:BB:CC:DD:EE:A0",
           lastSeen: new Date(),
@@ -402,25 +444,74 @@ describe("network-device.service", () => {
           backend: "DROPLET_IMAGE",
         });
 
-        expect(await svc.listDevices({ onlineOnly: true })).toHaveLength(0);
-        expect(await svc.listDevices({ groupId: "grp-a" })).toHaveLength(0);
+        expect(await svc.listDevices({ onlineOnly: true })).toHaveLength(1);
+        expect(await svc.listDevices({ groupId: "grp-a" })).toHaveLength(1);
+      });
+
+      it("attributes a station to the AP it joined through", async () => {
+        // WARP-1715: the router's assoclist doesn't contain stations on a
+        // standalone AP's radios, so they used to read as wired with no signal.
+        devices.set("AA:BB:CC:00:00:01", makeDevice({
+          mac: "AA:BB:CC:00:00:01",
+          lastSeen: new Date(),
+        }));
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+          displayName: "Living-room AP",
+        });
+        snapshot.wirelessClients = [
+          { mac: "aa:bb:cc:00:00:01", signal: -58, viaApMac: "aa-bb-cc-dd-ee-a0" },
+        ];
+
+        const [phone] = await svc.listDevices();
+        expect(phone.signal).toBe(-58);
+        expect((phone as any).viaAp).toBe("Living-room AP");
+      });
+
+      it("leaves viaAp null for a station on the router's own radio", async () => {
+        devices.set("AA:BB:CC:00:00:01", makeDevice({
+          mac: "AA:BB:CC:00:00:01",
+          lastSeen: new Date(),
+        }));
+        snapshot.wirelessClients = [{ mac: "AA:BB:CC:00:00:01", signal: -40 }];
+
+        const [phone] = await svc.listDevices();
+        expect((phone as any).viaAp).toBeNull();
+      });
+
+      it("falls back to the MAC when the station names an AP we don't know", async () => {
+        // Honest degradation: an unrecognised AP MAC is still better
+        // attribution than silently calling the device wired.
+        devices.set("AA:BB:CC:00:00:01", makeDevice({
+          mac: "AA:BB:CC:00:00:01",
+          lastSeen: new Date(),
+        }));
+        snapshot.wirelessClients = [
+          { mac: "AA:BB:CC:00:00:01", signal: -58, viaApMac: "DE:AD:BE:EF:00:01" },
+        ];
+
+        const [phone] = await svc.listDevices();
+        expect((phone as any).viaAp).toBe("DE:AD:BE:EF:00:01");
       });
 
       it("leaves the list untouched when no APs are onboarded", async () => {
         devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
         const list = await svc.listDevices();
         expect(list).toHaveLength(1);
+        expect((list[0] as any).isAccessPoint).toBe(false);
       });
 
-      it("degrades the FILTER, not the page, when the AP table is unreadable", async () => {
-        // The dedupe is cosmetic. An AP slipping through is a duplicated row;
-        // throwing here would 500 the whole Devices page. That trade only
+      it("degrades the FLAG, not the page, when the AP table is unreadable", async () => {
+        // The join is cosmetic. Losing it means an AP renders as an ordinary
+        // device; throwing would 500 the whole Devices page. That trade only
         // goes one way.
         devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
         prisma.apDevice.findMany = vi.fn().mockRejectedValue(new Error("db down"));
 
         const list = await svc.listDevices();
         expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:01"]);
+        expect((list[0] as any).isAccessPoint).toBe(false);
       });
 
       it("degrades when the AP table is missing from the client entirely", async () => {

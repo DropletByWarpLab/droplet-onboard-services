@@ -606,24 +606,6 @@ class _MockAp:
             "mock: AP set_band_steering mac=%s enabled=%s — no-op", canonical, enabled
         )
 
-    def pushed_config(self, mac: str) -> Optional[dict[str, Any]]:
-        """WARP-1714: the Wi-Fi this AP is broadcasting, as last pushed.
-
-        `_pushed` deliberately does NOT echo the key (see push_wireless_config),
-        so the mock reports `key: ""` — the honest mock answer, and one that
-        keeps a test from accidentally asserting a real PSK round-trip the mock
-        never performs.
-        """
-        cfg = self._pushed.get(mac.upper())
-        if not cfg:
-            return None
-        return {
-            "ssid": cfg.get("ssid", ""),
-            "key": "",
-            "encryption": cfg.get("encryption", ""),
-            "section": cfg.get("iface_section", ""),
-        }
-
     def get_clients(self, mac: str) -> list[dict[str, Any]]:
         """WARP-1715: stations associated to this AP's own radios.
 

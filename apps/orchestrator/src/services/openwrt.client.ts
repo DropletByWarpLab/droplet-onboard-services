@@ -518,36 +518,6 @@ export async function fetchApClients(
   };
 }
 
-/** The Wi-Fi a coverage AP is broadcasting (WARP-1714). */
-export interface ApWirelessConfig {
-  ssid: string;
-  key: string;
-  encryption: string;
-  section: string;
-}
-
-/**
- * Read a specific AP's own broadcast SSID + key.
- *
- * On the edge-router shape the ROUTER runs no AP-mode interface at all — the
- * Pi's radio0 reports `interfaces: []` and its uci holds only a disabled
- * `ssid='OpenWrt'` placeholder — so the household's real Wi-Fi lives here and
- * nowhere else. `supported: false` (no AP credential provisioned) is an honest
- * answer, not an error.
- */
-export async function fetchApWireless(
-  mac: string,
-): Promise<{ supported: boolean; wireless: ApWirelessConfig | null }> {
-  const data = await routingFetchJson<{
-    supported?: boolean;
-    wireless?: ApWirelessConfig | null;
-  }>(`/aps/${encodeURIComponent(mac)}/wireless`, { label: "AP wireless" });
-  return {
-    supported: data.supported !== false,
-    wireless: data.wireless ?? null,
-  };
-}
-
 export async function setWirelessSsid(
   radio: string,
   ifaceSection: string,

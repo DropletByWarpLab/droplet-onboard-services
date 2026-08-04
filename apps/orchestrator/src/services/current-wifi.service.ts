@@ -150,21 +150,25 @@ export async function getCurrentWifi(
   // it's operator-fixable — so report it rather than showing empty fields.
   let sawUnsupported = false;
   for (const ap of aps) {
+    // WARP-1712's `getApWireless` is the one AP-wireless read (it also carries
+    // per-radio state, band steering and the derived 5 GHz name — none of which
+    // this card needs, but one endpoint beats two).
     const result = await openwrt
-      .fetchApWireless(ap.mac)
-      .catch(() => ({ supported: true, wireless: null }));
+      .getApWireless({ mac: ap.mac })
+      .catch(() => null);
+    if (!result) continue;
     if (!result.supported) {
       sawUnsupported = true;
       continue;
     }
-    if (result.wireless?.ssid) {
+    if (result.ssid) {
       const name = ap.displayName?.trim() || "the access point";
       return {
-        ssid: result.wireless.ssid,
-        key: result.wireless.key || null,
+        ssid: result.ssid,
+        key: result.key || null,
         source: "ap",
         detail: `Broadcast by ${name}.`,
-        section: result.wireless.section || null,
+        section: result.primary_section || null,
         radio: null,
       };
     }
