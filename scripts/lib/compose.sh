@@ -293,9 +293,9 @@ prepare_and_build() {
 # =============================================================================
 # docker/nextcloud-init.sh (household group + "Household" group folder +
 # document-engine connector + viewer apps/previews — WARP-883/882/1686) is
-# mounted into the nextcloud container
-# as the official image's post-installation hook:
-#   /docker-entrypoint-hooks.d/post-installation/init-droplet.sh
+# mounted into the nextcloud container as the official image's
+# before-starting hook (WARP-1694; it was post-installation until then):
+#   /docker-entrypoint-hooks.d/before-starting/init-droplet.sh
 # The image fires post-installation hooks ONLY on the single boot that performs
 # the initial auto-install into an EMPTY nextcloud-data volume. On a reflashed
 # box that window is easy to miss entirely (WARP-990, live on .87 2026-07-01):
@@ -305,6 +305,17 @@ prepare_and_build() {
 #   * even on a genuinely fresh volume the hook races first-boot bring-up
 #     (db/appstore/DNS settling — the #691 fragility) and the image never
 #     re-fires a hook that erred.
+#
+# WARP-1694 moved the mount to `before-starting`, which the entrypoint runs on
+# EVERY start (outside the install branch, after any upgrade). That makes
+# convergence a property of the CONTAINER rather than of whichever script
+# brought the stack up — which is the hole this reconcile could not cover: a
+# no-wipe deploy (`docker compose up -d` straight onto a new main, no setup.sh)
+# never calls start_stack, so before WARP-1694 nothing re-ran the hook at all
+# and a changed DOCS_ENGINE silently did not converge (found live on .250,
+# 2026-08-04). The re-exec below is now belt-and-braces on top: it still earns
+# its keep because it runs AFTER `occ status` reports installed, so it also
+# covers the boot where before-starting fired too early and erred.
 # Either way the box serves a bare Nextcloud (`occ group:list` → only "admin"):
 # no household group, no shared folder, no OnlyOffice connector — which broke
 # the setup wizard's account creation with a 500 (WARP-989).
@@ -521,7 +532,7 @@ run_nextcloud_post_install_hook() {
   # The mounted hook — the single source of truth (docker/nextcloud-init.sh,
   # see the nextcloud volumes in docker/docker-compose.yml). Exec THIS path;
   # never reimplement its steps here.
-  local hook_path="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+  local hook_path="/docker-entrypoint-hooks.d/before-starting/init-droplet.sh"
   local recover_cmd="docker compose -f docker/docker-compose.yml exec -u 33 nextcloud bash $hook_path"
 
   log_info "Reconciling Nextcloud Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."

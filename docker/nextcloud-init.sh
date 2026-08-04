@@ -1,7 +1,12 @@
 #!/bin/bash
-# Nextcloud post-installation hook (runs ONCE after the initial auto-install,
-# from /docker-entrypoint-hooks.d/post-installation/). Every step is guarded so
-# a re-run — or a manual `occ`-driven re-invoke — is a no-op.
+# Nextcloud first-boot + reconcile hook. Mounted at
+# /docker-entrypoint-hooks.d/before-starting/, which the stock entrypoint runs
+# on EVERY container start (after any install/upgrade) — so this converges the
+# box's Nextcloud state on each boot rather than only on the run that installed
+# it (WARP-1694; it lived in post-installation before, where it fired exactly
+# once in a box's lifetime). Every step is guarded so a re-run — or a manual
+# `occ`-driven re-invoke — is a no-op, which is what makes the "reconciles on
+# the next boot" fallbacks below true rather than aspirational.
 set -euo pipefail
 
 OCC="php /var/www/html/occ"
@@ -267,17 +272,65 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
       # No JWT gate here — Collabora's trust model is the aliasgroup
       # allowlist + WOPI proof keys, not a shared HS256 secret.
       if nc_app_install richdocuments; then
-        occ_www config:app:set richdocuments wopi_url \
-          --value="${RICHDOCUMENTS_WOPI_URL:-http://docserver:9980/docs}" || true
-        occ_www config:app:set richdocuments public_wopi_url \
-          --value="${RICHDOCUMENTS_PUBLIC_WOPI_URL:-/docs}" || true
-        occ_www config:app:set richdocuments wopi_callback_url \
-          --value="${RICHDOCUMENTS_CALLBACK_URL:-http://nextcloud/}" || true
+        rd_wopi="${RICHDOCUMENTS_WOPI_URL:-http://docserver:9980/docs}"
+        rd_public="${RICHDOCUMENTS_PUBLIC_WOPI_URL:-/docs}"
+        rd_callback="${RICHDOCUMENTS_CALLBACK_URL:-http://nextcloud/}"
+
         occ_www config:system:set allow_local_remote_servers --value=true --type=boolean || true
-        # Re-fetch discovery so a config change applies now, not on TTL expiry.
+
+        # WARP-1694 — ORDER IS LOAD-BEARING: activate-config runs BETWEEN the
+        # wopi_url write and the other two, and it must not be moved.
+        #
+        # `richdocuments:activate-config` re-fetches discovery from wopi_url,
+        # so wopi_url has to be set before it. But the command does not only
+        # read — on richdocuments 8.4.16 it REWRITES the other two values it
+        # thinks it owns: it resets wopi_callback_url to "autodetect" (empty)
+        # and replaces public_wopi_url with the ABSOLUTE discovery host
+        # (`https://docserver:9980`). Both results are wrong here: docserver is
+        # a compose-internal name no browser can resolve, and an autodetected
+        # callback follows the browser's origin instead of the compose-internal
+        # host coolwsd's aliasgroup1 allowlist pins.
+        #
+        # Setting all three first and then activating — which is what this did
+        # before — therefore self-defeats: the editor iframe ends up pointed at
+        # https://docserver:9980. Writing the browser-facing pair AFTER
+        # activation is what makes the intended values the ones that survive.
+        # Discovery stays cached from the activation, so nothing is lost.
+        occ_www config:app:set richdocuments wopi_url --value="$rd_wopi" || true
         occ_www richdocuments:activate-config >/dev/null 2>&1 \
           || echo "[droplet] WARP-1686: richdocuments:activate-config failed (engine still starting?) — discovery refreshes on the next reconcile" >&2
-        echo "[droplet] WARP-1686: Nextcloud Office connector configured (richdocuments → Collabora CODE)"
+        occ_www config:app:set richdocuments public_wopi_url --value="$rd_public" || true
+        occ_www config:app:set richdocuments wopi_callback_url --value="$rd_callback" || true
+
+        # WARP-1694 — read the three values back. The failure this catches is
+        # silent by nature: the editor only breaks in the browser, long after
+        # this script exits 0, and every command above is `|| true`. If a
+        # future richdocuments changes which values activate-config claims,
+        # this is what says so out loud instead of shipping a dead editor.
+        # The `|| true` inside the substitution is load-bearing under
+        # `set -euo pipefail`, not style: `occ config:app:get` EXITS NON-ZERO
+        # for an unset key, and a failing command substitution carries that
+        # status into the assignment — so the first unset value would abort the
+        # whole hook mid-way, which is precisely when we most want the report.
+        # (Verified: without the guard the script dies before the next line.)
+        # if/else rather than `[ … ] && echo` is for the explicit drift message
+        # on the failing branch — errexit tolerates either form here, since a
+        # false left operand of && is a tested context.
+        rd_drift=0
+        for rd_pair in "wopi_url=$rd_wopi" "public_wopi_url=$rd_public" "wopi_callback_url=$rd_callback"; do
+          rd_key="${rd_pair%%=*}"
+          rd_want="${rd_pair#*=}"
+          rd_got="$( { occ_www config:app:get richdocuments "$rd_key" 2>/dev/null || true; } | tr -d '\r\n' )"
+          if [ "$rd_got" != "$rd_want" ]; then
+            echo "[droplet] WARP-1694: richdocuments $rd_key is '$rd_got', expected '$rd_want' — the in-browser editor will not load. Re-run this hook once the engine is up; if it persists, activate-config has changed which keys it rewrites." >&2
+            rd_drift=1
+          fi
+        done
+        if [ "$rd_drift" -eq 0 ]; then
+          echo "[droplet] WARP-1686: Nextcloud Office connector configured (richdocuments → Collabora CODE); URL trio verified"
+        else
+          echo "[droplet] WARP-1694: document-engine URL trio did NOT verify — see the lines above. Non-fatal; the next boot re-runs this hook." >&2
+        fi
       else
         echo "nextcloud-init: richdocuments connector install did NOT complete (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2
       fi
