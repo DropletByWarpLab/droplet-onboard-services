@@ -189,6 +189,11 @@ describe("runTeamChatMeetingReminderSweep", () => {
     });
     expect(prisma.meetings[0].reminderStatus).toBe("sent");
     expect(prisma.threadBumps).toEqual(["thread-1"]);
+    // Review pin: the candidate scan is BOUNDED — soonest-first, 500/tick,
+    // so a post-downtime backlog drains across ticks, never one big scan.
+    expect(prisma.teamChatMeeting.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: { startsAt: "asc" }, take: 500 }),
+    );
   });
 
   it("notifies every participant EXCEPT the organizer, keyed by USERNAME", async () => {

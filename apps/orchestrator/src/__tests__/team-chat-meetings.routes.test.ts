@@ -357,13 +357,18 @@ function createStub(seed: {
       ),
       updateMany: vi.fn(
         async (args: {
-          where: { id: string; status?: string };
+          where: { id: string; status?: string; reminderStatus?: string };
           data: Partial<MeetingRow>;
         }) => {
           let count = 0;
           for (const m of meetings) {
             if (m.id !== args.where.id) continue;
             if (args.where.status !== undefined && m.status !== args.where.status)
+              continue;
+            if (
+              args.where.reminderStatus !== undefined &&
+              m.reminderStatus !== args.where.reminderStatus
+            )
               continue;
             Object.assign(m, args.data, { updatedAt: new Date() });
             count++;
@@ -795,6 +800,19 @@ describe("POST /team-chat/meetings/:id/cancel", () => {
       where: { id: "cal-77" },
     });
     expect(prisma.calendarEvents).toHaveLength(0);
+  });
+
+  it("cancel after the reminder went out keeps the truthful `sent` terminal", async () => {
+    // Review pin: the not_needed flip is GUARDED on pending — a reminder
+    // that already fired stays recorded as sent through cancellation.
+    const meeting = seedMeeting({ reminderStatus: "sent" });
+    const prisma = baseSeed({ meetings: [meeting] });
+    const res = await request(buildApp(prisma, asAlice)).post(
+      `/api/team-chat/meetings/${meeting.id}/cancel`,
+    );
+    expect(res.status).toBe(200);
+    expect(prisma.meetings[0].status).toBe("cancelled");
+    expect(prisma.meetings[0].reminderStatus).toBe("sent");
   });
 
   it("a second cancel 409s and does not double-post the cancellation message", async () => {

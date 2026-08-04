@@ -241,4 +241,32 @@ describe("team_chat_send_message", () => {
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
     expect(r.error?.message).toContain("500");
   });
+
+  it("a malformed 2xx (unparseable or message-less body) returns the typed failure, never throws", async () => {
+    // Body that fails to parse at all…
+    const badJson = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const { ctx: ctx1 } = ctxWith({ post: badJson });
+    const r1 = await sendMessage.handler(
+      { thread_id: "t-77", body: "hi", confirmed: true },
+      ctx1,
+    );
+    expect(r1.ok).toBe(false);
+    expect(r1.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+
+    // …and a parseable body missing the message envelope.
+    const emptyBody = vi.fn().mockResolvedValueOnce(res(201, {}));
+    const { ctx: ctx2 } = ctxWith({ post: emptyBody });
+    const r2 = await sendMessage.handler(
+      { thread_id: "t-77", body: "hi", confirmed: true },
+      ctx2,
+    );
+    expect(r2.ok).toBe(false);
+    expect(r2.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+  });
 });

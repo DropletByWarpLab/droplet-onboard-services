@@ -122,10 +122,17 @@ describe("team_chat_send_meeting_invite", () => {
     expect(r.error?.message).toContain("Budget review");
     // UX review: display name, not the login handle.
     expect(r.error?.message).toContain("Bob B");
-    // UX review: readable local time in the copy, never raw ISO-UTC...
+    // UX review: readable local time in the copy — with the zone named
+    // (code review: the container's TZ must be explicit) — never raw ISO.
+    // Component options mirror the handler (ECMA-402 refuses
+    // dateStyle/timeStyle combined with timeZoneName).
     const whenReadable = new Date(startsAt).toLocaleString(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
     });
     expect(r.error?.message).toContain(whenReadable);
     expect(r.error?.message).not.toContain(startsAt);
@@ -147,6 +154,24 @@ describe("team_chat_send_meeting_invite", () => {
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("bob");
     expect(post).not.toHaveBeenCalled();
+  });
+
+  it("phase 1 surfaces the model-composed NOTE (truncated) in message + details", async () => {
+    // Code review: the note rides on the invite card — the user must see
+    // it before approving, parity with send-message's body preview.
+    const { ctx } = ctxWith({});
+    const note = "n".repeat(300);
+    const r = await sendMeetingInvite.handler(
+      { recipients: ["bob"], title: "Sync", starts_at: futureIso(), note },
+      ctx,
+    );
+    expect(r.status).toBe("confirmation_required");
+    expect(r.error?.message).toContain("Note on the invite:");
+    expect(r.error?.message).not.toContain(note); // truncated, never verbatim-long
+    const details = r.error?.details as { notePreview?: string };
+    expect(details.notePreview).toBeDefined();
+    expect(details.notePreview!.length).toBeLessThanOrEqual(120);
+    expect(details.notePreview!.endsWith("…")).toBe(true);
   });
 
   it("phase 2: resolves recipients, creates the thread, creates the meeting as the acting user", async () => {
@@ -244,5 +269,25 @@ describe("team_chat_send_meeting_invite", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe("NOT_FOUND");
+  });
+
+  it("a malformed 2xx meeting response returns the typed failure, never throws", async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(res(200, { thread: { id: "thread-dm" } }))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => {
+          throw new Error("bad json");
+        },
+      });
+    const { ctx } = ctxWith({ post });
+    const r = await sendMeetingInvite.handler(
+      { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
   });
 });

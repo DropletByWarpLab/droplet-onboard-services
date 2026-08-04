@@ -179,9 +179,18 @@ async function handler(
     } catch {
       // Preview-only read — usernames are an honest fallback.
     }
+    // Explicit zone (review): the readable form renders in the CONTAINER's
+    // timezone — naming it ("6:00 PM UTC") keeps the approval honest when
+    // that differs from the user's wall clock. Component options, not
+    // dateStyle/timeStyle: ECMA-402 refuses to combine the style shortcuts
+    // with timeZoneName.
     const whenReadable = startsAt.toLocaleString(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
     });
     const extras = [
       durationMinutes !== undefined ? `${durationMinutes} min` : null,
@@ -189,8 +198,13 @@ async function handler(
     ]
       .filter((x): x is string => x !== null)
       .join(", ");
+    // The note is model-composed and rides on the invite card — the user
+    // must SEE it before approving (review; parity with send-message's
+    // body preview).
+    const notePreview = note !== undefined ? truncateForPreview(note) : undefined;
     return confirmationRequired(
       `I'd like to invite ${names.join(", ")} to "${title}" starting ${whenReadable}${extras.length > 0 ? ` (${extras})` : ""}. ` +
+        (notePreview !== undefined ? `Note on the invite: "${notePreview}". ` : "") +
         "A meeting invite card will be posted in Messages and the meeting will land on the organizer's calendar. " +
         "Ask the user to approve, then re-issue this call with confirmed: true. " +
         "Do NOT set confirmed: true without an explicit yes from the user.",
@@ -201,6 +215,7 @@ async function handler(
         startsAt: startsAt.toISOString(),
         ...(durationMinutes !== undefined ? { durationMinutes } : {}),
         ...(location !== undefined ? { location } : {}),
+        ...(notePreview !== undefined ? { notePreview } : {}),
       },
     );
   }
@@ -253,17 +268,22 @@ async function handler(
   if (!res.ok) {
     return err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`);
   }
-  const data = (await res.json()) as {
-    meeting: { id: string; threadId: string; title: string; startsAt: string };
-  };
+  // Guarded success parse (review): a malformed 2xx body returns the
+  // typed failure instead of throwing out of the handler.
+  const data = (await res.json().catch(() => null)) as {
+    meeting?: { id?: string; threadId?: string; title?: string; startsAt?: string };
+  } | null;
+  if (!data?.meeting?.id) {
+    return err("TEAM_CHAT_SEND_FAILED", "orchestrator returned a malformed response");
+  }
   return {
     ok: true,
     data: {
       type: "team_chat_send_meeting_invite",
       meetingId: data.meeting.id,
       threadId: data.meeting.threadId ?? thread.threadId,
-      title: data.meeting.title,
-      startsAt: data.meeting.startsAt,
+      title: data.meeting.title ?? title,
+      startsAt: data.meeting.startsAt ?? startsAt.toISOString(),
       recipients,
       summary: "Meeting invite posted in Messages; recipients can RSVP from the card.",
     },

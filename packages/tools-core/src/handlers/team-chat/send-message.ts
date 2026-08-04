@@ -203,7 +203,14 @@ async function handler(
   if (!res.ok) {
     return err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`);
   }
-  const data = (await res.json()) as { message: { id: string; threadId: string } };
+  // Guarded success parse (review): a malformed 2xx body returns the
+  // typed failure instead of throwing out of the handler.
+  const data = (await res.json().catch(() => null)) as {
+    message?: { id?: string; threadId?: string };
+  } | null;
+  if (!data?.message?.id) {
+    return err("TEAM_CHAT_SEND_FAILED", "orchestrator returned a malformed response");
+  }
   return {
     ok: true,
     data: {

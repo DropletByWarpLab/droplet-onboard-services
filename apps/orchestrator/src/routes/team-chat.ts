@@ -994,9 +994,17 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           await prisma.$transaction(async (tx) => {
             const claimed = await tx.teamChatMeeting.updateMany({
               where: { id: meeting.id, status: "scheduled" },
-              data: { status: "cancelled", reminderStatus: "not_needed" },
+              data: { status: "cancelled" },
             });
             if (claimed.count === 0) throw new MeetingAlreadyCancelledError();
+            // Reminder terminal flips ONLY from pending (review): when the
+            // reminder already went out, `sent` is the truthful history and
+            // survives cancellation — overwriting it would say the reminder
+            // never fired.
+            await tx.teamChatMeeting.updateMany({
+              where: { id: meeting.id, reminderStatus: "pending" },
+              data: { reminderStatus: "not_needed" },
+            });
             await tx.teamChatMessage.create({
               data: {
                 threadId: meeting.threadId,

@@ -51,12 +51,19 @@ export async function runTeamChatMeetingReminderSweep(
   // be due (startsAt within the largest allowed reminder window). The
   // per-row due check happens below because reminderMinutesBefore varies
   // per meeting and can't fold into one indexed WHERE.
+  //
+  // Bounded batch (review): soonest-first, 500 per tick — a pathological
+  // backlog (box down for days) drains across successive ticks instead of
+  // one unbounded scan; every processed row leaves `pending`, so the next
+  // tick picks up exactly where this one stopped.
   const candidates = await prisma.teamChatMeeting.findMany({
     where: {
       status: "scheduled",
       reminderStatus: "pending",
       startsAt: { lte: new Date(now + MAX_REMINDER_MINUTES * 60_000) },
     },
+    orderBy: { startsAt: "asc" },
+    take: 500,
   });
 
   let remindersSent = 0;
