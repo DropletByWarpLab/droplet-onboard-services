@@ -25,21 +25,62 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: vi.fn(),
 }));
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { extractCitedFilePaths } from "../services/llm-agent.service.js";
+import { parseToolResultPayload } from "../services/tool-result-payload.js";
+import { mcpWirePayload, mcpWireText } from "./fixtures/mcp-wire.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { createFilesRouter } from "../routes/files.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { FileEntryInfo } from "../types/index.js";
 
+/**
+ * A real directory listing, typed as the orchestrator's own `FileEntryInfo` —
+ * the exact element type `GET /api/files` builds and `res.json`s, and
+ * therefore exactly what `list_files` returns as its `data`. Typing it this
+ * way is what stops a future fixture from inventing a shape again: an
+ * invented one no longer compiles.
+ */
+const listing: FileEntryInfo[] = [
+  {
+    name: "Q2.csv",
+    path: "/Invoices/Q2.csv",
+    isDirectory: false,
+    size: 4096,
+    mimeType: "text/csv",
+    modifiedAt: "2026-06-01T09:00:00.000Z",
+  },
+  {
+    name: "Archive",
+    path: "/Invoices/Archive",
+    isDirectory: true,
+    size: 0,
+    mimeType: null,
+    modifiedAt: "2026-05-02T11:30:00.000Z",
+  },
+];
+
 // ── 1. Extractor ──────────────────────────────────────────────────
+//
+// WARP-1604 — every case below feeds the PRODUCTION payload: a real
+// `ToolResult` run through mcp-server's serializer (`mcpWirePayload`), which
+// drops the `{ ok, data }` envelope and puts the handler's own object on the
+// wire. The previous version of this suite hand-built the envelope, so it
+// passed against an extractor that could only ever return `[]` in
+// production — the FileCitation table went unwritten for an entire release.
 describe("WARP-473 — extractCitedFilePaths", () => {
-  it("pulls data.path from single-file tool results (read_file shape)", () => {
-    const parsed = { ok: true, data: { path: "/Documents/foo.pdf", content: "…" } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/Documents/foo.pdf"]);
+  it("pulls the root `path` from single-file tool results (read_file shape)", () => {
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { path: "/Documents/foo.pdf", content: "…" },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Documents/foo.pdf"]);
   });
 
-  it("pulls every data.results[].path from search hits", () => {
-    const parsed = {
+  it("pulls every root `results[].path` from search hits (search_content shape)", () => {
+    const payload = mcpWirePayload({
       ok: true,
       data: {
         query: "invoices",
@@ -48,48 +89,261 @@ describe("WARP-473 — extractCitedFilePaths", () => {
           { path: "/Documents/inv-2.pdf", text: "…" },
         ],
       },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual([
+    });
+    expect(extractCitedFilePaths(payload)).toEqual([
       "/Documents/inv-1.pdf",
       "/Documents/inv-2.pdf",
     ]);
   });
 
-  it("handles data.files[].path (list_files shape)", () => {
-    const parsed = {
+  // The list_files shape, built from the REAL response type rather than an
+  // invented one. `list_files` returns the orchestrator directory route's
+  // body verbatim, and that route `res.json(entries)` with a bare
+  // `FileEntryInfo[]` — no `files`, no `items`, no object at all. Typing the
+  // fixture as `FileEntryInfo[]` is what keeps it honest: an invented shape
+  // stops compiling.
+  //
+  // The first version of this suite asserted `{ files: [{ path }] }` here,
+  // which no handler emits, so it certified a path that returned `[]` in
+  // production for the single highest-frequency file tool in the agent loop.
+  it("pulls paths from a BARE ARRAY root (the real list_files shape)", () => {
+    const payload = mcpWirePayload({ ok: true, data: listing });
+    // Pin the wire text too: this is what mcp-server actually sends, and the
+    // whole bug was that it starts with `[`, not `{`.
+    expect(mcpWireText({ ok: true, data: listing }).startsWith("[")).toBe(true);
+    // Only the FILE. `listing`'s second entry is a directory, and WARP-1656
+    // skips those — see the dedicated block below. What this case pins is that
+    // a bare array is descended into at all.
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  it("an empty listing yields no citations (the legitimate zero case)", () => {
+    const empty: FileEntryInfo[] = [];
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: empty }))).toEqual(
+      [],
+    );
+  });
+
+  it("caps a bare-array listing at 20 paths too", () => {
+    const many: FileEntryInfo[] = Array.from({ length: 50 }, (_, i) => ({
+      name: `f${i}.txt`,
+      path: `/Invoices/f${i}.txt`,
+      isDirectory: false,
+      size: 1,
+      mimeType: "text/plain",
+      modifiedAt: "2026-06-01T09:00:00.000Z",
+    }));
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: many }))).toHaveLength(
+      20,
+    );
+  });
+
+  it("handles root `items[].path` (search_files / list_recent_files shape)", () => {
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { items: [{ path: "/a.txt" }, { path: "/b.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
+  });
+
+  it("handles root `files[].path` (a listing wrapped under `files`)", () => {
+    const payload = mcpWirePayload({
       ok: true,
       data: { files: [{ path: "/a.txt" }, { path: "/b.txt" }] },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/a.txt", "/b.txt"]);
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
   });
 
   it("de-dupes identical paths within one tool result", () => {
-    const parsed = {
+    const payload = mcpWirePayload({
       ok: true,
-      data: {
-        path: "/a.txt",
-        results: [{ path: "/a.txt" }, { path: "/b.txt" }],
-      },
-    };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/a.txt", "/b.txt"]);
+      data: { path: "/a.txt", results: [{ path: "/a.txt" }, { path: "/b.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/a.txt", "/b.txt"]);
   });
 
   it("caps at 20 paths per result", () => {
     const results = Array.from({ length: 50 }, (_, i) => ({ path: `/f${i}.txt` }));
-    const parsed = { ok: true, data: { results } };
-    expect(extractCitedFilePaths(parsed)).toHaveLength(20);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: { results } }))).toHaveLength(
+      20,
+    );
   });
 
   it("returns empty for non-file results", () => {
-    expect(extractCitedFilePaths({ ok: true, data: { status: "ok" } })).toEqual([]);
-    expect(extractCitedFilePaths(null)).toEqual([]);
-    expect(extractCitedFilePaths({})).toEqual([]);
-    expect(extractCitedFilePaths({ ok: false, error: { code: "X" } })).toEqual([]);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: { status: "ok" } }))).toEqual(
+      [],
+    );
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: {} }))).toEqual([]);
+    expect(extractCitedFilePaths(mcpWirePayload({ ok: true, data: null }))).toEqual([]);
+  });
+
+  it("returns empty for the failure + confirmation branches of the wire contract", () => {
+    expect(
+      extractCitedFilePaths(
+        mcpWirePayload({
+          ok: false,
+          status: "error",
+          error: { code: "LIST_FAILED", message: "nextcloud returned 500" },
+        }),
+      ),
+    ).toEqual([]);
+    // confirmation_required is NOT an error to the agent loop, so it does
+    // reach the extractor — it must still yield nothing (nothing was read).
+    expect(
+      extractCitedFilePaths(
+        mcpWirePayload({
+          ok: false,
+          status: "confirmation_required",
+          error: { code: "CONFIRM", message: "approve first", details: { type: "delete_file" } },
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("ignores non-string path values", () => {
-    const parsed = { ok: true, data: { results: [{ path: 123 }, { path: "/real.txt" }] } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/real.txt"]);
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { results: [{ path: 123 }, { path: "/real.txt" }] },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual(["/real.txt"]);
+  });
+
+  it("survives non-JSON wire text (the `{ raw }` degrade path)", () => {
+    expect(extractCitedFilePaths(parseToolResultPayload("not json at all"))).toEqual([]);
+  });
+
+  // THE regression. Before WARP-1604 the extractor walked `data.*`, which is
+  // only ever populated if someone puts the envelope itself on the wire —
+  // something mcp-server does not do. Assert the dead shape stays dead so a
+  // future "let me also support the envelope" patch has to argue with a test
+  // instead of silently reviving two competing contracts.
+  it("does NOT read the legacy `{ ok, data }` envelope (WARP-1604 regression)", () => {
+    const legacyEnvelopeOnTheWire = parseToolResultPayload(
+      JSON.stringify({ ok: true, data: { path: "/Documents/foo.pdf" } }),
+    );
+    expect(extractCitedFilePaths(legacyEnvelopeOnTheWire)).toEqual([]);
+  });
+});
+
+// ── 1b. Shape-drift guard ─────────────────────────────────────────
+//
+// `fixtures/mcp-wire.ts` models mcp-server's serializer. mcp-server lives in
+// another workspace and the orchestrator does not import it at runtime, so
+// nothing but this canary stops the two from drifting. If it reds, read
+// `toolResultToContent` and update BOTH the fixture and
+// `services/tool-result-payload.ts` — do not just relax the assertion.
+function locateMcpServerSource(): string {
+  // CJS-safe (this package builds to CommonJS — `import.meta` is a tsc
+  // error here). Same candidates idiom as network-tool-paths.contract.test.ts
+  // so it works from apps/orchestrator or the repo root.
+  const candidates = [
+    resolve(process.cwd(), "../../services/mcp-server/src/server.ts"),
+    resolve(process.cwd(), "services/mcp-server/src/server.ts"),
+  ];
+  for (const p of candidates) {
+    try {
+      readFileSync(p, "utf8");
+      return p;
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error(
+    `Could not locate services/mcp-server/src/server.ts from ${process.cwd()}`,
+  );
+}
+
+describe("WARP-1604 — mcp-server ↔ extractor payload contract", () => {
+  const source = readFileSync(locateMcpServerSource(), "utf8").replace(/\s+/g, "");
+
+  it("still UNWRAPS the envelope on success (JSON.stringify(result.data))", () => {
+    expect(source).toContain("JSON.stringify(result.data)");
+    // The envelope itself must not be what goes on the wire.
+    expect(source).not.toContain("JSON.stringify(result)");
+  });
+
+  it("still emits { status, error } — no ok, no data — on failure", () => {
+    expect(source).toContain("status:result.status");
+    expect(source).toContain("error:result.error");
+  });
+
+  it("fixture text matches the contract the extractor is written against", () => {
+    // Success: the handler payload, at the root. No `ok`, no `data`.
+    expect(mcpWireText({ ok: true, data: { path: "/x.txt" } })).toBe('{"path":"/x.txt"}');
+    // Failure: status + error, at the root.
+    expect(
+      mcpWireText({ ok: false, status: "error", error: { code: "E", message: "m" } }),
+    ).toBe('{"status":"error","error":{"code":"E","message":"m"}}');
+  });
+});
+
+// The SECOND drift seam, and the one that made the first fix incomplete.
+//
+// `list_files` (tools-core) does `const data = await res.json(); return { ok:
+// true, data }` — `data` is typed `unknown`, so nothing on the tools-core side
+// records what shape it is. The real answer lives in the orchestrator's own
+// directory route, which responds with a bare `FileEntryInfo[]`. That is why
+// the extractor needs an array branch at all, and a test cannot learn it from
+// any type: it has to be pinned against the route.
+//
+// If this reds, the listing route's response shape changed. Update
+// `extractCitedFilePaths` to match BEFORE relaxing the assertion — a wrapped
+// shape that the extractor does not read means zero FileCitation rows for the
+// highest-frequency file tool in the agent loop, silently, which is exactly
+// the failure this PR exists to fix.
+function locateFilesRouteSource(): string {
+  // Same candidates idiom as locateMcpServerSource above — works whether the
+  // runner's cwd is apps/orchestrator or the repo root.
+  const candidates = [
+    resolve(process.cwd(), "src/routes/files.ts"),
+    resolve(process.cwd(), "apps/orchestrator/src/routes/files.ts"),
+  ];
+  for (const p of candidates) {
+    try {
+      readFileSync(p, "utf8");
+      return p;
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error(
+    `Could not locate apps/orchestrator/src/routes/files.ts from ${process.cwd()}`,
+  );
+}
+
+describe("WARP-1604 — the listing route still answers with a BARE array", () => {
+  const routeSource = readFileSync(locateFilesRouteSource(), "utf8").replace(
+    /\s+/g,
+    "",
+  );
+
+  it("responds with the entries array itself, not an object wrapper", () => {
+    // All three branches that can answer this route, each pinned by a probe
+    // that occurs exactly once in the stripped source — so wrapping any one of
+    // them reds this test.
+    //
+    // The cache-hit branch needs the whole `cacheGet → res.json(cached)` block,
+    // not just the generic: `cacheGet<FileEntryInfo[]>(cacheKey)` appears 4x in
+    // this file (:1633, :2825, :2854, :2895) and `res.json(cached);` 2x (:966,
+    // :1635), so neither pins this branch alone. Typing the cache to an object
+    // wrapper while the cold path still sent a bare array left the suite green
+    // — and that shape kills citations ONLY on cache hits: intermittent,
+    // TTL-windowed, no error, and the extractor's backstop is debug-level only.
+    expect(routeSource).toContain("res.json(entries);"); // normal branch
+    expect(routeSource).toContain("handleFileError(err,res,next,[]);"); // degrade branch
+    expect(routeSource).toContain(
+      "constcached=awaitcacheGet<FileEntryInfo[]>(cacheKey);if(cached){res.json(cached);return;}",
+    ); // cache-hit branch
+  });
+
+  it("the extractor reads that shape", () => {
+    // The end of the chain: route body → list_files `data` → wire → extractor.
+    const routeBody: FileEntryInfo[] = listing;
+    // The directory entry is dropped by WARP-1656; the file survives, which is
+    // what proves the chain is connected end to end.
+    expect(
+      extractCitedFilePaths(mcpWirePayload({ ok: true, data: routeBody })),
+    ).toEqual(["/Invoices/Q2.csv"]);
   });
 });
 
@@ -105,48 +359,38 @@ describe("WARP-473 — extractCitedFilePaths", () => {
 // a truthy `isDirectory` is skipped. Payloads that never carry the field
 // (read_file, search_content hits, …) are untouched, which the last two cases
 // in this block pin.
+// WARP-1604 merge note: these cases now feed the PRODUCTION payload via
+// `mcpWirePayload`, like every other extractor case above. They were written
+// against the hand-built `{ ok, data }` envelope, which the wire has never
+// carried — the exact shape WARP-1604 removed. The assertions are unchanged;
+// only the way the payload is obtained is. The module-scope `listing` fixture
+// is the same `FileEntryInfo[]` this block defined for itself.
 describe("WARP-1656 — directory entries are never cited", () => {
-  /**
-   * The real listing element type. Typing the fixture as `FileEntryInfo`
-   * rather than an ad-hoc object is what stops a future edit from inventing a
-   * shape the route never emits.
-   */
-  const listing: FileEntryInfo[] = [
-    {
-      name: "Q2.csv",
-      path: "/Invoices/Q2.csv",
-      isDirectory: false,
-      size: 4096,
-      mimeType: "text/csv",
-      modifiedAt: "2026-06-01T09:00:00.000Z",
-    },
-    {
-      name: "Archive",
-      path: "/Invoices/Archive",
-      isDirectory: true,
-      size: 0,
-      mimeType: null,
-      modifiedAt: "2026-05-02T11:30:00.000Z",
-    },
-  ];
-
   it("drops a directory entry from a listing (search_files / list_recent_files `items` shape)", () => {
-    const parsed = { ok: true, data: { items: listing } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/Invoices/Q2.csv"]);
+    const payload = mcpWirePayload({ ok: true, data: { items: listing } });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
   });
 
   it("drops a directory entry under `files` and under `results` too", () => {
-    expect(extractCitedFilePaths({ ok: true, data: { files: listing } })).toEqual([
-      "/Invoices/Q2.csv",
-    ]);
-    expect(extractCitedFilePaths({ ok: true, data: { results: listing } })).toEqual([
-      "/Invoices/Q2.csv",
-    ]);
+    expect(
+      extractCitedFilePaths(mcpWirePayload({ ok: true, data: { files: listing } })),
+    ).toEqual(["/Invoices/Q2.csv"]);
+    expect(
+      extractCitedFilePaths(mcpWirePayload({ ok: true, data: { results: listing } })),
+    ).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  // WARP-1604: a bare `FileEntryInfo[]` IS the list_files payload, so the
+  // directory skip has to hold on the root-array path too — the shape that
+  // actually reaches the extractor in production.
+  it("drops a directory entry from a BARE-ARRAY listing (list_files shape)", () => {
+    const payload = mcpWirePayload({ ok: true, data: listing });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
   });
 
   it("keeps entries that declare isDirectory: false", () => {
-    const parsed = { ok: true, data: { items: [listing[0]] } };
-    expect(extractCitedFilePaths(parsed)).toEqual(["/Invoices/Q2.csv"]);
+    const payload = mcpWirePayload({ ok: true, data: { items: [listing[0]] } });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
   });
 
   // The harm with teeth. Filtering has to happen BEFORE the cap is charged,
@@ -170,10 +414,9 @@ describe("WARP-1656 — directory entries are never cited", () => {
       mimeType: "text/csv",
       modifiedAt: "2026-06-01T09:00:00.000Z",
     }));
-    const paths = extractCitedFilePaths({
-      ok: true,
-      data: { items: [...dirs, ...files] },
-    });
+    const paths = extractCitedFilePaths(
+      mcpWirePayload({ ok: true, data: { items: [...dirs, ...files] } }),
+    );
     expect(paths).toHaveLength(20);
     // Twenty REAL files, starting at the first one — not 15 files behind 5
     // folders that ate the budget.
@@ -182,19 +425,24 @@ describe("WARP-1656 — directory entries are never cited", () => {
   });
 
   it("skips a root `path` that declares itself a directory", () => {
-    const parsed = { ok: true, data: { path: "/Invoices/Archive", isDirectory: true } };
-    expect(extractCitedFilePaths(parsed)).toEqual([]);
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { path: "/Invoices/Archive", isDirectory: true },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual([]);
   });
 
   // The shape-driven premise survives: no `isDirectory` field, no change.
   it("leaves payloads that never carry isDirectory untouched", () => {
-    const searchHits = {
+    const searchHits = mcpWirePayload({
       ok: true,
       data: { results: [{ path: "/a.txt", text: "…" }, { path: "/b.txt", text: "…" }] },
-    };
+    });
     expect(extractCitedFilePaths(searchHits)).toEqual(["/a.txt", "/b.txt"]);
     expect(
-      extractCitedFilePaths({ ok: true, data: { path: "/Documents/foo.pdf", content: "…" } }),
+      extractCitedFilePaths(
+        mcpWirePayload({ ok: true, data: { path: "/Documents/foo.pdf", content: "…" } }),
+      ),
     ).toEqual(["/Documents/foo.pdf"]);
   });
 });

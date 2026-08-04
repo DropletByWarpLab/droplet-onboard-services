@@ -34,11 +34,17 @@
 import type { PrivateEnhancement } from "@droplet/tools-core";
 
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 import type {
   McpCallContext,
   McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
+import {
+  parseToolResultPayload,
+  toolResultPayloadValue,
+  type ToolResultPayload,
+} from "./tool-result-payload.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
   toolAllowedInScope,
@@ -61,6 +67,8 @@ import {
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
+
+const logger = createLogger("llm-agent");
 
 /**
  * WARP-437 — pluggable enhancement deps. The agent loop calls these to
@@ -1918,12 +1926,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         };
       }
       const text = result.content[0]?.text ?? "{}";
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = { raw: text };
-      }
+      // WARP-1604 — single parse point for the tool-result wire payload.
+      // `payload` carries the mcp-server contract in its type (see
+      // services/tool-result-payload.ts); `parsed` is the same value widened
+      // for the existing untyped consumers (SSE event, trace).
+      const payload = parseToolResultPayload(text);
+      const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
       // Translate the MCP envelope into an SSE tool_result event.
@@ -1973,9 +1981,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // loop) so a single helper call captures every result this turn.
       // `deps.citation.enqueue` MUST NOT await — see CitationDeps.
       if (deps.citation && req.citationContext && !result.isError) {
-        const paths = extractCitedFilePaths(parsed);
+        const paths = extractCitedFilePaths(payload);
         if (paths.length > 0) {
           deps.citation.enqueue(paths, req.citationContext);
+        } else if (!isConfirmation && isRetrievalClassTool(call.function.name)) {
+          // WARP-1604 backstop. A retrieval-class tool that succeeded but
+          // yielded no citable path is almost always the payload contract
+          // drifting again (the whole citation trail then dies silently,
+          // with no error anywhere). Debug-level: a genuinely empty search
+          // or an empty directory hits this legitimately, so it must not
+          // be noise at info/warn.
+          logger.debug(
+            {
+              tool: call.function.name,
+              threadId: req.citationContext.threadId,
+              messageId: req.citationContext.messageId,
+            },
+            "retrieval-class tool succeeded with zero citable paths — no FileCitation row written (check the mcp-server ↔ extractor payload contract if persistent)",
+          );
         }
       }
 
@@ -2328,14 +2351,51 @@ function safeParseArgs(call: ToolCall): Record<string, unknown> {
 }
 
 /**
- * WARP-473 — extract file paths from a parsed tool result.
+ * WARP-1604 — tools whose successful result is expected to name at least
+ * one file. Used only by the zero-path backstop log below; extraction
+ * itself is shape-driven, not name-driven, so adding a tool here can never
+ * change which paths get cited.
+ */
+const RETRIEVAL_CLASS_TOOLS = new Set([
+  "read_file",
+  "search_content",
+  "search_files",
+  "list_files",
+  "list_recent_files",
+]);
+
+function isRetrievalClassTool(name: string): boolean {
+  return RETRIEVAL_CLASS_TOOLS.has(name);
+}
+
+/**
+ * WARP-473 — extract file paths from a tool-result wire payload.
  *
- * Heuristic walker that covers every file-shaped result the registry
- * emits today:
- *   - `data.path`              — read_file, write_file, move_file, …
- *   - `data.results[].path`    — search_content hits
- *   - `data.files[].path`      — list_files, list_recent_files
- *   - `data.items[].path`      — older listings
+ * WARP-1604: the keys live at the **ROOT** of the payload, not under
+ * `data`. mcp-server unwraps the `ToolResult` envelope before it hits the
+ * wire (`JSON.stringify(result.data)`), so what arrives here is the
+ * handler's own object — and for one tool it is not an object at all:
+ *   - a bare `[…]`        — list_files. Its handler returns the orchestrator
+ *                           directory route's body verbatim, and that route
+ *                           `res.json(entries)` with a bare `FileEntryInfo[]`
+ *                           on all three of its branches (cache hit, normal,
+ *                           and the `handleFileError(…, [])` degrade).
+ *   - `path`              — read_file, write_file, move_file, …
+ *   - `results[].path`    — search_content hits
+ *   - `items[].path`      — search_files, list_recent_files
+ *   - `files[].path`      — kept for any handler that wraps a listing
+ *
+ * The bare-array case is why `list_files` — the highest-frequency file tool
+ * in the agent loop — still wrote ZERO rows after the envelope fix: an array
+ * passes the `typeof === "object"` guard, but every key read off it is
+ * `undefined`. The original review of this PR caught it because the test
+ * asserted a `{ files: [...] }` shape `list_files` has never emitted.
+ *
+ * This function used to walk `data.*`, which is always `undefined` on the
+ * real wire — it returned `[]` for every successful call and the whole
+ * `FileCitation` trail was dead. The parameter type is the branded
+ * `ToolResultPayload` precisely so a caller (including a test) cannot hand
+ * it a hand-built envelope again; see services/tool-result-payload.ts.
  *
  * Anything outside these shapes is ignored — no path-finding by
  * regex across arbitrary text. Bounded to 20 paths per result so a
@@ -2356,11 +2416,9 @@ function safeParseArgs(call: ToolCall): Record<string, unknown> {
  *
  * The function is exported for direct testing.
  */
-export function extractCitedFilePaths(parsed: unknown): string[] {
-  if (typeof parsed !== "object" || parsed === null) return [];
-  const root = parsed as { data?: unknown };
-  const data = root.data;
-  if (typeof data !== "object" || data === null) return [];
+export function extractCitedFilePaths(payload: ToolResultPayload): string[] {
+  const root: unknown = toolResultPayloadValue(payload);
+  if (typeof root !== "object" || root === null) return [];
 
   const out: string[] = [];
   const push = (val: unknown) => {
@@ -2385,7 +2443,15 @@ export function extractCitedFilePaths(parsed: unknown): string[] {
     }
   };
 
-  const d = data as {
+  // A bare array IS the payload (list_files). Checked first because an array
+  // also satisfies the object guard above, and none of the keyed reads below
+  // can ever hit on one.
+  if (Array.isArray(root)) {
+    pushFrom(root);
+    return Array.from(new Set(out));
+  }
+
+  const d = root as {
     path?: unknown;
     results?: unknown;
     files?: unknown;
