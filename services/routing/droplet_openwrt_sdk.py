@@ -304,6 +304,34 @@ def _section_or(call, fallback):
 # ---------------------------------------------------------------------------
 # Core JSON-RPC client
 # ---------------------------------------------------------------------------
+def _pairs_keep_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """object_pairs_hook that turns repeated keys into a list (WARP-1720).
+
+    ubus serialises blobmsg straight to JSON, and blobmsg allows the same
+    field name to repeat — `umdns browse` emits every TXT record (and every
+    ipv6 address) as its own `"txt":` / `"ipv6":` key in ONE object.
+    Python's default decoder silently keeps only the LAST duplicate, which
+    threw away the `mac=` TXT record and made every Droplet AP invisible to
+    discovery, with no error anywhere (verified live 2026-08-04: the
+    ApDevice table had zero rows on a fabric with a healthy announcing AP).
+
+    Objects without duplicate keys — the overwhelmingly common case — come
+    out shape-identical to the default decoder, so this is safe to apply to
+    every response at the one place the bytes are decoded. It must live
+    here: after `json.loads` the loss is unrecoverable.
+    """
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            if isinstance(out[key], list):
+                out[key].append(value)
+            else:
+                out[key] = [out[key], value]
+        else:
+            out[key] = value
+    return out
+
+
 class UbusClient:
     """Low-level JSON-RPC 2.0 client for OpenWrt ubus over HTTP."""
 
@@ -341,7 +369,10 @@ class UbusClient:
         for attempt in (1, 2):
             try:
                 with urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    return json.loads(
+                        resp.read().decode("utf-8"),
+                        object_pairs_hook=_pairs_keep_duplicates,
+                    )
             except (OSError, HTTPException, ValueError) as exc:
                 # OSError covers URLError, ConnectionResetError, timeouts;
                 # http.client.HTTPException covers IncompleteRead /
@@ -2357,8 +2388,13 @@ class ApApi:
             if parsed is None:
                 continue
             # `ipv4` shape on umdns is just the address string; older
-            # builds sometimes nest it under `ipv4` -> "address". Tolerate.
+            # builds sometimes nest it under `ipv4` -> "address", and a
+            # dual-stack host announces it as a repeated blobmsg field,
+            # which the WARP-1720 pairs hook surfaces as a list. Tolerate
+            # all three; first address wins.
             ipv4 = entry.get("ipv4")
+            if isinstance(ipv4, list):
+                ipv4 = ipv4[0] if ipv4 else None
             if isinstance(ipv4, dict):
                 ipv4 = ipv4.get("address") or ipv4.get("ip")
             if isinstance(ipv4, str) and "last_ip" not in parsed:
@@ -2379,6 +2415,11 @@ class ApApi:
         """
         txt = entry.get("txt")
         kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A service with exactly ONE TXT record decodes to a bare
+            # string even with the WARP-1720 duplicate-key hook (the hook
+            # only lists keys that actually repeat).
+            txt = [txt]
         if isinstance(txt, list):
             for item in txt:
                 if not isinstance(item, str) or "=" not in item:
