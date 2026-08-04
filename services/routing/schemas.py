@@ -601,6 +601,29 @@ class ApBandSteeringRequest(BaseModel):
     enabled: bool = Field(..., description="Enable 802.11k/v band steering on the AP")
 
 
+class ApWirelessRequest(BaseModel):
+    """Set the external AP's network name / passphrase (WARP-1712).
+
+    Deliberately UNCONSTRAINED at the pydantic layer: both fields are plain
+    optional strings so an out-of-range SSID/key reaches the handler and is
+    refused with a **400** carrying an operator-readable message, rather than
+    pydantic's generic 422 validation envelope. The handler is also where the
+    "at least one field" rule lives — an empty body is a no-op the caller
+    should be told about, not a silent success.
+
+    `key` is the WPA2 passphrase. It is never logged and never echoed in an
+    error message; the GET surfaces it only to owner/admin principals (same
+    posture as the guest-network PSK).
+    """
+
+    ssid: Optional[str] = Field(
+        default=None, description="Network name to broadcast (1-32 bytes UTF-8)"
+    )
+    key: Optional[str] = Field(
+        default=None, description="WPA2 passphrase (8-63 characters)"
+    )
+
+
 # --- Response models ---
 
 class HealthResponse(BaseModel):

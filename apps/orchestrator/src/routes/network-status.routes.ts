@@ -55,7 +55,7 @@ import {
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 // WARP-1703 — band steering is Tier 2, so its write executes on the confirm
 // path rather than in the PUT handler.
-import { setBandSteering } from "../services/ap-onboard.service.js";
+import { setBandSteering, setApWifi } from "../services/ap-onboard.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -764,6 +764,17 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           // service's honest 422 (AP_BAND_STEERING_UNAVAILABLE) surfaces: the
           // PUT only mints the token, so nothing reaches the APs until here.
           writeResult = await setBandSteering(prisma, params?.enabled as boolean);
+          break;
+        case "set_ap_wifi_password":
+          // WARP-1712 — Tier-2 confirm for PUT /network/wifi/ap when the save
+          // carries a new passphrase. Nothing reached the APs on the original
+          // PUT (it only minted the token), so this is where the write —
+          // and the service's honest 422 (AP_WIRELESS_UNAVAILABLE) — lands.
+          // An SSID-only save is Tier 1 and never arrives here.
+          writeResult = await setApWifi(prisma, {
+            ssid: params?.ssid as string | undefined,
+            key: params?.key as string | undefined,
+          });
           break;
         case "set_dhcp_pool":
           // Tier-2 confirm for POST /network/dhcp/pool. The route validated the

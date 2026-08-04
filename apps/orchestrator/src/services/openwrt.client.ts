@@ -1270,6 +1270,108 @@ export async function setApBandSteering(opts: {
   return opFrom(res);
 }
 
+/**
+ * WARP-1712: the AP's OWN wireless state, read live off its uci every time.
+ *
+ * There is deliberately no orchestrator-side cache of the network name — the
+ * AP is authoritative for its own radios, so a stale copy here is exactly the
+ * "two places disagreeing" failure this ticket exists to remove.
+ *
+ * `supported: false` is the honest "can't do it on this shape" answer (no AP
+ * credential provisioned, or the AP reports no wireless interfaces) — never
+ * an error.
+ */
+export type ApWirelessRadio = {
+  section: string;
+  radio: string | null;
+  /** '2g' / '5g' / '6g' as uci reports it. */
+  band: string | null;
+  ssid: string | null;
+  encryption: string | null;
+  /** Configured channel — 'auto' is a legal uci value. */
+  channel: string | null;
+  htmode: string | null;
+  disabled: boolean;
+  /** True for the interface that owns the household name (the write target). */
+  primary: boolean;
+  ifname: string | null;
+  up: boolean | null;
+  /** Live channel/width off iwinfo; may differ from the configured value. */
+  live_channel: number | null;
+  live_htmode: string | null;
+  clients: number | null;
+};
+
+export type ApWirelessDevice = {
+  model: string | null;
+  firmware: string | null;
+  hostname: string | null;
+  uptime_seconds: number | null;
+};
+
+export type ApWireless = {
+  supported: boolean;
+  ap_detail?: string;
+  /** Null when the AP image predates the band-steering substrate. */
+  band_steering?: boolean | null;
+  primary_section?: string | null;
+  ssid?: string | null;
+  /** The live per-unit passphrase — owner/admin surfaces only. */
+  key?: string | null;
+  encryption?: string | null;
+  /** What the AP's applier will name the 5 GHz network. Display only. */
+  five_ghz_ssid?: string | null;
+  radios: ApWirelessRadio[];
+  device?: ApWirelessDevice;
+};
+
+export type ApWirelessWriteResponse = WriteResult & {
+  ssid?: string | null;
+  five_ghz_ssid?: string | null;
+  sections_written?: string[];
+};
+
+export async function getApWireless(opts: { mac: string }): Promise<ApWireless> {
+  return routingFetchJson<ApWireless>(
+    `/aps/${encodeURIComponent(opts.mac)}/wireless`,
+    { label: "AP wireless" },
+  );
+}
+
+export async function setApWireless(opts: {
+  mac: string;
+  ssid?: string;
+  key?: string;
+}): Promise<ApWirelessWriteResponse> {
+  const body: Record<string, unknown> = {};
+  if (opts.ssid !== undefined) body.ssid = opts.ssid;
+  if (opts.key !== undefined) body.key = opts.key;
+  const res = await routingFetch(`/aps/${encodeURIComponent(opts.mac)}/wireless`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    label: "AP wireless write",
+  });
+  // opFrom only reads a header, so the body is still ours to consume. The
+  // routing service reports the name it wrote, letting the dashboard confirm
+  // what the network will be called without racing the AP's reload with an
+  // immediate re-read. It also MIRRORS the Operation-Id into the body — some
+  // proxies strip non-standard response headers — so fall back to that.
+  const op = opFrom(res);
+  const payload = (await res.json().catch(() => ({}))) as {
+    ssid?: string | null;
+    five_ghz_ssid?: string | null;
+    sections_written?: string[];
+    operation_id?: string | null;
+  };
+  return {
+    operationId: op.operationId ?? payload.operation_id ?? null,
+    ssid: payload.ssid,
+    five_ghz_ssid: payload.five_ghz_ssid,
+    sections_written: payload.sections_written,
+  };
+}
+
 /** Test-only seam — only available when routing is in ROUTING_MODE=mock. */
 export async function seedDiscoveredAp(opts: {
   mac: string;

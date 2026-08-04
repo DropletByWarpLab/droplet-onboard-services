@@ -37,6 +37,7 @@ import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { BandSteeringCard } from "@/components/network/BandSteeringCard";
+import { ApWifiCard } from "@/components/network/ApWifiCard";
 import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
@@ -777,6 +778,14 @@ function WifiTab() {
           enable/disable toggle; every chip is a real iwinfo field or "not
           reported". */}
       <RadioDetailCard />
+
+      {/* WARP-1712: the external access point's OWN network name + password.
+          Sits directly under the router's Wi-Fi form so both halves of the
+          household's wireless are set from one place. The same component is
+          rendered inside the Coverage Extenders panel on the Devices tab —
+          shared SWR key, so the two surfaces can never disagree. Honest
+          unavailable state when no approved Droplet AP is online. */}
+      <ApWifiCard />
 
       {/* WARP-1703: the external Droplet AP's 802.11k/v band-steering master
           switch. Honest unavailable state when no approved Droplet AP is

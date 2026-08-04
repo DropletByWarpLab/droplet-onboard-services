@@ -14,10 +14,11 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   approveAp,
   decommissionAp,
+  getApWirelessForMac,
   ApOnboardError,
   DISCOVERED_AP_LRU_CAP,
 } from "../services/ap-onboard.service.js";
@@ -109,6 +110,32 @@ export function createApsRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // ── GET /api/aps/:mac/wireless ───────────────────────────────
+  // WARP-1712: live per-AP radio detail behind a Coverage Extenders card —
+  // model, firmware, uptime, per-radio band/channel/width, link state and
+  // associated clients, read straight off the AP so the card can never show
+  // a stale network name.
+  //
+  // owner/admin (unlike the plain row reads above): the body carries the
+  // live Wi-Fi passphrase, same posture as GET /network/wifi/ap and the
+  // guest-network PSK read. Kept next to `/aps/:mac` for readability — a
+  // path param never spans a `/`, so the two patterns can't collide.
+  router.get(
+    "/aps/:mac/wireless",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const mac = macFromParam(req);
+        res.json(await getApWirelessForMac(prisma, mac));
+      } catch (err) {
+        if (err instanceof ApOnboardError) {
+          return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        next(err);
+      }
+    },
+  );
 
   // ── GET /api/aps/:mac ────────────────────────────────────────
   router.get("/aps/:mac", async (req: Request, res: Response, next: NextFunction) => {

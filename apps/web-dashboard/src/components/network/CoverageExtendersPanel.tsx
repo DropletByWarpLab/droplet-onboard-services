@@ -64,6 +64,9 @@ import {
   fetchNetworkOperation,
 } from "@/lib/api";
 import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
+import { ApRadioDetail } from "@/components/network/ApRadioDetail";
+import { ApWifiCard } from "@/components/network/ApWifiCard";
+import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
@@ -328,6 +331,15 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               {friendlyError.body}
             </div>
           ) : null}
+          {/* WARP-1712: an ONLINE Droplet AP is infrastructure we can
+              interrogate — show its radios, firmware and uptime rather than
+              just a status pill. Read live off the AP, so it can never
+              disagree with the Wi-Fi controls below the list. Only the
+              Droplet image exposes this; vendor-managed APs report through
+              their own controllers. */}
+          {ap.status === "ONLINE" && ap.backend === "DROPLET_IMAGE" ? (
+            <ApRadioDetail mac={ap.mac} />
+          ) : null}
         </div>
       </div>
       {(showApprove || showRemove) && (
@@ -413,6 +425,13 @@ export function CoverageExtendersPanel() {
       return new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime();
     });
   }, [data]);
+
+  // WARP-1712: the AP Wi-Fi + band-steering controls are household-level and
+  // only mean anything once a Droplet-image AP is actually serving.
+  const hasOnlineDropletAp = useMemo(
+    () => aps.some((ap) => ap.status === "ONLINE" && ap.backend === "DROPLET_IMAGE"),
+    [aps],
+  );
 
   // ──────────────────────────────────────────────────────────────
   // Operation-Id polling (blocker #2). Lifted directly from
@@ -726,6 +745,20 @@ export function CoverageExtendersPanel() {
           ))}
         </div>
       )}
+
+      {/* WARP-1712 — the founder's ask: the AP belongs to the network, so its
+          controls live here in the extender surface too, not only on the Wi-Fi
+          tab. These are the SAME components the Wi-Fi tab renders, keyed on the
+          same SWR endpoints — so the two surfaces share one cache entry and
+          literally cannot show different values. Shown only once at least one
+          Droplet AP is ONLINE; before that the cards would just render their
+          "not available" state and add noise. */}
+      {hasOnlineDropletAp ? (
+        <div className="flex flex-col gap-3 mt-4">
+          <ApWifiCard />
+          <BandSteeringCard />
+        </div>
+      ) : null}
 
       {/* WARP-446 (blocker #3): masked-PSK dialog that replaced the old
           native browser prompt. Read-only network name + show/hide eyeball
