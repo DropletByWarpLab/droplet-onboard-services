@@ -2281,6 +2281,19 @@ function safeParseArgs(call: ToolCall): Record<string, unknown> {
  * regex across arbitrary text. Bounded to 20 paths per result so a
  * list_files on a giant directory can't enqueue thousands of rows.
  *
+ * WARP-1656 — one exception to "shape only, never semantics": an entry
+ * that explicitly carries a truthy `isDirectory` is skipped. A listing is
+ * a `FileEntryInfo[]` in which folders are elements exactly like files, so
+ * without this a folder became a `FileCitation` row — inert for the
+ * related-chats reverse index, and, far worse, it spent one of the 20
+ * slots a real file needed. The cap is silent, so the loss presented as
+ * "Related chats is missing entries" with nothing in the logs.
+ *
+ * This is still a shape check — does the entry carry this field at all? —
+ * not an interpretation of the payload, and it is a no-op for every shape
+ * that never carries the field (read_file, search_content hits, …). The
+ * skip happens BEFORE `push`, so a directory never charges the cap.
+ *
  * The function is exported for direct testing.
  */
 export function extractCitedFilePaths(parsed: unknown): string[] {
@@ -2295,18 +2308,31 @@ export function extractCitedFilePaths(parsed: unknown): string[] {
       out.push(val);
     }
   };
+  const isDirectoryEntry = (item: object): boolean =>
+    "isDirectory" in item && Boolean((item as { isDirectory?: unknown }).isDirectory);
   const pushFrom = (arr: unknown) => {
     if (!Array.isArray(arr)) return;
     for (const item of arr) {
-      if (item && typeof item === "object" && "path" in item) {
+      if (
+        item &&
+        typeof item === "object" &&
+        "path" in item &&
+        !isDirectoryEntry(item)
+      ) {
         push((item as { path?: unknown }).path);
       }
       if (out.length >= 20) return;
     }
   };
 
-  const d = data as { path?: unknown; results?: unknown; files?: unknown; items?: unknown };
-  push(d.path);
+  const d = data as {
+    path?: unknown;
+    results?: unknown;
+    files?: unknown;
+    items?: unknown;
+    isDirectory?: unknown;
+  };
+  if (!isDirectoryEntry(d)) push(d.path);
   pushFrom(d.results);
   pushFrom(d.files);
   pushFrom(d.items);
