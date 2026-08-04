@@ -110,13 +110,22 @@ export function GroupTypeahead({ mac, currentGroups, onError }: Props) {
         aria-activedescendant={
           highlighted !== null ? `gt-opt-${highlighted}` : undefined
         }
-        className="type-caption-1 px-2 py-0.5 rounded-full border border-dashed border-separator bg-transparent text-label-secondary outline-none focus:border-accent"
+        className="type-caption-1 px-2 py-0.5 rounded-full border border-dashed border-[var(--card-bd)] bg-transparent text-[color:var(--text-muted)] outline-none focus:border-[var(--brand)]"
       />
       {showList && (
         <ul
           id="gt-listbox"
           role="listbox"
-          className="absolute left-0 top-full mt-1 bg-surface-primary border border-separator rounded shadow z-10 min-w-[12rem]"
+          className="card absolute left-0 top-full mt-1 z-10 min-w-[12rem]"
+          style={{
+            padding: "4px 0",
+            background: "var(--glass)",
+            backdropFilter: "blur(20px) saturate(150%)",
+            WebkitBackdropFilter: "blur(20px) saturate(150%)",
+            border: "1px solid var(--card-bd)",
+            borderRadius: "var(--radius-card)",
+            boxShadow: "var(--lift)",
+          }}
         >
           {items.map((item) =>
             item.kind === "pick" ? (
@@ -125,14 +134,12 @@ export function GroupTypeahead({ mac, currentGroups, onError }: Props) {
                 role="option"
                 aria-selected={highlighted === item.idx}
                 id={`gt-opt-${item.idx}`}
-                className={
-                  highlighted === item.idx ? "bg-surface-secondary" : ""
-                }
+                className={highlighted === item.idx ? "bg-[var(--hover)]" : ""}
               >
                 <button
                   type="button"
                   onClick={() => void handlePick(item.group.id)}
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-secondary type-caption-1 text-label-primary"
+                  className="w-full text-left px-3 py-1.5 hover:bg-[var(--hover)] type-caption-1 text-[color:var(--text)]"
                 >
                   {item.group.name}
                 </button>
@@ -143,14 +150,12 @@ export function GroupTypeahead({ mac, currentGroups, onError }: Props) {
                 role="option"
                 aria-selected={highlighted === item.idx}
                 id={`gt-opt-${item.idx}`}
-                className={
-                  highlighted === item.idx ? "bg-surface-secondary" : ""
-                }
+                className={highlighted === item.idx ? "bg-[var(--hover)]" : ""}
               >
                 <button
                   type="button"
                   onClick={() => void handleCreateAndPick()}
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-secondary type-caption-1 text-accent"
+                  className="w-full text-left px-3 py-1.5 hover:bg-[var(--hover)] type-caption-1 text-[color:var(--brand)]"
                 >
                   Create &ldquo;{input.trim()}&rdquo;
                 </button>
