@@ -31,6 +31,7 @@ import operations
 from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
+    LoginDenied,
     UbusError,
     ScanUnsupportedError,
     UBUS_STATUS_NOT_FOUND,
@@ -143,6 +144,49 @@ def _load_openwrt_password() -> str:
 
 
 OPENWRT_PASSWORD = _load_openwrt_password()
+
+# ---------------------------------------------------------------------------
+# WARP-1675: external-AP credentials
+# ---------------------------------------------------------------------------
+# On the edge-router shape the approved coverage extender is an EXTERNAL
+# OpenWrt AP (droplet-edge-router ap/ image) provisioning the same per-unit
+# `droplet-ai` rpcd account model as the router. Approval configures the AP's
+# OWN wireless over its rpcd at the mDNS-discovered address — the router-side
+# wifi-iface staging is meaningless on a radio-less router. Same secret-file
+# discipline as the router credential (WARP-37); when no AP credential is
+# configured the service keeps the historical router-side-only behaviour.
+AP_USERNAME = os.environ.get("AP_USERNAME", "droplet-ai")
+AP_PORT = int(os.environ.get("AP_PORT", "80"))
+
+
+def _load_ap_password() -> str:
+    """Load the external AP's rpcd password, preferring the Docker secret file.
+
+    Mirrors `_load_openwrt_password` (WARP-37): /run/secrets/ap_openwrt_password
+    first, deprecated $AP_OPENWRT_PASSWORD env fallback. Empty string means "no
+    external AP configured" — AP-direct configuration is skipped, never failed.
+    """
+    secret_path = os.environ.get("AP_OPENWRT_PASSWORD_FILE", "/run/secrets/ap_openwrt_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            value = fh.read().strip()
+        if value:
+            return value
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not read AP password from %s: %s", secret_path, exc)
+
+    env_value = os.environ.get("AP_OPENWRT_PASSWORD", "")
+    if env_value:
+        logger.warning(
+            "AP_OPENWRT_PASSWORD env var is deprecated — migrate to the Docker "
+            "secret at /run/secrets/ap_openwrt_password. Falling back to env for now."
+        )
+    return env_value
+
+
+AP_PASSWORD = _load_ap_password()
 if not OPENWRT_PASSWORD:
     logger.warning(
         "OpenWrt password is not configured — router control will be unavailable "
@@ -210,19 +254,56 @@ def require_bearer(request: Request) -> None:
 
 router_instance: Optional[DropletRouter] = None
 
+# WARP-1673: WHY the last connect attempt failed — "auth" (router reachable but
+# it rejected the droplet-ai credentials) or "unreachable" (everything else).
+# Written by `_connect_to_openwrt` (whichever thread runs it — startup,
+# on-demand, or background retry; plain assignment is atomic under the GIL,
+# same discipline as the `router_instance` global itself) and read by
+# `get_router()` / `/health` so a stale router secret renders as the actionable
+# AUTH state instead of the generic "Router offline" one.
+_last_connect_failure: Optional[str] = None
+
 
 def _connect_to_openwrt() -> DropletRouter:
     """Construct a fresh, authenticated DropletRouter. Raises `ConnectionLost`
     / `UbusError` on failure — the caller (lifespan's startup attempt, or
     `reconnect_coordinator`'s on-demand / background retry, WARP-1510)
-    decides what to do."""
-    return DropletRouter(
-        host=OPENWRT_HOST,
-        port=OPENWRT_PORT,
-        username=OPENWRT_USERNAME,
-        password=OPENWRT_PASSWORD,
-        auto_login=True,
-    )
+    decides what to do. Records the failure *kind* (WARP-1673) as it passes."""
+    global _last_connect_failure
+    try:
+        router = DropletRouter(
+            host=OPENWRT_HOST,
+            port=OPENWRT_PORT,
+            username=OPENWRT_USERNAME,
+            password=OPENWRT_PASSWORD,
+            auto_login=True,
+        )
+    except LoginDenied:
+        _last_connect_failure = "auth"
+        raise
+    except (ConnectionLost, UbusError):
+        _last_connect_failure = "unreachable"
+        raise
+    _last_connect_failure = None
+    return router
+
+
+#: Wire detail for the typed router-credential failure (WARP-1673). HTTP 502:
+#: routing (the gateway) reached the router (the upstream) and the upstream
+#: refused our credentials. Nothing sits between the orchestrator and this
+#: service to mint a 502, so the status alone is an unambiguous classifier —
+#: same status-only discipline as the 409 SCAN_UNSUPPORTED contract. The
+#: orchestrator maps it to RouterError code AUTH (types/router-error.ts) and
+#: the dashboard renders the existing "Credentials rejected" copy.
+_ROUTER_AUTH_DETAIL = {
+    "code": "ROUTER_AUTH",
+    "message": (
+        "The router rejected the routing service's credentials — the router's "
+        "droplet-ai password has likely rotated (e.g. a reflash regenerated "
+        "it). Re-sync docker/secrets/openwrt_password and restart the routing "
+        "container."
+    ),
+}
 
 
 def _set_router_instance(router: DropletRouter) -> None:
@@ -256,12 +337,23 @@ def get_router() -> DropletRouter:
     if router_instance is None:
         reconnect_coordinator.maybe_reconnect_on_demand()
     if router_instance is None:
+        # WARP-1673: a router that is UP but refusing our credentials is a
+        # different operator problem than a router that is down — surface the
+        # typed 502 so the dashboard shows "Credentials rejected", not
+        # "Router offline".
+        if _last_connect_failure == "auth":
+            raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
 
 
 def handle_router_error(exc: Exception):
     """Convert SDK exceptions to HTTPException raises."""
+    if isinstance(exc, LoginDenied):
+        # WARP-1673: mid-session credential rejection (the password rotated
+        # while we held a session and the re-login was refused) — same typed
+        # 502 as the connect-time path in `get_router()`.
+        raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
     if isinstance(exc, ConnectionLost):
         raise HTTPException(status_code=503, detail=f"Router unreachable: {exc}")
     if isinstance(exc, UbusError):
@@ -508,11 +600,19 @@ def _best_effort_topology() -> Optional[str]:
 @app.get("/health", response_model=HealthResponse)
 def health():
     if router_instance is None:
+        # WARP-1673: name the reason when we know it — an operator reading
+        # /health should see "bad credentials" (fix the secret), not go
+        # checking cables for a router that is answering fine.
+        error = (
+            _ROUTER_AUTH_DETAIL["message"]
+            if _last_connect_failure == "auth"
+            else "Router not connected at startup"
+        )
         return HealthResponse(
             status="disconnected",
             connected=False,
             router_host=OPENWRT_HOST,
-            error="Router not connected at startup",
+            error=error,
         )
     try:
         board = router_instance.system.board_info()
@@ -1967,6 +2067,108 @@ def _get_ap_namespace(router):
     return router.ap
 
 
+def _router_has_ap_radios(router) -> bool:
+    """False only when the router POSITIVELY reports zero wireless radios
+    (`network.wireless status` → {} — the radio-less Pi edge router). Any
+    probe failure fails OPEN to True so the historical router-side staging
+    path is never skipped on a transient read error."""
+    try:
+        wireless = getattr(router, "wireless", None)
+        if wireless is None or not hasattr(wireless, "status"):
+            return True
+        return bool(wireless.status())
+    except (ConnectionLost, UbusError):
+        return True
+
+
+def _mac_key(mac: str) -> str:
+    return mac.replace(":", "").replace("-", "").strip().lower()
+
+
+def _discovered_ap_ip(ap, canonical: str) -> Optional[str]:
+    """The AP's last-seen address from the discovery layer (mock `get`, real
+    umdns browse). None when the AP isn't currently visible."""
+    if hasattr(ap, "get"):
+        info = ap.get(canonical)
+        if isinstance(info, dict) and info.get("last_ip"):
+            return info["last_ip"]
+    if hasattr(ap, "browse_discovered"):
+        try:
+            records = ap.browse_discovered()
+        except (ConnectionLost, UbusError):
+            return None
+        for rec in records:
+            if _mac_key(str(rec.get("mac", ""))) == _mac_key(canonical) and rec.get("last_ip"):
+                return rec["last_ip"]
+    return None
+
+
+def _push_ap_wireless(
+    host: str,
+    *,
+    enable: bool,
+    ssid: Optional[str] = None,
+    encryption: Optional[str] = None,
+    key: Optional[str] = None,
+) -> None:
+    """Configure the EXTERNAL AP's own wifi-iface sections over ITS rpcd.
+
+    WARP-1675 — this is the layer schema.prisma's `ApDevice.lastIp` comment
+    always promised. Connects to the AP as `droplet-ai` (AP_* config above),
+    sets ssid/encryption/key (when supplied) + the disabled flag on every
+    `wifi-iface` section the AP carries, and applies under the AP's own
+    safe_apply so a push that breaks the AP's management path auto-rolls back.
+    Raises ConnectionLost / UbusError for the caller to classify.
+    """
+    dev = DropletRouter(
+        host=host,
+        port=AP_PORT,
+        username=AP_USERNAME,
+        password=AP_PASSWORD,
+        auto_login=True,
+    )
+    envelope = dev.uci.get("wireless", type="wifi-iface") or {}
+    sections = envelope.get("values", {}) if isinstance(envelope, dict) else {}
+    values: dict[str, str] = {"disabled": "0" if enable else "1"}
+    if ssid is not None:
+        values["ssid"] = ssid
+    if encryption is not None:
+        values["encryption"] = encryption
+    if key is not None:
+        values["key"] = key
+    if not sections:
+        raise UbusError(-1, f"AP at {host} reports no wifi-iface sections to configure")
+    with dev.safe_apply(timeout=60):
+        for section_id in sections:
+            dev.uci.set("wireless", section_id, values)
+
+
+def _classify_ap_push_error(exc: Exception, host: str) -> HTTPException:
+    """Typed 502s for an AP-direct push failure — mirrors the WARP-1673
+    status-only discipline. Credential rejections are recognised both as
+    UbusError(6) at login (current SDK) and by the LoginDenied marker
+    (`code == "ROUTER_AUTH"`, WARP-1673) so either merge order behaves."""
+    is_auth = (isinstance(exc, UbusError) and exc.code == 6) or (
+        getattr(exc, "code", None) == "ROUTER_AUTH"
+    )
+    if is_auth:
+        return HTTPException(status_code=502, detail={
+            "code": "AP_AUTH",
+            "message": (
+                f"The AP at {host} rejected the droplet-ai credentials — its "
+                "per-unit password has likely rotated (reflash). Re-sync "
+                "docker/secrets/ap_openwrt_password and retry the approval."
+            ),
+        })
+    return HTTPException(status_code=502, detail={
+        "code": "AP_UNREACHABLE",
+        "message": (
+            f"Could not configure the AP at {host} over rpcd: {exc}. The "
+            "approval is retryable once the AP is reachable."
+        ),
+    })
+
+
 @app.get("/aps/discovered")
 def aps_discovered():
     """Return the live mDNS discovery snapshot.
@@ -2082,36 +2284,77 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        with r.safe_apply(timeout=60):
-            # Mock router's `push_wireless_config` takes the MAC so it
-            # can track per-AP state; the real SDK's signature doesn't
-            # take MAC because the iface_section already encodes it.
-            # Detect via the mock's `discovered` attribute.
-            if hasattr(ap, "discovered"):
-                ap.push_wireless_config(
-                    mac=canonical,
-                    iface_section=iface_section,
-                    radio=req.radio,
+        # WARP-1675: staging a wifi-iface on a router that HAS no AP radios
+        # (the Pi edge router) would leave a dead uci section that configures
+        # nothing — skip it and rely on the AP-direct push below.
+        router_staged = _router_has_ap_radios(r)
+        if router_staged:
+            with r.safe_apply(timeout=60):
+                # Mock router's `push_wireless_config` takes the MAC so it
+                # can track per-AP state; the real SDK's signature doesn't
+                # take MAC because the iface_section already encodes it.
+                # Detect via the mock's `discovered` attribute.
+                if hasattr(ap, "discovered"):
+                    ap.push_wireless_config(
+                        mac=canonical,
+                        iface_section=iface_section,
+                        radio=req.radio,
+                        ssid=req.ssid,
+                        encryption=req.encryption,
+                        key=req.encryption_key,
+                        network=req.network,
+                    )
+                else:
+                    ap.push_wireless_config(
+                        iface_section=iface_section,
+                        radio=req.radio,
+                        ssid=req.ssid,
+                        encryption=req.encryption,
+                        key=req.encryption_key,
+                        network=req.network,
+                    )
+        else:
+            logger.info(
+                "router reports no AP radios (edge-router shape) — skipping "
+                "router-side wifi-iface staging for %s", canonical,
+            )
+
+        # WARP-1675: configure the AP ITSELF when an AP credential is
+        # provisioned. Without one (single-box / legacy shapes) the
+        # router-side staging above remains the whole story.
+        ap_configured = False
+        ap_detail = "no AP credential configured — router-side approval only"
+        if AP_PASSWORD:
+            ap_ip = _discovered_ap_ip(ap, canonical)
+            if not ap_ip:
+                raise HTTPException(status_code=502, detail={
+                    "code": "AP_UNREACHABLE",
+                    "message": (
+                        f"AP {canonical} has no discovered address to "
+                        "configure — is it online? The approval is retryable."
+                    ),
+                })
+            try:
+                _push_ap_wireless(
+                    ap_ip,
+                    enable=True,
                     ssid=req.ssid,
                     encryption=req.encryption,
                     key=req.encryption_key,
-                    network=req.network,
                 )
-            else:
-                ap.push_wireless_config(
-                    iface_section=iface_section,
-                    radio=req.radio,
-                    ssid=req.ssid,
-                    encryption=req.encryption,
-                    key=req.encryption_key,
-                    network=req.network,
-                )
+            except (ConnectionLost, UbusError) as exc:
+                raise _classify_ap_push_error(exc, ap_ip)
+            ap_configured = True
+            ap_detail = f"AP at {ap_ip} configured directly over rpcd"
 
         return {
             "status": "ok",
             "mac": canonical,
             "iface_section": iface_section,
             "ssid": req.ssid,
+            "router_staged": router_staged,
+            "ap_configured": ap_configured,
+            "ap_detail": ap_detail,
             "operation_id": getattr(request.state, "operation_id", None),
         }
     except ConnectionLost as exc:
@@ -2149,15 +2392,39 @@ def aps_decommission(mac: str, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        with r.safe_apply(timeout=60):
-            if hasattr(ap, "discovered"):
-                ap.remove_wireless_config(canonical)
+        # WARP-1675: mirror approve's radio gating — there is nothing staged
+        # on a radio-less router to remove, and safe_apply with zero pending
+        # changes returns NO_DATA.
+        if _router_has_ap_radios(r):
+            with r.safe_apply(timeout=60):
+                if hasattr(ap, "discovered"):
+                    ap.remove_wireless_config(canonical)
+                else:
+                    ap.remove_wireless_config(iface_section=iface_section)
+
+        # WARP-1675: best-effort disable of the AP's own radios. A
+        # decommissioned AP may already be unplugged/off — an unreachable AP
+        # must NEVER fail the decommission, only annotate it.
+        ap_disabled = False
+        ap_detail = "no AP credential configured — router-side decommission only"
+        if AP_PASSWORD:
+            ap_ip = _discovered_ap_ip(ap, canonical)
+            if not ap_ip:
+                ap_detail = "AP not currently discovered — nothing to disable"
             else:
-                ap.remove_wireless_config(iface_section=iface_section)
+                try:
+                    _push_ap_wireless(ap_ip, enable=False)
+                    ap_disabled = True
+                    ap_detail = f"AP at {ap_ip} wireless disabled over rpcd"
+                except (ConnectionLost, UbusError) as exc:
+                    ap_detail = f"AP at {ap_ip} unreachable during decommission ({exc}) — proceeding"
+                    logger.warning("AP decommission: %s", ap_detail)
 
         return {
             "status": "ok",
             "mac": canonical,
+            "ap_disabled": ap_disabled,
+            "ap_detail": ap_detail,
             "operation_id": getattr(request.state, "operation_id", None),
         }
     except (ConnectionLost, UbusError) as exc:

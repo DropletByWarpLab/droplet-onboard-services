@@ -111,10 +111,10 @@ describe("WARP-473 — extractCitedFilePaths", () => {
     // Pin the wire text too: this is what mcp-server actually sends, and the
     // whole bug was that it starts with `[`, not `{`.
     expect(mcpWireText({ ok: true, data: listing }).startsWith("[")).toBe(true);
-    expect(extractCitedFilePaths(payload)).toEqual([
-      "/Invoices/Q2.csv",
-      "/Invoices/Archive",
-    ]);
+    // Only the FILE. `listing`'s second entry is a directory, and WARP-1656
+    // skips those — see the dedicated block below. What this case pins is that
+    // a bare array is descended into at all.
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
   });
 
   it("an empty listing yields no citations (the legitimate zero case)", () => {
@@ -339,9 +339,111 @@ describe("WARP-1604 — the listing route still answers with a BARE array", () =
   it("the extractor reads that shape", () => {
     // The end of the chain: route body → list_files `data` → wire → extractor.
     const routeBody: FileEntryInfo[] = listing;
+    // The directory entry is dropped by WARP-1656; the file survives, which is
+    // what proves the chain is connected end to end.
     expect(
       extractCitedFilePaths(mcpWirePayload({ ok: true, data: routeBody })),
-    ).toEqual(["/Invoices/Q2.csv", "/Invoices/Archive"]);
+    ).toEqual(["/Invoices/Q2.csv"]);
+  });
+});
+
+// ── 1b. Directories are not file citations (WARP-1656) ────────────
+//
+// A listing entry is a `FileEntryInfo`, and directories are elements of that
+// array exactly like files. The extractor is deliberately shape-driven — it
+// harvests `path` without interpreting the payload — so folders became
+// `FileCitation` rows, and worse, they consumed the 20-path budget that real
+// files needed.
+//
+// The rule under test is still a SHAPE rule: an entry that explicitly carries
+// a truthy `isDirectory` is skipped. Payloads that never carry the field
+// (read_file, search_content hits, …) are untouched, which the last two cases
+// in this block pin.
+// WARP-1604 merge note: these cases now feed the PRODUCTION payload via
+// `mcpWirePayload`, like every other extractor case above. They were written
+// against the hand-built `{ ok, data }` envelope, which the wire has never
+// carried — the exact shape WARP-1604 removed. The assertions are unchanged;
+// only the way the payload is obtained is. The module-scope `listing` fixture
+// is the same `FileEntryInfo[]` this block defined for itself.
+describe("WARP-1656 — directory entries are never cited", () => {
+  it("drops a directory entry from a listing (search_files / list_recent_files `items` shape)", () => {
+    const payload = mcpWirePayload({ ok: true, data: { items: listing } });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  it("drops a directory entry under `files` and under `results` too", () => {
+    expect(
+      extractCitedFilePaths(mcpWirePayload({ ok: true, data: { files: listing } })),
+    ).toEqual(["/Invoices/Q2.csv"]);
+    expect(
+      extractCitedFilePaths(mcpWirePayload({ ok: true, data: { results: listing } })),
+    ).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  // WARP-1604: a bare `FileEntryInfo[]` IS the list_files payload, so the
+  // directory skip has to hold on the root-array path too — the shape that
+  // actually reaches the extractor in production.
+  it("drops a directory entry from a BARE-ARRAY listing (list_files shape)", () => {
+    const payload = mcpWirePayload({ ok: true, data: listing });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  it("keeps entries that declare isDirectory: false", () => {
+    const payload = mcpWirePayload({ ok: true, data: { items: [listing[0]] } });
+    expect(extractCitedFilePaths(payload)).toEqual(["/Invoices/Q2.csv"]);
+  });
+
+  // The harm with teeth. Filtering has to happen BEFORE the cap is charged,
+  // otherwise five leading folders still evict five real files and the loss
+  // is silent — it presents as "Related chats is missing entries" with
+  // nothing in the logs.
+  it("directories do not consume the 20-path cap", () => {
+    const dirs: FileEntryInfo[] = Array.from({ length: 5 }, (_, i) => ({
+      name: `Folder${i}`,
+      path: `/Invoices/Folder${i}`,
+      isDirectory: true,
+      size: 0,
+      mimeType: null,
+      modifiedAt: "2026-05-02T11:30:00.000Z",
+    }));
+    const files: FileEntryInfo[] = Array.from({ length: 25 }, (_, i) => ({
+      name: `f${i}.csv`,
+      path: `/Invoices/f${i}.csv`,
+      isDirectory: false,
+      size: 10,
+      mimeType: "text/csv",
+      modifiedAt: "2026-06-01T09:00:00.000Z",
+    }));
+    const paths = extractCitedFilePaths(
+      mcpWirePayload({ ok: true, data: { items: [...dirs, ...files] } }),
+    );
+    expect(paths).toHaveLength(20);
+    // Twenty REAL files, starting at the first one — not 15 files behind 5
+    // folders that ate the budget.
+    expect(paths).toEqual(files.slice(0, 20).map((f) => f.path));
+    expect(paths.some((p) => p.startsWith("/Invoices/Folder"))).toBe(false);
+  });
+
+  it("skips a root `path` that declares itself a directory", () => {
+    const payload = mcpWirePayload({
+      ok: true,
+      data: { path: "/Invoices/Archive", isDirectory: true },
+    });
+    expect(extractCitedFilePaths(payload)).toEqual([]);
+  });
+
+  // The shape-driven premise survives: no `isDirectory` field, no change.
+  it("leaves payloads that never carry isDirectory untouched", () => {
+    const searchHits = mcpWirePayload({
+      ok: true,
+      data: { results: [{ path: "/a.txt", text: "…" }, { path: "/b.txt", text: "…" }] },
+    });
+    expect(extractCitedFilePaths(searchHits)).toEqual(["/a.txt", "/b.txt"]);
+    expect(
+      extractCitedFilePaths(
+        mcpWirePayload({ ok: true, data: { path: "/Documents/foo.pdf", content: "…" } }),
+      ),
+    ).toEqual(["/Documents/foo.pdf"]);
   });
 });
 

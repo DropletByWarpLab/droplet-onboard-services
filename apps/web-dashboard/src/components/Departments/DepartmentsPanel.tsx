@@ -935,6 +935,13 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
     </div>
   );
 
+  // WARP-1353 (WCAG 2.4.7): every control below wears `fieldStyle`, which sets
+  // `border: 1px solid var(--border)` INLINE — an inline declaration outranks any
+  // stylesheet rule, so the `focus:border-[var(--brand)]` idiom used on
+  // stylesheet-bordered inputs elsewhere in the dashboard would render as a
+  // silent no-op here. The affordance therefore has to be a ring (box-shadow),
+  // which an inline border cannot defeat — same conclusion WARP-1347 reached for
+  // the three converted selects above.
   function renderCreateDialog() {
     const headingLabel = createParent ? `New team in ${createParent.name}` : "New department";
     return (
@@ -958,11 +965,11 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
               value={createName}
               onChange={(e) => setCreateName(e.target.value)}
               placeholder={createParent ? "Platform" : "Finance"}
-              className="w-full px-3 py-2.5 outline-none transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
               style={fieldStyle}
             />
             {createName.trim() && (
-              <p className="dslug mt-1.5" style={FIELD_LABEL_STYLE}>
+              <p className="mt-1.5" style={FIELD_LABEL_STYLE}>
                 <span className="mono">
                   {createParent ? `${createParent.slug}-` : ""}
                   <b style={{ color: "var(--brand)" }}>{slugPreview(createName)}</b>
@@ -977,7 +984,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             <input
               value={createDescription}
               onChange={(e) => setCreateDescription(e.target.value)}
-              className="w-full px-3 py-2.5 outline-none transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
               style={fieldStyle}
             />
           </div>
@@ -995,14 +1002,14 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                 onChange={(e) => setCreateQuota((q) => ({ ...q, value: e.target.value }))}
                 placeholder="No limit"
                 aria-label="Quota amount"
-                className="flex-1 px-3 py-2.5 outline-none transition-colors"
+                className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={fieldStyle}
               />
               <select
                 value={createQuota.unit}
                 onChange={(e) => setCreateQuota((q) => ({ ...q, unit: e.target.value as StorageUnit }))}
                 aria-label="Quota unit"
-                className="px-2.5 py-2.5 outline-none transition-colors"
+                className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                 style={fieldStyle}
               >
                 <option value="GB">GB</option>

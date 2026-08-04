@@ -22,15 +22,41 @@
 #      security PRs. When a migration is scheduled, delete its entry and
 #      Dependabot re-raises on the next run.
 #
-#   2. `@matter/*` is excluded from the npm minor/patch GROUP. Those
-#      packages are 0.x, where Dependabot classifies 0.16 → 0.17 as a
-#      "minor" but semver makes it breaking — and it was. In #1261 that one
-#      family broke `build orchestrator`, `build matter-controller`,
-#      `build mcp-server` and both node legs, which held SEVEN unrelated,
-#      innocent bumps hostage (including a `sanitize-html` patch) because a
-#      group PR is all-or-nothing. Excluding it lets the innocents merge and
-#      gives matter.js its own PR that can be rejected or scheduled on its
-#      own evidence. This is NOT an ignore: matter still gets updates.
+#   2. EVERY external 0.x dependency is excluded from the minor/patch GROUP,
+#      in BOTH the npm and pip ecosystems. Below 1.0, semver gives `minor` no
+#      compatibility promise, so Dependabot's "minor" is routinely a breaking
+#      change — and because a group PR is all-or-nothing, ONE of them takes
+#      the whole batch down.
+#
+#      This rule was learned twice. First #1261: `@matter/*` 0.16 → 0.17 broke
+#      `build orchestrator`, `build matter-controller`, `build mcp-server` and
+#      both node legs, holding seven innocent bumps hostage (including a
+#      `sanitize-html` patch). The first version of this config excluded only
+#      the matter family — treating it as one bad package rather than as an
+#      instance of a class. The very next regenerated group PR, #1310, failed
+#      the same way on `argon2` 0.41 → 0.45 (`Options` no longer exported;
+#      `hash()` returns Buffer, not string), taking nine bumps down with it.
+#
+#      Hence the general rule. This is NOT an ignore: every one of these still
+#      gets update PRs, just individually, where a break is attributable and
+#      can be rejected or scheduled as the migration it is.
+#
+#      Keep both lists in sync with the 0.x direct deps they cover. As of
+#      2026-07-29 the npm side is: @matter/*, @project-chip/matter.js, argon2,
+#      @zxing/*, @grpc/proto-loader. (@droplet/* are workspace-internal and
+#      never bumped by Dependabot.) The pip side was established 2026-07-31 by
+#      scanning all 13 requirements directories; the list sits on the pip
+#      group below, annotated per package.
+#
+#   3. NOT SOLVED HERE: `>=` floor constraints. Most Python deps are pinned as
+#      floors (`pypdf>=4.0`), so Dependabot raises a PR whenever the floor can
+#      be raised — individually, outside any group, and a floor widening can
+#      cross majors without being labelled one. The 2026-07-30 batch was ten
+#      such PRs, including `pypdf >=4.0 → >=6.14.2` (two majors) and
+#      `reportlab >=4.0 → >=5.0.0`. Rule 2 does NOT prevent these: they are
+#      not group PRs. Fixing it means either pinning the Python services
+#      properly or adding per-package major `ignore` entries — a decision, not
+#      a config tweak. See ENGINEERING.md §3.2.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -43,10 +69,17 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
-        # 0.x: Dependabot's "minor" is semver-breaking here. See #1261.
+        # EVERY external 0.x dependency, not a hand-picked few. Below 1.0
+        # semver gives minor no compatibility promise, so Dependabot's "minor"
+        # is routinely a breaking change — and a group PR is all-or-nothing,
+        # so one of them takes the whole batch down with it. Keep this list in
+        # sync with the 0.x direct deps in the workspace package.json files.
         exclude-patterns:
           - "@matter/*"
-          - "@project-chip/matter.js"
+          - "@project-chip/matter.js"   # 0.16 → 0.17 broke 5 checks in #1261
+          - "argon2"                    # 0.41 → 0.45 broke 5 checks in #1310
+          - "@zxing/*"                  # 0.1.x / 0.21.x
+          - "@grpc/proto-loader"         # 0.8.x
     ignore:
       # Reviewed and rejected as migrations, not refreshes. Majors only —
       # minor/patch and security updates still flow.
@@ -97,6 +130,42 @@ updates:
     groups:
       pip-minor-and-patch:
         update-types: ["minor", "patch"]
+        # The pip twin of the npm rule above, and for the same reason: below
+        # 1.0 semver gives `minor` no compatibility promise, and a group PR is
+        # all-or-nothing, so one 0.x break holds the whole batch hostage. The
+        # npm side learned this twice (#1261 @matter/*, #1310 argon2) before
+        # being generalised; there is no reason to learn it a third time in
+        # Python. Every package here still gets update PRs — individually,
+        # where a break is attributable.
+        #
+        # Kept in sync with the 0.x direct deps across the 13 requirements
+        # directories above. As of 2026-07-31, established by scanning them.
+        exclude-patterns:
+          - "fastapi"                  # 0.140.x / 0.141.x — every service
+          - "uvicorn"                  # 0.51.x / 0.52.x — every service
+          - "httpx"                    # 0.28.x — every service
+          - "respx"                    # 0.23.x (dev)
+          - "python-multipart"         # 0.0.x — oled-display, voice-io
+          - "pgvector"                 # 0.5.x — file-indexer
+          - "pdfplumber"               # 0.11.x
+          - "readability-lxml"         # 0.8.x
+          - "lxml-html-clean"          # 0.1.x (canonical name)
+          - "lxml_html_clean"          # as spelled in requirements.txt
+          - "pytesseract"              # 0.3.x
+          - "extract-msg"              # 0.56.x
+          - "python-magic"             # 0.4.x
+          - "semantic-text-splitter"   # 0.32.x, capped <0.33
+          - "tokenizers"               # 0.23.x, capped <1.0
+          - "python-pptx"              # 0.6.x → 1.0 (see #1355)
+          - "onvif-zeep"               # 0.2.x — camera-discovery
+          - "asyncpg"                  # 0.31.x — email-indexer
+          - "optimum-onnx"             # 0.1.x — ai-gateway
+          - "huggingface-hub"          # 0.24.x, capped <1.0
+          - "huggingface_hub"          # as spelled in requirements.txt
+          - "sounddevice"              # 0.5.x — voice-io
+          - "vosk"                     # 0.3.x — voice-io
+          - "ragas"                    # 0.4.x — rag-eval
+          - "langchain*"               # 0.2.x / 0.3.x family, capped <0.4
     ignore:
       # Reviewed and rejected as migrations, not refreshes (ai-gateway).
       # Majors only — minor/patch and security updates still flow.

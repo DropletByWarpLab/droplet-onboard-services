@@ -39,6 +39,14 @@ Under the unified model the isolated camera VLAN becomes real on the single-box;
 ### 5. AP provisioning = reuse ADR-005 (no EasyMesh / TR-069)
 Wi-Fi coverage and AP onboarding stay on **ADR-005**'s `dawn` + mDNS auto-onboarding of OpenWrt-imaged APs. A third-party AP (e.g. the TRENDnet TEW-932DAP) is brought in by **flashing it with the Droplet OpenWrt image where the hardware is supported** (verified per model), or by recommending a supported AP for true zero-touch. **EasyMesh / TR-069 are rejected:** they would override ADR-005's `dawn` decision (preserved as a point-in-time record by ADR-011 §5) and would not configure a non-certified stock AP anyway.
 
+> **Amended by ADR-033 §6 (2026-07-30):** "rejected" here means *not the
+> Droplet path* — `DROPLET_IMAGE` (this section's flash-and-onboard flow)
+> remains the sanctioned default and the only path for Droplet-supplied
+> hardware. ADR-024's `EASYMESH`/`UNIFI` backend scaffolds (merged #670,
+> disabled by default) exist as explicit opt-ins for third-party ecosystems an
+> operator already owns; they do not reverse the `dawn` decision. The two
+> documents are a registry with a default, not a contradiction.
+
 ## Consequences
 
 **Easier:** one consistent OpenWrt-managed network model across shapes; the dashboard device list, camera discovery, and Wi-Fi all work from a single source of truth; the product becomes a true auto-configuring router in either posture; the `host-net` debt is retired.

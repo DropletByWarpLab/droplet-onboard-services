@@ -38,12 +38,18 @@ import {
   NextcloudOcsError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 import {
   sendShareNotificationEmail,
   type SendOptions as EmailSendOptions,
 } from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  invalidatePrefix,
+} from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import {
   ncMintEditorSession,
@@ -928,10 +934,24 @@ export function createFilesRouter(
    * Invalidate the listing cache for one already-resolved (space, path).
    *
    * WARP-1556: goes through `listCacheKey` so the del names exactly the key
-   * the read wrote. A null key means the caller's ACL tag or the space
-   * couldn't be resolved — there is nothing to name, and nothing readable
-   * either (the read path bypasses the cache in that state), so skipping is
-   * correct.
+   * the read wrote.
+   *
+   * WARP-1682 — a null key must NOT mean "skip". The original reasoning was
+   * that there is "nothing readable either, since the read path bypasses the
+   * cache in that state", but that treats a PER-REQUEST condition as durable
+   * state. `aclCacheTag` returns null whenever `visibleDeptsForCaller` fails
+   * to resolve, which it does on any transient Prisma hiccup (it swallows the
+   * throw and reports `resolved: false`). The entry we are trying to drop was
+   * written by an EARLIER request whose ACL walk DID resolve — so a live key
+   * exists, and skipping the del pins the pre-write listing for the rest of
+   * CACHE_TTL. On a delete that means the file the user just removed is served
+   * back to them until the entry expires.
+   *
+   * Fallback: sweep every listing entry for this user. It is broader than the
+   * one key we wanted — a cache miss on the user's other directories — but
+   * over-invalidating a cache is always safe, and this only runs on the rare
+   * unresolved-visibility path. The trailing ":" keeps the prefix from
+   * matching a different user whose name merely starts the same way.
    */
   async function invalidateListing(
     req: Request,
@@ -939,7 +959,11 @@ export function createFilesRouter(
     target: SpacedPath,
   ): Promise<void> {
     const key = await listCacheKey(req, user, target);
-    if (key) await cacheDel(key);
+    if (key) {
+      await cacheDel(key);
+      return;
+    }
+    await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
   }
 
   /**
@@ -1631,14 +1655,26 @@ export function createFilesRouter(
   // per-request multer(), not a shared module-level one. LIMIT_FILE_SIZE
   // gets an honest 413 (was 400) naming the ACTUAL limit that applied,
   // which may be tighter than config.MAX_UPLOAD_SIZE_MB.
+  //
+  // WARP-1666: `limits.files` is set as well as the `.array()` maxCount, and
+  // the two MUST stay equal. multer's own maxCount bookkeeping reports an
+  // over-count as LIMIT_UNEXPECTED_FILE — the same code a genuinely misnamed
+  // field raises (multer/index.js: `filesLeft[fieldname]` hits 0) — so without
+  // a busboy-level `files` limit a 36-file upload was rejected with "unexpected
+  // field name", pointing every reader at the wrong problem. With `limits.files`
+  // set, busboy raises LIMIT_FILE_COUNT first and each code again means one
+  // thing only.
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
     const userId = (req as { user?: { id?: string } }).user?.id;
     const limitMb = await resolveUploadLimitMb(prisma, userId);
     const scopedUpload = multer({
       storage: MEMORY_STORAGE,
-      limits: { fileSize: limitMb * 1024 * 1024 },
+      limits: {
+        fileSize: limitMb * 1024 * 1024,
+        files: MAX_FILES_PER_UPLOAD,
+      },
     });
-    scopedUpload.array("files", 20)(req, res, (err) => {
+    scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           res.status(413).json({
@@ -1647,7 +1683,7 @@ export function createFilesRouter(
           return;
         }
         const messages: Record<string, string> = {
-          LIMIT_FILE_COUNT: "Too many files (max 20)",
+          LIMIT_FILE_COUNT: `Too many files (max ${MAX_FILES_PER_UPLOAD} per upload)`,
           LIMIT_UNEXPECTED_FILE: 'Unexpected field name (use "files")',
         };
         res
@@ -2119,10 +2155,22 @@ export function createFilesRouter(
       const filePath = await rootForSpace(prisma, space, rawPath);
 
       const user = getUser(req);
-      await ncDeleteFile(await getToken(req), user, filePath);
-
       const parentPath = path.posix.dirname(filePath) || "/";
-      await invalidateListing(req, user, { space, path: parentPath });
+
+      // WARP-1682: invalidate the parent listing whether or not the WebDAV
+      // call succeeded. A FAILED delete is precisely when the cached listing
+      // is least trustworthy — `runBulk` below documents Nextcloud's trashbin
+      // race, where a request can 500 while the file "ends up half-moved
+      // (trash entry created but source not unlinked)". Skipping the del on
+      // the throw path left that half-applied state readable out of Redis for
+      // the rest of CACHE_TTL, which is how a delete that errored could still
+      // show the file until a page reload. `bulk-delete` already invalidates
+      // unconditionally; this matches it.
+      try {
+        await ncDeleteFile(await getToken(req), user, filePath);
+      } finally {
+        await invalidateListing(req, user, { space, path: parentPath });
+      }
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });

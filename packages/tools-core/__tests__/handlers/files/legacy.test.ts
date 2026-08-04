@@ -131,6 +131,49 @@ describe("validateNcPath via tools", () => {
     expect(res.ok).toBe(true);
     if (res.ok) expect((res.data as { written: string }).written).toBe("/Notes/x.md");
   });
+
+  // WARP-1373: the trailing separator is normalized away for every tool
+  // that addresses a directory, but write_file needs a filename — a bare
+  // "/Notes/" must not silently become a file literally named "Notes".
+  it("write_file still refuses a directory-shaped path", async () => {
+    const { ctx, ncPost } = makeCtx();
+    const res = await runTool("write_file", { path: "/Notes/", content: "x" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("INVALID_PATH");
+    expect(ncPost).not.toHaveBeenCalled();
+  });
+
+  it("create_directory accepts a trailing-slash path", async () => {
+    const { ctx, ncPost } = makeCtx();
+    const res = await runTool("create_directory", { path: "/Notes/Archive/" }, ctx);
+    expect(res.ok).toBe(true);
+    expect(ncPost).toHaveBeenCalledWith(
+      "/mkdir",
+      expect.objectContaining({ path: "/Notes/Archive" }),
+      expect.anything(),
+    );
+  });
+
+  it("delete_file accepts a trailing-slash directory path", async () => {
+    const { ctx, ncDelete } = makeCtx();
+    const res = await runTool("delete_file", { path: "/Notes/Archive/" }, ctx);
+    expect(res.ok).toBe(true);
+    expect(ncDelete).toHaveBeenCalledWith(
+      `/?path=${encodeURIComponent("/Notes/Archive")}`,
+      expect.anything(),
+    );
+  });
+
+  it("move_file normalizes trailing slashes on both endpoints", async () => {
+    const { ctx, ncPost } = makeCtx();
+    const res = await runTool("move_file", { from_path: "/a/b/", to_path: "/c/d/" }, ctx);
+    expect(res.ok).toBe(true);
+    expect(ncPost).toHaveBeenCalledWith(
+      "/move",
+      expect.objectContaining({ from: "/a/b", to: "/c/d" }),
+      expect.anything(),
+    );
+  });
 });
 
 describe("write_file", () => {

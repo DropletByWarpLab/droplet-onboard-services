@@ -14,8 +14,43 @@
  *     `userName eq` filter.
  *   - provisionGroup: upsert ScimGroup (mappedRole from the name) and raise
  *     each listed member's role to at least the group's mapped role.
+ *   - WARP-1568: those role writes run through the role-mutation guard, and
+ *     the mapping is capped at `admin` — SCIM can never mint an owner.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const {
+  recordActivityMock,
+  revokeAllSessionsMock,
+  denylistUserMock,
+  ncAddUserToGroupMock,
+  ncRemoveUserFromGroupMock,
+} = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(undefined),
+  revokeAllSessionsMock: vi.fn(async (_userId: string) => 1),
+  denylistUserMock: vi.fn().mockResolvedValue(undefined),
+  ncAddUserToGroupMock: vi.fn().mockResolvedValue(undefined),
+  ncRemoveUserFromGroupMock: vi.fn().mockResolvedValue(undefined),
+}));
+
+// The role-mutation guard's rail-6 effect runners reach Redis and Nextcloud.
+// Mocked at the leaf, the same way every other guard-driving suite does it
+// (see __tests__/rbac-v2-guard-rails.e2e.test.ts).
+vi.mock("./activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
+vi.mock("./session.service.js", () => ({ revokeAllSessions: revokeAllSessionsMock }));
+vi.mock("./auth-denylist.service.js", () => ({
+  denylistUser: denylistUserMock,
+  isUserDenied: vi.fn().mockResolvedValue(false),
+}));
+vi.mock("./department-provisioner.service.js", () => ({
+  adminBasicToken: vi.fn(() => "basic-token"),
+  DROPLET_ADMINS_GROUP: "droplet-admins",
+}));
+vi.mock("./nextcloud-groups.client.js", () => ({
+  ncAddUserToGroup: ncAddUserToGroupMock,
+  ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
+}));
+
 import { readUserEmail } from "./user-directory.service.js";
 import {
   provisionUser,
@@ -25,10 +60,19 @@ import {
   findUserByUserName,
   provisionGroup,
 } from "./scim.service.js";
+import {
+  assertRoleChangeInvariantsTx,
+  SERIALIZABLE_TX,
+} from "./role-mutation-guard.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
 
 interface UserRow {
   id: string;
   username: string;
+  nextcloudUsername: string | null;
   displayName: string;
   email: string | null;
   passwordHash: string | null;
@@ -61,6 +105,19 @@ function createPrismaMock(seed: UserRow[] = []) {
   self._groups = [] as GroupRow[];
   let useq = self._users.length;
 
+  // WARP-1570: the SHARED transaction seam, never a hand-rolled
+  // `async (fn) => fn(self)` — scim.service.ts opens its guarded role write
+  // at SERIALIZABLE_TX, and a stub that drops the options argument cannot
+  // tell that apart from no isolation level at all. Also gives us rollback,
+  // which is what makes "the rail refused, therefore nothing was written"
+  // provable below.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { users: self._users },
+  });
+  self._seam = seam;
+  self.$transaction = seam.$transaction;
+
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       // WARP-233: provisioning resolves users through the blind index.
@@ -70,6 +127,18 @@ function createPrismaMock(seed: UserRow[] = []) {
       if (where.id !== undefined) return self._users.find((u: UserRow) => u.id === where.id) ?? null;
       return null;
     }),
+    // Rails 4 + 5 count surviving owners / non-disabled operators.
+    count: vi.fn(async ({ where }: { where: any } = { where: {} }) =>
+      self._users.filter((u: UserRow) => {
+        if (typeof where?.role === "string" && u.role !== where.role) return false;
+        if (Array.isArray(where?.role?.in) && !where.role.in.includes(u.role)) return false;
+        if (where?.directoryStatus !== undefined && u.directoryStatus !== where.directoryStatus) {
+          return false;
+        }
+        if (where?.id?.not !== undefined && u.id === where.id.not) return false;
+        return true;
+      }).length,
+    ),
     // WARP-233 pre-backfill fallback probe (plaintext rows, no blind index).
     findFirst: vi.fn(async ({ where }: { where: any }) =>
       self._users.find((u: any) => u.email === where.email && u.emailLookupHash == null) ?? null,
@@ -78,6 +147,7 @@ function createPrismaMock(seed: UserRow[] = []) {
       const row: UserRow & { emailLookupHash?: string | null } = {
         id: data.id ?? `u-new-${++useq}`,
         username: data.username,
+        nextcloudUsername: data.nextcloudUsername ?? null,
         displayName: data.displayName,
         email: data.email ?? null,
         emailLookupHash: data.emailLookupHash ?? null,
@@ -92,8 +162,17 @@ function createPrismaMock(seed: UserRow[] = []) {
       return row;
     }),
     update: vi.fn(async ({ where, data }: { where: any; data: any }) => {
-      const u = self._users.find((x: UserRow) => x.id === where.id);
-      if (!u) throw new Error("not found");
+      // The guarded write pins `role` in its where-clause (optimistic
+      // concurrency). A miss is Prisma's P2025, NOT a generic Error — the
+      // service maps that code to "nothing was applied, retry".
+      const u = self._users.find(
+        (x: UserRow) => x.id === where.id && (where.role === undefined || x.role === where.role),
+      );
+      if (!u) {
+        const err = new Error("Record to update not found") as Error & { code: string };
+        err.code = "P2025";
+        throw err;
+      }
       Object.assign(u, data, { updatedAt: new Date() });
       return u;
     }),
@@ -197,7 +276,7 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
 
   it("links to an EXISTING local user (e.g. a password/SSO owner) by email — preserves their id + role", async () => {
     const owner: UserRow = {
-      id: "u-owner", username: "owner", displayName: "Owner", email: "boss@acme.test",
+      id: "u-owner", username: "owner", nextcloudUsername: "owner", displayName: "Owner", email: "boss@acme.test",
       passwordHash: "$argon2id$x", role: "owner", isLocal: true, directoryStatus: "ACTIVE",
       createdAt: new Date(), updatedAt: new Date(),
     };
@@ -298,7 +377,7 @@ describe("provisionGroup — upsert + role mapping (highest-privilege-wins floor
     const prisma = createPrismaMock();
     // owner user added to a plain "Everyone" group (maps to family) must stay owner.
     const owner: UserRow = {
-      id: "u-keepsowner", username: "ko", displayName: "KO", email: "ko@acme.test",
+      id: "u-keepsowner", username: "ko", nextcloudUsername: "ko", displayName: "KO", email: "ko@acme.test",
       passwordHash: null, role: "owner", isLocal: true, directoryStatus: "ACTIVE",
       createdAt: new Date(), updatedAt: new Date(),
     };
@@ -306,5 +385,163 @@ describe("provisionGroup — upsert + role mapping (highest-privilege-wins floor
     await provisionGroup(prisma2, { displayName: "Everyone", externalId: "okta-grp-4", memberUserIds: ["u-keepsowner"] });
     const after = await findUserById(prisma2, "u-keepsowner");
     expect(after?.role).toBe("owner"); // not demoted to family
+  });
+});
+
+/**
+ * WARP-1568 — SCIM's role write goes through the role-mutation guard, and
+ * `owner` is not an Okta-assignable role.
+ *
+ * Before this, `raiseUserRoleTo` wrote `User.role` directly: an Okta group
+ * called "Business Owners" set `role: "owner"` on a provisioned user with no
+ * rank cap, no assignable-enum narrowing, no owner immutability, no
+ * last-owner / last-operator invariant, no transaction and no audit row —
+ * every rail the interactive surfaces have run since WARP-1526.
+ */
+describe("WARP-1568 — SCIM role writes are guarded and capped at admin", () => {
+  const member = (id: string, role = "family"): UserRow => ({
+    id,
+    username: id,
+    nextcloudUsername: id,
+    displayName: id.toUpperCase(),
+    email: `${id}@acme.test`,
+    passwordHash: null,
+    role,
+    isLocal: true,
+    directoryStatus: "ACTIVE",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  it("an Okta group naming the OWNER role cannot mint an owner — the member lands at the admin ceiling", async () => {
+    const prisma = createPrismaMock([member("u-target")]);
+    const group = await provisionGroup(prisma, {
+      displayName: "Business Owners",
+      externalId: "okta-grp-owner",
+      memberUserIds: ["u-target"],
+    });
+
+    // The stored group mapping is capped too — not just the member write, so
+    // a later re-application of the same row cannot re-open the hole.
+    expect(group.mappedRole).toBe("admin");
+    const after = await findUserById(prisma, "u-target");
+    expect(after?.role).toBe("admin");
+    expect(prisma._users.some((u: UserRow) => u.role === "owner")).toBe(false);
+  });
+
+  it("no group name whatsoever can produce an owner row", async () => {
+    for (const displayName of ["Owners", "owner", "Owners and Admins", "co-owner"]) {
+      const prisma = createPrismaMock([member("u-x")]);
+      await provisionGroup(prisma, { displayName, externalId: undefined, memberUserIds: ["u-x"] });
+      expect(
+        (await findUserById(prisma, "u-x"))?.role,
+        `group "${displayName}" escalated past the ceiling`,
+      ).toBe("admin");
+    }
+  });
+
+  it("the role write runs in ONE explicitly SERIALIZABLE transaction", async () => {
+    const prisma = createPrismaMock([member("u-tx")]);
+    await provisionGroup(prisma, { displayName: "Admins", memberUserIds: ["u-tx"] });
+    // Fails if the write ever drops back to a bare $transaction (READ
+    // COMMITTED), which is invisible to Postgres SSI and defeats rails 4/5.
+    expectAllTransactionsAt(prisma._seam, SERIALIZABLE_TX);
+  });
+
+  it("emits the SAME audit row as the interactive surfaces, attributed to the SCIM principal", async () => {
+    const prisma = createPrismaMock([member("u-audit")]);
+    await provisionGroup(prisma, { displayName: "Droplet Admins", memberUserIds: ["u-audit"] });
+
+    // Rail 6, byte-identical to people.ts / access.ts: kind "system",
+    // "Role changed", previous → next in `sub`, and the actor is the box
+    // itself (an IdP is not a person), with `scim:okta` provenance in refs.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        what: "Role changed",
+        sub: "u-audit: family → admin",
+        actor: { type: "system", id: null },
+        refs: expect.objectContaining({
+          actor: "scim:okta",
+          targetUserId: "u-audit",
+          previousRole: "family",
+          nextRole: "admin",
+        }),
+      }),
+    );
+    // …and the rest of rail 6: the new role only takes effect on the next
+    // request if the old sessions are revoked, and the operator tier is
+    // mirrored into the box-wide Nextcloud group.
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-audit");
+    expect(ncAddUserToGroupMock).toHaveBeenCalledWith("basic-token", "u-audit", "droplet-admins");
+  });
+
+  it("a no-op mapping (already at or above the group's role) writes nothing and audits nothing", async () => {
+    const prisma = createPrismaMock([member("u-noop", "admin")]);
+    await provisionGroup(prisma, { displayName: "Everyone", memberUserIds: ["u-noop"] });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a promotion racing the mapping makes the write a no-op, never a demotion", async () => {
+    // The window the in-transaction re-read exists for: the pre-transaction
+    // snapshot says `guest`, so "raise to family" looks like a raise — but by
+    // the time the transaction opens another writer has made this row an
+    // admin. Re-evaluating the raise-only rule on the FRESH row is what stops
+    // SCIM from writing `family` over it.
+    const prisma = createPrismaMock([member("u-race", "guest")]);
+    const seam = createTransactionSeam({
+      client: () => prisma,
+      stores: { users: prisma._users },
+      onEnter: () => {
+        prisma._users[0].role = "admin";
+      },
+    });
+    prisma.$transaction = seam.$transaction;
+    prisma._seam = seam;
+
+    await provisionGroup(prisma, { displayName: "Everyone", memberUserIds: ["u-race"] });
+
+    expect((await findUserById(prisma, "u-race"))?.role).toBe("admin");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("the last-operator invariant the guarded write carries refuses a demotion that would empty owner ∪ admin", async () => {
+    // The invariant SCIM's transaction now runs (rails 4 + 5), exercised
+    // against this suite's directory. It cannot be reached THROUGH
+    // provisionGroup today because the mapping is raise-only — every write
+    // SCIM performs moves INTO the operator tier, never out of it — so this
+    // asserts the backstop the path carries for the day group membership
+    // becomes authoritative (leaving a group lowers a role). Without it, an
+    // Okta push could leave the box with nobody able to manage access.
+    const prisma = createPrismaMock([
+      member("u-lastadmin", "admin"),
+      member("u-family"),
+    ]);
+    await expect(
+      prisma.$transaction(
+        (tx: any) =>
+          assertRoleChangeInvariantsTx(tx, {
+            target: { id: "u-lastadmin", role: "admin", directoryStatus: "ACTIVE" },
+            requestedRole: "family",
+          }),
+        SERIALIZABLE_TX,
+      ),
+    ).rejects.toMatchObject({ code: "LAST_OPERATOR_INVARIANT", status: 409 });
+
+    // A second operator makes the same demotion legal — proving the refusal
+    // above was the invariant firing, not the mock counting nothing.
+    const ok = createPrismaMock([member("u-a", "admin"), member("u-b", "owner")]);
+    await expect(
+      ok.$transaction(
+        (tx: any) =>
+          assertRoleChangeInvariantsTx(tx, {
+            target: { id: "u-a", role: "admin", directoryStatus: "ACTIVE" },
+            requestedRole: "family",
+          }),
+        SERIALIZABLE_TX,
+      ),
+    ).resolves.toBeUndefined();
   });
 });

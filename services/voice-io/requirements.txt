@@ -5,8 +5,8 @@ sounddevice==0.5.5        # PortAudio binding — preferred over PyAudio for cle
 # numpy>=2.0,<2.8 — pinning 1.26.4 makes the requirements file
 # unresolvable against the scipy pin below.
 numpy==2.5.1
-fastapi==0.140.0          # Control surface
-uvicorn[standard]==0.51.0 # ASGI server for FastAPI
+fastapi==0.141.1          # Control surface
+uvicorn[standard]==0.52.0 # ASGI server for FastAPI
 pydantic==2.13.4           # Schemas
 httpx==0.28.1             # Async HTTP client for orchestrator/LLM proxying (used in subsequent commits)
 python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accepts audio uploads)
@@ -20,8 +20,8 @@ python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accep
 # `pip install -r requirements.txt` from a dev box still works.
 onnxruntime==1.28.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
 scipy==1.18.0             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
-huggingface_hub==1.24.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
-tqdm==4.69.1              # Progress bar during model download
+huggingface_hub==1.25.1   # First-run download of bundled models (hey_jarvis, alexa, etc.)
+tqdm==4.70.0              # Progress bar during model download
 pyyaml==6.0.3             # openWakeWord parses model config from YAML
 requests==2.34.2          # huggingface_hub's HTTP layer
 # openwakeword 0.6.0's package __init__ unconditionally imports

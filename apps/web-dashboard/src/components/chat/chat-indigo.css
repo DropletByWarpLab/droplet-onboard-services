@@ -539,7 +539,9 @@
   border-radius: 9px;
   border: 0;
   background: var(--brand);
-  color: #fff;
+  /* icon glyph on a --brand fill — white is 2.98:1 on the dark ramp, under
+     the 3:1 WCAG 1.4.11 floor for meaningful graphics. WARP-1358. */
+  color: var(--on-brand);
   transition: background 180ms ease, transform 120ms ease;
 }
 .droplet-shell .chat-send:hover:not(:disabled) { background: var(--brand-hover); }
