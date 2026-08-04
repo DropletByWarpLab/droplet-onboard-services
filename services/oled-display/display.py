@@ -62,6 +62,50 @@ logger = logging.getLogger("droplet.tft")
 WIDTH = int(os.environ.get("LCD_WIDTH", "480"))
 HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 
+
+# ---------------------------------------------------------------------------
+# The safe area — WARP-1702
+# ---------------------------------------------------------------------------
+# The screens further down are authored against the raw frame edge: their
+# margins are literals measured from x=0 and from WIDTH/HEIGHT. That is correct
+# on a 480x320 TFT, where every pixel reaches the eye. On the 1424x280 rack bar
+# it is not — the bezel/driver board eats a strip on each side, which is why
+# WARP-1644 gave layout_wide a safe area.
+#
+# Only `system` and `debug` route through layout_wide, so every other screen
+# still ran off the glass: the founder's photo of the home tile grid had the
+# mark sliced, "Ask AI" reading "sk AI" and the status ribbon cut off.
+#
+# Rather than re-derive coordinates in eight renderers, those renderers draw
+# onto a canvas the size of the SAFE AREA and hand it to `_fit_panel()`, which
+# composites it into the panel frame at the inset. Their literals stay correct
+# because every one of them is relative to the canvas origin — which is exactly
+# why this is done with a canvas rather than by threading an origin through.
+#
+# On a 480x320 panel the inset is (0, 0), the canvas IS the frame and
+# `_fit_panel` is a no-op, so that path renders byte-identically to before.
+def _safe_inset() -> Tuple[int, int]:
+    """(x, y) bezel inset for the current panel. (0, 0) unless wide.
+
+    Deferred import: layout_wide imports us, so this cannot be module-level.
+    It is also the single source of the inset — the env knobs stay documented
+    in one place (layout_wide.SAFE_INSET_*) rather than being read twice.
+    """
+    try:
+        import layout_wide
+        if not layout_wide.is_wide():
+            return 0, 0
+        return layout_wide.SAFE_INSET_X, layout_wide.SAFE_INSET_Y
+    except Exception:                                           # noqa: BLE001
+        # A display backend must never take the service down over geometry.
+        return 0, 0
+
+
+def _safe_canvas(bg) -> Image.Image:
+    """Blank canvas for a 480x320-authored screen: the panel minus the bezel."""
+    ix, iy = _safe_inset()
+    return Image.new("RGB", (WIDTH - 2 * ix, HEIGHT - 2 * iy), bg)
+
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
@@ -994,6 +1038,29 @@ class TFTDisplay:
 
     # ----- Push to display ---------------------------------------------
 
+    def _fit_panel(self, img: Image.Image, bg) -> Image.Image:
+        """Composite a safe-area canvas into the full panel frame (WARP-1702).
+
+        Returns `img` untouched when it already fills the panel — which covers
+        both the wide-native screens (layout_wide draws at full size and does
+        its own insetting) and every screen on a 480x320 panel.
+
+        Touch regions are recorded by the renderers in CANVAS coordinates, so
+        they are translated here, in the same place and by the same offset as
+        the pixels. Doing it anywhere else is how the two drift apart.
+        """
+        if img.size == (WIDTH, HEIGHT):
+            return img
+        ox = (WIDTH - img.width) // 2
+        oy = (HEIGHT - img.height) // 2
+        frame = Image.new("RGB", (WIDTH, HEIGHT), bg)
+        frame.paste(img, (ox, oy))
+        with self._touch_regions_lock:
+            for r in self._touch_regions:
+                r.x += ox
+                r.y += oy
+        return frame
+
     def _push(self, image: Image.Image):
         # Every backend writes the preview PNG: the PyPortal renders the frame
         # itself from the data commands we stream over serial, the sim backend
@@ -1028,9 +1095,12 @@ class TFTDisplay:
 
         Returns the y-coordinate where the header ends (content starts).
         """
+        # Extents come off the canvas, not WIDTH: on the rack panel the canvas
+        # is the safe area, not the whole frame (WARP-1702).
+        cw = img.width
         bar_h = 52
-        draw.rectangle([(0, 0), (WIDTH, bar_h)], fill=SURFACE_SECONDARY)
-        draw.line([(0, bar_h), (WIDTH, bar_h)], fill=SEPARATOR, width=1)
+        draw.rectangle([(0, 0), (cw, bar_h)], fill=SURFACE_SECONDARY)
+        draw.line([(0, bar_h), (cw, bar_h)], fill=SEPARATOR, width=1)
 
         font_title = _get_font(17, bold=True)
         font_small = _get_font(12, bold=True)
@@ -1065,7 +1135,7 @@ class TFTDisplay:
         clock = time.strftime("%H:%M")
         bbox = draw.textbbox((0, 0), clock, font=font_clock)
         clock_w = bbox[2] - bbox[0]
-        draw.text((WIDTH - clock_w - 14, 14), clock,
+        draw.text((cw - clock_w - 14, 14), clock,
                   fill=TEXT_COLOR, font=font_clock)
 
         # Status chip between clock and brand
@@ -1074,7 +1144,7 @@ class TFTDisplay:
             chip_bbox = draw.textbbox((0, 0), status, font=chip_font)
             chip_w = (chip_bbox[2] - chip_bbox[0]) + 22
             chip_h = 20
-            chip_x = WIDTH - clock_w - 14 - chip_w - 10
+            chip_x = cw - clock_w - 14 - chip_w - 10
             chip_y = (bar_h - chip_h) // 2
             draw.rounded_rectangle(
                 [(chip_x, chip_y), (chip_x + chip_w, chip_y + chip_h)],
@@ -1122,7 +1192,8 @@ class TFTDisplay:
 
     def render_home(self) -> Image.Image:
         """Dashboard-style tile grid. This is the root interactive screen."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1131,15 +1202,6 @@ class TFTDisplay:
             img, draw, show_home=False,
             status="Online",
         )
-
-        # Tile grid: 2 columns x 2 rows of primary destinations + a
-        # compact system status ribbon at the foot.
-        pad = 10
-        tile_gap = 10
-        grid_w = WIDTH - 2 * pad
-        grid_h = HEIGHT - content_y - 66  # leave space for footer
-        tile_w = (grid_w - tile_gap) // 2
-        tile_h = (grid_h - tile_gap) // 2
 
         font_label = _get_font(12, bold=True)
         font_title = _get_font(19, bold=True)
@@ -1151,9 +1213,26 @@ class TFTDisplay:
             ("NET",  "Network", self._get_ip(),   self.DEVICES,  self._go_devices),
             ("CFG",  "Settings", "Brightness & more", self.SETTINGS, self._go_settings),
         ]
+
+        # Tile grid + a compact system status ribbon at the foot.
+        #
+        # WARP-1702 — the column count follows the panel shape. A tile needs
+        # ~100px of height for its pill, title and subtitle, and the rack bar
+        # has only ~270 to spend on header + grid + ribbon. Two rows do not fit
+        # there: the subtitles were clipped by the tile edge and then again by
+        # the ribbon. A 5:1 bar wants a single row of four anyway, and it has
+        # the width to spare.
+        pad = 10
+        tile_gap = 10
+        cols = 4 if cw >= 3 * ch else 2
+        rows = -(-len(tiles) // cols)
+        grid_h = ch - content_y - 66  # leave space for footer
+        tile_w = (cw - 2 * pad - (cols - 1) * tile_gap) // cols
+        tile_h = (grid_h - (rows - 1) * tile_gap) // rows
+
         for idx, (tag, title, sub, _mode, action) in enumerate(tiles):
-            col = idx % 2
-            row = idx // 2
+            col = idx % cols
+            row = idx // cols
             tx = pad + col * (tile_w + tile_gap)
             ty = content_y + row * (tile_h + tile_gap)
             self._draw_tile(draw, tx, ty, tile_w, tile_h,
@@ -1163,10 +1242,10 @@ class TFTDisplay:
                                                tx, ty, tile_w, tile_h, action))
 
         # Status ribbon (mirrors dashboard's StatusSegment row)
-        ribbon_y = HEIGHT - 56
-        self._draw_status_ribbon(draw, pad, ribbon_y, WIDTH - 2 * pad, 44)
+        ribbon_y = ch - 56
+        self._draw_status_ribbon(draw, pad, ribbon_y, cw - 2 * pad, 44)
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def _draw_tile(self, draw, x, y, w, h,
                    tag, title, sub,
@@ -1261,7 +1340,8 @@ class TFTDisplay:
 
     def render_stats(self) -> Image.Image:
         """Detailed health screen — 2x2 metric cards, back button."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1287,8 +1367,8 @@ class TFTDisplay:
 
         pad = 10
         gap = 10
-        card_w = (WIDTH - 2 * pad - gap) // 2
-        card_h = (HEIGHT - content_y - 56 - gap) // 2
+        card_w = (cw - 2 * pad - gap) // 2
+        card_h = (ch - content_y - 56 - gap) // 2
 
         self._draw_metric_card(
             draw, pad, content_y, card_w, card_h,
@@ -1320,7 +1400,7 @@ class TFTDisplay:
         )
 
         # Footer: IP + hostname (mirrors dashboard status ribbon)
-        foot_y = HEIGHT - 42
+        foot_y = ch - 42
         draw.text((pad, foot_y), "IP",
                   fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
         draw.text((pad + 24, foot_y - 2),
@@ -1332,12 +1412,12 @@ class TFTDisplay:
         mins = int((up % 3600) // 60)
         up_str = f"{days}d {hours}h" if days else f"{hours}h {mins}m"
         bbox = draw.textbbox((0, 0), up_str, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad, foot_y - 2),
+        draw.text((cw - (bbox[2] - bbox[0]) - pad, foot_y - 2),
                   up_str, fill=TEXT_COLOR, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad - 28, foot_y),
+        draw.text((cw - (bbox[2] - bbox[0]) - pad - 28, foot_y),
                   "UP", fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_chat(self) -> Image.Image:
         """Chat-prep screen — mirrors the dashboard's hero prompt capsule.
@@ -1346,7 +1426,8 @@ class TFTDisplay:
         screen shows a reminder that the user should speak (or use the
         web UI) and displays the latest LLM-pushed message when present.
         """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1364,7 +1445,7 @@ class TFTDisplay:
         # Capsule (faux prompt input — touch target routes to web UI)
         cap_x = 16
         cap_y = content_y + 92
-        cap_w = WIDTH - 32
+        cap_w = cw - 32
         cap_h = 48
         draw.rounded_rectangle(
             [(cap_x, cap_y), (cap_x + cap_w, cap_y + cap_h)],
@@ -1396,9 +1477,9 @@ class TFTDisplay:
 
         # Last message panel (if any)
         msg_y = cap_y + cap_h + 16
-        msg_h = HEIGHT - msg_y - 16
+        msg_h = ch - msg_y - 16
         draw.rounded_rectangle(
-            [(16, msg_y), (WIDTH - 16, msg_y + msg_h)],
+            [(16, msg_y), (cw - 16, msg_y + msg_h)],
             radius=12, fill=SURFACE_RAISED,
         )
         font_label = _get_font(10, bold=True)
@@ -1422,12 +1503,13 @@ class TFTDisplay:
                       "Tool calls and replies appear here.",
                       fill=LABEL_TERTIARY, font=_get_font(12))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_devices(self) -> Image.Image:
         """Network / devices summary screen — derived from dashboard's
         devices tile + status-ribbon row."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1445,7 +1527,7 @@ class TFTDisplay:
         card_h = 96
         draw.rounded_rectangle(
             [(pad, content_y + 4),
-             (WIDTH - pad, content_y + 4 + card_h)],
+             (cw - pad, content_y + 4 + card_h)],
             radius=14, fill=SURFACE_RAISED,
         )
         draw_droplet_mark(draw, pad + 16, content_y + 18, 52,
@@ -1460,8 +1542,8 @@ class TFTDisplay:
 
         # Two secondary cards
         sub_y = content_y + 4 + card_h + 12
-        sub_h = HEIGHT - sub_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
+        sub_h = ch - sub_y - 16
+        col_w = (cw - 2 * pad - 12) // 2
         for idx, (label, primary, secondary) in enumerate([
             ("LAN", self._get_ip(), "Via gateway"),
             ("UPLINK", "Online", "DNS reachable"),
@@ -1477,11 +1559,12 @@ class TFTDisplay:
                       primary, fill=TEXT_COLOR, font=font_title)
             draw.text((sx + 14, sub_y + sub_h - 26),
                       secondary, fill=LABEL_SECONDARY, font=font_meta)
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_settings(self) -> Image.Image:
         """Settings screen — brightness slider + quick actions."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1497,7 +1580,7 @@ class TFTDisplay:
         card_y = content_y + 4
         card_h = 130
         draw.rounded_rectangle(
-            [(pad, card_y), (WIDTH - pad, card_y + card_h)],
+            [(pad, card_y), (cw - pad, card_y + card_h)],
             radius=14, fill=SURFACE_RAISED,
         )
         draw.text((pad + 16, card_y + 14),
@@ -1508,8 +1591,8 @@ class TFTDisplay:
 
         # Stepper buttons
         btn_font = _get_font(20, bold=True)
-        minus_x = WIDTH - pad - 120
-        plus_x = WIDTH - pad - 60
+        minus_x = cw - pad - 120
+        plus_x = cw - pad - 60
         btn_y = card_y + 18
         self._draw_button(
             draw, minus_x, btn_y, 50, 44, "-", btn_font,
@@ -1527,7 +1610,7 @@ class TFTDisplay:
         # Brightness bar
         bar_x = pad + 16
         bar_y = card_y + card_h - 22
-        bar_w = WIDTH - 2 * pad - 32
+        bar_w = cw - 2 * pad - 32
         draw.rounded_rectangle(
             [(bar_x, bar_y), (bar_x + bar_w, bar_y + 8)],
             radius=4, fill=SURFACE_SECONDARY,
@@ -1541,8 +1624,8 @@ class TFTDisplay:
 
         # Quick actions row
         act_y = card_y + card_h + 14
-        act_h = HEIGHT - act_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
+        act_h = ch - act_y - 16
+        col_w = (cw - 2 * pad - 12) // 2
 
         # Show logo
         draw.rounded_rectangle(
@@ -1574,10 +1657,11 @@ class TFTDisplay:
             self._toggle_cycle,
         ))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_message(self, title: str, lines: List[str]) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1588,14 +1672,14 @@ class TFTDisplay:
         font_body = _get_font(17)
         y = content_y + 18
         draw.rounded_rectangle(
-            [(16, content_y + 6), (WIDTH - 16, HEIGHT - 16)],
+            [(16, content_y + 6), (cw - 16, ch - 16)],
             radius=14, fill=SURFACE_RAISED,
         )
         for line in lines[:10]:
             draw.text((28, y), line[:52],
                       fill=TEXT_COLOR, font=font_body)
             y += 24
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_boot(self, stage=None, detail: str = "",
                     pct: Optional[int] = None, *,
@@ -1841,7 +1925,8 @@ class TFTDisplay:
         """Editorial hero clock (design_handoff §1 / preview.html drawIdle)."""
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
-        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        img = _safe_canvas(V3_BG)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1854,7 +1939,7 @@ class TFTDisplay:
 
         # 12/24 segmented toggle — top-right (two 38px cells, h26).
         seg_w, seg_h, tg_y = 38, 26, 17
-        tg_x = WIDTH - 20 - seg_w * 2
+        tg_x = cw - 20 - seg_w * 2
         _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, fill=V3_SURFACE)
         _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, outline=V3_SEP, width=1)
         for i, opt in enumerate(("12", "24")):
@@ -1883,7 +1968,7 @@ class TFTDisplay:
         suffix_font = _get_font(24, weight="heavy")
         suffix_w = (_v3_text_width(draw, parts["suffix"], suffix_font, 1)
                     + suffix_gap) if parts["is12"] else 0
-        cx_center = WIDTH / 2 - suffix_w / 2
+        cx_center = cw / 2 - suffix_w / 2
         _v3_text(draw, time_str, int(cx_center), clock_y, font=hero,
                  fill=V3_TEXT, anchor="mm", tracking=-6)
         if parts["is12"]:
@@ -1894,34 +1979,34 @@ class TFTDisplay:
 
         # 56x3 accent rule under the clock at y=220.
         rule_w = 56
-        _rrect(draw, WIDTH // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
+        _rrect(draw, cw // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
                fill=V3_ACCENT)
 
         # Bottom-left date.
         date_str = (self._v3.get("date") or
                     now.strftime("%A, %b %d")).upper()
-        _v3_text(draw, date_str, 20, HEIGHT - 28,
+        _v3_text(draw, date_str, 20, ch - 28,
                  font=_get_font(11, weight="bold"), fill=V3_LABEL3, tracking=1.6)
 
         # Bottom-right green dot + SSID.
         ssid = str(self._v3["wifi"].get("ssid") or "Droplet-AI")
         ssid_font = _get_font(11, weight="bold")
         ssid_w = _v3_text_width(draw, ssid, ssid_font)
-        draw.ellipse([WIDTH - 20 - ssid_w - 14 - 3, HEIGHT - 23 - 3,
-                      WIDTH - 20 - ssid_w - 14 + 3, HEIGHT - 23 + 3],
+        draw.ellipse([cw - 20 - ssid_w - 14 - 3, ch - 23 - 3,
+                      cw - 20 - ssid_w - 14 + 3, ch - 23 + 3],
                      fill=V3_GREEN)
-        _v3_text(draw, ssid, WIDTH - 20, HEIGHT - 28, font=ssid_font,
+        _v3_text(draw, ssid, cw - 20, ch - 28, font=ssid_font,
                  fill=V3_ACCENT, anchor="ra")
 
         # Seconds progress hairline along the bottom edge.
         sec_frac = parts["second"] / 60.0
-        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
-        draw.rectangle([0, HEIGHT - 2, max(2, int(WIDTH * sec_frac)), HEIGHT],
+        draw.rectangle([0, ch - 2, cw, ch], fill=V3_TRACK)
+        draw.rectangle([0, ch - 2, max(2, int(cw * sec_frac)), ch],
                        fill=V3_ACCENT_DIM)
 
         self._touch_regions.append(TouchRegion(
-            "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
-        return img
+            "idle_wake", 0, 0, cw, ch, lambda: self._go_system()))
+        return self._fit_panel(img, V3_BG)
 
     def render_debug(self, now: Optional[_dt_datetime] = None) -> Image.Image:
         """WARP-1641 — the rack panel's debug / recovery screen.
@@ -2292,7 +2377,8 @@ class TFTDisplay:
         """
         has_wifi = bool(wifi_qr_matrix and wifi_ssid)
 
-        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        img = _safe_canvas(V3_BG)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -2305,18 +2391,18 @@ class TFTDisplay:
                  fill=V3_LABEL3, tracking=2)
         setup_lbl = "FIRST-TIME SETUP"
         slw = _v3_text_width(draw, setup_lbl, font_eyebrow, 1.4)
-        _v3_text(draw, setup_lbl, WIDTH - 20, 21, font=font_eyebrow,
+        _v3_text(draw, setup_lbl, cw - 20, 21, font=font_eyebrow,
                  fill=V3_ACCENT, anchor="ra", tracking=1.4)
         # Status dot left of the label. Static on BOTH halves — the design's
         # slow alpha pulse is dropped on firmware (heap discipline: the
         # WAITING dots carry the claim screen's only motion).
-        dcx = int(WIDTH - 20 - slw - 12)
+        dcx = int(cw - 20 - slw - 12)
         draw.ellipse([dcx - 3, 23, dcx + 3, 29], fill=V3_ACCENT)
-        draw.rectangle([20, 44, WIDTH - 20, 44], fill=V3_SEP)
+        draw.rectangle([20, 44, cw - 20, 44], fill=V3_SEP)
 
         # ---- Column divider ------------------------------------------------
         div_x = 284
-        draw.rectangle([div_x, 58, div_x, HEIGHT - 26], fill=V3_SEP)
+        draw.rectangle([div_x, 58, div_x, ch - 26], fill=V3_SEP)
 
         # ================= LEFT — claim code hero + steps ===================
         _v3_text(draw, "CLAIM CODE", 20, 56, font=font_eyebrow,
@@ -2410,7 +2496,7 @@ class TFTDisplay:
 
         # ================= RIGHT — scan QR card =============================
         rx = div_x + 16
-        rw = WIDTH - 20 - rx
+        rw = cw - 20 - rx
         # Resolve the card's matrix FIRST so the eyebrow/caption stay honest:
         # a card with no scannable matrix must never read "SCAN TO CLAIM".
         # The firmware applies the same rule, so preview and panel agree in
@@ -2483,20 +2569,20 @@ class TFTDisplay:
         # ---- Foot: waiting status + scan track -----------------------------
         waiting = "WAITING TO BE CLAIMED"
         wlw = _v3_text_width(draw, waiting, font_eyebrow, 0.6)
-        _v3_text(draw, waiting, WIDTH - 20, HEIGHT - 27, font=font_eyebrow,
+        _v3_text(draw, waiting, cw - 20, ch - 27, font=font_eyebrow,
                  fill=V3_ACCENT, anchor="ra", tracking=0.6)
         for i in range(3):
-            ddx = int(WIDTH - 20 - wlw - 22 + i * 7)
-            draw.ellipse([ddx - 2, HEIGHT - 25, ddx + 2, HEIGHT - 21],
+            ddx = int(cw - 20 - wlw - 22 + i * 7)
+            draw.ellipse([ddx - 2, ch - 25, ddx + 2, ch - 21],
                          fill=V3_ACCENT if i == 0 else V3_ACCENT_FAINT)
 
         # 2px scan track with an accent segment. Static on BOTH halves — the
         # design's travelling shimmer is dropped on firmware (same heap
         # discipline; the WAITING dots are the only claim-screen motion).
-        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
-        seg_x = (WIDTH - 90) // 2
-        draw.rectangle([seg_x, HEIGHT - 2, seg_x + 90, HEIGHT], fill=V3_ACCENT)
-        return img
+        draw.rectangle([0, ch - 2, cw, ch], fill=V3_TRACK)
+        seg_x = (cw - 90) // 2
+        draw.rectangle([seg_x, ch - 2, seg_x + 90, ch], fill=V3_ACCENT)
+        return self._fit_panel(img, V3_BG)
 
     @staticmethod
     def _draw_metric_card(draw, x, y, w, h, label, value, pct,
