@@ -17,6 +17,11 @@ import {
   removeGuestWifi,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import {
+  ApOnboardError,
+  getBandSteering,
+  setBandSteering,
+} from "../services/ap-onboard.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface WifiDeps {
@@ -229,6 +234,51 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       const op = await setWifiChannel(radio_section, String(channel));
       res.json({ status: "ok", channel, tier: result.tier, operationId: op.operationId });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-1703: band-steering read — no RBAC, matches GET /network/wifi/radio.
+  // The honesty envelope ({supported:false, enabled:false} when no approved
+  // Droplet AP is online) comes from the service, never inferred here.
+  router.get("/network/wifi/band-steering", async (_req, res, next) => {
+    try {
+      res.json(await getBandSteering(prisma));
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1703: band-steering write — owner/admin only, Tier 1
+  // (set_ap_band_steering, same posture as set_channel: reversible, drops no
+  // household device permanently — a steered client just re-picks its band).
+  // No MCP principal: there is no band-steering tool yet; this is a
+  // deliberate household-admin toggle in the dashboard.
+  router.put("/network/wifi/band-steering", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "`enabled` must be a boolean" });
+      }
+
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, "wireless.band_steering", "set_ap_band_steering", { enabled }, userId
+      );
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+
+      const op = await setBandSteering(prisma, enabled);
+      res.json({ status: "ok", enabled, tier: result.tier, operationId: op.operationId });
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
       next(err);
     }
   });

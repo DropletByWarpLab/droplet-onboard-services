@@ -38,6 +38,8 @@ import { normalizeMac } from "../lib/mac.js";
 import {
   approveAp as routingApproveAp,
   decommissionAp as routingDecommissionAp,
+  getApBandSteering as routingGetApBandSteering,
+  setApBandSteering as routingSetApBandSteering,
   RouterError,
 } from "./openwrt.client.js";
 import {
@@ -97,6 +99,10 @@ export type ApOnboardErrorCode =
   | "PROVISIONING_TIMEOUT"
   | "ROUTER_UNREACHABLE"
   | "WIRELESS_CONFIG_REJECTED"
+  // WARP-1703: band steering can't be toggled on this shape — no ONLINE
+  // Droplet-image AP, no AP credential, or the AP's image predates the
+  // droplet.wifi substrate. Mirrors the routing service's 422 code verbatim.
+  | "AP_BAND_STEERING_UNAVAILABLE"
   | "UNKNOWN";
 
 export class ApOnboardError extends Error {
@@ -935,6 +941,108 @@ export async function decommissionAp(
 ): Promise<ApMutationResult> {
   const handler = await resolveBackendForMac(prisma, rawMac);
   return handler.decommission(prisma, rawMac);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// WARP-1703 — AP band steering (the droplet.wifi.band_steering master
+// switch on the Droplet-image AP, shipped in droplet-edge-router PR #5).
+//
+// Household-level surface: the dashboard toggles "band steering" for the
+// home, not per-AP, so these fan across every ONLINE DROPLET_IMAGE row.
+// Only the Droplet image carries the substrate — UNIFI / EASYMESH APs
+// manage their own steering on their controllers, so their rows are
+// excluded by the explicit `backend` filter (never inferred).
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ApBandSteeringState {
+  /** False = no ONLINE Droplet-image AP (or none of them carry the substrate). */
+  supported: boolean;
+  enabled: boolean;
+}
+
+function toApOnboardError(err: unknown): ApOnboardError {
+  if (err instanceof ApOnboardError) return err;
+  if (err instanceof RouterError) return ApOnboardError.routerError(err);
+  const message = err instanceof Error ? err.message : String(err);
+  return new ApOnboardError(message, 502, "UNKNOWN");
+}
+
+async function onlineDropletImageAps(prisma: PrismaClient): Promise<{ mac: string }[]> {
+  return prisma.apDevice.findMany({
+    where: { status: "ONLINE", backend: "DROPLET_IMAGE" },
+    select: { mac: true },
+  });
+}
+
+/**
+ * Read the household band-steering state. Honesty contract: zero ONLINE
+ * Droplet-image APs → `{ supported: false, enabled: false }` — never an
+ * error. With APs present, `supported` is true when at least one reports
+ * the substrate, and `enabled` AND-reduces across the supported ones (the
+ * household toggle only reads ON when every steerable AP steers).
+ */
+export async function getBandSteering(
+  prisma: PrismaClient,
+): Promise<ApBandSteeringState> {
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) return { supported: false, enabled: false };
+  try {
+    const states = await Promise.all(
+      rows.map((row) => routingGetApBandSteering({ mac: row.mac })),
+    );
+    const supported = states.filter((s) => s.supported);
+    if (supported.length === 0) return { supported: false, enabled: false };
+    return { supported: true, enabled: supported.every((s) => s.enabled) };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
+}
+
+/**
+ * Toggle band steering on every ONLINE Droplet-image AP. Reads first so an
+ * unsupported shape gets the honest 422 (AP_BAND_STEERING_UNAVAILABLE)
+ * instead of a confusing write failure; the write then fans across the
+ * supported rows only. Returns the last routing operation id (when any) so
+ * the dashboard can poll the apply-vs-rollback outcome.
+ */
+export async function setBandSteering(
+  prisma: PrismaClient,
+  enabled: boolean,
+): Promise<{ operationId: string | null }> {
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) {
+    throw new ApOnboardError(
+      "Band steering isn't available — no approved Droplet access point is online.",
+      422,
+      "AP_BAND_STEERING_UNAVAILABLE",
+    );
+  }
+  try {
+    const states = await Promise.all(
+      rows.map(async (row) => ({
+        mac: row.mac,
+        state: await routingGetApBandSteering({ mac: row.mac }),
+      })),
+    );
+    const supported = states.filter((s) => s.state.supported);
+    if (supported.length === 0) {
+      throw new ApOnboardError(
+        "Band steering isn't available — the access point's software doesn't support it yet.",
+        422,
+        "AP_BAND_STEERING_UNAVAILABLE",
+      );
+    }
+    let operationId: string | null = null;
+    // Sequential fan-out: one AP at a time so a failure surfaces before the
+    // next write starts (typical deployments have a single external AP).
+    for (const target of supported) {
+      const result = await routingSetApBandSteering({ mac: target.mac, enabled });
+      operationId = result.operationId ?? operationId;
+    }
+    return { operationId };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
 }
 
 /**
