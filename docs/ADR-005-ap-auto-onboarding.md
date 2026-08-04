@@ -117,8 +117,28 @@ Per ADR-004 §3:
 | GET `/api/aps/:mac/status` | `owner`, `admin`, `family`, `guest`, `service` |
 | POST `/api/aps/:mac/approve` | `owner`, `admin` |
 | POST `/api/aps/:mac/decommission` | `owner`, `admin` |
+| GET `/api/aps/:mac/wireless` (WARP-1712) | `owner`, `admin` |
+| GET `/api/network/wifi/ap` (WARP-1712) | `owner`, `admin` |
+| PUT `/api/network/wifi/ap` (WARP-1712) | `owner`, `admin` |
 
 Reads are open to every authenticated principal (including the `service` role) because the LLM agent loop's `list_ap_devices` tool needs to surface AP state in voice and dashboard chat. Writes are admin-tier — approving a new AP changes the household's wireless surface and is consistent with the existing rule that SSID/PSK changes require `owner`+`admin`.
+
+The three WARP-1712 rows are the deliberate exception to "reads are open": their bodies carry the AP's **live Wi-Fi passphrase**, so they follow the `GET /api/network/wifi/guest` posture (which carries the guest PSK for the join QR) rather than the open band-steering read. `PUT /api/network/wifi/ap` is additionally tiered by payload — a name-only change classifies as `set_ap_wifi_ssid` (Tier 1, matching the router's `set_ssid`), and any change carrying a passphrase classifies as `set_ap_wifi_password` (Tier 2, confirm first, matching the router's `set_wifi_password`).
+
+## The AP owns its own radios (WARP-1712)
+
+The orchestrator keeps **no cached copy** of an approved AP's SSID or passphrase. Every read dials the AP over its rpcd and reports what its uci actually says, so the Network tab's Wi-Fi form, the Coverage Extenders card and the hardware cannot drift apart. `ApDevice.approvedSsid` remains an **approval-time audit column** and is never read for display.
+
+Writes obey the AP image's band-steering applier (`/etc/init.d/droplet-band-steer`, droplet-edge-router PR #5), which derives the 5 GHz interface from the 2.4 GHz one on every reload:
+
+| `droplet.wifi.band_steering` | `wireless.default_radio1.ssid` becomes |
+|---|---|
+| `1` | `<ssid>` (bands unified) |
+| `0` | `<ssid>-5g` (bands split) |
+
+So the routing service authors **only** `wireless.default_radio0` (resolved by the radio it is attached to, not by section name) and lets `uci apply` fire the applier. Authoring `default_radio1` here would race a value the applier recomputes and would put the household's network name in two places. The one exception is a pre-substrate image with no applier, where every `wifi-iface` is written directly — the same shape the approval push already uses.
+
+An approved Droplet-image AP is also **excluded from `GET /api/network/devices`**: it takes a DHCP lease like any client, but it is infrastructure and the Coverage Extenders panel owns it. The exclusion is scoped to `backend = DROPLET_IMAGE`; third-party (UniFi / EasyMesh) APs stay visible as network devices because a household may legitimately want to see, group or block them.
 
 ## Environment variables — `DROPLET_AP_*` only, never `MATTER_*`
 
