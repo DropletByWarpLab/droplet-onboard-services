@@ -313,6 +313,38 @@ describe("redactSecretParams", () => {
     expect(() => redactSecretParams(cyclic)).not.toThrow();
   });
 
+  it("redacts a CLASS INSTANCE's secret rather than failing open", () => {
+    // JSON.stringify emits an instance's own enumerable properties, so a
+    // "not a plain object -> return as-is" bail-out would leak them. Walk it.
+    class WifiParams {
+      ssid = "Droplet";
+      password = "class-instance-psk-leak";
+    }
+    const out = redactSecretParams(new WifiParams());
+    expect(JSON.stringify(out)).not.toContain("class-instance-psk-leak");
+    expect((out as any).ssid).toBe("Droplet");
+    expect((out as any).password).toBe(REDACTION_PLACEHOLDER);
+  });
+
+  it("leaves objects that define their own JSON form intact", () => {
+    // A Date has no own enumerable properties — walking it would turn it into
+    // {} and destroy the value. toJSON is the signal to leave it alone.
+    const when = new Date("2026-08-04T00:00:00.000Z");
+    const out = redactSecretParams({ ssid: "Droplet", when });
+    expect(JSON.parse(JSON.stringify(out)).when).toBe("2026-08-04T00:00:00.000Z");
+  });
+
+  it("a null-prototype object is still walked", () => {
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare.password = "null-proto-psk-leak";
+    expect(JSON.stringify(redactSecretParams(bare))).not.toContain("null-proto-psk-leak");
+  });
+
+  it("redacts a secret nested under a sensitive key holding an object", () => {
+    const out = redactSecretParams({ credentials: { user: "u", pass: "creds-leak" } });
+    expect(JSON.stringify(out)).not.toContain("creds-leak");
+  });
+
   it("passes through undefined / primitives untouched", () => {
     expect(redactSecretParams(undefined)).toBeUndefined();
     expect(redactSecretParams({})).toEqual({});

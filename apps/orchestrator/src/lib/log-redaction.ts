@@ -171,7 +171,7 @@ const SENSITIVE_KEY_RE = new RegExp(`^${SENSITIVE_KEY_WORD}$`, "i");
  * `encryption_key`, `psk`, `secret`, `token`, `wpa_passphrase` all hit), minus
  * the {@link SAFE_KEY_RE} carve-out so a public key / key *id* stays legible.
  */
-export function isSensitiveKey(key: string): boolean {
+function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_RE.test(key) && !SAFE_KEY_RE.test(key);
 }
 
@@ -224,11 +224,17 @@ function redactValue(value: unknown, depth: number): unknown {
     return value.map((item) => redactValue(item, depth + 1));
   }
 
-  // Non-plain objects (Date, Buffer, class instances) have no key/value shape
-  // worth walking — hand them back untouched and let the caller's
-  // JSON.stringify serialize them as it would have.
-  const proto: unknown = Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) return value;
+  // Objects that define their OWN JSON form (Date, Buffer, Prisma Decimal…)
+  // serialize to something other than their own properties, so walking them
+  // would corrupt the audit payload — hand those back untouched.
+  //
+  // Everything else IS walked, class instances included. Bailing out on
+  // "not a plain object" would fail OPEN: `JSON.stringify` emits an instance's
+  // own enumerable properties regardless, so a secret-bearing field would ride
+  // through unredacted. Walking is also exactly faithful for those — the
+  // rebuilt plain object serializes identically (as it does for Map/Set/RegExp/
+  // Error, which have no own enumerable properties and no toJSON).
+  if (typeof (value as { toJSON?: unknown }).toJSON === "function") return value;
 
   const out: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
