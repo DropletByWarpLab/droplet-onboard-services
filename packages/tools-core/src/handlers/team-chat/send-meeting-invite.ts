@@ -155,9 +155,34 @@ async function handler(
     note = args.note.trim();
   }
 
-  // Confirmation gate — AFTER validation, BEFORE any HTTP (share_file).
+  // Confirmation gate — AFTER validation, BEFORE any WRITE (share_file).
+  // The roster is read best-effort so the approval copy shows DISPLAY
+  // NAMES; the timestamp renders in the readable local form (UX review —
+  // raw ISO-UTC is machine copy). The ISO original stays in `details`.
   if (args.confirmed !== true) {
-    const when = startsAt.toISOString();
+    let names = recipients;
+    try {
+      const rosterRes = await ctx.http.orchestrator.get(
+        "/api/team-chat/contacts",
+        { headers: actingHeaders(ctx) },
+      );
+      const roster = await readRosterResponse(rosterRes);
+      if (roster.ok) {
+        const byUsername = new Map(
+          roster.contacts.map((c) => [c.username, c] as const),
+        );
+        names = recipients.map((u) => {
+          const display = byUsername.get(u)?.displayName;
+          return display && display.length > 0 ? display : u;
+        });
+      }
+    } catch {
+      // Preview-only read — usernames are an honest fallback.
+    }
+    const whenReadable = startsAt.toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
     const extras = [
       durationMinutes !== undefined ? `${durationMinutes} min` : null,
       location !== undefined ? `at ${truncateForPreview(location, 60)}` : null,
@@ -165,7 +190,7 @@ async function handler(
       .filter((x): x is string => x !== null)
       .join(", ");
     return confirmationRequired(
-      `I'd like to invite ${recipients.join(", ")} to "${title}" starting ${when}${extras.length > 0 ? ` (${extras})` : ""}. ` +
+      `I'd like to invite ${names.join(", ")} to "${title}" starting ${whenReadable}${extras.length > 0 ? ` (${extras})` : ""}. ` +
         "A meeting invite card will be posted in Messages and the meeting will land on the organizer's calendar. " +
         "Ask the user to approve, then re-issue this call with confirmed: true. " +
         "Do NOT set confirmed: true without an explicit yes from the user.",
@@ -173,7 +198,7 @@ async function handler(
         type: "team_chat_send_meeting_invite",
         recipients,
         title,
-        startsAt: when,
+        startsAt: startsAt.toISOString(),
         ...(durationMinutes !== undefined ? { durationMinutes } : {}),
         ...(location !== undefined ? { location } : {}),
       },

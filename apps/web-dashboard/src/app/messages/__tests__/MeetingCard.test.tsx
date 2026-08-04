@@ -147,6 +147,23 @@ describe("MeetingCard (WARP-1685)", () => {
     expect(screen.queryByRole("button", { name: "Cancel meeting" })).toBeNull();
   });
 
+  it("a scheduled meeting that already began shows the cue instead of live RSVP pills", () => {
+    render(
+      <MeetingCard
+        meeting={meeting({ startsAt: new Date(Date.now() - 10 * 60_000).toISOString() })}
+        mine={false}
+        meId="u-bob"
+        participants={PARTICIPANTS}
+        onRsvp={noop}
+        onCancel={noop}
+        busy={false}
+      />,
+    );
+    expect(screen.getByText("Already started")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Going" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Can't go" })).toBeNull();
+  });
+
   it("renders RSVP summary chips with roster names", () => {
     render(
       <MeetingCard

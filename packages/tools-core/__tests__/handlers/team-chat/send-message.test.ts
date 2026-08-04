@@ -99,16 +99,26 @@ describe("team_chat_send_message", () => {
     expect(r.error?.code).toBe("INVALID_ARGS");
   });
 
-  it("phase 1: returns confirmation_required with names + truncated body, ZERO HTTP", async () => {
+  it("phase 1: confirmation_required with DISPLAY NAMES + truncated body — roster read only, NO writes", async () => {
     const { ctx, get, post } = ctxWith({});
     const body = "a".repeat(200);
     const r = await sendMessage.handler({ recipients: ["bob", "carol"], body }, ctx);
     expect(r.ok).toBe(false);
     expect(r.status).toBe("confirmation_required");
-    expect(r.error?.message).toContain("bob");
-    expect(r.error?.message).toContain("carol");
+    // UX review: the approval copy names people, not login handles.
+    expect(r.error?.message).toContain("Bob B");
+    expect(r.error?.message).toContain("Carol C");
     expect(r.error?.message).not.toContain(body); // truncated, never verbatim-long
-    expect(get).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1); // the preview's roster read
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("phase 1 falls back to usernames when the roster read fails — still no writes", async () => {
+    const get = vi.fn(async () => res(500, {}));
+    const { ctx, post } = ctxWith({ get });
+    const r = await sendMessage.handler({ recipients: ["bob"], body: "hi" }, ctx);
+    expect(r.status).toBe("confirmation_required");
+    expect(r.error?.message).toContain("bob");
     expect(post).not.toHaveBeenCalled();
   });
 

@@ -65,9 +65,12 @@ export function ConversationPane({
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [chatPickerOpen, setChatPickerOpen] = useState(false);
   const [transcriptFor, setTranscriptFor] = useState<TeamChatMessage | null>(null);
-  // WARP-1685 — meetings.
+  // WARP-1685 — meetings. Busy is scoped to the TARGET meeting (UX
+  // review: other cards' pills must not grey out); mutations still
+  // serialize globally — one in flight at a time keeps the optimistic
+  // cache coherent.
   const [meetingDialogOpen, setMeetingDialogOpen] = useState(false);
-  const [meetingBusy, setMeetingBusy] = useState(false);
+  const [busyMeetingId, setBusyMeetingId] = useState<string | null>(null);
   const [meetingError, setMeetingError] = useState<string | null>(null);
 
   // Mark read on open + whenever a new newest message lands while open.
@@ -123,8 +126,8 @@ export function ConversationPane({
    * the rollback path when the POST failed (plus honest error copy).
    */
   async function rsvp(meetingId: string, response: TeamChatRsvpResponse) {
-    if (!threadId || meetingBusy) return;
-    setMeetingBusy(true);
+    if (!threadId || busyMeetingId !== null) return;
+    setBusyMeetingId(meetingId);
     setMeetingError(null);
     await mutate(
       (current) =>
@@ -154,14 +157,14 @@ export function ConversationPane({
       );
     } finally {
       await mutate();
-      setMeetingBusy(false);
+      setBusyMeetingId(null);
     }
   }
 
   /** Organizer cancel — the two-step confirm lives in the card itself. */
   async function cancelMeeting(meetingId: string) {
-    if (!threadId || meetingBusy) return;
-    setMeetingBusy(true);
+    if (!threadId || busyMeetingId !== null) return;
+    setBusyMeetingId(meetingId);
     setMeetingError(null);
     try {
       await cancelTeamChatMeeting(meetingId);
@@ -172,7 +175,7 @@ export function ConversationPane({
       );
     } finally {
       await mutate();
-      setMeetingBusy(false);
+      setBusyMeetingId(null);
     }
   }
 
@@ -259,7 +262,7 @@ export function ConversationPane({
             participants={thread.participants}
             onRsvp={(meetingId, response) => void rsvp(meetingId, response)}
             onCancelMeeting={(meetingId) => void cancelMeeting(meetingId)}
-            meetingBusy={meetingBusy}
+            busyMeetingId={busyMeetingId}
           />
         ))}
       </div>
@@ -416,7 +419,7 @@ function MessageBubble({
   participants,
   onRsvp,
   onCancelMeeting,
-  meetingBusy,
+  busyMeetingId,
 }: {
   message: TeamChatMessage;
   mine: boolean;
@@ -426,7 +429,8 @@ function MessageBubble({
   participants: TeamChatThreadSummary["participants"];
   onRsvp: (meetingId: string, response: TeamChatRsvpResponse) => void;
   onCancelMeeting: (meetingId: string) => void;
-  meetingBusy: boolean;
+  /** The one meeting with a mutation in flight — only ITS card disables. */
+  busyMeetingId: string | null;
 }) {
   const align = mine ? "items-end" : "items-start";
   const bubble = mine
@@ -488,7 +492,7 @@ function MessageBubble({
               participants={participants}
               onRsvp={onRsvp}
               onCancel={onCancelMeeting}
-              busy={meetingBusy}
+              busy={busyMeetingId === message.meeting.id}
             />
           ) : (
             // The meeting row is gone (FK SetNull) — say so honestly

@@ -95,7 +95,14 @@ export function MeetingDialog({
 
   return (
     <Dialog open={open} onClose={close} labelledBy="meeting-dialog-title">
-      <div>
+      {/* A real form so Enter in Title/Starts submits (keyboard parity —
+          UX review); Enter in the note textarea still inserts a newline. */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void create();
+        }}
+      >
         <h2 id="meeting-dialog-title" className="type-headline text-label-primary">
           Schedule a meeting
         </h2>
@@ -181,15 +188,14 @@ export function MeetingDialog({
             Cancel
           </button>
           <button
-            type="button"
-            onClick={() => void create()}
+            type="submit"
             disabled={!canSubmit}
             className="dp-btn-primary disabled:opacity-50"
           >
             {creating ? "Scheduling…" : "Schedule meeting"}
           </button>
         </div>
-      </div>
+      </form>
     </Dialog>
   );
 }

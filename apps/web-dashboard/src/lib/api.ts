@@ -7194,7 +7194,16 @@ export async function rsvpTeamChatMeeting(
     },
   );
   if (!res.ok) {
-    return teamChatFail("rsvp", "Couldn't send your answer. Try again.", res);
+    // UX review: on the cancelled race the generic "Try again" is false
+    // advice next to a Cancelled banner — say what likely happened.
+    // Same log-then-plain-copy shape as teamChatFail.
+    const detail = await res.text().catch(() => "");
+    console.error(`[team-chat] rsvp failed: ${res.status} ${detail}`);
+    throw new Error(
+      detail.includes("meeting_cancelled")
+        ? "Couldn't send your answer — the meeting may have been cancelled."
+        : "Couldn't send your answer. Try again.",
+    );
   }
 }
 

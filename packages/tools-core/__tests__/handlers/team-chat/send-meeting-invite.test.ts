@@ -104,13 +104,14 @@ describe("team_chat_send_meeting_invite", () => {
     expect(longTitle.error?.code).toBe("INVALID_ARGS");
   });
 
-  it("phase 1: confirmation_required carries title + recipients, ZERO HTTP", async () => {
+  it("phase 1: confirmation_required carries title + DISPLAY NAME + readable local time — roster read only, NO writes", async () => {
     const { ctx, get, post } = ctxWith({});
+    const startsAt = futureIso();
     const r = await sendMeetingInvite.handler(
       {
         recipients: ["bob"],
         title: "Budget review",
-        starts_at: futureIso(),
+        starts_at: startsAt,
         duration_minutes: 30,
         location: "Kitchen",
       },
@@ -119,8 +120,32 @@ describe("team_chat_send_meeting_invite", () => {
     expect(r.ok).toBe(false);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("Budget review");
+    // UX review: display name, not the login handle.
+    expect(r.error?.message).toContain("Bob B");
+    // UX review: readable local time in the copy, never raw ISO-UTC...
+    const whenReadable = new Date(startsAt).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    expect(r.error?.message).toContain(whenReadable);
+    expect(r.error?.message).not.toContain(startsAt);
+    // ...while details keeps the machine-precise ISO for the approval chip.
+    expect((r.error?.details as { startsAt: string }).startsAt).toBe(
+      new Date(startsAt).toISOString(),
+    );
+    expect(get).toHaveBeenCalledTimes(1); // the preview's roster read
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("phase 1 falls back to usernames when the roster read fails — still no writes", async () => {
+    const get = vi.fn(async () => res(500, {}));
+    const { ctx, post } = ctxWith({ get });
+    const r = await sendMeetingInvite.handler(
+      { recipients: ["bob"], title: "Sync", starts_at: futureIso() },
+      ctx,
+    );
+    expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("bob");
-    expect(get).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
   });
 

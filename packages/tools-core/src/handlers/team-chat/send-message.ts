@@ -118,11 +118,33 @@ async function handler(
   }
 
   // Confirmation gate — AFTER validation (a malformed call should fail
-  // loudly, not ask the user to approve it) and BEFORE any HTTP.
+  // loudly, not ask the user to approve it) and BEFORE any WRITE. The
+  // roster is read best-effort so the approval copy shows DISPLAY NAMES
+  // ("Bob B", not "bob" — UX review); any roster hiccup falls back to
+  // the typed usernames, and phase 2 still validates them loudly.
   if (args.confirmed !== true) {
-    const target = hasRecipients
-      ? recipients.join(", ")
-      : "the existing conversation";
+    let names = recipients;
+    if (hasRecipients) {
+      try {
+        const rosterRes = await ctx.http.orchestrator.get(
+          "/api/team-chat/contacts",
+          { headers: actingHeaders(ctx) },
+        );
+        const roster = await readRosterResponse(rosterRes);
+        if (roster.ok) {
+          const byUsername = new Map(
+            roster.contacts.map((c) => [c.username, c] as const),
+          );
+          names = recipients.map((u) => {
+            const display = byUsername.get(u)?.displayName;
+            return display && display.length > 0 ? display : u;
+          });
+        }
+      } catch {
+        // Preview-only read — usernames are an honest fallback.
+      }
+    }
+    const target = hasRecipients ? names.join(", ") : "the existing conversation";
     const preview = truncateForPreview(body);
     return confirmationRequired(
       `I'd like to send a Messages chat to ${target}: "${preview}". ` +

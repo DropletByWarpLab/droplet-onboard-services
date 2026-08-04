@@ -37,7 +37,8 @@ function formatMeetingStart(iso: string): string {
     weekday: "short",
     month: "short",
     day: "numeric",
-    hour: "2-digit",
+    // UX review: "2:30 PM", never the zero-padded "02:30 PM".
+    hour: "numeric",
     minute: "2-digit",
   });
 }
@@ -73,6 +74,9 @@ export function MeetingCard({
   const isOrganizer = meeting.createdById === meId;
   const myResponse =
     meeting.rsvps.find((r) => r.userId === meId)?.response ?? null;
+  // Render-time cue; the surface's 5s poll keeps it honest (UX review:
+  // live RSVP pills on a meeting that already began are stale advice).
+  const started = new Date(meeting.startsAt).getTime() <= Date.now();
 
   const cardTone = mine
     ? "bg-white/10 border-white/20"
@@ -143,8 +147,12 @@ export function MeetingCard({
             </div>
           )}
 
-          {/* Actions — scheduled meetings only. */}
-          {!cancelled && !isOrganizer && (
+          {/* Actions — scheduled meetings only. A meeting that already
+              began shows the honest cue instead of live RSVP pills. */}
+          {!cancelled && !isOrganizer && started && (
+            <p className={`type-caption-2 mt-1.5 ${subtle}`}>Already started</p>
+          )}
+          {!cancelled && !isOrganizer && !started && (
             <div className="flex gap-1.5 mt-2">
               <RsvpButton
                 label="Going"
@@ -163,7 +171,7 @@ export function MeetingCard({
             </div>
           )}
           {!cancelled && isOrganizer && (
-            <div className="flex items-center gap-1.5 mt-2">
+            <div className="flex flex-wrap items-center gap-1.5 mt-2">
               {confirmingCancel ? (
                 <>
                   <span className={`type-caption-1 ${subtle}`}>
