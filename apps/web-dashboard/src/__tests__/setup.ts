@@ -4,6 +4,22 @@ import "@testing-library/jest-dom/vitest";
 import { vi } from "vitest";
 import { configure } from "@testing-library/react";
 
+// WARP-1689: Node 22+ ships its own global `localStorage` (`undefined` unless
+// the process was started with --localstorage-file) and `sessionStorage`.
+// Vitest's jsdom environment only copies a window key onto globalThis when
+// that key is not already there, so on those runtimes jsdom's Storage is never
+// installed and an unqualified `localStorage` in a test resolves to Node's
+// global instead — 26 failures across 9 files locally, green on CI's Node 20.
+// Qualifying the call sites would not help: vitest sets `window = globalThis`,
+// so `window.localStorage` is the same shadowed global. Take the storages off
+// the JSDOM instance vitest parks on `globalThis.jsdom` instead. No-op under
+// Node 20, where these globals already are jsdom's.
+const jsdomWindow = (globalThis as { jsdom?: { window: Window } }).jsdom?.window;
+if (jsdomWindow) {
+  globalThis.localStorage = jsdomWindow.localStorage;
+  globalThis.sessionStorage = jsdomWindow.sessionStorage;
+}
+
 // Testing Library's default asyncUtilTimeout is 1000 ms, measured in wall
 // clock. That is ample for a single file but not for this suite: CI runs
 // ~380 files across a handful of workers on a shared runner, so a component

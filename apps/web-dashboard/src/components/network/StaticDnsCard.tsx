@@ -153,17 +153,17 @@ export function StaticDnsCard() {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">Local DNS names</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline mb-1" style={{ color: "var(--text)" }}>Local DNS names</h3>
+      <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
         Give a device a friendly name on your network — e.g. reach your NAS at{" "}
-        <span className="font-mono text-label-secondary">nas.lan</span> instead of
+        <span className="font-mono" style={{ color: "var(--text-muted)" }}>nas.lan</span> instead of
         its IP. These resolve for any device using the Droplet for DNS.
       </p>
 
       {/* Existing entries */}
       {listLoading ? (
-        <div className="flex items-center gap-2 type-subheadline text-label-tertiary mb-4">
+        <div className="flex items-center gap-2 type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
           <Loader2 size={16} className="animate-spin" />
           Loading names…
         </div>
@@ -172,18 +172,19 @@ export function StaticDnsCard() {
           {entries.map((e) => (
             <div
               key={e.section}
-              className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
+              className="flex items-center justify-between px-3 py-2 rounded-sm"
+              style={{ background: "var(--inset)" }}
             >
-              <p className="type-subheadline text-label-primary font-mono">
+              <p className="type-subheadline font-mono" style={{ color: "var(--text)" }}>
                 {e.hostname}{" "}
-                <span className="text-label-tertiary">→ {e.ip}</span>
+                <span style={{ color: "var(--text-muted)" }}>→ {e.ip}</span>
               </p>
               <button
                 type="button"
                 onClick={() => handleDelete(e.hostname)}
                 disabled={busyHost === e.hostname}
                 aria-label={`Remove ${e.hostname}`}
-                className="text-label-tertiary transition-colors duration-200 hover:text-system-red disabled:opacity-50"
+                className="text-[color:var(--text-muted)] transition-colors duration-200 hover:text-system-red disabled:opacity-50"
               >
                 {busyHost === e.hostname ? (
                   <Loader2 size={16} className="animate-spin" />
@@ -195,7 +196,7 @@ export function StaticDnsCard() {
           ))}
         </div>
       ) : (
-        <p className="type-subheadline text-label-tertiary mb-4">
+        <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
           No local DNS names yet.
         </p>
       )}
@@ -206,7 +207,8 @@ export function StaticDnsCard() {
           <div>
             <label
               htmlFor="dns-hostname"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline block mb-1.5"
+              style={{ color: "var(--text-muted)" }}
             >
               Name
             </label>
@@ -216,7 +218,13 @@ export function StaticDnsCard() {
               value={hostname}
               onChange={(e) => setHostname(e.target.value)}
               placeholder="nas.lan"
-              className="dp-input font-mono"
+              className="w-full px-3 py-2.5 font-mono outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -225,7 +233,8 @@ export function StaticDnsCard() {
           <div>
             <label
               htmlFor="dns-host-ip"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline block mb-1.5"
+              style={{ color: "var(--text-muted)" }}
             >
               Points to (IP)
             </label>
@@ -236,7 +245,13 @@ export function StaticDnsCard() {
               value={ip}
               onChange={(e) => setIp(e.target.value)}
               placeholder="192.168.50.20"
-              className="dp-input font-mono"
+              className="w-full px-3 py-2.5 font-mono outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -248,7 +263,7 @@ export function StaticDnsCard() {
           type="button"
           onClick={handleAdd}
           disabled={saving}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving ? (
             <Loader2 size={16} className="animate-spin" />
@@ -262,7 +277,8 @@ export function StaticDnsCard() {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote bg-system-green/10 rounded-sm px-3 py-2"
+          style={{ color: "var(--text)" }}
         >
           <CheckCircle2
             size={14}
@@ -277,7 +293,8 @@ export function StaticDnsCard() {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote bg-system-orange/10 rounded-sm px-3 py-2"
+          style={{ color: "var(--text)" }}
         >
           <AlertCircle
             size={14}

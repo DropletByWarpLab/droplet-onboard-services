@@ -50,14 +50,14 @@ export const STATUS_TONE: Record<SwitchPortStatus, "ok" | "warn" | "neutral" | "
 export const CHIP_CLASS: Record<"ok" | "warn" | "neutral" | "err", string> = {
   ok: "bg-system-green/10 text-system-green",
   warn: "bg-system-orange/10 text-system-orange",
-  neutral: "bg-surface-secondary text-label-secondary",
+  neutral: "bg-[var(--card-inner)] text-[color:var(--text-muted)]",
   err: "bg-system-red/10 text-system-red",
 };
 
 export const DOT_CLASS: Record<"ok" | "warn" | "neutral" | "err", string> = {
   ok: "bg-system-green",
   warn: "bg-system-orange",
-  neutral: "bg-label-quaternary",
+  neutral: "bg-[var(--text-faint)]",
   err: "bg-system-red",
 };
 

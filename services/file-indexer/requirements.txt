@@ -7,7 +7,7 @@ pgvector>=0.5.0
 pdfplumber>=0.11.10
 python-docx>=1.2.0
 openpyxl>=3.1.5
-beautifulsoup4>=4.12.0
+beautifulsoup4>=4.15.0
 # WARP-201 RAG Phase 1 extractors
 pypdf>=6.14.2
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
@@ -17,7 +17,7 @@ pypdf>=6.14.2
 readability-lxml>=0.8.4.1
 lxml_html_clean>=0.4.5
 pytesseract>=0.3.10
-Pillow>=10.0
+Pillow>=12.3.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
 faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor

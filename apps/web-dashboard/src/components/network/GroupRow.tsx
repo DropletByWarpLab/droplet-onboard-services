@@ -68,10 +68,10 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
               void onRename(g.id, { name: next });
             }
           }}
-          className="type-body text-label-primary bg-transparent border-b border-transparent hover:border-separator focus:border-accent outline-none flex-1 min-w-0"
+          className="type-body text-[color:var(--text)] bg-transparent border-b border-transparent hover:border-[var(--card-bd)] focus:border-[var(--brand)] outline-none flex-1 min-w-0"
           aria-label={`Rename ${g.name}`}
         />
-        <span className="type-caption-1 text-label-tertiary whitespace-nowrap">
+        <span className="type-caption-1 text-[color:var(--text-muted)] whitespace-nowrap">
           {countLabel}
         </span>
 
@@ -82,7 +82,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
             type="button"
             onClick={() => setQuickScheduleOpen((o) => !o)}
             aria-label={`Quick schedule for ${g.name}`}
-            className="type-caption-1 px-2 py-1 rounded text-label-secondary hover:bg-surface-secondary"
+            className="type-caption-1 px-2 py-1 rounded text-[color:var(--text-muted)] hover:bg-[var(--hover)]"
             title="Quick schedule"
           >
             <Icons.CalendarClock className="w-4 h-4" />
@@ -106,7 +106,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
           </button>
         ) : (
           <div className="flex items-center gap-1">
-            <span className="type-caption-1 text-label-secondary">
+            <span className="type-caption-1 text-[color:var(--text-muted)]">
               {count} ungrouped. Delete?
             </span>
             <button
@@ -122,7 +122,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
             <button
               type="button"
               onClick={() => setConfirmDelete(false)}
-              className="type-caption-1 px-2 py-1 bg-surface-secondary rounded"
+              className="type-caption-1 px-2 py-1 bg-[var(--card-inner)] rounded"
             >
               Cancel
             </button>
@@ -132,7 +132,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
 
       {/* Color swatches */}
       <div className="flex items-center gap-2 mt-2 flex-wrap">
-        <span className="type-caption-1 text-label-tertiary">Color</span>
+        <span className="type-caption-1 text-[color:var(--text-muted)]">Color</span>
         {PRESET_COLORS.map((c) => (
           <button
             key={c}
@@ -140,7 +140,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
             onClick={() => void onRename(g.id, { color: c })}
             aria-label={`Color ${c}`}
             className={`w-5 h-5 rounded-full border ${
-              g.color === c ? "ring-2 ring-accent" : "border-separator"
+              g.color === c ? "ring-2 ring-[var(--brand)]" : "border-[var(--card-bd)]"
             }`}
             style={{ backgroundColor: c }}
           />
@@ -148,7 +148,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
         <button
           type="button"
           onClick={() => void onRename(g.id, { color: null })}
-          className="type-caption-1 text-label-secondary ml-1"
+          className="type-caption-1 text-[color:var(--text-muted)] ml-1"
         >
           None
         </button>
@@ -159,7 +159,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
         <button
           type="button"
           onClick={() => setIconOpen((o) => !o)}
-          className="type-caption-1 text-label-secondary"
+          className="type-caption-1 text-[color:var(--text-muted)]"
         >
           {iconOpen ? "Hide icon picker" : `Icon: ${g.icon ?? "None"}`}
         </button>
@@ -182,7 +182,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
           type="button"
           onClick={() => setSchedulesExpanded((o) => !o)}
           aria-expanded={schedulesExpanded}
-          className="type-caption-1 text-label-secondary hover:text-label-primary"
+          className="type-caption-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
         >
           {renderScheduleSummary(groupSchedules)}
         </button>
@@ -190,7 +190,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
         {schedulesExpanded && (
           <div className="mt-2 space-y-1">
             {groupSchedules.length === 0 ? (
-              <p className="type-caption-1 text-label-tertiary">
+              <p className="type-caption-1 text-[color:var(--text-muted)]">
                 No schedules for this group yet.
               </p>
             ) : (
@@ -198,12 +198,12 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
                 {groupSchedules.map((s) => (
                   <li
                     key={s.id}
-                    className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-surface-secondary"
+                    className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-[var(--card-inner)]"
                   >
-                    <span className="type-caption-1 text-label-primary truncate">
+                    <span className="type-caption-1 text-[color:var(--text)] truncate">
                       {s.name}
                     </span>
-                    <span className="type-caption-2 text-label-tertiary whitespace-nowrap">
+                    <span className="type-caption-2 text-[color:var(--text-muted)] whitespace-nowrap">
                       {s.enabled ? "enabled" : "disabled"}
                     </span>
                   </li>
@@ -213,7 +213,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
             <button
               type="button"
               onClick={() => setEditorOpen(true)}
-              className="dp-btn-secondary text-sm"
+              className="btn sm"
             >
               + New schedule
             </button>
