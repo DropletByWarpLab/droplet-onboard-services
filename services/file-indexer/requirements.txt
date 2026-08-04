@@ -16,7 +16,7 @@ pypdf>=6.14.2
 # pdfminer.six is pulled in transitively by pdfplumber — no explicit pin needed.
 readability-lxml>=0.8.4.1
 lxml_html_clean>=0.4.5
-pytesseract>=0.3.10
+pytesseract>=0.3.13
 Pillow>=12.3.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
 faster-whisper==1.2.1
