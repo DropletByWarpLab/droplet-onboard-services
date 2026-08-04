@@ -80,13 +80,24 @@ interface StoredActivityRow {
   at: Date;
 }
 
-function makePrisma(initial: ProfileRow | null) {
+/** WARP-1668 — chat sessions are owner-scoped, so resumability depends on
+ *  WHO asks. Tests pass the sessions that exist; anything not listed simply
+ *  does not exist (deleted row → `onDelete: SetNull` territory). */
+function makePrisma(
+  initial: ProfileRow | null,
+  sessions: ReadonlyArray<{ id: string; userId: string }> = [],
+) {
   let row = initial;
   const activityRows: StoredActivityRow[] = [];
   let nextId = 1n;
   const prisma = {
     _row: () => row,
     _activityRows: activityRows,
+    chatSession: {
+      findFirst: async ({ where }: { where: { id: string; userId: string } }) =>
+        sessions.find((s) => s.id === where.id && s.userId === where.userId) ??
+        null,
+    },
     businessProfile: {
       findUnique: async () => row,
       create: async ({ data }: { data: Partial<ProfileRow> }) => {
@@ -471,5 +482,69 @@ describe("PATCH /api/business-profile — RBAC", () => {
       .patch("/api/business-profile")
       .send({ whatWeDo: "nope" });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("GET /api/business-profile — interviewResumable (WARP-1668)", () => {
+  const PARKED = { onboardingState: "in_progress", interviewChatId: "conv-int" };
+
+  it("is true when the parked session exists and belongs to the caller", async () => {
+    const res = await request(
+      buildApp(
+        makePrisma(filled(PARKED), [{ id: "conv-int", userId: OWNER.username }]),
+        OWNER,
+      ),
+    ).get("/api/business-profile");
+    expect(res.status).toBe(200);
+    expect(res.body.interviewResumable).toBe(true);
+  });
+
+  it("is false when the link is null — the `onDelete: SetNull` shape", async () => {
+    // The exact dead-end Romain hit: state still says an interview is in
+    // flight, but the session row is gone so the FK was nulled. The banner
+    // used to render here and Resume did nothing at all.
+    const res = await request(
+      buildApp(
+        makePrisma(filled({ onboardingState: "in_progress", interviewChatId: null })),
+        OWNER,
+      ),
+    ).get("/api/business-profile");
+    expect(res.status).toBe(200);
+    expect(res.body.interviewResumable).toBe(false);
+  });
+
+  it("is false when the linked session no longer exists", async () => {
+    const res = await request(
+      buildApp(makePrisma(filled(PARKED), []), OWNER),
+    ).get("/api/business-profile");
+    expect(res.body.interviewResumable).toBe(false);
+  });
+
+  it("is false for an admin who does not own the interview session", async () => {
+    // Onboarding state is box-wide but the session is owner-scoped: the
+    // other admin's Resume would 404 and loop, so never offer it.
+    const prisma = makePrisma(filled(PARKED), [
+      { id: "conv-int", userId: OWNER.username },
+    ]);
+    const mine = await request(buildApp(prisma, OWNER)).get(
+      "/api/business-profile",
+    );
+    const theirs = await request(buildApp(prisma, ADMIN)).get(
+      "/api/business-profile",
+    );
+    expect(mine.body.interviewResumable).toBe(true);
+    expect(theirs.body.interviewResumable).toBe(false);
+  });
+
+  it("is never exposed to family, guest, or service", async () => {
+    for (const who of [FAMILY, GUEST, SERVICE]) {
+      const res = await request(
+        buildApp(
+          makePrisma(filled(PARKED), [{ id: "conv-int", userId: who.username }]),
+          who,
+        ),
+      ).get("/api/business-profile");
+      expect(res.body).not.toHaveProperty("interviewResumable");
+    }
   });
 });

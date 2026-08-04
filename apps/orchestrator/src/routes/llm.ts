@@ -1736,7 +1736,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         let terminal: "completed" | "failed" | "aborted" = "completed";
         // WARP-854 — set by the onEvent done-rewrite above.
         let emptyCompletion = false;
-        // WARP-329: detect client-side abort. req.on("close") fires when
+        // WARP-329: detect client-side abort — "close" fires when
         // the client disconnects mid-stream; we still finalize but flag
         // the turn as aborted so the row reflects reality. The
         // AbortController additionally tears down the in-flight work:
@@ -1747,12 +1747,25 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // the background.
         let clientAborted = false;
         const abortController = new AbortController();
-        req.on("close", () => {
+        const onClientGone = () => {
           if (!res.writableEnded) {
             clientAborted = true;
             abortController.abort();
           }
-        });
+        };
+        // `req` alone is NOT enough on this route. Since Node 16 an
+        // IncomingMessage emits "close" once its own stream completes — and
+        // `express.json()` has already drained this POST's body by the time
+        // the handler runs (`req.destroyed === true` here), so the listener
+        // below is registered after the event it waits for and can never
+        // fire. The GET/SSE routes that use the same idiom are unaffected:
+        // no body, nothing drains, the stream stays open for the connection's
+        // lifetime. `res` closes when the connection does, whether or not the
+        // response ended, so it is the one that actually reports a Stop press
+        // — and `writableEnded` (set synchronously by `res.end()`) keeps a
+        // NORMAL completion from being mislabelled "aborted".
+        req.on("close", onClientGone);
+        res.on("close", onClientGone);
 
         // ── WARP-903 — cold-model loading signal ─────────────────────
         // One budgeted lifecycle probe (Ollama /api/ps + /api/tags via

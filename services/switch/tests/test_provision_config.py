@@ -52,9 +52,9 @@ def test_provision_config_echoes_env(monkeypatch, tmp_path):
     assert body["camera_ports"] == [6, 7, 8]
     assert body["ap_ports"] == [2, 4]
     assert body["client_ports"] == [1, 3]
-    # PoE budget is a documented model constant (130 W for the SM8TAT2SA),
+    # PoE budget is a documented model constant (77 W for the GS1900-10HP),
     # surfaced in watts here for the orchestrator.
-    assert body["poe_budget_w"] == 130
+    assert body["poe_budget_w"] == 77
     # No reconcile has run -> last_provisioned_at is null, not fabricated.
     assert body["last_provisioned_at"] is None
 
@@ -85,7 +85,7 @@ def test_provision_config_available_when_switch_absent(monkeypatch, tmp_path):
     main, client = _client(monkeypatch, tmp_path, driver=None)
     resp = client.get("/provision/config", headers=_AUTH)
     assert resp.status_code == 200
-    assert resp.json()["poe_budget_w"] == 130
+    assert resp.json()["poe_budget_w"] == 77
 
 
 # --- last_provisioned_at persistence ----------------------------------------

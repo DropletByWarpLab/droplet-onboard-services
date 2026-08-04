@@ -37,6 +37,7 @@ function renderRow(file: FileEntryInfo, overrides: Partial<React.ComponentProps<
       isSelected={false}
       isRenaming={false}
       onSelect={vi.fn()}
+      onToggleSelect={vi.fn()}
       onOpen={vi.fn()}
       onDownload={vi.fn()}
       onDelete={vi.fn()}

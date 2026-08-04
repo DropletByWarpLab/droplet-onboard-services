@@ -49,6 +49,7 @@ import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
   uploadFiles,
+  UploadBatchError,
   deleteFile,
   createDirectory,
   getDownloadUrl,
@@ -378,7 +379,26 @@ export default function FilesPage() {
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        toast(translateError(err, "files"));
+        // WARP-1666: a large selection is uploaded in batches, so a failure
+        // partway through still leaves earlier batches on the box. Refresh so
+        // those files actually appear, and say how many landed rather than
+        // implying the whole upload was lost. `translateError` deliberately
+        // never echoes a raw message, so the count is composed here from the
+        // typed error instead of read out of `err.message`.
+        if (err instanceof UploadBatchError && err.uploaded > 0) {
+          console.error("partial upload", err.cause);
+          await refresh();
+          toast(
+            `Uploaded ${err.uploaded} of ${err.total} files. The rest didn't upload — try again to finish.`
+          );
+        } else {
+          toast(
+            translateError(
+              err instanceof UploadBatchError ? err.cause : err,
+              "files"
+            )
+          );
+        }
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
@@ -425,6 +445,14 @@ export default function FilesPage() {
     setPendingDeletePath(filePath);
   }, []);
 
+  // WARP-1682 — `refresh()` runs on BOTH paths. A delete that reports an error
+  // may still have removed the file (see the trashbin race the orchestrator's
+  // bulk-delete documents), and re-listing is the only way to find out. Before
+  // this, the error path returned without refreshing, so the row stayed on
+  // screen until the user reloaded the page — the "it's still there, then it's
+  // gone after a reload" half of the reported bug. The re-list costs one
+  // request and is harmless when the delete genuinely failed: the row simply
+  // comes back.
   const performDelete = useCallback(async () => {
     const filePath = pendingDeletePath;
     if (!filePath) return;
@@ -433,10 +461,11 @@ export default function FilesPage() {
       if (selectedFile?.path === filePath) setSelectedFile(null);
       fm.clearSelection();
       setPendingDeletePath(null);
-      await refresh();
     } catch (err) {
       toast(translateError(err, "files"));
       throw err;
+    } finally {
+      await refresh();
     }
   }, [pendingDeletePath, selectedFile, refresh, toast, fm, toActiveSpaceRelative, space]);
 
@@ -458,10 +487,15 @@ export default function FilesPage() {
       fm.clearSelection();
       setSelectedFile(null);
       setPendingBulkDelete(false);
-      await refresh();
     } catch (err) {
       toast(translateError(err, "files"));
       throw err;
+    } finally {
+      // WARP-1682 — same contract as performDelete: re-list either way. A
+      // bulk delete can be PARTIALLY applied (the route answers 207 with
+      // per-item results), so the listing is the only honest account of what
+      // survived.
+      await refresh();
     }
   }, [fm, refresh, toast, toActiveSpaceRelative, space]);
 
@@ -829,8 +863,16 @@ export default function FilesPage() {
 
       {/* Space switcher (My Files / Household / N department+team spaces,
           WARP-1267). The switcher itself renders nothing when there's only
-          one space to be in — no lone control. */}
-      <div className="mb-4">
+          one space to be in — no lone control.
+
+          WARP-1667: `relative z-30` for the same reason the search bar above
+          carries `relative z-40` — ds-rise's `fill-mode: both` makes every
+          `.page-inner` child a permanent stacking context, so the Spaces
+          menu's own z-index is trapped in this wrapper and the later
+          siblings (breadcrumbs, banner, volumes, file rows) painted over it.
+          z-30 and NOT z-40: a tie would go to this wrapper on DOM order and
+          put the search results back underneath the pills (WARP-1139). */}
+      <div className="mb-4 relative z-30">
         <SpaceSwitcher
           spaces={spaces}
           active={space}
@@ -1065,6 +1107,7 @@ export default function FilesPage() {
                       isRenaming={fm.renamingPath === file.path}
                       favoritedPaths={favoritedPaths}
                       onSelect={(e) => handleRowSelect(file, e)}
+                      onToggleSelect={() => fm.toggleSelection(file.path, "toggle", files)}
                       onOpen={() => handleRowOpen(file)}
                       onDownload={() => handleDownload(file.path)}
                       onDelete={() => handleDelete(file.path)}

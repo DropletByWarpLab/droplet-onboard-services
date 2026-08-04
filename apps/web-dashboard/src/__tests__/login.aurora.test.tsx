@@ -59,13 +59,23 @@ describe("Aurora LoginPage", () => {
 
   it("renders the brand hero and the sign-in form", () => {
     render(<LoginPage />);
-    expect(
-      screen.getByRole("heading", { name: /on your premises/i }),
-    ).toBeInTheDocument();
+    // The hero's positioning line is brand copy, not document structure, so
+    // it is deliberately NOT a heading — it used to be a second <h1> that
+    // competed with "Welcome back" for the page's top-level heading, which
+    // landed screen-reader users on the marketing pitch instead of the form.
+    // Assert the copy renders; the heading role is asserted below.
+    expect(screen.getByText(/on your premises/i)).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: /welcome back/i }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  it("exposes exactly one top-level heading — the form's, not the hero's", () => {
+    render(<LoginPage />);
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveTextContent(/welcome back/i);
   });
 
   // WARP-629: SSO buttons are RUNTIME-DISCOVERED. An appliance that has

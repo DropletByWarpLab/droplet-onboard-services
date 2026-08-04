@@ -3,8 +3,14 @@
 This is the SINGLE decision point for which hardware driver to use.
 Set SWITCH_DRIVER environment variable to select the implementation:
 
-  - "lantronix"  (default) — SM8TAT2SA via HTTPS JSON API
-  - "asic"       (future)  — Custom PCB via SPI/I2C registers
+  - "openwrt"  (default) — a switch reflashed to the Droplet OpenWrt image
+                (Zyxel GS1900 family), ubus-over-HTTP as `droplet-ai`
+  - "asic"     (future)  — Custom PCB via SPI/I2C registers
+
+The retired Lantronix SM8TAT2SA WebStaX driver was removed in WARP-1674:
+managed switches are Zyxel units reflashed to the Droplet OpenWrt image
+(droplet-edge-router switch/ subtree) — there is no stock-firmware protocol
+to maintain.
 
 Everything above this layer (FastAPI endpoints, orchestrator, LLM tools,
 dashboard) stays identical regardless of which driver is active.
@@ -66,30 +72,24 @@ def _load_switch_password() -> str:
 def create_driver() -> SwitchDriver:
     """Create and return a switch driver instance based on SWITCH_DRIVER env var."""
 
-    driver_type = os.environ.get("SWITCH_DRIVER", "lantronix").lower()
+    driver_type = os.environ.get("SWITCH_DRIVER", "openwrt").lower()
 
-    if driver_type == "lantronix":
-        from .lantronix import LantronixDriver
+    if driver_type == "openwrt":
+        # WARP-1674: a switch running the Droplet OpenWrt image (first target:
+        # Zyxel GS1900-10HP on the edge-router shape — droplet-edge-router
+        # switch/ subtree). ubus-over-HTTP as the per-unit `droplet-ai` rpcd
+        # user; defaults mirror the committed image config (static 192.168.9.2,
+        # plain-HTTP LAN-side rpcd on :80).
+        from .openwrt import OpenWrtSwitchDriver
 
-        host = os.environ.get("SWITCH_HOST", "192.168.1.77")
-        port = int(os.environ.get("SWITCH_PORT", "443"))
-        username = os.environ.get("SWITCH_USERNAME", "admin")
-        # ADR-018 T1: resolve from the Docker secret file first
-        # (SWITCH_PASSWORD_FILE → /run/secrets/switch_password), falling back to
-        # the deprecated SWITCH_PASSWORD env var. Empty → graceful "disconnected".
+        host = os.environ.get("SWITCH_HOST", "192.168.9.2")
+        port = int(os.environ.get("SWITCH_PORT", "80"))
+        username = os.environ.get("SWITCH_USERNAME", "droplet-ai")
         password = _load_switch_password()
-        # NET-07: optional CA bundle / cert path enabling TLS verification of
-        # the switch. Empty/unset → driver keeps the insecure self-signed
-        # default (with a warning). Honoured in LantronixDriver.connect().
-        ca_cert = os.environ.get("SWITCH_CA_CERT", "").strip() or None
-
-        # ADR-018 item 10: the WebStaX write shape (POST /config/<name>) is
-        # pattern-inferred and NOT yet confirmed on firmware v1.04.0079. The
-        # driver therefore runs PLAN-ONLY by default — writes compute the
-        # intended change without POSTing. SWITCH_LIVE_WRITES must be explicitly
-        # truthy to apply writes, and only after a one-time supervised
-        # confirmation of the write shape per firmware. Default-safe posture
-        # (matches SWITCH_AUTOPROVISION defaulting off).
+        # Default-safe write posture (ADR-018 item 10 discipline): the uci
+        # write shapes are unconfirmed on flashed hardware (the lab unit is
+        # still on stock firmware), so writes stay PLAN-ONLY until the
+        # post-flash supervised confirmation flips SWITCH_LIVE_WRITES.
         plan_only = os.environ.get("SWITCH_LIVE_WRITES", "0").strip().lower() not in (
             "1",
             "true",
@@ -100,20 +100,20 @@ def create_driver() -> SwitchDriver:
         if not password:
             logger.warning(
                 "Switch password not configured (no /run/secrets/switch_password "
-                "and no SWITCH_PASSWORD) — switch auth will fail and the switch "
-                "reports 'disconnected'. Boxes without a managed switch can ignore this."
+                "and no SWITCH_PASSWORD) — copy the switch's "
+                "/etc/droplet/droplet-ai-password into the secret. The switch "
+                "reports 'disconnected' until then."
             )
 
         logger.info(
-            "Creating managed switch driver for %s:%d (user: %s, writes: %s)",
+            "Creating OpenWrt switch driver for %s:%d (user: %s, writes: %s)",
             host, port, username, "PLAN-ONLY" if plan_only else "LIVE",
         )
-        return LantronixDriver(
+        return OpenWrtSwitchDriver(
             host=host,
             port=port,
             username=username,
             password=password,
-            ca_cert=ca_cert,
             plan_only=plan_only,
         )
 
@@ -128,5 +128,7 @@ def create_driver() -> SwitchDriver:
     else:
         raise ValueError(
             f"Unknown SWITCH_DRIVER: '{driver_type}'. "
-            f"Supported: 'lantronix'. Future: 'asic'."
+            f"Supported: 'openwrt'. Future: 'asic'. "
+            f"('lantronix' was removed in WARP-1674 — reflash the switch to "
+            f"the Droplet OpenWrt image.)"
         )

@@ -29,22 +29,14 @@ function read(rel: string): string {
 
 describe("WARP-300 DropletMark callsite audit", () => {
   describe("standalone (no nearby wordmark) — opt-in to aria-label", () => {
-    it("invite page loading-state mark is standalone and announces", () => {
+    it("invite page renders no standalone mark of its own", () => {
       const src = read("app/invite/[token]/page.tsx");
-      // Loading state mark sits next to "Loading your invitation..." —
-      // no "Droplet" word adjacent, so the mark must self-label.
-      expect(src).toMatch(
-        /<DropletMark size=\{40\} className="text-accent mx-auto mb-4" aria-label="Droplet"/,
-      );
-    });
-
-    it("invite page header mark is standalone and announces", () => {
-      const src = read("app/invite/[token]/page.tsx");
-      // The header mark sits in its own div above the heading and has
-      // no adjacent "Droplet" wordmark — opt-in to aria-label.
-      expect(src).toMatch(
-        /<DropletMark size=\{40\} className="text-accent" aria-label="Droplet"/,
-      );
+      // The invite page now shares <AuthLayout> with /login, which owns
+      // the only mark on the surface (decorative — see below). The page
+      // itself must not reintroduce a bare one: any mark it added would
+      // be standalone and would need its own aria-label, which is the
+      // trap this audit exists to catch.
+      expect(src).not.toMatch(/<DropletMark/);
     });
 
     it("AuthGate loading-state mark is standalone and announces", () => {
@@ -70,15 +62,26 @@ describe("WARP-300 DropletMark callsite audit", () => {
       );
     });
 
-    it("login wordmark mark is decorative (wordmark adjacent)", () => {
+    it("auth-layout wordmark mark is decorative (wordmark adjacent)", () => {
       // The aurora re-skin pairs the compact mark with a visible
       // "Droplet" wordmark span — default aria-hidden is correct;
-      // announcing the SVG would duplicate the wordmark.
-      const src = read("app/login/page.tsx");
+      // announcing the SVG would duplicate the wordmark. The mark moved
+      // out of the login page into <AuthLayout>, the shared shell behind
+      // BOTH /login and /invite/[token], so this one assertion now covers
+      // every public auth surface.
+      const src = read("components/auth/AuthLayout.tsx");
       expect(src).toMatch(
         /<DropletMark size=\{24\} className="text-accent" \/>/,
       );
       expect(src).not.toMatch(/<DropletMark[^>]*aria-label/);
+    });
+
+    it("login page delegates its mark to AuthLayout", () => {
+      // Guards the delegation itself: if /login ever re-adds its own
+      // mark it would sit alongside AuthLayout's, duplicating the logo.
+      const src = read("app/login/page.tsx");
+      expect(src).not.toMatch(/<DropletMark/);
+      expect(src).toMatch(/<AuthLayout/);
     });
 
     it("setup welcome mark is decorative (heading adjacent)", () => {

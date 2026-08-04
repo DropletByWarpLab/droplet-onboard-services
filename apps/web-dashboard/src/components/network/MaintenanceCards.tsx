@@ -25,6 +25,11 @@ import { useAuth } from "@/lib/auth";
  * container UCI-wipe here would either no-op or be dangerous, exactly the
  * fabricated-control anti-pattern. They explain the truth and point the owner
  * at the real, appliance-level flows. Owner-scoped, mirroring RouterRebootCard.
+ *
+ * WARP-1676 (ADR-033): the edge-router shape DOES have flashable router
+ * firmware — an external bare-metal OpenWrt device reflashed from the
+ * droplet-edge-router tooling, never from this page. The copy below covers
+ * both shapes without claiming the container story universally.
  */
 export function MaintenanceCards() {
   const { user } = useAuth();
@@ -41,8 +46,9 @@ export function MaintenanceCards() {
           <div className="flex-1 min-w-0">
             <h3 className="type-headline text-label-primary">Firmware</h3>
             <p className="type-caption-1 text-label-tertiary mt-0.5">
-              Firmware updates ship with appliance updates — there&apos;s no
-              separate router firmware to flash on this model.
+              Router firmware isn&apos;t managed from this page. On the
+              all-in-one model it ships with appliance updates; a dedicated
+              edge router is updated by your installer&apos;s router tooling.
             </p>
           </div>
         </div>

@@ -607,6 +607,21 @@ interface StreamTeardownPartial {
    * quarantined analysis and must never surface as the answer.
    */
   released: boolean;
+  /**
+   * WARP-1602 (review) — the EXACT concatenation of the `content_delta` events
+   * `settle()` emitted, straight off the emitter's own accumulator.
+   *
+   * `raw` is NOT a substitute. On a teardown the stream did not finish, so the
+   * emitter releases only the stable prefix and holds the volatile tail back;
+   * re-deriving the answer from `raw` here would put a longer string in
+   * `message.content` than the wire ever carried and break the WARP-1442 sum
+   * invariant. Taking the accumulator makes the two agree by construction
+   * rather than by two parses that have to be kept in step.
+   *
+   * Empty when nothing was released (`released: false`, or a bare-JSON buffer
+   * that WARP-854 holds back whole).
+   */
+  releasedContent: string;
 }
 
 /** Thrown by the stream consumer when the client disconnected mid-generation. */
@@ -635,7 +650,34 @@ class AgentStreamPartialError extends Error {
 }
 
 /** The partial an outside-the-consumer abort (no buffer at all) reports. */
-const NO_PARTIAL: StreamTeardownPartial = { raw: "", released: false };
+const NO_PARTIAL: StreamTeardownPartial = {
+  raw: "",
+  released: false,
+  releasedContent: "",
+};
+
+/**
+ * WARP-1660 — the salvaged partial off EITHER teardown carrier.
+ *
+ * `consumeChatStream` picks the carrier from the signal it sees at the instant
+ * it fails; `runAgent` picks the terminal from the signal it sees one async
+ * hop later. Those two reads can disagree: a disconnect landing inside that
+ * window sends an `AgentStreamPartialError` down the abort branch. Both types
+ * carry `.partial` for exactly the same reason, so which one arrives must not
+ * decide whether the answer survives — reading it off only `AgentStreamAborted`
+ * replaced a recovered answer with `NO_PARTIAL`, i.e. the blank row this whole
+ * salvage path exists to prevent.
+ *
+ * An EMPTY partial needs no special case: `teardownResult` already renders
+ * `{ released: true, releasedContent: "" }` as `content: ""` — the same
+ * outcome as `NO_PARTIAL`.
+ */
+function teardownPartialOf(err: unknown): StreamTeardownPartial {
+  return err instanceof AgentStreamAborted ||
+    err instanceof AgentStreamPartialError
+    ? err.partial
+    : NO_PARTIAL;
+}
 
 /** Name-based abort check (mirrors routes/llm.ts — robust to error re-wrapping). */
 function isAbortError(err: unknown): boolean {
@@ -740,14 +782,35 @@ class StreamingContentEmitter {
    *     turn), or the turn was never deferred and its content already went out
    *     progressively — flushing the final remainder keeps the emitted deltas
    *     summing to the whole buffer, which is the WARP-1442 invariant.
+   *
+   * `streamComplete` says whether the token stream actually REACHED its end.
+   * It is what `flush`'s `final` means, and the two are not interchangeable:
+   * `final: true` asserts "the whole buffer is stable because no more tokens
+   * are coming". A teardown is precisely the case where that is false — more
+   * tokens were coming, the connection just died first — so a torn-down turn
+   * must release only `stableStreamedContent`'s prefix. Passing `true` here
+   * unconditionally (as this did) put half-finished tokens on the wire and in
+   * the DB: a partial `<reasoning>` open tag, or an unterminated harmony
+   * citation like `【3†source=inv`, which WARP-1331 cannot strip because it
+   * only matches the COMPLETE token.
    */
-  settle(isToolCallTurn: boolean): { raw: string; contentReleased: boolean } {
+  settle(
+    isToolCallTurn: boolean,
+    streamComplete: boolean,
+  ): { raw: string; contentReleased: boolean; releasedContent: string } {
     if (isToolCallTurn && this.deferred) {
-      return { raw: this.raw, contentReleased: false };
+      return { raw: this.raw, contentReleased: false, releasedContent: "" };
     }
     this.deferred = false;
-    this.flush(true);
-    return { raw: this.raw, contentReleased: true };
+    this.flush(streamComplete);
+    // The accumulator IS the sum of the content_delta events emitted for this
+    // turn, so handing it back keeps `message.content` byte-identical to the
+    // wire without a second parse that could drift from `flush`'s.
+    return {
+      raw: this.raw,
+      contentReleased: true,
+      releasedContent: this.emittedContent,
+    };
   }
 
   private flush(final: boolean): void {
@@ -883,8 +946,13 @@ async function consumeChatStream(
    * tool-call fragments is the buffer released as answer text.
    */
   const settleTeardown = (): StreamTeardownPartial => {
-    const { raw, contentReleased } = content.settle(toolOrder.length > 0);
-    return { raw, released: contentReleased };
+    // `streamComplete: false` — this is a teardown by definition, so only the
+    // stable prefix may be released (see `settle`).
+    const { raw, contentReleased, releasedContent } = content.settle(
+      toolOrder.length > 0,
+      false,
+    );
+    return { raw, released: contentReleased, releasedContent };
   };
 
   try {
@@ -950,7 +1018,12 @@ async function consumeChatStream(
   // that was NOT deferred already streamed its content, so it still flushes:
   // withholding only the volatile tail would leave the wire short of the
   // buffer, and the WARP-1442 sum invariant is what catches that.
-  const { raw: rawContent, contentReleased } = content.settle(isToolCallTurn);
+  // `streamComplete: true` — the for-await drained to its end, so the whole
+  // buffer is stable and `flush` may release it entire.
+  const { raw: rawContent, contentReleased } = content.settle(
+    isToolCallTurn,
+    true,
+  );
 
   const asst: ChatMessage = { role: "assistant", content: rawContent };
   if (toolOrder.length > 0) {
@@ -1201,17 +1274,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     iterations: number,
     partial: StreamTeardownPartial,
   ): AgentResult => {
-    // The SAME parse + sanitize the terminal finalize applies, so a salvaged
-    // partial equals the `content_delta` events `settle()` just emitted — the
-    // WARP-1442 sum invariant holds on the teardown paths too.
+    // The reasoning trace is derived from the WHOLE buffer: closed
+    // `<reasoning>` segments are deterministic, and the trace never goes on the
+    // wire as answer text, so there is no volatile tail to hold back.
     const parsed = parseReasoningTrace({ content: partial.raw || null });
-    const visible = sanitizeFinalContent(parsed.cleanedContent);
     const thisStep = [...parsed.reasoningSteps];
-    if (!partial.released && visible) {
+    if (!partial.released) {
       // Tool-call turn: the buffer is analysis. It joins the trace and must
       // never become `content` — that IS the WARP-1602 bug.
-      thisStep.push(visible);
-      quarantinedChars += visible.length;
+      const quarantined = sanitizeFinalContent(parsed.cleanedContent);
+      if (quarantined) {
+        thisStep.push(quarantined);
+        quarantinedChars += quarantined.length;
+      }
     }
     const steps = [...reasoningSteps];
     if (thisStep.length > 0) steps.push(thisStep.join("\n\n"));
@@ -1220,7 +1295,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     return {
       message: {
         role: "assistant",
-        content: partial.released ? visible : "",
+        // Exactly what went on the wire — NOT a re-parse of `raw`, which on a
+        // teardown is longer than the released prefix (see `releasedContent`).
+        content: partial.released ? partial.releasedContent : "",
         ...(reasoning != null ? { reasoning } : {}),
       },
       trace,
@@ -1331,10 +1408,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // DEFERRED turn this is the ONLY copy of the partial answer: nothing
           // reached the wire during the stream, so without it a Stop press
           // blanked the screen and persisted an empty row.
-          return abortedResult(
-            iter,
-            err instanceof AgentStreamAborted ? err.partial : NO_PARTIAL,
-          );
+          //
+          // WARP-1660 — off EITHER carrier: `req.signal` can flip after the
+          // consumer already classified the failure as a transport death, so
+          // an `AgentStreamPartialError` reaches this branch with a perfectly
+          // good partial in it.
+          return abortedResult(iter, teardownPartialOf(err));
         }
         if (err instanceof AgentStreamPartialError) {
           // The stream died AFTER partial content was emitted — falling back to
@@ -2202,6 +2281,19 @@ function safeParseArgs(call: ToolCall): Record<string, unknown> {
  * regex across arbitrary text. Bounded to 20 paths per result so a
  * list_files on a giant directory can't enqueue thousands of rows.
  *
+ * WARP-1656 — one exception to "shape only, never semantics": an entry
+ * that explicitly carries a truthy `isDirectory` is skipped. A listing is
+ * a `FileEntryInfo[]` in which folders are elements exactly like files, so
+ * without this a folder became a `FileCitation` row — inert for the
+ * related-chats reverse index, and, far worse, it spent one of the 20
+ * slots a real file needed. The cap is silent, so the loss presented as
+ * "Related chats is missing entries" with nothing in the logs.
+ *
+ * This is still a shape check — does the entry carry this field at all? —
+ * not an interpretation of the payload, and it is a no-op for every shape
+ * that never carries the field (read_file, search_content hits, …). The
+ * skip happens BEFORE `push`, so a directory never charges the cap.
+ *
  * The function is exported for direct testing.
  */
 export function extractCitedFilePaths(parsed: unknown): string[] {
@@ -2216,18 +2308,31 @@ export function extractCitedFilePaths(parsed: unknown): string[] {
       out.push(val);
     }
   };
+  const isDirectoryEntry = (item: object): boolean =>
+    "isDirectory" in item && Boolean((item as { isDirectory?: unknown }).isDirectory);
   const pushFrom = (arr: unknown) => {
     if (!Array.isArray(arr)) return;
     for (const item of arr) {
-      if (item && typeof item === "object" && "path" in item) {
+      if (
+        item &&
+        typeof item === "object" &&
+        "path" in item &&
+        !isDirectoryEntry(item)
+      ) {
         push((item as { path?: unknown }).path);
       }
       if (out.length >= 20) return;
     }
   };
 
-  const d = data as { path?: unknown; results?: unknown; files?: unknown; items?: unknown };
-  push(d.path);
+  const d = data as {
+    path?: unknown;
+    results?: unknown;
+    files?: unknown;
+    items?: unknown;
+    isDirectory?: unknown;
+  };
+  if (!isDirectoryEntry(d)) push(d.path);
   pushFrom(d.results);
   pushFrom(d.files);
   pushFrom(d.items);

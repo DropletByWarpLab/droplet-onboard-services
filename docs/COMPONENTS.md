@@ -292,7 +292,7 @@ network. Host-published ports and host-network services are called out.
 ## services/switch
 
 - **Purpose:** FastAPI managed-switch control behind an abstract `SwitchDriver`
-  (`drivers/base.py`). `LantronixDriver` (SM8TAT2SA, prototype) is real; `ASICDriver`
+  (`drivers/base.py`). `OpenWrtSwitchDriver` (Droplet-OpenWrt-imaged Zyxel GS1900, WARP-1674) is real; `ASICDriver`
   (future custom PCB) is a placeholder. `create_driver()` picks by `SWITCH_DRIVER`.
   Endpoints (ports, VLANs, PoE, WAN detect, one-click camera setup) are
   driver-agnostic. Bearer `SERVICE_SECRET`. Profile `full`.

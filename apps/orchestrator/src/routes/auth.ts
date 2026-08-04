@@ -112,6 +112,9 @@ import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
+// WARP-1558: the create paths below must ensure this box-wide group exists
+// before OCS is asked to provision an admin-tier account into it.
+import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -135,6 +138,39 @@ export function callerIpFromReq(req: Request): string | undefined {
 }
 
 const logger = createLogger("auth-route");
+
+/**
+ * WARP-1558 — make the box-wide `droplet-admins` group exist before a create
+ * path asks OCS to provision an admin-tier account into it.
+ *
+ * `buildNcGroups` now lists `droplet-admins` for owner/admin (ADR-029 §2.5
+ * Tier-1 see-all), and OCS rejects the whole create-user call when ANY listed
+ * group is missing — the WARP-990 failure mode. `droplet-admins` is created
+ * lazily by the department provisioner, so on a box that has never
+ * provisioned a department it simply does not exist yet: /auth/setup on a
+ * fresh appliance is exactly that box. Ensuring here is what stops the
+ * primary fix from turning into a setup-breaking regression.
+ *
+ * Best-effort and non-blocking, matching the household ensure alongside it:
+ * `ncEnsureGroup` is idempotent (OCS 100 = created, 102 = already there), and
+ * a transient failure must not block a create that would otherwise succeed.
+ * If the group is GENUINELY missing and uncreatable, the create below fails
+ * loudly on its own — which is the correct outcome, not a silent half-state.
+ *
+ * Skipped entirely when the caller's group list doesn't reference it, so
+ * family/guest creates pay no extra OCS round-trip.
+ */
+async function ensureDropletAdminsGroupFor(groups: string[]): Promise<void> {
+  if (!groups.includes(DROPLET_ADMINS_GROUP)) return;
+  try {
+    await ncEnsureGroup(DROPLET_ADMINS_GROUP);
+  } catch (err) {
+    logger.warn(
+      { err, group: DROPLET_ADMINS_GROUP },
+      "could not ensure the droplet-admins group exists (continuing — the reconciler's membership sweep converges this)",
+    );
+  }
+}
 
 const usernameField = z
   .string()
@@ -851,6 +887,13 @@ export function createPublicAuthRouter(
           "setup: could not ensure the household group exists (continuing — user provisioning is the authority)",
         );
       }
+
+      // WARP-1558: same belt-and-braces for `droplet-admins`. The first owner
+      // is created before any department exists, so on a fresh appliance this
+      // group has never been created by the provisioner — without the ensure,
+      // adding it to `ownerGroups` would make ncInstallAndCreateAdmin fail and
+      // roll setup back on EVERY box.
+      await ensureDropletAdminsGroupFor(ownerGroups);
 
       // WARP-989 — setup must be ATOMIC. The local owner row is written
       // first (idempotent, see the ordering comment above), but the N1
@@ -1820,6 +1863,11 @@ export function createPublicAuthRouter(
         acceptedAccessRole ? acceptedAccessRole.startingPoint : (invite.role as Role),
         householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
+
+      // WARP-1558: an invite can start its holder at an admin-tier role, in
+      // which case `groups` now carries `droplet-admins` — ensure it exists
+      // before ncCreateUser below refuses the whole call over it.
+      await ensureDropletAdminsGroupFor(groups);
 
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
@@ -2917,13 +2965,15 @@ export function createProtectedAuthRouter(
       // same way invite-accept does (owner/admin → NC "admin" group, guest →
       // "guest", family → none) and ALWAYS add the household group so the
       // shared "Household" group folder mounts for them.
-      await ncCreateUser(
-        token,
-        username,
-        password,
-        displayName,
-        buildNcGroups(role as Role, householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)),
+      // WARP-1558: owner/admin additionally land in `droplet-admins` — ensure
+      // it exists first (this route is how the .87 box's admin-tier users
+      // were created, and it is why none of them were ever in the group).
+      const newUserGroups = buildNcGroups(
+        role as Role,
+        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
+      await ensureDropletAdminsGroupFor(newUserGroups);
+      await ncCreateUser(token, username, password, displayName, newUserGroups);
 
       // WARP-1042: audit the creation — invite create/accept and
       // change-password all emit activity rows; direct user creation was the
@@ -3139,12 +3189,12 @@ export function createProtectedAuthRouter(
             // was still a `family`.
             //
             // That window has a REAL concurrent writer, not a theoretical one:
-            // scim-role-mapping.service.ts maps any SCIM group whose
-            // normalized name CONTAINS "owner" to role "owner", and
-            // effectiveRoleForGroupNames raises a member to their highest
-            // match — so an Okta push of a customer group called e.g.
-            // "Business Owners" mints owners asynchronously, with no
-            // coordination with this route.
+            // an Okta push (scim.service.ts `provisionGroup`) raises a
+            // member's role from its group mapping asynchronously, with no
+            // coordination with this route. WARP-1568 capped that writer at
+            // `admin` and routed it through the guard, so it can no longer
+            // mint OWNERS — but it still writes `role` out-of-band, which is
+            // exactly what the pin below defends against.
             //
             // Pinning makes a raced promotion a 0-row no-op instead of a
             // credential rotation. `target` is null only where there is no

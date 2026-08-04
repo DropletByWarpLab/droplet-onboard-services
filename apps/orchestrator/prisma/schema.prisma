@@ -172,6 +172,11 @@ model ChatSession {
   /// most one profile points here). SetNull on delete so deleting the
   /// interview session doesn't cascade the singleton profile away.
   businessProfile BusinessProfile?
+  /// WARP-1683 — back-relation for TeamChatMessage.sharedChatSession (an
+  /// AI-chat transcript forwarded into a team-chat thread). SetNull on
+  /// delete: the forward keeps serving from its immutable
+  /// `sharedChatSnapshot` after the source conversation is deleted.
+  teamChatShares  TeamChatMessage[]
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -3233,6 +3238,8 @@ enum ModuleId {
   smart_home
   network
   managed_switch
+  /// WARP-1683 — Team chat (member-to-member Messages surface).
+  team_chat
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -4346,4 +4353,94 @@ model DeviceAlias {
   updatedAt DateTime @updatedAt
 
   @@index([roomId])
+}
+
+/// WARP-1683 — Team chat v1: thread shape. `direct` is a 1:1 DM (deduped —
+/// one thread per user pair); `group` is a small named group. Lowercase
+/// members per the ChatMessageStatus enum style.
+enum TeamChatThreadKind {
+  direct
+  group
+}
+
+/// WARP-1683 — what a team-chat message carries: plain text, a forwarded
+/// Files document (cached name/path + ncFileId), or a forwarded AI-chat
+/// transcript (immutable snapshot taken at send time).
+enum TeamChatMessageKind {
+  text
+  file_share
+  ai_chat_share
+}
+
+/// WARP-1683 — an internal member-to-member conversation (DM or small
+/// group). LAN-local only; served by routes/team-chat.ts behind the
+/// `team_chat` module gate.
+///
+/// `createdById` is the LOCAL `User.id` UUID (`req.user.id`) — NEVER the
+/// username (ADR-027 IDOR rule; FileComment.authorUserId precedent: a bare
+/// column, no FK, so user deletion never cascades a shared history away).
+/// `lastMessageAt` is denormalized for the thread-list sort + is bumped in
+/// the same transaction as every message insert.
+model TeamChatThread {
+  id            String                @id @default(uuid())
+  kind          TeamChatThreadKind
+  /// Optional display title for `group` threads; `direct` threads render
+  /// the other participant's name instead.
+  title         String?
+  createdById   String
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @default(now()) @updatedAt
+  lastMessageAt DateTime              @default(now())
+  participants  TeamChatParticipant[]
+  messages      TeamChatMessage[]
+
+  @@index([lastMessageAt(sort: Desc)])
+}
+
+/// WARP-1683 — membership + per-member read cursor. `userId` is the LOCAL
+/// `User.id` UUID (ADR-027 — never username). Unread for a member = messages
+/// in the thread newer than THEIR `lastReadAt` from OTHER senders — an
+/// explicit cursor defaulted to now() at join, never null-absence semantics
+/// (CLAUDE.md no-guessing rule).
+model TeamChatParticipant {
+  id         String         @id @default(uuid())
+  threadId   String
+  thread     TeamChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  userId     String
+  joinedAt   DateTime       @default(now())
+  lastReadAt DateTime       @default(now())
+
+  @@unique([threadId, userId])
+  @@index([userId])
+}
+
+/// WARP-1683 — one message in a team-chat thread. `senderId` is the LOCAL
+/// `User.id` UUID (ADR-027). `body` is the text for kind=text and the
+/// optional caption for the two forward kinds.
+///
+/// file_share: `sharedNcFileId` + cached `sharedFileName`/`sharedFilePath`
+/// (display cache stamped at send time — the card keeps rendering after a
+/// rename/move; the link resolves through /files' own access control).
+///
+/// ai_chat_share: `sharedChatSnapshot` holds the immutable
+/// `{title, messages:[{role, content, createdAt}]}` transcript taken at
+/// send time; `sharedChatSessionId` is provenance only — SetNull on session
+/// delete so the forward survives the source conversation's deletion.
+model TeamChatMessage {
+  id                  String              @id @default(uuid())
+  threadId            String
+  thread              TeamChatThread      @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  senderId            String
+  kind                TeamChatMessageKind
+  body                String?
+  sharedNcFileId      Int?
+  sharedFileName      String?
+  sharedFilePath      String?
+  sharedChatSessionId String?
+  sharedChatSession   ChatSession?        @relation(fields: [sharedChatSessionId], references: [id], onDelete: SetNull)
+  sharedChatSnapshot  Json?
+  createdAt           DateTime            @default(now())
+
+  @@index([threadId, createdAt])
+  @@index([sharedChatSessionId])
 }

@@ -3,7 +3,7 @@
 # Sourced by systemd via the EnvironmentFile= directive. Override any
 # of these to retarget the script without editing the body.
 #
-# SWITCH_IP            — mgmt IP of the Lantronix switch. Defaults to
+# SWITCH_IP            — mgmt IP of the managed switch. Defaults to
 #                        the factory-set 192.168.1.77; only override
 #                        once the smart-port rework re-IPs the switch
 #                        into the LAN subnet.

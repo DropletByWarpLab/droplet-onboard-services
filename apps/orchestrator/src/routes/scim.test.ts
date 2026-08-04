@@ -37,7 +37,15 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// WARP-1568: the guarded role write runs rail 6, whose first step is the
+// WARP-247 session revocation — Redis-backed, and there is no Redis here.
+// Mocked at the leaf like every other guard-driving route suite.
+vi.mock("../services/session.service.js", () => ({
+  revokeAllSessions: vi.fn(async () => 0),
+}));
+
 import { createScimRouter } from "./scim.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
 
@@ -68,6 +76,18 @@ function createPrismaMock(seed: UserRow[] = []) {
   self._identities = [] as any[];
   self._groups = [] as any[];
   let useq = self._users.length;
+
+  // WARP-1568: the group→role write now runs through the role-mutation guard
+  // in a SERIALIZABLE transaction, so this stub needs a $transaction — and
+  // per WARP-1570 it must be the SHARED seam, which records the isolation
+  // option and rolls back on a refusal rather than dropping both.
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { users: self._users },
+  });
+  self._seam = seam;
+  self.$transaction = seam.$transaction;
+
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       // WARP-233: provisioning resolves users through the blind index.
@@ -80,6 +100,18 @@ function createPrismaMock(seed: UserRow[] = []) {
     // WARP-233 pre-backfill fallback probe (plaintext rows, no blind index).
     findFirst: vi.fn(async ({ where }: { where: any }) =>
       self._users.find((u: UserRow) => u.email === where.email) ?? null,
+    ),
+    // WARP-1568: rails 4 + 5 count surviving owners / non-disabled operators.
+    count: vi.fn(async ({ where }: { where: any } = { where: {} }) =>
+      self._users.filter((u: UserRow) => {
+        if (typeof where?.role === "string" && u.role !== where.role) return false;
+        if (Array.isArray(where?.role?.in) && !where.role.in.includes(u.role)) return false;
+        if (where?.directoryStatus !== undefined && u.directoryStatus !== where.directoryStatus) {
+          return false;
+        }
+        if (where?.id?.not !== undefined && u.id === where.id.not) return false;
+        return true;
+      }).length,
     ),
     create: vi.fn(async ({ data }: { data: any }) => {
       const row: UserRow & { emailLookupHash?: string | null } = {
@@ -99,8 +131,16 @@ function createPrismaMock(seed: UserRow[] = []) {
       return row;
     }),
     update: vi.fn(async ({ where, data }: { where: any; data: any }) => {
-      const u = self._users.find((x: UserRow) => x.id === where.id);
-      if (!u) throw new Error("not found");
+      // WARP-1568: the guarded role write pins `role` in its where-clause; a
+      // miss is Prisma's P2025 ("nothing applied, retry"), not a 500.
+      const u = self._users.find(
+        (x: UserRow) => x.id === where.id && (where.role === undefined || x.role === where.role),
+      );
+      if (!u) {
+        const err = new Error("Record to update not found") as Error & { code: string };
+        err.code = "P2025";
+        throw err;
+      }
       Object.assign(u, data, { updatedAt: new Date() });
       return u;
     }),
@@ -412,5 +452,43 @@ describe("POST /scim/v2/Groups — group + role mapping", () => {
     expect(res.body.displayName).toBe("Droplet Admins");
     // The member was raised to admin.
     expect(prisma._users.find((u: UserRow) => u.id === "u-mem")!.role).toBe("admin");
+  });
+
+  it("WARP-1568: an OWNER-named Okta group cannot mint an owner over the wire", async () => {
+    // The end-to-end shape of the escalation: Okta pushes a group whose name
+    // says "owner", the box hands the IdP its root of trust. The push still
+    // succeeds (Okta must not retry-loop) — the member lands at the ceiling.
+    const member: UserRow = {
+      id: "u-esc", username: "esc", displayName: "Esc Alate", email: "esc@acme.test",
+      passwordHash: null, role: "family", isLocal: true, directoryStatus: "ACTIVE",
+      createdAt: new Date(), updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([member]);
+    const res = await request(buildApp(prisma))
+      .post("/scim/v2/Groups")
+      .set(...AUTH)
+      .send({
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        displayName: "Business Owners",
+        externalId: "okta-grp-owner",
+        members: [{ value: "u-esc" }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(prisma._users.find((u: UserRow) => u.id === "u-esc")!.role).toBe("admin");
+    expect(prisma._users.some((u: UserRow) => u.role === "owner")).toBe(false);
+    expect(prisma._groups[0].mappedRole).toBe("admin");
+
+    // …and the change is audited like every other role change, attributed to
+    // the SCIM principal rather than to a person.
+    expect(recordedScim).toContainEqual(
+      expect.objectContaining({
+        kind: "system",
+        what: "Role changed",
+        sub: "esc: family → admin",
+        actor: { type: "system", id: null },
+        refs: expect.objectContaining({ actor: "scim:okta", nextRole: "admin" }),
+      }),
+    );
   });
 });

@@ -1,0 +1,105 @@
+#!/bin/bash
+# droplet-net-selfheal — last-resort network recovery at boot (WARP-1680).
+#
+# WHY THIS EXISTS
+# ---------------
+# Twice now a kernel/hardware enumeration change has RENAMED the box's NICs
+# (enp11s0 -> enp8s0, wlp10s0 -> wlp7s0). netplan then configured a device that
+# does not exist, the box booted with NO IPv4 on any interface, and recovery
+# needed a physical console trip — during which the dashboard, the router
+# control plane, and every remote path were dark.
+#
+# The primary fix is in netplan itself: the uplink is matched by MAC, not by
+# name (see scripts/host/etc-netplan/70-eth.yaml.example), which closes the
+# known failure. THIS script is the backstop for the unknown one — a replaced
+# NIC, a dead NIC, a USB adapter swapped in during an outage, or simply a bad
+# netplan edit. It is deliberately dumb, has no dependencies beyond iproute2,
+# and never touches a healthy configuration.
+#
+# WHAT IT DOES
+# ------------
+# Runs once after boot. If no PHYSICAL interface holds a usable (global,
+# non-link-local) IPv4, it brings every wired NIC up, requests DHCP on any that
+# have carrier, and — failing that — pins the well-known fallback address so
+# the box is reachable from the edge router for a remote fix.
+#
+# Exits 0 immediately on a healthy boot. Idempotent. Safe to run by hand.
+set -u
+
+# Fallback address on the edge router's LAN (ADR-033). Overridable via
+# /etc/default/droplet-net-selfheal so a differently-addressed deployment can
+# adjust it without editing this script.
+FALLBACK_ADDR="${DROPLET_NET_FALLBACK_ADDR:-192.168.9.250/24}"
+
+LOG() { logger -t droplet-net-selfheal "$*"; echo "droplet-net-selfheal: $*"; }
+
+# Physical NICs only: skip loopback, docker/veth/bridge plumbing, wireguard,
+# and anything without a backing device (i.e. virtual).
+phys_nics() {
+    local path dev
+    for path in /sys/class/net/*; do
+        dev=${path##*/}
+        case "$dev" in lo|docker*|veth*|br-*|wg*|tun*|tap*) continue ;; esac
+        [ -e "$path/device" ] || continue
+        echo "$dev"
+    done
+}
+
+wired_nics() {
+    local d
+    for d in $(phys_nics); do
+        [ -d "/sys/class/net/$d/wireless" ] || echo "$d"
+    done
+}
+
+# "Usable" = a global-scope IPv4 on a physical NIC. A 169.254 link-local
+# address means DHCP FAILED, so it must not count as healthy.
+has_usable_ipv4() {
+    local d
+    for d in $(phys_nics); do
+        ip -4 -o addr show dev "$d" scope global 2>/dev/null \
+            | grep -qv '169\.254\.' && return 0
+    done
+    return 1
+}
+
+if has_usable_ipv4; then
+    LOG "healthy: a physical NIC already holds a global IPv4 — nothing to do"
+    exit 0
+fi
+
+LOG "NO global IPv4 on any physical NIC — starting recovery"
+LOG "interfaces seen: $(phys_nics | tr '\n' ' ')"
+
+for d in $(wired_nics); do ip link set "$d" up 2>/dev/null; done
+sleep 5
+
+# Prefer DHCP on whichever wired NIC actually has carrier.
+for d in $(wired_nics); do
+    [ "$(cat "/sys/class/net/$d/carrier" 2>/dev/null || echo 0)" = "1" ] || continue
+    LOG "carrier on $d — requesting DHCP"
+    # Whichever client this image ships. dhcpcd is what Ubuntu has here;
+    # dhclient/udhcpc are kept for other deployment shapes. A missing client is
+    # NOT fatal — the fallback pin below still makes the box reachable.
+    if command -v dhcpcd >/dev/null 2>&1; then
+        timeout 25 dhcpcd -1 -t 20 "$d" 2>/dev/null
+    elif command -v dhclient >/dev/null 2>&1; then
+        timeout 20 dhclient -1 "$d" 2>/dev/null
+    elif command -v udhcpc >/dev/null 2>&1; then
+        timeout 20 udhcpc -i "$d" -n -q 2>/dev/null
+    else
+        LOG "no DHCP client found — going straight to the fallback address"
+    fi
+    has_usable_ipv4 && { LOG "recovered via DHCP on $d"; exit 0; }
+done
+
+# No DHCP anywhere: pin the fallback so the box is at least reachable from the
+# edge router's LAN for a remote fix.
+for d in $(wired_nics); do
+    [ "$(cat "/sys/class/net/$d/carrier" 2>/dev/null || echo 0)" = "1" ] || continue
+    ip addr add "$FALLBACK_ADDR" dev "$d" 2>/dev/null \
+        && { LOG "pinned fallback $FALLBACK_ADDR on $d"; exit 0; }
+done
+
+LOG "FAILED: no wired NIC has carrier — physical link problem, needs hands"
+exit 1

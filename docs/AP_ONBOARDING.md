@@ -13,7 +13,7 @@
 
 ## 1. How Droplet's mDNS-announced zero-touch AP onboarding works today
 
-Droplet does **not** use a vendor mesh protocol (no EasyMesh, no TR-069, no controller cloud). Coverage extension is built on the fact that **every Droplet AP runs the same OpenWrt image as the Droplet router**, and that image knows how to announce itself and accept configuration from the Droplet control plane.
+Droplet does **not** use a vendor mesh protocol by default (no EasyMesh, no TR-069, no controller cloud on the Droplet path). Coverage extension is built on the fact that **every Droplet AP runs the same OpenWrt image as the Droplet router**, and that image knows how to announce itself and accept configuration from the Droplet control plane. (For households that already run a UniFi controller or an EasyMesh ecosystem, disabled-by-default integration backends exist — see ADR-024 and ADR-033 §6; they are explicit opt-ins, never the default.)
 
 The end-to-end flow for an AP that already runs the Droplet image:
 
