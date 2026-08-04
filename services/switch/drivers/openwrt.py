@@ -93,6 +93,26 @@ def _speed_fields(speed: Any) -> tuple[str, str]:
     return label, duplex
 
 
+def _traffic_fields(statistics: Any) -> Optional[dict]:
+    """netifd's per-device `statistics` block → the §7 traffic shape.
+
+    Returns ``None`` when the driver reports no counters (an SFP cage with no
+    module, a build without statistics) rather than zeros — "we don't know" and
+    "nothing has crossed this port" are different claims, and the dashboard
+    renders them differently.
+    """
+    if not isinstance(statistics, dict):
+        return None
+    try:
+        rx = int(statistics["rx_bytes"])
+        tx = int(statistics["tx_bytes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if rx < 0 or tx < 0:
+        return None
+    return {"rx_bytes": rx, "tx_bytes": tx}
+
+
 def _format_uptime(seconds: Any) -> Optional[str]:
     try:
         total = int(seconds)
@@ -350,6 +370,11 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 "duplex": duplex,
                 "is_sfp": SFP_PORT_MIN <= port <= SFP_PORT_MAX,
                 "vlan": pvids.get(port, 1),
+                # WARP-1716: netifd already hands us per-port counters on the
+                # SAME `network.device status` read (no extra call, no new ACL
+                # grant). They are the only evidence the dashboard has that a
+                # port is carrying traffic rather than merely being plugged in.
+                "traffic": _traffic_fields(st.get("statistics")),
             }
             if port in poe_by_port:
                 p = poe_by_port[port]

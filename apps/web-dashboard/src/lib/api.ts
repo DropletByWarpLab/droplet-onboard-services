@@ -21,6 +21,7 @@ import type {
   TimelineEntry,
   ChatRequest,
   ConnectedDevice,
+  CurrentWifi,
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
@@ -1620,6 +1621,19 @@ export interface GuestWifiStatus {
   ssid: string | null;
   password: string | null;
   supported: boolean;
+}
+
+/**
+ * WARP-1714: the Wi-Fi this household is broadcasting, so the Wi-Fi card opens
+ * showing the network it's about to edit. `source` names where the answer came
+ * from (the router's own radio, or a coverage AP); `source: null` with a
+ * populated `detail` means we couldn't read it and why — which is NOT the same
+ * as "no Wi-Fi is set", and the card must not render the two identically.
+ */
+export async function fetchCurrentWifi(): Promise<CurrentWifi> {
+  const res = await authFetch(`${BASE}/api/network/wifi/current`);
+  if (!res.ok) throw new Error(`Failed to fetch current Wi-Fi: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchGuestWifi(): Promise<GuestWifiStatus> {

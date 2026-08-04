@@ -2,7 +2,16 @@
 
 import { Lock, ChevronRight } from "lucide-react";
 import type { SwitchPort } from "@/lib/types/switch";
-import { ROLE, CHIP_CLASS, DOT_CLASS, STATUS_TONE, portName, pct } from "./helpers";
+import {
+  ROLE,
+  CHIP_CLASS,
+  DOT_CLASS,
+  STATUS_TONE,
+  formatBytes,
+  portName,
+  roleLabel,
+  pct,
+} from "./helpers";
 import styles from "./switch.module.css";
 
 interface Props {
@@ -13,7 +22,8 @@ interface Props {
 const GRID = "grid-cols-[1.7fr_0.9fr_0.9fr_1.3fr_1.4fr_0.9fr_24px]";
 
 function Row({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void }) {
-  const { Icon, label } = ROLE[p.role];
+  const { Icon } = ROLE[p.role];
+  const label = roleLabel(p);
   const tone = STATUS_TONE[p.status];
   const poeDelivering = p.poe?.delivering ?? false;
   const poePct = p.poe && poeDelivering ? pct(p.poe.power_w, p.poe.max_power_w) : 0;
@@ -32,7 +42,7 @@ function Row({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void 
       {/* Port — friendly name + id (mono) */}
       <span className="min-w-0">
         <span className="block type-footnote font-medium text-[color:var(--text)] truncate">
-          {portName(p.name)}
+          {portName(p)}
         </span>
         <span className="block type-caption-2 text-[color:var(--text-muted)] font-mono mt-px">
           {p.label}
@@ -40,13 +50,22 @@ function Row({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void 
         </span>
       </span>
 
-      {/* Link — LED + speed */}
-      <span className="type-caption-2 text-[color:var(--text-muted)] flex items-center gap-1.5">
-        <span
-          className={[styles.led, styles.ledLink, styles.ledInline, p.link_up ? styles.ledLinkOn : ""].join(" ")}
-          aria-hidden="true"
-        />
-        <span className="font-mono">{p.link_up ? (p.speed ?? "—") : "—"}</span>
+      {/* Link — LED + speed, and the traffic the port has actually carried.
+          WARP-1716: the counters are what distinguish a busy port from one
+          that's merely plugged in. */}
+      <span className="type-caption-2 text-[color:var(--text-muted)] flex flex-col gap-0.5">
+        <span className="flex items-center gap-1.5">
+          <span
+            className={[styles.led, styles.ledLink, styles.ledInline, p.link_up ? styles.ledLinkOn : ""].join(" ")}
+            aria-hidden="true"
+          />
+          <span className="font-mono">{p.link_up ? (p.speed ?? "—") : "—"}</span>
+        </span>
+        {p.link_up && p.traffic && (
+          <span className="font-mono text-[10px] leading-none text-[color:var(--text-faint)]">
+            ↓{formatBytes(p.traffic.rx_bytes)} ↑{formatBytes(p.traffic.tx_bytes)}
+          </span>
+        )}
       </span>
 
       {/* Role chip */}

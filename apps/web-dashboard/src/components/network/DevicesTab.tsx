@@ -60,9 +60,19 @@ export function DevicesTab() {
   }
   const sorted = filtered.slice().sort(sortFn);
 
+  // WARP-1715: the household's own access points ARE part of the network and
+  // belong in this list — but they're infrastructure, not client devices, so
+  // they get their own section instead of sorting between two phones. (#1401
+  // hid them outright to avoid the same hardware appearing in two places; the
+  // founder's call on 2026-08-04 was to show them, separated. The Coverage
+  // Extenders panel is still where you manage them.) An AP the operator has
+  // deliberately put in a group is honoured there instead.
+  const infrastructure = sorted.filter((d) => d.isAccessPoint && d.groups.length === 0);
+  const clients = sorted.filter((d) => !(d.isAccessPoint && d.groups.length === 0));
+
   // Bucket by group; a device may belong to multiple groups and appear in each.
   const byGroup = new Map<string, EnrichedNetworkDevice[]>();
-  for (const d of sorted) {
+  for (const d of clients) {
     if (d.groups.length === 0) {
       byGroup.set("__ungrouped", [...(byGroup.get("__ungrouped") ?? []), d]);
     } else {
@@ -80,7 +90,8 @@ export function DevicesTab() {
   // active search that matched nothing (onlineOnly filters server-side, so it
   // empties `devices` instead). Distinguish that from the raw zero-devices case
   // so the search miss gets its own empty state rather than a blank area.
-  const hasMatches = groupsWithMembers.length > 0 || ungrouped.length > 0;
+  const hasMatches =
+    groupsWithMembers.length > 0 || ungrouped.length > 0 || infrastructure.length > 0;
 
   const isLoading = !devicesSwr.data && devicesSwr.isLoading;
 
@@ -202,6 +213,14 @@ export function DevicesTab() {
               onError={setToast}
             />
           ))}
+          {infrastructure.length > 0 && (
+            <DeviceGridSection
+              group={{ id: "__infrastructure", name: "Network infrastructure" }}
+              devices={infrastructure}
+              onOpen={(d) => setOpenMac(d.mac)}
+              onError={setToast}
+            />
+          )}
           {ungrouped.length > 0 && (
             <DeviceGridSection
               group={{ id: "__ungrouped", name: "Ungrouped" }}

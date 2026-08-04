@@ -24,6 +24,7 @@ import {
   getApWifi,
   setApWifi,
 } from "../services/ap-onboard.service.js";
+import { getCurrentWifi } from "../services/current-wifi.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface WifiDeps {
@@ -37,6 +38,27 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     try {
       const wifi = await getWifiSettings();
       res.json(wifi);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * WARP-1714: the Wi-Fi this household is actually broadcasting, so the Wi-Fi
+   * card can open showing the network it's about to edit instead of two empty
+   * boxes. Resolves the router's live AP interface first, then an approved AP
+   * — on the edge-router shape the router hosts nothing and the SSID lives
+   * only on the AP.
+   *
+   * owner/admin only: the body carries the PSK, same tier as the write that
+   * sets it and as the guest-Wi-Fi read directly below.
+   */
+  router.get("/network/wifi/current", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      // A router we can't reach must not fail the card — getCurrentWifi still
+      // answers from the AP, and reports honestly when nothing can be read.
+      const wifi = await getWifiSettings().catch(() => null);
+      res.json(await getCurrentWifi(prisma, wifi));
     } catch (err) {
       next(err);
     }

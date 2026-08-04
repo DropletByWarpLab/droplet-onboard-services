@@ -1,23 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import useSWR from "swr";
 import {
   AlertCircle,
   CheckCircle2,
   Eye,
   EyeOff,
+  Info,
   Loader2,
   Lock,
   Wifi,
 } from "lucide-react";
 import {
   confirmNetworkCommand,
+  fetchCurrentWifi,
   fetchNetworkOperation,
   RouterStatusError,
   routerUnreachableNotice,
   setWifiPassword,
   setWifiSsid,
 } from "@/lib/api";
+import type { CurrentWifi } from "@/lib/types";
+
+/** Under the /api/network prefix, so the tab's Refresh sweep covers it. */
+const CURRENT_WIFI_KEY = "/api/network/wifi/current";
 
 /**
  * Issue #12 — editable Wi-Fi provisioning for the Network → WiFi tab.
@@ -58,6 +65,47 @@ export function WifiSettingsForm() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+
+  // WARP-1714: seed the form from the Wi-Fi actually being broadcast. Both
+  // fields used to start empty and never hydrate, so the card couldn't tell you
+  // your own network name and the password you set visibly "went away" on every
+  // reload.
+  //
+  // The orchestrator resolves WHERE that Wi-Fi lives, because it differs by
+  // deployment shape: on the edge-router shape this Droplet's own radio hosts
+  // nothing (`interfaces: []`, uci carries only a disabled placeholder) and the
+  // household SSID exists only on the approved access point.
+  //
+  // A background poll must never overwrite what the user is halfway through
+  // typing. `dirty` latches on the first edit and holds the fields until the
+  // next successful save; `lastSynced` keeps the adopt idempotent so an
+  // unchanged poll doesn't re-set state (or fight the reveal toggle).
+  const { data: live, mutate: refreshLive } = useSWR<CurrentWifi>(
+    CURRENT_WIFI_KEY,
+    fetchCurrentWifi,
+    { refreshInterval: 30_000 },
+  );
+  const dirty = useRef(false);
+  const lastSynced = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!live?.ssid || dirty.current) return;
+    const fingerprint = `${live.source} ${live.ssid} ${live.key ?? ""}`;
+    if (lastSynced.current === fingerprint) return;
+    lastSynced.current = fingerprint;
+    setSsid(live.ssid);
+    setPassword(live.key ?? "");
+  }, [live?.source, live?.ssid, live?.key]);
+
+  function editSsid(next: string) {
+    dirty.current = true;
+    setSsid(next);
+  }
+
+  function editPassword(next: string) {
+    dirty.current = true;
+    setPassword(next);
+  }
 
   function validate(): string | null {
     const name = ssid.trim();
@@ -129,7 +177,14 @@ export function WifiSettingsForm() {
     setStatus({ kind: "saving" });
     try {
       await applyWifi(ssid.trim());
+      // The save landed, so the router is now the authority again — release the
+      // fields back to live values (and let the next poll confirm them) instead
+      // of pinning the form to what the user typed.
+      dirty.current = false;
+      lastSynced.current = null;
       setStatus({ kind: "applied" });
+      // Pull the new value back from the box rather than trusting the echo.
+      void refreshLive();
     } catch (e) {
       // Same calm ladder as InternetStep, but the "do it later" destination is
       // the page we're already on — so an unreachable router becomes a plain
@@ -176,6 +231,24 @@ export function WifiSettingsForm() {
         including this one. Rejoin with the new name and password.
       </p>
 
+      {/* WARP-1714: when we can't read the current Wi-Fi, SAY SO. Empty fields
+          that mean "we couldn't ask" are indistinguishable from ones that mean
+          "no Wi-Fi is set" — and on the edge-router shape, with no AP
+          credential provisioned, the honest answer is the actionable one. */}
+      {live && !live.ssid && (
+        <div
+          role="status"
+          className="mb-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-[var(--card-inner)] rounded-sm px-3 py-2"
+        >
+          <Info
+            size={14}
+            className="mt-0.5 flex-shrink-0 text-[color:var(--text-muted)]"
+            aria-hidden="true"
+          />
+          <span>{live.detail}</span>
+        </div>
+      )}
+
       <div className="space-y-4 max-w-md">
         <div>
           <label
@@ -194,7 +267,7 @@ export function WifiSettingsForm() {
               id="wifi-ssid"
               type="text"
               value={ssid}
-              onChange={(e) => setSsid(e.target.value)}
+              onChange={(e) => editSsid(e.target.value)}
               placeholder="Studio Fotonia"
               className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10"
               style={{
@@ -228,7 +301,7 @@ export function WifiSettingsForm() {
               id="wifi-password"
               type={showPassword ? "text" : "password"}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => editPassword(e.target.value)}
               placeholder="Wi-Fi password"
               className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10 pr-10"
               style={{

@@ -22,7 +22,7 @@ function Cell({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void
     <button
       type="button"
       onClick={() => onPick(p)}
-      title={portName(p.name)}
+      title={portName(p)}
       className={[
         "flex flex-col items-center gap-1.5 rounded-[9px] border bg-[var(--card-bg)]",
         "px-1.5 pt-2.5 pb-2 min-w-0 cursor-pointer transition-all duration-150 ease-smooth",
@@ -54,7 +54,7 @@ function Cell({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void
         <Icon size={11} aria-hidden="true" />
       </span>
       <span className="type-caption-2 max-w-full truncate text-[color:var(--text)]">
-        {portName(p.name)}
+        {portName(p)}
       </span>
       <span className="text-[10px] leading-none text-[color:var(--text-muted)] font-mono">
         {p.poe ? (poeDelivering ? `${p.poe.power_w.toFixed(1)} W` : "off") : "—"}

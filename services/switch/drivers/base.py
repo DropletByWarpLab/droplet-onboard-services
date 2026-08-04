@@ -127,13 +127,17 @@ class SwitchDriver(ABC):
 
         Returns one dict per physical port::
 
-            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
+            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool,
+             "traffic": {"rx_bytes": int, "tx_bytes": int} | None}
 
-        ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down). A driver
-        whose primary port read (``get_ports``) cannot report link state
-        overrides this with a dedicated read. The default derives from
-        ``get_ports`` so every driver — and the test fakes — answer this without
-        bespoke code. The orchestrator §7 aggregation joins this read in.
+        ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down).
+        ``traffic`` carries the port's cumulative byte counters when the driver
+        reports them and ``None`` when it can't — the two are distinct claims
+        (WARP-1716), so absence is never flattened to zero. A driver whose
+        primary port read (``get_ports``) cannot report link state overrides
+        this with a dedicated read. The default derives from ``get_ports`` so
+        every driver — and the test fakes — answer this without bespoke code.
+        The orchestrator §7 aggregation joins this read in.
         """
         out: list[dict] = []
         for p in await self.get_ports():
@@ -142,6 +146,7 @@ class SwitchDriver(ABC):
                 "link_up": bool(p.get("link_up")),
                 "speed": p.get("speed") or "",
                 "is_sfp": bool(p.get("is_sfp")),
+                "traffic": p.get("traffic"),
             })
         return out
 

@@ -13,6 +13,7 @@ import {
   aggregateStatus,
   aggregatePorts,
   aggregateVlans,
+  derivePortName,
 } from "../services/switch-aggregation.service.js";
 import type {
   SwitchProvisionConfig,
@@ -211,7 +212,7 @@ describe("aggregatePorts", () => {
     expect(byPort[3].poe).toBeNull();
   });
 
-  it("joins vlan + vlan_name from membership; name/device null in v1", () => {
+  it("joins vlan + vlan_name from membership", () => {
     const byPort = Object.fromEntries(ports().map((p) => [p.port, p]));
     // Port 7 is an untagged member of VLAN 100 (cameras) per membership.
     expect(byPort[7].vlan).toBe(100);
@@ -219,14 +220,105 @@ describe("aggregatePorts", () => {
     // Port 1 untagged on VLAN 1 (LAN).
     expect(byPort[1].vlan).toBe(1);
     expect(byPort[1].vlan_name).toBe("LAN");
-    // v1 caveat: friendly name + device deferred (LLDP/MAC join).
-    expect(byPort[1].name).toBeNull();
+    // The MAC→device join still has no ACL-legal source on the flashed image
+    // (WARP-1717), so `device` stays null — but `name` no longer does.
     expect(byPort[1].device).toBeNull();
+  });
+
+  // WARP-1716: `name` used to be a hardcoded null, which the dashboard rendered
+  // as the word "Open" — on every port, including ones with link up and traffic
+  // flowing. A provisioned role is a name we can state honestly.
+  it("names a port from its provisioned role", () => {
+    const byPort = Object.fromEntries(ports().map((p) => [p.port, p]));
+    expect(byPort[1].name).toBe("Client"); // client_ports [1,3]
+    expect(byPort[2].name).toBe("Access point"); // ap_ports [2,4]
+    expect(byPort[7].name).toBe("Camera"); // camera_ports [7,8]
+    expect(byPort[9].name).toBe("Uplink"); // protected_port 9
+  });
+
+  it("leaves an unprovisioned port unnamed rather than labelling it 'Port N'", () => {
+    // The openwrt driver labels every port "Port N", which says nothing the
+    // `1/N` label doesn't. Passing it through would just be noise dressed up as
+    // an answer; null lets the dashboard describe the port by link state.
+    const byPort = Object.fromEntries(ports().map((p) => [p.port, p]));
+    expect(byPort[5].role).toBe("unknown");
+    expect(byPort[5].name).toBeNull();
   });
 
   it("returns all 10 ports sorted", () => {
     const ps = ports();
     expect(ps.map((p) => p.port)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  // WARP-1716: without counters the dashboard can't tell a busy port from one
+  // that's merely plugged in — which is exactly the report that opened the bug
+  // ("says open even though there is traffic running through the ports").
+  it("carries per-port byte counters through from port_status", () => {
+    const withTraffic = aggregatePorts({
+      rawPorts: RAW_PORTS,
+      portStatus: PORT_STATUS.map((s) =>
+        s.port === 1 ? { ...s, traffic: { rx_bytes: 1_500_000, tx_bytes: 900_000 } } : s,
+      ),
+      poe: POE,
+      vlans: VLANS,
+      config: makeConfig(),
+    });
+    const byPort = Object.fromEntries(withTraffic.map((p) => [p.port, p]));
+    expect(byPort[1].traffic).toEqual({ rx_bytes: 1_500_000, tx_bytes: 900_000 });
+  });
+
+  it("reports traffic as null — never zero — when the driver has no counters", () => {
+    // "We don't know" and "nothing crossed this port" are different claims.
+    const byPort = Object.fromEntries(ports().map((p) => [p.port, p]));
+    expect(byPort[1].traffic).toBeNull();
+  });
+
+  it("rejects nonsensical counters rather than rendering them", () => {
+    const bogus = aggregatePorts({
+      rawPorts: RAW_PORTS,
+      portStatus: [
+        { port: 1, link_up: true, speed: "1 Gb", is_sfp: false, traffic: { rx_bytes: -1, tx_bytes: 5 } },
+        { port: 2, link_up: true, speed: "1 Gb", is_sfp: false, traffic: { rx_bytes: NaN, tx_bytes: 5 } },
+      ],
+      poe: [],
+      vlans: VLANS,
+      config: makeConfig(),
+    });
+    const byPort = Object.fromEntries(bogus.map((p) => [p.port, p]));
+    expect(byPort[1].traffic).toBeNull();
+    expect(byPort[2].traffic).toBeNull();
+  });
+});
+
+// --- Port naming (WARP-1716) -----------------------------------------------
+
+describe("derivePortName", () => {
+  it("names a port by its provisioned role", () => {
+    expect(derivePortName({ role: "uplink", rawName: null })).toBe("Uplink");
+    expect(derivePortName({ role: "camera", rawName: null })).toBe("Camera");
+    expect(derivePortName({ role: "ap", rawName: null })).toBe("Access point");
+    expect(derivePortName({ role: "client", rawName: null })).toBe("Client");
+  });
+
+  it("prefers the role over a generic driver label", () => {
+    expect(derivePortName({ role: "camera", rawName: "Port 7" })).toBe("Camera");
+  });
+
+  it("passes through a real name the driver reports for an unknown role", () => {
+    expect(derivePortName({ role: "unknown", rawName: "Front desk" })).toBe("Front desk");
+  });
+
+  it("discards the driver's generic 'Port N' label in all its spellings", () => {
+    for (const raw of ["Port 5", "port5", "PORT  10", "  Port 3  "]) {
+      expect(derivePortName({ role: "unknown", rawName: raw })).toBeNull();
+    }
+  });
+
+  it("treats blank/absent names as no name", () => {
+    expect(derivePortName({ role: "unknown", rawName: "" })).toBeNull();
+    expect(derivePortName({ role: "unknown", rawName: "   " })).toBeNull();
+    expect(derivePortName({ role: "unknown", rawName: null })).toBeNull();
+    expect(derivePortName({ role: "unknown", rawName: undefined })).toBeNull();
   });
 });
 

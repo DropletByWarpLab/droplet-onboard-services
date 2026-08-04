@@ -765,7 +765,10 @@ function WifiTab() {
     <div className="space-y-4">
       {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
           during onboarding can set the SSID/password here — same write path as
-          the setup wizard's InternetStep. */}
+          the setup wizard's InternetStep. WARP-1714: the form seeds the current
+          SSID/password from /api/network/wifi/current, which resolves this
+          Droplet's own radio OR the approved AP — on the edge-router shape the
+          router hosts no AP at all, so reading it alone leaves the card blank. */}
       <WifiSettingsForm />
 
       {/* WARP-871: the channel write path (orchestrator route + routing) shipped

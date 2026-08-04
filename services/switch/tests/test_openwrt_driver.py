@@ -61,7 +61,14 @@ class FakeUbus:
             },
         }
         self.devices = {
-            "lan1": {"up": True, "carrier": True, "speed": "1000F", "macaddr": "70:49:a2:77:64:01"},
+            "lan1": {
+                "up": True,
+                "carrier": True,
+                "speed": "1000F",
+                "macaddr": "70:49:a2:77:64:01",
+                # WARP-1716: netifd ships counters on this same read.
+                "statistics": {"rx_bytes": 1500000, "tx_bytes": 900000, "rx_packets": 4200},
+            },
             "lan2": {"up": True, "carrier": False, "speed": "-1F"},
             "lan3": {"up": True, "carrier": True, "speed": "100H"},
             "lan9": {"up": True, "carrier": True, "speed": "1000F"},
@@ -234,6 +241,39 @@ class TestReads:
         assert ports[9]["is_sfp"] is True
         assert ports[10]["is_sfp"] is True
         assert ports[10]["link_up"] is False  # absent from netifd → down
+
+    @pytest.mark.asyncio
+    async def test_get_ports_carries_netifd_byte_counters(self):
+        """WARP-1716 — counters are the only evidence the dashboard has that a
+        port is carrying traffic rather than merely being plugged in."""
+        driver = make_driver(FakeUbus())
+        ports = {p["port"]: p for p in await driver.get_ports()}
+        assert ports[1]["traffic"] == {"rx_bytes": 1500000, "tx_bytes": 900000}
+        # A port netifd reports without a statistics block gets None, NOT zeros
+        # — "unknown" and "nothing crossed here" are different claims.
+        assert ports[3]["traffic"] is None
+        assert ports[10]["traffic"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_ports_rejects_malformed_counters(self):
+        fake = FakeUbus()
+        fake.devices["lan1"]["statistics"] = {"rx_bytes": "not-a-number", "tx_bytes": 1}
+        fake.devices["lan3"]["statistics"] = {"rx_bytes": -5, "tx_bytes": 1}
+        fake.devices["lan9"]["statistics"] = {"tx_bytes": 1}  # rx_bytes missing
+        driver = make_driver(fake)
+        ports = {p["port"]: p for p in await driver.get_ports()}
+        assert ports[1]["traffic"] is None
+        assert ports[3]["traffic"] is None
+        assert ports[9]["traffic"] is None
+
+    @pytest.mark.asyncio
+    async def test_port_status_passes_traffic_through(self):
+        """The §7 aggregation joins port_status, not get_ports — the counters
+        have to survive that hop or the dashboard never sees them."""
+        driver = make_driver(FakeUbus())
+        rows = {r["port"]: r for r in await driver.get_port_status()}
+        assert rows[1]["traffic"] == {"rx_bytes": 1500000, "tx_bytes": 900000}
+        assert rows[3]["traffic"] is None
 
     @pytest.mark.asyncio
     async def test_get_vlans_parses_bridge_vlan_sections_without_leaking_internals(self):

@@ -5,7 +5,11 @@ import type { EnrichedNetworkDevice, DeviceGroupRef } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 
 interface Props {
-  group: DeviceGroupRef | { id: "__ungrouped"; name: "Ungrouped" };
+  group:
+    | DeviceGroupRef
+    | { id: "__ungrouped"; name: "Ungrouped" }
+    // WARP-1715: the household's own APs, sectioned off from client devices.
+    | { id: "__infrastructure"; name: "Network infrastructure" };
   devices: EnrichedNetworkDevice[];
   onOpen: (device: EnrichedNetworkDevice) => void;
   // Forwarded to each DeviceCard so block/unblock errors can bubble up to

@@ -4,7 +4,15 @@ import { useId } from "react";
 import { Tag, Zap, Lock, ShieldCheck } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import type { SwitchPort, SwitchVlanProfile } from "@/lib/types/switch";
-import { ROLE, CHIP_CLASS, STATUS_TONE, portName, pct, type SwitchAction } from "./helpers";
+import {
+  ROLE,
+  CHIP_CLASS,
+  STATUS_TONE,
+  portName,
+  roleLabel,
+  pct,
+  type SwitchAction,
+} from "./helpers";
 import styles from "./switch.module.css";
 
 interface Props {
@@ -57,7 +65,8 @@ export function SwitchPortDrawer({
   onAction,
 }: Props) {
   const headingId = useId();
-  const { Icon, label } = ROLE[port.role];
+  const { Icon } = ROLE[port.role];
+  const label = roleLabel(port);
   const tone = STATUS_TONE[port.status];
   const isProtected = protectedPort != null && port.port === protectedPort;
   const poeDelivering = port.poe?.delivering ?? false;
@@ -65,7 +74,7 @@ export function SwitchPortDrawer({
   // Camera-safe gate: a camera can only change VLAN once the fabric is segmented.
   const canIsolate = profile === "segmented" || port.role !== "camera";
   const targetVlan = port.vlan === 100 ? 1 : 100;
-  const name = portName(port.name);
+  const name = portName(port);
 
   return (
     <Dialog open onClose={onClose} labelledBy={headingId} placement="right">

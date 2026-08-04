@@ -495,6 +495,10 @@ class _MockAp:
         # `droplet.wifi.band_steering` master switch. Absent = the substrate
         # default (ON) — same semantics as an unset uci option.
         self._band_steering: dict[str, bool] = {}
+        # WARP-1715: { mac -> [assoclist rows] } — stations associated to this
+        # AP's own radios, seeded via /aps/_test_seed. Distinct from the
+        # per-radio client COUNT in `get_ap_wireless`: attribution needs MACs.
+        self._clients: dict[str, list[dict[str, Any]]] = {}
         # WARP-1712: per-MAC { ssid, key } standing in for the AP's own
         # `wireless.default_radio0` section — the household network name.
         self._wireless: dict[str, dict[str, str]] = {}
@@ -523,6 +527,12 @@ class _MockAp:
         the way in so the rest of the SDK's normalisation invariants
         hold."""
         canonical = mac.upper()
+        # WARP-1715: stations live in their own map, not in the discovery
+        # record — `get()` echoes `_discovered` wholesale and an assoclist has
+        # no business in the AP's mDNS identity.
+        clients = info.pop("clients", None)
+        if clients is not None:
+            self._clients[canonical] = list(clients)
         existing = self._discovered.get(canonical, {})
         existing.update({k: v for k, v in info.items() if v is not None})
         self._discovered[canonical] = existing
@@ -595,6 +605,15 @@ class _MockAp:
         logger.info(
             "mock: AP set_band_steering mac=%s enabled=%s — no-op", canonical, enabled
         )
+
+    def get_clients(self, mac: str) -> list[dict[str, Any]]:
+        """WARP-1715: stations associated to this AP's own radios.
+
+        Seeded per-MAC by `/aps/_test_seed`; an AP nobody seeded reports an
+        empty list, which is the honest mock answer (an approved-but-idle AP
+        really does have no stations).
+        """
+        return list(self._clients.get(mac.upper(), []))
 
     def get_ap_wireless(self, mac: str) -> dict[str, Any]:
         """WARP-1712: the AP's own network name + passphrase, mock edition.
