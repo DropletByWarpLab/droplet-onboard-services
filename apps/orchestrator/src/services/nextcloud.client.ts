@@ -137,20 +137,50 @@ export async function ncDownloadFile(
   return resp.body;
 }
 
+/**
+ * WARP-1682 — what a DELETE actually accomplished. Both values are SUCCESS;
+ * they differ only in whether this call is the one that removed the resource,
+ * which callers may want for logging but never for error handling.
+ */
+export type NcDeleteOutcome = "deleted" | "already-absent";
+
+/**
+ * Delete a file or directory. Idempotent: the caller is asking for an END
+ * STATE ("this path must not exist"), not for a state transition, so a 404 —
+ * the state already holds — is a success (RFC 9110 §9.2.2).
+ *
+ * WARP-1682: this used to throw on 404, and `handleFileError` turned that into
+ * a 404 response, so the dashboard told the user a delete had failed over a
+ * file that really was gone. The resource legitimately can disappear before
+ * our DELETE lands — a retry, a second tab, the file indexer, or the trashbin
+ * race documented at routes/files.ts:2404 ("one of the requests can 500 while
+ * the file ends up half-moved").
+ *
+ * The trade-off is deliberate: a DELETE aimed at the WRONG path also 404s and
+ * now reports success. That is acceptable because the route re-lists
+ * immediately afterwards, so a file that did not actually go away is visibly
+ * still there — whereas the pre-fix behaviour failed the common case to guard
+ * the rare one. Everything else (403 forbidden, 423 locked, 5xx) still throws:
+ * those leave the end state either unchanged or unknown.
+ */
 export async function ncDeleteFile(
   token: string,
   user: string,
   path: string
-): Promise<void> {
+): Promise<NcDeleteOutcome> {
   const url = webdavUrl(user, path);
   const resp = await fetch(url, {
     method: "DELETE",
     headers: davHeaders(token),
   });
 
-  if (!resp.ok && resp.status !== 204) {
+  if (resp.status === 404) return "already-absent";
+
+  if (!resp.ok) {
     throw new Error(`WebDAV DELETE failed: ${resp.status}`);
   }
+
+  return "deleted";
 }
 
 export async function ncCreateDirectory(

@@ -1,29 +1,32 @@
 /**
- * WARP-882 / WS-4 — In-browser editing + co-authoring document-server client.
+ * WARP-882 / WARP-1686 — in-browser viewing/editing document-server client.
  *
- * The Droplet integrates an OnlyOffice Document Server (the configured ENGINE)
- * via the Nextcloud `onlyoffice` connector app over a WOPI-style handshake.
- * This module is the orchestrator's thin, ENGINE-AGNOSTIC seam:
+ * The Droplet integrates a WOPI document engine via a Nextcloud connector app.
+ * WHICH engine is a CONFIG choice (DOCS_ENGINE, ADR-034), not a code
+ * dependency — this module is the orchestrator's thin, ENGINE-AWARE seam:
  *
- *   - It NEVER speaks the raw WOPI/Document-Server wire protocol. That handshake
- *     (file fetch + save callback + JWT verification) is owned by the Nextcloud
- *     connector and the Document Server itself. Keeping the engine behind WOPI
- *     means the engine is a CONFIG choice (DOCS_INTERNAL_URL + the connector's
- *     DocumentServerUrl), not a code dependency — swapping the Document Server
- *     for any other WOPI-capable engine needs no change here.
+ *   - It NEVER speaks the raw WOPI/Document-Server wire protocol. That
+ *     handshake (file fetch + save callback + token verification) is owned by
+ *     the Nextcloud connector and the engine itself. Keeping the engine behind
+ *     WOPI means swapping it changes DOCS_* config + the two engine-keyed
+ *     branches below (health path + connector page), nothing else.
  *   - `ncMintEditorSession` resolves the Nextcloud numeric fileId for the path
  *     (via `ncGetFileId(token, ncUser, path)` — 3 args) and returns the editor
- *     URL the dashboard iframe loads, plus a short-lived signed access token the
- *     editor presents back on its WOPI calls.
+ *     URL the dashboard iframe loads, plus a short-lived signed access token
+ *     the editor presents back on its WOPI calls.
  *   - `docServerHealthy` is a bounded reachability probe used by the
  *     `/files/docs/status` route.
  *
- * LICENSING NOTE (CE → OEM): we build and test against OnlyOffice Document
- * Server **Community Edition**, which is AGPLv3. Shipping the doc-server engine
- * in the product at GA requires an OnlyOffice OEM/commercial license. There is
- * deliberately NO license-enforcement code here — the engine choice stays
- * config-driven so the commercial swap is an ops/packaging decision, not a code
- * change. See docs/ADR-021 (`docs` profile section) and docs/ENVIRONMENT.md.
+ * ENGINES (DOCS_ENGINE):
+ *   - "collabora" (default) — Collabora CODE (LibreOffice technology; MPLv2
+ *     core, free-of-charge binaries — NO licensing fee, which is why ADR-034
+ *     made it the default). Connector app: `richdocuments`. Readiness =
+ *     GET {DOCS_INTERNAL_URL}/hosting/discovery returning the WOPI discovery
+ *     XML (coolwsd has no /healthcheck).
+ *   - "onlyoffice" — OnlyOffice Document Server CE (AGPLv3; an OnlyOffice
+ *     OEM/commercial license is required to SHIP this engine — kept selectable
+ *     for a future OEM-licensed SKU). Connector app: `onlyoffice`. Readiness =
+ *     GET {DOCS_INTERNAL_URL}/healthcheck returning the literal `true`.
  */
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
@@ -89,23 +92,33 @@ function docsConfigured(): boolean {
 /**
  * Bounded reachability probe against the internal document-server URL. Returns
  * `false` (never throws) on any failure so `/files/docs/status` can render a
- * calm "unavailable" state instead of 500-ing. The Document Server exposes a
- * `/healthcheck` endpoint that returns `true` when ready.
+ * calm "unavailable" state instead of 500-ing. The readiness endpoint is
+ * ENGINE-SPECIFIC (see the module header): Collabora's coolwsd serves the WOPI
+ * discovery XML at /hosting/discovery; OnlyOffice serves the literal `true` at
+ * /healthcheck.
  */
 export async function docServerHealthy(): Promise<boolean> {
   if (!docsConfigured()) return false;
   if (!config.DOCS_INTERNAL_URL.trim()) return false;
   if (!config.ONLYOFFICE_JWT_SECRET.trim()) return false;
+  const base = config.DOCS_INTERNAL_URL.replace(/\/$/, "");
+  const collabora = config.DOCS_ENGINE !== "onlyoffice";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const url = `${config.DOCS_INTERNAL_URL.replace(/\/$/, "")}/healthcheck`;
+    const url = collabora ? `${base}/hosting/discovery` : `${base}/healthcheck`;
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return false;
-    const body = (await res.text()).trim().toLowerCase();
-    // Document Server returns the literal `true`; tolerate a JSON-wrapped boolean.
-    if (body === "true") return true;
-    try { return JSON.parse(body) === true; } catch { return false; }
+    const body = (await res.text()).trim();
+    if (collabora) {
+      // coolwsd's discovery document — root element `wopi-discovery`. Any 200
+      // that carries it means the engine parsed its config and is serving.
+      return body.includes("wopi-discovery");
+    }
+    // OnlyOffice returns the literal `true`; tolerate a JSON-wrapped boolean.
+    const lower = body.toLowerCase();
+    if (lower === "true") return true;
+    try { return JSON.parse(lower) === true; } catch { return false; }
   } catch {
     return false;
   } finally {
@@ -124,8 +137,15 @@ export async function docServerHealthy(): Promise<boolean> {
  *      explicitly NOT a DocServerUnavailableError.
  *   4. Build the connector editor URL + sign a short-lived access token bound to
  *      {ncFileId, ncUser, mode}. The token is HS256-signed with the shared
- *      ONLYOFFICE_JWT_SECRET — the same secret the connector and Document Server
- *      verify — so the engine choice stays config-driven.
+ *      ONLYOFFICE_JWT_SECRET (generated unconditionally per-device by
+ *      scripts/lib/secrets.sh, so it is present under BOTH engines).
+ *
+ * The editor URL targets the Nextcloud CONNECTOR PAGE for the configured
+ * engine, addressed via the gateway's browser-facing /nextcloud/ leg
+ * (NEXTCLOUD_PUBLIC_PATH) — NOT the compose-internal NEXTCLOUD_URL, which a
+ * browser can never resolve (the WARP-882 editorUrl host bug WARP-1686 fixes):
+ *   - collabora  → {NEXTCLOUD_PUBLIC_PATH}/index.php/apps/richdocuments/index?fileId={id}
+ *   - onlyoffice → {NEXTCLOUD_PUBLIC_PATH}/index.php/apps/onlyoffice/{id}?mode={mode}
  *
  * `requestedMode` is the ALREADY-server-decided mode passed by the route; this
  * function does not itself authorize edit-vs-view (the route owns that, via the
@@ -161,13 +181,16 @@ export async function ncMintEditorSession(
 
   const ttl = config.DOCS_ACCESS_TOKEN_TTL_SECONDS;
 
-  // The editor is fronted publicly at DOCS_EDITOR_PUBLIC_PATH (nginx /docs/),
-  // but the editable document is opened through the Nextcloud `onlyoffice`
-  // connector, keyed by fileId. The dashboard loads this URL in the iframe.
-  const editorBase = `${config.NEXTCLOUD_URL.replace(/\/$/, "")}/index.php/apps/onlyoffice/${ncFileId}`;
-  const editorUrl = `${editorBase}?mode=${requestedMode}`;
+  // Browser-facing Nextcloud base (gateway `location /nextcloud/`). Kept
+  // path-relative by default so the editor stays same-origin with whatever
+  // hostname the user browsed in on (FQDN, droplet-ai.local, .lan).
+  const ncPublicBase = config.NEXTCLOUD_PUBLIC_PATH.replace(/\/$/, "");
+  const editorUrl =
+    config.DOCS_ENGINE === "onlyoffice"
+      ? `${ncPublicBase}/index.php/apps/onlyoffice/${ncFileId}?mode=${requestedMode}`
+      : `${ncPublicBase}/index.php/apps/richdocuments/index?fileId=${ncFileId}`;
 
-  // `documentKey` namespaces the co-authoring session in the engine: OnlyOffice
+  // `documentKey` namespaces the co-authoring session in the engine: the engine
   // treats two opens with the SAME documentKey as ONE shared live document
   // (real-time co-authoring) and two opens with DIFFERENT keys as separate
   // documents. Co-authoring is the whole point of WS-4, so the key MUST be

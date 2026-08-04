@@ -17,7 +17,9 @@ type PanelState =
   | { kind: "error" };
 
 /**
- * WARP-882 / WS-4 — Droplet-chrome iframe that hosts the OnlyOffice editor.
+ * WARP-882 / WARP-1686 — Droplet-chrome iframe that hosts the document editor
+ * (the Nextcloud connector page for the configured engine — Collabora CODE by
+ * default, OnlyOffice when DOCS_ENGINE=onlyoffice).
  *
  * The session (editorUrl + server-decided mode) is minted by the orchestrator;
  * this panel never asks for edit vs view. States: loading · ready (iframe,
