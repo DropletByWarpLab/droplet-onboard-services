@@ -101,7 +101,13 @@ export function ApWifiCard() {
     if (bytes > SSID_MAX_BYTES) {
       return `Network name (SSID) must be ${SSID_MAX_BYTES} characters or fewer.`;
     }
-    if (password.length < PSK_MIN)
+    // An AP that reports no passphrase at all (an open network, or an image
+    // that keys its radios some other way) must not leave Save permanently
+    // blocked behind a length rule for a field it never populated — a rename
+    // should still go through. Once there IS a passphrase, clearing or
+    // shortening it is refused, same as the router's form.
+    const passwordInPlay = password.length > 0 || liveKey.length > 0;
+    if (passwordInPlay && password.length < PSK_MIN)
       return `Wi-Fi password must be at least ${PSK_MIN} characters.`;
     if (password.length > PSK_MAX)
       return `Wi-Fi password must be ${PSK_MAX} characters or fewer.`;

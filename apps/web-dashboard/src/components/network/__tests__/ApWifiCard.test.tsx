@@ -174,6 +174,28 @@ describe("validation refuses what the AP would refuse", () => {
     expect(mockSet).not.toHaveBeenCalled();
   });
 
+  it("still allows a rename when the AP reports no passphrase at all", async () => {
+    // An open network (or an image that keys its radios another way) must not
+    // leave Save permanently blocked behind a rule for a field it never filled.
+    mockFetch.mockResolvedValue({ ...SUPPORTED, key: null });
+    renderCard();
+    await waitFor(() => expect(ssidInput()).toBeTruthy());
+    fireEvent.change(ssidInput(), { target: { value: "Renamed" } });
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(mockSet).toHaveBeenCalledWith({ ssid: "Renamed" }));
+  });
+
+  it("still refuses to shorten an EXISTING passphrase", async () => {
+    renderCard();
+    await waitFor(() => expect(pwInput().value).toBe("per-unit-psk"));
+    fireEvent.change(pwInput(), { target: { value: "" } });
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
   it("rejects a name that is 32 characters but over 32 BYTES", async () => {
     renderCard();
     await waitFor(() => expect(ssidInput()).toBeTruthy());
