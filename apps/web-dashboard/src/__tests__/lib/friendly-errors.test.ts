@@ -469,6 +469,123 @@ describe("translateError — share-bulk domain (WARP-1659)", () => {
       expect(translateError(err, "share-bulk"), JSON.stringify(err)).not.toBe(fileLoading);
     }
   });
+
+  // WARP-1659 × WARP-1658. WARP-1658 gave `share` a 403 entry; `share-bulk`
+  // needs the same one, because POST /files/share is role-gated and
+  // `shareBlockedReason` gates on space posture rather than role — a
+  // member/guest reaches the fan-out and every row 403s. Without it those rows
+  // get FALLBACK["share-bulk"] ("try again in a moment") — the WARP-1658 defect
+  // relocated one surface over rather than fixed.
+  it("answers a role-denial 403 the way the dialog does, not with the retry fallback", () => {
+    const BULK_FALLBACK = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "share-bulk");
+    const DENIALS: unknown[] = [
+      { status: 403 },
+      {
+        status: 403,
+        code: "Forbidden: role not permitted",
+        message: "Forbidden: role not permitted",
+      },
+    ];
+    for (const err of DENIALS) {
+      const result = translateError(err, "share-bulk");
+      expect(result, JSON.stringify(err)).not.toBe(BULK_FALLBACK);
+      expect(result.toLowerCase(), JSON.stringify(err)).not.toContain("try again");
+      expect(result.toLowerCase(), JSON.stringify(err)).not.toContain("in a moment");
+      // A reason the fan-out is not responsible for must read exactly as it
+      // does in the dialog — "same 403, two messages one click apart" is the
+      // WARP-1148 defect this whole domain exists to prevent.
+      expect(result, JSON.stringify(err)).toBe(translateError(err, "share"));
+    }
+  });
+
+  // The carve-out that makes the two tickets coexist: `share-bulk` infers from
+  // the message BEFORE it dispatches on status. Nextcloud answers a passwordless
+  // link create on an enforce-password box with OCSForbidden — a 403 carrying
+  // password prose — so without this the 403 entry above would shadow
+  // PASSWORD_REJECTED and every row would read "you don't have permission",
+  // which is false and hides the only remedy the user has.
+  it("still reaches the bulk password copy when the 403 carries password prose", () => {
+    const result = translateError(PASSWORD_ENFORCED, "share-bulk").toLowerCase();
+    expect(result).not.toBe(translateError({ status: 403 }, "share-bulk").toLowerCase());
+    expect(result).toContain("password");
+    expect(result).toMatch(/on its own|one at a time/);
+  });
+
+  it("never leaks the raw wire error string on a 403", () => {
+    const result = translateError(
+      { status: 403, code: "Forbidden: role not permitted", message: SECRET },
+      "share-bulk",
+    );
+    expect(result).not.toContain(SECRET);
+    expect(result).not.toContain("Forbidden");
+  });
+});
+
+// WARP-1658 — a share 403 had no entry in CODES.share, so it fell all the way
+// through to FALLBACK.share ("…Try again in a moment."). Every 403 the
+// orchestrator can answer a share write with is a DETERMINISTIC policy
+// rejection — role denial (requireRole), guest read-only, or insufficient
+// space rights (requireSpaceAccess) — so retrying can never succeed. The copy
+// must name the blocker and who can lift it, and must not offer a retry.
+describe("translateError — share 403 (WARP-1658)", () => {
+  const SHARE_FALLBACK = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "share");
+
+  // The shapes ShareRequestError actually produces for the three 403 flavours:
+  // `code` carries the wire `error` string (no stable code exists for these —
+  // see the scope note in friendly-errors.ts), `status` carries the 403.
+  const FORBIDDEN_SHAPES: unknown[] = [
+    { status: 403 },
+    {
+      status: 403,
+      code: "Forbidden: role not permitted",
+      message: "Forbidden: role not permitted",
+    },
+    {
+      status: 403,
+      code: "Forbidden: manager right required for this space",
+      message: "Forbidden: manager right required for this space",
+    },
+  ];
+
+  it("does not fall through to the retry fallback", () => {
+    for (const err of FORBIDDEN_SHAPES) {
+      const result = translateError(err, "share");
+      expect(result, JSON.stringify(err)).not.toBe(SHARE_FALLBACK);
+    }
+  });
+
+  it("never tells the user to try again — the rejection is deterministic", () => {
+    for (const err of FORBIDDEN_SHAPES) {
+      const result = translateError(err, "share").toLowerCase();
+      expect(result, JSON.stringify(err)).not.toContain("try again");
+      expect(result, JSON.stringify(err)).not.toContain("in a moment");
+    }
+  });
+
+  it("names the permission problem and who can lift it", () => {
+    const result = translateError({ status: 403 }, "share").toLowerCase();
+    expect(result).toContain("permission");
+    expect(result).toMatch(/owner or an admin|owner or admin/);
+  });
+
+  it("covers the stale-rights case a client-side gate cannot pre-empt", () => {
+    // No client-side share gate exists on main (files/page.tsx gates the Share
+    // item on `!isSingle` only), so plain role denials land here too. But the
+    // case a gate can never pre-empt is client state disagreeing with server
+    // rights — stale ACL cache, rights revoked mid-session — and a fresh
+    // session fixes it. Mirror the storage["403"] precedent and say so.
+    const result = translateError({ status: 403 }, "share").toLowerCase();
+    expect(result).toMatch(/sign out/);
+  });
+
+  it("never leaks the raw wire error string", () => {
+    const result = translateError(
+      { status: 403, code: "Forbidden: role not permitted", message: SECRET },
+      "share",
+    );
+    expect(result).not.toContain(SECRET);
+    expect(result).not.toContain("Forbidden");
+  });
 });
 
 describe("translateError — auth domain two-factor codes (WARP-646)", () => {
