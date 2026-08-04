@@ -838,12 +838,13 @@ fi
 # Phase 8: Nextcloud post-install hook reconcile on bring-up (WARP-990)
 # =============================================================================
 # docker/nextcloud-init.sh (household group + "Household" group folder +
-# OnlyOffice connector) is mounted as the official image's post-installation
-# hook, which fires ONLY on the single boot that auto-installs into an EMPTY
-# nextcloud-data volume. A volume-preserving reset/reflash never re-enters
-# that window, so a reflashed box came up with a bare Nextcloud (occ
-# group:list → only "admin") and the setup wizard's account creation 500'd
-# (WARP-989). start_stack must therefore wait for `php occ status` to report
+# document-engine connector) is mounted as the official image's before-starting
+# hook (WARP-1694). It used to be the post-installation hook, which fires ONLY
+# on the single boot that auto-installs into an EMPTY nextcloud-data volume: a
+# volume-preserving reset/reflash never re-enters that window, so a reflashed
+# box came up with a bare Nextcloud (occ group:list → only "admin") and the
+# setup wizard's account creation 500'd (WARP-989); and a no-wipe deploy never
+# reconciled at all. start_stack must additionally wait for `php occ status` to report
 # installed (bounded retry) and re-exec the SAME mounted hook — idempotent,
 # single source of truth — on every bring-up, loudly surfacing but never
 # fataling on a hook failure. Static wiring asserts + behavioural runs of the
@@ -851,7 +852,7 @@ fi
 # tests/single-box-openwrt-readiness.test.sh).
 echo "--- Phase 8: Nextcloud post-install hook reconcile (WARP-990) ---"
 
-NC_HOOK_PATH="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+NC_HOOK_PATH="/docker-entrypoint-hooks.d/before-starting/init-droplet.sh"
 
 # (1) Both reconcile functions are present and sentinel-delimited (the markers
 # are the extraction contract for the behavioural asserts below).
@@ -895,10 +896,22 @@ else
 fi
 
 # …which docker-compose.yml actually mounts docker/nextcloud-init.sh at…
-if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/post-installation/init-droplet\.sh' "$COMPOSE_FILE_REAL"; then
+if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/before-starting/init-droplet\.sh' "$COMPOSE_FILE_REAL"; then
   pass "docker-compose.yml mounts nextcloud-init.sh at the exec'd hook path (paths agree)"
 else
   fail "docker-compose.yml no longer mounts nextcloud-init.sh at $NC_HOOK_PATH — the reconcile exec would 404"
+fi
+
+# WARP-1694 — and specifically NOT back in post-installation. That slot fires
+# only on the boot that auto-installs, so a box that is already installed never
+# re-runs the hook: a no-wipe deploy (`docker compose up -d`, no setup.sh, so no
+# start_stack reconcile) silently does not converge. Found live on .250 when a
+# DOCS_ENGINE change did not take. This assertion is the regression guard —
+# `before-starting` runs on EVERY container start.
+if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/post-installation/' "$COMPOSE_FILE_REAL"; then
+  fail "docker-compose.yml mounts nextcloud-init.sh at post-installation — that fires only on the install boot, so an installed box never reconciles (WARP-1694)"
+else
+  pass "nextcloud-init.sh is not mounted at post-installation (every-boot reconcile preserved — WARP-1694)"
 fi
 
 # …and compose.sh never reimplements the hook's occ steps (the script stays

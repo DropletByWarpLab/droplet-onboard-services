@@ -720,7 +720,23 @@ services:
     volumes:
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro
-      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      # WARP-1694 — `before-starting`, NOT `post-installation`. The stock
+      # entrypoint runs post-installation hooks only on the run that installs
+      # Nextcloud (entrypoint.sh `run_path post-installation`, inside
+      # `if [ "$install" = true ]`), so on an already-installed box this hook
+      # never fired again — and every "the next boot's idempotent re-run will
+      # reconcile it" fallback in the script below was a promise nothing kept.
+      # A no-wipe deploy that changed DOCS_ENGINE, or any WARP-990-class
+      # convergence, silently did not converge.
+      #
+      # `run_path before-starting` sits at the end of the entrypoint, outside
+      # the install branch and after any upgrade, so it runs on EVERY start —
+      # including the install run, just a few lines later. That makes this the
+      # reconcile slot the script was always written for (every step is
+      # guarded; a re-run is a no-op). Deliberately not mounted in both slots:
+      # that would double the appstore round-trips on first boot, which is the
+      # slowest and most failure-prone moment (see the WARP-883 retry loop).
+      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/before-starting/init-droplet.sh:ro
       # WARP-234: Redis-over-TLS config override (sorts after the
       # entrypoint's redis.config.php, so its `redis` key wins) + the
       # internal-CA bundle phpredis verifies the cache cert against.
