@@ -19,6 +19,19 @@ vi.mock("@/lib/api", () => ({
   fetchApDevices: vi.fn(),
   approveApDevice: vi.fn(),
   decommissionApDevice: vi.fn(),
+  // WARP-1712: the panel now also renders the AP's live radio detail and the
+  // shared AP Wi-Fi / band-steering controls, so their API surface has to
+  // exist on this mock. Defaults are the honest "nothing to show" answers.
+  fetchApWirelessDetail: vi.fn().mockResolvedValue({ supported: false, radios: [] }),
+  fetchApWifi: vi.fn().mockResolvedValue({
+    supported: false, ssid: null, fiveGhzSsid: null, key: null,
+    encryption: null, bandSteering: null, apCount: 0, inSync: true,
+  }),
+  setApWifi: vi.fn(),
+  fetchBandSteering: vi.fn().mockResolvedValue({ supported: false, enabled: false }),
+  setBandSteering: vi.fn(),
+  fetchNetworkOperation: vi.fn(),
+  confirmNetworkCommand: vi.fn(),
 }));
 
 import { fetchApDevices } from "@/lib/api";
@@ -69,7 +82,10 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
     });
     renderPanel();
     expect(await screen.findByText("Upstairs")).toBeInTheDocument();
-    expect(screen.getByText(/online/i)).toBeInTheDocument();
+    // Exact match on the status pill. A loose /online/i also catches the
+    // WARP-1712 control cards' copy ("…access point that's online"), which
+    // isn't what this test is about.
+    expect(screen.getByText("Online")).toBeInTheDocument();
   });
 
   it("highlights AWAITING_APPROVAL above ONLINE so the operator sees action-required first", async () => {
@@ -147,5 +163,49 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
     // fallback name must NOT carry the "Pi5" framing.
     expect(screen.getByText(/AP \(12:34:56\)/i)).toBeInTheDocument();
     expect(screen.queryByText(/Pi5/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * WARP-1712 — the founder's ask: the AP belongs to the network, so it lives
+   * in the extender surface AND is controllable there, not just listed.
+   */
+  describe("the AP as controllable infrastructure", () => {
+    it("renders the AP Wi-Fi + band-steering controls once one is ONLINE", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      renderPanel();
+      expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
+      expect(screen.getByText("Band steering")).toBeInTheDocument();
+    });
+
+    it("identifies it as Droplet infrastructure, not a generic device", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      renderPanel();
+      // The vendor badge is the "whose hardware is this" signal (ADR-024 §4).
+      // Exact match — the control cards' copy also mentions Droplet.
+      expect(await screen.findByText("Droplet")).toBeInTheDocument();
+    });
+
+    it("hides the controls when no Droplet AP is ONLINE — no fake surface", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "AWAITING_APPROVAL" })],
+      });
+      renderPanel();
+      await screen.findByText(/approve/i);
+      expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
+      expect(screen.queryByText("Band steering")).not.toBeInTheDocument();
+    });
+
+    it("hides the controls for a vendor-managed AP — its controller owns them", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "UNIFI", vendor: "Ubiquiti" })],
+      });
+      renderPanel();
+      await screen.findByText("Upstairs");
+      expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
+    });
   });
 });

@@ -44,6 +44,18 @@ vi.mock("@/lib/api", () => ({
   approveApDevice: vi.fn(),
   decommissionApDevice: vi.fn(),
   fetchNetworkOperation: vi.fn(),
+  // WARP-1712: the panel also renders live AP radio detail + the shared AP
+  // Wi-Fi / band-steering controls. Honest "nothing to show" defaults keep
+  // the approve/decommission flows under test unchanged.
+  fetchApWirelessDetail: vi.fn().mockResolvedValue({ supported: false, radios: [] }),
+  fetchApWifi: vi.fn().mockResolvedValue({
+    supported: false, ssid: null, fiveGhzSsid: null, key: null,
+    encryption: null, bandSteering: null, apCount: 0, inSync: true,
+  }),
+  setApWifi: vi.fn(),
+  fetchBandSteering: vi.fn().mockResolvedValue({ supported: false, enabled: false }),
+  setBandSteering: vi.fn(),
+  confirmNetworkCommand: vi.fn(),
 }));
 
 import {

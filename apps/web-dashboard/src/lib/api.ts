@@ -1687,6 +1687,102 @@ export async function setBandSteering(enabled: boolean): Promise<NetworkCommandR
   return data;
 }
 
+// ── WARP-1712: the access point's own Wi-Fi ──
+//
+// Read live off the AP every time — there is no cached copy anywhere, so the
+// Network tab's form and the Coverage Extenders card can never disagree.
+
+/** One radio on the AP, config joined with live iwinfo state. */
+export interface ApRadioInfo {
+  section: string;
+  radio: string | null;
+  /** '2g' / '5g' / '6g' as the AP reports it. */
+  band: string | null;
+  ssid: string | null;
+  encryption: string | null;
+  /** Configured channel — 'auto' is a legal value. */
+  channel: string | null;
+  htmode: string | null;
+  disabled: boolean;
+  /** The interface that owns the household name (the one writes target). */
+  primary: boolean;
+  ifname: string | null;
+  up: boolean | null;
+  live_channel: number | null;
+  live_htmode: string | null;
+  clients: number | null;
+}
+
+export interface ApDeviceHardwareInfo {
+  model: string | null;
+  firmware: string | null;
+  hostname: string | null;
+  uptime_seconds: number | null;
+}
+
+/** Household AP Wi-Fi. `supported: false` = no approved Droplet AP online. */
+export interface ApWifiStatus {
+  supported: boolean;
+  ssid: string | null;
+  /** What the AP names the 5 GHz network (`<ssid>-5g` when steering is off). */
+  fiveGhzSsid: string | null;
+  /** The live per-unit passphrase, revealable rather than ssh-only. */
+  key: string | null;
+  encryption: string | null;
+  bandSteering: boolean | null;
+  apCount: number;
+  /** False = the online APs aren't all broadcasting the same name. */
+  inSync: boolean;
+}
+
+/** Per-AP live detail behind a Coverage Extenders card. */
+export interface ApWirelessDetail {
+  mac: string;
+  supported: boolean;
+  ap_detail?: string;
+  band_steering?: boolean | null;
+  ssid?: string | null;
+  key?: string | null;
+  encryption?: string | null;
+  five_ghz_ssid?: string | null;
+  radios: ApRadioInfo[];
+  device?: ApDeviceHardwareInfo;
+}
+
+export async function fetchApWifi(): Promise<ApWifiStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ap`);
+  if (!res.ok) throw new Error(`Failed to fetch access point Wi-Fi: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Set the AP's network name and/or passphrase. A name-only save is Tier 1 and
+ * applies immediately; a save carrying a passphrase is Tier 2 and answers 202
+ * `confirmation_required` — the caller confirms, then polls the operation.
+ */
+export async function setApWifi(body: {
+  ssid?: string;
+  key?: string;
+}): Promise<NetworkCommandResult & { ssid?: string | null; fiveGhzSsid?: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ap`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throwNetworkWriteError(data, res.status, "Failed to update access point Wi-Fi");
+  }
+  return data;
+}
+
+export async function fetchApWirelessDetail(mac: string): Promise<ApWirelessDetail> {
+  // Colons in a MAC are legal unencoded in a path segment (RFC 3986 §3.3).
+  const res = await authFetch(`${BASE}/api/aps/${mac}/wireless`);
+  if (!res.ok) throw new Error(`Failed to fetch access point radios: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
