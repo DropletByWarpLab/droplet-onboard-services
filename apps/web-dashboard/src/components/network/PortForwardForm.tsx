@@ -201,9 +201,9 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">Add port forward</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline text-[color:var(--text)] mb-1">Add port forward</h3>
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Send traffic that arrives on an external port straight to a device on
         your network — for example to reach a camera or game server from
         outside. Only forward ports you understand; each one opens a path from
@@ -214,7 +214,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
         <div>
           <label
             htmlFor="pf-name"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
           >
             Name
           </label>
@@ -224,7 +224,13 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Front-door camera"
-            className="dp-input"
+            className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             maxLength={NAME_MAX}
             autoComplete="off"
             spellCheck={false}
@@ -236,7 +242,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="pf-src-port"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               External port
             </label>
@@ -247,7 +253,13 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={srcPort}
               onChange={(e) => setSrcPort(e.target.value)}
               placeholder="8080"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               disabled={saving}
             />
@@ -255,7 +267,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="pf-proto"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Protocol
             </label>
@@ -263,7 +275,13 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               id="pf-proto"
               value={proto}
               onChange={(e) => setProto(e.target.value as Proto)}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               disabled={saving}
             >
               {PROTOS.map((p) => (
@@ -279,7 +297,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="pf-dest-ip"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Internal device IP
             </label>
@@ -290,7 +308,13 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={destIp}
               onChange={(e) => setDestIp(e.target.value)}
               placeholder="192.168.50.20"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -299,7 +323,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="pf-dest-port"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Internal port
             </label>
@@ -310,7 +334,13 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={destPort}
               onChange={(e) => setDestPort(e.target.value)}
               placeholder="80"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               disabled={saving}
             />
@@ -319,12 +349,12 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
 
         {/* Plain-language preview of the rule being created. */}
         {(srcPort.trim() || destIp.trim() || destPort.trim()) && (
-          <div className="flex items-center gap-2 type-footnote text-label-tertiary">
-            <span className="font-mono text-label-secondary">
+          <div className="flex items-center gap-2 type-footnote text-[color:var(--text-muted)]">
+            <span className="font-mono text-[color:var(--text-muted)]">
               :{srcPort.trim() || "?"} ({PROTO_LABEL[proto]})
             </span>
             <ArrowRight size={14} aria-hidden="true" />
-            <span className="font-mono text-label-secondary">
+            <span className="font-mono text-[color:var(--text-muted)]">
               {destIp.trim() || "?"}:{destPort.trim() || "?"}
             </span>
           </div>
@@ -334,7 +364,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
           type="button"
           onClick={handleAdd}
           disabled={saving}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving ? (
             <Loader2 size={16} className="animate-spin" />
@@ -348,7 +378,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2
             size={14}
@@ -363,7 +393,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
         >
           <AlertCircle
             size={14}

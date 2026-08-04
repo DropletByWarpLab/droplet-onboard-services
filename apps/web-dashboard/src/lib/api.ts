@@ -6921,3 +6921,198 @@ export async function putAccessExceptions(
   }
   return res.json();
 }
+
+// --- Team chat (WARP-1683, /messages) ---
+
+/**
+ * UX review (WARP-1683): the Messages surface renders `err.message`
+ * verbatim, so raw status codes / server error tokens must never ride on
+ * the thrown Error. Every team-chat helper funnels failures here — the
+ * diagnostic detail goes to the console, the user gets plain copy.
+ */
+async function teamChatFail(
+  op: string,
+  userMessage: string,
+  res: Response,
+): Promise<never> {
+  const detail = await res.text().catch(() => "");
+  console.error(`[team-chat] ${op} failed: ${res.status} ${detail}`);
+  throw new Error(userMessage);
+}
+
+export interface TeamChatContact {
+  id: string;
+  displayName: string;
+  username: string;
+  role: string;
+}
+
+export type TeamChatMessageKind = "text" | "file_share" | "ai_chat_share";
+
+export interface TeamChatMessage {
+  id: string;
+  threadId: string;
+  senderId: string;
+  senderDisplayName: string | null;
+  kind: TeamChatMessageKind;
+  /** Text body, or the forward's optional caption. */
+  body: string | null;
+  sharedNcFileId: number | null;
+  sharedFileName: string | null;
+  sharedFilePath: string | null;
+  sharedChatSessionId: string | null;
+  createdAt: string;
+}
+
+export interface TeamChatThreadSummary {
+  id: string;
+  kind: "direct" | "group";
+  title: string | null;
+  createdById: string;
+  createdAt: string;
+  lastMessageAt: string;
+  participants: Array<{
+    userId: string;
+    displayName: string | null;
+    username: string | null;
+  }>;
+  lastMessage: TeamChatMessage | null;
+  unreadCount: number;
+}
+
+export interface TeamChatTranscript {
+  title: string | null;
+  messages: Array<{ role: string; content: string; createdAt: string }>;
+}
+
+export type TeamChatSendBody =
+  | { kind: "text"; body: string }
+  | {
+      kind: "file_share";
+      ncFileId: number;
+      fileName: string;
+      filePath: string;
+      caption?: string;
+    }
+  | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };
+
+export async function fetchTeamChatContacts(): Promise<TeamChatContact[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/contacts`);
+  if (!res.ok) {
+    return teamChatFail("contacts", "Couldn't load people. Try again.", res);
+  }
+  const body = (await res.json()) as { contacts: TeamChatContact[] };
+  return body.contacts;
+}
+
+export async function fetchTeamChatThreads(): Promise<TeamChatThreadSummary[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`);
+  if (!res.ok) {
+    return teamChatFail("threads", "Couldn't load conversations. Try again.", res);
+  }
+  const body = (await res.json()) as { threads: TeamChatThreadSummary[] };
+  return body.threads;
+}
+
+/** Create a DM/group. The server dedupes direct pairs — a repeat create
+ *  returns the existing thread (200) instead of a new row (201). */
+export async function createTeamChatThread(args: {
+  kind: "direct" | "group";
+  participantIds: string[];
+  title?: string;
+}): Promise<{ id: string }> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    return teamChatFail(
+      "create-thread",
+      "Couldn't start the conversation. Try again.",
+      res,
+    );
+  }
+  const body = (await res.json()) as { thread: { id: string } };
+  return body.thread;
+}
+
+export async function fetchTeamChatMessages(
+  threadId: string,
+  opts: { cursor?: string; limit?: number } = {},
+): Promise<{ messages: TeamChatMessage[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const qsStr = qs.toString();
+  const suffix = qsStr.length > 0 ? `?${qsStr}` : "";
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages${suffix}`,
+  );
+  if (!res.ok) {
+    return teamChatFail("messages", "Couldn't load messages. Try again.", res);
+  }
+  return res.json() as Promise<{
+    messages: TeamChatMessage[];
+    nextCursor: string | null;
+  }>;
+}
+
+export async function sendTeamChatMessage(
+  threadId: string,
+  body: TeamChatSendBody,
+): Promise<TeamChatMessage> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    return teamChatFail("send", "Couldn't send. Try again.", res);
+  }
+  const out = (await res.json()) as { message: TeamChatMessage };
+  return out.message;
+}
+
+export async function markTeamChatThreadRead(threadId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/read`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    return teamChatFail("mark-read", "Couldn't update read status.", res);
+  }
+}
+
+export async function fetchTeamChatTranscript(
+  messageId: string,
+): Promise<TeamChatTranscript> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/messages/${encodeURIComponent(messageId)}/transcript`,
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "transcript",
+      "Couldn't open the transcript. Try again.",
+      res,
+    );
+  }
+  return res.json() as Promise<TeamChatTranscript>;
+}
+
+export async function fetchTeamChatUnreadCount(): Promise<number> {
+  const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
+  // Review: the sidebar polls this on EVERY page every ~20s. With the
+  // team_chat module off, the gate 404s the whole surface — that's an
+  // expected steady state, not an error: a quiet zero, no console spam.
+  // (The poll keeps running, so re-enabling the module recovers alone.)
+  if (res.status === 404) return 0;
+  if (!res.ok) {
+    return teamChatFail("unread-count", "Couldn't load unread count.", res);
+  }
+  const body = (await res.json()) as { total: number };
+  return body.total;
+}

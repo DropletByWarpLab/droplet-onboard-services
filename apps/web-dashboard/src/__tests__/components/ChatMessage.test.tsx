@@ -12,6 +12,7 @@ vi.mock("next/link", () => ({
 }));
 
 import { ChatMessage } from "@/components/ChatMessage";
+import { REASONING_STEP_SEPARATOR } from "@/components/chat/reasoning-trace";
 import type {
   ChatMessage as ChatMessageType,
   ChatToolCall,
@@ -731,6 +732,201 @@ describe("ChatMessage", () => {
       expect(
         screen.queryByRole("button", { name: /thought process/i }),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  /**
+   * WARP-1605 — Romain: "make sure that 'new messages' are shown between
+   * thinking and actual answers from the LLM."
+   *
+   * Before this, one bubble carried the collapsed trace AND the answer, with
+   * nothing marking where the answer began. A turn that produced reasoning now
+   * renders TWO rows off the SAME message record — thinking, then answer — so
+   * the boundary exists live and on reload, with no wire or DB change.
+   */
+  describe("thinking / answer separation (WARP-1605)", () => {
+    const TWO_STEPS = [
+      "We need the invoice folder first.",
+      "Now summarise what came back.",
+    ].join(REASONING_STEP_SEPARATOR);
+
+    const withReasoning = {
+      id: "asst-1605",
+      role: "assistant" as const,
+      content: "Here are your invoices.",
+      reasoning: TWO_STEPS,
+    };
+
+    it("splits the turn into a thinking row followed by the answer row", () => {
+      const { container } = render(<ChatMessage message={withReasoning} />);
+      const rows = container.querySelectorAll(".msg");
+      expect(rows).toHaveLength(2);
+
+      const [thinking, answer] = Array.from(rows);
+      expect(thinking).toHaveAttribute("data-testid", "assistant-process");
+      // The boundary is structural: the answer is in a bubble of its own and
+      // no part of it bleeds into the thinking row.
+      expect(thinking.querySelector(".msg-bubble")).toBeNull();
+      expect(thinking.textContent).not.toContain("Here are your invoices.");
+      expect(answer.querySelector(".msg-bubble")).not.toBeNull();
+      expect(answer.textContent).toContain("Here are your invoices.");
+      // …and the disclosure is NOT in the answer bubble any more.
+      expect(
+        answer.querySelector('[data-testid="reasoning-disclosure"]'),
+      ).toBeNull();
+    });
+
+    it("keeps the trace collapsed by default and expands to per-step blocks", () => {
+      render(<ChatMessage message={withReasoning} />);
+      const toggle = screen.getByRole("button", { name: /thought process/i });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText(/invoice folder/)).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      const steps = screen.getAllByTestId("reasoning-step");
+      expect(steps).toHaveLength(2);
+      expect(steps[0].textContent).toContain("We need the invoice folder");
+      expect(steps[1].textContent).toContain("Now summarise what came back");
+    });
+
+    it("moves the tool-call chips into the thinking row", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            ...withReasoning,
+            toolCalls: [
+              { id: "tc-1", name: "search_files", args: {}, ok: true },
+            ],
+          }}
+        />,
+      );
+      const [thinking, answer] = Array.from(container.querySelectorAll(".msg"));
+      // Tool calls are process, not answer.
+      expect(thinking.querySelector('[data-tool-call-id="tc-1"]')).not.toBeNull();
+      expect(answer.querySelector('[data-tool-call-id="tc-1"]')).toBeNull();
+    });
+
+    it("leaves a turn with NO reasoning exactly as it was — one row, chips in the bubble", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-plain",
+            role: "assistant",
+            content: "Hi.",
+            toolCalls: [
+              { id: "tc-2", name: "list_files", args: {}, ok: true },
+            ],
+          }}
+        />,
+      );
+      const rows = container.querySelectorAll(".msg");
+      expect(rows).toHaveLength(1);
+      expect(
+        container.querySelector('[data-testid="assistant-process"]'),
+      ).toBeNull();
+      expect(
+        rows[0].querySelector(".msg-bubble [data-tool-call-id='tc-2']"),
+      ).not.toBeNull();
+    });
+
+    it("renders a pre-WARP-1602 fused row as-is — no retro-split", () => {
+      // Rows written before the leak fix have the analysis inside `content`
+      // and a NULL reasoning column. There is nothing to separate, and
+      // guessing where the answer starts would corrupt real answers.
+      const fused =
+        "We need to answer the user's question about invoices. " +
+        "The invoices are in /Finance.";
+      const { container } = render(
+        <ChatMessage
+          message={{ id: "asst-old", role: "assistant", content: fused }}
+        />,
+      );
+      expect(container.querySelectorAll(".msg")).toHaveLength(1);
+      expect(
+        screen.queryByRole("button", { name: /thought process/i }),
+      ).not.toBeInTheDocument();
+      expect(container.textContent).toContain(fused);
+    });
+
+    it("shows the thinking row while the answer is still pending, then a new answer bubble", () => {
+      // Live: reasoning has landed, the first answer token has not. The
+      // thinking row is up and the answer's place is held by the indicator —
+      // the thinking block never morphs into the answer.
+      const { container, rerender } = render(
+        <ChatMessage
+          message={{
+            id: "asst-live",
+            role: "assistant",
+            content: "",
+            reasoning: TWO_STEPS,
+          }}
+          isStreaming
+        />,
+      );
+      expect(
+        container.querySelector('[data-testid="assistant-process"]'),
+      ).not.toBeNull();
+      expect(container.querySelector(".msg-bubble")).toBeNull();
+      expect(container.querySelector(".ds-thinking")).not.toBeNull();
+
+      // First answer token: the indicator becomes a real bubble BELOW the
+      // (unchanged) thinking row.
+      rerender(
+        <ChatMessage
+          message={{
+            id: "asst-live",
+            role: "assistant",
+            content: "Here",
+            reasoning: TWO_STEPS,
+          }}
+          isStreaming
+        />,
+      );
+      expect(container.querySelector(".ds-thinking")).toBeNull();
+      const rows = container.querySelectorAll(".msg");
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toHaveAttribute("data-testid", "assistant-process");
+      expect(rows[1].textContent).toContain("Here");
+    });
+
+    it("still shows the cold-load copy under the thinking row", () => {
+      // WARP-903's model_loading window is cleared by any later event, but a
+      // turn that reaches it with reasoning already in hand must keep both.
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-cold",
+            role: "assistant",
+            content: "",
+            reasoning: TWO_STEPS,
+            modelLoading: { model: "gpt-oss:20b", sizeGb: 13.4 },
+          }}
+          isStreaming
+        />,
+      );
+      expect(
+        container.querySelector('[data-testid="assistant-process"]'),
+      ).not.toBeNull();
+      expect(screen.getByText(/Loading gpt-oss:20b \(13.4 GB\)/)).toBeInTheDocument();
+    });
+
+    it("never renders a thinking row for a user turn", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "user-1",
+            role: "user",
+            content: "Where are my invoices?",
+            // Defensive: the field is assistant-only, but a bad rehydrate
+            // must not sprout an assistant-shaped row on a user message.
+            reasoning: TWO_STEPS,
+          }}
+        />,
+      );
+      expect(container.querySelectorAll(".msg")).toHaveLength(1);
+      expect(
+        container.querySelector('[data-testid="assistant-process"]'),
+      ).toBeNull();
     });
   });
 

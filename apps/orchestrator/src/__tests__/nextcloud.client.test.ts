@@ -18,6 +18,10 @@ vi.mock("../config.js", () => ({
 }));
 
 import {
+  ncListFiles,
+  ncUploadFile,
+  ncDownloadFile,
+  ncCreateDirectory,
   ncMoveFile,
   ncCopyFile,
   ncGetFileId,
@@ -38,6 +42,7 @@ import {
   ncListSharedWithMe,
   ncListOutboundShares,
   ncEnsureGroup,
+  ncDeleteFile,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -495,6 +500,20 @@ describe("nextcloud.client — search and recents", () => {
   </d:response>
 </d:multistatus>`;
 
+  /**
+   * The `<d:href>` SEARCH scope is a URL path embedded in an XML document, so a
+   * username has to survive BOTH layers: percent-encoding first (it is one path
+   * segment) and XML escaping second. `[user, expected encoded segment]`.
+   */
+  const scopeUserCases: Array<[string, string]> = [
+    ["a&b", "a%26b"],
+    ["a<b", "a%3Cb"],
+    ["a>b", "a%3Eb"],
+    ["bob smith", "bob%20smith"],
+    ["tag#1", "tag%231"],
+    ["100%done", "100%25done"],
+  ];
+
   describe("ncSearchFiles", () => {
     it("issues SEARCH with basicsearch wrapping a LIKE pattern", async () => {
       const fetchMock = vi
@@ -552,6 +571,26 @@ describe("nextcloud.client — search and recents", () => {
 
       expect(fetchMock.mock.calls[0][1].body).toContain("<d:nresults>5</d:nresults>");
     });
+
+    it.each(scopeUserCases)(
+      "percent-encodes then XML-escapes the username %j in the search scope href",
+      async (user, encoded) => {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+        global.fetch = fetchMock as unknown as typeof fetch;
+
+        await ncSearchFiles("token", user, { query: "q" });
+
+        const body = fetchMock.mock.calls[0][1].body as string;
+        expect(body).toContain(`<d:href>/files/${encoded}</d:href>`);
+        // The raw username must never reach the document — that is either an
+        // XML injection (`&`, `<`, `>`) or a wrong-scope address (` `, `#`, `%`).
+        expect(body).not.toContain(`/files/${user}`);
+        // Encode-then-escape, not escape-then-encode: the latter yields `%26amp%3B`.
+        expect(body).not.toContain("amp%3B");
+      }
+    );
   });
 
   describe("ncListRecents", () => {
@@ -600,6 +639,23 @@ describe("nextcloud.client — search and recents", () => {
       expect(items[0].name).toBe("newer.txt");
       expect(items[1].name).toBe("older.txt");
     });
+
+    it.each(scopeUserCases)(
+      "percent-encodes then XML-escapes the username %j in the recents scope href",
+      async (user, encoded) => {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+        global.fetch = fetchMock as unknown as typeof fetch;
+
+        await ncListRecents("token", user, 10);
+
+        const body = fetchMock.mock.calls[0][1].body as string;
+        expect(body).toContain(`<d:href>/files/${encoded}</d:href>`);
+        expect(body).not.toContain(`/files/${user}`);
+        expect(body).not.toContain("amp%3B");
+      }
+    );
   });
 });
 
@@ -973,5 +1029,245 @@ describe("nextcloud.client — ncEnsureGroup (WARP-989)", () => {
     ) as unknown as typeof fetch;
 
     await expect(ncEnsureGroup("household")).rejects.toThrow(/invalid response/);
+  });
+});
+
+/**
+ * WARP-1682 — DELETE is idempotent (RFC 9110 §9.2.2): the caller asks for an
+ * end state ("this path must not exist"), not for a state transition. A 404
+ * means that end state already holds, so it is a SUCCESS, not a failure.
+ *
+ * Treating it as a failure is what produced the reported symptom — an error
+ * toast over a file that really was deleted. The resource genuinely can be
+ * gone by the time our DELETE lands: a retry, a second tab, the file indexer,
+ * or the trashbin race that `runBulk` in routes/files.ts:2404 documents
+ * ("one of the requests can 500 while the file ends up half-moved").
+ *
+ * The outcome is still reported back so callers can tell the two apart for
+ * logging without either being an error.
+ */
+describe("nextcloud.client — ncDeleteFile idempotence (WARP-1682)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("issues DELETE at the WebDAV path and reports 'deleted' on 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 204 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/report.pdf")).resolves.toBe("deleted");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://nextcloud.test/remote.php/dav/files/alice/docs/report.pdf");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("reports 'already-absent' on 404 instead of throwing", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 404 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/gone.pdf")).resolves.toBe("already-absent");
+  });
+
+  it("still throws on 423 Locked — the file is NOT gone and the caller must hear about it", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 423 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/locked.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 423/,
+    );
+  });
+
+  it("still throws on 403 Forbidden", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 403 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/nope.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 403/,
+    );
+  });
+
+  it("still throws on 500 — the trashbin race leaves the outcome unknown, so it is not success", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 500 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/racy.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 500/,
+    );
+  });
+});
+
+// ── WebDAV URL percent-encoding ──
+
+describe("nextcloud.client — WebDAV URL percent-encoding", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  const DAV = "http://nextcloud.test/remote.php/dav/files";
+
+  /**
+   * Characters that change which resource a URL addresses when interpolated
+   * raw: `#` truncates at the fragment, `?` starts a query string, a bare `%`
+   * is an invalid escape, `+` may decode to a space, `&` and space are simply
+   * not path-legal. Non-ASCII must be UTF-8 percent-encoded.
+   */
+  const NASTY: Array<[label: string, name: string, encoded: string]> = [
+    ["a space", "my report.txt", "my%20report.txt"],
+    ["a hash", "note#1.txt", "note%231.txt"],
+    ["a question mark", "what?.txt", "what%3F.txt"],
+    ["a percent", "100%.txt", "100%25.txt"],
+    ["a plus", "a+b.txt", "a%2Bb.txt"],
+    ["an ampersand", "r&d.txt", "r%26d.txt"],
+    ["a non-ASCII char", "résumé.txt", "r%C3%A9sum%C3%A9.txt"],
+  ];
+
+  function okFetch(status = 204, text = "<d:multistatus/>") {
+    const mock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status, text }));
+    global.fetch = mock as unknown as typeof fetch;
+    return mock;
+  }
+
+  describe("ncDeleteFile", () => {
+    for (const [label, name, encoded] of NASTY) {
+      it(`encodes ${label} in the DELETE target`, async () => {
+        const fetchMock = okFetch(204);
+        await ncDeleteFile("token", "alice", `/docs/${name}`);
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe(`${DAV}/alice/docs/${encoded}`);
+        expect(init.method).toBe("DELETE");
+      });
+    }
+  });
+
+  describe("ncDownloadFile", () => {
+    for (const [label, name, encoded] of NASTY) {
+      it(`encodes ${label} in the GET target`, async () => {
+        const fetchMock = okFetch(200);
+        await ncDownloadFile("token", "alice", `/docs/${name}`);
+        expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/docs/${encoded}`);
+      });
+    }
+  });
+
+  describe("ncUploadFile", () => {
+    for (const [label, name, encoded] of NASTY) {
+      it(`encodes ${label} in the PUT target`, async () => {
+        const fetchMock = okFetch(201);
+        await ncUploadFile("token", "alice", "/docs", name, Buffer.from("x"));
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe(`${DAV}/alice/docs/${encoded}`);
+        expect(init.method).toBe("PUT");
+      });
+    }
+  });
+
+  describe("ncListFiles", () => {
+    for (const [label, name, encoded] of NASTY) {
+      it(`encodes ${label} in the PROPFIND target`, async () => {
+        const fetchMock = okFetch(207);
+        await ncListFiles("token", "alice", `/${name}`);
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe(`${DAV}/alice/${encoded}`);
+        expect(init.method).toBe("PROPFIND");
+      });
+    }
+  });
+
+  describe("ncCreateDirectory", () => {
+    it("encodes every segment of a nested MKCOL path", async () => {
+      const fetchMock = okFetch(201);
+      await ncCreateDirectory("token", "alice", "/R&D/Q1 2026/100% done");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${DAV}/alice/R%26D/Q1%202026/100%25%20done`);
+      expect(init.method).toBe("MKCOL");
+    });
+  });
+
+  describe("ncMoveFile", () => {
+    it("encodes both the request URL and the Destination header", async () => {
+      const fetchMock = okFetch(201);
+      await ncMoveFile("token", "alice", "/a/old #1.txt", "/b/new ?2.txt");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${DAV}/alice/a/old%20%231.txt`);
+      expect(init.headers.Destination).toBe(`${DAV}/alice/b/new%20%3F2.txt`);
+    });
+  });
+
+  describe("ncSetFavorite", () => {
+    it("encodes the PROPPATCH target", async () => {
+      const fetchMock = okFetch(207);
+      await ncSetFavorite("token", "alice", "/notes/todo #3.md", true);
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/notes/todo%20%233.md`);
+    });
+  });
+
+  describe("path/user structure", () => {
+    it("preserves `/` as the segment separator", async () => {
+      const fetchMock = okFetch(204);
+      await ncDeleteFile("token", "alice", "/a/b/c.txt");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/a/b/c.txt`);
+    });
+
+    it("strips leading slashes before encoding", async () => {
+      const fetchMock = okFetch(204);
+      await ncDeleteFile("token", "alice", "///a b.txt");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/a%20b.txt`);
+    });
+
+    it("encodes the user component", async () => {
+      const fetchMock = okFetch(204);
+      await ncDeleteFile("token", "a b#c", "/x.txt");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/a%20b%23c/x.txt`);
+    });
+
+    it("keeps the REPORT root URL for ncListFavorites unchanged", async () => {
+      const fetchMock = okFetch(207);
+      await ncListFavorites("token", "alice");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/`);
+    });
+
+    it("does not double-encode a path that already contains a literal percent", async () => {
+      // "%23" as literal filename text must become "%2523", not stay "%23".
+      const fetchMock = okFetch(204);
+      await ncDeleteFile("token", "alice", "/%23literal.txt");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${DAV}/alice/%2523literal.txt`);
+    });
+  });
+
+  describe("PROPFIND href decoding", () => {
+    it("decodes percent-encoded hrefs back into raw names and paths", async () => {
+      const xml = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/docs/</d:href>
+    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/docs/r%C3%A9sum%C3%A9%20%231%20100%25.txt</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Mon, 01 Apr 2024 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>7</d:getcontentlength>
+      <d:getcontenttype>text/plain</d:getcontenttype>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: xml })) as unknown as typeof fetch;
+
+      const entries = await ncListFiles("token", "alice", "/docs");
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0].name).toBe("résumé #1 100%.txt");
+      expect(entries[0].path).toBe("/docs/résumé #1 100%.txt");
+    });
   });
 });

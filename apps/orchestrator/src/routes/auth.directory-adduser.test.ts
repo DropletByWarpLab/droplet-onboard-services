@@ -53,6 +53,9 @@ vi.mock("../services/nextcloud.client.js", () => {
     ncGetCurrentUser: vi.fn(),
     ncCreateUser: vi.fn().mockResolvedValue(undefined),
     ncDeleteUser: vi.fn(),
+    // WARP-1558: the admin-tier create path ensures `droplet-admins` exists
+    // before OCS is asked to provision the account into it.
+    ncEnsureGroup: vi.fn().mockResolvedValue(undefined),
     ncListUsers: vi.fn(),
     ncUpdateUser: vi.fn(),
     ncSetUserEnabled: vi.fn(),
@@ -384,13 +387,39 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       expect(row.role).toBe("admin");
       // buildNcGroups("admin", "household") → NC admin group + household,
       // exactly like the invite-accept path (WARP-883 mapping).
+      // WARP-1558: plus `droplet-admins`. This route is exactly how the .87
+      // box's admin-tier users were created — and why none of them were ever
+      // in the group, leaving ADR-029 §2.5 Tier-1 see-all inert on a box whose
+      // groupfolders were otherwise correctly provisioned.
       expect(nc.ncCreateUser).toHaveBeenCalledWith(
         expect.anything(),
         "ada",
         "Ada-secret123",
         undefined,
-        ["admin", "household"],
+        ["admin", "droplet-admins", "household"],
       );
+      // The group is created lazily by the department provisioner, so a box
+      // with no departments has never seen it and OCS would reject the whole
+      // create-user call. Ensure precedes create.
+      expect(nc.ncEnsureGroup).toHaveBeenCalledWith("droplet-admins");
+    });
+
+    /**
+     * WARP-1558 — the ensure is scoped to the admin tier: a family/guest
+     * create must not pay an extra OCS round-trip for a group it never joins.
+     */
+    it("does NOT touch droplet-admins when creating a non-admin-tier user", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "kid@warp.test", password: "Kid-secret12345", role: "family" });
+
+      expect(res.status).toBe(201);
+      const groupsArg = (nc.ncCreateUser as any).mock.calls[0][4] as string[];
+      expect(groupsArg).not.toContain("droplet-admins");
+      expect(nc.ncEnsureGroup).not.toHaveBeenCalledWith("droplet-admins");
     });
 
     it("coerces the legacy role value 'user' to 'family'", async () => {

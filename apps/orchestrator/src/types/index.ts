@@ -138,7 +138,32 @@ export interface ChatStreamChunk {
     delta?: {
       role?: string;
       content?: string | null;
+      /**
+       * Provider-native reasoning, under all three names it ships under.
+       *
+       * WARP-1613: we only ever read `reasoning_content` — a LiteLLM/cloud
+       * spelling — but **Ollama's OpenAI-compat layer emits `reasoning`**
+       * (`ollama/openai/openai.go`: `Reasoning string \`json:"reasoning"\``,
+       * populated from `r.Message.Thinking`). So for gpt-oss the analysis
+       * channel was arriving under a name nothing looked at, and every local
+       * turn fell back to treating it as ordinary content. Reading all three
+       * costs nothing and is the difference between capturing the trace and
+       * silently dropping it.
+       *
+       * `thinking` is the native `/api/chat` spelling, tolerated here so a
+       * future transport switch needs no further change.
+       *
+       * NOTE this does not by itself restore token-by-token streaming on
+       * tool-advertising turns — WARP-1602's `deferContent` is keyed on the
+       * turn advertising tools, not on whether reasoning arrived separately.
+       * Relaxing that is deliberately NOT done here: Ollama issue #12158 has
+       * `reasoning` going missing on the turn AFTER a tool call for gpt-oss,
+       * which is exactly the agentic shape, and un-deferring on an unverified
+       * assumption would reinstate the WARP-1602 leak.
+       */
       reasoning_content?: string | null;
+      reasoning?: string | null;
+      thinking?: string | null;
       tool_calls?: Array<{
         index: number;
         id?: string;
@@ -216,6 +241,14 @@ export interface FileEntryInfo {
   size: number;
   mimeType: string | null;
   modifiedAt: string;
+  /**
+   * WARP-1683 — Nextcloud numeric fileId (oc:fileid). The listing PROPFIND
+   * has always requested it; it is now surfaced so pickers (team-chat file
+   * forwarding) can address a file by the same stable id the registry gate
+   * (`resolveFileDepartment`) keys on. Optional: absent when the PROPFIND
+   * response omits the prop.
+   */
+  ncFileId?: number;
 }
 
 export interface TrashItemInfo {
