@@ -67,7 +67,7 @@ export function GuestWifiCard() {
   });
 
   if (isLoading && !data) {
-    return <div className="dp-card animate-pulse" style={{ height: 160, background: "var(--surface-2)" }} />;
+    return <div className="card animate-pulse" style={{ height: 160, background: "var(--surface-2)" }} />;
   }
 
   // Honest unavailable state — this appliance shape can't provision a guest
@@ -87,15 +87,15 @@ export function GuestWifiCard() {
 // --- Not available on this appliance shape ---
 function GuestUnavailable() {
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-1">
-        <Users size={18} className="text-label-tertiary" />
-        <h3 className="type-headline text-label-primary">Guest Wi-Fi</h3>
-        <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-surface-secondary text-label-tertiary">
+        <Users size={18} className="text-[color:var(--text-muted)]" />
+        <h3 className="type-headline text-[color:var(--text)]">Guest Wi-Fi</h3>
+        <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-[var(--card-inner)] text-[color:var(--text-muted)]">
           Not available
         </span>
       </div>
-      <p className="type-subheadline text-label-tertiary">
+      <p className="type-subheadline text-[color:var(--text-muted)]">
         A separate visitor network isn&apos;t available on this Droplet yet.
       </p>
     </div>
@@ -143,10 +143,10 @@ function GuestActive({
   }
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-1">
         <Users size={18} className="text-system-green" />
-        <h3 className="type-headline text-label-primary">Guest Wi-Fi</h3>
+        <h3 className="type-headline text-[color:var(--text)]">Guest Wi-Fi</h3>
         <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-system-green/15 text-system-green">
           On
         </span>
@@ -159,20 +159,20 @@ function GuestActive({
       <div className="flex flex-col sm:flex-row gap-5">
         <div className="flex-1 space-y-3 min-w-0">
           <div>
-            <p className="type-caption-1 text-label-tertiary">Network name</p>
-            <p className="type-subheadline text-label-primary font-mono truncate">{ssid}</p>
+            <p className="type-caption-1 text-[color:var(--text-muted)]">Network name</p>
+            <p className="type-subheadline text-[color:var(--text)] font-mono truncate">{ssid}</p>
           </div>
           <div>
-            <p className="type-caption-1 text-label-tertiary">Password</p>
+            <p className="type-caption-1 text-[color:var(--text-muted)]">Password</p>
             <div className="flex items-center gap-2">
-              <p className="type-subheadline text-label-primary font-mono truncate">
+              <p className="type-subheadline text-[color:var(--text)] font-mono truncate">
                 {showPassword ? password : "•".repeat(Math.min(password.length, 12))}
               </p>
               <button
                 type="button"
                 onClick={() => setShowPassword((s) => !s)}
                 aria-label={showPassword ? "Hide guest password" : "Show guest password"}
-                className="text-label-tertiary hover:text-label-secondary transition-colors"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] transition-colors"
               >
                 {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
               </button>
@@ -180,7 +180,7 @@ function GuestActive({
                 type="button"
                 onClick={copyPassword}
                 aria-label="Copy guest password"
-                className="text-label-tertiary hover:text-label-secondary transition-colors"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] transition-colors"
               >
                 {copied ? <CheckCircle2 size={15} className="text-system-green" /> : <Copy size={15} />}
               </button>
@@ -191,7 +191,11 @@ function GuestActive({
             type="button"
             onClick={() => setConfirmOpen(true)}
             disabled={removing}
-            className="dp-btn-secondary flex items-center gap-2 text-system-red"
+            className="btn ghost"
+            /* `.droplet-shell .btn` pins `color` at (0,2,0), so the danger ink
+               has to come from the style attribute — same as the converted
+               access panel's destructive menu item. */
+            style={{ color: "var(--danger)" }}
           >
             {removing ? <Loader2 size={15} className="animate-spin" /> : <Power size={15} />}
             {removing ? "Turning off…" : "Turn off guest Wi-Fi"}
@@ -209,7 +213,7 @@ function GuestActive({
           <div className="p-2 bg-white rounded-md">
             <QRCodeSVG value={wifiQrPayload(ssid, password)} size={120} level="M" />
           </div>
-          <span className="type-caption-2 text-label-tertiary">Scan to join</span>
+          <span className="type-caption-2 text-[color:var(--text-muted)]">Scan to join</span>
         </div>
       </div>
 
@@ -294,12 +298,12 @@ function GuestSetup({ onConfigured }: { onConfigured: () => void }) {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-1">
-        <Users size={18} className="text-label-tertiary" />
-        <h3 className="type-headline text-label-primary">Guest Wi-Fi</h3>
+        <Users size={18} className="text-[color:var(--text-muted)]" />
+        <h3 className="type-headline text-[color:var(--text)]">Guest Wi-Fi</h3>
       </div>
-      <p className="type-subheadline text-label-tertiary mb-3">
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-3">
         A separate network for visitors. Guests get internet only — they can&apos;t
         reach your devices, cameras or files.
       </p>
@@ -310,18 +314,24 @@ function GuestSetup({ onConfigured }: { onConfigured: () => void }) {
 
       <div className="space-y-4 max-w-md">
         <div>
-          <label htmlFor="guest-ssid" className="type-subheadline text-label-secondary block mb-1.5">
+          <label htmlFor="guest-ssid" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
             Guest network name (SSID)
           </label>
           <div className="relative">
-            <Users size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary" aria-hidden="true" />
+            <Users size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]" aria-hidden="true" />
             <input
               id="guest-ssid"
               type="text"
               value={ssid}
               onChange={(e) => setSsid(e.target.value)}
               placeholder="Studio Guest"
-              className="dp-input pl-10"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={SSID_MAX}
               autoComplete="off"
               spellCheck={false}
@@ -331,18 +341,24 @@ function GuestSetup({ onConfigured }: { onConfigured: () => void }) {
         </div>
 
         <div>
-          <label htmlFor="guest-password" className="type-subheadline text-label-secondary block mb-1.5">
+          <label htmlFor="guest-password" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
             Guest password
           </label>
           <div className="relative">
-            <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary" aria-hidden="true" />
+            <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]" aria-hidden="true" />
             <input
               id="guest-password"
               type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="At least 8 characters"
-              className="dp-input pl-10 pr-10"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pl-10 pr-10"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={PSK_MAX}
               autoComplete="off"
               disabled={saving}
@@ -351,21 +367,21 @@ function GuestSetup({ onConfigured }: { onConfigured: () => void }) {
               type="button"
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide guest password" : "Show guest password"}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </div>
         </div>
 
-        <button type="button" onClick={handleSave} disabled={saving} className="dp-btn-primary flex items-center gap-2">
+        <button type="button" onClick={handleSave} disabled={saving} className="btn primary">
           {saving && <Loader2 size={16} className="animate-spin" />}
           {saving ? "Setting up…" : "Set up guest Wi-Fi"}
         </button>
       </div>
 
       {status.kind === "notice" && (
-        <div role="status" aria-live="polite" className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2">
+        <div role="status" aria-live="polite" className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2">
           <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
           <span>{status.message}</span>
         </div>

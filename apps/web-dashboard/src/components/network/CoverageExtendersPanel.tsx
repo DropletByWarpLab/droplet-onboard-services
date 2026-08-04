@@ -24,10 +24,11 @@
  * with `useReducedMotion` honored.
  *
  * Design tokens — every status pill / button / banner uses a semantic
- * token from app/globals.css (text-system-*, bg-system-*, text-label-*,
- * dp-btn-primary, dp-btn-secondary, dp-card, type-*). NO raw Tailwind
- * palette classes — those drift away from the dashboard's typography
- * and color tokens and break the home-user persona.
+ * token: the system-* state ramp from app/globals.css (text-system-*,
+ * bg-system-*) plus the indigo shell primitives and vars from
+ * components/shell (.card, .btn, var(--text), var(--card-bd), type-*).
+ * NO raw Tailwind palette classes — those drift away from the dashboard's
+ * typography and color tokens and break the home-user persona.
  *
  * Blockers resolved (WARP-446 post-QA):
  *   #2  Operation-Id polling on approve + decommission.
@@ -80,7 +81,7 @@ const STATUS_META: Record<
 > = {
   DISCOVERED: {
     label: "Discovered",
-    pillClass: "bg-label-quaternary/10 text-label-tertiary",
+    pillClass: "bg-[var(--card-inner)] text-[color:var(--text-muted)]",
     icon: Clock,
   },
   AWAITING_APPROVAL: {
@@ -105,7 +106,7 @@ const STATUS_META: Record<
   },
   DECOMMISSIONED: {
     label: "Removed",
-    pillClass: "bg-label-quaternary/10 text-label-tertiary",
+    pillClass: "bg-[var(--card-inner)] text-[color:var(--text-muted)]",
     icon: WifiOff,
   },
 };
@@ -289,9 +290,9 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
     : null;
 
   return (
-    <div className={`dp-card flex flex-col gap-3 p-4 ${ringClass}`}>
+    <div className={`card flex flex-col gap-3 ${ringClass}`}>
       <div className="flex items-start gap-3">
-        <div className="rounded-full bg-surface-secondary p-2 text-label-secondary">
+        <div className="rounded-full bg-[var(--card-inner)] p-2 text-[color:var(--text-muted)]">
           <Icon
             size={18}
             className={isSpinning ? "animate-spin" : ""}
@@ -300,7 +301,7 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="type-card-title text-label-primary font-medium truncate">
+            <span className="type-card-title text-[color:var(--text)] font-medium truncate">
               {displayNameFor(ap)}
             </span>
             <span
@@ -309,14 +310,14 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               {meta.label}
             </span>
             {/* ADR-024 §4: quiet, text-only vendor badge. Neutral
-                (label tokens + separator border) so it reads as metadata
+                (muted ink + hairline border) so it reads as metadata
                 and never competes with the semantic status pill — and so
                 it carries meaning by text, not color (a11y). */}
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium border border-separator text-label-secondary">
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium border border-[var(--card-bd)] text-[color:var(--text-muted)]">
               {vendorLabelFor(ap)}
             </span>
           </div>
-          <div className="type-footnote text-label-tertiary mt-0.5">
+          <div className="type-footnote text-[color:var(--text-muted)] mt-0.5">
             {ap.model ? `${ap.model} · ` : ""}
             Last seen {timeAgo(ap.lastSeen)}
             {ap.lastIp ? ` · ${ap.lastIp}` : ""}
@@ -338,7 +339,7 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               onClick={(e) =>
                 onApprove(ap, e.currentTarget as HTMLElement)
               }
-              className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+              className="btn primary !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
               aria-label={`Approve ${displayNameFor(ap)}`}
             >
               {busy ? (
@@ -358,7 +359,7 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               onClick={(e) =>
                 onRequestRemove(ap, e.currentTarget as HTMLElement)
               }
-              className="dp-btn-secondary type-subheadline !min-h-[36px] !py-1.5 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+              className="btn ghost !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
               aria-label={`Remove ${displayNameFor(ap)}`}
             >
               <Trash2 size={14} aria-hidden /> Remove
@@ -566,13 +567,13 @@ export function CoverageExtendersPanel() {
   }
 
   return (
-    <section className="dp-card p-4 sm:p-5">
+    <section className="card">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
-          <h2 className="type-headline text-label-primary">
+          <h2 className="type-headline text-[color:var(--text)]">
             Coverage extenders
           </h2>
-          <p className="type-footnote text-label-tertiary mt-0.5">
+          <p className="type-footnote text-[color:var(--text-muted)] mt-0.5">
             Extra Wi-Fi access points around your home.
           </p>
         </div>
@@ -580,7 +581,7 @@ export function CoverageExtendersPanel() {
           ref={addHeaderRef}
           type="button"
           onClick={handleAddExtenderClick}
-          className="dp-btn-secondary type-subheadline !min-h-[36px] !py-1.5 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="btn ghost !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
         >
           <Plus size={14} aria-hidden /> Add extender
         </button>
@@ -610,10 +611,10 @@ export function CoverageExtendersPanel() {
       {opStatus.state === "pending" && (
         <div
           role="status"
-          className="mb-3 dp-card border border-system-blue/30 bg-system-blue/5 flex items-center gap-3 px-3 py-2"
+          className="mb-3 rounded-lg shadow border border-system-blue/30 bg-system-blue/5 flex items-center gap-3 px-3 py-2"
         >
           <Loader2 size={16} className="animate-spin text-system-blue" />
-          <p className="type-subheadline text-label-primary flex-1">
+          <p className="type-subheadline text-[color:var(--text)] flex-1">
             Finishing setup… the router is applying the new configuration.
           </p>
         </div>
@@ -621,14 +622,14 @@ export function CoverageExtendersPanel() {
       {opStatus.state === "rejected" && (
         <div
           role="status"
-          className="mb-3 dp-card border border-separator bg-surface-secondary flex items-center gap-3 px-3 py-2"
+          className="mb-3 rounded-lg shadow border border-[var(--card-bd)] bg-[var(--inset)] flex items-center gap-3 px-3 py-2"
         >
-          <Info size={16} className="text-label-secondary" />
+          <Info size={16} className="text-[color:var(--text-muted)]" />
           <div className="flex-1">
-            <p className="type-subheadline text-label-primary font-medium">
+            <p className="type-subheadline text-[color:var(--text)] font-medium">
               No change made
             </p>
-            <p className="type-footnote text-label-tertiary">
+            <p className="type-footnote text-[color:var(--text-muted)]">
               {opStatus.reason ??
                 "The router rejected the request, so nothing was changed."}
             </p>
@@ -636,7 +637,7 @@ export function CoverageExtendersPanel() {
           <button
             type="button"
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="btn ghost !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
             aria-label="Dismiss"
           >
             Dismiss
@@ -646,14 +647,14 @@ export function CoverageExtendersPanel() {
       {opStatus.state === "rolled_back" && (
         <div
           role="alert"
-          className="mb-3 dp-card border border-system-red/30 bg-system-red/5 flex items-center gap-3 px-3 py-2"
+          className="mb-3 rounded-lg shadow border border-system-red/30 bg-system-red/5 flex items-center gap-3 px-3 py-2"
         >
           <AlertTriangle size={16} className="text-system-red" />
           <div className="flex-1">
-            <p className="type-subheadline text-label-primary font-medium">
+            <p className="type-subheadline text-[color:var(--text)] font-medium">
               The change was rolled back
             </p>
-            <p className="type-footnote text-label-tertiary">
+            <p className="type-footnote text-[color:var(--text-muted)]">
               {opStatus.reason ??
                 "The router reverted to the previous configuration."}
             </p>
@@ -661,7 +662,7 @@ export function CoverageExtendersPanel() {
           <button
             type="button"
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="btn ghost !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
             aria-label="Dismiss"
           >
             Dismiss
@@ -676,10 +677,10 @@ export function CoverageExtendersPanel() {
       {data?.discoveredCapReached && (
         <div
           role="status"
-          className="mb-3 dp-card border border-system-orange/30 bg-system-orange/5 flex items-start gap-3 px-3 py-2"
+          className="mb-3 rounded-lg shadow border border-system-orange/30 bg-system-orange/5 flex items-start gap-3 px-3 py-2"
         >
           <AlertTriangle size={16} className="text-system-orange mt-0.5 shrink-0" />
-          <p className="type-footnote text-label-secondary flex-1">
+          <p className="type-footnote text-[color:var(--text-muted)] flex-1">
             Showing the {data.discoveredCap} most recently detected access
             points. If yours isn&apos;t listed, unplug it for a moment and
             plug it back in to refresh the list.
@@ -690,7 +691,7 @@ export function CoverageExtendersPanel() {
       {isLoading && !data ? (
         <div
           role="status"
-          className="flex items-center gap-2 text-label-tertiary text-sm py-6"
+          className="flex items-center gap-2 text-[color:var(--text-muted)] text-sm py-6"
         >
           <Loader2 size={16} className="animate-spin" aria-hidden /> Loading
           extenders…
@@ -773,13 +774,13 @@ export function CoverageExtendersPanel() {
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="flex flex-col items-center text-center py-8 px-4">
-      <div className="rounded-full bg-surface-secondary p-3 text-label-quaternary mb-3">
+      <div className="rounded-full bg-[var(--card-inner)] p-3 text-[color:var(--text-faint)] mb-3">
         <Wifi size={28} aria-hidden />
       </div>
-      <p className="type-subheadline text-label-secondary font-medium mb-1">
+      <p className="type-subheadline text-[color:var(--text-muted)] font-medium mb-1">
         No extra access points yet
       </p>
-      <p className="type-footnote text-label-tertiary max-w-md">
+      <p className="type-footnote text-[color:var(--text-muted)] max-w-md">
         Plug a compatible access point into the same network and it will appear
         here for one-tap approval — a Droplet extender, an EasyMesh access point
         (such as TP-Link), or a Ubiquiti unit. New extenders show up within 30
@@ -789,13 +790,13 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
         <button
           type="button"
           onClick={onAdd}
-          className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="btn primary !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
         >
           <Plus size={14} aria-hidden /> Add extender
         </button>
         <a
           href="/help#extenders"
-          className="type-footnote text-label-tertiary hover:text-label-primary inline-flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm"
+          className="type-footnote text-[color:var(--text-muted)] hover:text-[color:var(--text)] inline-flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
         >
           Learn more <ArrowUpRight size={12} aria-hidden />
         </a>
@@ -889,14 +890,14 @@ function ApproveExtenderDialog({
       flush
     >
       <div>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-          <h3 id={headingId} className="type-headline text-label-primary">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--card-bd)]">
+          <h3 id={headingId} className="type-headline text-[color:var(--text)]">
             Add an extender
           </h3>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm"
+            className="p-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
             aria-label="Close"
           >
             <X size={18} />
@@ -905,8 +906,8 @@ function ApproveExtenderDialog({
 
         {isEmptyMode ? (
           <div className="p-5 space-y-4">
-            <div className="rounded-md bg-system-blue/10 px-3 py-3 type-footnote text-label-secondary">
-              <p className="font-medium text-label-primary mb-1">
+            <div className="rounded-md bg-system-blue/10 px-3 py-3 type-footnote text-[color:var(--text-muted)]">
+              <p className="font-medium text-[color:var(--text)] mb-1">
                 No extenders detected yet
               </p>
               <p>
@@ -920,7 +921,7 @@ function ApproveExtenderDialog({
               <button
                 type="button"
                 onClick={onClose}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="btn primary !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
               >
                 Got it
               </button>
@@ -929,30 +930,36 @@ function ApproveExtenderDialog({
         ) : target ? (
           <div className="p-5 space-y-4">
             <div>
-              <p className="type-footnote text-label-tertiary mb-1">
+              <p className="type-footnote text-[color:var(--text-muted)] mb-1">
                 Approving
               </p>
-              <p className="type-subheadline text-label-primary font-medium">
+              <p className="type-subheadline text-[color:var(--text)] font-medium">
                 {displayNameFor(target)}
               </p>
               {target.model ? (
-                <p className="type-footnote text-label-tertiary">
+                <p className="type-footnote text-[color:var(--text-muted)]">
                   {target.model}
                 </p>
               ) : null}
             </div>
 
             <div>
-              <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+              <label className="type-caption-1 text-[color:var(--text-muted)] mb-1.5 block">
                 Network
               </label>
               <div
-                className="dp-input bg-surface-secondary text-label-secondary cursor-not-allowed select-text"
+                className="w-full px-3 py-2.5 cursor-not-allowed select-text"
+                style={{
+                  background: "var(--surface-2)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text-muted)",
+                }}
                 aria-readonly="true"
               >
                 {DEFAULT_SSID}
               </div>
-              <p className="type-caption-2 text-label-quaternary mt-1.5">
+              <p className="type-caption-2 text-[color:var(--text-faint)] mt-1.5">
                 The extender will join the same network as your main router.
               </p>
             </div>
@@ -960,7 +967,7 @@ function ApproveExtenderDialog({
             <div>
               <label
                 htmlFor="ap-approve-psk"
-                className="type-caption-1 text-label-tertiary mb-1.5 block"
+                className="type-caption-1 text-[color:var(--text-muted)] mb-1.5 block"
               >
                 WiFi password
               </label>
@@ -976,7 +983,13 @@ function ApproveExtenderDialog({
                     if (localError) setLocalError(null);
                   }}
                   placeholder="At least 8 characters"
-                  className="dp-input pr-10"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors pr-10"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   minLength={8}
                   maxLength={63}
                   aria-describedby={formatHintId}
@@ -990,7 +1003,7 @@ function ApproveExtenderDialog({
                 <button
                   type="button"
                   onClick={() => setShowPsk((v) => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
                   aria-label={showPsk ? "Hide password" : "Show password"}
                   aria-pressed={showPsk}
                 >
@@ -1003,7 +1016,7 @@ function ApproveExtenderDialog({
               </div>
               <p
                 id={formatHintId}
-                className="type-caption-2 text-label-quaternary mt-1.5"
+                className="type-caption-2 text-[color:var(--text-faint)] mt-1.5"
               >
                 Same WiFi password you use to join the network on your phone.
               </p>
@@ -1028,7 +1041,7 @@ function ApproveExtenderDialog({
                 type="button"
                 onClick={onClose}
                 disabled={submitting}
-                className="dp-btn-secondary type-subheadline !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+                className="btn ghost !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
               >
                 Cancel
               </button>
@@ -1036,7 +1049,7 @@ function ApproveExtenderDialog({
                 type="button"
                 onClick={() => void handleSubmit()}
                 disabled={submitting}
-                className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+                className="btn primary !min-h-[36px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
                 aria-busy={submitting || undefined}
               >
                 {submitting ? (

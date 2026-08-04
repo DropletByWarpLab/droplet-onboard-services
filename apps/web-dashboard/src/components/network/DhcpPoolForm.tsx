@@ -122,12 +122,12 @@ export function DhcpPoolForm() {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-1">
-        <Network size={18} className="text-label-tertiary" aria-hidden="true" />
-        <h3 className="type-headline text-label-primary">DHCP pool</h3>
+        <Network size={18} className="text-[color:var(--text-muted)]" aria-hidden="true" />
+        <h3 className="type-headline text-[color:var(--text)]">DHCP pool</h3>
       </div>
-      <p className="type-subheadline text-label-tertiary mb-4">
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         The range of addresses Droplet hands out to devices on your network, and
         how long each one lasts. Shrinking the range can disconnect devices that
         already have an address, so we ask you to confirm.
@@ -138,7 +138,7 @@ export function DhcpPoolForm() {
           <div>
             <label
               htmlFor="dhcp-pool-start"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Start
             </label>
@@ -150,14 +150,20 @@ export function DhcpPoolForm() {
               max={254}
               value={start}
               onChange={(e) => setStart(e.target.value)}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               disabled={saving || isLoading}
             />
           </div>
           <div>
             <label
               htmlFor="dhcp-pool-limit"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Pool size
             </label>
@@ -169,7 +175,13 @@ export function DhcpPoolForm() {
               max={253}
               value={limit}
               onChange={(e) => setLimit(e.target.value)}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               disabled={saving || isLoading}
             />
           </div>
@@ -178,7 +190,7 @@ export function DhcpPoolForm() {
         <div>
           <label
             htmlFor="dhcp-pool-leasetime"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
           >
             Lease time
           </label>
@@ -186,7 +198,13 @@ export function DhcpPoolForm() {
             id="dhcp-pool-leasetime"
             value={leasetime}
             onChange={(e) => setLeasetime(e.target.value)}
-            className="dp-input"
+            className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             disabled={saving || isLoading}
           >
             {LEASE_OPTIONS.map((o) => (
@@ -201,7 +219,7 @@ export function DhcpPoolForm() {
           type="button"
           onClick={handleSave}
           disabled={saving || isLoading}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving && <Loader2 size={16} className="animate-spin" />}
           {saving ? "Saving…" : "Save pool"}
@@ -211,7 +229,7 @@ export function DhcpPoolForm() {
       {status.kind === "saved" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2 size={14} className="mt-0.5 flex-shrink-0 text-system-green" aria-hidden="true" />
           <span>DHCP pool updated.</span>
