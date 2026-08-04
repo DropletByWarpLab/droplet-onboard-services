@@ -44,7 +44,12 @@ import {
   type SendOptions as EmailSendOptions,
 } from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  invalidatePrefix,
+} from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import {
   ncMintEditorSession,
@@ -929,10 +934,24 @@ export function createFilesRouter(
    * Invalidate the listing cache for one already-resolved (space, path).
    *
    * WARP-1556: goes through `listCacheKey` so the del names exactly the key
-   * the read wrote. A null key means the caller's ACL tag or the space
-   * couldn't be resolved — there is nothing to name, and nothing readable
-   * either (the read path bypasses the cache in that state), so skipping is
-   * correct.
+   * the read wrote.
+   *
+   * WARP-1682 — a null key must NOT mean "skip". The original reasoning was
+   * that there is "nothing readable either, since the read path bypasses the
+   * cache in that state", but that treats a PER-REQUEST condition as durable
+   * state. `aclCacheTag` returns null whenever `visibleDeptsForCaller` fails
+   * to resolve, which it does on any transient Prisma hiccup (it swallows the
+   * throw and reports `resolved: false`). The entry we are trying to drop was
+   * written by an EARLIER request whose ACL walk DID resolve — so a live key
+   * exists, and skipping the del pins the pre-write listing for the rest of
+   * CACHE_TTL. On a delete that means the file the user just removed is served
+   * back to them until the entry expires.
+   *
+   * Fallback: sweep every listing entry for this user. It is broader than the
+   * one key we wanted — a cache miss on the user's other directories — but
+   * over-invalidating a cache is always safe, and this only runs on the rare
+   * unresolved-visibility path. The trailing ":" keeps the prefix from
+   * matching a different user whose name merely starts the same way.
    */
   async function invalidateListing(
     req: Request,
@@ -940,7 +959,11 @@ export function createFilesRouter(
     target: SpacedPath,
   ): Promise<void> {
     const key = await listCacheKey(req, user, target);
-    if (key) await cacheDel(key);
+    if (key) {
+      await cacheDel(key);
+      return;
+    }
+    await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
   }
 
   /**
@@ -2132,10 +2155,22 @@ export function createFilesRouter(
       const filePath = await rootForSpace(prisma, space, rawPath);
 
       const user = getUser(req);
-      await ncDeleteFile(await getToken(req), user, filePath);
-
       const parentPath = path.posix.dirname(filePath) || "/";
-      await invalidateListing(req, user, { space, path: parentPath });
+
+      // WARP-1682: invalidate the parent listing whether or not the WebDAV
+      // call succeeded. A FAILED delete is precisely when the cached listing
+      // is least trustworthy — `runBulk` below documents Nextcloud's trashbin
+      // race, where a request can 500 while the file "ends up half-moved
+      // (trash entry created but source not unlinked)". Skipping the del on
+      // the throw path left that half-applied state readable out of Redis for
+      // the rest of CACHE_TTL, which is how a delete that errored could still
+      // show the file until a page reload. `bulk-delete` already invalidates
+      // unconditionally; this matches it.
+      try {
+        await ncDeleteFile(await getToken(req), user, filePath);
+      } finally {
+        await invalidateListing(req, user, { space, path: parentPath });
+      }
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });

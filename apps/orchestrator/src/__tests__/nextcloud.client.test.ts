@@ -21,7 +21,6 @@ import {
   ncListFiles,
   ncUploadFile,
   ncDownloadFile,
-  ncDeleteFile,
   ncCreateDirectory,
   ncMoveFile,
   ncCopyFile,
@@ -43,6 +42,7 @@ import {
   ncListSharedWithMe,
   ncListOutboundShares,
   ncEnsureGroup,
+  ncDeleteFile,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -978,6 +978,76 @@ describe("nextcloud.client — ncEnsureGroup (WARP-989)", () => {
     ) as unknown as typeof fetch;
 
     await expect(ncEnsureGroup("household")).rejects.toThrow(/invalid response/);
+  });
+});
+
+/**
+ * WARP-1682 — DELETE is idempotent (RFC 9110 §9.2.2): the caller asks for an
+ * end state ("this path must not exist"), not for a state transition. A 404
+ * means that end state already holds, so it is a SUCCESS, not a failure.
+ *
+ * Treating it as a failure is what produced the reported symptom — an error
+ * toast over a file that really was deleted. The resource genuinely can be
+ * gone by the time our DELETE lands: a retry, a second tab, the file indexer,
+ * or the trashbin race that `runBulk` in routes/files.ts:2404 documents
+ * ("one of the requests can 500 while the file ends up half-moved").
+ *
+ * The outcome is still reported back so callers can tell the two apart for
+ * logging without either being an error.
+ */
+describe("nextcloud.client — ncDeleteFile idempotence (WARP-1682)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("issues DELETE at the WebDAV path and reports 'deleted' on 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 204 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/report.pdf")).resolves.toBe("deleted");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://nextcloud.test/remote.php/dav/files/alice/docs/report.pdf");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("reports 'already-absent' on 404 instead of throwing", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 404 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/gone.pdf")).resolves.toBe("already-absent");
+  });
+
+  it("still throws on 423 Locked — the file is NOT gone and the caller must hear about it", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 423 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/locked.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 423/,
+    );
+  });
+
+  it("still throws on 403 Forbidden", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 403 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/nope.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 403/,
+    );
+  });
+
+  it("still throws on 500 — the trashbin race leaves the outcome unknown, so it is not success", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 500 })) as unknown as typeof fetch;
+
+    await expect(ncDeleteFile("tok", "alice", "/docs/racy.pdf")).rejects.toThrow(
+      /WebDAV DELETE failed: 500/,
+    );
   });
 });
 
