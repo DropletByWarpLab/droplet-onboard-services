@@ -1660,6 +1660,33 @@ export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
   return data;
 }
 
+/** Band-steering state of the external Droplet AP (WARP-1703). `supported`
+ *  false = no approved Droplet access point is online (or its software
+ *  predates the feature) — the card then shows an honest unavailable state. */
+export interface BandSteeringStatus {
+  supported: boolean;
+  enabled: boolean;
+}
+
+export async function fetchBandSteering(): Promise<BandSteeringStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/band-steering`);
+  if (!res.ok) throw new Error(`Failed to fetch band steering status: ${res.status}`);
+  return res.json();
+}
+
+/** Toggle band steering on the Droplet AP. Tier 1 — applies immediately;
+ *  poll the returned operationId for the apply-vs-rollback outcome. */
+export async function setBandSteering(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/band-steering`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update band steering");
+  return data;
+}
+
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
