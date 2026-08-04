@@ -26,6 +26,7 @@ const DOMAINS: ErrorDomain[] = [
   "auth",
   "files",
   "share",
+  "share-bulk",
   "chat",
   "invite",
   "calendar",
@@ -384,6 +385,139 @@ describe("translateError — share domain (WARP-1148/1149)", () => {
       "share",
     );
     expect(result.toLowerCase()).toMatch(/find that file|moved or deleted/);
+  });
+});
+
+// WARP-1659 — the same substring inference, one layer down. Nextcloud's
+// share-create checks answer 400/403 with prose, so the `share` domain matches
+// keywords to recover an actionable code. That is right for the ShareDialog,
+// which HAS a password field and an expiry picker. It is wrong for the
+// multi-select fan-out, which hardcodes `{ shareType: 3, permissions: 1 }` and
+// renders neither control: on a box with enforce-password-on-public-links
+// turned on, every row would tell the user their password doesn't meet the
+// rules — for a password they were never asked for and cannot supply, pointing
+// them away from the real cause (an instance policy only an admin can change).
+//
+// The bulk path gets its own domain. It is the `share` domain in every respect
+// except the two inferences that name a control it does not render; those keep
+// their inferred codes but answer with copy that is true of THIS flow and
+// names the remedy that exists — share the file on its own, where the controls
+// are.
+describe("translateError — share-bulk domain (WARP-1659)", () => {
+  const PASSWORD_ENFORCED = {
+    status: 403,
+    message: "OCS share create: Passwords are enforced for link shares (403)",
+  };
+  const EXPIRY_ENFORCED = {
+    status: 400,
+    message: "OCS share create: Cannot set expiration date more than 7 days in the future (400)",
+  };
+
+  it("never claims the user's password was rejected in a flow with no password field", () => {
+    const result = translateError(PASSWORD_ENFORCED, "share-bulk");
+    // The exact ShareDialog sentence must not appear here.
+    expect(result).not.toBe(translateError(PASSWORD_ENFORCED, "share"));
+    expect(result.toLowerCase()).not.toMatch(
+      /that password|your password|doesn't meet|longer, less common/,
+    );
+    expect(result).not.toContain("OCS");
+  });
+
+  it("says why the bulk run can't satisfy the password rule, and where the control is", () => {
+    const result = translateError(PASSWORD_ENFORCED, "share-bulk").toLowerCase();
+    // Not the retry fallback: the rejection is deterministic, so "try again in
+    // a moment" is the WARP-1148 defect wearing a different hat.
+    expect(result).not.toContain("try again");
+    expect(result).toContain("password");
+    // The remedy that actually exists without an admin: the single-file dialog.
+    expect(result).toMatch(/on its own|one at a time/);
+  });
+
+  it("applies the same treatment to the expiry rule", () => {
+    const result = translateError(EXPIRY_ENFORCED, "share-bulk");
+    expect(result).not.toBe(translateError(EXPIRY_ENFORCED, "share"));
+    expect(result.toLowerCase()).not.toMatch(/that expiration date|pick a different date/);
+    expect(result.toLowerCase()).toMatch(/on its own|one at a time/);
+  });
+
+  it("keeps every other share code identical to the share domain", () => {
+    // The two overrides are the whole difference. A bulk row failing for a
+    // reason the fan-out CAN be responsible for must read exactly as it does
+    // in the dialog — divergence here is how "same 403, two messages one click
+    // apart" (WARP-1148) came back.
+    const shared: unknown[] = [
+      { code: "module_disabled", status: 404 },
+      { status: 404, message: "OCS share create: Wrong path, file/folder does not exist (404)" },
+      {
+        status: 400,
+        message: "OCS share create: File shares cannot have create or delete permissions (400)",
+      },
+      { message: "Failed to fetch" },
+      { message: "The operation timed out" },
+      new Error("boom"),
+    ];
+    for (const err of shared) {
+      expect(translateError(err, "share-bulk"), JSON.stringify(err)).toBe(
+        translateError(err, "share"),
+      );
+    }
+  });
+
+  it("never renders the file-loading copy either", () => {
+    const fileLoading = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "files");
+    for (const err of [null, {}, PASSWORD_ENFORCED, EXPIRY_ENFORCED, new Error("boom")]) {
+      expect(translateError(err, "share-bulk"), JSON.stringify(err)).not.toBe(fileLoading);
+    }
+  });
+
+  // WARP-1659 × WARP-1658. WARP-1658 gave `share` a 403 entry; `share-bulk`
+  // needs the same one, because POST /files/share is role-gated and
+  // `shareBlockedReason` gates on space posture rather than role — a
+  // member/guest reaches the fan-out and every row 403s. Without it those rows
+  // get FALLBACK["share-bulk"] ("try again in a moment") — the WARP-1658 defect
+  // relocated one surface over rather than fixed.
+  it("answers a role-denial 403 the way the dialog does, not with the retry fallback", () => {
+    const BULK_FALLBACK = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "share-bulk");
+    const DENIALS: unknown[] = [
+      { status: 403 },
+      {
+        status: 403,
+        code: "Forbidden: role not permitted",
+        message: "Forbidden: role not permitted",
+      },
+    ];
+    for (const err of DENIALS) {
+      const result = translateError(err, "share-bulk");
+      expect(result, JSON.stringify(err)).not.toBe(BULK_FALLBACK);
+      expect(result.toLowerCase(), JSON.stringify(err)).not.toContain("try again");
+      expect(result.toLowerCase(), JSON.stringify(err)).not.toContain("in a moment");
+      // A reason the fan-out is not responsible for must read exactly as it
+      // does in the dialog — "same 403, two messages one click apart" is the
+      // WARP-1148 defect this whole domain exists to prevent.
+      expect(result, JSON.stringify(err)).toBe(translateError(err, "share"));
+    }
+  });
+
+  // The carve-out that makes the two tickets coexist: `share-bulk` infers from
+  // the message BEFORE it dispatches on status. Nextcloud answers a passwordless
+  // link create on an enforce-password box with OCSForbidden — a 403 carrying
+  // password prose — so without this the 403 entry above would shadow
+  // PASSWORD_REJECTED and every row would read "you don't have permission",
+  // which is false and hides the only remedy the user has.
+  it("still reaches the bulk password copy when the 403 carries password prose", () => {
+    const result = translateError(PASSWORD_ENFORCED, "share-bulk").toLowerCase();
+    expect(result).not.toBe(translateError({ status: 403 }, "share-bulk").toLowerCase());
+    expect(result).toContain("password");
+    expect(result).toMatch(/on its own|one at a time/);
+  });
+
+  it("never leaks the raw wire error string on a 403", () => {
+    const result = translateError(
+      { status: 403, code: "Forbidden: role not permitted", message: SECRET },
+      "share-bulk",
+    );
+    expect(result).not.toContain(SECRET);
+    expect(result).not.toContain("Forbidden");
   });
 });
 
