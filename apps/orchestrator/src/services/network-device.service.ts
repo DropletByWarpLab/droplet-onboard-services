@@ -84,7 +84,14 @@ const ONLINE_WINDOW_MS = 2 * 60_000;
 
 export interface LiveSnapshot {
   leases: Array<{ mac: string; ip: string; hostname?: string }>;
-  wirelessClients: Array<{ mac: string; signal?: number }>;
+  /**
+   * Every station the box can see, from the router's radios AND from each
+   * approved coverage AP's own assoclist (WARP-1715). `viaApMac` names the AP
+   * a station joined through; absent means the router's own radio. Without the
+   * AP legs, devices on a standalone AP's Wi-Fi appeared wired with no signal —
+   * they hold a router lease but appear in no router assoclist.
+   */
+  wirelessClients: Array<{ mac: string; signal?: number; viaApMac?: string }>;
 }
 
 export type LiveSnapshotFn = () => Promise<LiveSnapshot>;
@@ -148,35 +155,47 @@ export function createNetworkDeviceService(
   const inFlight = new Map<string, Promise<unknown>>();
 
   /**
-   * WARP-1712: canonical MACs of the access points Droplet itself provisions,
-   * for hiding them from the client-devices list.
+   * Canonical MACs -> identity of the access points Droplet itself provisions.
+   *
+   * WARP-1712 used this to HIDE APs from the devices grid, on the reasoning
+   * that the same hardware in two places invites renaming it in one and being
+   * confused by the other. WARP-1715 keeps the concern but not the remedy
+   * (founder call, 2026-08-04): an AP IS part of the household network and
+   * should be visible there — so the row is kept and FLAGGED
+   * (`isAccessPoint`), and the dashboard renders it in its own "Network
+   * infrastructure" group rather than mixed among the laptops. The Coverage
+   * Extenders panel remains the place you manage it.
    *
    * Never throws. The filter is cosmetic — an AP that slips through is a
    * duplicated row, whereas a rejection here would 500 the entire Devices
    * page. That trade only goes one way. It also keeps every caller's Prisma
    * stub from having to grow a table just to satisfy a display filter.
    */
-  async function infraApMacs(): Promise<Set<string>> {
-    const macs = new Set<string>();
+  async function infraApIndex(): Promise<Map<string, { name: string; model: string | null }>> {
+    const index = new Map<string, { name: string; model: string | null }>();
     try {
       const rows = await prisma.apDevice.findMany({
         where: { backend: "DROPLET_IMAGE" },
-        select: { mac: true },
+        select: { mac: true, displayName: true, model: true },
       });
       // Both tables store canonical MACs (every ingress goes through
       // `normalizeMac`), but re-normalise anyway so a row written by an
-      // older/looser path can't slip the filter on case or separators.
+      // older/looser path can't slip the index on case or separators.
       for (const ap of rows) {
         const mac = safeNormalize(ap.mac);
-        if (mac) macs.add(mac);
+        if (!mac) continue;
+        index.set(mac, {
+          name: ap.displayName?.trim() || ap.model?.trim() || "Access point",
+          model: ap.model,
+        });
       }
     } catch (err) {
       logger.warn(
         { err },
-        "network-device: AP table unreadable; access points may appear as devices",
+        "network-device: AP table unreadable; access points render as ordinary devices",
       );
     }
-    return macs;
+    return index;
   }
 
   function singleFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
@@ -229,35 +248,45 @@ export function createNetworkDeviceService(
         // filter, so if the AP table can't be reached the right outcome is
         // "the AP shows up in the list too", not a 500 that takes the whole
         // Devices page down with it. Same posture as `liveSnapshot()` above.
-        infraApMacs(),
+        infraApIndex(),
       ]);
-
-      const infraMacs = infraAps;
 
       // Build a MAC -> signal lookup from wireless clients (normalized).
       const signalByMac = new Map<string, number | undefined>();
+      const viaApByMac = new Map<string, string>();
       for (const w of snap.wirelessClients) {
         const mac = safeNormalize(w.mac);
-        if (mac) signalByMac.set(mac, w.signal);
+        if (!mac) continue;
+        signalByMac.set(mac, w.signal);
+        // WARP-1715: name the AP a station joined through, so a device on the
+        // AP's radio stops looking wired.
+        const apMac = w.viaApMac ? safeNormalize(w.viaApMac) : null;
+        if (apMac) viaApByMac.set(mac, infraAps.get(apMac)?.name ?? apMac);
       }
 
       const now = Date.now();
-      const enriched = rows
-        .filter((row) => !infraMacs.has(row.mac))
-        .map((row) => {
-          const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
-          const signal = signalByMac.get(row.mac);
-          return {
-            ...row,
-            // WARP-106: computed display flag. `lastAppliedBlocked` is the
-            // ticker-authored source of truth; fall back to `manualBlock`
-            // (user intent) before the ticker has ever run. There is no
-            // reconciler-authored `isBlocked` column anymore.
-            isBlocked: row.lastAppliedBlocked ?? row.manualBlock,
-            online,
-            signal,
-          };
-        });
+      const enriched = rows.map((row) => {
+        const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
+        const signal = signalByMac.get(row.mac);
+        const ap = infraAps.get(row.mac);
+        return {
+          ...row,
+          // WARP-106: computed display flag. `lastAppliedBlocked` is the
+          // ticker-authored source of truth; fall back to `manualBlock`
+          // (user intent) before the ticker has ever run. There is no
+          // reconciler-authored `isBlocked` column anymore.
+          isBlocked: row.lastAppliedBlocked ?? row.manualBlock,
+          online,
+          signal,
+          // WARP-1715 — an unnamed AP row rendered as "Unknown" beside the
+          // household's laptops. Never overwrite a name the operator set.
+          displayName: row.displayName ?? ap?.name ?? null,
+          isAccessPoint: Boolean(ap),
+          apModel: ap?.model ?? null,
+          /** The AP this device joined through, or null on the router's radio. */
+          viaAp: viaApByMac.get(row.mac) ?? null,
+        };
+      });
 
       return opts.onlineOnly ? enriched.filter((d) => d.online) : enriched;
     }),

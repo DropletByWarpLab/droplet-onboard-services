@@ -2204,6 +2204,14 @@ export interface EnrichedNetworkDevice {
   signal?: number;
   groups: DeviceGroupRef[];
   presenceDays?: DevicePresenceDay[];
+  // WARP-1715: the coverage APs are part of the household network, not a
+  // separate silo. `isAccessPoint` marks a row that IS an approved AP (so it
+  // renders as named infrastructure rather than an anonymous DHCP lease);
+  // `viaAp` names the AP a station joined through, null on the router's own
+  // radio. Before this join, every device on an AP's Wi-Fi read as wired.
+  isAccessPoint?: boolean;
+  apModel?: string | null;
+  viaAp?: string | null;
 }
 
 export interface DeviceGroupWithCount extends DeviceGroupRef {

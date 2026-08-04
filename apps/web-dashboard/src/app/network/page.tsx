@@ -596,7 +596,7 @@ function NetworkPageInner() {
         tabIndex={0}
         hidden={activeTab !== "wifi"}
       >
-        {activeTab === "wifi" && <WifiTab />}
+        {activeTab === "wifi" && <WifiTab overview={overview} />}
       </div>
       <div
         role="tabpanel"
@@ -760,13 +760,15 @@ function StatusCard({
 
 
 // --- WiFi Tab ---
-function WifiTab() {
+function WifiTab({ overview }: { overview: NetworkOverview | undefined }) {
   return (
     <div className="space-y-4">
       {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
           during onboarding can set the SSID/password here — same write path as
-          the setup wizard's InternetStep. */}
-      <WifiSettingsForm />
+          the setup wizard's InternetStep. WARP-1714: `overview.wireless` is the
+          netifd status the form seeds the current SSID/password from — without
+          it the card opens blank and can't tell you your own network name. */}
+      <WifiSettingsForm wireless={overview?.wireless} />
 
       {/* WARP-871: the channel write path (orchestrator route + routing) shipped
           at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab

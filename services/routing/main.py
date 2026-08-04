@@ -2537,6 +2537,66 @@ def _shape_ap_wireless(dev) -> Optional[dict]:
     }
 
 
+def _ap_mode_ifnames(dev) -> list[str]:
+    """Every AP-mode radio interface name the AP is currently running.
+
+    `connected_clients` needs a concrete iwinfo device, and an external AP's
+    interface names aren't knowable up front (phy0-ap0, wlan0, ...) — so read
+    them off the AP's own wireless status rather than guessing. Interfaces
+    with no `ifname` are not up and have no clients to report.
+    """
+    names: list[str] = []
+    status = dev.wireless.status()
+    if not isinstance(status, dict):
+        return names
+    for radio in status.values():
+        if not isinstance(radio, dict):
+            continue
+        for iface in radio.get("interfaces") or []:
+            if not isinstance(iface, dict):
+                continue
+            cfg = iface.get("config") or {}
+            if isinstance(cfg, dict) and str(cfg.get("mode", "")).lower() != "ap":
+                continue
+            ifname = iface.get("ifname")
+            if isinstance(ifname, str) and ifname and ifname not in names:
+                names.append(ifname)
+    return names
+
+
+def _read_ap_clients(host: str) -> list[dict]:
+    """Stations currently associated to the EXTERNAL AP's own radios.
+
+    WARP-1715 — the router's assoclist only covers the ROUTER's radios, so
+    every device joined through a standalone AP looked wired (no signal, no
+    AP attribution) in the dashboard. This reads the AP's own iwinfo assoclist
+    over its rpcd, the same credential path as the approval push.
+
+    Distinct from WARP-1712's `/aps/{mac}/wireless`, whose per-radio `clients`
+    is a COUNT — device attribution needs each station's MAC and signal.
+
+    Each returned client carries the `ifname` it associated on so the caller
+    can attribute a station to the right radio. Raises ConnectionLost /
+    UbusError for the caller to classify.
+    """
+    dev = _connect_ap(host)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ifname in _ap_mode_ifnames(dev):
+        for client in dev.wireless.connected_clients(ifname):
+            if not isinstance(client, dict):
+                continue
+            mac = str(client.get("mac", "")).strip()
+            # A station roaming between the AP's own bands can appear on two
+            # radios at once; first sighting wins so it stays one device.
+            key = _mac_key(mac)
+            if not mac or key in seen:
+                continue
+            seen.add(key)
+            out.append({**client, "ifname": ifname})
+    return out
+
+
 def _read_ap_wireless(host: str) -> Optional[dict]:
     """Dial the AP and snapshot its wireless state. None = unsupported."""
     return _shape_ap_wireless(_connect_ap(host))
@@ -2674,6 +2734,7 @@ def aps_test_seed(req: ApTestSeedRequest):
             version=req.version,
             last_ip=req.last_ip,
             hostname=req.hostname,
+            clients=req.clients,
         )
         return {"status": "ok", "mac": req.mac.upper()}
     except (ConnectionLost, UbusError) as exc:
@@ -2808,6 +2869,65 @@ def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request
             "enabled": req.enabled,
             "ap_detail": f"AP at {ap_ip} band steering {'on' if req.enabled else 'off'}",
             "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/clients")
+def aps_clients(mac: str):
+    """Stations associated to this AP's own radios (WARP-1715).
+
+    Distinct from `/aps/{mac}/wireless` (WARP-1712), which reports per-radio
+    STATE and a client COUNT. Device attribution in the orchestrator needs the
+    per-station MAC + signal, which only the assoclist carries.
+
+    Same honesty contract: `supported` is False — never an error — when no AP
+    credential is provisioned (single-box / legacy shapes), because on those
+    shapes the router's own assoclist already covers every wireless client. A
+    *configured* AP that can't be reached is a typed 502 (AP_AUTH /
+    AP_UNREACHABLE), so "no clients" never masks "couldn't ask".
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock) so dashboard dev can drive the
+        # via-AP attribution without a real AP on the bench.
+        if hasattr(ap, "get_clients"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {
+                "supported": True,
+                "clients": ap.get_clients(canonical),
+                "ap_detail": "mock AP",
+            }
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "clients": [],
+                "ap_detail": "no AP credential configured",
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            clients = _read_ap_clients(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        return {
+            "supported": True,
+            "clients": clients,
+            "ap_detail": f"AP at {ap_ip}",
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

@@ -37,7 +37,10 @@ function timeAgo(iso: string): string {
 }
 
 export function DeviceCard({ device, onOpen, onError }: Props) {
-  const IconComp = iconFor(device.icon);
+  // WARP-1715: an approved coverage AP is a device on the household network,
+  // not a separate silo — but it IS infrastructure, so give it the router icon
+  // rather than the generic HelpCircle an un-iconed row would otherwise get.
+  const IconComp = device.isAccessPoint && !device.icon ? Icons.Router : iconFor(device.icon);
   const displayName = device.displayName ?? device.hostname ?? device.vendor ?? "Device";
 
   function handleKey(e: React.KeyboardEvent<HTMLDivElement>) {
@@ -69,9 +72,18 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
         <div className="flex-1 min-w-0">
           <p className="type-headline text-[color:var(--text)] truncate">{displayName}</p>
           <p className="type-footnote text-[color:var(--text-muted)] truncate">
-            {device.vendor ?? "Unknown vendor"}
+            {/* An AP describes itself by what it IS — "Unknown vendor" on the
+                household's own access point reads as a fault. */}
+            {device.isAccessPoint
+              ? (device.apModel ?? "Access point")
+              : (device.vendor ?? "Unknown vendor")}
             {device.lastIp ? ` · ${device.lastIp}` : ""}
           </p>
+          {device.viaAp && (
+            <p className="type-caption-1 text-[color:var(--text-muted)] mt-0.5 truncate">
+              via {device.viaAp}
+            </p>
+          )}
           {!device.online && (
             <p className="type-caption-1 text-[color:var(--text-muted)] mt-0.5">last seen {timeAgo(device.lastSeen)}</p>
           )}

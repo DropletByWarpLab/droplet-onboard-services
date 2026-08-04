@@ -65,7 +65,10 @@ function makePrismaMock() {
   const groups = new Map<string, GroupRow>();
   const presence: PresenceRow[] = [];
   // WARP-1712: ApDevice rows, keyed by canonical MAC.
-  const apDevices = new Map<string, { mac: string; backend: string }>();
+  const apDevices = new Map<
+    string,
+    { mac: string; backend: string; displayName?: string | null; model?: string | null }
+  >();
 
   function hydrateDevice(row: DeviceRow, include?: any): any {
     const out: any = { ...row };
@@ -128,7 +131,11 @@ function makePrismaMock() {
       if (args.where?.backend) {
         rows = rows.filter((r) => r.backend === args.where.backend);
       }
-      return rows.map((r) => ({ ...r }));
+      return rows.map((r) => ({
+        displayName: null,
+        model: null,
+        ...r,
+      }));
     }),
   };
 

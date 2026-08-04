@@ -492,6 +492,32 @@ export async function fetchWirelessClients(device?: string): Promise<WirelessCli
   return data.clients;
 }
 
+/**
+ * Stations associated to a specific coverage AP's own radios (WARP-1715).
+ *
+ * `fetchWirelessClients` only covers the ROUTER's radios. On the edge-router
+ * shape the Wi-Fi is served by standalone APs, so without this every device on
+ * the household Wi-Fi looked wired: it held a router DHCP lease but appeared in
+ * no assoclist the orchestrator could see.
+ *
+ * `supported: false` is the honest answer on shapes with no AP credential
+ * (single-box / legacy), where the router's own assoclist is already complete —
+ * it is NOT an error, and is distinct from a typed 502 for a configured AP we
+ * couldn't reach.
+ */
+export async function fetchApClients(
+  mac: string,
+): Promise<{ supported: boolean; clients: WirelessClient[] }> {
+  const data = await routingFetchJson<{
+    supported?: boolean;
+    clients?: WirelessClient[];
+  }>(`/aps/${encodeURIComponent(mac)}/clients`, { label: "AP clients" });
+  return {
+    supported: data.supported !== false,
+    clients: Array.isArray(data.clients) ? data.clients : [],
+  };
+}
+
 export async function setWirelessSsid(
   radio: string,
   ifaceSection: string,

@@ -587,6 +587,9 @@ class ApTestSeedRequest(BaseModel):
     version: Optional[str] = None
     last_ip: Optional[str] = None
     hostname: Optional[str] = None
+    # WARP-1715: assoclist rows for GET /aps/{mac}/clients. Test-only, same as
+    # the rest of this payload — production learns stations from the AP itself.
+    clients: Optional[list[dict]] = None
 
 
 class ApBandSteeringRequest(BaseModel):
