@@ -147,6 +147,22 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     alwaysOnReason: ACCESS_COPY.chatAlwaysOn,
     levels: [{ value: "act", label: "Use chat", grants: "Send messages and use the assistant" }],
   },
+  // WARP-1683 — Messages (team chat). Mirrors the orchestrator catalog:
+  // view + act only, act un-floored (guests may message); no manage level —
+  // v1 has no admin surface, and a level that gates nothing would lie here.
+  {
+    moduleId: "team_chat",
+    label: "Messages",
+    description: "Direct and group messages between members",
+    levels: [
+      { value: "view", label: "Read", grants: "Read conversations they're in" },
+      {
+        value: "act",
+        label: "Send & forward",
+        grants: "Send messages, forward files and AI chats",
+      },
+    ],
+  },
   {
     moduleId: "files",
     label: "Files",

@@ -207,6 +207,23 @@ DEFAULT_MEASURE_SECONDS = 5.0
 # from the request thread while the worker thread is mid-prediction.
 _pipeline: Optional[WakePipeline] = None
 
+# WARP-1619 — a pipeline whose stop() outlived its join budget. Its
+# capture worker is finishing the turn it was in (LLM → TTS → playback
+# all run inline on that thread) and STILL HOLDS the exclusive mic
+# device, so it is kept reachable here after `_pipeline` is dropped.
+# `_build_and_start_pipeline` is gated on it: opening a second
+# InputStream on the same device is ALSA EBUSY, and the failed-open
+# recovery would then run `sd._terminate()`/`_initialize()` — a
+# PROCESS-WIDE PortAudio reset — while the first stream is still open.
+_draining_pipeline: Optional[WakePipeline] = None
+
+# How long the disable path waits for the capture worker to exit before
+# answering, and how much longer a subsequent enable waits for a worker
+# that outlived that budget before refusing to open a second stream.
+# Both sit well inside the orchestrator proxy's 40 s enable budget.
+_STOP_JOIN_TIMEOUT_S = 5.0
+_DRAIN_JOIN_TIMEOUT_S = 5.0
+
 # WARP-1119 — the greeting-path persona fetcher (arch brief §14). Module
 # scope so /health can mirror its fetch_ok / last_fetch_at from the
 # request thread. None until startup builds it (and always None under
@@ -394,7 +411,27 @@ def _build_and_start_pipeline() -> None:
     clients. The box then behaves like a mic-less boot — exactly what the
     enable path wants when there's no working hardware to listen with —
     and the NEXT enable can retry from scratch.
+
+    WARP-1619 — refuses outright while a previous pipeline is still
+    draining. That is the hard guarantee this function owes the
+    exclusive audio device: two of them can never coexist on it.
     """
+    global _draining_pipeline
+    if _draining_pipeline is not None:
+        # A previous stop() timed out. Give the worker the rest of its
+        # turn, then re-check: in the common case (the box was finishing
+        # a sentence) it has left by now and the toggle just works.
+        _draining_pipeline.stop(timeout=_DRAIN_JOIN_TIMEOUT_S)
+        if _draining_pipeline.running:
+            logger.error(
+                "voice enable refused: the previous wake pipeline's worker is "
+                "still mid-turn and holds the mic device. Nothing was started "
+                "— toggle voice on again once it has finished speaking.",
+            )
+            return
+        logger.info("previous wake pipeline finished draining — mic released")
+        _draining_pipeline = None
+
     # Resolve audio devices on boot so the first /health hit is cheap.
     # Doesn't fail the boot if PortAudio is missing — we want the
     # service running so operators can still hit /audio/devices and
@@ -538,8 +575,15 @@ async def startup() -> None:
     await asyncio.to_thread(_build_and_start_pipeline)
 
 
-def _teardown_voice_runtime() -> None:
+def _teardown_voice_runtime() -> bool:
     """Stop the pipeline and release everything built alongside it.
+
+    Returns True when the mic device was genuinely released. False means
+    the capture worker outlived its join budget: it is finishing the turn
+    it was in and STILL HOLDS the device (WARP-1619). The switch is off
+    either way — no new audio is processed, because the loop exits before
+    the next frame — but the box is still speaking and the device is not
+    free yet, and the disable path says so rather than claiming otherwise.
 
     The mirror image of `_build_and_start_pipeline()`: every module
     global that one assigns, this one closes and clears. Shared by the
@@ -553,6 +597,8 @@ def _teardown_voice_runtime() -> None:
     it and no reply()/persona fetch can still be in flight.
     """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
+    global _draining_pipeline
+    released = True
     # Drop the module reference BEFORE stopping: stop() joins the worker
     # (up to 5 s) and a join timeout or a raise must never leave
     # /voice/status handing out a pipeline that is on its way out.
@@ -566,7 +612,19 @@ def _teardown_voice_runtime() -> None:
         # anything that can fail, so the worker is on its way out either
         # way; giving up on the join is better than skipping the rest.
         try:
-            pipeline.stop()
+            if not pipeline.stop(timeout=_STOP_JOIN_TIMEOUT_S):
+                # WARP-1619 — the worker did NOT exit. Keep it reachable:
+                # it still owns the exclusive device, and the next enable
+                # has to wait for it rather than open a second stream.
+                released = False
+                _draining_pipeline = pipeline
+                logger.warning(
+                    "voice disable: the wake pipeline's worker did not exit "
+                    "within %.1fs — it is finishing the turn it was in and "
+                    "still holds the mic device. No new audio is processed; "
+                    "the device frees itself when the turn ends.",
+                    _STOP_JOIN_TIMEOUT_S,
+                )
         except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.warning("pipeline stop raised", exc_info=True)
     if _activity_reporter is not None:
@@ -590,6 +648,7 @@ def _teardown_voice_runtime() -> None:
         except Exception:  # noqa: BLE001 — teardown is best-effort
             logger.debug("persona fetcher close raised", exc_info=True)
         _persona_fetcher = None
+    return released
 
 
 @app.on_event("shutdown")
@@ -826,6 +885,14 @@ class VoiceEnabledRequest(BaseModel):
 
 class VoiceEnabledResponse(BaseModel):
     enabled: bool
+    # WARP-1619 — whether the mic device is free by the time we answer.
+    # Always True on enable, and on a disable that joined its worker.
+    # False means the switch IS off (nothing reads new audio) but the
+    # capture worker is finishing the turn it was in — the box is still
+    # speaking and still holds the exclusive device for a few seconds.
+    # Callers must not render "no audio is captured" unconditionally on
+    # the strength of `enabled: false` alone.
+    mic_released: bool = True
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1421,6 +1488,7 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
                 "— give it a moment, then check the status again."
             ),
         )
+    mic_released = True
     try:
         VoiceEnabledStore().save(req.enabled)
         if req.enabled:
@@ -1435,10 +1503,15 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
             # reporter that were built alongside the pipeline, so the
             # next enable rebuilds from clean state rather than stranding
             # a set of them per toggle. Tolerates an already-off box.
-            _teardown_voice_runtime()
+            #
+            # WARP-1619 — the return says whether the mic device was
+            # actually released. Answering a flat 200 when the worker is
+            # mid-turn is what made the dashboard's "no audio is
+            # captured" hero false for the length of a reply.
+            mic_released = _teardown_voice_runtime()
     finally:
         _enabled_lock.release()
-    return VoiceEnabledResponse(enabled=req.enabled)
+    return VoiceEnabledResponse(enabled=req.enabled, mic_released=mic_released)
 
 
 # ────────────────────────────────────────────────────────────────────

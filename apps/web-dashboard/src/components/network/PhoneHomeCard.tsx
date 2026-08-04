@@ -101,15 +101,15 @@ function Switch({
       }}
       className={[
         "relative inline-flex shrink-0 items-center rounded-full transition-colors duration-150 ease-smooth",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]",
         "disabled:opacity-40 disabled:cursor-not-allowed",
         lg ? "h-7 w-12" : "h-[18px] w-8",
-        on ? "bg-accent" : "bg-label-quaternary",
       ].join(" ")}
+      style={{ background: on ? "var(--brand)" : "var(--text-faint)" }}
     >
       <span
         className={[
-          "inline-block rounded-full bg-white shadow transition-transform duration-150 ease-smooth",
+          "inline-block rounded-full shadow transition-transform duration-150 ease-smooth",
           lg ? "h-[22px] w-[22px]" : "h-3.5 w-3.5",
           on
             ? lg
@@ -117,6 +117,13 @@ function Switch({
               : "translate-x-[16px]"
             : "translate-x-[3px]",
         ].join(" ")}
+        // WARP-1358: the knob is the only thing distinguishing on from off, so
+        // it owes 3:1 against the track (WCAG 1.4.11). White on the dark
+        // --brand (#818cf8) is 2.98:1; --on-brand carries it (5.64:1 dark,
+        // 4.47:1 light). The off track is --text-faint, not a brand fill, so
+        // white still clears there — mirrors `.droplet-shell .sw` in
+        // droplet-shell.css.
+        style={{ background: on ? "var(--on-brand)" : "#fff" }}
       />
     </button>
   );
@@ -126,17 +133,23 @@ function Switch({
 function ScopeStatus({ sc, active }: { sc: ScopeView; active: boolean }) {
   if (!active) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-tertiary px-2 py-0.5 type-caption-1 text-label-tertiary">
-        <span className="h-1.5 w-1.5 rounded-full bg-label-quaternary" />
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 type-caption-1"
+        style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+      >
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--text-faint)" }} />
         Paused
       </span>
     );
   }
   if (sc.desired !== sc.applied) {
-    // text-label-primary (not text-system-orange) for WCAG AA contrast on the
+    // var(--text) (not text-system-orange) for WCAG AA contrast on the
     // faint amber tint; the orange spinner carries the colour cue (UX note).
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-system-orange/15 px-2 py-0.5 type-caption-1 font-medium text-label-primary">
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full bg-system-orange/15 px-2 py-0.5 type-caption-1 font-medium"
+        style={{ color: "var(--text)" }}
+      >
         <RefreshCw size={11} className="text-system-orange animate-spin motion-reduce:animate-none" />
         Applying…
       </span>
@@ -144,14 +157,20 @@ function ScopeStatus({ sc, active }: { sc: ScopeView; active: boolean }) {
   }
   if (sc.applied) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2 py-0.5 type-caption-1 font-semibold text-accent">
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 type-caption-1 font-semibold"
+        style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
+      >
         <ShieldCheck size={11} />
         Blocked
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-separator bg-surface-primary px-2 py-0.5 type-caption-1 text-label-secondary">
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 type-caption-1"
+      style={{ borderColor: "var(--card-bd)", background: "var(--surface)", color: "var(--text-muted)" }}
+    >
       <Globe size={11} />
       Can phone home
     </span>
@@ -179,21 +198,26 @@ function ScopeRow({
   const enforced = active && sc.applied && sc.desired === sc.applied;
   const lit = sc.desired && active;
   return (
-    <li className="flex items-center gap-3 border-b border-separator px-3.5 py-2.5 last:border-b-0">
+    <li
+      className="flex items-center gap-3 border-b px-3.5 py-2.5 last:border-b-0"
+      style={{ borderColor: "var(--card-bd)" }}
+    >
       <span
-        className={[
-          "grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors duration-150",
-          lit ? "bg-accent/10 text-accent" : "bg-surface-tertiary text-label-tertiary",
-        ].join(" ")}
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors duration-150"
+        style={
+          lit
+            ? { background: "var(--brand-subtle)", color: "var(--brand)" }
+            : { background: "var(--card-inner)", color: "var(--text-muted)" }
+        }
       >
         <Icon size={16} />
       </span>
       <div className="min-w-0 flex-1">
-        <div className="type-subheadline text-label-primary">{title}</div>
-        <div className="type-caption-2 text-label-tertiary">
+        <div className="type-subheadline" style={{ color: "var(--text)" }}>{title}</div>
+        <div className="type-caption-2" style={{ color: "var(--text-muted)" }}>
           {sub}
           {enforced && sc.appliedAt && (
-            <span className="font-medium text-accent"> · enforced {ago(sc.appliedAt)}</span>
+            <span className="font-medium" style={{ color: "var(--brand)" }}> · enforced {ago(sc.appliedAt)}</span>
           )}
         </div>
       </div>
@@ -210,14 +234,32 @@ function ScopeRow({
 
 function SkelRow() {
   return (
-    <li className="flex items-center gap-3 border-b border-separator px-3.5 py-2.5 last:border-b-0">
-      <span className="h-8 w-8 shrink-0 animate-pulse rounded-lg bg-surface-tertiary" />
+    <li
+      className="flex items-center gap-3 border-b px-3.5 py-2.5 last:border-b-0"
+      style={{ borderColor: "var(--card-bd)" }}
+    >
+      <span
+        className="h-8 w-8 shrink-0 animate-pulse rounded-lg"
+        style={{ background: "var(--surface-2)" }}
+      />
       <div className="min-w-0 flex-1 space-y-2">
-        <span className="block h-2.5 w-2/5 animate-pulse rounded bg-surface-tertiary" />
-        <span className="block h-2 w-3/5 animate-pulse rounded bg-surface-tertiary" />
+        <span
+          className="block h-2.5 w-2/5 animate-pulse rounded"
+          style={{ background: "var(--surface-2)" }}
+        />
+        <span
+          className="block h-2 w-3/5 animate-pulse rounded"
+          style={{ background: "var(--surface-2)" }}
+        />
       </div>
-      <span className="h-[22px] w-[70px] shrink-0 animate-pulse rounded-full bg-surface-tertiary" />
-      <span className="h-[18px] w-8 shrink-0 animate-pulse rounded-full bg-surface-tertiary" />
+      <span
+        className="h-[22px] w-[70px] shrink-0 animate-pulse rounded-full"
+        style={{ background: "var(--surface-2)" }}
+      />
+      <span
+        className="h-[18px] w-8 shrink-0 animate-pulse rounded-full"
+        style={{ background: "var(--surface-2)" }}
+      />
     </li>
   );
 }
@@ -297,24 +339,34 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
     (data?.cameras.applied ? data.cameras.count ?? 0 : 0);
 
   const HeroIcon = phase === "error" ? AlertTriangle : active ? ShieldCheck : Globe;
-  const heroTone =
+  const heroTone = phase === "error" ? "bg-system-red/10 text-system-red" : "";
+  const heroStyle =
     phase === "error"
-      ? "bg-system-red/10 text-system-red"
+      ? undefined
       : active && phase === "ready"
-        ? "bg-accent/10 text-accent"
-        : "bg-surface-tertiary text-label-tertiary";
+        ? { background: "var(--brand-subtle)", color: "var(--brand)" }
+        : { background: "var(--card-inner)", color: "var(--text-muted)" };
 
   return (
-    <section className="overflow-hidden rounded-[10px] border border-separator bg-surface-primary shadow-sm">
+    <section
+      className="overflow-hidden rounded-[10px] border shadow-sm"
+      style={{ borderColor: "var(--card-bd)", background: "var(--surface)" }}
+    >
       {/* header */}
-      <header className="flex items-start justify-between gap-4 border-b border-separator px-5 py-3">
+      <header
+        className="flex items-start justify-between gap-4 border-b px-5 py-3"
+        style={{ borderColor: "var(--card-bd)" }}
+      >
         <div>
-          <h3 className="type-subheadline font-semibold text-label-primary">Block phone-home</h3>
-          <p className="type-caption-1 text-label-tertiary">
+          <h3 className="type-subheadline font-semibold" style={{ color: "var(--text)" }}>Block phone-home</h3>
+          <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
             Stop devices from quietly sending data back to their makers.
           </p>
         </div>
-        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-accent/10 px-2 py-0.5 type-caption-1 font-medium text-accent">
+        <span
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 type-caption-1 font-medium"
+          style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
+        >
           <Lock size={11} />
           Owner &amp; admins
         </span>
@@ -322,18 +374,23 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
 
       {/* "Why this matters" — opt-in explainer keeps the card compact while
           giving a home owner the what + why of phone-home blocking. */}
-      <details className="group border-b border-separator bg-surface-secondary px-5 [&_summary]:list-none [&_summary::-webkit-details-marker]:hidden">
-        <summary className="flex cursor-pointer select-none items-center gap-2 py-2.5 type-caption-1 font-medium text-label-secondary transition-colors duration-150 hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
-          <Info size={13} className="text-label-tertiary" />
+      <details
+        className="group border-b px-5 [&_summary]:list-none [&_summary::-webkit-details-marker]:hidden"
+        style={{ borderColor: "var(--card-bd)", background: "var(--inset)" }}
+      >
+        <summary className="flex cursor-pointer select-none items-center gap-2 py-2.5 type-caption-1 font-medium text-[var(--text-muted)] transition-colors duration-150 hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]">
+          <Info size={13} style={{ color: "var(--text-muted)" }} />
           Why this matters
           <ChevronDown
             size={13}
-            className="ml-auto text-label-tertiary transition-transform duration-150 ease-smooth group-open:rotate-180 motion-reduce:transition-none"
+            className="ml-auto transition-transform duration-150 ease-smooth group-open:rotate-180 motion-reduce:transition-none"
+            style={{ color: "var(--text-muted)" }}
           />
         </summary>
         <p
           data-testid="phone-home-explainer"
-          className="pb-3 pr-1 type-caption-1 leading-relaxed text-label-tertiary"
+          className="pb-3 pr-1 type-caption-1 leading-relaxed"
+          style={{ color: "var(--text-muted)" }}
         >
           Many smart devices and cameras quietly send usage data — telemetry —
           back to the companies that made them. Blocking phone-home keeps that
@@ -345,26 +402,35 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
 
       {/* hero + master */}
       <div className="flex items-center gap-4 px-5 py-[18px]">
-        <span className={`grid h-[46px] w-[46px] shrink-0 place-items-center rounded-[13px] ${heroTone}`}>
+        <span
+          className={`grid h-[46px] w-[46px] shrink-0 place-items-center rounded-[13px] ${heroTone}`}
+          style={heroStyle}
+        >
           <HeroIcon size={22} />
         </span>
         <div className="min-w-0 flex-1">
           {phase === "loading" ? (
             <div className="space-y-2">
-              <span className="block h-3.5 w-48 animate-pulse rounded bg-surface-tertiary" />
-              <span className="block h-2.5 w-64 animate-pulse rounded bg-surface-tertiary" />
+              <span
+                className="block h-3.5 w-48 animate-pulse rounded"
+                style={{ background: "var(--surface-2)" }}
+              />
+              <span
+                className="block h-2.5 w-64 animate-pulse rounded"
+                style={{ background: "var(--surface-2)" }}
+              />
             </div>
           ) : phase === "error" ? (
             <>
-              <h2 className="type-headline text-label-primary">Enforcement service unreachable</h2>
-              <p className="type-caption-1 text-label-tertiary">
+              <h2 className="type-headline" style={{ color: "var(--text)" }}>Enforcement service unreachable</h2>
+              <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
                 Your last saved rules are still in effect on the router.
               </p>
             </>
           ) : active ? (
             <>
-              <h2 className="type-headline text-label-primary">Phone-home blocking is on</h2>
-              <p className="type-caption-1 text-label-tertiary">
+              <h2 className="type-headline" style={{ color: "var(--text)" }}>Phone-home blocking is on</h2>
+              <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
                 Enforced for {blockedDevices} device{blockedDevices === 1 ? "" : "s"} ·{" "}
                 {blockedGroups.length} of {data!.groups.length || "—"} groups
                 {data!.cameras.applied ? " + cameras" : ""}
@@ -372,8 +438,8 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
             </>
           ) : (
             <>
-              <h2 className="type-headline text-label-primary">Phone-home blocking is off</h2>
-              <p className="type-caption-1 text-label-tertiary">
+              <h2 className="type-headline" style={{ color: "var(--text)" }}>Phone-home blocking is off</h2>
+              <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
                 Devices can send usage data and telemetry to their makers.
               </p>
             </>
@@ -387,7 +453,7 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
             disabled={phase !== "ready" || !canEdit}
             onToggle={toggleMaster}
           />
-          <span className="type-caption-2 font-semibold text-label-tertiary">
+          <span className="type-caption-2 font-semibold" style={{ color: "var(--text-muted)" }}>
             {phase !== "ready" ? "—" : masterApplying ? "Applying…" : active ? "On" : "Off"}
           </span>
         </div>
@@ -395,15 +461,27 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
 
       {/* always-allowed strip */}
       {phase === "ready" && active && (
-        <div className="flex flex-wrap items-center gap-4 border-y border-separator bg-surface-secondary px-5 py-2.5">
-          <span className="type-caption-2 font-semibold uppercase tracking-wider text-label-quaternary">
+        <div
+          className="flex flex-wrap items-center gap-4 border-y px-5 py-2.5"
+          style={{ borderColor: "var(--card-bd)", background: "var(--inset)" }}
+        >
+          <span
+            className="type-caption-2 font-semibold uppercase tracking-wider"
+            style={{ color: "var(--text-faint)" }}
+          >
             Always allowed
           </span>
-          <span className="inline-flex items-center gap-1.5 type-caption-1 text-label-secondary">
+          <span
+            className="inline-flex items-center gap-1.5 type-caption-1"
+            style={{ color: "var(--text-muted)" }}
+          >
             <Clock size={12} className="text-system-green" />
             Time sync (NTP)
           </span>
-          <span className="inline-flex items-center gap-1.5 type-caption-1 text-label-secondary">
+          <span
+            className="inline-flex items-center gap-1.5 type-caption-1"
+            style={{ color: "var(--text-muted)" }}
+          >
             <RefreshCw size={12} className="text-system-green" />
             Security &amp; firmware updates
           </span>
@@ -425,14 +503,14 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
             <AlertTriangle size={18} />
           </span>
           <div className="flex-1">
-            <div className="type-subheadline font-semibold text-label-primary">
+            <div className="type-subheadline font-semibold" style={{ color: "var(--text)" }}>
               Couldn&apos;t reach the reconciler
             </div>
-            <div className="type-caption-1 text-label-tertiary">
+            <div className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               The egress sync didn&apos;t respond. Changes you make won&apos;t apply until it&apos;s back.
             </div>
           </div>
-          <button onClick={() => mutate()} className="dp-btn-secondary inline-flex items-center gap-2 text-sm">
+          <button onClick={() => mutate()} className="btn text-sm">
             <RefreshCw size={13} />
             Try again
           </button>
@@ -458,25 +536,25 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
 
             {data.groups.length === 0 ? (
               <li className="flex flex-col items-center gap-1.5 px-6 py-7 text-center">
-                <span className="mb-1 grid h-10 w-10 place-items-center rounded-[11px] bg-surface-tertiary text-label-quaternary">
+                <span
+                  className="mb-1 grid h-10 w-10 place-items-center rounded-[11px]"
+                  style={{ background: "var(--card-inner)", color: "var(--text-faint)" }}
+                >
                   <Users size={18} />
                 </span>
-                <div className="type-subheadline font-semibold text-label-secondary">
+                <div className="type-subheadline font-semibold" style={{ color: "var(--text-muted)" }}>
                   No device groups yet
                 </div>
-                <p className="max-w-[340px] type-caption-1 text-label-tertiary">
+                <p className="max-w-[340px] type-caption-1" style={{ color: "var(--text-muted)" }}>
                   Group devices by team or room to block phone-home for some without affecting others.
                 </p>
                 {onManageGroups ? (
-                  <button
-                    onClick={onManageGroups}
-                    className="dp-btn-secondary mt-2 inline-flex items-center gap-1.5 text-sm"
-                  >
+                  <button onClick={onManageGroups} className="btn mt-2 text-sm">
                     <Plus size={12} />
                     Create a group
                   </button>
                 ) : (
-                  <p className="mt-1 type-caption-2 text-label-quaternary">
+                  <p className="mt-1 type-caption-2" style={{ color: "var(--text-faint)" }}>
                     Add groups from the Devices tab.
                   </p>
                 )}
@@ -498,8 +576,14 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
           </ul>
 
           {/* reconciler heartbeat footer */}
-          <div className="flex items-center justify-between border-t border-separator bg-surface-secondary px-5 py-2.5">
-            <span className="inline-flex items-center gap-2 type-caption-1 text-label-secondary">
+          <div
+            className="flex items-center justify-between border-t px-5 py-2.5"
+            style={{ borderColor: "var(--card-bd)", background: "var(--inset)" }}
+          >
+            <span
+              className="inline-flex items-center gap-2 type-caption-1"
+              style={{ color: "var(--text-muted)" }}
+            >
               <span
                 className={[
                   "h-2 w-2 rounded-full",
@@ -510,13 +594,17 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
                 ? `Applying ${pending} change${pending > 1 ? "s" : ""} — enforced within 30s`
                 : `Enforced & healthy · re-checked ${ago(data.lastSync)}`}
             </span>
-            <span className="font-mono type-caption-2 text-label-quaternary">reconcile ≤ 30s</span>
+            <span className="font-mono type-caption-2" style={{ color: "var(--text-faint)" }}>reconcile ≤ 30s</span>
           </div>
         </>
       )}
 
       {mutErr && (
-        <p role="alert" className="border-t border-separator px-5 py-2 type-caption-1 text-system-red">
+        <p
+          role="alert"
+          className="border-t px-5 py-2 type-caption-1 text-system-red"
+          style={{ borderColor: "var(--card-bd)" }}
+        >
           {mutErr}
         </p>
       )}

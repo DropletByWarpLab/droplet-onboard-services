@@ -14,7 +14,7 @@
  * (ReferenceError) before the hoist fix and PASSES after.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import type { FileEntryInfo, FileSpace } from "@/lib/types";
 
 // ── next/navigation — the page reads ?path= (and, WARP-1270, ?space=) via
@@ -31,6 +31,17 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(mockSearchParamsString),
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   usePathname: () => "/files",
+}));
+
+// WARP-1661 — the share-routing decisions that do NOT open a surface report
+// themselves through a toast (folders-only, a skipped folder alongside a single
+// shareable file). Nothing here mounts a ToastProvider, so without this spy
+// those calls land on the context default and vanish. `importOriginal` keeps
+// the module's other exports (ToastProvider) real for anything that needs them.
+const toastSpy = vi.fn();
+vi.mock("@/components/Toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/Toast")>()),
+  useToast: () => ({ toast: toastSpy }),
 }));
 
 // ── Data hooks ──
@@ -166,12 +177,17 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
+// WARP-1540 — the selection toolbar only renders with something selected, so
+// the Share tests need to drive `selectedPaths`. `let` binding read at call
+// time (every render); reset in beforeEach below so every other suite keeps
+// the empty selection it was written against.
+let mockSelectedPaths: string[] = [];
 vi.mock("@/lib/hooks/useFileManager", () => ({
   useFileManager: () => ({
-    selection: new Set<string>(),
-    selectedPaths: [],
-    selectedCount: 0,
-    isSelected: () => false,
+    selection: new Set<string>(mockSelectedPaths),
+    selectedPaths: mockSelectedPaths,
+    selectedCount: mockSelectedPaths.length,
+    isSelected: (p: string) => mockSelectedPaths.includes(p),
     selectOnly: vi.fn(),
     toggleSelection: vi.fn(),
     selectAll: vi.fn(),
@@ -191,6 +207,10 @@ vi.mock("@/lib/hooks/useFileManager", () => ({
 // Spread the real api module (so every export the page chrome references — e.g.
 // ShellPage's fetchSystemHealth — stays defined) but override the network-
 // touching calls that fire at render so nothing hits a server in the test env.
+// WARP-1540 — the multi-file Share loop calls createShare once per path.
+// Declared outside the factory so tests can script per-path outcomes (incl. a
+// failure at item 2 of 3) and assert the exact arguments.
+const createShareMock = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -200,8 +220,19 @@ vi.mock("@/lib/api", async (importOriginal) => {
     // WARP-1623 — asserted below: an entry path must be converted to the
     // active space's relative form before it reaches a space-threaded write.
     deleteFile: vi.fn().mockResolvedValue(undefined),
+    createShare: (...args: unknown[]) => createShareMock(...args),
   };
 });
+
+// WARP-1540 — the single-file branch must land on the SAME surface the detail
+// panel's "Share…" opens. Stub the dialog down to a marker so the assertion is
+// about the page's wiring (which dialog, for which file), not the dialog's own
+// network-touching internals (it fetches share recipients on mount).
+vi.mock("@/components/FileManager/ShareDialog", () => ({
+  ShareDialog: ({ fileName }: { fileName: string }) => (
+    <div data-testid="share-dialog">ShareDialog: {fileName}</div>
+  ),
+}));
 
 import FilesPage from "./page";
 
@@ -217,6 +248,8 @@ beforeEach(() => {
   mockPools = [];
   mockSearchResult = FILES[0];
   mockFilesCalls = [];
+  mockSelectedPaths = [];
+  createShareMock.mockReset();
 });
 
 describe("<FilesPage /> (WARP-883 smoke)", () => {
@@ -867,6 +900,556 @@ describe("<FilesPage /> — department library browsing (WARP-1623)", () => {
     render(<FilesPage />);
     fireEvent.click(screen.getByRole("button", { name: /^folder docs$/i }));
     expect(mockFilesCalls.at(-1)).toEqual(["/Docs", "personal"]);
+  });
+});
+
+// WARP-1540 — Share in the selection toolbar.
+//
+// Sharing used to be reachable only from the single-file detail panel and a
+// `disabled: !isSingle` context item, so a selection of several files had no
+// way to share at all. Decision (Romain, 2026-07-24): loop `createShare` per
+// selected path — no bulk endpoint, no zip. One selected file still opens the
+// existing ShareDialog, unchanged.
+describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () => {
+  const READER_TOOLTIP =
+    "You can view and download here. Ask a manager for edit access.";
+  const MANAGER_ONLY =
+    "Only a manager can share from this library. Ask one to create the link.";
+
+  const file = (name: string): FileEntryInfo => ({
+    name,
+    path: `/${name}`,
+    isDirectory: false,
+    size: 10,
+    mimeType: "application/pdf",
+    modifiedAt: "2026-04-16T00:00:00.000Z",
+  });
+  const folder = (name: string): FileEntryInfo => ({
+    name,
+    path: `/${name}`,
+    isDirectory: true,
+    size: 0,
+    mimeType: null,
+    modifiedAt: "2026-04-16T00:00:00.000Z",
+  });
+
+  // The toolbar label states the posture: "Share" for one item (ShareDialog
+  // lets the user choose a person or a link), "Share publicly" for several
+  // (the loop mints a public link per file with no intervening choice).
+  const shareBtn = () =>
+    screen.getByRole("button", { name: /^share( publicly)?$/i });
+
+  it("offers Share as soon as one item is selected", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    expect(shareBtn()).not.toBeDisabled();
+  });
+
+  it("opens the existing ShareDialog for a single file — same as the detail panel, no loop", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("a.pdf");
+    expect(createShareMock).not.toHaveBeenCalled();
+  });
+
+  it("creates one link per file for a multi-selection, labeled with its filename", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      Promise.resolve({ id: 1, url: `https://box/s/${path.slice(1)}`, token: "t" })
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /shared 3 files — one public link each/i
+      )
+    );
+    // N calls, one per selected path — the raw entry path the single-file
+    // ShareDialog would have sent (POST /api/files/share takes no space).
+    expect(createShareMock).toHaveBeenCalledTimes(3);
+    expect(createShareMock.mock.calls.map((c) => c[0])).toEqual([
+      "/a.pdf",
+      "/b.pdf",
+      "/c.pdf",
+    ]);
+    // Pin the GRANT, not just the paths. Omitting the options relied on
+    // `createShare`'s `{ shareType: 3 }` default and the server's
+    // `permissions` default of 1 — so widening either default would have
+    // widened every bulk link with nothing here going red. shareType 3 =
+    // public link, permissions 1 = read-only, and no password/expiry is set
+    // by this path (that stays a per-share decision in ShareDialog).
+    for (const call of createShareMock.mock.calls) {
+      expect(call[1]).toEqual({ shareType: 3, permissions: 1 });
+    }
+    // Not a raw dump: each link is attached to its filename and copyable alone.
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("a.pdf")).toBeInTheDocument();
+    expect(within(dialog).getByText("https://box/s/c.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /copy link for b\.pdf/i })
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /copy all public links/i })
+    ).not.toBeDisabled();
+    // The single-file dialog is NOT what a multi-selection opens.
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
+  });
+
+  it("reports a mid-loop failure per target without hiding or undoing the successes", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      path === "/b.pdf"
+        ? Promise.reject(new Error("Share failed: 403"))
+        : Promise.resolve({ id: 1, url: `https://box/s/${path.slice(1)}`, token: "t" })
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/shared 2 of 3/i)
+    );
+    const dialog = screen.getByRole("dialog");
+    // The failure did not stop the run: c.pdf, queued after it, still got a link.
+    expect(within(dialog).getByText("https://box/s/a.pdf")).toBeInTheDocument();
+    expect(within(dialog).getByText("https://box/s/c.pdf")).toBeInTheDocument();
+    // …and the failed one is named, on its own row, beside the survivors.
+    expect(within(dialog).getByText("b.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: /copy link for b\.pdf/i })
+    ).toBeNull();
+  });
+
+  // Review B1 — a failed share CREATE used to render the file-LOADING
+  // fallback ("We couldn't load those files right now. Try again in a
+  // moment."): an action the user never performed, a cause that isn't the
+  // cause, and retry advice for a deterministic policy rejection. That is the
+  // exact WARP-1148 regression the `share` domain was added to end, and
+  // ShareDialog already routes through it — so the same 403 gave two
+  // different messages one click apart.
+  it("renders share-domain copy on a failure, never the file-LOADING fallback", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf"];
+    createShareMock.mockRejectedValue(
+      Object.assign(new Error("Sharing is disabled"), {
+        code: "module_disabled",
+      })
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /none of the 2 files could be shared/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The module gate names itself, with the remedy — not "try again".
+    expect(
+      within(dialog).getAllByText(/file sharing is turned off on this droplet/i)
+    ).toHaveLength(2);
+    expect(within(dialog).queryByText(/couldn't load those files/i)).toBeNull();
+  });
+
+  // WARP-1659 — the run hardcodes `BULK_SHARE_OPTIONS` and the panel renders
+  // no password field and no expiry picker. The `share` domain infers
+  // PASSWORD_REJECTED from any OCS message containing "password", so on a box
+  // with enforce-password-on-public-links turned on, EVERY row used to tell the
+  // user their password didn't meet the rules — for a password they were never
+  // asked for and cannot supply, which reads as "the app is broken" and points
+  // away from the instance policy that is the actual cause.
+  it("never blames the user's password for a rejection in a flow that has no password field", async () => {
+    mockFiles = [file("a.pdf"), file("b.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf"];
+    createShareMock.mockRejectedValue(
+      Object.assign(
+        new Error("OCS share create: Passwords are enforced for link shares (403)"),
+        { status: 403 }
+      )
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /none of the 2 files could be shared/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The ShareDialog's sentence, about a control this surface never showed.
+    expect(
+      within(dialog).queryByText(/that password doesn't meet/i)
+    ).toBeNull();
+    expect(within(dialog).queryByText(/longer, less common/i)).toBeNull();
+    // …replaced by copy that is true here AND names a remedy that exists
+    // without an admin — not the "try again in a moment" fallback, which is
+    // wrong advice for a deterministic policy rejection.
+    expect(
+      within(dialog).getAllByText(/share this file on its own to add a password/i)
+    ).toHaveLength(2);
+    expect(within(dialog).queryByText(/try again in a moment/i)).toBeNull();
+    // Raw OCS prose never reaches the panel.
+    expect(within(dialog).queryByText(/OCS/)).toBeNull();
+  });
+
+  // WARP-1661 — routing used to be decided on the RAW selection count, before
+  // folders were filtered out. One folder + one file is 2 entries, so the
+  // single-file shortcut missed, the fan-out ran, the folder was dropped inside
+  // it, and the user got the bulk panel with ONE row — hardcoded public link,
+  // no permission preset, no expiry, no password — for what is a single-file
+  // share. Its summary could even read "None of the 1 file could be shared."
+  //
+  // The count that decides the surface is the SHAREABLE count, so all three
+  // routes are pinned here against the reorder.
+  it("opens the ShareDialog when a selection holds exactly one shareable file, and names the skipped folder", () => {
+    mockFiles = [folder("Trips"), file("a.pdf")];
+    mockSelectedPaths = ["/Trips", "/a.pdf"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    // The single-file surface — with the controls the fan-out does not have.
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("a.pdf");
+    // Not the fan-out: no loop, no one-row panel.
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The folder is dropped, never silently — same sentence the panel uses.
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Skipped 1 folder (Trips) — folders are shared one at a time.",
+      "info"
+    );
+  });
+
+  it("opens the ShareDialog for a lone file with nothing to skip and no note", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("a.pdf");
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  // The trap in the WARP-1661 reorder: routing purely on `shareable.length`
+  // sends a folder selected ON ITS OWN to the folders-only toast — telling a
+  // user who did exactly what the toast asks to go do it. A solo selection is
+  // the deliberate single share the dialog exists for, folder included.
+  it("opens the ShareDialog for a folder selected on its own", () => {
+    mockFiles = [folder("Trips")];
+    mockSelectedPaths = ["/Trips"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(screen.getByTestId("share-dialog")).toHaveTextContent("Trips");
+    expect(toastSpy).not.toHaveBeenCalled();
+    expect(createShareMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a folders-only selection without opening either share surface", () => {
+    mockFiles = [folder("Trips"), folder("Photos")];
+    mockSelectedPaths = ["/Trips", "/Photos"];
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Folders are shared one at a time — select a folder on its own."
+    );
+    expect(createShareMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
+  });
+
+  it("keeps folders out of a bulk run and says which ones it skipped", async () => {
+    mockFiles = [file("a.pdf"), folder("Trips"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/Trips", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      Promise.resolve({ id: 1, url: `https://box/s/${path.slice(1)}`, token: "t" })
+    );
+    render(<FilesPage />);
+
+    fireEvent.click(shareBtn());
+
+    await waitFor(() => expect(createShareMock).toHaveBeenCalledTimes(2));
+    expect(createShareMock.mock.calls.map((c) => c[0])).toEqual([
+      "/a.pdf",
+      "/c.pdf",
+    ]);
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      /skipped 1 folder \(trips\)/i
+    );
+  });
+
+  // Review B2 — the links this loop mints are live, public, unauthenticated
+  // and no-expiry the instant each POST returns. Dismissing the panel
+  // mid-run used to bump the generation ref and null the state, so a stray
+  // click just outside left N public links in existence that were never
+  // displayed to anyone, while the user believed they had cancelled. The only
+  // way to find them is Files → Shared → Shared by me, which nothing in the
+  // flow points at.
+  //
+  // Helper: a.pdf lands, b.pdf hangs — the panel is then observably in flight.
+  const startStalledRun = () => {
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      path === "/b.pdf"
+        ? new Promise(() => {})
+        : Promise.resolve({
+            id: 1,
+            url: `https://box/s/${path.slice(1)}`,
+            token: "t",
+          })
+    );
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    return waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 1 of 3 done/i
+      )
+    );
+  };
+
+  it("ignores a backdrop click while links are still being created", async () => {
+    await startStalledRun();
+
+    const backdrop = screen.getByRole("dialog").parentElement as HTMLElement;
+    fireEvent.click(backdrop);
+
+    // Still mounted, still showing the link that already exists.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("dialog")).getByText("https://box/s/a.pdf")
+    ).toBeInTheDocument();
+  });
+
+  it("stops on Escape without hiding the public links it already created", async () => {
+    await startStalledRun();
+
+    // Escape is NOT covered by closeOnBackdrop — Dialog's key handler calls
+    // onClose unconditionally — so the guard has to live in onClose too.
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /stopped\. 1 public link of 3 was already created and stays active/i
+      )
+    );
+    const dialog = screen.getByRole("dialog");
+    // The created link is still on screen and still copyable…
+    expect(within(dialog).getByText("https://box/s/a.pdf")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /copy link for a\.pdf/i })
+    ).toBeInTheDocument();
+    // …and it says where to find it afterwards.
+    expect(dialog).toHaveTextContent(/shared by me/i);
+    // ONLY c.pdf was never dispatched. b.pdf's POST was already on the wire
+    // when Escape landed, so calling it "stopped before this file" would deny
+    // a link that may well exist — this used to assert 2 and pinned that bug.
+    expect(
+      within(dialog).getAllByText(/no link — stopped before this file/i)
+    ).toHaveLength(1);
+    expect(
+      within(dialog).getByText(
+        /stopped while this one was still being created — it may have a link/i
+      )
+    ).toBeInTheDocument();
+    // The loop really stopped: c.pdf was queued after the hung b.pdf.
+    expect(createShareMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the link when the in-flight share lands AFTER the user stopped", async () => {
+    // The harm this fixes, end to end: b.pdf's POST is already on the wire when
+    // Stop is pressed, and it succeeds. The link is live, public, no-expiry.
+    // Discarding that result (the old run-token gate) left the panel stating
+    // no link existed for b.pdf — an affirmative denial, which is worse than
+    // silence because it says there is nothing to go clean up.
+    let resolveB: (v: unknown) => void = () => {};
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation((path: string) =>
+      path === "/b.pdf"
+        ? new Promise((res) => {
+            resolveB = res;
+          })
+        : Promise.resolve({
+            id: 1,
+            url: `https://box/s/${path.slice(1)}`,
+            token: "t",
+          })
+    );
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 1 of 3 done/i
+      )
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/stopped\./i)
+    );
+
+    // The hung request now settles — successfully.
+    resolveB({ id: 2, url: "https://box/s/b.pdf", token: "t2" });
+
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByText("https://box/s/b.pdf")).toBeInTheDocument()
+    );
+    // It is no longer described as "may have a link" — we now know it does.
+    expect(
+      within(dialog).queryByText(
+        /stopped while this one was still being created/i
+      )
+    ).not.toBeInTheDocument();
+    // And it is copyable, like any other created link.
+    expect(
+      within(dialog).getByRole("button", { name: /copy link for b\.pdf/i })
+    ).toBeInTheDocument();
+    // c.pdf was still never dispatched — stopping really did stop the loop.
+    expect(createShareMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("points at Shared by me when the ONLY in-flight share is left unknown", async () => {
+    // ok === 0 with an unknown row: the old copy said "Stopped — no links were
+    // created." and offered no recovery path at all.
+    mockFiles = [file("a.pdf"), file("b.pdf"), file("c.pdf")];
+    mockSelectedPaths = ["/a.pdf", "/b.pdf", "/c.pdf"];
+    createShareMock.mockImplementation(() => new Promise(() => {}));
+    render(<FilesPage />);
+    fireEvent.click(shareBtn());
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /creating public links… 0 of 3 done/i
+      )
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /no links finished being created, but 1 was still in progress and may have one — check shared → shared by me/i
+      )
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      /no links were created\./i
+    );
+  });
+
+  it("closes normally once the run has settled — never a trap", async () => {
+    await startStalledRun();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/stopped/i)
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("refuses a selection over the bulk cap with an honest count, not an unbounded fan-out", () => {
+    const many = Array.from({ length: 21 }, (_, i) => file(`f${i}.pdf`));
+    mockFiles = many;
+    mockSelectedPaths = many.map((f) => f.path);
+    render(<FilesPage />);
+
+    const btn = shareBtn();
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute(
+      "title",
+      "You can share up to 20 files at once — 21 are selected."
+    );
+    fireEvent.click(btn);
+    expect(createShareMock).not.toHaveBeenCalled();
+  });
+
+  it("disables Share for a reader in a library, with the reader tooltip", () => {
+    mockSpaces = [
+      PERSONAL,
+      {
+        id: "dept:finance",
+        name: "Finance",
+        root: "/Finance",
+        kind: "department",
+        state: "active",
+        right: "reader",
+        isMember: true,
+      },
+    ];
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+
+    const btn = shareBtn();
+    // Visible-but-disabled — never a silently missing button.
+    expect(btn).toBeInTheDocument();
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", READER_TOOLTIP);
+    fireEvent.click(btn);
+    expect(createShareMock).not.toHaveBeenCalled();
+  });
+
+  it("disables Share for a CONTRIBUTOR in a library — the share bit is a manager right", () => {
+    mockSpaces = [
+      PERSONAL,
+      {
+        id: "dept:finance",
+        name: "Finance",
+        root: "/Finance",
+        kind: "department",
+        state: "active",
+        right: "contributor",
+        isMember: true,
+      },
+    ];
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+
+    const btn = shareBtn();
+    expect(btn).toBeDisabled();
+    // Distinct from the reader copy: a contributor CAN write here, just not share.
+    expect(btn).toHaveAttribute("title", MANAGER_ONLY);
+  });
+
+  it("leaves Share enabled for a manager in a library", () => {
+    mockSpaces = [
+      PERSONAL,
+      {
+        id: "dept:finance",
+        name: "Finance",
+        root: "/Finance",
+        kind: "department",
+        state: "active",
+        right: "manager",
+        isMember: true,
+      },
+    ];
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
+
+    expect(shareBtn()).not.toBeDisabled();
   });
 });
 

@@ -29,7 +29,7 @@ describe("WebSocket bridge — /api/ws/events", () => {
   beforeAll(async () => {
     server = createServer();
     attachWsBridge(server);
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr === "string") throw new Error("No address");
@@ -41,7 +41,7 @@ describe("WebSocket bridge — /api/ws/events", () => {
   });
 
   it("rejects upgrade on wrong path", async () => {
-    const ws = new WebSocket(`ws://localhost:${port}/api/nope`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/nope`);
     // Wait for error or close — Node's ws emits 'unexpected-response' or 'error'
     const outcome = await new Promise<string>((resolve) => {
       ws.on("error", () => resolve("error"));
@@ -53,7 +53,7 @@ describe("WebSocket bridge — /api/ws/events", () => {
   });
 
   it("accepts upgrade on /api/ws/events (AUTH_ENABLED=false)", async () => {
-    const ws = new WebSocket(`ws://localhost:${port}/api/ws/events`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws/events`);
     await once(ws, "open");
     expect(ws.readyState).toBe(WebSocket.OPEN);
     ws.close();
@@ -61,7 +61,7 @@ describe("WebSocket bridge — /api/ws/events", () => {
   });
 
   it("forwards published MQTT messages to subscribed connections", async () => {
-    const ws = new WebSocket(`ws://localhost:${port}/api/ws/events`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws/events`);
     await once(ws, "open");
 
     // Give the bridge a microtask tick to finish subscribing before we fan out.

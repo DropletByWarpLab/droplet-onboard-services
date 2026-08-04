@@ -104,8 +104,8 @@ describe("DeviceCard", () => {
       s.textContent?.includes("Living Room"),
     );
     expect(chip).toBeDefined();
-    // Chip should have background "surface-secondary" class (readable), NOT g.color as background
-    expect(chip!.className).toContain("bg-surface-secondary");
+    // Chip should have the shell's inner-surface background (readable), NOT g.color as background
+    expect(chip!.className).toContain("bg-[var(--card-inner)]");
     // The colored dot should exist with the group color as backgroundColor inline style
     const dot = chip!.querySelector("span[style]");
     expect(dot).not.toBeNull();

@@ -120,14 +120,17 @@ describe("openwrt.client routingFetch", () => {
   });
 
   it("throws after exhausting all attempts on persistent 5xx", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 502 }));
+    // 500, not 502: WARP-1673 reserves 502 for the routing↔router credential
+    // rejection (AUTH — terminal, never retried). 500 is the generic transient
+    // 5xx that exercises the retry-exhaustion path.
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 500 }));
     global.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(
       routingFetch("/network/summary", {
         retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
       }),
-    ).rejects.toThrow(/502/);
+    ).rejects.toThrow(/500/);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     // Delays fire between attempts: 1→2 and 2→3, so 2 sleeps total.
@@ -217,7 +220,8 @@ describe("openwrt.client routingFetch", () => {
 
     it("persistent 5xx → UNREACHABLE after retry exhaustion", async () => {
       const { RouterError } = await import("../types/router-error.js");
-      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 502 }));
+      // 500, not 502 — 502 is the reserved AUTH signal (WARP-1673), tested below.
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 500 }));
       global.fetch = fetchMock as unknown as typeof fetch;
 
       await expect(
@@ -227,6 +231,27 @@ describe("openwrt.client routingFetch", () => {
       ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "UNREACHABLE");
 
       expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    // WARP-1673: the routing service reserves 502 for "the ROUTER rejected the
+    // routing service's own rpcd credentials". That's AUTH — terminal — so the
+    // retry loop must NOT spin on it: retrying can't fix a rotated credential,
+    // and spinning would misreport a credential problem as an outage.
+    it("502 → AUTH, no retry (WARP-1673: reserved for router credential rejection)", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 502 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/network/summary", {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) => e instanceof RouterError && e.code === "AUTH" && e.status === 502,
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // terminal — no retry
+      expect(noSleep).not.toHaveBeenCalled();
     });
 
     it("network error (fetch throws) → UNREACHABLE after retry exhaustion", async () => {

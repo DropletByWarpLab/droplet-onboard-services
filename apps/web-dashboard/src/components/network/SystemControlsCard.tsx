@@ -119,12 +119,12 @@ export function SystemControlsCard() {
   const countryValue = data?.country.value ?? null;
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-1">
-        <Server size={18} className="text-label-tertiary" aria-hidden="true" />
-        <h3 className="type-headline text-label-primary">System</h3>
+        <Server size={18} style={{ color: "var(--text-muted)" }} aria-hidden="true" />
+        <h3 className="type-headline" style={{ color: "var(--text)" }}>System</h3>
       </div>
-      <p className="type-subheadline text-label-tertiary mb-4">
+      <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
         The appliance&apos;s name on your network and its time-sync settings.
       </p>
 
@@ -133,11 +133,12 @@ export function SystemControlsCard() {
         <div>
           <label
             htmlFor="system-hostname"
-            className="type-subheadline text-label-secondary block mb-1.5"
+            className="type-subheadline block mb-1.5"
+            style={{ color: "var(--text-muted)" }}
           >
             Hostname
           </label>
-          <p className="type-caption-1 text-label-tertiary mb-1.5">
+          <p className="type-caption-1 mb-1.5" style={{ color: "var(--text-muted)" }}>
             Changing this renames the appliance on your network — devices may
             briefly lose its address, so we ask you to confirm.
           </p>
@@ -147,7 +148,13 @@ export function SystemControlsCard() {
               type="text"
               value={hostname}
               onChange={(e) => setHostnameValue(e.target.value)}
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               maxLength={63}
               autoComplete="off"
               spellCheck={false}
@@ -157,7 +164,7 @@ export function SystemControlsCard() {
               type="button"
               onClick={saveHostname}
               disabled={savingHostname}
-              className="dp-btn-secondary flex items-center gap-2 flex-shrink-0"
+              className="btn flex-shrink-0"
             >
               {savingHostname && <Loader2 size={16} className="animate-spin" />}
               Save hostname
@@ -166,7 +173,8 @@ export function SystemControlsCard() {
           {hostnameStatus.kind === "saved" && (
             <div
               role="status"
-              className="mt-2 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+              className="mt-2 flex items-start gap-2 type-footnote bg-system-green/10 rounded-sm px-3 py-2"
+              style={{ color: "var(--text)" }}
             >
               <CheckCircle2 size={14} className="mt-0.5 flex-shrink-0 text-system-green" aria-hidden="true" />
               <span>Hostname updated.</span>
@@ -185,10 +193,10 @@ export function SystemControlsCard() {
 
         {/* NTP / time-sync — Tier 1 */}
         <div className="flex items-start gap-3 pt-1">
-          <Clock size={16} className="text-label-tertiary mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <Clock size={16} className="mt-0.5 flex-shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <p className="type-subheadline text-label-primary">Time sync</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>Time sync</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               Keeps the appliance&apos;s OpenWrt clock accurate over the internet.
             </p>
           </div>
@@ -211,10 +219,10 @@ export function SystemControlsCard() {
 
         {/* Status light — honest gate on the single-box shape */}
         <div className="flex items-start gap-3 pt-1">
-          <Lightbulb size={16} className="text-label-tertiary mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <Lightbulb size={16} className="mt-0.5 flex-shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <p className="type-subheadline text-label-primary">Status light</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>Status light</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               {ledSupported
                 ? "The front-panel activity light."
                 : "Not available on this appliance — the status light is on the appliance itself, not the network software."}
@@ -228,7 +236,7 @@ export function SystemControlsCard() {
               ariaLabel="Status light"
             />
           ) : (
-            <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full flex-shrink-0 bg-surface-secondary text-label-tertiary">
+            <span className="badge muted">
               n/a
             </span>
           )}
@@ -236,16 +244,19 @@ export function SystemControlsCard() {
 
         {/* Regulatory domain — read-only value + honest gate on single-box */}
         <div className="flex items-start gap-3 pt-1">
-          <Globe size={16} className="text-label-tertiary mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <Globe size={16} className="mt-0.5 flex-shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <p className="type-subheadline text-label-primary">Wi-Fi country</p>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>Wi-Fi country</p>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               {countryEditable
                 ? "The regulatory domain your Wi-Fi follows."
                 : "Not available on this appliance — the Wi-Fi country is set when the appliance is built and can't be changed here."}
             </p>
           </div>
-          <span className="type-caption-1 font-mono px-2 py-0.5 rounded-sm flex-shrink-0 bg-surface-secondary text-label-secondary">
+          <span
+            className="type-caption-1 font-mono px-2 py-0.5 rounded-sm flex-shrink-0"
+            style={{ background: "var(--surface-2)", color: "var(--text-muted)" }}
+          >
             {countryValue ?? "—"}
           </span>
         </div>

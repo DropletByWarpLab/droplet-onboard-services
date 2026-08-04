@@ -28,30 +28,30 @@ export function VlanView({ profile, vlans }: Props) {
   const camCount = cameras?.ports.length ?? 0;
 
   return (
-    <div className="border border-separator rounded-[12px] overflow-hidden">
+    <div className="border border-[var(--card-bd)] rounded-[12px] overflow-hidden">
       {/* VLAN 1 · LAN */}
-      <div className="flex items-center gap-3.5 px-4 py-3 border-t border-separator first:border-t-0">
-        <span className="type-caption-2 font-bold text-accent bg-accent-subtle px-2.5 py-1 rounded-[7px] flex-none font-mono">
+      <div className="flex items-center gap-3.5 px-4 py-3 border-t border-[var(--card-bd)] first:border-t-0">
+        <span className="type-caption-2 font-bold text-[color:var(--brand)] bg-[var(--brand-subtle)] px-2.5 py-1 rounded-[7px] flex-none font-mono">
           VLAN 1
         </span>
         <div className="flex-1 min-w-0">
-          <div className="type-footnote font-semibold text-label-primary flex items-center gap-2 flex-wrap">
-            LAN <span className="text-label-tertiary font-normal">· default</span>
+          <div className="type-footnote font-semibold text-[color:var(--text)] flex items-center gap-2 flex-wrap">
+            LAN <span className="text-[color:var(--text-muted)] font-normal">· default</span>
           </div>
-          <div className="type-caption-1 text-label-tertiary mt-0.5">
+          <div className="type-caption-1 text-[color:var(--text-muted)] mt-0.5">
             Workstations, printers and access points
           </div>
         </div>
-        <span className="type-caption-2 text-label-tertiary font-mono">{lanCount} ports</span>
+        <span className="type-caption-2 text-[color:var(--text-muted)] font-mono">{lanCount} ports</span>
       </div>
 
       {/* VLAN 100 · Cameras */}
-      <div className="flex items-center gap-3.5 px-4 py-3 border-t border-separator">
+      <div className="flex items-center gap-3.5 px-4 py-3 border-t border-[var(--card-bd)]">
         <span className="type-caption-2 font-bold text-system-green bg-system-green/10 px-2.5 py-1 rounded-[7px] flex-none font-mono">
           VLAN 100
         </span>
         <div className="flex-1 min-w-0">
-          <div className="type-footnote font-semibold text-label-primary flex items-center gap-2 flex-wrap">
+          <div className="type-footnote font-semibold text-[color:var(--text)] flex items-center gap-2 flex-wrap">
             Cameras
             {segmented ? (
               <span className="inline-flex items-center gap-1 type-caption-2 font-semibold text-system-green bg-system-green/10 px-2 py-0.5 rounded-full">
@@ -64,20 +64,20 @@ export function VlanView({ profile, vlans }: Props) {
               </span>
             )}
           </div>
-          <div className="type-caption-1 text-label-tertiary mt-0.5">
+          <div className="type-caption-1 text-[color:var(--text-muted)] mt-0.5">
             {segmented
               ? "Camera traffic kept off the main LAN — on-prem only"
               : "Cameras are on the main LAN for now"}
           </div>
         </div>
-        <span className="type-caption-2 text-label-tertiary font-mono">
+        <span className="type-caption-2 text-[color:var(--text-muted)] font-mono">
           {segmented ? `${camCount} ports` : "—"}
         </span>
       </div>
 
       {/* Calm blue info note — flat-lan only, never an error */}
       {!segmented && (
-        <div className="flex gap-2.5 items-start px-4 py-3 border-t border-separator bg-system-blue/5 type-caption-1 leading-relaxed text-label-secondary">
+        <div className="flex gap-2.5 items-start px-4 py-3 border-t border-[var(--card-bd)] bg-system-blue/5 type-caption-1 leading-relaxed text-[color:var(--text-muted)]">
           <ShieldCheck size={13} className="text-system-blue flex-none mt-px" aria-hidden="true" />
           <span>
             Camera isolation becomes available after router setup supports inter-VLAN routing. Until

@@ -729,18 +729,52 @@ class WakePipeline:
             )
             self._probe_thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Signal shutdown and join the threads. Idempotent."""
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Signal shutdown and join the threads. Idempotent.
+
+        Returns True when every thread this pipeline owns has actually
+        exited. False means one is STILL RUNNING — and when that one is
+        the capture worker, the exclusive mic InputStream is still open:
+        the loop below only re-checks ``_shutdown`` BETWEEN frames, and
+        ``_on_frame`` runs the whole turn (LLM reply → TTS synthesize →
+        ``_play_pcm``, blocking) inline on that same thread. A stop()
+        issued mid-turn therefore routinely outlives its join budget.
+
+        WARP-1619: ``_thread`` used to be cleared unconditionally, which
+        threw away the only evidence that the worker outlived the join —
+        so every caller that treats stop() as "the device is free now"
+        was guessing. It is now cleared only when the thread is gone,
+        and ``running`` reports the difference.
+        """
         self._shutdown.set()
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
-        self._thread = None
         pt = self._probe_thread
         if pt is not None and pt.is_alive():
             pt.join(timeout=timeout)
-        self._probe_thread = None
+        # Forget only a thread that is genuinely gone. A live one still
+        # holds something the next caller must not race.
+        joined = True
+        if t is not None and t.is_alive():
+            joined = False
+        else:
+            self._thread = None
+        if pt is not None and pt.is_alive():
+            joined = False
+        else:
+            self._probe_thread = None
         self._set_state("idle")
+        return joined
+
+    @property
+    def running(self) -> bool:
+        """True while the capture worker is alive — i.e. while this
+        pipeline still owns the exclusive mic device. Stays True after a
+        stop() whose join timed out, which is the whole point: nothing
+        else may open that device until this reads False."""
+        t = self._thread
+        return t is not None and t.is_alive()
 
     # ──────────────────────────────────────────────────────────────
     # Upstream probes (STT/TTS/LLM) — periodic re-check

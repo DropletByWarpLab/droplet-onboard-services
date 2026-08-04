@@ -43,6 +43,9 @@ vi.mock("../config.js", () => ({
     FRIGATE_URL: "http://frigate:5000",
     DOCS_INTERNAL_URL: "http://docserver.test",
     DOCS_ENABLED: true,
+    // WARP-1686: the status route surfaces the CONFIGURED engine verbatim.
+    DOCS_ENGINE: "collabora",
+    NEXTCLOUD_PUBLIC_PATH: "/nextcloud",
     DOCS_EDITOR_PUBLIC_PATH: "/docs/",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -292,7 +295,8 @@ describe("Editor session + docs status routes (WARP-882)", () => {
       const res = await request(app).get("/api/files/docs/status");
       expect(res.status).toBe(200);
       expect(res.body.state).toBe("ready");
-      expect(res.body.engine).toBeTruthy();
+      // WARP-1686: the engine string is the CONFIGURED engine, verbatim.
+      expect(res.body.engine).toBe("collabora");
     });
 
     it("reports unavailable when the engine is not healthy", async () => {

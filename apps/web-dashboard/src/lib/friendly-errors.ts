@@ -37,6 +37,10 @@ export type ErrorDomain =
   | "auth"
   | "files"
   | "share"
+  // WARP-1659 — the multi-select share fan-out. Same wire calls as "share",
+  // but the surface has no password field and no expiry picker, so the two
+  // inferences that name those controls must not speak for it.
+  | "share-bulk"
   | "chat"
   | "invite"
   | "calendar"
@@ -59,6 +63,12 @@ const FALLBACK: Record<ErrorDomain, string> = {
   auth: "We couldn't sign you in. Check your username and password, then try again.",
   files: "We couldn't load those files right now. Try again in a moment.",
   share:
+    "We couldn't create that share link right now. Try again in a moment.",
+  // Per ROW of a bulk run, so the singular "that share link" still reads
+  // correctly — deliberately the same sentence as `share`, because an unknown
+  // failure is not something the fan-out is any more responsible for than the
+  // dialog is.
+  "share-bulk":
     "We couldn't create that share link right now. Try again in a moment.",
   chat:
     "Something went wrong on this turn. Try again, or simplify the request.",
@@ -194,6 +204,86 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
+    // rejection: role denial (requireRole), guest read-only, or insufficient
+    // rights on a household/department space (requireSpaceAccess). Without this
+    // entry a 403 fell through to FALLBACK.share ("Try again in a moment"),
+    // which advises the one action guaranteed never to work — the WARP-1148
+    // defect class this domain exists to prevent.
+    //
+    // The three flavours share one bare 403 with no stable wire code, so they
+    // deliberately share one string: telling them apart needs distinct codes
+    // from the orchestrator first (out of scope here). The wording therefore
+    // stays true for all three.
+    //
+    // The copy has to serve two populations at once, so it names BOTH remedies.
+    // On main today nothing pre-empts a role-denied share client-side — the
+    // Share item in files/page.tsx is gated on `!isSingle` only, unlike its
+    // Delete sibling which honours `isReaderSpace` — so an ordinary
+    // reader/contributor 403 lands here and needs "ask an owner or admin".
+    // Once a client-side share gate lands (the `shareBlockedReason` check
+    // proposed on the WARP-1540 branch), the residual traffic is client state
+    // disagreeing with server rights — a stale ACL cache, or rights revoked
+    // mid-session — which a fresh session resolves, hence "sign out and back
+    // in", mirroring storage["403"].
+    //
+    // Precedence note: `translateError` checks `err.status` before it infers a
+    // code from the message, so a Nextcloud OCS rejection that arrives with
+    // ocsStatus 403 (e.g. "Public upload disabled by the administrator") now
+    // renders this string instead of PERMISSIONS_REJECTED. That is a
+    // deliberate trade: this copy is still accurate for it (an admin policy
+    // blocks the share, and an admin can lift it), and it is strictly better
+    // than the retry fallback every other 403 was getting.
+    "403":
+      "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
+    NOT_FOUND:
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    "404":
+      "We couldn't find that file or share anymore. It may have been moved or deleted.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  // WARP-1659 — the multi-select share fan-out (`BULK_SHARE_OPTIONS` in
+  // files/page.tsx), one row per file. Identical to `share` apart from the two
+  // codes below, because a row that fails for a reason the fan-out really is
+  // responsible for must read exactly as it does in the dialog — "same 403,
+  // two messages one click apart" is the WARP-1148 defect.
+  //
+  // PASSWORD_REJECTED / EXPIRATION_REJECTED are the exception. They are
+  // INFERRED from OCS prose (see inferCodeFromMessage), and this flow hardcodes
+  // its grant: no password field, no expiry picker, nothing the user chose. The
+  // dialog's "that password doesn't meet the rules" is then a claim about input
+  // the user never gave — on an enforce-password-on-public-links box it would
+  // fire on EVERY row of the run and point away from the real cause.
+  //
+  // They are re-answered rather than dropped: dropping them would fall through
+  // to the retry fallback, and "try again in a moment" for a deterministic
+  // policy rejection is exactly what the share domain was created to stop. What
+  // is true of this flow is that the rule needs a control the fan-out doesn't
+  // have — and the single-file dialog does.
+  //
+  // `403` is NOT a divergence — it is carried over verbatim from `share`, and
+  // it has to exist. Without it a bulk row's 403 falls through to
+  // FALLBACK["share-bulk"] ("Try again in a moment"), which is the WARP-1658
+  // defect relocated one surface over rather than fixed: POST /files/share is
+  // requireRole("owner","admin","family") and `shareBlockedReason` in
+  // files/page.tsx gates on space posture, not role, so a member/guest reaches
+  // the fan-out and every row 403s deterministically.
+  //
+  // Its presence is what forces the inference-before-status carve-out in
+  // `translateError` — see the comment there. Read the two together.
+  "share-bulk": {
+    module_disabled:
+      "File sharing is turned off on this Droplet. An owner or admin can turn the Files module back on in Settings.",
+    PASSWORD_REJECTED:
+      "This Droplet's rules require a password on share links, and sharing several files at once can't set one. Share this file on its own to add a password.",
+    EXPIRATION_REJECTED:
+      "This Droplet's rules limit when share links expire, and sharing several files at once can't set an expiry date. Share this file on its own to pick one.",
+    PERMISSIONS_REJECTED:
+      "That access level isn't available for this item. Pick a different access level and try again.",
+    "403":
+      "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
       "We couldn't find that file or share anymore. It may have been moved or deleted.",
     "404":
@@ -465,7 +555,9 @@ function inferCodeFromMessage(
   // disabled by the administrator"). Match the stable keywords so the dialog
   // renders the actionable copy instead of the retry fallback — these are
   // deterministic policy rejections where retrying can never help.
-  if (domain === "share") {
+  // WARP-1659: `share-bulk` reads the same wire, so it infers the same codes —
+  // the divergence lives in the copy each domain maps them to, not here.
+  if (domain === "share" || domain === "share-bulk") {
     if (/password/.test(m)) return "PASSWORD_REJECTED";
     if (/expir/.test(m)) return "EXPIRATION_REJECTED";
     if (/permission|public upload/.test(m)) return "PERMISSIONS_REJECTED";
@@ -494,6 +586,8 @@ function inferCodeFromMessage(
  *   3. `err.message` → infer a code via substring match; map that.
  *   4. Otherwise → domain fallback (never `err.message`).
  *
+ * `share-bulk` swaps 2 and 3 — see the carve-out comment in the body.
+ *
  * The raw error is logged to `console.error` so operators still have
  * the underlying cause when reviewing DevTools.
  */
@@ -516,6 +610,27 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
   const domainCodes = CODES[domain];
 
   if (code && domainCodes[code]) return domainCodes[code];
+  // WARP-1659 × WARP-1658 — `share-bulk` alone infers BEFORE it dispatches on
+  // status. Both tickets are right and the default order cannot serve both.
+  //
+  // Nextcloud answers a passwordless link create on an
+  // enforce-password-on-public-links box with OCSForbidden — status 403,
+  // password prose. Under the default order that 403 would shadow
+  // PASSWORD_REJECTED, so every row of a bulk run would read "you don't have
+  // permission" (false — the user has permission; the box wants a password)
+  // and the one remedy available without an admin, the single-file dialog,
+  // would never be named. Dropping CODES["share-bulk"]["403"] instead would
+  // hand a role-denied member the retry fallback, the WARP-1658 defect.
+  //
+  // Inferring first serves both: prose-bearing rejections keep the copy
+  // WARP-1659 wrote for them, and a bare/role-denial 403 — which infers
+  // nothing — still falls to the 403 entry below. Scoped to this domain
+  // deliberately: `share`'s status-first order and the trade WARP-1658
+  // documented for it are untouched.
+  if (message && domain === "share-bulk") {
+    const inferred = inferCodeFromMessage(message, domain);
+    if (inferred && domainCodes[inferred]) return domainCodes[inferred];
+  }
   if (status !== undefined && domainCodes[String(status)]) {
     return domainCodes[String(status)];
   }

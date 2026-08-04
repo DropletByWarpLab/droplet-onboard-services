@@ -4,20 +4,20 @@ paho-mqtt>=2.1.0
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
 pgvector>=0.5.0
-pdfplumber>=0.11.0
+pdfplumber>=0.11.10
 python-docx>=1.2.0
 openpyxl>=3.1.5
-beautifulsoup4>=4.12.0
+beautifulsoup4>=4.15.0
 # WARP-201 RAG Phase 1 extractors
-pypdf>=4.0
+pypdf>=6.14.2
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
 # pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
 # rebuilds words from glyph geometry. MIT-licensed.
 # pdfminer.six is pulled in transitively by pdfplumber — no explicit pin needed.
 readability-lxml>=0.8
-lxml_html_clean>=0.1
+lxml_html_clean>=0.4.5
 pytesseract>=0.3.10
-Pillow>=10.0
+Pillow>=12.3.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
 faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
@@ -60,7 +60,7 @@ tokenizers>=0.23.1,<1.0
 # hierarchical paths (section_name → slide_title). python-pptx is the
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,
 # both of which are already pulled in transitively.
-python-pptx>=0.6.23,<1.0
+python-pptx>=1.0.2,<2.0
 # WARP-1018 — FIPS boot self-test. services/_shared/fips_selftest.py is
 # COPY'd into this image and its is_fips_enabled() probe reads
 # cryptography's backend `_fips_enabled` flag. The dep was previously

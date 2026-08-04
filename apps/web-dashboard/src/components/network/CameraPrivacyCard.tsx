@@ -79,13 +79,16 @@ export function CameraPrivacyCard() {
 
   return (
     <div className="card">
-      <h3 className="type-headline text-label-primary mb-1">Camera privacy</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+      <h3 className="type-headline mb-1" style={{ color: "var(--text)" }}>Camera privacy</h3>
+      <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
         Keep your cameras local. Reads stay on your Droplet.
       </p>
 
       {/* 1 — network isolation posture (read-only, honest) */}
-      <div className="flex items-start gap-3 py-3 border-t border-separator">
+      <div
+        className="flex items-start gap-3 py-3"
+        style={{ borderTop: "1px solid var(--card-bd)" }}
+      >
         <div
           className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${
             isolated
@@ -96,7 +99,7 @@ export function CameraPrivacyCard() {
           {isolated ? <Lock size={18} /> : <ShieldCheck size={18} />}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="type-subheadline text-label-primary font-medium">
+          <p className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
             Keep cameras on their own network
           </p>
           {isolated ? (
@@ -106,7 +109,7 @@ export function CameraPrivacyCard() {
               reach them.
             </p>
           ) : (
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               Cameras share the main network. Isolation becomes available after
               router setup.
             </p>
@@ -124,15 +127,21 @@ export function CameraPrivacyCard() {
       </div>
 
       {/* 2 — block cameras from the internet (live toggle) */}
-      <div className="flex items-start gap-3 py-3 border-t border-separator">
-        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-secondary text-label-tertiary">
+      <div
+        className="flex items-start gap-3 py-3"
+        style={{ borderTop: "1px solid var(--card-bd)" }}
+      >
+        <div
+          className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+        >
           <Globe size={18} />
         </div>
         <div className="flex-1 min-w-0">
-          <p className="type-subheadline text-label-primary font-medium">
+          <p className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
             Block cameras from the internet
           </p>
-          <p className="type-caption-1 text-label-tertiary mt-0.5">
+          <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
             Allow only firmware updates and time sync
             {cameraCount != null ? ` · ${cameraCount} camera${cameraCount === 1 ? "" : "s"}` : ""}
             {blockPending ? " · applying…" : ""}

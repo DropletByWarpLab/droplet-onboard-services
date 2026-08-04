@@ -32,7 +32,10 @@
     "gen:anchor-schema": "node scripts/gen-anchor-schema.mjs"
   },
   "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": "20.x"
+  },
   "devDependencies": {
-    "turbo": "^2.10.5"
+    "turbo": "^2.10.8"
   }
 }
