@@ -134,9 +134,9 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
   const saving = status.kind === "saving";
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">DNS servers</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline text-[color:var(--text)] mb-1">DNS servers</h3>
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Choose which DNS servers the network uses to look up website addresses.
         Point these at a service like Cloudflare (1.1.1.1), a privacy resolver,
         or your own Pi-hole. Leave blank to keep using your provider&apos;s.
@@ -147,14 +147,14 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="dns-primary"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Primary DNS
             </label>
             <div className="relative">
               <Globe
                 size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]"
                 aria-hidden="true"
               />
               <input
@@ -164,7 +164,13 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
                 value={primary}
                 onChange={(e) => setPrimary(e.target.value)}
                 placeholder="1.1.1.1"
-                className="dp-input pl-10 font-mono"
+                className="w-full px-3 py-2.5 pl-10 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
                 autoComplete="off"
                 spellCheck={false}
                 disabled={saving}
@@ -174,10 +180,10 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
           <div>
             <label
               htmlFor="dns-secondary"
-              className="type-subheadline text-label-secondary block mb-1.5"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
             >
               Secondary DNS{" "}
-              <span className="text-label-tertiary">(optional)</span>
+              <span className="text-[color:var(--text-muted)]">(optional)</span>
             </label>
             <input
               id="dns-secondary"
@@ -186,7 +192,13 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
               value={secondary}
               onChange={(e) => setSecondary(e.target.value)}
               placeholder="1.0.0.1"
-              className="dp-input font-mono"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               autoComplete="off"
               spellCheck={false}
               disabled={saving}
@@ -198,7 +210,7 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
           type="button"
           onClick={handleSave}
           disabled={saving}
-          className="dp-btn-primary flex items-center gap-2"
+          className="btn primary"
         >
           {saving && <Loader2 size={16} className="animate-spin" />}
           {saving ? "Saving…" : "Save DNS servers"}
@@ -208,7 +220,7 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2
             size={14}
@@ -223,7 +235,7 @@ export function DnsServersForm({ onApplied }: { onApplied?: () => void }) {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
         >
           <AlertCircle
             size={14}
