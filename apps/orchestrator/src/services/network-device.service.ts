@@ -27,6 +27,9 @@ import {
   withSwrCache as defaultWithSwrCache,
   invalidatePrefix as defaultInvalidatePrefix,
 } from "./cache.service.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("network-device");
 
 /**
  * Prisma's `update` and `delete` throw `PrismaClientKnownRequestError` with
@@ -144,6 +147,38 @@ export function createNetworkDeviceService(
    */
   const inFlight = new Map<string, Promise<unknown>>();
 
+  /**
+   * WARP-1712: canonical MACs of the access points Droplet itself provisions,
+   * for hiding them from the client-devices list.
+   *
+   * Never throws. The filter is cosmetic — an AP that slips through is a
+   * duplicated row, whereas a rejection here would 500 the entire Devices
+   * page. That trade only goes one way. It also keeps every caller's Prisma
+   * stub from having to grow a table just to satisfy a display filter.
+   */
+  async function infraApMacs(): Promise<Set<string>> {
+    const macs = new Set<string>();
+    try {
+      const rows = await prisma.apDevice.findMany({
+        where: { backend: "DROPLET_IMAGE" },
+        select: { mac: true },
+      });
+      // Both tables store canonical MACs (every ingress goes through
+      // `normalizeMac`), but re-normalise anyway so a row written by an
+      // older/looser path can't slip the filter on case or separators.
+      for (const ap of rows) {
+        const mac = safeNormalize(ap.mac);
+        if (mac) macs.add(mac);
+      }
+    } catch (err) {
+      logger.warn(
+        { err },
+        "network-device: AP table unreadable; access points may appear as devices",
+      );
+    }
+    return macs;
+  }
+
   function singleFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
     const existing = inFlight.get(key) as Promise<T> | undefined;
     if (existing) return existing;
@@ -189,20 +224,15 @@ export function createNetworkDeviceService(
         // complete home for them. A UNIFI / EASYMESH AP is third-party gear
         // the operator may legitimately want to see, block or group as a
         // network device, so those rows stay visible.
-        prisma.apDevice.findMany({
-          where: { backend: "DROPLET_IMAGE" },
-          select: { mac: true },
-        }),
+        //
+        // Degrades rather than throwing: this read only drives a COSMETIC
+        // filter, so if the AP table can't be reached the right outcome is
+        // "the AP shows up in the list too", not a 500 that takes the whole
+        // Devices page down with it. Same posture as `liveSnapshot()` above.
+        infraApMacs(),
       ]);
 
-      // Both tables store canonical MACs (every ingress goes through
-      // `normalizeMac`), but re-normalise anyway so a row written by an
-      // older/looser path can't slip the filter on case or separators.
-      const infraMacs = new Set<string>();
-      for (const ap of infraAps) {
-        const mac = safeNormalize(ap.mac);
-        if (mac) infraMacs.add(mac);
-      }
+      const infraMacs = infraAps;
 
       // Build a MAC -> signal lookup from wireless clients (normalized).
       const signalByMac = new Map<string, number | undefined>();

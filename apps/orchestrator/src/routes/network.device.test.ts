@@ -269,6 +269,11 @@ vi.mock("@prisma/client", () => {
     },
     networkDevice,
     deviceGroup,
+    // WARP-1712: `listDevices` reads this to hide Droplet's own access points
+    // from the client-devices list (the Coverage Extenders panel owns them).
+    apDevice: {
+      findMany: vi.fn(async () => [] as { mac: string }[]),
+    },
   };
   // WARP-1583: the T3 effective-access resolver composes its reads inside ONE
   // RepeatableRead transaction, and app.ts mounts requireFeatureAccess on this

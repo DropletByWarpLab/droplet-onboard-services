@@ -404,6 +404,26 @@ describe("network-device.service", () => {
         const list = await svc.listDevices();
         expect(list).toHaveLength(1);
       });
+
+      it("degrades the FILTER, not the page, when the AP table is unreadable", async () => {
+        // The dedupe is cosmetic. An AP slipping through is a duplicated row;
+        // throwing here would 500 the whole Devices page. That trade only
+        // goes one way.
+        devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
+        prisma.apDevice.findMany = vi.fn().mockRejectedValue(new Error("db down"));
+
+        const list = await svc.listDevices();
+        expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:01"]);
+      });
+
+      it("degrades when the AP table is missing from the client entirely", async () => {
+        devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
+        // e.g. a generated Prisma client that predates the ApDevice model.
+        (prisma as any).apDevice = undefined;
+
+        const list = await svc.listDevices();
+        expect(list).toHaveLength(1);
+      });
     });
   });
 
