@@ -15,9 +15,32 @@ const logger = pino({ name: "nextcloud-client" });
 
 const WEBDAV_BASE = "/remote.php/dav/files";
 
+/**
+ * Percent-encode each path segment, leaving the `/` separators intact.
+ * `encodeURIComponent` on the whole string would escape the separators too.
+ * Empty segments (leading/trailing/doubled slashes) are preserved verbatim so
+ * callers that pass "/" keep addressing the WebDAV root.
+ */
+function encodePathSegments(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => (segment === "" ? "" : encodeURIComponent(segment)))
+    .join("/");
+}
+
+/**
+ * Build a WebDAV URL for `path` in `user`'s namespace.
+ *
+ * `user` and `path` are raw (already-decoded) values coming from route params,
+ * query strings, and DB records — they MUST be percent-encoded here. Without
+ * it a filename containing `#` truncates the URL at the fragment, `?` starts a
+ * query string, a bare `%` is an invalid escape, and `+`/space are not
+ * path-legal — so the request lands on a DIFFERENT resource than intended. For
+ * DELETE and overwriting PUT/MOVE that means destroying the wrong file.
+ */
 function webdavUrl(user: string, path: string): string {
   const cleanPath = path.replace(/^\/+/, "");
-  return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${user}/${cleanPath}`;
+  return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${encodeURIComponent(user)}/${encodePathSegments(cleanPath)}`;
 }
 
 function ocsUrl(endpoint: string): string {
