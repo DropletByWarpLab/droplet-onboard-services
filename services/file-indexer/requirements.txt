@@ -17,7 +17,7 @@ pypdf>=6.14.2
 readability-lxml>=0.8
 lxml_html_clean>=0.4.5
 pytesseract>=0.3.10
-Pillow>=10.0
+Pillow>=12.3.0
 # WARP-197 RAG Phase 2 audio extractor (faster-whisper ASR)
 faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
