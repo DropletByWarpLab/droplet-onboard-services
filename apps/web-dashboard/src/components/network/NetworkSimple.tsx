@@ -74,7 +74,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
   return (
     <div className="flex flex-col gap-4">
       {/* Internet hero */}
-      <section className="dp-card p-5">
+      <section className="card">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             <span
@@ -85,8 +85,8 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
               <Globe className="h-5 w-5" />
             </span>
             <div>
-              <h2 className="type-title-3 text-label-primary">Internet</h2>
-              <p className="type-subheadline text-label-secondary">
+              <h2 className="type-title-3" style={{ color: "var(--text)" }}>Internet</h2>
+              <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                 {online ? "Connected" : "Offline"}
                 {online && uptime !== "—" ? ` · up ${uptime}` : ""}
               </p>
@@ -103,31 +103,34 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
 
         <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-4">
           <div>
-            <p className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-0.5">Public IP</p>
-            <p className="type-subheadline font-mono text-label-primary">{wanIp}</p>
+            <p className="type-caption-2 uppercase tracking-wide mb-0.5" style={{ color: "var(--text-muted)" }}>Public IP</p>
+            <p className="type-subheadline font-mono" style={{ color: "var(--text)" }}>{wanIp}</p>
           </div>
           <div>
-            <p className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-0.5">Connection</p>
-            <p className="type-subheadline text-label-primary">{protoLabel(wan?.proto ?? "")}</p>
+            <p className="type-caption-2 uppercase tracking-wide mb-0.5" style={{ color: "var(--text-muted)" }}>Connection</p>
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>{protoLabel(wan?.proto ?? "")}</p>
           </div>
           <div>
-            <p className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-0.5">Uptime</p>
-            <p className="type-subheadline text-label-primary tabular-nums">{uptime}</p>
+            <p className="type-caption-2 uppercase tracking-wide mb-0.5" style={{ color: "var(--text-muted)" }}>Uptime</p>
+            <p className="type-subheadline tabular-nums" style={{ color: "var(--text)" }}>{uptime}</p>
           </div>
         </div>
       </section>
 
       {/* Devices + auto-managed coverage + escape hatch to Advanced */}
-      <section className="dp-card p-5">
+      <section className="card">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-8">
             <div className="flex items-center gap-3">
-              <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+              <span
+                className="flex-none h-10 w-10 rounded-[10px] flex items-center justify-center"
+                style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+              >
                 <Cpu className="h-5 w-5" />
               </span>
               <div>
-                <p className="type-title-3 text-label-primary tabular-nums">{deviceCount}</p>
-                <p className="type-subheadline text-label-secondary">
+                <p className="type-title-3 tabular-nums" style={{ color: "var(--text)" }}>{deviceCount}</p>
+                <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                   device{deviceCount === 1 ? "" : "s"} on your network
                 </p>
               </div>
@@ -135,12 +138,15 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
 
             {hasExtenders && (
               <div className="flex items-center gap-3">
-                <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+                <span
+                  className="flex-none h-10 w-10 rounded-[10px] flex items-center justify-center"
+                  style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+                >
                   <Wifi className="h-5 w-5" />
                 </span>
                 <div>
-                  <p className="type-title-3 text-label-primary tabular-nums">{apsOnline}</p>
-                  <p className="type-subheadline text-label-secondary">
+                  <p className="type-title-3 tabular-nums" style={{ color: "var(--text)" }}>{apsOnline}</p>
+                  <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                     access point{apsOnline === 1 ? "" : "s"} · auto-managed
                   </p>
                 </div>
@@ -150,7 +156,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
 
           <button
             onClick={onOpenAdvanced}
-            className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
+            className="btn px-3 h-9 rounded-md"
           >
             <span className="type-subheadline">All network controls</span>
             <ArrowRight size={15} />
@@ -160,7 +166,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
         {apsAwaiting > 0 && (
           <button
             onClick={onOpenAdvanced}
-            className="mt-3 w-full flex items-center gap-2 rounded-md bg-system-orange/10 text-system-orange px-3 py-2 text-left transition-colors hover:bg-system-orange/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="mt-3 w-full flex items-center gap-2 rounded-md bg-system-orange/10 text-system-orange px-3 py-2 text-left transition-colors hover:bg-system-orange/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
           >
             <AlertTriangle size={15} className="flex-none" />
             <span className="type-subheadline">
@@ -176,22 +182,25 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
           (hostname, OpenWrt version, reboot, resources) live in Advanced ›
           System; home users had no discoverable entry point. Hardware-agnostic
           per ADR-011 — status + a settings link, no board/NIC names. */}
-      <section className="dp-card p-5">
+      <section className="card">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
-            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+            <span
+              className="flex-none h-10 w-10 rounded-[10px] flex items-center justify-center"
+              style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+            >
               <Router className="h-5 w-5" />
             </span>
             <div>
-              <p className="type-title-3 text-label-primary">Router</p>
-              <p className="type-subheadline text-label-secondary">
+              <p className="type-title-3" style={{ color: "var(--text)" }}>Router</p>
+              <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
                 {routerConnected ? "Connected" : "Status unknown"}
               </p>
             </div>
           </div>
           <button
             onClick={onOpenAdvanced}
-            className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
+            className="btn px-3 h-9 rounded-md"
           >
             <span className="type-subheadline">Router settings</span>
             <ArrowRight size={15} />
