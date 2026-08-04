@@ -511,7 +511,18 @@ export async function fetchApClients(
   const data = await routingFetchJson<{
     supported?: boolean;
     clients?: WirelessClient[];
-  }>(`/aps/${encodeURIComponent(mac)}/clients`, { label: "AP clients" });
+  }>(`/aps/${encodeURIComponent(mac)}/clients`, {
+    label: "AP clients",
+    // Single attempt, deliberately. This sits on the DEVICE-LIST hot path, and
+    // it is best-effort enrichment: losing it costs a signal bar and an AP
+    // attribution, never a row. `routingFetch` carries no client-side timeout
+    // and the routing service dials the AP with the SDK's 10s default per call,
+    // so the stock 3-attempt policy would let one half-alive AP (SYN accepted,
+    // never answers) stall the Devices page for tens of seconds. Failing fast
+    // and degrading is the right trade here; the 10s list cache means a
+    // genuinely slow AP is re-probed at most once per cache miss.
+    retry: { attempts: 1 },
+  });
   return {
     supported: data.supported !== false,
     clients: Array.isArray(data.clients) ? data.clients : [],
