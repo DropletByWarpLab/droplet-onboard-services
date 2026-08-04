@@ -92,7 +92,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `SWITCH_PORT`        | Managed switch HTTPS port (default `443`)              |
 | `SWITCH_USERNAME`    | Switch admin username (default `admin`)                |
 | `SWITCH_PASSWORD`    | Switch admin password                                  |
-| `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
+| `SWITCH_DRIVER`      | Switch driver: `openwrt` (default) or `asic` (future) |
 | `SWITCH_CA_CERT` | (switch, WARP-583/NET-07) Container-visible path to a CA bundle/cert for TLS verification of the switch admin HTTPS session. When set, the driver verifies the switch's cert against it at connect; a set-but-missing path fails closed (the driver refuses to connect, no silent downgrade). Default unset → unverified session (the embedded switch ships a self-signed cert) with a loud warning. Pinning also verifies the hostname/IP against the cert's SANs, so a cert without the switch's IP (`SWITCH_HOST`) in its SANs will fail verification against raw-IP targets — fail-closed, by design; provision a cert carrying the switch IP in its SANs, or fall back to unpinned. |
 | `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://host.docker.internal:8081` — same host-mode rationale as `ROUTING_SERVICE_URL`) |
 | `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the inference host) |

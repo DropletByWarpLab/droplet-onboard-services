@@ -30,6 +30,14 @@
   --brand-hover: #4f46e5;
   --brand-soft: #818cf8;
   --brand-deep: #4338ca;
+  /* Ink for anything filled with --brand. The two themes take OPPOSITE
+     answers because the ramp flips: light --brand is indigo-500 (#6366f1,
+     white ink 4.47:1) but dark --brand is the much lighter indigo-400
+     (#818cf8), where white ink is only 2.98:1 — a WCAG 1.4.3 failure. Dark
+     ink on it measures 5.64:1. Same call the legacy violet system makes with
+     `--color-on-accent` in globals.css, and `.dark .dh-edit-toggle.on` in
+     home-bento.css. Never hardcode #fff on a --brand fill. WARP-1358. */
+  --on-brand: #ffffff;
   --success: #16a34a;
   --danger: #b91c1c;
   --user-bubble: #dbe4ff;
@@ -88,6 +96,7 @@
   --brand-hover: #6366f1;
   --brand-soft: #a5b4fc;
   --brand-deep: #4f46e5;
+  --on-brand: #1d1d1f;     /* dark ink — 5.64:1 on #818cf8 (white is 2.98:1) */
   --success: #22c55e;
   --danger: #7f1d1d;
   --user-bubble: #1e3a5f;

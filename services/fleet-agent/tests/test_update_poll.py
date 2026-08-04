@@ -240,12 +240,26 @@ async def test_schema_invalid_manifest_rejected_audited(state_dir, caplog):
 
 @respx.mock
 async def test_placeholder_trust_anchor_fails_closed_end_to_end(state_dir):
-    """With the shipped (placeholder) anchor — i.e. no key ceremony —
-    even a correctly-signed release is refused and never recorded."""
+    """With a placeholder anchor — i.e. an image built before the key
+    ceremony — even a correctly-signed release is refused and never
+    recorded.
+
+    This used to rely on the SHIPPED anchor being the placeholder. The key
+    ceremony stamped the real key over it, so the fixture is now injected
+    explicitly: the scenario (a box whose baked-in anchor predates the
+    ceremony) is still real and still has to fail closed, and pinning it
+    to a fixture keeps the coverage from evaporating the moment the repo
+    state changed. See test_release_verify.py for the shipped-anchor
+    assertions."""
     serve_release("v1", fx("release.valid.json"), fx("release.valid.json.sig"))
     cfg = load_config(update_env(state_dir))
     store = StateStore(cfg.state_dir)
-    poller = UpdatePoller(config=cfg, state=store, errors=ErrorReporter())  # baked-in anchor
+    poller = UpdatePoller(
+        config=cfg,
+        state=store,
+        errors=ErrorReporter(),
+        public_key_path=_FIXTURES / "placeholder-cosign.pub",
+    )
 
     outcome = await poller.poll_once()
 

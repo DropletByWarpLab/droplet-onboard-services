@@ -118,9 +118,16 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "view" },
     { level: "manage", minTier: "admin" }, // no act level by design
   ],
+  // WARP-1683 — Messages (team chat). `act` is un-floored like voice:
+  // requireRole on /api/team-chat admits guests, so a guest may read AND
+  // send. No `manage` level in v1 — there is no admin surface to manage.
+  team_chat: [
+    { level: "view" },
+    { level: "act" },
+  ],
 };
 
-/** The 11 grant-bearing ModuleIds (everything but the always-on chat). */
+/** The 12 grant-bearing ModuleIds (everything but the always-on chat). */
 export const GATEABLE_MODULE_IDS = Object.keys(CATALOG) as ReadonlyArray<
   Exclude<ModuleId, "chat">
 >;

@@ -1,6 +1,6 @@
 """WARP-1176 (PYNET-001): plan-only writes must never be reported as applied.
 
-The Lantronix driver runs plan-only by default (SWITCH_LIVE_WRITES=0) and every
+Switch drivers run plan-only by default (SWITCH_LIVE_WRITES=0) and every
 write method no-ops (returning the plan dict instead of POSTing). The REST
 layer used to answer unconditional ``{"status": "ok"}`` for those no-op writes
 — and even discarded the driver's returned ``{**plan, "dry_run": True}`` on
@@ -14,7 +14,7 @@ These tests pin the honest contract on EVERY write endpoint:
 * live mode      -> the pre-existing success shape: ``status: "ok"`` +
   ``dry_run: false`` and no ``plan`` key.
 
-The fake driver mirrors the REAL LantronixDriver return shapes (see
+The fake driver mirrors the real drivers' write return shapes (see
 ``_gated_write``): ``set_vlan_membership`` / ``set_port_poe`` return
 ``{**plan, "dry_run": bool}``; ``set_port_enabled`` / ``create_vlan`` /
 ``delete_vlan`` return ``None`` (their endpoints fall back to the driver's
@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 
 
 class _FakeDriver:
-    """Stand-in mirroring LantronixDriver's write-method return shapes."""
+    """Stand-in mirroring the real drivers' write-method return shapes."""
 
     def __init__(self, *, plan_only: bool) -> None:
         self.plan_only = plan_only

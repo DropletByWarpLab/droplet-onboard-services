@@ -1,3 +1,4 @@
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -4055,6 +4056,12 @@ export type BusinessOnboardingState =
 export interface BusinessProfileView {
   onboardingState?: BusinessOnboardingState;
   interviewChatId?: string | null;
+  /** WARP-1668 — owner/admin only: is the parked interview session one THIS
+   *  user can actually open? `interviewChatId` cannot answer that (sessions
+   *  are owner-scoped and the FK is `onDelete: SetNull`), so the server
+   *  resolves it. Absent ⇒ treat as false: an orchestrator that predates the
+   *  field must not paint a resume banner that cannot act. */
+  interviewResumable?: boolean;
   summary?: string;
   whatWeDo?: string;
   customers?: string;
@@ -4286,21 +4293,39 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
 // contract at `fetchFiles` above). Kept out of the request entirely for
 // "personal" so the URL/body shape — and any test/cache assertions pinned
 // to it — stays byte-identical to before WARP-883 introduced spaces.
-export async function uploadFiles(
-  path: string,
-  files: FileList | File[],
-  onProgress?: (percent: number) => void,
-  space: FileSpaceId = "personal"
+/**
+ * Thrown when an upload stops partway through a multi-batch selection.
+ *
+ * WARP-1666: selections past `MAX_FILES_PER_UPLOAD` go out as several requests,
+ * so "the upload failed" stopped being the whole truth — some files are already
+ * on the box. `uploaded` is how many actually landed. Successful batches are
+ * deliberately NOT rolled back: the caller surfaces the count and the user
+ * retries to pick up the remainder.
+ */
+export class UploadBatchError extends Error {
+  readonly name = "UploadBatchError";
+
+  constructor(
+    readonly uploaded: number,
+    readonly total: number,
+    readonly cause: unknown
+  ) {
+    super(`Uploaded ${uploaded} of ${total} files`);
+  }
+}
+
+/** POST a single batch — never more files than the server accepts at once. */
+async function uploadBatch(
+  url: string,
+  batch: File[],
+  onFraction?: (fraction: number) => void
 ): Promise<void> {
   const formData = new FormData();
-  for (const file of files) {
+  for (const file of batch) {
     formData.append("files", file);
   }
-  const qs = new URLSearchParams({ path });
-  if (space !== "personal") qs.set("space", space);
-  const url = `${BASE}/api/files/upload?${qs.toString()}`;
 
-  if (onProgress) {
+  if (onFraction) {
     // Use XMLHttpRequest for progress events
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -4308,8 +4333,8 @@ export async function uploadFiles(
       xhr.withCredentials = true;
 
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable && e.total > 0) {
+          onFraction(e.loaded / e.total);
         }
       };
 
@@ -4330,6 +4355,63 @@ export async function uploadFiles(
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Upload failed: ${body}`);
+  }
+}
+
+/**
+ * Upload a selection to `path`, in batches the server will actually accept.
+ *
+ * WARP-1666: a folder-sized selection exceeds the per-request cap, and the
+ * server rejects an over-cap request WHOLESALE — so posting everything at once
+ * meant zero files landed. Batching is what makes large selections work at all.
+ *
+ * Batches run sequentially, not concurrently: each is buffered in the
+ * orchestrator's memory before it reaches Nextcloud, so parallel batches would
+ * multiply peak memory on the box for no user-visible gain.
+ *
+ * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
+ * advances monotonically to 100% instead of resetting once per batch.
+ *
+ * Throws {@link UploadBatchError} if a batch fails; earlier batches stay
+ * uploaded.
+ */
+export async function uploadFiles(
+  path: string,
+  files: FileList | File[],
+  onProgress?: (percent: number) => void,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const url = `${BASE}/api/files/upload?${qs.toString()}`;
+
+  const all = Array.from(files);
+  const totalBytes = all.reduce((sum, f) => sum + f.size, 0);
+  let uploaded = 0;
+  let sentBytes = 0;
+
+  for (let i = 0; i < all.length; i += MAX_FILES_PER_UPLOAD) {
+    const batch = all.slice(i, i + MAX_FILES_PER_UPLOAD);
+    const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
+
+    try {
+      await uploadBatch(
+        url,
+        batch,
+        onProgress &&
+          ((fraction) => {
+            const done = sentBytes + fraction * batchBytes;
+            onProgress(
+              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100
+            );
+          })
+      );
+    } catch (err) {
+      throw new UploadBatchError(uploaded, all.length, err);
+    }
+
+    uploaded += batch.length;
+    sentBytes += batchBytes;
   }
 }
 
@@ -6838,4 +6920,199 @@ export async function putAccessExceptions(
     throw new Error(body.error || `Failed to save exceptions: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Team chat (WARP-1683, /messages) ---
+
+/**
+ * UX review (WARP-1683): the Messages surface renders `err.message`
+ * verbatim, so raw status codes / server error tokens must never ride on
+ * the thrown Error. Every team-chat helper funnels failures here — the
+ * diagnostic detail goes to the console, the user gets plain copy.
+ */
+async function teamChatFail(
+  op: string,
+  userMessage: string,
+  res: Response,
+): Promise<never> {
+  const detail = await res.text().catch(() => "");
+  console.error(`[team-chat] ${op} failed: ${res.status} ${detail}`);
+  throw new Error(userMessage);
+}
+
+export interface TeamChatContact {
+  id: string;
+  displayName: string;
+  username: string;
+  role: string;
+}
+
+export type TeamChatMessageKind = "text" | "file_share" | "ai_chat_share";
+
+export interface TeamChatMessage {
+  id: string;
+  threadId: string;
+  senderId: string;
+  senderDisplayName: string | null;
+  kind: TeamChatMessageKind;
+  /** Text body, or the forward's optional caption. */
+  body: string | null;
+  sharedNcFileId: number | null;
+  sharedFileName: string | null;
+  sharedFilePath: string | null;
+  sharedChatSessionId: string | null;
+  createdAt: string;
+}
+
+export interface TeamChatThreadSummary {
+  id: string;
+  kind: "direct" | "group";
+  title: string | null;
+  createdById: string;
+  createdAt: string;
+  lastMessageAt: string;
+  participants: Array<{
+    userId: string;
+    displayName: string | null;
+    username: string | null;
+  }>;
+  lastMessage: TeamChatMessage | null;
+  unreadCount: number;
+}
+
+export interface TeamChatTranscript {
+  title: string | null;
+  messages: Array<{ role: string; content: string; createdAt: string }>;
+}
+
+export type TeamChatSendBody =
+  | { kind: "text"; body: string }
+  | {
+      kind: "file_share";
+      ncFileId: number;
+      fileName: string;
+      filePath: string;
+      caption?: string;
+    }
+  | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };
+
+export async function fetchTeamChatContacts(): Promise<TeamChatContact[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/contacts`);
+  if (!res.ok) {
+    return teamChatFail("contacts", "Couldn't load people. Try again.", res);
+  }
+  const body = (await res.json()) as { contacts: TeamChatContact[] };
+  return body.contacts;
+}
+
+export async function fetchTeamChatThreads(): Promise<TeamChatThreadSummary[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`);
+  if (!res.ok) {
+    return teamChatFail("threads", "Couldn't load conversations. Try again.", res);
+  }
+  const body = (await res.json()) as { threads: TeamChatThreadSummary[] };
+  return body.threads;
+}
+
+/** Create a DM/group. The server dedupes direct pairs — a repeat create
+ *  returns the existing thread (200) instead of a new row (201). */
+export async function createTeamChatThread(args: {
+  kind: "direct" | "group";
+  participantIds: string[];
+  title?: string;
+}): Promise<{ id: string }> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    return teamChatFail(
+      "create-thread",
+      "Couldn't start the conversation. Try again.",
+      res,
+    );
+  }
+  const body = (await res.json()) as { thread: { id: string } };
+  return body.thread;
+}
+
+export async function fetchTeamChatMessages(
+  threadId: string,
+  opts: { cursor?: string; limit?: number } = {},
+): Promise<{ messages: TeamChatMessage[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const qsStr = qs.toString();
+  const suffix = qsStr.length > 0 ? `?${qsStr}` : "";
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages${suffix}`,
+  );
+  if (!res.ok) {
+    return teamChatFail("messages", "Couldn't load messages. Try again.", res);
+  }
+  return res.json() as Promise<{
+    messages: TeamChatMessage[];
+    nextCursor: string | null;
+  }>;
+}
+
+export async function sendTeamChatMessage(
+  threadId: string,
+  body: TeamChatSendBody,
+): Promise<TeamChatMessage> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    return teamChatFail("send", "Couldn't send. Try again.", res);
+  }
+  const out = (await res.json()) as { message: TeamChatMessage };
+  return out.message;
+}
+
+export async function markTeamChatThreadRead(threadId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/read`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    return teamChatFail("mark-read", "Couldn't update read status.", res);
+  }
+}
+
+export async function fetchTeamChatTranscript(
+  messageId: string,
+): Promise<TeamChatTranscript> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/messages/${encodeURIComponent(messageId)}/transcript`,
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "transcript",
+      "Couldn't open the transcript. Try again.",
+      res,
+    );
+  }
+  return res.json() as Promise<TeamChatTranscript>;
+}
+
+export async function fetchTeamChatUnreadCount(): Promise<number> {
+  const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
+  // Review: the sidebar polls this on EVERY page every ~20s. With the
+  // team_chat module off, the gate 404s the whole surface — that's an
+  // expected steady state, not an error: a quiet zero, no console spam.
+  // (The poll keeps running, so re-enabling the module recovers alone.)
+  if (res.status === 404) return 0;
+  if (!res.ok) {
+    return teamChatFail("unread-count", "Couldn't load unread count.", res);
+  }
+  const body = (await res.json()) as { total: number };
+  return body.total;
 }

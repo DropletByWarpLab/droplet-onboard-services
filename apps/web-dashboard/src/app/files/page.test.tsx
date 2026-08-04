@@ -1452,3 +1452,102 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     expect(shareBtn()).not.toBeDisabled();
   });
 });
+
+// WARP-1667 — the Spaces menu paints BEHIND the page content below it.
+//
+// Not a z-index-too-low bug in the menu itself. `droplet-shell.css` puts
+// `animation: ds-rise 520ms var(--ease) both` on every `.page-inner > *`;
+// ds-rise animates `transform`/`opacity` and `fill-mode: both` keeps it in
+// its filling phase forever, so each `.page-inner` child is a PERMANENT
+// stacking context. The menu's own `z-30` is therefore trapped inside the
+// switcher's wrapper, and the wrapper — `z-index: auto` — simply loses to
+// its later siblings (breadcrumbs, admin banner, volumes panel, file rows)
+// in paint order.
+//
+// The search bar hit this exact wall in WARP-1139 and got `relative z-40`.
+// These specs pin the equivalent lift on the switcher wrapper, and pin the
+// ORDERING that makes `z-30` (not `z-40`) the right number: search results
+// must keep painting over the space pills.
+//
+// jsdom evaluates no Tailwind stylesheet, so `getComputedStyle` reports no
+// z-index — the utility class is the only observable. `zIndexOf` reads it.
+describe("<FilesPage /> — Spaces menu layering (WARP-1667)", () => {
+  const FINANCE: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "contributor",
+    isMember: true,
+  };
+  const LEGAL: FileSpace = { ...FINANCE, id: "dept:legal", name: "Legal", root: "/Legal" };
+  const ENG: FileSpace = { ...FINANCE, id: "dept:eng", name: "Engineering", root: "/Eng" };
+
+  // >3 active spaces forces the collapsed "Spaces" menu rather than the
+  // plain segmented tablist — the only shape in which this bug exists.
+  beforeEach(() => {
+    mockSpaces = [PERSONAL, SHARED, FINANCE, LEGAL, ENG];
+  });
+
+  /** Tailwind's `z-<n>` utility as a number; no utility means `auto` → 0. */
+  function zIndexOf(el: Element | null | undefined): number {
+    const match = el?.className?.toString().match(/(?:^|\s)z-(\d+)(?:\s|$)/);
+    return match ? Number(match[1]) : 0;
+  }
+
+  /** The `.page-inner` child that contains `el` — the stacking context it's trapped in. */
+  function pageInnerAncestorOf(el: Element): Element {
+    const inner = el.closest(".page-inner");
+    expect(inner).not.toBeNull();
+    const child = Array.from(inner!.children).find((c) => c.contains(el));
+    expect(child).toBeDefined();
+    return child!;
+  }
+
+  it("collapses to the Spaces menu and opens it", () => {
+    render(<FilesPage />);
+    const trigger = screen.getByRole("button", { name: /spaces/i });
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("menu", { name: /spaces/i })).toBeInTheDocument();
+  });
+
+  it("raises the switcher's stacking context above every later page-inner sibling", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("button", { name: /spaces/i }));
+
+    const wrapper = pageInnerAncestorOf(screen.getByRole("tablist", { name: /file space/i }));
+    const siblings = Array.from(wrapper.parentElement!.children);
+    const later = siblings.slice(siblings.indexOf(wrapper) + 1);
+
+    // Every one of these — breadcrumbs, banner, volumes panel, file rows —
+    // is its own stacking context; the switcher has to outrank all of them.
+    expect(later.length).toBeGreaterThan(0);
+    for (const sibling of later) {
+      expect(zIndexOf(sibling)).toBeLessThan(zIndexOf(wrapper));
+    }
+  });
+
+  it("is positioned, so its z-index actually applies", () => {
+    render(<FilesPage />);
+    const wrapper = pageInnerAncestorOf(screen.getByRole("tablist", { name: /file space/i }));
+    // `z-*` is inert on a `position: static` box.
+    expect(wrapper.className).toMatch(/(?:^|\s)(relative|absolute|fixed|sticky)(?:\s|$)/);
+  });
+
+  it("stays BELOW the search wrapper — WARP-1139 is not regressed", () => {
+    render(<FilesPage />);
+    const switcher = pageInnerAncestorOf(screen.getByRole("tablist", { name: /file space/i }));
+    // The real SearchBar is stubbed at the top of this file; the WRAPPER that
+    // carries the WARP-1139 `relative z-40` is the page's own and is
+    // unaffected by that stub.
+    const search = pageInnerAncestorOf(
+      screen.getByRole("button", { name: /pick search result/i })
+    );
+
+    // The search wrapper comes FIRST in DOM order, so a tie would hand the
+    // win to the switcher and put the results popover back underneath it.
+    expect(zIndexOf(switcher)).toBeLessThan(zIndexOf(search));
+  });
+});

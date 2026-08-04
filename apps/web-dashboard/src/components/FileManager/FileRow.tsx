@@ -23,6 +23,13 @@ interface FileRowProps {
   /** Set of paths currently marked as favorites (so the row can show the star filled). */
   favoritedPaths?: Set<string>;
   onSelect: (e: React.MouseEvent) => void;
+  /**
+   * Additive toggle fired by the row's selection checkbox. Distinct from
+   * `onSelect`, which derives its mode from the click's modifier keys — a
+   * checkbox click carries none, so it must never collapse the selection to
+   * this one row.
+   */
+  onToggleSelect: () => void;
   onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
@@ -93,6 +100,7 @@ export function FileRow({
   isRenaming,
   favoritedPaths,
   onSelect,
+  onToggleSelect,
   onOpen,
   onDownload,
   onDelete,
@@ -231,19 +239,52 @@ export function FileRow({
         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--brand)]
         ${isSelected ? "" : "hover:bg-[var(--hover)]"}`}
     >
-      {/* Selection indicator */}
+      {/*
+        Selection checkbox. The circle used to be an inert <div>, so clicking
+        the one thing that looks like "tick me" bubbled to the row — which for
+        a folder navigates into it (WARP-309). It is now its own control:
+        toggles selection additively, swallows the click, and never opens.
+        `-m-2 p-2` grows the 18 px glyph to a 34 px hit target without moving
+        the layout.
+      */}
       <div className="flex items-center gap-3 flex-1 min-w-0">
-        <div className="relative flex-shrink-0">
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={isSelected}
+          aria-label={`Select ${file.name}`}
+          disabled={isRenaming}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect();
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            // Keep Space/Enter here — bubbling would hit the row's handler,
+            // which opens the entry.
+            e.stopPropagation();
+            if (e.key === " " || e.key === "Enter") {
+              e.preventDefault();
+              onToggleSelect();
+            }
+          }}
+          className="group/select relative flex-shrink-0 -m-2 p-2 rounded-full
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--brand)]"
+        >
           <Icon
             size={18}
             style={{ color: iconColor }}
-            className={`transition-opacity duration-150 ${
-              isSelected ? "opacity-0" : "group-hover:opacity-0"
+            className={`block transition-opacity duration-150 ${
+              isSelected
+                ? "opacity-0"
+                : "group-hover:opacity-0 group-focus-visible/select:opacity-0"
             }`}
           />
           <div
             className={`absolute inset-0 flex items-center justify-center transition-opacity duration-150 ${
-              isSelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              isSelected
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-visible/select:opacity-100"
             }`}
           >
             <div
@@ -257,7 +298,7 @@ export function FileRow({
               {isSelected && <Check size={12} />}
             </div>
           </div>
-        </div>
+        </button>
 
         {isRenaming ? (
           <input

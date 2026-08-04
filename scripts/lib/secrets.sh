@@ -1008,6 +1008,7 @@ materialize_artifacts() {
   _generate_tls_cert
   sync_openwrt_password_secret
   sync_switch_password_secret
+  sync_ap_password_secret
   sync_audit_signing_key
   sync_doc_kek_key
   sync_email_fernet_key
@@ -1220,6 +1221,43 @@ sync_switch_password_secret() {
 
   # Write atomically: stage to .tmp then rename, so a crashed write never leaves
   # a half-populated secret file that the switch container would then read.
+  local tmp="$secret_file.tmp"
+  printf '%s' "$password" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$secret_file"
+  log_success "Wrote $secret_file (chmod 600)"
+}
+
+# WARP-1675/WARP-1676 — Write the OPERATOR-SUPPLIED $AP_OPENWRT_PASSWORD (from
+# env or .env) into docker/secrets/ap_openwrt_password so Compose can mount it
+# read-only at /run/secrets/ap_openwrt_password in the routing container.
+# Exactly the switch_password contract: the external OpenWrt AP mints its own
+# per-unit droplet-ai password at first boot (droplet-edge-router ap/), so this
+# NEVER generates a value — the operator copies the AP's
+# /etc/droplet/droplet-ai-password here (manual until the pairing handshake in
+# ADR-033 lands). Empty/missing → empty placeholder; routing's
+# _load_ap_password() treats that as "no external AP" and keeps the historical
+# router-side-only approval behaviour, so every existing box is unaffected.
+sync_ap_password_secret() {
+  local secret_dir="$REPO_ROOT/docker/secrets"
+  local secret_file="$secret_dir/ap_openwrt_password"
+  local password="${AP_OPENWRT_PASSWORD:-}"
+
+  if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
+    password=$(grep -E '^AP_OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
+  fi
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  if [ -z "$password" ]; then
+    : > "$secret_file"
+    chmod 600 "$secret_file"
+    log_info "AP_OPENWRT_PASSWORD not set in .env — wrote empty $secret_file (no external AP)"
+    log_info "  For an external OpenWrt AP: copy its /etc/droplet/droplet-ai-password into AP_OPENWRT_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
+    return 0
+  fi
+
   local tmp="$secret_file.tmp"
   printf '%s' "$password" > "$tmp"
   chmod 600 "$tmp"

@@ -580,3 +580,123 @@ def test_long_host_shrinks_but_never_spills(populated):
     for box, text in _rail_boxes(populated):
         assert box[0] >= g.rail_x, f"{text!r} spills left: {box}"
         assert box[2] <= g.rail_x + g.rail_w, f"{text!r} spills right: {box}"
+
+
+# ---------------------------------------------------------------------------
+# Vertical safe area — the whole-panel guard
+# ---------------------------------------------------------------------------
+
+def _all_boxes(disp, monkeypatch):
+    """Every glyph box drawn by a full LIVE render, panel coordinates."""
+    drawn = []
+    real = ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, *a, **kw):
+        if text:
+            drawn.append((self.textbbox(xy, text, font=kw.get("font"),
+                                        anchor=kw.get("anchor")), str(text)))
+        return real(self, xy, text, *a, **kw)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
+    lw.render_status(disp)
+    assert drawn, "spy never fired — the render path changed"
+    return drawn
+
+
+def test_default_vertical_inset_is_five_px(populated):
+    """The founder asked for 5px of breathing room top and bottom after
+    looking at the real panel. Pinned because it is a hardware fact, not a
+    taste call — a bezel change is what should move it, via the env knob."""
+    assert lw.SAFE_INSET_Y == 5
+    g = lw.geom()
+    assert g.top == 5
+    assert g.bottom == PANEL_H - 5
+
+
+def test_nothing_is_drawn_inside_the_vertical_padding(populated, monkeypatch):
+    """The padding is only real if it stays empty."""
+    g = lw.geom()
+    for box, text in _all_boxes(populated, monkeypatch):
+        assert box[1] >= g.top, f"{text!r} intrudes into the top pad: {box}"
+        assert box[3] <= g.bottom, f"{text!r} intrudes into the bottom pad: {box}"
+
+
+def test_top_chrome_moves_with_the_inset(populated, monkeypatch):
+    """The actual regression guard, and the one a containment assertion cannot
+    make: the top rail used absolute y literals (mark at 12, clock at 10)
+    while the band rules derived from g.top. Raising the inset moved the rules
+    DOWN and left the chrome where it was — squeezing the rail instead of
+    padding it, and still passing every "inside the panel" check because y=10
+    is inside a panel whose safe area starts at 5.
+
+    So assert the delta, not the bound: every top-rail glyph must shift by
+    exactly the inset."""
+    def top_of_chrome(inset: int) -> dict:
+        monkeypatch.setattr(lw, "SAFE_INSET_Y", inset)
+        # Band A only — below the rule the content is deliberately unmoved.
+        rule = lw.geom().band_a_rule
+        return {t: b[1] for b, t in _all_boxes(populated, monkeypatch)
+                if b[3] <= rule}
+
+    at0, at5 = top_of_chrome(0), top_of_chrome(5)
+    assert at0, "no chrome glyphs captured — the render path changed"
+    assert set(at0) == set(at5), "chrome content changed between insets"
+    for text, y0 in at0.items():
+        assert at5[text] - y0 == 5, (
+            f"{text!r} did not move with the inset: {y0} -> {at5[text]}")
+
+
+def test_chrome_tracks_a_larger_inset(populated, monkeypatch):
+    """Scales, rather than being hard-coded to 5. A second unit with a deeper
+    bezel sets PANEL_SAFE_INSET_Y and gets a correct layout without a rebuild."""
+    monkeypatch.setattr(lw, "SAFE_INSET_Y", 24)
+    g = lw.geom()
+    assert g.top == 24
+    for box, text in _all_boxes(populated, monkeypatch):
+        assert box[1] >= g.top, f"{text!r} above the safe area: {box}"
+        assert box[3] <= g.bottom, f"{text!r} below the safe area: {box}"
+
+
+def test_zero_inset_still_renders_the_original_layout(populated, monkeypatch):
+    """Escape hatch: PANEL_SAFE_INSET_Y=0 must reproduce the pre-padding
+    geometry exactly, so the change can be backed out on a box without one."""
+    monkeypatch.setattr(lw, "SAFE_INSET_Y", 0)
+    g = lw.geom()
+    assert (g.top, g.bottom) == (0, PANEL_H)
+    assert g.band_a_rule == 46 and g.band_c_y == PANEL_H - 32
+
+
+def test_qr_card_never_collides_with_the_rail_caption(populated, monkeypatch):
+    """The rail is anchored at both ends, so a vertical inset costs it TWICE
+    the inset. A fixed 176px card had 6px of slack; the 5px default overran it
+    and the caption printed through the card. Caught by eye on a render, not
+    by any bounds check — the caption was still inside the safe area, just on
+    top of the card. So assert the gap itself, at every inset we support."""
+    for inset in (0, 5, 12, 24):
+        monkeypatch.setattr(lw, "SAFE_INSET_Y", inset)
+        g = lw.geom()
+        card_y = g.top + 24
+        cap_y = (g.bottom - 30) - 26 - 18
+        card = min(lw.QR_CARD, max(0, cap_y - lw.QR_CARD_GAP - card_y))
+        assert card_y + card <= cap_y - lw.QR_CARD_GAP, (
+            f"inset={inset}: card bottom {card_y + card} overlaps caption "
+            f"at {cap_y}")
+
+
+def test_shipping_inset_keeps_the_qr_at_full_scannable_size(populated,
+                                                            monkeypatch):
+    """Shrinking the card must not shrink the CODE at the inset we actually
+    ship. 166px still clears version-3-at-4px/module, so the scan target is
+    bit-identical to the zero-inset render — only the white surround narrows."""
+    monkeypatch.setattr(lw, "SAFE_INSET_Y", 0)
+    at0, mod0 = lw.render_qr("https://warp-lab.droplet-us.com/dashboard",
+                             card=lw.QR_CARD)
+    monkeypatch.setattr(lw, "SAFE_INSET_Y", 5)
+    g = lw.geom()
+    cap_y = (g.bottom - 30) - 26 - 18
+    card = min(lw.QR_CARD, max(0, cap_y - lw.QR_CARD_GAP - (g.top + 24)))
+    at5, mod5 = lw.render_qr("https://warp-lab.droplet-us.com/dashboard",
+                             card=card)
+    assert at0 is not None and at5 is not None
+    assert mod5 == mod0 >= lw.QR_MIN_MODULE_PX
+    assert at5.size == at0.size

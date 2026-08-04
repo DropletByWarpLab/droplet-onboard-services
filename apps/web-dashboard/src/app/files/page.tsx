@@ -52,6 +52,7 @@ import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
   uploadFiles,
+  UploadBatchError,
   deleteFile,
   createDirectory,
   getDownloadUrl,
@@ -461,7 +462,26 @@ export default function FilesPage() {
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        toast(translateError(err, "files"));
+        // WARP-1666: a large selection is uploaded in batches, so a failure
+        // partway through still leaves earlier batches on the box. Refresh so
+        // those files actually appear, and say how many landed rather than
+        // implying the whole upload was lost. `translateError` deliberately
+        // never echoes a raw message, so the count is composed here from the
+        // typed error instead of read out of `err.message`.
+        if (err instanceof UploadBatchError && err.uploaded > 0) {
+          console.error("partial upload", err.cause);
+          await refresh();
+          toast(
+            `Uploaded ${err.uploaded} of ${err.total} files. The rest didn't upload — try again to finish.`
+          );
+        } else {
+          toast(
+            translateError(
+              err instanceof UploadBatchError ? err.cause : err,
+              "files"
+            )
+          );
+        }
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
@@ -1199,8 +1219,16 @@ export default function FilesPage() {
 
       {/* Space switcher (My Files / Household / N department+team spaces,
           WARP-1267). The switcher itself renders nothing when there's only
-          one space to be in — no lone control. */}
-      <div className="mb-4">
+          one space to be in — no lone control.
+
+          WARP-1667: `relative z-30` for the same reason the search bar above
+          carries `relative z-40` — ds-rise's `fill-mode: both` makes every
+          `.page-inner` child a permanent stacking context, so the Spaces
+          menu's own z-index is trapped in this wrapper and the later
+          siblings (breadcrumbs, banner, volumes, file rows) painted over it.
+          z-30 and NOT z-40: a tie would go to this wrapper on DOM order and
+          put the search results back underneath the pills (WARP-1139). */}
+      <div className="mb-4 relative z-30">
         <SpaceSwitcher
           spaces={spaces}
           active={space}
@@ -1441,6 +1469,7 @@ export default function FilesPage() {
                       isRenaming={fm.renamingPath === file.path}
                       favoritedPaths={favoritedPaths}
                       onSelect={(e) => handleRowSelect(file, e)}
+                      onToggleSelect={() => fm.toggleSelection(file.path, "toggle", files)}
                       onOpen={() => handleRowOpen(file)}
                       onDownload={() => handleDownload(file.path)}
                       onDelete={() => handleDelete(file.path)}

@@ -76,9 +76,18 @@ def is_wide() -> bool:
 #     works; import-time constants silently broke that promise (and stopped
 #     tests being able to monkeypatch WIDTH).
 SAFE_INSET_X = int(os.environ.get("PANEL_SAFE_INSET_X", "30"))
-# Nothing has reported vertical clipping, so this defaults off — but it is
-# plumbed, because the next bezel probably will.
-SAFE_INSET_Y = int(os.environ.get("PANEL_SAFE_INSET_Y", "0"))
+# 5px top and bottom, off the founder's read of the real panel: the bezel
+# crops far less vertically than horizontally (hence 30 on X), but the chrome
+# still sat right on the glass edge.
+#
+# What moves: the top rail (mark, device label, state pill, clock, date, alert
+# badge), the foot rule + footer text, and the rail's QR card and typed
+# address — everything that lives near an edge. What deliberately does NOT
+# move is band-B cell content (the hero numbers at y≈74–226): it is nowhere
+# near an edge, and shifting it too would cost 10px of the tightest gap on the
+# panel — the one between the metric row and the foot rule — for no visible
+# gain. The band rules absorb the inset instead.
+SAFE_INSET_Y = int(os.environ.get("PANEL_SAFE_INSET_Y", "5"))
 
 DESIGN_MARGIN = 28          # breathing room INSIDE the safe area
 GUTTER = 24
@@ -238,7 +247,8 @@ def _fit_text(draw, text: str, max_w: int, start: int, floor: int = 14,
 # ---------------------------------------------------------------------------
 # QR — design brief §5
 # ---------------------------------------------------------------------------
-QR_CARD = 176
+QR_CARD = 176                 # nominal; render_rail shrinks it to fit the rail
+QR_CARD_GAP = 6               # clear space between the card and the caption
 QR_MIN_MODULE_PX = 4          # hard floor; below this it stops scanning reliably
 QR_MAX_VERSION = 4            # version 4 + 8 quiet modules = 41 -> 4px = 164px
 
@@ -318,26 +328,6 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
     draw.rectangle([g.rail_x, 0, d.WIDTH, d.HEIGHT], fill=d.V3_PANEL)
     draw.rectangle([g.rail_x, 0, g.rail_x, d.HEIGHT], fill=d.V3_SEP)
 
-    card_x = g.rail_x + (g.rail_w - QR_CARD) // 2
-    card_y = g.top + 24
-    d._rrect(draw, card_x, card_y, QR_CARD, QR_CARD, 14, fill=d.V3_WHITE)
-
-    qr_img, module_px = render_qr(payload, ecc=ecc)
-    if qr_img is not None:
-        px = card_x + (QR_CARD - qr_img.width) // 2
-        py = card_y + (QR_CARD - qr_img.height) // 2
-        img.paste(qr_img, (px, py))
-        # A 22px mark over a ~164px code occludes <2% of the area; ECC M
-        # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
-        if ecc != "L":
-            d.draw_droplet_mark(draw, card_x + QR_CARD // 2 - 11,
-                                card_y + QR_CARD // 2 - 11, 22,
-                                primary=d.V3_ACCENT, highlight=d.V3_ACCENT_INK)
-    else:
-        d._v3_text(draw, "SEE ADDRESS BELOW", card_x + QR_CARD // 2,
-                   card_y + QR_CARD // 2, font=d._get_font(11, weight="bold"),
-                   fill=(0x40, 0x40, 0x48), anchor="mm")
-
     cx = g.rail_x + g.rail_w // 2
     # Everything in the rail is centred, so an over-wide string spills out
     # BOTH sides of it. The fallback is a hostname, and hostnames vary in
@@ -353,6 +343,39 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
     fb_y = g.bottom - 30
     hl_y = fb_y - 26
     cap_y = hl_y - 18
+
+    # The card is sized AFTER the text block, because the rail is anchored at
+    # both ends — card down from g.top, address up from g.bottom — so a
+    # vertical inset squeezes it from both sides and costs twice the inset.
+    # At a hard-coded 176 the card had exactly 6px of slack, and the 5px
+    # default inset overran it: the "SCAN TO OPEN" caption printed through the
+    # card's bottom edge. Fit the card to the gap that is actually left.
+    # render_qr() re-fits the code to whatever it is given, and returns None
+    # (→ the typed-address fallback) if it can no longer make the modules big
+    # enough to scan, so shrinking degrades honestly instead of lying.
+    card_x = g.rail_x + (g.rail_w - QR_CARD) // 2
+    card_y = g.top + 24
+    card = min(QR_CARD, max(0, cap_y - QR_CARD_GAP - card_y))
+    if card:
+        card_x = g.rail_x + (g.rail_w - card) // 2
+        d._rrect(draw, card_x, card_y, card, card, 14, fill=d.V3_WHITE)
+
+        qr_img, module_px = render_qr(payload, card=card, ecc=ecc)
+        if qr_img is not None:
+            px = card_x + (card - qr_img.width) // 2
+            py = card_y + (card - qr_img.height) // 2
+            img.paste(qr_img, (px, py))
+            # A 22px mark over a ~164px code occludes <2% of the area; ECC M
+            # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
+            if ecc != "L":
+                d.draw_droplet_mark(draw, card_x + card // 2 - 11,
+                                    card_y + card // 2 - 11, 22,
+                                    primary=d.V3_ACCENT,
+                                    highlight=d.V3_ACCENT_INK)
+        else:
+            d._v3_text(draw, "SEE ADDRESS BELOW", card_x + card // 2,
+                       card_y + card // 2, font=d._get_font(11, weight="bold"),
+                       fill=(0x40, 0x40, 0x48), anchor="mm")
 
     d._v3_text(draw, caption, cx, cap_y, font=d._get_font(11, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
@@ -377,15 +400,16 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
 def _render_chrome(disp, draw, now, state: str) -> None:
     d = _d()
     g = geom()
-    d.draw_droplet_mark(draw, g.left, 12, 22,
+    d.draw_droplet_mark(draw, g.left, g.top + 12, 22,
                         primary=d.V3_ACCENT, highlight=d.V3_ACCENT_INK)
-    d._v3_text(draw, "DROPLET", g.left + 30, 16, font=d._get_font(9, weight="bold"),
+    d._v3_text(draw, "DROPLET", g.left + 30, g.top + 16,
+               font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL3, tracking=2)
     # The device label doubles as the way into the DEBUG/recovery screen.
     # Deliberately a small, unlabelled target rather than a visible button:
     # the LIVE screen is what belongs on a rack front, and the people who need
     # the recovery path are the people who have been told where it is.
-    d._v3_text(draw, "WARP LAB · MINI-RACK", g.left + 104, 16,
+    d._v3_text(draw, "WARP LAB · MINI-RACK", g.left + 104, g.top + 16,
                font=d._get_font(9), fill=d.V3_LABEL4, tracking=1.2)
     with disp._touch_regions_lock:
         disp._touch_regions.append(
@@ -394,24 +418,25 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
     pw = int(d._v3_text_width(draw, label, pf, 1.2)) + 24
-    d._rrect(draw, g.left + 312, 12, pw, 22, 11, fill=fill)
-    d._v3_text(draw, label, g.left + 312 + pw // 2, 17, font=pf, fill=ink,
+    d._rrect(draw, g.left + 312, g.top + 12, pw, 22, 11, fill=fill)
+    d._v3_text(draw, label, g.left + 312 + pw // 2, g.top + 17, font=pf, fill=ink,
                anchor="ma", tracking=1.2)
 
     clk = disp._fmt_clock_parts(now)["str"]
     cf = d._get_font(20, weight="heavy")
-    d._v3_text(draw, clk, g.content_r, 10, font=cf, fill=d.V3_LABEL2, anchor="ra")
+    d._v3_text(draw, clk, g.content_r, g.top + 10, font=cf, fill=d.V3_LABEL2,
+               anchor="ra")
     clk_w = d._v3_text_width(draw, clk, cf)
 
     date = (now.strftime("%a %d %b") if now else "").upper()
     date_x = int(g.content_r - clk_w - 16)
-    d._v3_text(draw, date, date_x, 18, font=d._get_font(9, weight="bold"),
+    d._v3_text(draw, date, date_x, g.top + 18, font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL4, anchor="ra", tracking=1.4)
 
     open_count = disp._open_alerts_count()
     if open_count:
         date_w = d._v3_text_width(draw, date, d._get_font(9, weight="bold"), 1.4)
-        bx, by, br = int(date_x - date_w - 24), 23, 11
+        bx, by, br = int(date_x - date_w - 24), g.top + 23, 11
         draw.ellipse([bx - br, by - br, bx + br, by + br], fill=d.V3_RED)
         d._v3_text(draw, "!", bx, by, font=d._get_font(15, weight="heavy"),
                    fill=d.V3_WHITE, anchor="mm")
@@ -731,13 +756,14 @@ def render_debug(disp, now=None) -> Image.Image:
     status = disp.get_status()
 
     # ---- chrome ----
-    d.draw_droplet_mark(draw, g.left, 12, 22,
+    d.draw_droplet_mark(draw, g.left, g.top + 12, 22,
                         primary=d.V3_ORANGE, highlight=d.V3_ACCENT_INK)
-    d._v3_text(draw, "DEBUG · RECOVERY", g.left + 30, 16,
+    d._v3_text(draw, "DEBUG · RECOVERY", g.left + 30, g.top + 16,
                font=d._get_font(9, weight="bold"), fill=d.V3_ORANGE, tracking=2)
     _back_button(disp, draw)
     clk = disp._fmt_clock_parts(now)["str"]
-    d._v3_text(draw, clk, g.content_r, 10, font=d._get_font(20, weight="heavy"),
+    d._v3_text(draw, clk, g.content_r, g.top + 10,
+               font=d._get_font(20, weight="heavy"),
                fill=d.V3_LABEL2, anchor="ra")
     draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
     for dx in g.dividers[:2]:
@@ -827,7 +853,7 @@ def render_debug(disp, now=None) -> Image.Image:
 def _back_button(disp, draw) -> None:
     d = _d()
     g = geom()
-    x, y, w, h = g.left + 172, 12, 74, 22
+    x, y, w, h = g.left + 172, g.top + 12, 74, 22
     d._rrect(draw, x, y, w, h, 11, fill=d.V3_SURFACE, outline=d.V3_SEP, width=1)
     d._v3_text(draw, "‹ BACK", x + w // 2, y + 5,
                font=d._get_font(10, weight="bold"), fill=d.V3_LABEL2,
