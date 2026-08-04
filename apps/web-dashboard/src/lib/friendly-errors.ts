@@ -194,6 +194,38 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
+    // rejection: role denial (requireRole), guest read-only, or insufficient
+    // rights on a household/department space (requireSpaceAccess). Without this
+    // entry a 403 fell through to FALLBACK.share ("Try again in a moment"),
+    // which advises the one action guaranteed never to work — the WARP-1148
+    // defect class this domain exists to prevent.
+    //
+    // The three flavours share one bare 403 with no stable wire code, so they
+    // deliberately share one string: telling them apart needs distinct codes
+    // from the orchestrator first (out of scope here). The wording therefore
+    // stays true for all three.
+    //
+    // The copy has to serve two populations at once, so it names BOTH remedies.
+    // On main today nothing pre-empts a role-denied share client-side — the
+    // Share item in files/page.tsx is gated on `!isSingle` only, unlike its
+    // Delete sibling which honours `isReaderSpace` — so an ordinary
+    // reader/contributor 403 lands here and needs "ask an owner or admin".
+    // Once a client-side share gate lands (the `shareBlockedReason` check
+    // proposed on the WARP-1540 branch), the residual traffic is client state
+    // disagreeing with server rights — a stale ACL cache, or rights revoked
+    // mid-session — which a fresh session resolves, hence "sign out and back
+    // in", mirroring storage["403"].
+    //
+    // Precedence note: `translateError` checks `err.status` before it infers a
+    // code from the message, so a Nextcloud OCS rejection that arrives with
+    // ocsStatus 403 (e.g. "Public upload disabled by the administrator") now
+    // renders this string instead of PERMISSIONS_REJECTED. That is a
+    // deliberate trade: this copy is still accurate for it (an admin policy
+    // blocks the share, and an admin can lift it), and it is strictly better
+    // than the retry fallback every other 403 was getting.
+    "403":
+      "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
       "We couldn't find that file or share anymore. It may have been moved or deleted.",
     "404":
