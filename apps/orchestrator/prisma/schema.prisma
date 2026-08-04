@@ -4366,10 +4366,43 @@ enum TeamChatThreadKind {
 /// WARP-1683 — what a team-chat message carries: plain text, a forwarded
 /// Files document (cached name/path + ncFileId), or a forwarded AI-chat
 /// transcript (immutable snapshot taken at send time).
+/// WARP-1685 appends the two meeting kinds: `meeting_invite` (the card a
+/// meeting create posts into its thread) and `meeting_reminder` (the card
+/// the reminder sweep posts as the meeting approaches). Append-only.
 enum TeamChatMessageKind {
   text
   file_share
   ai_chat_share
+  meeting_invite
+  meeting_reminder
+}
+
+/// WARP-1685 — meeting lifecycle. Explicit column, never derived from
+/// absence (CLAUDE.md no-guessing rule). `cancelled` keeps the row (and
+/// its invite card) around so the thread history stays truthful.
+enum TeamChatMeetingStatus {
+  scheduled
+  cancelled
+}
+
+/// WARP-1685 — reminder lifecycle for the 60s sweep. `pending` → `sent`
+/// happens in the SAME transaction as the meeting_reminder message insert
+/// (exactly-once, restart-safe); `not_needed` is the explicit terminal for
+/// meetings that were cancelled or slipped past the grace window — never a
+/// silent skip.
+enum TeamChatMeetingReminderStatus {
+  pending
+  sent
+  not_needed
+}
+
+/// WARP-1685 — a participant's RSVP. Two-state on purpose: "no row yet"
+/// is the honest representation of "hasn't answered", and rows are only
+/// ever created with an answer (upsert), so absence is a real state here,
+/// not a guessed one.
+enum TeamChatRsvpResponse {
+  accepted
+  declined
 }
 
 /// WARP-1683 — an internal member-to-member conversation (DM or small
@@ -4393,6 +4426,7 @@ model TeamChatThread {
   lastMessageAt DateTime              @default(now())
   participants  TeamChatParticipant[]
   messages      TeamChatMessage[]
+  meetings      TeamChatMeeting[]
 
   @@index([lastMessageAt(sort: Desc)])
 }
@@ -4439,8 +4473,67 @@ model TeamChatMessage {
   sharedChatSessionId String?
   sharedChatSession   ChatSession?        @relation(fields: [sharedChatSessionId], references: [id], onDelete: SetNull)
   sharedChatSnapshot  Json?
+  /// WARP-1685 — set on meeting_invite / meeting_reminder messages so the
+  /// card renders from the live meeting row in one fetch. SetNull on
+  /// meeting delete: the message survives as history.
+  meetingId           String?
+  meeting             TeamChatMeeting?    @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   createdAt           DateTime            @default(now())
 
   @@index([threadId, createdAt])
   @@index([sharedChatSessionId])
+  @@index([meetingId])
+}
+
+/// WARP-1685 — a meeting scheduled inside a team-chat thread. Invitees are
+/// the THREAD's participants (no separate invite list). `createdById` is
+/// the organizer's LOCAL `User.id` UUID — a bare column, no FK, per the
+/// v1 TeamChatThread.createdById / FileComment.authorUserId precedent.
+///
+/// `inviteMessageId` links back to the meeting_invite card posted in the
+/// same transaction as the meeting create. `calendarEventId` links the
+/// local CalendarEvent mirrored onto the organizer's calendar — created
+/// best-effort AFTER the transaction (a calendar hiccup never loses the
+/// meeting), deleted best-effort on cancel. Both are bare columns: the
+/// message/event tables never cascade a meeting away.
+///
+/// `@@index([reminderStatus, startsAt])` is the sweep's scan key.
+model TeamChatMeeting {
+  id                    String                        @id @default(uuid())
+  threadId              String
+  thread                TeamChatThread                @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  inviteMessageId       String?
+  calendarEventId       String?
+  title                 String
+  startsAt              DateTime
+  durationMinutes       Int?
+  location              String?
+  note                  String?
+  createdById           String
+  status                TeamChatMeetingStatus         @default(scheduled)
+  reminderMinutesBefore Int                           @default(15)
+  reminderStatus        TeamChatMeetingReminderStatus @default(pending)
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @default(now()) @updatedAt
+  rsvps                 TeamChatMeetingRsvp[]
+  messages              TeamChatMessage[]
+
+  @@index([reminderStatus, startsAt])
+  @@index([threadId])
+}
+
+/// WARP-1685 — one participant's answer to a meeting. `userId` is the
+/// LOCAL `User.id` UUID (ADR-027 — never username). Upsert-only surface:
+/// a member may flip accepted ↔ declined; `@@unique` keeps one answer per
+/// member per meeting.
+model TeamChatMeetingRsvp {
+  id          String               @id @default(uuid())
+  meetingId   String
+  meeting     TeamChatMeeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId      String
+  response    TeamChatRsvpResponse
+  respondedAt DateTime             @default(now())
+
+  @@unique([meetingId, userId])
+  @@index([userId])
 }

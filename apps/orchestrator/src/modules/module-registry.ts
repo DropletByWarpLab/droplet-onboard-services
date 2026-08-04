@@ -111,9 +111,11 @@ export const MODULES: readonly ModuleDef[] = [
     id: "team_chat", label: "Messages",
     description: "Direct and small-group messages between members, with file and AI-chat forwarding.",
     category: "workspace", routePrefixes: ["/api/team-chat"], navHrefs: ["/messages"],
-    // WARP-1683: no tool surface in v1 — the assistant does not read or send
+    // WARP-1685: the assistant can now SEND (message + meeting invite) on
+    // the acting human's behalf — the `team_chat` tool domain is claimed
+    // here so the module toggle gates the tools. It still never READS
     // member-to-member messages.
-    toolDomains: [], core: false, defaultEnabled: true,
+    toolDomains: ["team_chat"], core: false, defaultEnabled: true,
     // On-box Postgres only — no external service to probe, so the module is
     // always AVAILABLE; ENABLEMENT (the operator toggle) is the real gate.
     available: () => true,

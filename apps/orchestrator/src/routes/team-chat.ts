@@ -12,8 +12,23 @@
  *   GET  /team-chat/messages/:messageId/transcript — the ai_chat_share snapshot
  *   GET  /team-chat/unread-count                  — cheap total for the badge
  *
+ * WARP-1685 — meetings inside threads:
+ *   POST /team-chat/threads/:id/meetings          — schedule + invite card
+ *   GET  /team-chat/meetings/:id                  — meeting + named RSVPs
+ *   POST /team-chat/meetings/:id/rsvp             — accept/decline (upsert)
+ *   POST /team-chat/meetings/:id/cancel           — organizer-only
+ *
  * Access model:
- *   - Humans only (owner/admin/family/guest) — no service principals.
+ *   - Humans only (owner/admin/family/guest) — no service principals,
+ *     with ONE pinned exception (WARP-1685): the routes the two team-chat
+ *     LLM tools dispatch through (contacts roster, thread create, message
+ *     send, meeting create) ALSO admit the trusted `_service:mcp`
+ *     principal via requireRoleOrMcpService, acting AS the X-Droplet-User
+ *     username exactly like routes/email.ts effectiveUser(): the header is
+ *     honored ONLY for that principal (a human session's header is
+ *     IGNORED — no impersonation path), the forwarded identity must
+ *     resolve to an ACTIVE human (fail closed → 401), and the resolved
+ *     user then flows through the IDENTICAL participant/role checks below.
  *   - Everything thread-scoped is PARTICIPANT-ONLY, and a non-participant
  *     gets 404, never 403 (no existence leak — ADR-027 posture).
  *   - All ownership/filter columns hold the LOCAL `User.id` UUID
@@ -41,9 +56,12 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
 import type { PrismaClient, Prisma } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { checkSpaceAccess } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("team-chat");
 
 type AuthedRequest = {
   user?: { id?: string; username?: string; role?: string };
@@ -51,6 +69,22 @@ type AuthedRequest = {
 
 /** The four human tiers — service principals never message. */
 const HUMAN_ROLES = ["owner", "admin", "family", "guest"] as const;
+
+/**
+ * WARP-1685 — CalendarEvent.endsAt is required; a meeting created without
+ * a duration mirrors onto the organizer's calendar as the calendar-world
+ * standard one-hour block. Display surfaces still show "no duration".
+ */
+const DEFAULT_CALENDAR_EVENT_MINUTES = 60;
+
+/** WARP-1685 — tx sentinel: the cancel claim found the meeting already
+ *  cancelled (double-click / double-tab race) → 409, no message posted. */
+class MeetingAlreadyCancelledError extends Error {
+  constructor() {
+    super("meeting_already_cancelled");
+    this.name = "MeetingAlreadyCancelledError";
+  }
+}
 
 interface Caller {
   /** LOCAL User.id UUID — the scoping key for every team-chat column. */
@@ -101,6 +135,22 @@ const sendMessageSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+// WARP-1685 — meeting create. `startsAt` stays a string here; the route
+// parses + future-checks it explicitly so a garbage date and a past date
+// each get their own clear 400 (zod-before-prisma either way).
+const createMeetingSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  startsAt: z.string().trim().min(1),
+  durationMinutes: z.number().int().min(1).max(1440).optional(),
+  location: z.string().trim().min(1).max(200).optional(),
+  note: z.string().trim().min(1).max(2000).optional(),
+  reminderMinutesBefore: z.number().int().min(1).max(10_080).optional(),
+});
+
+const rsvpSchema = z.object({
+  response: z.enum(["accepted", "declined"]),
+});
+
 // ── DTOs ────────────────────────────────────────────────────────────
 
 interface ContactDto {
@@ -108,6 +158,61 @@ interface ContactDto {
   displayName: string;
   username: string;
   role: string;
+}
+
+/** WARP-1685 — the meeting row shape the DTOs render from. */
+interface MeetingRowLike {
+  id: string;
+  threadId: string;
+  inviteMessageId: string | null;
+  calendarEventId: string | null;
+  title: string;
+  startsAt: Date;
+  durationMinutes: number | null;
+  location: string | null;
+  note: string | null;
+  createdById: string;
+  status: string;
+  reminderMinutesBefore: number;
+  reminderStatus: string;
+  createdAt: Date;
+  rsvps?: Array<{
+    userId: string;
+    response: string;
+    respondedAt: Date;
+  }>;
+}
+
+/**
+ * WARP-1685 — meeting wire shape. RSVPs ride along whenever the relation
+ * was loaded (message list, meeting GET) so the invite card renders —
+ * including its RSVP chips — in one fetch. `names` optionally resolves
+ * display names for the RSVP list (meeting GET); the message list leaves
+ * them to the thread's participant roster the client already holds.
+ */
+function toMeetingDto(m: MeetingRowLike, names?: Map<string, ContactDto>) {
+  return {
+    id: m.id,
+    threadId: m.threadId,
+    inviteMessageId: m.inviteMessageId,
+    calendarEventId: m.calendarEventId,
+    title: m.title,
+    startsAt: m.startsAt.toISOString(),
+    durationMinutes: m.durationMinutes,
+    location: m.location,
+    note: m.note,
+    createdById: m.createdById,
+    status: m.status,
+    reminderMinutesBefore: m.reminderMinutesBefore,
+    reminderStatus: m.reminderStatus,
+    createdAt: m.createdAt.toISOString(),
+    rsvps: (m.rsvps ?? []).map((r) => ({
+      userId: r.userId,
+      ...(names ? { displayName: names.get(r.userId)?.displayName ?? null } : {}),
+      response: r.response,
+      respondedAt: r.respondedAt.toISOString(),
+    })),
+  };
 }
 
 function toMessageDto(
@@ -121,6 +226,8 @@ function toMessageDto(
     sharedFileName: string | null;
     sharedFilePath: string | null;
     sharedChatSessionId: string | null;
+    meetingId?: string | null;
+    meeting?: MeetingRowLike | null;
     createdAt: Date;
   },
   senderName?: string,
@@ -136,6 +243,10 @@ function toMessageDto(
     sharedFileName: m.sharedFileName,
     sharedFilePath: m.sharedFilePath,
     sharedChatSessionId: m.sharedChatSessionId,
+    // WARP-1685 — present (possibly null) on every message; populated when
+    // the meeting relation was loaded (meeting_invite / meeting_reminder).
+    meetingId: m.meetingId ?? null,
+    meeting: m.meeting ? toMeetingDto(m.meeting) : null,
     createdAt: m.createdAt.toISOString(),
   };
 }
@@ -149,6 +260,46 @@ interface TranscriptSnapshot {
 export function createTeamChatRouter(prisma: PrismaClient): Router {
   const router = Router();
   const guard = requireRole(...HUMAN_ROLES);
+  // WARP-1685 — the four routes the team-chat LLM tools dispatch through
+  // additionally admit the trusted `_service:mcp` principal (and ONLY that
+  // principal — voice/email-indexer's coarse "service" role still 403s).
+  const guardOrMcp = requireRoleOrMcpService(...HUMAN_ROLES);
+
+  /** Same trusted-principal check as routes/email.ts isMcpService(). */
+  function isMcpService(req: Request): boolean {
+    const u = (req as AuthedRequest).user;
+    return u?.id === "_service:mcp" && u.role === "service";
+  }
+
+  /**
+   * WARP-1685 — the effective human identity a request acts as (the
+   * routes/email.ts effectiveUser()/assertAccountAccessible composition,
+   * folded into one resolver because every team-chat decision needs the
+   * full id/username/role triple).
+   *
+   * For the trusted mcp service principal ONLY, the identity is the
+   * X-Droplet-User USERNAME the tool handlers forward (`ctx.userId`,
+   * threaded from the chat session via MCP `_meta.userId` — WARP-202
+   * username semantics). It must resolve to an ACTIVE human in the
+   * directory; missing header, unknown user, deactivated user, or a
+   * service row all yield null → 401, never a fallback identity. For
+   * every other caller the header is IGNORED and the session's own
+   * req.user rules — a human session cannot impersonate this way.
+   */
+  async function resolveCaller(req: Request): Promise<Caller | null> {
+    if (!isMcpService(req)) return callerOf(req);
+    const forwarded = (req.header("x-droplet-user") ?? "").trim();
+    if (!forwarded) return null;
+    const row = await prisma.user.findFirst({
+      where: {
+        username: forwarded,
+        directoryStatus: "ACTIVE",
+        role: { in: [...HUMAN_ROLES] },
+      },
+      select: { id: true, username: true, role: true },
+    });
+    return row ?? null;
+  }
 
   /** Contact projection for roster + name resolution. */
   const contactSelect = {
@@ -179,9 +330,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
   // Exists because GET /api/auth/users is owner/admin-only; the picker
   // needs names for every human tier. Minimal projection, ACTIVE humans
   // only — never service principals, never deactivated rows.
-  router.get("/team-chat/contacts", guard, async (req, res, next) => {
+  // WARP-1685: guardOrMcp — the send tools resolve recipient usernames to
+  // User.ids through this roster, acting as the forwarded human.
+  router.get("/team-chat/contacts", guardOrMcp, async (req, res, next) => {
     try {
-      const me = callerOf(req);
+      const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
         return;
@@ -221,7 +374,13 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         where: { id: { in: myParts.map((p) => p.threadId) } },
         include: {
           participants: true,
-          messages: { orderBy: { createdAt: "desc" }, take: 1 },
+          // WARP-1685: the preview message carries its meeting so the
+          // thread list can say "Meeting: <title>".
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            include: { meeting: true },
+          },
         },
         orderBy: { lastMessageAt: "desc" },
       });
@@ -267,9 +426,12 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
 
   // ── Thread creation ─────────────────────────────────────────────
 
-  router.post("/team-chat/threads", guard, async (req, res, next) => {
+  // WARP-1685: guardOrMcp — team_chat_send_message / _send_meeting_invite
+  // create (or dedupe into) the thread through this route as the acting
+  // human; the participant-validation below is identical either way.
+  router.post("/team-chat/threads", guardOrMcp, async (req, res, next) => {
     try {
-      const me = callerOf(req);
+      const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
         return;
@@ -403,10 +565,13 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       // Total order (review): createdAt alone is non-unique — two messages
       // in the same millisecond could skip/duplicate across a page
       // boundary. The id tiebreak makes the sort stable for the cursor.
+      // WARP-1685: the meeting relation (with RSVPs) rides along so
+      // meeting_invite / meeting_reminder cards render in ONE fetch.
       const rows = await prisma.teamChatMessage.findMany({
         where: { threadId: req.params.id },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: limit + 1,
+        include: { meeting: { include: { rsvps: true } } },
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
       const page = rows.slice(0, limit);
@@ -424,9 +589,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
 
   // ── Messages: send ──────────────────────────────────────────────
 
-  router.post("/team-chat/threads/:id/messages", guard, async (req, res, next) => {
+  // WARP-1685: guardOrMcp — the send tools post through here as the acting
+  // human; senderId is the RESOLVED user's id, never the principal.
+  router.post("/team-chat/threads/:id/messages", guardOrMcp, async (req, res, next) => {
     try {
-      const me = callerOf(req);
+      const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
         return;
@@ -575,6 +742,317 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // ── Meetings (WARP-1685) ────────────────────────────────────────
+
+  // Schedule a meeting in a thread. One transaction commits the meeting,
+  // its meeting_invite card (senderId = organizer, meetingId set), the
+  // inviteMessageId backlink, and the lastMessageAt bump — the invite can
+  // never exist without its meeting or vice versa. The LOCAL CalendarEvent
+  // mirror (the create_event tool's exact row shape) happens AFTER the
+  // transaction, best-effort: a calendar hiccup logs and the meeting
+  // stands, calendarEventId simply stays null.
+  router.post(
+    "/team-chat/threads/:id/meetings",
+    guardOrMcp,
+    async (req, res, next) => {
+      try {
+        const me = await resolveCaller(req);
+        if (!me) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const parsed = createMeetingSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "invalid_meeting",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const startsAt = new Date(parsed.data.startsAt);
+        if (Number.isNaN(startsAt.getTime())) {
+          res.status(400).json({
+            error: "invalid_meeting",
+            details: { startsAt: "must be an ISO-8601 timestamp" },
+          });
+          return;
+        }
+        if (startsAt.getTime() <= Date.now()) {
+          res.status(400).json({ error: "starts_at_must_be_future" });
+          return;
+        }
+        const membership = await participantRow(req.params.id, me.id);
+        if (!membership) {
+          res.status(404).json({ error: "thread_not_found" });
+          return;
+        }
+
+        const durationMinutes = parsed.data.durationMinutes ?? null;
+        const { meeting, message } = await prisma.$transaction(async (tx) => {
+          const created = await tx.teamChatMeeting.create({
+            data: {
+              threadId: req.params.id,
+              title: parsed.data.title,
+              startsAt,
+              durationMinutes,
+              location: parsed.data.location ?? null,
+              note: parsed.data.note ?? null,
+              createdById: me.id,
+              reminderMinutesBefore: parsed.data.reminderMinutesBefore ?? 15,
+            },
+          });
+          const inviteMessage = await tx.teamChatMessage.create({
+            data: {
+              threadId: req.params.id,
+              senderId: me.id,
+              kind: "meeting_invite",
+              meetingId: created.id,
+            },
+          });
+          const linked = await tx.teamChatMeeting.update({
+            where: { id: created.id },
+            data: { inviteMessageId: inviteMessage.id },
+          });
+          await tx.teamChatThread.update({
+            where: { id: req.params.id },
+            data: { lastMessageAt: new Date() },
+          });
+          return { meeting: linked, message: inviteMessage };
+        });
+
+        // Best-effort local calendar mirror on the ORGANIZER's calendar.
+        // CalendarEvent.userId holds the Nextcloud USERNAME (the
+        // create_event tool's semantics) and endsAt is required — an
+        // unspecified duration mirrors as the calendar's standard hour.
+        let finalMeeting = meeting;
+        try {
+          const endsAt = new Date(
+            startsAt.getTime() +
+              (durationMinutes ?? DEFAULT_CALENDAR_EVENT_MINUTES) * 60_000,
+          );
+          const event = await prisma.calendarEvent.create({
+            data: {
+              userId: me.username,
+              title: parsed.data.title,
+              description: parsed.data.note ?? null,
+              location: parsed.data.location ?? null,
+              startsAt,
+              endsAt,
+              allDay: false,
+              source: "local",
+            },
+          });
+          finalMeeting = await prisma.teamChatMeeting.update({
+            where: { id: meeting.id },
+            data: { calendarEventId: event.id },
+          });
+        } catch (err) {
+          logger.warn(
+            { err, meetingId: meeting.id },
+            "calendar mirror failed — meeting stands without a CalendarEvent",
+          );
+        }
+
+        const dto = toMeetingDto({ ...finalMeeting, rsvps: [] });
+        res.status(201).json({
+          meeting: dto,
+          message: { ...toMessageDto(message), meeting: dto },
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // Meeting detail + named RSVP list. One indistinguishable 404 for "no
+  // such meeting" and "not a participant of its thread" (v1 posture).
+  router.get("/team-chat/meetings/:id", guard, async (req, res, next) => {
+    try {
+      const me = callerOf(req);
+      if (!me) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const meeting = await prisma.teamChatMeeting.findUnique({
+        where: { id: req.params.id },
+        include: { rsvps: true },
+      });
+      if (!meeting) {
+        res.status(404).json({ error: "meeting_not_found" });
+        return;
+      }
+      const membership = await participantRow(meeting.threadId, me.id);
+      if (!membership) {
+        res.status(404).json({ error: "meeting_not_found" });
+        return;
+      }
+      const names = await contactsByIds(meeting.rsvps.map((r) => r.userId));
+      res.json({ meeting: toMeetingDto(meeting, names) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // RSVP — participant-only upsert (accept ↔ decline flips the same row).
+  // The organizer's answer is implicit in organizing; they get a 400. A
+  // cancelled meeting takes no new answers.
+  router.post("/team-chat/meetings/:id/rsvp", guard, async (req, res, next) => {
+    try {
+      const me = callerOf(req);
+      if (!me) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const parsed = rsvpSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "invalid_rsvp",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const meeting = await prisma.teamChatMeeting.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!meeting) {
+        res.status(404).json({ error: "meeting_not_found" });
+        return;
+      }
+      const membership = await participantRow(meeting.threadId, me.id);
+      if (!membership) {
+        res.status(404).json({ error: "meeting_not_found" });
+        return;
+      }
+      if (meeting.createdById === me.id) {
+        res.status(400).json({ error: "organizer_cannot_rsvp" });
+        return;
+      }
+      if (meeting.status !== "scheduled") {
+        res.status(400).json({ error: "meeting_cancelled" });
+        return;
+      }
+      const rsvp = await prisma.teamChatMeetingRsvp.upsert({
+        where: {
+          meetingId_userId: { meetingId: meeting.id, userId: me.id },
+        },
+        create: {
+          meetingId: meeting.id,
+          userId: me.id,
+          response: parsed.data.response,
+        },
+        update: { response: parsed.data.response, respondedAt: new Date() },
+      });
+      res.json({
+        rsvp: {
+          userId: rsvp.userId,
+          response: rsvp.response,
+          respondedAt: rsvp.respondedAt.toISOString(),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Cancel — organizer only. Outsiders get the indistinguishable 404; a
+  // participant who is NOT the organizer can already see the meeting, so
+  // a plain 403 leaks nothing. The status flip is CLAIMED atomically
+  // inside the transaction (updateMany guarded on status=scheduled), so a
+  // double-cancel race can never double-post the cancellation message.
+  router.post(
+    "/team-chat/meetings/:id/cancel",
+    guard,
+    async (req, res, next) => {
+      try {
+        const me = callerOf(req);
+        if (!me) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const meeting = await prisma.teamChatMeeting.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!meeting) {
+          res.status(404).json({ error: "meeting_not_found" });
+          return;
+        }
+        const membership = await participantRow(meeting.threadId, me.id);
+        if (!membership) {
+          res.status(404).json({ error: "meeting_not_found" });
+          return;
+        }
+        if (meeting.createdById !== me.id) {
+          res.status(403).json({ error: "organizer_only" });
+          return;
+        }
+        if (meeting.status !== "scheduled") {
+          res.status(409).json({ error: "meeting_already_cancelled" });
+          return;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            const claimed = await tx.teamChatMeeting.updateMany({
+              where: { id: meeting.id, status: "scheduled" },
+              data: { status: "cancelled" },
+            });
+            if (claimed.count === 0) throw new MeetingAlreadyCancelledError();
+            // Reminder terminal flips ONLY from pending (review): when the
+            // reminder already went out, `sent` is the truthful history and
+            // survives cancellation — overwriting it would say the reminder
+            // never fired.
+            await tx.teamChatMeeting.updateMany({
+              where: { id: meeting.id, reminderStatus: "pending" },
+              data: { reminderStatus: "not_needed" },
+            });
+            await tx.teamChatMessage.create({
+              data: {
+                threadId: meeting.threadId,
+                senderId: me.id,
+                kind: "text",
+                body: `Meeting cancelled: ${meeting.title}`,
+              },
+            });
+            await tx.teamChatThread.update({
+              where: { id: meeting.threadId },
+              data: { lastMessageAt: new Date() },
+            });
+          });
+        } catch (err) {
+          if (err instanceof MeetingAlreadyCancelledError) {
+            res.status(409).json({ error: "meeting_already_cancelled" });
+            return;
+          }
+          throw err;
+        }
+        // Best-effort: retract the organizer-calendar mirror. deleteMany —
+        // an already-deleted event is a no-op, never a throw.
+        if (meeting.calendarEventId) {
+          try {
+            await prisma.calendarEvent.deleteMany({
+              where: { id: meeting.calendarEventId },
+            });
+          } catch (err) {
+            logger.warn(
+              { err, meetingId: meeting.id },
+              "calendar mirror delete failed — meeting cancelled regardless",
+            );
+          }
+        }
+        const updated = await prisma.teamChatMeeting.findUnique({
+          where: { id: meeting.id },
+          include: { rsvps: true },
+        });
+        if (!updated) {
+          res.status(404).json({ error: "meeting_not_found" });
+          return;
+        }
+        res.json({ meeting: toMeetingDto(updated) });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── Transcript ──────────────────────────────────────────────────
 

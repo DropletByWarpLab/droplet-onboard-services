@@ -33,8 +33,12 @@ import express, {
 // Functional requireRole stand-in — mimics the real allowed-set check so the
 // router's role list (humans only, no service principals) is actually pinned,
 // without pulling auth.ts's full dependency graph into the unit lane.
-vi.mock("../middleware/auth.js", () => ({
-  requireRole:
+// WARP-1685: the router now also imports requireRoleOrMcpService for the
+// tool-reachable routes; this lane never presents the mcp principal, so the
+// stand-in defers straight to the role check (service-path behavior is
+// pinned in team-chat-meetings.routes.test.ts + the pg lane).
+vi.mock("../middleware/auth.js", () => {
+  const roleCheck =
     (...allowed: string[]) =>
     (req: Request, res: Response, next: NextFunction) => {
       const role = (req as { user?: { role?: string } }).user?.role;
@@ -43,8 +47,21 @@ vi.mock("../middleware/auth.js", () => ({
         return;
       }
       next();
-    },
-}));
+    };
+  return {
+    requireRole: roleCheck,
+    requireRoleOrMcpService:
+      (...allowed: string[]) =>
+      (req: Request, res: Response, next: NextFunction) => {
+        const u = (req as { user?: { id?: string; role?: string } }).user;
+        if (u?.id === "_service:mcp" && u.role === "service") {
+          next();
+          return;
+        }
+        roleCheck(...allowed)(req, res, next);
+      },
+  };
+});
 
 const { checkSpaceAccessMock, resolveFileDepartmentMock } = vi.hoisted(() => ({
   checkSpaceAccessMock: vi.fn(),

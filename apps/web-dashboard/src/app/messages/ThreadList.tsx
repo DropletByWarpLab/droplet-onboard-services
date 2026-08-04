@@ -46,6 +46,11 @@ function previewText(thread: TeamChatThreadSummary): string {
   if (m.kind === "file_share")
     return m.sharedFileName ? `Shared ${m.sharedFileName}` : "Shared a file";
   if (m.kind === "ai_chat_share") return "Shared an AI conversation";
+  // WARP-1685 — the preview message carries its meeting relation.
+  if (m.kind === "meeting_invite")
+    return m.meeting ? `Meeting: ${m.meeting.title}` : "Meeting invite";
+  if (m.kind === "meeting_reminder")
+    return m.meeting ? `Reminder: ${m.meeting.title}` : "Meeting reminder";
   return m.body ?? "";
 }
 

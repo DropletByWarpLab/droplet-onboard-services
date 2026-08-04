@@ -6947,7 +6947,43 @@ export interface TeamChatContact {
   role: string;
 }
 
-export type TeamChatMessageKind = "text" | "file_share" | "ai_chat_share";
+export type TeamChatMessageKind =
+  | "text"
+  | "file_share"
+  | "ai_chat_share"
+  | "meeting_invite"
+  | "meeting_reminder";
+
+// --- Meetings (WARP-1685) ---
+
+export type TeamChatRsvpResponse = "accepted" | "declined";
+
+export interface TeamChatMeetingRsvp {
+  userId: string;
+  response: TeamChatRsvpResponse;
+  respondedAt: string;
+  /** Present on GET /meetings/:id; the message-list payload leaves names
+   *  to the thread's participant roster the client already holds. */
+  displayName?: string | null;
+}
+
+export interface TeamChatMeeting {
+  id: string;
+  threadId: string;
+  inviteMessageId: string | null;
+  calendarEventId: string | null;
+  title: string;
+  startsAt: string;
+  durationMinutes: number | null;
+  location: string | null;
+  note: string | null;
+  createdById: string;
+  status: "scheduled" | "cancelled";
+  reminderMinutesBefore: number;
+  reminderStatus: "pending" | "sent" | "not_needed";
+  createdAt: string;
+  rsvps: TeamChatMeetingRsvp[];
+}
 
 export interface TeamChatMessage {
   id: string;
@@ -6961,6 +6997,10 @@ export interface TeamChatMessage {
   sharedFileName: string | null;
   sharedFilePath: string | null;
   sharedChatSessionId: string | null;
+  /** WARP-1685 — set on meeting_invite / meeting_reminder; the live
+   *  meeting (incl. RSVPs) rides along so cards render in one fetch. */
+  meetingId: string | null;
+  meeting: TeamChatMeeting | null;
   createdAt: string;
 }
 
@@ -7101,6 +7141,86 @@ export async function fetchTeamChatTranscript(
     );
   }
   return res.json() as Promise<TeamChatTranscript>;
+}
+
+export interface TeamChatMeetingCreateBody {
+  title: string;
+  /** ISO timestamp; the server refuses past starts. */
+  startsAt: string;
+  durationMinutes?: number;
+  location?: string;
+  note?: string;
+  reminderMinutesBefore?: number;
+}
+
+/** Schedule a meeting in a thread — the server commits the meeting + its
+ *  invite card together and mirrors a local CalendarEvent best-effort. */
+export async function createTeamChatMeeting(
+  threadId: string,
+  body: TeamChatMeetingCreateBody,
+): Promise<{ meeting: TeamChatMeeting; message: TeamChatMessage }> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/meetings`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "create-meeting",
+      "Couldn't schedule the meeting. Try again.",
+      res,
+    );
+  }
+  return res.json() as Promise<{
+    meeting: TeamChatMeeting;
+    message: TeamChatMessage;
+  }>;
+}
+
+/** Accept/decline a meeting — an upsert, so flipping the answer is fine. */
+export async function rsvpTeamChatMeeting(
+  meetingId: string,
+  response: TeamChatRsvpResponse,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/meetings/${encodeURIComponent(meetingId)}/rsvp`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response }),
+    },
+  );
+  if (!res.ok) {
+    // UX review: on the cancelled race the generic "Try again" is false
+    // advice next to a Cancelled banner — say what likely happened.
+    // Same log-then-plain-copy shape as teamChatFail.
+    const detail = await res.text().catch(() => "");
+    console.error(`[team-chat] rsvp failed: ${res.status} ${detail}`);
+    throw new Error(
+      detail.includes("meeting_cancelled")
+        ? "Couldn't send your answer — the meeting may have been cancelled."
+        : "Couldn't send your answer. Try again.",
+    );
+  }
+}
+
+/** Organizer-only cancel — flips the meeting to cancelled and posts the
+ *  cancellation note in the thread. */
+export async function cancelTeamChatMeeting(meetingId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/meetings/${encodeURIComponent(meetingId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "cancel-meeting",
+      "Couldn't cancel the meeting. Try again.",
+      res,
+    );
+  }
 }
 
 export async function fetchTeamChatUnreadCount(): Promise<number> {

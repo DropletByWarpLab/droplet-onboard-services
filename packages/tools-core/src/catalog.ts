@@ -44,7 +44,10 @@ export type ToolDomain =
   | "erp"
   | "business"
   | "system"
-  | "data";
+  | "data"
+  // WARP-1685 — Messages (member-to-member team chat). Slug matches the
+  // `team_chat` ModuleId so the module toggle gates the domain.
+  | "team_chat";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -185,6 +188,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "erp_schedule_appointment",
   ],
   business: ["business_profile_get"],
+  // WARP-1685 — Messages sends on the acting human's behalf.
+  team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
     "get_system_health",
     "list_drives",
@@ -358,6 +363,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Business (business-knowledge profile)
   business_profile_get: "Look up what Droplet knows about your business",
+  // Team chat (Messages)
+  team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
+  team_chat_send_meeting_invite:
+    "Set up a meeting and invite members in Messages (you approve it first)",
   // Data (encode/decode, hashing, format conversion)
   encode_text: "Encode text as base64, hex, or a URL-safe form",
   decode_text: "Decode base64, hex, or URL-encoded text back to plain text",

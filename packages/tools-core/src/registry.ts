@@ -166,6 +166,12 @@ import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
 
+// team chat (WARP-1685) — Messages sends on the acting human's behalf.
+// Both Tier-2 (requiresWrite + handler-enforced two-phase confirmation);
+// dispatch via /api/team-chat as X-Droplet-User = ctx.userId.
+import teamChatSendMessage from "./handlers/team-chat/send-message.js";
+import teamChatSendMeetingInvite from "./handlers/team-chat/send-meeting-invite.js";
+
 // data (WARP-899/WARP-900) — encode/decode, hashing, format conversion.
 // All Tier-1 read/pure-computation: no I/O, no app secrets, no network egress.
 import encodeText from "./handlers/data/encode-text.js";
@@ -336,6 +342,9 @@ const allTools: Tool[] = [
   erpScheduleAppointment,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
+  // WARP-1685: Messages sends (Tier-2: write + two-phase confirmation)
+  teamChatSendMessage,
+  teamChatSendMeetingInvite,
   // WARP-899/WARP-900: data-utility domain (encode/decode, hashing, format
   // conversion) — all Tier-1 read/pure-computation.
   encodeText,
