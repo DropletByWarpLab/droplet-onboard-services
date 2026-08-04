@@ -144,15 +144,27 @@ const ANALYSIS_1 =
 const ANALYSIS_2 = "Let's read csv.";
 const ANSWER = "You spent 6,240 EUR in June 2026.";
 
+let app: ReturnType<typeof createApp>;
+
+beforeAll(() => {
+  const prisma = new PrismaClient();
+  initDeviceService(prisma);
+  app = createApp(prisma);
+});
+
+/** Concatenate the `text` field of every content_delta frame, in order. */
+function joinContentDeltas(sse: string): string {
+  const frames = sse.split("\n\n").filter(Boolean);
+  let out = "";
+  for (const frame of frames) {
+    const [evtLine, dataLine] = frame.split("\n");
+    if (evtLine !== "event: content_delta" || !dataLine) continue;
+    out += (JSON.parse(dataLine.slice("data: ".length)) as { text: string }).text;
+  }
+  return out;
+}
+
 describe("POST /api/llm/chat stream=true — WARP-1602 analysis quarantine", () => {
-  let app: ReturnType<typeof createApp>;
-
-  beforeAll(() => {
-    const prisma = new PrismaClient();
-    initDeviceService(prisma);
-    app = createApp(prisma);
-  });
-
   beforeEach(() => {
     vi.clearAllMocks();
     mockEnsureConversation.mockResolvedValue({ id: "conv-1", created: true });
@@ -201,18 +213,6 @@ describe("POST /api/llm/chat stream=true — WARP-1602 analysis quarantine", () 
       });
     expect(res.status).toBe(200);
     return res.text;
-  }
-
-  /** Concatenate the `text` field of every content_delta frame, in order. */
-  function joinContentDeltas(sse: string): string {
-    const frames = sse.split("\n\n").filter(Boolean);
-    let out = "";
-    for (const frame of frames) {
-      const [evtLine, dataLine] = frame.split("\n");
-      if (evtLine !== "event: content_delta" || !dataLine) continue;
-      out += (JSON.parse(dataLine.slice("data: ".length)) as { text: string }).text;
-    }
-    return out;
   }
 
   it("never puts intermediate analysis on the wire as content_delta", async () => {
@@ -282,5 +282,133 @@ describe("POST /api/llm/chat stream=true — WARP-1602 analysis quarantine", () 
     expect(
       mockFinalizeAssistantMessage.mock.calls[0][0].reasoning,
     ).toContain("We need to answer");
+  });
+});
+
+/**
+ * WARP-1602 review B1/B2 — the PERSISTENCE half of the deferred-teardown fix.
+ *
+ * `llm-agent.streaming.test.ts` pins that a torn-down DEFERRED turn still puts
+ * its buffered partial on the wire and returns it on `message.content`. But
+ * the reported symptom was about the ROW — "pressing Stop mid-answer discards
+ * the entire partial answer and persists an empty row" — and that outcome is
+ * produced further downstream, by the route: it keeps `liveAssistantContent`
+ * (the `content_delta` accumulator) on an `error` terminal instead of
+ * overwriting it from `streamResult.message.content`. Nothing asserted that
+ * link, so these two drive the real route on the only shape production takes
+ * (tools advertised ⇒ `deferContent === true`) and assert on what
+ * `finalizeAssistantMessage` is handed.
+ *
+ * The turn is single-iteration on purpose: the terminal answer turn is itself
+ * deferred, which is exactly the case the reviewer flagged.
+ */
+describe("POST /api/llm/chat stream=true — a torn-down DEFERRED turn persists the partial", () => {
+  const PARTIAL = "You spent 6,240 EUR";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChatStream.mockReset();
+    mockEnsureConversation.mockResolvedValue({ id: "conv-1", created: true });
+    mockCreateTurnRows.mockResolvedValue({
+      userMessageId: "user-1",
+      assistantMessageId: "asst-1",
+      assistantAlreadyFinal: false,
+    });
+    mockFinalizeAssistantMessage.mockResolvedValue(undefined);
+    mockUpdateAssistantStreaming.mockResolvedValue(undefined);
+  });
+
+  function postTurn() {
+    return request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "owner")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [
+          { role: "user", content: "how much money did I spend in June?" },
+        ],
+        stream: true,
+        captureReasoning: true,
+      });
+  }
+
+  it("persists the partial answer when the client hits Stop mid-answer (B1)", async () => {
+    // Signals the test that the answer is half-written and it may disconnect.
+    let midAnswer!: () => void;
+    const midAnswerReached = new Promise<void>((r) => {
+      midAnswer = r;
+    });
+    // The generator resumes on the ROUTE's own AbortController rather than a
+    // timer, so the disconnect lands inside the stream deterministically.
+    async function* answering(signal: AbortSignal) {
+      yield {
+        choices: [{ delta: { reasoning_content: "User asks June spend." } }],
+      };
+      yield { choices: [{ delta: { content: "You spent " } }] };
+      yield { choices: [{ delta: { content: "6,240 EUR" } }] };
+      midAnswer();
+      if (!signal.aborted) {
+        await new Promise<void>((r) =>
+          signal.addEventListener("abort", () => r(), { once: true }),
+        );
+      }
+      yield {
+        choices: [
+          { delta: { content: " in June 2026." }, finish_reason: "stop" },
+        ],
+      };
+    }
+    mockChatStream.mockImplementation((_req: unknown, signal: AbortSignal) =>
+      answering(signal),
+    );
+
+    const pending = postTurn();
+    // The client goes away mid-answer; the aborted request rejects, which is
+    // the point, so swallow it and assert on the server side instead.
+    const settled = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    await midAnswerReached;
+    pending.abort();
+    await settled;
+
+    await vi.waitFor(() =>
+      expect(mockFinalizeAssistantMessage).toHaveBeenCalledTimes(1),
+    );
+    const args = mockFinalizeAssistantMessage.mock.calls[0][0];
+    // THE ROW: the partial the user was reading, not the blank this PR's
+    // deferral introduced.
+    expect(args.content).toBe(PARTIAL);
+    // …and only what actually arrived — the chunk after the Stop is dropped.
+    expect(args.content).not.toContain("in June 2026");
+    // WARP-329's label still applies to the row.
+    expect(args.status).toBe("aborted");
+  });
+
+  it("persists the partial answer when the transport dies mid-answer (B2)", async () => {
+    // The real gpt-oss shape: the reasoning channel streams fully before
+    // content, so the first `delta.content` flushes a reasoning_step and sets
+    // `emittedAny` — the blocking fallback is therefore NOT available, and the
+    // buffered answer is the only copy there is.
+    async function* dying() {
+      yield {
+        choices: [{ delta: { reasoning_content: "User asks June spend." } }],
+      };
+      yield { choices: [{ delta: { content: PARTIAL } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    mockChatStream.mockImplementation(() => dying());
+
+    const res = await postTurn();
+    expect(res.status).toBe(200);
+
+    // The wire carried the salvage and an honest error terminal.
+    expect(joinContentDeltas(res.text)).toBe(PARTIAL);
+    expect(res.text).toContain("stream_interrupted");
+
+    expect(mockFinalizeAssistantMessage).toHaveBeenCalledTimes(1);
+    const args = mockFinalizeAssistantMessage.mock.calls[0][0];
+    expect(args.content).toBe(PARTIAL);
   });
 });
